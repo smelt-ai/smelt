@@ -25,9 +25,12 @@ struct MergeGroup {
 
 pub async fn run() -> Result<()> {
     let conn = db::open()?;
-    let items = db::list_by_confidence(&conn)?;
+    let all = db::list_by_confidence(&conn)?;
+    // 只对全局 instinct 做语义合并；项目级原样保留，避免跨项目错误归并。
+    let (items, projects): (Vec<Instinct>, Vec<Instinct>) =
+        all.into_iter().partition(|it| it.scope == Scope::Global);
     if items.len() < 2 {
-        println!("instinct 不足 2 条，无需合并。");
+        println!("全局 instinct 不足 2 条，无需合并。");
         return Ok(());
     }
 
@@ -68,6 +71,7 @@ pub async fn run() -> Result<()> {
             evidence_count,
             last_seen,
             scope: Scope::Global,
+            project: None,
         });
     }
 
@@ -77,6 +81,8 @@ pub async fn run() -> Result<()> {
             merged.push(items[i].clone());
         }
     }
+    // 项目级 instinct 原样写回，不参与全局合并。
+    merged.extend(projects);
 
     db::replace_all(&conn, &merged)?;
     let path = render::write_global()?;

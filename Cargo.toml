@@ -14,3 +14,5 @@ notify = "6"
 anyhow = "1"
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+qrcode = "0.14"

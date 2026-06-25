@@ -46,4 +46,6 @@ pub struct Instinct {
     pub last_seen: String,
     /// 作用域
     pub scope: Scope,
+    /// 所属项目（None=全局；Some=仓库名，配合 Scope::Project）
+    pub project: Option<String>,
 }

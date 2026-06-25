@@ -29,10 +29,13 @@ fn init(conn: &Connection) -> Result<()> {
             domain         TEXT NOT NULL,
             evidence_count INTEGER NOT NULL,
             last_seen      TEXT NOT NULL,
-            scope          TEXT NOT NULL
+            scope          TEXT NOT NULL,
+            project        TEXT
         )",
         [],
     )?;
+    // 老库迁移：补 project 列（已存在则忽略错误）。
+    let _ = conn.execute("ALTER TABLE instincts ADD COLUMN project TEXT", []);
     Ok(())
 }
 
@@ -41,18 +44,19 @@ pub fn upsert(conn: &Connection, it: &Instinct) -> Result<()> {
     let domain = serde_json::to_string(&it.domain)?;
     conn.execute(
         "INSERT INTO instincts
-            (id, content, confidence, domain, evidence_count, last_seen, scope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            (id, content, confidence, domain, evidence_count, last_seen, scope, project)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
             content=excluded.content,
             confidence=excluded.confidence,
             domain=excluded.domain,
             evidence_count=instincts.evidence_count + 1,
             last_seen=excluded.last_seen,
-            scope=excluded.scope",
+            scope=excluded.scope,
+            project=excluded.project",
         rusqlite::params![
             it.id, it.content, it.confidence, domain,
-            it.evidence_count, it.last_seen, it.scope.as_str(),
+            it.evidence_count, it.last_seen, it.scope.as_str(), it.project,
         ],
     )?;
     Ok(())
@@ -66,11 +70,11 @@ pub fn replace_all(conn: &Connection, items: &[Instinct]) -> Result<()> {
         let domain = serde_json::to_string(&it.domain)?;
         tx.execute(
             "INSERT OR REPLACE INTO instincts
-                (id, content, confidence, domain, evidence_count, last_seen, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, content, confidence, domain, evidence_count, last_seen, scope, project)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 it.id, it.content, it.confidence, domain,
-                it.evidence_count, it.last_seen, it.scope.as_str(),
+                it.evidence_count, it.last_seen, it.scope.as_str(), it.project,
             ],
         )?;
     }
@@ -80,7 +84,7 @@ pub fn replace_all(conn: &Connection, items: &[Instinct]) -> Result<()> {
 
 pub fn list_by_confidence(conn: &Connection) -> Result<Vec<Instinct>> {
     let mut stmt = conn.prepare(
-        "SELECT id, content, confidence, domain, evidence_count, last_seen, scope
+        "SELECT id, content, confidence, domain, evidence_count, last_seen, scope, project
          FROM instincts ORDER BY confidence DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -95,6 +99,7 @@ pub fn list_by_confidence(conn: &Connection) -> Result<Vec<Instinct>> {
             evidence_count: row.get(4)?,
             last_seen: row.get(5)?,
             scope: Scope::from_db(&scope_str),
+            project: row.get(7)?,
         })
     })?;
     let mut out = Vec::new();
