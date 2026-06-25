@@ -1,5 +1,6 @@
 //! smelt：Mac 上的个人知识蒸馏引擎。
 
+mod brief;
 mod chat;
 mod claude;
 mod db;
@@ -51,6 +52,8 @@ enum Command {
     Install,
     /// 和你的数字分身对话（基于已蒸馏的 instincts）
     Chat,
+    /// 主动简报：分身主动产出「我观察到的你 + 该注意的事」
+    Brief,
 }
 
 #[tokio::main]
@@ -68,6 +71,7 @@ async fn main() -> Result<()> {
         Command::Show => show()?,
         Command::Install => install::run()?,
         Command::Chat => chat::run().await?,
+        Command::Brief => brief::run().await?,
     }
     Ok(())
 }

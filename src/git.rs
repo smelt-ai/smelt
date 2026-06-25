@@ -146,6 +146,37 @@ fn repo_commits(repo: &Path, email: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// 仓库的「值得注意」信号：未推送提交数、最后提交相对时间，供主动简报用。
+pub struct RepoSignal {
+    pub name: String,
+    pub branch: Option<String>,
+    pub unpushed: usize,
+    pub last_commit: Option<String>,
+}
+
+/// 探测各活跃仓库的状态信号（未推送 / 最后提交多久前）。
+pub fn repo_signals() -> Vec<RepoSignal> {
+    discover_repos()
+        .iter()
+        .take(MAX_REPOS)
+        .filter_map(|repo| {
+            let name = repo.file_name()?.to_string_lossy().into_owned();
+            let last_commit = git_str(repo, &["log", "-1", "--format=%cr"]);
+            // 未推送提交数（无 upstream 时该命令失败，记 0）。
+            let unpushed = git_str(repo, &["rev-list", "--count", "@{u}..HEAD"])
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let branch = git_str(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+            Some(RepoSignal {
+                name,
+                branch,
+                unpushed,
+                last_commit,
+            })
+        })
+        .collect()
+}
+
 /// 把一个仓库的活动格式化成报告块。
 fn format_repo(r: &RepoActivity) -> String {
     let mut header = format!("[{}]", r.name);
