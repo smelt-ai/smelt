@@ -4,8 +4,10 @@
 use crate::db;
 use crate::digest;
 use crate::feishu::{discovery, gateway, messages};
+use crate::model::{Instinct, Scope};
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
 const API_URL: &str = "https://api.deepseek.com/chat/completions";
@@ -233,26 +235,80 @@ fn build_system_prompt() -> Result<String> {
     let conn = db::open()?;
     let instincts = db::list_by_confidence(&conn)?;
 
-    let mut prompt = String::from(
-        "你是这个人的数字分身。以下是从TA的真实行为中蒸馏出的编码直觉（instincts），\
-置信度越高越核心，请以TA的视角和风格回答问题。\n\
-如果不确定TA的立场，用第一人称表达推测，保持诚实。\n\
-你可以调用飞书工具读取消息和会话，帮助回答与工作相关的问题。\n\n\
-=== 我的 instincts ===\n",
-    );
-    if instincts.is_empty() {
-        prompt.push_str("（尚无 instincts，先跑 `smelt digest` 提炼一次。）\n");
-    } else {
-        for it in &instincts {
-            prompt.push_str(&format!(
-                "[{:.2}] ({}) {}\n",
-                it.confidence,
-                it.domain.join("/"),
-                it.content
-            ));
+    // 把画像拆成三块：全局核心习惯、活跃领域、各项目特有习惯。
+    let mut globals: Vec<&Instinct> = Vec::new();
+    let mut by_project: BTreeMap<String, Vec<&Instinct>> = BTreeMap::new();
+    let mut domain_count: BTreeMap<String, usize> = BTreeMap::new();
+    for it in &instincts {
+        for d in &it.domain {
+            *domain_count.entry(d.clone()).or_insert(0) += 1;
+        }
+        match (&it.scope, &it.project) {
+            (Scope::Project, Some(p)) => by_project.entry(p.clone()).or_default().push(it),
+            _ => globals.push(it),
         }
     }
-    Ok(prompt)
+
+    let mut p = String::from(
+        "你是这个人的数字分身。下面是从 TA 的真实行为（shell 历史 / 改动的文件 / git 提交 / 与 AI 的对话）\
+中蒸馏出的画像。请始终以 TA 本人的第一人称视角、风格和判断来回答；不确定 TA 立场时，\
+基于画像诚实地推测并说明依据，绝不编造。回答时可以引用具体习惯佐证（如「我在 X 项目通常…」）。\n\n",
+    );
+
+    // 活跃领域概览
+    if !domain_count.is_empty() {
+        let mut dv: Vec<(String, usize)> = domain_count.into_iter().collect();
+        dv.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let top = dv
+            .iter()
+            .take(8)
+            .map(|(d, n)| format!("{d}({n})"))
+            .collect::<Vec<_>>()
+            .join("、");
+        p.push_str(&format!("【我活跃的领域】{top}\n\n"));
+    }
+
+    // 全局核心习惯与原则（置信度越高越稳定）
+    p.push_str("【我的核心习惯与原则】（置信度越高越是我的稳定特征）\n");
+    if globals.is_empty() {
+        p.push_str("（尚无，先跑 `smelt digest` 提炼一次。）\n");
+    } else {
+        for it in &globals {
+            let tag = if it.confidence >= 0.7 { "核心" } else { "倾向" };
+            let dom = if it.domain.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", it.domain.join("/"))
+            };
+            p.push_str(&format!("- [{tag} {:.2}] {}{}\n", it.confidence, it.content, dom));
+        }
+    }
+    p.push('\n');
+
+    // 各项目特有习惯（关系图谱·项目维度）
+    if !by_project.is_empty() {
+        p.push_str(&format!(
+            "【我参与的项目及各自的工作习惯】（共 {} 个项目）\n",
+            by_project.len()
+        ));
+        for (proj, its) in &by_project {
+            p.push_str(&format!("◆ {proj}：\n"));
+            for it in its {
+                p.push_str(&format!("  - [{:.2}] {}\n", it.confidence, it.content));
+            }
+        }
+        p.push('\n');
+    }
+
+    // 对话准则
+    p.push_str(
+        "【对话准则】\n\
+- 用第一人称「我」，像 TA 本人那样简洁、直接、现代。\n\
+- 基于上面的画像判断；画像没覆盖的，先坦白「这条我没把握」再推测。\n\
+- 涉及工作 / 飞书消息时，可调用飞书工具读取真实信息再回答。\n",
+    );
+
+    Ok(p)
 }
 
 // ── 主循环 ────────────────────────────────────────────────────────────────────
