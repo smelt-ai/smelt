@@ -8,10 +8,99 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+
+/// 默认前景 / 背景色（与窗口底色一致，Tokyo Night 风格）。
+const DEFAULT_FG: u32 = 0x00c0_caf5;
+const DEFAULT_BG: u32 = 0x001a_1b26;
+
+/// 16 色 ANSI 调色板（Tokyo Night）。索引 0-7 常规、8-15 明亮。
+const PALETTE: [u32; 16] = [
+    0x0015_161e, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7, 0x007d_cfff,
+    0x00a9_b1d6, 0x0041_4868, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7,
+    0x007d_cfff, 0x00c0_caf5,
+];
+
+/// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 粗体/下划线。
+pub struct Cell {
+    pub ch: char,
+    pub fg: u32,
+    pub bg: u32,
+    pub bold: bool,
+    pub underline: bool,
+}
+
+/// 一帧终端快照：网格行 + 光标位置（行, 列）。cursor 为 None 表示已上滚离开可视区。
+pub struct Frame {
+    pub rows: Vec<Vec<Cell>>,
+    pub cursor: Option<(usize, usize)>,
+}
+
+/// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
+fn resolve(color: Color, is_fg: bool) -> u32 {
+    match color {
+        Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32,
+        Color::Indexed(i) => indexed_rgb(i),
+        Color::Named(n) => named_rgb(n, is_fg),
+    }
+}
+
+fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
+    use NamedColor::*;
+    match n {
+        Black => PALETTE[0],
+        Red => PALETTE[1],
+        Green => PALETTE[2],
+        Yellow => PALETTE[3],
+        Blue => PALETTE[4],
+        Magenta => PALETTE[5],
+        Cyan => PALETTE[6],
+        White => PALETTE[7],
+        BrightBlack => PALETTE[8],
+        BrightRed => PALETTE[9],
+        BrightGreen => PALETTE[10],
+        BrightYellow => PALETTE[11],
+        BrightBlue => PALETTE[12],
+        BrightMagenta => PALETTE[13],
+        BrightCyan => PALETTE[14],
+        BrightWhite => PALETTE[15],
+        Background => DEFAULT_BG,
+        // Foreground / Cursor / Dim* / 未来新增变体统一回落到默认色
+        _ => {
+            if is_fg {
+                DEFAULT_FG
+            } else {
+                DEFAULT_BG
+            }
+        }
+    }
+}
+
+/// xterm 256 色索引 → rgb：0-15 用调色板，16-231 为 6×6×6 色立方，232-255 为灰阶。
+fn indexed_rgb(i: u8) -> u32 {
+    match i {
+        0..=15 => PALETTE[i as usize],
+        16..=231 => {
+            let i = i - 16;
+            let step = |v: u8| -> u32 {
+                if v == 0 {
+                    0
+                } else {
+                    55 + v as u32 * 40
+                }
+            };
+            (step(i / 36) << 16) | (step((i % 36) / 6) << 8) | step(i % 6)
+        }
+        232..=255 => {
+            let v = 8 + (i as u32 - 232) * 10;
+            (v << 16) | (v << 8) | v
+        }
+    }
+}
 
 /// 终端尺寸，实现 alacritty 的 Dimensions（先固定行列，resize 留到下一步）。
 #[derive(Clone, Copy)]
@@ -44,6 +133,7 @@ impl EventListener for EventProxy {
 pub struct Terminal {
     term: Arc<Mutex<Term<EventProxy>>>,
     writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
     size: TermSize,
 }
 
@@ -94,8 +184,34 @@ impl Terminal {
         });
 
         let writer = pair.master.take_writer()?;
+        let master = pair.master; // 保留 master 用于 resize
 
-        Ok(Self { term, writer, size })
+        Ok(Self {
+            term,
+            writer,
+            master,
+            size,
+        })
+    }
+
+    /// 按新行列 resize：同步 alacritty 网格与底层 PTY。无变化则跳过。
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        if rows == self.size.rows && cols == self.size.cols {
+            return;
+        }
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        self.size = TermSize { rows, cols };
+        if let Ok(mut term) = self.term.lock() {
+            term.resize(self.size);
+        }
+        let _ = self.master.resize(PtySize {
+            rows: rows as u16,
+            cols: cols as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
     }
 
     /// 向 shell 写入字节（键盘输入用）。
@@ -104,27 +220,69 @@ impl Terminal {
         let _ = self.writer.flush();
     }
 
-    /// 快照当前可视网格为文本行（先只取字符，颜色留到下一步）。
-    pub fn snapshot_lines(&self) -> Vec<String> {
+    /// 快照当前可视网格 + 光标。用 renderable_content：尊重滚动偏移、带光标，
+    /// 并处理反色（INVERSE）/粗体/下划线属性。
+    pub fn snapshot(&self) -> Frame {
         let term = match self.term.lock() {
             Ok(t) => t,
-            Err(_) => return Vec::new(),
+            Err(_) => {
+                return Frame {
+                    rows: Vec::new(),
+                    cursor: None,
+                }
+            }
         };
+        let content = term.renderable_content();
+        let cursor_pt = content.cursor.point;
+        let display_offset = content.display_offset;
+
         let cols = self.size.cols;
-        let mut lines: Vec<String> = Vec::with_capacity(self.size.rows);
-        let mut current = String::with_capacity(cols);
+        let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(self.size.rows);
+        let mut row: Vec<Cell> = Vec::with_capacity(cols);
         let mut count = 0usize;
-        // display_iter 按可视区行主序逐格给出 Indexed<&Cell>
-        for indexed in term.grid().display_iter() {
-            current.push(indexed.cell.c);
+        for indexed in content.display_iter {
+            let cell = indexed.cell;
+            let flags = cell.flags;
+            let mut fg = resolve(cell.fg, true);
+            let mut bg = resolve(cell.bg, false);
+            if flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            row.push(Cell {
+                ch: cell.c,
+                fg,
+                bg,
+                bold: flags.contains(Flags::BOLD),
+                underline: flags.contains(Flags::UNDERLINE),
+            });
             count += 1;
             if count % cols == 0 {
-                lines.push(std::mem::take(&mut current));
+                rows.push(std::mem::take(&mut row));
             }
         }
-        if !current.is_empty() {
-            lines.push(current);
+        if !row.is_empty() {
+            rows.push(row);
         }
-        lines
+
+        // 仅在未上滚（offset==0）且光标行在可视范围内时显示光标。
+        let cursor = if display_offset == 0 {
+            let r = cursor_pt.line.0;
+            if r >= 0 && (r as usize) < rows.len() {
+                Some((r as usize, cursor_pt.column.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Frame { rows, cursor }
+    }
+
+    /// 上下滚动历史缓冲：正数向上翻看历史，负数向下。
+    pub fn scroll(&mut self, lines: i32) {
+        if let Ok(mut term) = self.term.lock() {
+            term.scroll_display(Scroll::Delta(lines));
+        }
     }
 }
