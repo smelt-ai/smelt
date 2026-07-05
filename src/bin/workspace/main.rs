@@ -12,10 +12,30 @@ use gpui::*;
 use gpui_component::*;
 use terminal_view::TerminalView;
 
+/// 命令面板里的一个可执行动作。
+#[derive(Clone)]
+enum Cmd {
+    NewTab,
+    OpenProject,
+    CloseTab,
+    NextTab,
+    PrevTab,
+    SwitchTab(usize),
+}
+
+/// 命令面板状态。
+struct Palette {
+    query: String,
+    selected: usize,
+}
+
 /// 工作台根视图：多标签终端管理器。
 struct Workspace {
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
+    /// 命令面板（Cmd+K）；None 表示未打开。
+    palette: Option<Palette>,
+    palette_focus: FocusHandle,
 }
 
 impl Workspace {
@@ -24,6 +44,8 @@ impl Workspace {
         Self {
             tabs: vec![first],
             active: 0,
+            palette: None,
+            palette_focus: cx.focus_handle(),
         }
     }
 
@@ -76,6 +98,88 @@ impl Workspace {
         }
         cx.notify();
     }
+
+    /// 聚焦当前活动终端。
+    fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        if let Some(t) = self.tabs.get(self.active) {
+            let h = t.read(cx).focus_handle();
+            window.focus(&h, cx);
+        }
+    }
+
+    /// 切换到第 ix 个标签并聚焦。
+    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix < self.tabs.len() {
+            self.active = ix;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = Some(Palette {
+            query: String::new(),
+            selected: 0,
+        });
+        window.focus(&self.palette_focus, cx);
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// 全部命令（含逐标签切换）。
+    fn all_commands(&self, cx: &App) -> Vec<(String, Cmd)> {
+        let mut v = vec![
+            ("新建标签".to_string(), Cmd::NewTab),
+            ("打开项目…".to_string(), Cmd::OpenProject),
+            ("关闭当前标签".to_string(), Cmd::CloseTab),
+            ("下一个标签".to_string(), Cmd::NextTab),
+            ("上一个标签".to_string(), Cmd::PrevTab),
+        ];
+        for (i, t) in self.tabs.iter().enumerate() {
+            v.push((format!("切换到: {}", t.read(cx).title()), Cmd::SwitchTab(i)));
+        }
+        v
+    }
+
+    /// 按查询过滤后的命令。
+    fn filtered(&self, cx: &App) -> Vec<(String, Cmd)> {
+        let q = self
+            .palette
+            .as_ref()
+            .map(|p| p.query.to_lowercase())
+            .unwrap_or_default();
+        self.all_commands(cx)
+            .into_iter()
+            .filter(|(label, _)| q.is_empty() || label.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    fn exec_cmd(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        match cmd {
+            Cmd::NewTab => self.new_tab(cx),
+            Cmd::OpenProject => self.open_project(cx),
+            Cmd::CloseTab => self.close_tab(self.active, cx),
+            Cmd::NextTab => {
+                let n = self.tabs.len();
+                if n > 0 {
+                    self.activate((self.active + 1) % n, window, cx);
+                }
+            }
+            Cmd::PrevTab => {
+                let n = self.tabs.len();
+                if n > 0 {
+                    self.activate((self.active + n - 1) % n, window, cx);
+                }
+            }
+            Cmd::SwitchTab(i) => self.activate(i, window, cx),
+        }
+    }
 }
 
 impl Render for Workspace {
@@ -98,12 +202,88 @@ impl Render for Workspace {
 
         let active_view = self.tabs[active].clone();
 
+        // 命令面板弹层
+        let palette_overlay = self.palette.as_ref().map(|p| {
+            let cmds = self.filtered(cx);
+            let sel = if cmds.is_empty() {
+                0
+            } else {
+                p.selected.min(cmds.len() - 1)
+            };
+            let query = p.query.clone();
+            let items: Vec<Stateful<Div>> = cmds
+                .iter()
+                .enumerate()
+                .map(|(i, (label, cmd))| {
+                    let is_sel = i == sel;
+                    let cmd = cmd.clone();
+                    let mut d = div()
+                        .id(("cmd", i))
+                        .px_3()
+                        .py_1()
+                        .text_color(if is_sel { rgb(0xc0caf5) } else { rgb(0x9aa5ce) })
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.exec_cmd(cmd.clone(), window, cx)
+                        }))
+                        .child(label.clone());
+                    if is_sel {
+                        d = d.bg(rgb(0x2a2b3d));
+                    }
+                    d
+                })
+                .collect();
+
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .pt(px(80.))
+                .child(
+                    div()
+                        .track_focus(&self.palette_focus)
+                        .on_key_down(cx.listener(palette_key))
+                        .w(px(480.))
+                        .flex()
+                        .flex_col()
+                        .bg(rgb(0x16161e))
+                        .border_1()
+                        .border_color(rgb(0x2a2b3d))
+                        .rounded_lg()
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .text_color(rgb(0xc0caf5))
+                                .child(if query.is_empty() {
+                                    "› 输入命令…".to_string()
+                                } else {
+                                    format!("› {}", query)
+                                }),
+                        )
+                        .children(items),
+                )
+        });
+
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(0x1a1b26))
             .font_family(terminal_view::FONT_FAMILY)
+            // Cmd+K 开关命令面板
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let ks = &ev.keystroke;
+                if ks.modifiers.platform && ks.key == "k" {
+                    if this.palette.is_some() {
+                        this.close_palette(window, cx);
+                    } else {
+                        this.open_palette(window, cx);
+                    }
+                }
+            }))
             // 标签栏
             .child(
                 div()
@@ -119,6 +299,66 @@ impl Render for Workspace {
             )
             // 活动终端
             .child(div().flex_1().child(active_view))
+            // 命令面板（在最上层）
+            .children(palette_overlay)
+    }
+}
+
+/// 命令面板的键盘处理：字符过滤、上下选择、回车执行、Esc 关闭。
+fn palette_key(
+    this: &mut Workspace,
+    ev: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if this.palette.is_none() {
+        return;
+    }
+    let ks = &ev.keystroke;
+    match ks.key.as_str() {
+        "escape" => this.close_palette(window, cx),
+        "up" => {
+            if let Some(p) = this.palette.as_mut() {
+                p.selected = p.selected.saturating_sub(1);
+            }
+            cx.notify();
+        }
+        "down" => {
+            let len = this.filtered(cx).len();
+            if let Some(p) = this.palette.as_mut() {
+                if len > 0 && p.selected + 1 < len {
+                    p.selected += 1;
+                }
+            }
+            cx.notify();
+        }
+        "backspace" => {
+            if let Some(p) = this.palette.as_mut() {
+                p.query.pop();
+                p.selected = 0;
+            }
+            cx.notify();
+        }
+        "enter" => {
+            let sel = this.palette.as_ref().map(|p| p.selected).unwrap_or(0);
+            let cmds = this.filtered(cx);
+            if let Some((_, cmd)) = cmds.into_iter().nth(sel) {
+                this.exec_cmd(cmd, window, cx);
+            }
+        }
+        _ => {
+            if !ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.function {
+                if let Some(kc) = ks.key_char.clone() {
+                    if !kc.is_empty() {
+                        if let Some(p) = this.palette.as_mut() {
+                            p.query.push_str(&kc);
+                            p.selected = 0;
+                        }
+                        cx.notify();
+                    }
+                }
+            }
+        }
     }
 }
 
