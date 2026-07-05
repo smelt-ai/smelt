@@ -33,6 +33,10 @@ struct Palette {
 struct Workspace {
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
+    /// 网格列数：1=单终端，2=两列，3=三列。
+    layout_cols: usize,
+    /// 左侧会话侧栏是否展开（Cmd+B 切换）。
+    sidebar_open: bool,
     /// 命令面板（Cmd+K）；None 表示未打开。
     palette: Option<Palette>,
     palette_focus: FocusHandle,
@@ -44,6 +48,8 @@ impl Workspace {
         Self {
             tabs: vec![first],
             active: 0,
+            layout_cols: 1,
+            sidebar_open: true,
             palette: None,
             palette_focus: cx.focus_handle(),
         }
@@ -113,6 +119,30 @@ impl Workspace {
             self.active = ix;
             self.focus_active(window, cx);
             cx.notify();
+        }
+    }
+
+    /// 循环切换网格布局：1 → 2 → 3 → 1 列。
+    fn cycle_layout(&mut self, cx: &mut Context<Self>) {
+        self.layout_cols = match self.layout_cols {
+            1 => 2,
+            2 => 3,
+            _ => 1,
+        };
+        cx.notify();
+    }
+
+    fn next_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.tabs.len();
+        if n > 0 {
+            self.activate((self.active + 1) % n, window, cx);
+        }
+    }
+
+    fn prev_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.tabs.len();
+        if n > 0 {
+            self.activate((self.active + n - 1) % n, window, cx);
         }
     }
 
@@ -195,12 +225,102 @@ impl Render for Workspace {
             .map(|(ix, v)| (ix, v.read(cx).title().to_string()))
             .collect();
 
-        let tab_buttons: Vec<Stateful<Div>> = titles
-            .into_iter()
-            .map(|(ix, title)| tab_button(ix, title, ix == active, can_close, cx))
-            .collect();
+        // 左侧会话侧栏
+        let sidebar = if self.sidebar_open {
+            let rows: Vec<Stateful<Div>> = titles
+                .iter()
+                .map(|(ix, title)| sidebar_row(*ix, title.clone(), *ix == active, can_close, cx))
+                .collect();
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(200.))
+                    .h_full()
+                    .bg(rgb(0x16161e))
+                    .border_r_1()
+                    .border_color(rgb(0x2a2b3d))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_sm()
+                            .text_color(rgb(0x565f89))
+                            .child("会话"),
+                    )
+                    .child(div().flex().flex_col().flex_1().children(rows))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .border_t_1()
+                            .border_color(rgb(0x2a2b3d))
+                            .child(new_tab_button(cx))
+                            .child(open_project_button(cx))
+                            .child(div().flex_1())
+                            .child(layout_button(self.layout_cols, cx)),
+                    ),
+            )
+        } else {
+            None
+        };
 
-        let active_view = self.tabs[active].clone();
+        // 主内容：单终端 或 网格（多列）
+        let cols = self.layout_cols;
+        let n = self.tabs.len();
+        let content = if cols <= 1 {
+            div().flex_1().child(self.tabs[active].clone())
+        } else {
+            let rows: Vec<Div> = (0..n)
+                .step_by(cols)
+                .map(|start| {
+                    let end = (start + cols).min(n);
+                    let cards: Vec<Div> = (start..end)
+                        .map(|ix| {
+                            let is_active = ix == active;
+                            let view = self.tabs[ix].clone();
+                            let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .border_1()
+                                .border_color(if is_active {
+                                    rgb(0x7aa2f7)
+                                } else {
+                                    rgb(0x2a2b3d)
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _ev, window, cx| {
+                                        this.activate(ix, window, cx)
+                                    }),
+                                )
+                                // 卡片标题头
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .text_sm()
+                                        .bg(if is_active { rgb(0x2a2b3d) } else { rgb(0x16161e) })
+                                        .text_color(if is_active {
+                                            rgb(0xc0caf5)
+                                        } else {
+                                            rgb(0x565f89)
+                                        })
+                                        .child(title),
+                                )
+                                .child(div().flex_1().child(view))
+                        })
+                        .collect();
+                    div().flex_1().flex().gap_1().children(cards)
+                })
+                .collect();
+            div().flex_1().flex().flex_col().gap_1().p_1().children(rows)
+        };
 
         // 命令面板弹层
         let palette_overlay = self.palette.as_ref().map(|p| {
@@ -269,37 +389,38 @@ impl Render for Workspace {
         div()
             .relative()
             .flex()
-            .flex_col()
             .size_full()
             .bg(rgb(0x1a1b26))
             .font_family(terminal_view::FONT_FAMILY)
-            // Cmd+K 开关命令面板
+            // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+\ 布局 / Cmd+[ ] 切换
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
-                if ks.modifiers.platform && ks.key == "k" {
-                    if this.palette.is_some() {
-                        this.close_palette(window, cx);
-                    } else {
-                        this.open_palette(window, cx);
+                if !ks.modifiers.platform {
+                    return;
+                }
+                match ks.key.as_str() {
+                    "k" => {
+                        if this.palette.is_some() {
+                            this.close_palette(window, cx);
+                        } else {
+                            this.open_palette(window, cx);
+                        }
                     }
+                    "b" => {
+                        this.sidebar_open = !this.sidebar_open;
+                        cx.notify();
+                    }
+                    "\\" => this.cycle_layout(cx),
+                    "[" => this.prev_active(window, cx),
+                    "]" => this.next_active(window, cx),
+                    _ => {}
                 }
             }))
-            // 标签栏
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .bg(rgb(0x16161e))
-                    .children(tab_buttons)
-                    .child(new_tab_button(cx))
-                    .child(open_project_button(cx)),
-            )
-            // 活动终端
-            .child(div().flex_1().child(active_view))
-            // 命令面板（在最上层）
+            // 左侧会话侧栏
+            .children(sidebar)
+            // 主区（单终端 / 网格）
+            .child(div().flex_1().flex().flex_col().child(content))
+            // 命令面板（最上层）
             .children(palette_overlay)
     }
 }
@@ -362,8 +483,8 @@ fn palette_key(
     }
 }
 
-/// 一个标签按钮：点击切换；活动态高亮；可关闭时带「×」。
-fn tab_button(
+/// 侧栏里的一个会话行：点击切换；活动态高亮；可关闭时带「×」。
+fn sidebar_row(
     ix: usize,
     title: String,
     active: bool,
@@ -373,40 +494,32 @@ fn tab_button(
     let (bg, fg) = if active {
         (rgb(0x2a2b3d), rgb(0xc0caf5))
     } else {
-        (rgb(0x16161e), rgb(0x565f89))
+        (rgb(0x16161e), rgb(0x9aa5ce))
     };
 
-    let mut tab = div()
-        .id(("tab", ix))
+    let mut row = div()
+        .id(("sess", ix))
         .flex()
         .items_center()
         .gap_2()
         .px_3()
         .py_1()
-        .rounded_md()
         .bg(bg)
         .text_color(fg)
         .text_sm()
         .on_click(cx.listener(move |this, _ev, window, cx| {
-            if ix >= this.tabs.len() {
-                return;
-            }
-            this.active = ix;
-            let h = this.tabs[ix].read(cx).focus_handle();
-            window.focus(&h, cx);
-            cx.notify();
+            this.activate(ix, window, cx);
         }))
-        .child(title);
+        .child(div().flex_1().child(title));
 
     if can_close {
-        tab = tab.child(
+        row = row.child(
             div()
-                .id(("close", ix))
+                .id(("sess-close", ix))
                 .px_1()
                 .rounded_sm()
                 .text_color(rgb(0x565f89))
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
-                    // 阻止冒泡到标签切换
                     cx.stop_propagation();
                     this.close_tab(ix, cx);
                 }))
@@ -414,7 +527,7 @@ fn tab_button(
         );
     }
 
-    tab
+    row
 }
 
 /// 「+」新建标签按钮（继承当前项目目录）。
@@ -429,6 +542,23 @@ fn new_tab_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
             this.new_tab(cx);
         }))
         .child("+")
+}
+
+/// 布局切换按钮：显示当前列数图标，点击循环 1/2/3 列。
+fn layout_button(cols: usize, cx: &mut Context<Workspace>) -> Stateful<Div> {
+    let icon = match cols {
+        1 => "▢",
+        2 => "▥",
+        _ => "▦",
+    };
+    div()
+        .id("layout")
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_color(rgb(0x565f89))
+        .on_click(cx.listener(|this, _ev, _window, cx| this.cycle_layout(cx)))
+        .child(icon)
 }
 
 /// 「打开项目」按钮：弹选择框选目录，在其中开新标签。

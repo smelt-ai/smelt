@@ -31,7 +31,6 @@ const CELL_W_RATIO: f32 = 0.6;
 /// 估算的边距 / 标签栏高度，用于从窗口尺寸推算终端可用网格区域。
 const PAD_X: f32 = 16.0;
 const PAD_Y: f32 = 16.0;
-const CHROME_H: f32 = 44.0;
 /// Shift+PageUp/Down 每次滚动的行数。
 const PAGE_LINES: i32 = 20;
 
@@ -51,6 +50,8 @@ pub struct TerminalView {
     cell_w: f32,
     /// 网格原点（含内边距）的窗口像素坐标，由 canvas 在 paint 时写入。
     grid_origin: Rc<StdCell<(f32, f32)>>,
+    /// 终端自身像素尺寸 (宽, 高)，由 canvas 写入；按卡片大小算行列（网格 Hub 用）。
+    grid_size: Rc<StdCell<(f32, f32)>>,
     /// 当前 Cmd 悬停的链接范围 (行, 起列, 止列)，用于高亮 + 切换鼠标样式。
     hover_url: Option<(usize, usize, usize)>,
 }
@@ -86,6 +87,7 @@ impl TerminalView {
             sel: None,
             cell_w: 8.0,
             grid_origin: Rc::new(StdCell::new((0.0, 0.0))),
+            grid_size: Rc::new(StdCell::new((0.0, 0.0))),
             hover_url: None,
         }
     }
@@ -293,9 +295,9 @@ impl Render for TerminalView {
             window.focus(&self.focus_handle, cx);
         }
 
-        // 依据窗口尺寸重算终端行列，并 resize 网格 + PTY（无变化则内部跳过）。
+        // 依据「本终端自身尺寸」重算行列（网格 Hub 里每个终端只占一格）。
         {
-            let vp = window.viewport_size();
+            let (w, h) = self.grid_size.get();
             // 精确测量等宽字符宽度（量一个 'M'）；异常时回退到 0.6 估算。
             let run = TextRun {
                 len: 1,
@@ -313,10 +315,8 @@ impl Render for TerminalView {
                 FONT_PX * CELL_W_RATIO
             };
             self.cell_w = cell_w; // 供鼠标坐标换算
-            let vw = f32::from(vp.width);
-            let vh = f32::from(vp.height);
-            let cols = (((vw - PAD_X) / cell_w).floor() as usize).max(20);
-            let grid_rows = (((vh - CHROME_H - PAD_Y) / LINE_PX).floor() as usize).max(5);
+            let cols = (((w - PAD_X).max(0.0) / cell_w).floor() as usize).clamp(4, 1000);
+            let grid_rows = (((h - PAD_Y).max(0.0) / LINE_PX).floor() as usize).clamp(2, 1000);
             self.terminal.resize(grid_rows, cols);
         }
 
@@ -329,6 +329,7 @@ impl Render for TerminalView {
         let fh = self.focus_handle.clone();
         let entity = cx.entity();
         let origin_cell = self.grid_origin.clone();
+        let size_cell = self.grid_size.clone();
 
         div()
             .relative()
@@ -484,6 +485,8 @@ impl Render for TerminalView {
                         );
                         // 网格原点 = 覆盖层原点（终端主体已去内边距，直接对齐）
                         origin_cell.set((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
+                        // 记录自身尺寸，供按卡片大小算行列
+                        size_cell.set((f32::from(bounds.size.width), f32::from(bounds.size.height)));
                         window.handle_input(&fh, ElementInputHandler::new(bounds, entity), cx);
                     },
                 )
