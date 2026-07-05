@@ -217,6 +217,23 @@ impl Render for Workspace {
         let active = self.active;
         let can_close = self.tabs.len() > 1;
 
+        // 主题色 token（跟随 gpui-component 主题，替代硬编码）
+        let (c_bg, c_sidebar, c_sidebar_border, c_border, c_muted, c_accent, c_accent_fg, c_primary, c_popover, c_fg) = {
+            let t = cx.theme();
+            (
+                t.background,
+                t.sidebar,
+                t.sidebar_border,
+                t.border,
+                t.muted_foreground,
+                t.sidebar_accent,
+                t.sidebar_accent_foreground,
+                t.primary,
+                t.popover,
+                t.foreground,
+            )
+        };
+
         // 先收集标签标题，释放对 self.tabs 的借用
         let titles: Vec<(usize, String)> = self
             .tabs
@@ -235,17 +252,17 @@ impl Render for Workspace {
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(200.))
+                    .w(px(220.))
                     .h_full()
-                    .bg(rgb(0x16161e))
+                    .bg(c_sidebar)
                     .border_r_1()
-                    .border_color(rgb(0x2a2b3d))
+                    .border_color(c_sidebar_border)
                     .child(
                         div()
                             .px_3()
                             .py_2()
                             .text_sm()
-                            .text_color(rgb(0x565f89))
+                            .text_color(c_muted)
                             .child("会话"),
                     )
                     .child(div().flex().flex_col().flex_1().children(rows))
@@ -257,7 +274,7 @@ impl Render for Workspace {
                             .px_2()
                             .py_1()
                             .border_t_1()
-                            .border_color(rgb(0x2a2b3d))
+                            .border_color(c_sidebar_border)
                             .child(new_tab_button(cx))
                             .child(open_project_button(cx))
                             .child(div().flex_1())
@@ -288,11 +305,7 @@ impl Render for Workspace {
                                 .flex()
                                 .flex_col()
                                 .border_1()
-                                .border_color(if is_active {
-                                    rgb(0x7aa2f7)
-                                } else {
-                                    rgb(0x2a2b3d)
-                                })
+                                .border_color(if is_active { c_primary } else { c_border })
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _ev, window, cx| {
@@ -305,12 +318,8 @@ impl Render for Workspace {
                                         .px_2()
                                         .py_1()
                                         .text_sm()
-                                        .bg(if is_active { rgb(0x2a2b3d) } else { rgb(0x16161e) })
-                                        .text_color(if is_active {
-                                            rgb(0xc0caf5)
-                                        } else {
-                                            rgb(0x565f89)
-                                        })
+                                        .bg(if is_active { c_accent } else { c_sidebar })
+                                        .text_color(if is_active { c_accent_fg } else { c_muted })
                                         .child(title),
                                 )
                                 .child(div().flex_1().child(view))
@@ -341,13 +350,13 @@ impl Render for Workspace {
                         .id(("cmd", i))
                         .px_3()
                         .py_1()
-                        .text_color(if is_sel { rgb(0xc0caf5) } else { rgb(0x9aa5ce) })
+                        .text_color(if is_sel { c_accent_fg } else { c_muted })
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.exec_cmd(cmd.clone(), window, cx)
                         }))
                         .child(label.clone());
                     if is_sel {
-                        d = d.bg(rgb(0x2a2b3d));
+                        d = d.bg(c_accent);
                     }
                     d
                 })
@@ -366,16 +375,16 @@ impl Render for Workspace {
                         .w(px(480.))
                         .flex()
                         .flex_col()
-                        .bg(rgb(0x16161e))
+                        .bg(c_popover)
                         .border_1()
-                        .border_color(rgb(0x2a2b3d))
+                        .border_color(c_border)
                         .rounded_lg()
                         .shadow_lg()
                         .child(
                             div()
                                 .px_3()
                                 .py_2()
-                                .text_color(rgb(0xc0caf5))
+                                .text_color(c_fg)
                                 .child(if query.is_empty() {
                                     "› 输入命令…".to_string()
                                 } else {
@@ -390,7 +399,7 @@ impl Render for Workspace {
             .relative()
             .flex()
             .size_full()
-            .bg(rgb(0x1a1b26))
+            .bg(c_bg)
             .font_family(terminal_view::FONT_FAMILY)
             // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+\ 布局 / Cmd+[ ] 切换
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -491,10 +500,11 @@ fn sidebar_row(
     can_close: bool,
     cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
-    let (bg, fg) = if active {
-        (rgb(0x2a2b3d), rgb(0xc0caf5))
+    let t = cx.theme();
+    let (bg, fg, muted) = if active {
+        (t.sidebar_accent, t.sidebar_accent_foreground, t.muted_foreground)
     } else {
-        (rgb(0x16161e), rgb(0x9aa5ce))
+        (t.sidebar, t.sidebar_foreground, t.muted_foreground)
     };
 
     let mut row = div()
@@ -518,7 +528,7 @@ fn sidebar_row(
                 .id(("sess-close", ix))
                 .px_1()
                 .rounded_sm()
-                .text_color(rgb(0x565f89))
+                .text_color(muted)
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     cx.stop_propagation();
                     this.close_tab(ix, cx);
@@ -586,6 +596,8 @@ fn main() {
     gpui_platform::application().run(move |cx| {
         // 用任何 gpui-component 功能前必须先初始化。
         gpui_component::init(cx);
+        // 深色主题（与终端配色一致）
+        Theme::change(ThemeMode::Dark, None, cx);
 
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
