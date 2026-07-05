@@ -8,7 +8,11 @@
 mod terminal;
 mod terminal_view;
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::*;
 use terminal_view::TerminalView;
 
@@ -29,12 +33,26 @@ struct Palette {
     selected: usize,
 }
 
+/// 主区视图：终端 / 文件树 / Git（按项目切换）。
+#[derive(Clone, Copy, PartialEq)]
+enum MainView {
+    Terminal,
+    Files,
+    Git,
+}
+
 /// 工作台根视图：多标签终端管理器。
 struct Workspace {
     tabs: Vec<Entity<TerminalView>>,
     active: usize,
     /// 网格列数：1=单终端，2=两列，3=三列。
     layout_cols: usize,
+    /// 主区当前视图：终端 / 文件树 / Git。
+    view: MainView,
+    /// 文件树里已展开的文件夹绝对路径。
+    expanded: HashSet<String>,
+    /// 当前在文件树里打开查看的文件 (路径, 内容)。
+    open_file: Option<(String, String)>,
     /// 左侧会话侧栏是否展开（Cmd+B 切换）。
     sidebar_open: bool,
     /// 命令面板（Cmd+K）；None 表示未打开。
@@ -49,6 +67,9 @@ impl Workspace {
             tabs: vec![first],
             active: 0,
             layout_cols: 1,
+            view: MainView::Terminal,
+            expanded: HashSet::new(),
+            open_file: None,
             sidebar_open: true,
             palette: None,
             palette_focus: cx.focus_handle(),
@@ -144,6 +165,26 @@ impl Workspace {
         if n > 0 {
             self.activate((self.active + n - 1) % n, window, cx);
         }
+    }
+
+    /// 文件树：展开/收起一个文件夹。
+    fn toggle_expand(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.expanded.remove(&path) {
+            self.expanded.insert(path);
+        }
+        cx.notify();
+    }
+
+    /// 文件树：打开一个文件查看内容（读文本，最多 3000 行）。
+    fn view_file(&mut self, path: String, cx: &mut Context<Self>) {
+        let content = std::fs::read_to_string(&path)
+            .map(|c| {
+                let lines: Vec<&str> = c.lines().take(3000).collect();
+                lines.join("\n")
+            })
+            .unwrap_or_else(|_| "（无法以文本方式读取：可能是二进制文件）".to_string());
+        self.open_file = Some((path, content));
+        cx.notify();
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -243,11 +284,35 @@ impl Render for Workspace {
             .collect();
 
         // 左侧会话侧栏
+        // 按 cwd 把终端分组成项目（保持出现顺序）
+        let mut projects: Vec<(String, Vec<usize>)> = Vec::new();
+        for (ix, _title) in titles.iter() {
+            let cwd = self.tabs[*ix].read(cx).cwd().unwrap_or_default();
+            let name = cwd
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("项目")
+                .to_string();
+            match projects.iter_mut().find(|(n, _)| *n == name) {
+                Some(p) => p.1.push(*ix),
+                None => projects.push((name, vec![*ix])),
+            }
+        }
+
         let sidebar = if self.sidebar_open {
-            let rows: Vec<Stateful<Div>> = titles
-                .iter()
-                .map(|(ix, title)| sidebar_row(*ix, title.clone(), *ix == active, can_close, cx))
-                .collect();
+            // 项目头 + 其下终端行
+            let mut rows: Vec<AnyElement> = Vec::new();
+            for (name, ixs) in &projects {
+                rows.push(project_header(name.clone(), cx).into_any_element());
+                for &ix in ixs {
+                    let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
+                    rows.push(
+                        sidebar_row(ix, title, ix == active, can_close, cx).into_any_element(),
+                    );
+                }
+            }
             Some(
                 div()
                     .flex()
@@ -427,10 +492,325 @@ impl Render for Workspace {
             }))
             // 左侧会话侧栏
             .children(sidebar)
-            // 主区（单终端 / 网格）
-            .child(div().flex_1().flex().flex_col().child(content))
+            // 主区：顶部视图切换 + 内容
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(c_border)
+                            .child(view_tab(0, "终端", self.view == MainView::Terminal, MainView::Terminal, cx))
+                            .child(view_tab(1, "文件树", self.view == MainView::Files, MainView::Files, cx))
+                            .child(view_tab(2, "Git", self.view == MainView::Git, MainView::Git, cx)),
+                    )
+                    .child(match self.view {
+                        MainView::Terminal => content,
+                        MainView::Files => {
+                            let cwd = self.tabs.get(active).and_then(|t| t.read(cx).cwd());
+                            let tree = file_tree(cwd, &self.expanded, cx);
+                            let content = file_content_pane(&self.open_file, cx);
+                            div()
+                                .flex_1()
+                                .flex()
+                                .child(
+                                    div()
+                                        .w(px(260.))
+                                        .border_r_1()
+                                        .border_color(c_border)
+                                        .child(tree),
+                                )
+                                .child(content)
+                        }
+                        MainView::Git => {
+                            let cwd = self.tabs.get(active).and_then(|t| t.read(cx).cwd());
+                            git_view(cwd, cx)
+                        }
+                    }),
+            )
             // 命令面板（最上层）
             .children(palette_overlay)
+    }
+}
+
+/// 顶部视图切换标签。
+fn view_tab(
+    id: usize,
+    label: &str,
+    active: bool,
+    view: MainView,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    let t = cx.theme();
+    let (fg, bg, hover) = if active {
+        (t.foreground, t.accent, t.accent)
+    } else {
+        (t.muted_foreground, t.background, t.accent)
+    };
+    div()
+        .id(("view", id))
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .text_sm()
+        .bg(bg)
+        .text_color(fg)
+        .hover(move |s| s.bg(hover))
+        .on_click(cx.listener(move |this, _ev, _window, cx| {
+            this.view = view;
+            cx.notify();
+        }))
+        .child(label.to_string())
+}
+
+/// 主区占位视图（文件树 / Git 尚未实现）。
+fn placeholder_view(text: &str, muted: Hsla) -> Div {
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(muted)
+        .child(text.to_string())
+}
+
+/// 侧栏里的项目头（分组标题）。
+fn project_header(name: String, cx: &mut Context<Workspace>) -> Div {
+    let muted = cx.theme().muted_foreground;
+    div()
+        .px_2()
+        .pt_2()
+        .pb_1()
+        .text_sm()
+        .text_color(muted)
+        .child(format!("▾ {name}"))
+}
+
+/// 文件树视图：读取项目目录，已展开的文件夹递归显示，点击文件夹展开/收起。
+fn file_tree(cwd: Option<String>, expanded: &HashSet<String>, cx: &mut Context<Workspace>) -> Div {
+    let (muted, fg, hover) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.foreground, t.accent)
+    };
+    let Some(root) = cwd else {
+        return placeholder_view("无项目目录", muted);
+    };
+    let mut flat: Vec<(usize, String, bool, String)> = Vec::new();
+    walk_dir(Path::new(&root), expanded, 0, &mut flat);
+
+    let rows: Vec<Stateful<Div>> = flat
+        .into_iter()
+        .enumerate()
+        .map(|(i, (depth, name, is_dir, path))| {
+            let indent = px(8.0 + depth as f32 * 14.0);
+            let icon = if is_dir {
+                if expanded.contains(&path) {
+                    "▾"
+                } else {
+                    "▸"
+                }
+            } else {
+                " "
+            };
+            let p = path.clone();
+            div()
+                .id(("file", i))
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl(indent)
+                .pr_2()
+                .py(px(1.0))
+                .text_sm()
+                .text_color(if is_dir { fg } else { muted })
+                .hover(move |s| s.bg(hover))
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    if is_dir {
+                        this.toggle_expand(p.clone(), cx);
+                    } else {
+                        this.view_file(p.clone(), cx);
+                    }
+                }))
+                .child(icon.to_string())
+                .child(name)
+        })
+        .collect();
+
+    div().flex_1().flex().flex_col().py_1().children(rows)
+}
+
+/// 递归收集目录条目（仅进入已展开的文件夹），忽略常见重目录。
+fn walk_dir(
+    root: &Path,
+    expanded: &HashSet<String>,
+    depth: usize,
+    out: &mut Vec<(usize, String, bool, String)>,
+) {
+    let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(root) {
+        Ok(rd) => rd.flatten().collect(),
+        Err(_) => return,
+    };
+    entries.sort_by_key(|e| {
+        (
+            !e.path().is_dir(),
+            e.file_name().to_string_lossy().to_lowercase(),
+        )
+    });
+    for e in entries {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".DS_Store") {
+            continue;
+        }
+        let is_dir = path.is_dir();
+        let ps = path.to_string_lossy().to_string();
+        out.push((depth, name, is_dir, ps.clone()));
+        if is_dir && expanded.contains(&ps) {
+            walk_dir(&path, expanded, depth + 1, out);
+        }
+    }
+}
+
+/// Git 视图：显示当前分支 + 改动文件（git status）。
+fn git_view(cwd: Option<String>, cx: &mut Context<Workspace>) -> Div {
+    let (muted, fg, border) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.foreground, t.border)
+    };
+    let Some(root) = cwd else {
+        return placeholder_view("无项目目录", muted);
+    };
+    let output = std::process::Command::new("git")
+        .args(["-C", &root, "status", "--porcelain=v1", "-b"])
+        .output();
+    let text = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return placeholder_view("不是 git 仓库，或 git 不可用", muted),
+    };
+
+    let mut branch = String::from("?");
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        if let Some(b) = line.strip_prefix("## ") {
+            branch = b.split("...").next().unwrap_or("").trim().to_string();
+        } else if line.len() >= 3 {
+            files.push((line[..2].to_string(), line[3..].to_string()));
+        }
+    }
+
+    let body = if files.is_empty() {
+        placeholder_view("工作区干净，无改动 ✓", muted)
+    } else {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .p_1()
+            .children(files.into_iter().enumerate().map(|(i, (st, path))| {
+                let color = git_status_color(&st);
+                div()
+                    .id(("git", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(px(1.0))
+                    .text_sm()
+                    .child(
+                        div()
+                            .w(px(22.))
+                            .text_color(color)
+                            .child(if st.trim().is_empty() {
+                                "•".to_string()
+                            } else {
+                                st.trim().to_string()
+                            }),
+                    )
+                    .child(div().text_color(fg).child(path))
+            }))
+    };
+
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .text_color(fg)
+                .border_b_1()
+                .border_color(border)
+                .child(format!("⎇ {branch}")),
+        )
+        .child(body)
+}
+
+/// git 状态码 → 颜色（约定色）。
+fn git_status_color(st: &str) -> Rgba {
+    if st.contains('?') {
+        rgb(0x565f89) // 未跟踪
+    } else if st.contains('A') {
+        rgb(0x9ece6a) // 新增
+    } else if st.contains('D') {
+        rgb(0xf7768e) // 删除
+    } else if st.contains('M') {
+        rgb(0xe0af68) // 修改
+    } else {
+        rgb(0x7aa2f7)
+    }
+}
+
+/// 文件内容查看面板：逐行显示选中文件的文本。
+fn file_content_pane(open_file: &Option<(String, String)>, cx: &mut Context<Workspace>) -> Div {
+    let (muted, fg, border) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.foreground, t.border)
+    };
+    match open_file {
+        None => placeholder_view("← 从左侧选择文件查看内容", muted),
+        Some((path, content)) => {
+            let name = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .border_b_1()
+                        .border_color(border)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .p_2()
+                        .font_family(terminal_view::FONT_FAMILY)
+                        .text_sm()
+                        .text_color(fg)
+                        .children(
+                            content
+                                .lines()
+                                .map(|l| div().whitespace_nowrap().child(l.to_string())),
+                        ),
+                )
+        }
     }
 }
 
@@ -501,10 +881,20 @@ fn sidebar_row(
     cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
     let t = cx.theme();
-    let (bg, fg, muted) = if active {
-        (t.sidebar_accent, t.sidebar_accent_foreground, t.muted_foreground)
+    let (bg, fg, muted, hover) = if active {
+        (
+            t.sidebar_accent,
+            t.sidebar_accent_foreground,
+            t.muted_foreground,
+            t.sidebar_accent,
+        )
     } else {
-        (t.sidebar, t.sidebar_foreground, t.muted_foreground)
+        (
+            t.sidebar,
+            t.sidebar_foreground,
+            t.muted_foreground,
+            t.sidebar_accent,
+        )
     };
 
     let mut row = div()
@@ -517,6 +907,7 @@ fn sidebar_row(
         .bg(bg)
         .text_color(fg)
         .text_sm()
+        .hover(move |s| s.bg(hover))
         .on_click(cx.listener(move |this, _ev, window, cx| {
             this.activate(ix, window, cx);
         }))
@@ -540,49 +931,40 @@ fn sidebar_row(
     row
 }
 
-/// 「+」新建标签按钮（继承当前项目目录）。
-fn new_tab_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    div()
-        .id("new-tab")
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_color(rgb(0x7aa2f7))
+/// 「+」新建终端按钮（继承当前项目目录）。
+fn new_tab_button(cx: &mut Context<Workspace>) -> Button {
+    Button::new("new-tab")
+        .ghost()
+        .label("+")
+        .tooltip("新建终端")
         .on_click(cx.listener(|this, _ev, _window, cx| {
             this.new_tab(cx);
         }))
-        .child("+")
 }
 
 /// 布局切换按钮：显示当前列数图标，点击循环 1/2/3 列。
-fn layout_button(cols: usize, cx: &mut Context<Workspace>) -> Stateful<Div> {
+fn layout_button(cols: usize, cx: &mut Context<Workspace>) -> Button {
     let icon = match cols {
         1 => "▢",
         2 => "▥",
         _ => "▦",
     };
-    div()
-        .id("layout")
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_color(rgb(0x565f89))
+    Button::new("layout")
+        .ghost()
+        .label(icon)
+        .tooltip("切换布局")
         .on_click(cx.listener(|this, _ev, _window, cx| this.cycle_layout(cx)))
-        .child(icon)
 }
 
 /// 「打开项目」按钮：弹选择框选目录，在其中开新标签。
-fn open_project_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    div()
-        .id("open-project")
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_color(rgb(0x565f89))
+fn open_project_button(cx: &mut Context<Workspace>) -> Button {
+    Button::new("open-project")
+        .ghost()
+        .label("📂")
+        .tooltip("打开项目")
         .on_click(cx.listener(|this, _ev, _window, cx| {
             this.open_project(cx);
         }))
-        .child("📂")
 }
 
 /// 当前工作目录字符串。
