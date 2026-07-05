@@ -21,6 +21,8 @@ const CELL_W_RATIO: f32 = 0.6;
 const PAD_X: f32 = 16.0;
 const PAD_Y: f32 = 16.0;
 const CHROME_H: f32 = 44.0;
+/// Shift+PageUp/Down 每次滚动的行数。
+const PAGE_LINES: i32 = 20;
 
 /// 一个内嵌终端视图。
 pub struct TerminalView {
@@ -171,7 +173,22 @@ impl Render for TerminalView {
         // 依据窗口尺寸重算终端行列，并 resize 网格 + PTY（无变化则内部跳过）。
         {
             let vp = window.viewport_size();
-            let cell_w = FONT_PX * CELL_W_RATIO;
+            // 精确测量等宽字符宽度（量一个 'M'）；异常时回退到 0.6 估算。
+            let run = TextRun {
+                len: 1,
+                font: font("monospace"),
+                color: hsla(0.0, 0.0, 1.0, 1.0),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let measured =
+                f32::from(window.text_system().layout_line("M", px(FONT_PX), &[run], None).width);
+            let cell_w = if measured > 1.0 {
+                measured
+            } else {
+                FONT_PX * CELL_W_RATIO
+            };
             let vw = f32::from(vp.width);
             let vh = f32::from(vp.height);
             let cols = (((vw - PAD_X) / cell_w).floor() as usize).max(20);
@@ -192,7 +209,28 @@ impl Render for TerminalView {
             .text_color(rgb(0xc0caf5))
             .font_family("monospace")
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
-                if let Some(bytes) = keystroke_to_bytes(&ev.keystroke) {
+                let ks = &ev.keystroke;
+                let m = &ks.modifiers;
+                // Cmd+V 粘贴：读剪贴板写入 PTY
+                if m.platform && ks.key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
+                        this.terminal.send_input(text.as_bytes());
+                        cx.notify();
+                    }
+                    return;
+                }
+                // Shift+PageUp/Down 滚动历史缓冲
+                if m.shift && (ks.key == "pageup" || ks.key == "pagedown") {
+                    let delta = if ks.key == "pageup" {
+                        PAGE_LINES
+                    } else {
+                        -PAGE_LINES
+                    };
+                    this.terminal.scroll(delta);
+                    cx.notify();
+                    return;
+                }
+                if let Some(bytes) = keystroke_to_bytes(ks) {
                     this.terminal.send_input(&bytes);
                     cx.notify();
                 }
