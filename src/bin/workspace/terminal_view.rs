@@ -20,6 +20,21 @@ const LINK_FG: u32 = 0x007d_cfff;
 /// 终端字体：Nerd Font 的严格等宽变体（含图标/powerline 字形，且单格宽对齐）。
 pub const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
+/// 图标 fallback：内嵌的 Nerd Font Symbols-only 字体（见 main.rs 里的 add_fonts）。
+/// FONT_FAMILY 本身查不到的码位（比如装的是非 Nerd Font 版本、或某些较新图标）会落到这里，
+/// 不必强求用户机器上装的必须是打了 Nerd Font 补丁的那个变体。
+const SYMBOLS_FALLBACK_FONT: &str = "Symbols Nerd Font Mono";
+
+/// 终端字体（主字体 + 图标 fallback）。渲染和测量都应该用这个，保持字形来源一致——
+/// 否则测量用的字体和实际渲染用的字体对某个字符的 fallback 结果不一样，会导致
+/// 列宽计算和实际显示对不上（拖选/鼠标定位跑偏）。
+fn terminal_font() -> Font {
+    Font {
+        fallbacks: Some(FontFallbacks::from_fonts(vec![SYMBOLS_FALLBACK_FONT.to_string()])),
+        ..font(FONT_FAMILY)
+    }
+}
+
 /// 终端网格刷新间隔（后台线程在更新，UI 定时快照重绘）。
 const REFRESH: Duration = Duration::from_millis(30);
 
@@ -76,6 +91,16 @@ pub struct TerminalView {
     /// 最近一次系统通知的 (文本, 时刻)：同文本 60s 内不重发（Claude Code 会反复
     /// 上报 waiting for input，不去重就是通知轰炸）。
     last_notified: Option<(String, Instant)>,
+    /// 最近一次比较过的外观设置：定时刷新时用于判断"背景色/图/透明度/模糊"是否被
+    /// 改过（这些跟 PTY 内容无关，Terminal::take_damage 感知不到）。
+    /// None = 还没比较过，首次一律当作"变了"以确保能显示当前外观。
+    last_appearance: Option<crate::Appearance>,
+}
+
+/// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
+/// Appearance 未 derive PartialEq，故手动比较这几个字段。
+fn appearance_changed(a: &crate::Appearance, b: &crate::Appearance) -> bool {
+    a.bg_color != b.bg_color || a.bg_image != b.bg_image || a.opacity != b.opacity || a.blur != b.blur
 }
 
 /// 「需要注意」的细分：等审批（红，最高优先）> 其他需要处理（等输入 / 响铃等，橙）。
@@ -171,7 +196,25 @@ impl TerminalView {
                 }
                 this.was_running = running;
 
-                cx.notify();
+                // P0 性能修复：这句 notify() 以前无条件调用，导致哪怕 shell 完全空闲
+                // 也在以 33 次/秒的频率触发 render() 里"整个网格快照 + 每行重新整形
+                // 文字"的重活。现在先问 alacritty 自带的 damage tracking——终端内容
+                // （字符/颜色/光标/翻滚/进出备用屏幕/resize）没有真的变化，就跳过。
+                // 外观设置（背景色/图/透明度/模糊）单独比较，因为这些跟 PTY 内容无关、
+                // damage tracking 感知不到。拖选高亮 / Cmd 悬停链接不受影响：它们各自
+                // 的鼠标事件处理里已经各自调用过 cx.notify()，跟这里无关。
+                let content_changed = this.terminal.take_damage();
+                let ap_now = cx.global::<crate::Appearance>().clone();
+                let ap_changed = match &this.last_appearance {
+                    Some(prev) => appearance_changed(prev, &ap_now),
+                    None => true,
+                };
+                if ap_changed {
+                    this.last_appearance = Some(ap_now);
+                }
+                if content_changed || ap_changed {
+                    cx.notify();
+                }
             });
             if r.is_err() {
                 break; // 视图已销毁
@@ -208,6 +251,7 @@ impl TerminalView {
             session_id,
             completed_unread: false,
             last_notified: None,
+            last_appearance: None,
         }
     }
 
@@ -314,7 +358,7 @@ impl TerminalView {
         }
         let run = TextRun {
             len: line.len(),
-            font: font(FONT_FAMILY),
+            font: terminal_font(),
             color: Hsla::default(),
             background_color: None,
             underline: None,
@@ -563,7 +607,7 @@ impl Render for TerminalView {
         let sel = self.sel;
         let hover_url = self.hover_url;
         let has_hover = hover_url.is_some();
-        let base_font = font(FONT_FAMILY);
+        let base_font = terminal_font();
         let fh = self.focus_handle.clone();
         let entity = cx.entity();
         let origin_cell = self.grid_origin.clone();

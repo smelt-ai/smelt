@@ -240,13 +240,6 @@ impl Session {
         v.len()
     }
 
-    /// 会话内是否有 pane「需要注意」（某个 agent 响了铃）。
-    fn has_attention(&self, cx: &App) -> bool {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
-        v.iter().any(|t| t.read(cx).has_attention())
-    }
-
     /// 会话内任一 pane 的待处理通知消息（供总览卡片显示「等你确认 xxx」）。
     fn notification_msg(&self, cx: &App) -> Option<String> {
         let mut v = Vec::new();
@@ -644,6 +637,12 @@ struct Workspace {
     view: MainView,
     /// 文件树里已展开的文件夹绝对路径。
     expanded: HashSet<String>,
+    /// 目录列表缓存（绝对路径 → 已排序过滤的直接子项 (名, 是否目录)）。后台读盘填充，
+    /// render 只读；此前 file_tree 在 render 里同步 fs::read_dir，大目录会像 git
+    /// status 那样掉帧，这里改用同款「后台刷新 + 缓存 + render 只读」模式修复。
+    dir_cache: HashMap<String, (Instant, Rc<Vec<(String, bool)>>)>,
+    /// 正在后台读取的目录（防重复并发 spawn）。
+    dir_inflight: HashSet<String>,
     /// 当前在文件树里打开查看的文件（含预高亮的行数据）。
     open_file: Option<OpenFile>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
@@ -669,6 +668,8 @@ struct Workspace {
     git_files_scroll: ScrollHandle,
     diff_scroll: UniformListScrollHandle,
     file_scroll: UniformListScrollHandle,
+    /// 文件树列表的滚动句柄（普通滚动，非虚拟滚动——见 file_tree 函数注释）。
+    file_tree_scroll: ScrollHandle,
     /// 根布局左右分栏（会话侧栏 ↔ 主区）的可拖拽状态；常驻以保住拖出的宽度。
     root_resize: Entity<ResizableState>,
     /// 侧栏初始宽度（px）：启动时从存档恢复，作为 resizable_panel 的初始 size。
@@ -758,6 +759,8 @@ impl Workspace {
             active_session,
             view: MainView::Terminal,
             expanded: HashSet::new(),
+            dir_cache: HashMap::new(),
+            dir_inflight: HashSet::new(),
             open_file: None,
             file_gen: 0,
             git_diff: None,
@@ -771,6 +774,7 @@ impl Workspace {
             git_files_scroll: ScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
             file_scroll: UniformListScrollHandle::new(),
+            file_tree_scroll: ScrollHandle::new(),
             root_resize,
             sidebar_w,
             _resize_sub,
@@ -1847,6 +1851,55 @@ impl Workspace {
         .detach();
     }
 
+    /// 确保某目录的直接子项列表缓存新鲜（>2s 或缺失就后台刷新）。
+    /// 绝不阻塞 render：此前 file_tree 在 render 里同步 fs::read_dir，大目录会
+    /// 像 git status 那样掉帧，这里挪到后台执行器 + 缓存，render 只读。
+    fn ensure_dir_listing(&mut self, dir: String, cx: &mut Context<Self>) {
+        let fresh = self
+            .dir_cache
+            .get(&dir)
+            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_millis(2000));
+        if fresh || self.dir_inflight.contains(&dir) {
+            return;
+        }
+        self.dir_inflight.insert(dir.clone());
+        cx.spawn(async move |this, cx| {
+            let d = dir.clone();
+            let entries = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut items: Vec<std::fs::DirEntry> = match std::fs::read_dir(&d) {
+                        Ok(rd) => rd.flatten().collect(),
+                        Err(_) => return Vec::new(),
+                    };
+                    items.sort_by_key(|e| {
+                        (
+                            !e.path().is_dir(),
+                            e.file_name().to_string_lossy().to_lowercase(),
+                        )
+                    });
+                    items
+                        .into_iter()
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".DS_Store")
+                            {
+                                return None;
+                            }
+                            Some((name, e.path().is_dir()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.dir_inflight.remove(&dir);
+                this.dir_cache.insert(dir, (Instant::now(), Rc::new(entries)));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// 跑 git + 着色放后台，用 file_gen 丢弃过期结果。
     fn open_diff(&mut self, root: String, path: String, untracked: bool, cx: &mut Context<Self>) {
         self.diff_gen = self.diff_gen.wrapping_add(1);
@@ -2025,6 +2078,17 @@ impl Render for Workspace {
             }
         }
 
+        // 文件树页：后台刷新根目录 + 所有已展开目录的直接子项列表（fs::read_dir 绝不
+        // 在 render 里同步跑）。展开新目录时它会先落空，下一帧缓存到位后自动出现。
+        if self.view == MainView::Files {
+            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                self.ensure_dir_listing(root, cx);
+            }
+            for dir in self.expanded.clone() {
+                self.ensure_dir_listing(dir, cx);
+            }
+        }
+
         // 同步窗口背景外观：不透明度 / 模糊改了（可能来自 slider/取色器的无 window 回调）
         // → 这里用 window 切换透明/模糊。仅在变化时调，避免每帧重复。
         let want_bg = cx.global::<Appearance>().window_bg();
@@ -2064,8 +2128,8 @@ impl Render for Workspace {
             .enumerate()
             .map(|(ix, s)| (ix, s.title(cx)))
             .collect();
-        // 各会话是否「需要注意」（预算好，避免在侧栏 map 闭包里借用 cx）。
-        let attentions: Vec<bool> = self.sessions.iter().map(|s| s.has_attention(cx)).collect();
+        // 各会话状态（预算好，避免在侧栏 map 闭包里借用 cx）。与总览页共用同一套五态配色。
+        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
         // 待处理通知总数（标题栏铃铛用）。
         let notif_count = self.collect_notifications(cx).len();
         // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
@@ -2105,9 +2169,18 @@ impl Render for Workspace {
                     .iter()
                     .map(|&ix| {
                         let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
+                        let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
                         // 只在「非活动」会话上亮点：正在看的那个不提醒（但通知仍留着）。
-                        let attention =
-                            attentions.get(ix).copied().unwrap_or(false) && ix != active;
+                        // 空闲不点，其余四态用与总览页一致的颜色，一眼区分等审批/需处理/运行中/已完成。
+                        let status_dot = (status != AgentStatus::Idle && ix != active).then(|| {
+                            match status {
+                                AgentStatus::WaitingApproval => rgb(0xef4444),
+                                AgentStatus::NeedsAttention => rgb(0xf59e0b),
+                                AgentStatus::Running => rgb(0x4a9eff),
+                                AgentStatus::Done => rgb(0x22c55e),
+                                AgentStatus::Idle => unreachable!(),
+                            }
+                        });
                         let e_act = this.clone();
                         let mut item = SidebarMenuItem::new(title)
                             .icon(IconName::SquareTerminal)
@@ -2115,18 +2188,18 @@ impl Render for Workspace {
                             .on_click(move |_ev, window, cx| {
                                 e_act.update(cx, |ws, cx| ws.activate(ix, window, cx));
                             });
-                        // suffix：「需要注意」蓝点 + 关闭按钮（有其一就挂）。
-                        if attention || can_close {
+                        // suffix：状态点 + 关闭按钮（有其一就挂）。
+                        if status_dot.is_some() || can_close {
                             let e_close = this.clone();
                             item = item.suffix(move |_w, _cx| {
                                 let e = e_close.clone();
                                 h_flex()
                                     .items_center()
                                     .gap_1()
-                                    // agent 响铃 → 蓝点
-                                    .children(attention.then(|| {
-                                        div().size_2().rounded_full().bg(rgb(0x4a9eff))
-                                    }))
+                                    .children(
+                                        status_dot
+                                            .map(|c| div().size_2().rounded_full().bg(c)),
+                                    )
                                     .children(can_close.then(|| {
                                         Button::new(("close-session", ix))
                                             .ghost()
@@ -2476,7 +2549,13 @@ impl Render for Workspace {
                         MainView::Terminal => content,
                         MainView::Files => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let tree = file_tree(cwd, &self.expanded, cx);
+                            let tree = file_tree(
+                                cwd,
+                                &self.expanded,
+                                &self.dir_cache,
+                                &self.file_tree_scroll,
+                                cx,
+                            );
                             let content = file_content_pane(&self.open_file, &self.file_scroll, cx);
                             div()
                                 .flex_1()
@@ -2558,31 +2637,51 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
         .child(text.to_string())
 }
 
-/// 文件树视图：读取项目目录，已展开的文件夹递归显示，点击文件夹展开/收起。
-fn file_tree(cwd: Option<String>, expanded: &HashSet<String>, cx: &mut Context<Workspace>) -> Div {
+/// 文件树视图：只读目录列表缓存渲染（ensure_dir_listing 后台刷新，绝不在这里碰
+/// 文件系统），已展开的文件夹递归显示，点击文件夹展开/收起、点击文件打开。
+///
+/// 未用 uniform_list 虚拟滚动：实测它对这里的行内容（含 Icon）的孤立测量会算出
+/// 异常偏大的行高，导致可视区间被判定只能塞下 1 行——已用隔离实验定位到具体是
+/// uniform_list 的度量逻辑而非容器高度链的问题。文件树条目量级远小于 git diff，
+/// 虚拟滚动只是锦上添花而非必需，故改走普通可滚动列表（与 git-files 同款写法），
+/// 优先保证正确显示；虚拟滚动作为后续可选优化记在 docs/roadmap.md。
+fn file_tree(
+    cwd: Option<String>,
+    expanded: &HashSet<String>,
+    dir_cache: &HashMap<String, (Instant, Rc<Vec<(String, bool)>>)>,
+    scroll: &ScrollHandle,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let (muted, fg, hover) = {
         let t = cx.theme();
         (t.muted_foreground, t.foreground, t.accent)
     };
     let Some(root) = cwd else {
-        return placeholder_view("无项目目录", muted);
+        return placeholder_view("无项目目录", muted).into_any_element();
     };
-    let mut flat: Vec<(usize, String, bool, String)> = Vec::new();
-    walk_dir(Path::new(&root), expanded, 0, &mut flat);
+    if !dir_cache.contains_key(&root) {
+        // 首次进入该项目：ensure_dir_listing 已在 render 顶部触发，下一帧就有数据。
+        return placeholder_view("加载中…", muted).into_any_element();
+    }
 
-    let rows: Vec<Stateful<Div>> = flat
+    // 每行预先算好展开状态。
+    let mut flat: Vec<(usize, String, bool, String, bool)> = Vec::new();
+    walk_dir_cached(&root, dir_cache, expanded, 0, &mut flat);
+
+    let this = cx.entity();
+    let rows: Vec<AnyElement> = flat
         .into_iter()
         .enumerate()
-        .map(|(i, (depth, name, is_dir, path))| {
+        .map(|(i, (depth, name, is_dir, path, is_expanded))| {
             let indent = px(8.0 + depth as f32 * 14.0);
-            // 展开箭头：目录用 chevron 图标（展开朝下 / 收起朝右），文件留等宽占位对齐。
+            // 展开箭头：目录用 chevron（展开朝下 / 收起朝右），文件留等宽占位对齐。
             let arrow = if is_dir {
                 div()
                     .w(px(14.))
                     .flex()
                     .justify_center()
                     .child(
-                        Icon::new(if expanded.contains(&path) {
+                        Icon::new(if is_expanded {
                             IconName::ChevronDown
                         } else {
                             IconName::ChevronRight
@@ -2596,7 +2695,7 @@ fn file_tree(cwd: Option<String>, expanded: &HashSet<String>, cx: &mut Context<W
             };
             // 类型图标：目录（展开 / 收起用不同文件夹图标）与文件区分。
             let type_icon = Icon::new(if is_dir {
-                if expanded.contains(&path) {
+                if is_expanded {
                     IconName::FolderOpen
                 } else {
                     IconName::Folder
@@ -2606,6 +2705,7 @@ fn file_tree(cwd: Option<String>, expanded: &HashSet<String>, cx: &mut Context<W
             })
             .size(px(14.))
             .text_color(if is_dir { fg } else { muted });
+            let this = this.clone();
             let p = path.clone();
             div()
                 .id(("file", i))
@@ -2618,50 +2718,52 @@ fn file_tree(cwd: Option<String>, expanded: &HashSet<String>, cx: &mut Context<W
                 .text_sm()
                 .text_color(if is_dir { fg } else { muted })
                 .hover(move |s| s.bg(hover))
-                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                    if is_dir {
-                        this.toggle_expand(p.clone(), cx);
-                    } else {
-                        this.view_file(p.clone(), cx);
-                    }
-                }))
+                .on_click(move |_ev, _window, cx| {
+                    this.update(cx, |ws, cx| {
+                        if is_dir {
+                            ws.toggle_expand(p.clone(), cx);
+                        } else {
+                            ws.view_file(p.clone(), cx);
+                        }
+                    });
+                })
                 .child(arrow)
                 .child(type_icon)
                 .child(name)
+                .into_any_element()
         })
         .collect();
 
-    div().flex_1().flex().flex_col().py_1().children(rows)
+    div()
+        .id("file-tree")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .py_1()
+        .track_scroll(scroll)
+        .vertical_scrollbar(scroll)
+        .children(rows)
+        .into_any_element()
 }
 
-/// 递归收集目录条目（仅进入已展开的文件夹），忽略常见重目录。
-fn walk_dir(
-    root: &Path,
+/// 只读缓存的递归收集目录条目（仅进入已展开且已缓存的文件夹）；绝不做任何 fs 调用。
+/// 展开了但尚未缓存的目录会被跳过——render 每帧检查并后台补齐，下一帧自动出现。
+fn walk_dir_cached(
+    dir: &str,
+    dir_cache: &HashMap<String, (Instant, Rc<Vec<(String, bool)>>)>,
     expanded: &HashSet<String>,
     depth: usize,
-    out: &mut Vec<(usize, String, bool, String)>,
+    out: &mut Vec<(usize, String, bool, String, bool)>,
 ) {
-    let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(root) {
-        Ok(rd) => rd.flatten().collect(),
-        Err(_) => return,
-    };
-    entries.sort_by_key(|e| {
-        (
-            !e.path().is_dir(),
-            e.file_name().to_string_lossy().to_lowercase(),
-        )
-    });
-    for e in entries {
-        let path = e.path();
-        let name = e.file_name().to_string_lossy().to_string();
-        if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".DS_Store") {
-            continue;
-        }
-        let is_dir = path.is_dir();
-        let ps = path.to_string_lossy().to_string();
-        out.push((depth, name, is_dir, ps.clone()));
-        if is_dir && expanded.contains(&ps) {
-            walk_dir(&path, expanded, depth + 1, out);
+    let Some((_, entries)) = dir_cache.get(dir) else { return };
+    for (name, is_dir) in entries.iter() {
+        let path = Path::new(dir).join(name).to_string_lossy().to_string();
+        let is_expanded = expanded.contains(&path);
+        out.push((depth, name.clone(), *is_dir, path.clone(), is_expanded));
+        if *is_dir && is_expanded {
+            walk_dir_cached(&path, dir_cache, expanded, depth + 1, out);
         }
     }
 }
@@ -3406,6 +3508,13 @@ fn main() {
     app.run(move |cx| {
         // 用任何 gpui-component 功能前必须先初始化。
         gpui_component::init(cx);
+        // 内嵌 Nerd Font 图标 fallback 字体：主字体查不到的图标码位会落到这里
+        // （terminal_view::terminal_font），不必强求用户机器装了打过 Nerd Font 补丁的字体。
+        cx.text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(
+                include_bytes!("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf").as_slice(),
+            )])
+            .expect("加载图标 fallback 字体失败");
         // 深色主题（与终端配色一致）
         Theme::change(ThemeMode::Dark, None, cx);
 

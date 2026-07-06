@@ -13,7 +13,7 @@ use std::time::Duration;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 
 /// 默认前景 / 背景色（与窗口底色一致，Tokyo Night 风格）。
@@ -379,6 +379,39 @@ impl Terminal {
         self.title.lock().ok().and_then(|g| g.clone())
     }
 
+    /// 自上次调用以来，终端网格内容是否真的变化了（读并清 alacritty 自带的
+    /// damage tracking）。涵盖：PTY 写入的字符/颜色、光标移动、翻滚历史、
+    /// 进出备用屏幕（vim/less 等全屏 TUI）、resize 等——这些都由 alacritty 自动
+    /// 判定。**不**涵盖：用户拖选（Selection）、Cmd 悬停链接高亮——这两个是
+    /// TerminalView 自己维护的 UI 状态，跟 Term 无关，各自的鼠标事件处理里已经
+    /// 各自调用 cx.notify()，不依赖这里。
+    ///
+    /// 只应由每个 TerminalView 自己的定时刷新循环调用（每个 Terminal 独占一个
+    /// Term，不会有多个消费者互相"偷"对方读到的脏区）。
+    pub fn take_damage(&self) -> bool {
+        let Ok(mut term) = self.term.lock() else {
+            // 拿不到锁（锁中毒）：保守起见当作有变化，避免画面从此卡死不再刷新。
+            return true;
+        };
+        // 光标当前 (行, 列)：alacritty 的 damage_cursor() 每次调用都会无条件把光标
+        // 所在这一格标脏（哪怕光标压根没动），这是它假设"渲染方每帧都要重画光标做
+        // 闪烁动画"的设计——实测验证过：完全空闲的终端 take_damage() 会一直返回
+        // true，就是这个原因（不是猜的，写了隔离测试复现过）。smelt 没有光标闪烁
+        // 动画，不能把这个无条件标记当成"内容变了"，得从判定里精确减掉：只有脏区
+        // 范围比"仅光标那一格"更宽，才算数（光标真的移动了、或该格所在行其它字符
+        // 也变了，都会让范围变宽；纯粹静止不动时范围恰好等于光标那一格）。
+        let cursor = term.grid().cursor.point;
+        let (cursor_line, cursor_col) = (cursor.line.0 as usize, cursor.column.0);
+        let damaged = match term.damage() {
+            TermDamage::Full => true,
+            TermDamage::Partial(it) => it.into_iter().any(|l| {
+                l.line != cursor_line || l.left != cursor_col || l.right != cursor_col
+            }),
+        };
+        term.reset_damage();
+        damaged
+    }
+
     /// 按新行列 resize：同步 alacritty 网格，并发帧让守护 resize 底层 PTY。无变化则跳过。
     pub fn resize(&mut self, rows: usize, cols: usize) {
         if rows == self.size.rows && cols == self.size.cols {
@@ -534,5 +567,51 @@ impl Terminal {
         } else if let Ok(mut term) = self.term.lock() {
             term.scroll_display(Scroll::Delta(lines));
         }
+    }
+}
+
+#[cfg(test)]
+mod damage_gate_tests {
+    use super::*;
+
+    /// P0 性能修复的验证：真空闲时 take_damage() 应稳定为 false（跳过重画），
+    /// 写入字节后应变 true（真实变化不会被吞掉）。用全新一次性 session id +
+    /// 空临时目录，不碰任何真实/持久化会话。
+    #[test]
+    fn idle_then_input_toggles_damage() {
+        let dir = std::env::temp_dir().join(format!("smelt-damage-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let id = format!("damage-test-{}", uuid_like());
+
+        let mut term = Terminal::spawn(24, 80, dir.to_str(), &id).expect("spawn 失败");
+
+        // 让 shell 起步、打印 prompt 稳定下来（这部分输出算真实变化，先排掉）。
+        thread::sleep(Duration::from_millis(800));
+        let _ = term.take_damage(); // 清掉启动阶段的输出
+
+        // 真空闲：什么都不做，多次采样应稳定为 false。
+        let mut idle_true_count = 0;
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(100));
+            if term.take_damage() {
+                idle_true_count += 1;
+            }
+        }
+        assert_eq!(idle_true_count, 0, "真空闲时 take_damage() 不该返回 true（次数={idle_true_count}）");
+
+        // 写入真实字节：应该被判定为变化。
+        term.send_input(b"echo hi\n");
+        thread::sleep(Duration::from_millis(300));
+        assert!(term.take_damage(), "写入字节后 take_damage() 应返回 true");
+
+        // 清理：让守护杀掉这个一次性测试会话。
+        kill_remote(&id);
+    }
+
+    /// 不依赖 uuid crate（terminal.rs 本身不需要它），用 pid+时间戳拼一个够唯一的 id。
+    fn uuid_like() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        format!("{}-{nanos}", std::process::id())
     }
 }
