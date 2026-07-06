@@ -576,14 +576,14 @@ impl Render for TerminalView {
                     cx.notify();
                 }
             }))
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
                 let lines = match ev.delta {
                     ScrollDelta::Lines(p) => p.y as i32,
                     ScrollDelta::Pixels(p) => (f32::from(p.y) / LINE_PX) as i32,
                 };
                 if lines != 0 {
                     // 按终端模式分流：TUI（Claude Code）转成鼠标滚轮事件，普通 shell 滚历史。
-                    let (row, col) = this.pos_to_cell(ev.position);
+                    let (row, col) = this.pos_to_cell(ev.position, window);
                     this.terminal.scroll_wheel(lines, row, col);
                     cx.notify();
                 }
@@ -593,7 +593,7 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    let cell = this.pos_to_cell(ev.position);
+                    let cell = this.pos_to_cell(ev.position, window);
                     // Cmd+点击打开链接
                     if ev.modifiers.platform {
                         if let Some(url) = this.url_at(cell) {
@@ -609,17 +609,17 @@ impl Render for TerminalView {
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
                 if ev.pressed_button == Some(MouseButton::Left) {
                     if let Some((a, _)) = this.sel {
-                        let head = this.pos_to_cell(ev.position);
+                        let head = this.pos_to_cell(ev.position, window);
                         this.sel = Some((a, head));
                         cx.notify();
                     }
                 } else {
                     // 按住 Cmd 悬停链接：记录链接范围（用于高亮 + 手型）
                     let hl = if ev.modifiers.platform {
-                        this.link_range_at(this.pos_to_cell(ev.position))
+                        this.link_range_at(this.pos_to_cell(ev.position, window))
                     } else {
                         None
                     };
@@ -632,7 +632,7 @@ impl Render for TerminalView {
             // 按/松 Cmd 时（鼠标不动也）即时更新链接高亮/手型
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, window, cx| {
                 let hl = if ev.modifiers.platform {
-                    this.link_range_at(this.pos_to_cell(window.mouse_position()))
+                    this.link_range_at(this.pos_to_cell(window.mouse_position(), window))
                 } else {
                     None
                 };

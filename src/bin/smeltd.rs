@@ -41,6 +41,10 @@ struct Ctl {
     /// reattach 后首个 resize 强制「抖动」（先 rows+1 再回正）：即使尺寸与断开前相同也
     /// 制造 SIGWINCH，让备用屏 TUI（Claude Code 等）重绘整屏，避免重连花屏。
     jolt: bool,
+    /// PTY 当前行列。attach 时回报给客户端：重放字节按此宽度生成，GUI 必须把本地
+    /// 终端建成同尺寸再解析，否则行宽错位（zsh 行尾 % 盖不掉、TUI 布局撕裂）。
+    cols: u16,
+    rows: u16,
 }
 
 /// 会话输出端：回放缓冲 + 当前 attach 的客户端。「重放→接管」与实时转发共用这把锁，
@@ -142,13 +146,21 @@ fn handle_open(
         }
     };
 
-    // attach：重放缓冲 + 接管转发（同一锁内，保证与实时输出串行无乱序）。
+    // attach：回报 PTY 当前尺寸 → 重放缓冲 → 接管转发（尺寸行 + 重放在同一锁内先于
+    // 实时转发，客户端先按正确宽度建终端再解析重放字节，行宽才对得上）。
+    let (cur_cols, cur_rows) = {
+        let ctl = sess.ctl.lock().unwrap();
+        (ctl.cols, ctl.rows)
+    };
     let attached_fd = {
         let Ok(mut c) = conn.try_clone() else { return };
         let fd = c.as_raw_fd();
         let mut out = sess.out.lock().unwrap();
         if let Some(old) = out.client.take() {
             let _ = old.shutdown(Shutdown::Both); // 顶掉旧连接（同 id 只允许一个 GUI）
+        }
+        if writeln!(c, "{}", serde_json::json!({ "cols": cur_cols, "rows": cur_rows })).is_err() {
+            return;
         }
         if !out.buf.is_empty() && c.write_all(&out.buf).is_err() {
             return;
@@ -187,6 +199,8 @@ fn handle_open(
                     let _ = ctl.master.resize(PtySize { rows: rows.saturating_add(1), ..size });
                 }
                 let _ = ctl.master.resize(size);
+                ctl.cols = cols;
+                ctl.rows = rows;
             }
             _ => break,
         }
@@ -228,7 +242,7 @@ fn spawn_session(
     let pty_reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
     let sess = Session {
-        ctl: Mutex::new(Ctl { writer, master: pair.master, child, jolt: false }),
+        ctl: Mutex::new(Ctl { writer, master: pair.master, child, jolt: false, cols, rows }),
         out: Mutex::new(Out { buf: Vec::new(), client: None }),
     };
     Ok((sess, pty_reader))

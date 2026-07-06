@@ -1216,8 +1216,6 @@ impl Workspace {
             .items_center()
             .gap_2()
             .child(div().text_xl().font_bold().text_color(fg).mr_2().child("总览"))
-            // 版本号：编译期取 Cargo.toml 的 version。
-            .child(div().text_sm().text_color(muted).mr_2().child(concat!("v", env!("CARGO_PKG_VERSION"))))
             .child(pill(format!("{} 会话", self.sessions.len()), fg, soft_bg))
             .child(pill(format!("{need} 需要处理"), c_red, red_tint))
             .child(pill(format!("{running} 运行中"), c_blue, blue_tint));
@@ -2080,7 +2078,16 @@ impl Render for Workspace {
                     .w_full()
                     .p_1()
                     .child(new_tab_button(cx))
-                    .child(open_project_button(cx)),
+                    .child(open_project_button(cx))
+                    // 版本号靠右：编译期取 Cargo.toml 的 version。
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .mr_1()
+                            .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                    ),
             );
 
         // 主内容：有会话就渲染当前会话的分屏布局树；无会话显示空状态引导。

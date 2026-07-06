@@ -301,8 +301,6 @@ impl Terminal {
     /// iTerm2 伪装 / LANG 兜底，见 smeltd.rs）。id 已存在 → attach，守护先重放输出
     /// 缓冲恢复画面，再实时转发。
     pub fn spawn(rows: usize, cols: usize, cwd: Option<&str>, id: &str) -> anyhow::Result<Self> {
-        let size = TermSize { rows, cols };
-
         // 1) 连守护（不在则自动拉起）并声明要打开的会话
         let mut writer = connect_daemon()?;
         writeln!(
@@ -310,6 +308,19 @@ impl Terminal {
             "{}",
             serde_json::json!({ "op": "open", "id": id, "cwd": cwd, "cols": cols, "rows": rows })
         )?;
+
+        // 守护先回报 PTY 当前尺寸（reattach 时是断开前的实际尺寸）：本地终端必须建成
+        // 同尺寸再解析重放字节，否则行宽错位（zsh 行尾 % 盖不掉、Claude Code 布局撕裂）。
+        // 之后 GUI 布局就绪会正常 resize 到新尺寸，alacritty reflow 会重排。
+        // 注意：重放字节可能已被 BufReader 预读，读线程必须复用它，不能再从裸流读。
+        let mut buffered = BufReader::new(writer.try_clone()?);
+        let mut line = String::new();
+        buffered.read_line(&mut line)?;
+        let v: serde_json::Value = serde_json::from_str(line.trim())?;
+        let size = TermSize {
+            rows: v["rows"].as_u64().unwrap_or(rows as u64) as usize,
+            cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
+        };
 
         // 2) alacritty 终端状态机（EventProxy 把响铃 / 标题写入共享槽）
         let notify: NotifySlot = Arc::new(Mutex::new(None));
@@ -323,7 +334,8 @@ impl Terminal {
 
         // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫 OSC 9/777。
         //    EOF = shell 退出或守护离线（网格冻结，重开会话即恢复）。
-        let mut reader = writer.try_clone()?;
+        //    复用尺寸行的 BufReader：重放字节可能已在其内部缓冲里。
+        let mut reader = buffered;
         let term_reader = Arc::clone(&term);
         let notify_reader = notify.clone();
         thread::spawn(move || {
