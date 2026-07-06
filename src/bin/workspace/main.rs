@@ -150,12 +150,24 @@ impl ListDelegate for CmdDelegate {
     }
 }
 
-/// 主区视图：终端 / 文件树 / Git（按项目切换）。
+/// 主区视图：总览 / 终端 / 文件树 / Git。
 #[derive(Clone, Copy, PartialEq)]
 enum MainView {
+    Overview,
     Terminal,
     Files,
     Git,
+}
+
+/// 会话里 agent 的状态（用于总览页状态徽章）。
+#[derive(Clone, Copy, PartialEq)]
+enum AgentStatus {
+    /// 响铃/OSC 通知 → 需要你处理。
+    NeedsAttention,
+    /// 标题以 Braille spinner 开头 → 运行中。
+    Running,
+    /// 其余 → 空闲/等待。
+    Idle,
 }
 
 /// 主区终端分屏布局树：叶子是一个终端，内部 Split 把区域按某轴切成多块。
@@ -182,14 +194,22 @@ impl Session {
         Self { layout: Pane::Leaf(view.clone()), active: view }
     }
 
-    /// 会话标题：优先用 agent 报告的任务名（去掉状态符号），否则回退 cwd 末段。
+    /// 会话标题：仅当终端标题是 Claude Code 风格（✳ 或 Braille spinner 开头）时用它的
+    /// 任务名，否则回退 cwd 末段——避免把普通 shell 的 user@host:path 标题当任务名。
     fn title(&self, cx: &App) -> String {
         let t = self.active.read(cx);
         if let Some(raw) = t.agent_title() {
-            let task = strip_status(&raw);
-            // 排除无具体任务的占位标题（如「Claude Code」启动态）。
-            if !task.is_empty() && task != "Claude Code" && task != "claude" {
-                return task;
+            let head = raw.trim_start();
+            let is_agent = head.starts_with('✳')
+                || head
+                    .chars()
+                    .next()
+                    .is_some_and(|c| ('\u{2801}'..='\u{28FF}').contains(&c));
+            if is_agent {
+                let task = strip_status(&raw);
+                if !task.is_empty() && task != "Claude Code" && task != "claude" {
+                    return task;
+                }
             }
         }
         t.title().to_string()
@@ -212,6 +232,22 @@ impl Session {
         let mut v = Vec::new();
         collect_leaves(&self.layout, &mut v);
         v.iter().any(|t| t.read(cx).has_attention())
+    }
+
+    /// 会话状态：需要处理 > 运行中 > 空闲。
+    fn status(&self, cx: &App) -> AgentStatus {
+        if self.has_attention(cx) {
+            return AgentStatus::NeedsAttention;
+        }
+        // 活动终端标题以 Braille spinner（非空盲文块）开头 → 运行中。
+        if let Some(raw) = self.active.read(cx).agent_title() {
+            if let Some(c) = raw.trim_start().chars().next() {
+                if ('\u{2801}'..='\u{28FF}').contains(&c) {
+                    return AgentStatus::Running;
+                }
+            }
+        }
+        AgentStatus::Idle
     }
 }
 
@@ -771,6 +807,10 @@ impl Workspace {
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix < self.sessions.len() {
             self.active_session = ix;
+            // 从总览点会话 → 进入该会话的终端视图。
+            if self.view == MainView::Overview {
+                self.view = MainView::Terminal;
+            }
             // 切到的会话的活动 pane 已被查看 → 清除它的「需要注意」。
             if let Some(sess) = self.sessions.get(ix) {
                 sess.active.update(cx, |t, _| t.clear_attention());
@@ -952,6 +992,112 @@ impl Workspace {
                     .children(list),
             )
             .into_any_element()
+    }
+
+    /// 总览页：所有会话的卡片网格（状态徽章 + 任务名 + cwd + 窗格数），点击跳转。
+    fn render_overview(&self, cx: &mut Context<Self>) -> Div {
+        let (fg, muted, border, popover) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground, t.border, t.popover)
+        };
+
+        // 顶部汇总。
+        let need = self.sessions.iter().filter(|s| s.status(cx) == AgentStatus::NeedsAttention).count();
+        let running = self.sessions.iter().filter(|s| s.status(cx) == AgentStatus::Running).count();
+        let summary = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_1()
+            .py_1()
+            .text_sm()
+            .child(div().text_color(fg).child(format!("{} 个会话", self.sessions.len())))
+            .child(div().text_color(rgb(0xef4444)).child(format!("{need} 需要处理")))
+            .child(div().text_color(rgb(0x4a9eff)).child(format!("{running} 运行中")));
+
+        // 会话卡片。
+        let cards: Vec<_> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(ix, s)| {
+                let name = s.title(cx);
+                let cwd = s
+                    .cwd(cx)
+                    .unwrap_or_default()
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let (dot, label) = match s.status(cx) {
+                    AgentStatus::NeedsAttention => (rgb(0xef4444), "需要处理"),
+                    AgentStatus::Running => (rgb(0x4a9eff), "运行中"),
+                    AgentStatus::Idle => (rgb(0x22c55e), "空闲"),
+                };
+                let panes = s.pane_count();
+                div()
+                    .id(("ov-card", ix))
+                    .w(px(240.))
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(border)
+                    .bg(popover)
+                    .cursor_pointer()
+                    .hover(|d| d.border_color(dot))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, window, cx| this.activate(ix, window, cx)),
+                    )
+                    // 状态点 + 会话名（任务）
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(div().size_2().rounded_full().bg(dot).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_bold()
+                                    .text_color(fg)
+                                    .child(name),
+                            ),
+                    )
+                    // cwd 项目名
+                    .child(div().text_xs().text_color(muted).child(cwd))
+                    // 状态 + 窗格数
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().text_color(dot).child(label))
+                            .child(div().text_color(muted).child(format!("· {panes} 窗格"))),
+                    )
+            })
+            .collect();
+
+        div().flex_1().min_h_0().child(
+            div()
+                .id("overview-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(summary)
+                .child(div().flex().flex_wrap().gap_3().children(cards)),
+        )
     }
 
     /// 渲染外观设置浮层（标题栏齿轮打开）：背景色 / 背景图 / 不透明度 / 模糊。
@@ -1458,11 +1604,29 @@ impl Render for Workspace {
             })
             .collect();
 
+        let overview_active = self.view == MainView::Overview;
+        let e_overview = this.clone();
         let sidebar_el = Sidebar::new("workspace-sidebar")
             .collapsible(SidebarCollapsible::Offcanvas)
             // 宽度交给外层 resizable_panel 控制（可拖），这里填满 panel。
             // 品牌已移到顶部标题栏，侧栏直接从「会话」开始，避免重复。
             .w(relative(1.))
+            // 总览：全局视图，独立入口（不在会话的终端/文件树/Git tab 里）。
+            .child(
+                SidebarGroup::new("").child(
+                    SidebarMenu::new().child(
+                        SidebarMenuItem::new("总览")
+                            .icon(IconName::LayoutDashboard)
+                            .active(overview_active)
+                            .on_click(move |_ev, _window, cx| {
+                                e_overview.update(cx, |ws, cx| {
+                                    ws.view = MainView::Overview;
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+                ),
+            )
             .child(SidebarGroup::new("会话").child(SidebarMenu::new().children(menu_items)))
             // 不用 SidebarFooter：它会给整块 footer 挂 hover 背景（sidebar_accent），
             // 盖住按钮自己的 hover。直接放普通容器，让每个按钮各自 hover 可见。
@@ -1696,7 +1860,8 @@ impl Render for Workspace {
                             .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(
+                    // 会话视图 tab（终端/文件树/Git）——总览是全局视图，走侧栏入口，不在这排里。
+                    .children((self.view != MainView::Overview).then(|| {
                         TabBar::new("main-view-tabs")
                             .underline()
                             // 左缩进 12px，与终端/文件内容左边基线对齐（不贴边）；
@@ -1705,7 +1870,7 @@ impl Render for Workspace {
                             .selected_index(match self.view {
                                 MainView::Terminal => 0,
                                 MainView::Files => 1,
-                                MainView::Git => 2,
+                                _ => 2,
                             })
                             .on_click(cx.listener(|this, ix: &usize, _window, cx| {
                                 this.view = match *ix {
@@ -1717,9 +1882,10 @@ impl Render for Workspace {
                             }))
                             .child(Tab::new().label("终端"))
                             .child(Tab::new().label("文件树"))
-                            .child(Tab::new().label("Git")),
-                    )
+                            .child(Tab::new().label("Git"))
+                    }))
                     .child(match self.view {
+                        MainView::Overview => self.render_overview(cx),
                         MainView::Terminal => content,
                         MainView::Files => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
