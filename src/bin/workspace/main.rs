@@ -182,9 +182,17 @@ impl Session {
         Self { layout: Pane::Leaf(view.clone()), active: view }
     }
 
-    /// 会话标题：取活动终端标题（cwd 末段）。
+    /// 会话标题：优先用 agent 报告的任务名（去掉状态符号），否则回退 cwd 末段。
     fn title(&self, cx: &App) -> String {
-        self.active.read(cx).title().to_string()
+        let t = self.active.read(cx);
+        if let Some(raw) = t.agent_title() {
+            let task = strip_status(&raw);
+            // 排除无具体任务的占位标题（如「Claude Code」启动态）。
+            if !task.is_empty() && task != "Claude Code" && task != "claude" {
+                return task;
+            }
+        }
+        t.title().to_string()
     }
 
     /// 会话工作目录：活动终端的 cwd（侧栏分组用）。
@@ -205,6 +213,20 @@ impl Session {
         collect_leaves(&self.layout, &mut v);
         v.iter().any(|t| t.read(cx).has_attention())
     }
+}
+
+/// 去掉 agent 标题开头的状态符号（✳ / Braille spinner ⠂⠐ 等）+ 空白，保留任务名。
+fn strip_status(title: &str) -> String {
+    title
+        .trim_start_matches(|c: char| {
+            c.is_whitespace()
+                || c == '✳'
+                || c == '·'
+                || c == '*'
+                || ('\u{2800}'..='\u{28FF}').contains(&c) // Braille 盲文块（spinner 动画帧）
+        })
+        .trim()
+        .to_string()
 }
 
 /// 收集布局树里所有叶子终端（clone 句柄，顺序 = 深度优先遍历序）。

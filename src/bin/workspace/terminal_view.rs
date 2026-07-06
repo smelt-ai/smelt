@@ -72,6 +72,9 @@ impl TerminalView {
             Timer::after(REFRESH).await;
             let r = this.update(cx, |this, cx| {
                 if let Some(msg) = this.terminal.take_notification() {
+                    // 弹 macOS 系统通知，带上 agent 当前任务标题（对齐 cmux 信息量）。
+                    let task = this.terminal.current_title();
+                    system_notify(&this.title, task.as_deref(), &msg);
                     this.notification = Some(msg);
                 }
                 cx.notify();
@@ -115,6 +118,11 @@ impl TerminalView {
     /// 通知消息文本（供通知面板显示）。
     pub fn notification(&self) -> Option<&str> {
         self.notification.as_deref()
+    }
+
+    /// agent 报告的终端标题（含任务名 + 状态符号）；供侧栏 / 总览显示。
+    pub fn agent_title(&self) -> Option<String> {
+        self.terminal.current_title()
     }
 
     /// 清除通知（用户切到 / 聚焦该终端时调用）。
@@ -664,6 +672,27 @@ fn sel_range_for_row(
     } else {
         Some((lo, hi))
     }
+}
+
+/// 弹一条 macOS 系统通知（osascript，无额外依赖）。title 固定 smelt、
+/// 副标题为「会话名 · agent 任务名」、正文为通知消息（对齐 cmux 的信息量）。
+/// 失败静默忽略（未签名 / 无权限时可能不显示）。
+fn system_notify(session: &str, task: Option<&str>, body: &str) {
+    // AppleScript 字符串转义：反斜杠、双引号。
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let subtitle = match task {
+        Some(t) if !t.trim().is_empty() => format!("{session} · {t}"),
+        _ => session.to_string(),
+    };
+    let script = format!(
+        "display notification \"{}\" with title \"smelt\" subtitle \"{}\"",
+        esc(body),
+        esc(&subtitle)
+    );
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .spawn();
 }
 
 /// 在一行里找出所有 URL，返回 (起列, 止列含, url)。

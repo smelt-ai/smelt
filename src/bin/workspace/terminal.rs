@@ -150,14 +150,24 @@ type NotifySlot = Arc<Mutex<Option<String>>>;
 #[derive(Clone)]
 struct EventProxy {
     notify: NotifySlot,
+    /// 终端标题（OSC 0/2）——Claude Code 用它实时报告「在干嘛」（任务名 + 状态符号）。
+    title: Arc<Mutex<Option<String>>>,
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if matches!(event, Event::Bell) {
-            if let Ok(mut g) = self.notify.lock() {
-                *g = Some("🔔 响铃".to_string());
+        match event {
+            Event::Bell => {
+                if let Ok(mut g) = self.notify.lock() {
+                    *g = Some("🔔 响铃".to_string());
+                }
             }
+            Event::Title(t) => {
+                if let Ok(mut g) = self.title.lock() {
+                    *g = Some(t);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -227,6 +237,8 @@ pub struct Terminal {
     size: TermSize,
     /// 通知消息槽（响铃 / OSC 9 写入，UI 轮询 take_notification 取走）。
     notify: NotifySlot,
+    /// 终端标题（agent 实时状态；UI 读 current_title 用于通知 / 总览）。
+    title: Arc<Mutex<Option<String>>>,
 }
 
 impl Terminal {
@@ -252,6 +264,12 @@ impl Terminal {
             cmd.cwd(dir);
         }
         cmd.env("TERM", "xterm-256color");
+        // 伪装成 iTerm2：Claude Code 的 auto 通知渠道靠 TERM_PROGRAM 识别终端，认出
+        // iTerm2 就自动发 OSC 9 通知（我们已支持捕获）→ 用户零配置即可收到「agent 需要
+        // 注意」。选 iTerm2 而非 Ghostty/Kitty：它不用 kitty 键盘协议（CSI u），不干扰
+        // 按键输入，副作用最小。TERM 仍保持 xterm-256color，不启用 iTerm 私有 terminfo。
+        cmd.env("TERM_PROGRAM", "iTerm.app");
+        cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
         // UTF-8 locale（对齐 Zed terminal 的做法）：双击 .app 启动时系统环境极简、
         // 没有 LANG，zsh 会落到 C/POSIX locale，把 starship 输出的多字节 UTF-8 续字节
         // 当成一个个 C1 控制符转义成 <009a> 之类，满屏乱码。父环境没设 LANG 才补
@@ -261,9 +279,14 @@ impl Terminal {
         }
         let _child = pair.slave.spawn_command(cmd)?;
 
-        // 2) alacritty 终端状态机（EventProxy 把响铃写入通知槽）
+        // 2) alacritty 终端状态机（EventProxy 把响铃 / 标题写入共享槽）
         let notify: NotifySlot = Arc::new(Mutex::new(None));
-        let term = Term::new(Config::default(), &size, EventProxy { notify: notify.clone() });
+        let title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let term = Term::new(
+            Config::default(),
+            &size,
+            EventProxy { notify: notify.clone(), title: title.clone() },
+        );
         let term = Arc::new(Mutex::new(term));
 
         // 3) 后台读线程：PTY 输出 → vte 解析更新 Term 网格 + 自己扫 OSC 9/777 通知
@@ -301,12 +324,18 @@ impl Terminal {
             master,
             size,
             notify,
+            title,
         })
     }
 
     /// 取走最新通知消息（读并清）：响铃或 OSC 9/777 上报的「需要注意」文本。
     pub fn take_notification(&self) -> Option<String> {
         self.notify.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// 当前终端标题（agent 报告的任务名 + 状态符号）；未设置返回 None。
+    pub fn current_title(&self) -> Option<String> {
+        self.title.lock().ok().and_then(|g| g.clone())
     }
 
     /// 按新行列 resize：同步 alacritty 网格与底层 PTY。无变化则跳过。
