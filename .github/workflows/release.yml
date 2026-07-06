@@ -1,0 +1,76 @@
+# 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release。
+# 本地打包链路复用：make dist-build → scripts/package-mac.sh（详见该脚本）。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# 需要写权限才能创建 Release 并上传产物
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # 必须 arm64：package-mac.sh 会用 file 校验产物是 arm64，Intel 直接拒绝。
+    # macos-14 及以上默认就是 Apple Silicon。
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 打包链路依赖这些文件真的进了 git；缺任何一个就一次性列全并失败，
+      # 而不是跑到一半才炸（历史教训：本地能打包 ≠ 文件都入了库）。
+      - name: Verify required files exist
+        run: |
+          missing=0
+          for f in \
+            Makefile \
+            scripts/package-mac.sh \
+            scripts/make-dmg-bg.py \
+            assets/AppIcon.icns \
+            Cargo.toml; do
+            if [[ ! -f "$f" ]]; then
+              echo "✗ 缺少打包所需文件：$f"
+              missing=1
+            fi
+          done
+          [[ "$missing" == 0 ]] || { echo "打包链路文件不完整，终止。"; exit 1; }
+          echo "✅ 打包所需文件齐全"
+
+      # tag 去掉 v 前缀，必须与 Cargo.toml 的 version 一致，避免版本号漂移。
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "tag=$tag  Cargo.toml=$crate"
+          if [[ "$tag" != "$crate" ]]; then
+            echo "✗ tag($tag) 与 Cargo.toml version($crate) 不一致，先改 Cargo.toml 再打 tag。"
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 一步到位：cargo build --release + 组装 .app + 打 dmg。
+      # 注：headless CI 下 dmg 的 AppleScript 定制窗口会被脚本跳过（|| echo 兜住），
+      # dmg 仍正常产出，只是没有定制背景/图标摆位——属预期，别当失败。
+      - name: Build & package
+        run: make dist-build
+
+      # 产物必须真的生成，否则后面上传会是空发布。
+      - name: Verify artifact
+        run: |
+          test -f dist/Smelt.dmg || { echo "✗ 没生成 dist/Smelt.dmg"; exit 1; }
+          ls -lh dist/Smelt.dmg
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Smelt.dmg
+          generate_release_notes: true
