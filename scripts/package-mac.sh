@@ -83,6 +83,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- 声明可打开文件夹：Dock 图标才接受拖入目录（触发 application:openURLs:）。
+	     LSHandlerRank=Alternate 避免抢占系统默认的文件夹打开方式。 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
 ${ICON_LINE}
 </dict>
 </plist>

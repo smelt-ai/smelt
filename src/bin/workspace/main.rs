@@ -32,7 +32,6 @@ use gpui_component::resizable::{
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
-use gpui_component::tooltip::Tooltip;
 use gpui_component::*;
 use terminal_view::TerminalView;
 
@@ -163,14 +162,20 @@ enum MainView {
     Git,
 }
 
-/// 会话里 agent 的状态（用于总览页状态徽章）。
+/// 会话里 agent 的状态（用于总览页状态徽章）。借鉴 codex 的 ThreadStatus 细分：
+/// 「需要处理」不再一锅烩，等审批和一般等待是不同等级的行动召唤。
+/// 排列顺序即优先级（值越小越靠前 / 越紧急）。
 #[derive(Clone, Copy, PartialEq)]
 enum AgentStatus {
-    /// 响铃/OSC 通知 → 需要你处理。
+    /// Claude 等你批准操作（通知文本含 permission/权限等）→ 最高优先，红色。
+    WaitingApproval,
+    /// 其他需要处理：等输入 / 响铃 / 自定义通知 → 橙色。
     NeedsAttention,
-    /// 标题以 Braille spinner 开头 → 运行中。
+    /// 标题以 Braille spinner 开头 → 运行中，蓝色。
     Running,
-    /// 其余 → 空闲/等待。
+    /// 任务刚完成、你还没回应过 → 「有结果可看」，绿色。
+    Done,
+    /// 其余 → 空闲，灰色。
     Idle,
 }
 
@@ -257,10 +262,25 @@ impl Session {
         v.iter().filter_map(|t| t.read(cx).notified_at()).max()
     }
 
-    /// 会话状态：需要处理 > 运行中 > 空闲。
+    /// 会话状态：等审批 > 需要处理 > 运行中 > 刚完成未读 > 空闲（遍历全部 pane 取最高）。
     fn status(&self, cx: &App) -> AgentStatus {
-        if self.has_attention(cx) {
-            return AgentStatus::NeedsAttention;
+        let mut v = Vec::new();
+        collect_leaves(&self.layout, &mut v);
+        // 等审批（红）压过一般注意（橙）。
+        let mut attention = None;
+        for t in &v {
+            match t.read(cx).attention_kind() {
+                Some(terminal_view::AttentionKind::Approval) => {
+                    return AgentStatus::WaitingApproval
+                }
+                Some(terminal_view::AttentionKind::Attention) => {
+                    attention = Some(AgentStatus::NeedsAttention)
+                }
+                None => {}
+            }
+        }
+        if let Some(s) = attention {
+            return s;
         }
         // 活动终端标题以 Braille spinner（非空盲文块）开头 → 运行中。
         if let Some(raw) = self.active.read(cx).agent_title() {
@@ -269,6 +289,10 @@ impl Session {
                     return AgentStatus::Running;
                 }
             }
+        }
+        // 有 pane 刚跑完还没被回应 → 提示「有结果可看」。
+        if v.iter().any(|t| t.read(cx).completed_unread()) {
+            return AgentStatus::Done;
         }
         AgentStatus::Idle
     }
@@ -1204,10 +1228,18 @@ impl Workspace {
         let red_tint: Hsla = rgba(0xef444422).into();
         let blue_tint: Hsla = rgba(0x4a9eff22).into();
         let green_tint: Hsla = rgba(0x22c55e22).into();
+        let amber_tint: Hsla = rgba(0xf59e0b22).into();
+        // 空闲态圆点：低调灰，不与「已完成」的绿抢注意力。
+        let c_muted_dot: Hsla = rgba(0x8b93a7aa).into();
 
-        // 顶部汇总：标题 + 胶囊统计。
-        let need = self.sessions.iter().filter(|s| s.status(cx) == AgentStatus::NeedsAttention).count();
-        let running = self.sessions.iter().filter(|s| s.status(cx) == AgentStatus::Running).count();
+        // 顶部汇总：标题 + 胶囊统计。「需要处理」= 等审批 + 一般注意。
+        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
+        let need = statuses
+            .iter()
+            .filter(|s| matches!(s, AgentStatus::WaitingApproval | AgentStatus::NeedsAttention))
+            .count();
+        let running = statuses.iter().filter(|s| matches!(s, AgentStatus::Running)).count();
+        let done = statuses.iter().filter(|s| matches!(s, AgentStatus::Done)).count();
         let pill = |text: String, color: Hsla, bg: Hsla| {
             div().px(px(11.)).py(px(4.)).rounded_full().bg(bg).text_sm().text_color(color).child(text)
         };
@@ -1218,14 +1250,17 @@ impl Workspace {
             .child(div().text_xl().font_bold().text_color(fg).mr_2().child("总览"))
             .child(pill(format!("{} 会话", self.sessions.len()), fg, soft_bg))
             .child(pill(format!("{need} 需要处理"), c_red, red_tint))
-            .child(pill(format!("{running} 运行中"), c_blue, blue_tint));
+            .child(pill(format!("{running} 运行中"), c_blue, blue_tint))
+            .children((done > 0).then(|| pill(format!("{done} 已完成"), c_green, green_tint)));
 
-        // 按状态排序：需要处理 > 运行中 > 空闲（同级保持原顺序）。
+        // 按状态排序：等审批 > 需要处理 > 运行中 > 刚完成 > 空闲（同级保持原顺序）。
         let mut order: Vec<usize> = (0..self.sessions.len()).collect();
-        order.sort_by_key(|&ix| match self.sessions[ix].status(cx) {
-            AgentStatus::NeedsAttention => 0,
-            AgentStatus::Running => 1,
-            AgentStatus::Idle => 2,
+        order.sort_by_key(|&ix| match statuses[ix] {
+            AgentStatus::WaitingApproval => 0,
+            AgentStatus::NeedsAttention => 1,
+            AgentStatus::Running => 2,
+            AgentStatus::Done => 3,
+            AgentStatus::Idle => 4,
         });
 
         // 会话卡片。
@@ -1242,10 +1277,12 @@ impl Workspace {
                     .next()
                     .unwrap_or("")
                     .to_string();
-                let (dot, label, tint) = match s.status(cx) {
-                    AgentStatus::NeedsAttention => (c_red, "需要处理", red_tint),
+                let (dot, label, tint) = match statuses[ix] {
+                    AgentStatus::WaitingApproval => (c_red, "等你批准", red_tint),
+                    AgentStatus::NeedsAttention => (c_amber, "需要处理", amber_tint),
                     AgentStatus::Running => (c_blue, "运行中", blue_tint),
-                    AgentStatus::Idle => (c_green, "空闲", green_tint),
+                    AgentStatus::Done => (c_green, "已完成", green_tint),
+                    AgentStatus::Idle => (c_muted_dot, "空闲", soft_bg),
                 };
                 let panes = s.pane_count();
                 let notif = s.notification_msg(cx);
@@ -1969,8 +2006,9 @@ impl Render for Workspace {
             .map(|(_, t)| t.clone())
             .unwrap_or_default();
 
-        // 左侧会话侧栏：按会话的 cwd 分组成项目（保持出现顺序）
-        let mut projects: Vec<(String, Vec<usize>)> = Vec::new();
+        // 左侧会话侧栏：按会话的 cwd 分组成项目（保持出现顺序），
+        // 记住每组的完整 cwd 供「在该项目新建终端」用。
+        let mut projects: Vec<(String, String, Vec<usize>)> = Vec::new();
         for (ix, _title) in titles.iter() {
             let cwd = self.sessions[*ix].cwd(cx).unwrap_or_default();
             let name = cwd
@@ -1980,9 +2018,9 @@ impl Render for Workspace {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("项目")
                 .to_string();
-            match projects.iter_mut().find(|(n, _)| *n == name) {
-                Some(p) => p.1.push(*ix),
-                None => projects.push((name, vec![*ix])),
+            match projects.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(p) => p.2.push(*ix),
+                None => projects.push((name, cwd, vec![*ix])),
             }
         }
 
@@ -1992,7 +2030,8 @@ impl Render for Workspace {
         let this = cx.entity();
         let menu_items: Vec<SidebarMenuItem> = projects
             .iter()
-            .map(|(name, ixs)| {
+            .enumerate()
+            .map(|(pix, (name, cwd, ixs))| {
                 let sess_items: Vec<SidebarMenuItem> = ixs
                     .iter()
                     .map(|&ix| {
@@ -2035,10 +2074,27 @@ impl Render for Workspace {
                         item
                     })
                     .collect();
+                // 项目行右侧「+」：在该项目目录下新建终端会话。
+                let e_new = this.clone();
+                let new_cwd = cwd.clone();
                 SidebarMenuItem::new(name.clone())
                     .icon(IconName::Folder)
                     .default_open(true)
                     .click_to_toggle(true)
+                    .suffix(move |_w, _cx| {
+                        let e = e_new.clone();
+                        let cwd = new_cwd.clone();
+                        Button::new(("new-in-project", pix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .on_click(move |_ev, _w, cx| {
+                                // 别把点击冒泡成「折叠/展开分组」
+                                cx.stop_propagation();
+                                let cwd = (!cwd.is_empty()).then(|| cwd.clone());
+                                e.update(cx, |ws, cx| ws.add_session(cwd, cx));
+                            })
+                    })
                     .children(sess_items)
             })
             .collect();
@@ -2073,19 +2129,23 @@ impl Render for Workspace {
             .footer(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_1()
+                    .flex_col()
                     .w_full()
-                    .p_1()
-                    .child(new_tab_button(cx))
-                    .child(open_project_button(cx))
-                    // 版本号靠右：编译期取 Cargo.toml 的 version。
-                    .child(div().flex_1())
+                    .gap_1()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .border_t_1()
+                    .border_color(rgba(0xffffff0d))
+                    .child(div().flex().w_full().child(open_project_button(cx)))
+                    // 版本号居中：编译期取 Cargo.toml 的 version。
                     .child(
                         div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .mr_1()
                             .child(concat!("v", env!("CARGO_PKG_VERSION"))),
                     ),
             );
@@ -3159,44 +3219,49 @@ fn file_content_pane(
     }
 }
 
-/// 命令面板的键盘处理：字符过滤、上下选择、回车执行、Esc 关闭。
-/// 侧栏底部工具按钮：图标 + 明显 hover + tooltip。
+/// 侧栏底部胶囊按钮：图标 + 文字，果冻感（tint 底 + 细白边 + hover 提亮），
+/// 与总览页设计语言一致。accent = 品牌蓝主按钮，否则中性次按钮。
 /// （组件 Button 的 ghost 在暗色下 hover 几乎不可见，这里自绘保证反馈明显。）
 fn tool_button(
     id: &'static str,
     icon: IconName,
-    tip: &'static str,
+    label: &'static str,
+    accent: bool,
     cx: &mut Context<Workspace>,
     handler: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) -> Stateful<Div> {
-    let (fg, hover) = {
-        let t = cx.theme();
-        (t.sidebar_foreground, t.sidebar_accent)
+    let (fg, bg, bg_hover): (Hsla, Hsla, Hsla) = if accent {
+        (rgb(0x8fc7ff).into(), rgba(0x4a9eff24).into(), rgba(0x4a9eff40).into())
+    } else {
+        (
+            cx.theme().sidebar_foreground,
+            rgba(0xffffff0a).into(),
+            rgba(0xffffff1f).into(),
+        )
     };
     div()
         .id(id)
+        .flex_1()
         .flex()
         .items_center()
         .justify_center()
-        .size_7()
-        .rounded_md()
+        .gap_1()
+        .py(px(5.))
+        .rounded_lg()
+        .bg(bg)
+        .border_1()
+        .border_color(rgba(0xffffff12))
+        .text_sm()
         .text_color(fg)
-        .hover(move |s| s.bg(hover))
-        .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-        .child(Icon::new(icon))
+        .hover(move |s| s.bg(bg_hover))
+        .child(Icon::new(icon).size(px(14.)))
+        .child(label)
         .on_click(cx.listener(move |this, _ev, window, cx| handler(this, window, cx)))
-}
-
-/// 「+」新建终端按钮（继承当前项目目录）。
-fn new_tab_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    tool_button("new-tab", IconName::Plus, "新建终端", cx, |this, _w, cx| {
-        this.new_tab(cx)
-    })
 }
 
 /// 「打开项目」按钮：弹选择框选目录，在其中开新标签。
 fn open_project_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    tool_button("open-project", IconName::Folder, "打开项目", cx, |this, _w, cx| {
+    tool_button("open-project", IconName::Folder, "打开项目", true, cx, |this, _w, cx| {
         this.open_project(cx)
     })
 }
@@ -3208,11 +3273,38 @@ fn current_dir() -> Option<String> {
         .and_then(|p| p.to_str().map(String::from))
 }
 
+/// file:// URL → 本地路径（percent 解码，支持中文 / 空格目录名）。
+fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    // 跳过可能的 host 段（file://localhost/…），从首个 '/' 起才是路径。
+    let path = &rest[rest.find('/')?..];
+    let b = path.as_bytes();
+    let mut bytes = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16) {
+                bytes.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(b[i]);
+        i += 1;
+    }
+    Some(std::path::PathBuf::from(String::from_utf8(bytes).ok()?))
+}
+
 fn main() {
     // with_assets 注册组件库图标资源，Sidebar 的 IconName svg 才能渲染。
-    gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
-        .run(move |cx| {
+    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    // Dock / Finder「打开」投递的 file:// URL（拖文件夹到 Dock 图标、右键用 Smelt 打开）。
+    // 回调里没有 cx，经 channel 转发；unbounded 会缓存首启动时窗口建好前到达的 URL。
+    let (url_tx, url_rx) = smol::channel::unbounded::<Vec<String>>();
+    app.on_open_urls(move |urls| {
+        let _ = url_tx.send_blocking(urls);
+    });
+    app.run(move |cx| {
         // 用任何 gpui-component 功能前必须先初始化。
         gpui_component::init(cx);
         // 深色主题（与终端配色一致）
@@ -3244,12 +3336,27 @@ fn main() {
                 window_background: window_bg,
                 ..Default::default()
             };
+            let mut workspace = None;
             cx.open_window(window_options, |window, cx| {
                 let view = cx.new(|cx| Workspace::new(cx));
+                workspace = Some(view.clone());
                 // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("打开窗口失败");
+            // 消费 Dock / Finder 投递的目录：每个开一个会话（文件取父目录）。
+            // 用 weak 引用：窗口销毁后 update 返回 Err，循环自然退出。
+            let Some(ws) = workspace.map(|w| w.downgrade()) else { return };
+            while let Ok(urls) = url_rx.recv().await {
+                let paths: Vec<std::path::PathBuf> =
+                    urls.iter().filter_map(|u| file_url_to_path(u)).collect();
+                if paths.is_empty() {
+                    continue;
+                }
+                if ws.update(cx, |ws, cx| ws.open_paths(&paths, cx)).is_err() {
+                    break; // 窗口已销毁
+                }
+            }
         })
         .detach();
     });

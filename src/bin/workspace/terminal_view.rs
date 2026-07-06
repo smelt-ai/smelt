@@ -70,7 +70,37 @@ pub struct TerminalView {
     stuck_notified: bool,
     /// 守护里的会话 id（持久化到 workspace.json；重开 GUI 按它 reattach）。
     session_id: String,
+    /// 「任务完成未读」：Running→Idle 边沿置位，用户输入回应后清。
+    /// 与 notification 分开：完成 ≠ 需要处理，只是提示「有结果可以看了」。
+    completed_unread: bool,
+    /// 最近一次系统通知的 (文本, 时刻)：同文本 60s 内不重发（Claude Code 会反复
+    /// 上报 waiting for input，不去重就是通知轰炸）。
+    last_notified: Option<(String, Instant)>,
 }
+
+/// 「需要注意」的细分：等审批（红，最高优先）> 其他需要处理（等输入 / 响铃等，橙）。
+/// 借鉴 codex 的 ThreadActiveFlag 设计——审批和一般等待是不同等级的行动召唤。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AttentionKind {
+    /// Claude 等你批准某个操作（文本含 permission / approv / 权限 / 批准）。
+    Approval,
+    /// 其他需要处理（等输入、响铃、自定义通知）。
+    Attention,
+}
+
+/// 从通知文本推断注意力等级。
+fn classify_attention(msg: &str) -> AttentionKind {
+    let m = msg.to_lowercase();
+    if m.contains("permission") || m.contains("approv") || m.contains("权限") || m.contains("批准")
+    {
+        AttentionKind::Approval
+    } else {
+        AttentionKind::Attention
+    }
+}
+
+/// 同一终端同文本的系统通知最小间隔。
+const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
 
 /// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
 fn title_is_running(title: Option<String>) -> bool {
@@ -94,10 +124,21 @@ impl TerminalView {
             Timer::after(REFRESH).await;
             let r = this.update(cx, |this, cx| {
                 if let Some(msg) = this.terminal.take_notification() {
-                    // 弹 macOS 系统通知，带上 agent 当前任务标题（对齐 cmux 信息量）。
                     let task = this.terminal.current_title();
-                    system_notify(&this.title, task.as_deref(), &msg);
-                    // 同时投给桌面宠物，让它主动「说」出来（气泡）。
+                    // 焦点感知（借鉴 codex）：app 在前台时不弹系统通知——你自己看得见
+                    // 蓝点/徽章，弹了是打扰；切走了才提醒。cx.active_window() 在 app
+                    // 失活时为 None（宠物窗是 NonactivatingPanel，不参与）。
+                    // 同文本 60s 去重：Claude Code 会反复上报同一条 waiting。
+                    let now = Instant::now();
+                    let dup = this
+                        .last_notified
+                        .as_ref()
+                        .is_some_and(|(m, t)| *m == msg && now.duration_since(*t) < NOTIFY_DEDUP);
+                    if cx.active_window().is_none() && !dup {
+                        system_notify(&this.title, task.as_deref(), &msg);
+                        this.last_notified = Some((msg.clone(), now));
+                    }
+                    // 宠物播报照常（应用内的轻提示，不算系统级打扰；宠物自己有气泡节流）。
                     let line = match task.as_deref() {
                         Some(t) if !t.is_empty() => format!("「{t}」{msg}"),
                         _ => msg.clone(),
@@ -111,7 +152,8 @@ impl TerminalView {
                 let running = title_is_running(this.terminal.current_title());
                 let name = this.title.clone();
                 if this.was_running && !running {
-                    // Running → Idle：该会话的 agent 干完了。
+                    // Running → Idle：该会话的 agent 干完了 → 标「完成未读」（总览绿标）。
+                    this.completed_unread = true;
                     crate::pet::push_pet_message(cx, format!("「{name}」任务完成啦，来看看结果吧"));
                 }
                 if running {
@@ -164,7 +206,19 @@ impl TerminalView {
             running_frames: 0,
             stuck_notified: false,
             session_id,
+            completed_unread: false,
+            last_notified: None,
         }
+    }
+
+    /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。
+    pub fn attention_kind(&self) -> Option<AttentionKind> {
+        self.notification.as_deref().map(classify_attention)
+    }
+
+    /// 是否「任务完成未读」（Running→Idle 后用户还没回应过）。
+    pub fn completed_unread(&self) -> bool {
+        self.completed_unread
     }
 
     /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
@@ -417,6 +471,7 @@ impl EntityInputHandler for TerminalView {
         if !text.is_empty() {
             self.terminal.send_input(text.as_bytes());
             self.notification = None; // 用户回应了该会话 → 视为已处理，清「需要注意」
+            self.completed_unread = false;
         }
         cx.notify();
     }
@@ -555,6 +610,7 @@ impl Render for TerminalView {
                     if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
                         this.terminal.send_input(text.as_bytes());
                         this.notification = None; // 粘贴回应 → 清「需要注意」
+                        this.completed_unread = false;
                         cx.notify();
                     }
                     return;
@@ -573,6 +629,7 @@ impl Render for TerminalView {
                 if let Some(bytes) = keystroke_to_bytes(ks) {
                     this.terminal.send_input(&bytes);
                     this.notification = None; // 用户按键回应 → 清「需要注意」
+                    this.completed_unread = false;
                     cx.notify();
                 }
             }))
