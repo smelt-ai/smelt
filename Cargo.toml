@@ -32,3 +32,9 @@ smol = "2"  # 定时器：驱动终端网格的定时快照重绘
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 # diff 行内高亮：对配对的删/增行做字符级 diff，标出具体变化的片段。
 similar = "2"
+
+# macOS：桌面宠物浮窗需要绕过 GPUI（它在 mac 上只会建 Titled 窗口，必带圆角边框+
+# 阴影），直接操作底层 NSWindow 改成 Borderless/无阴影/透明。版本对齐 gpui 依赖树。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+raw-window-handle = "0.6"

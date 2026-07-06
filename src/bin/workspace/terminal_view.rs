@@ -4,7 +4,7 @@
 use std::cell::Cell as StdCell;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::*;
 use smol::Timer;
@@ -60,6 +60,8 @@ pub struct TerminalView {
     /// 「需要注意」通知消息：响铃 / OSC 9 上报且尚未被查看（供侧栏蓝点 / pane 蓝环 /
     /// 通知面板）；None = 无待处理通知。
     notification: Option<String>,
+    /// 最近收到通知的时刻（总览页显示「N 分钟前」）。
+    notified_at: Option<Instant>,
 }
 
 impl TerminalView {
@@ -75,7 +77,14 @@ impl TerminalView {
                     // 弹 macOS 系统通知，带上 agent 当前任务标题（对齐 cmux 信息量）。
                     let task = this.terminal.current_title();
                     system_notify(&this.title, task.as_deref(), &msg);
+                    // 同时投给桌面宠物，让它主动「说」出来（气泡）。
+                    let line = match task.as_deref() {
+                        Some(t) if !t.is_empty() => format!("「{t}」{msg}"),
+                        _ => msg.clone(),
+                    };
+                    crate::pet::push_pet_message(cx, line);
                     this.notification = Some(msg);
+                    this.notified_at = Some(Instant::now());
                 }
                 cx.notify();
             });
@@ -107,7 +116,35 @@ impl TerminalView {
             hover_url: None,
             cursor: None,
             notification: None,
+            notified_at: None,
         }
+    }
+
+    /// 最近通知时刻（总览页「N 分钟前」用）。
+    pub fn notified_at(&self) -> Option<Instant> {
+        self.notified_at
+    }
+
+    /// 终端末尾最多 n 行非空文本（总览页迷你预览用）。
+    pub fn last_lines(&self, n: usize) -> Vec<String> {
+        let frame = self.terminal.snapshot();
+        let mut lines: Vec<String> = frame
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter(|c| c.ch != '\0')
+                    .map(|c| c.ch)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(n);
+        lines[start..].to_vec()
     }
 
     /// 是否有待处理通知（agent 需要注意）。
@@ -125,10 +162,6 @@ impl TerminalView {
         self.terminal.current_title()
     }
 
-    /// 清除通知（用户切到 / 聚焦该终端时调用）。
-    pub fn clear_attention(&mut self) {
-        self.notification = None;
-    }
 
     pub fn title(&self) -> &str {
         &self.title
@@ -285,6 +318,7 @@ impl EntityInputHandler for TerminalView {
         self.marked_text = None;
         if !text.is_empty() {
             self.terminal.send_input(text.as_bytes());
+            self.notification = None; // 用户回应了该会话 → 视为已处理，清「需要注意」
         }
         cx.notify();
     }
@@ -422,6 +456,7 @@ impl Render for TerminalView {
                 if m.platform && ks.key == "v" {
                     if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
                         this.terminal.send_input(text.as_bytes());
+                        this.notification = None; // 粘贴回应 → 清「需要注意」
                         cx.notify();
                     }
                     return;
@@ -439,6 +474,7 @@ impl Render for TerminalView {
                 }
                 if let Some(bytes) = keystroke_to_bytes(ks) {
                     this.terminal.send_input(&bytes);
+                    this.notification = None; // 用户按键回应 → 清「需要注意」
                     cx.notify();
                 }
             }))

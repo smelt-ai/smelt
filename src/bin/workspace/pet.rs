@@ -1,0 +1,641 @@
+//! 桌面宠物 —— 独立的透明置顶浮窗，陪伴用户。
+//!
+//! 与主工作台完全解耦：单开一个 NSPanel（`WindowKind::PopUp`）——无边框、透明背景、
+//! 浮在所有窗口之上并跟随所有 Space、不抢焦点。宠物本体用 GPUI 图元手绘（无需图片
+//! 资源），smol 定时器逐帧驱动待机动画（呼吸 + 上下浮动 + 眨眼）。
+//!
+//! 交互：
+//! - 按住宠物拖动 → `start_window_move` 让整窗走遍全屏；轻点一下 → 蹦跳 + 换句台词。
+//! - 眼睛始终看向鼠标（用 `[NSEvent mouseLocation]` 取全屏光标）。
+//! - 主程序通过 [`push_pet_message`] 投递事件，宠物主动「说」出来（气泡）。
+//!
+//! 配置见 [`PetConfig`]（显示开关 / 通知播报 / 颜色 / 大小），存 ~/.smelt/pet.json，
+//! 由主窗口的设置面板编辑，跨窗口经全局单例共享。
+
+use std::collections::VecDeque;
+use std::f32::consts::TAU;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use gpui::*;
+use smol::Timer;
+
+/// 动画时钟间隔：约 20fps，足够顺滑且开销极低。
+const FRAME: Duration = Duration::from_millis(50);
+/// 每帧相位步进（弧度）；一个完整呼吸周期约 TAU / 0.12 ≈ 52 帧 ≈ 2.6s。
+const PHASE_STEP: f32 = 0.12;
+/// 宠物窗口宽度：给气泡 + 连点鼓大的形变留足空间（周围透明区已点击穿透，不挡操作）。
+const WIN_W: f32 = 260.0;
+/// 宠物窗口高度：下半安放宠物，上半留给头顶的说话气泡 + 鼓大余量。
+const WIN_H: f32 = 300.0;
+/// 一句话默认停留时长（帧）：约 20fps × 4.5s。
+const SPEECH_FRAMES: f32 = 90.0;
+/// 瞳孔朝鼠标偏移的最大像素。
+const EYE_LOOK_MAX: f32 = 4.0;
+
+/// 点一下宠物轮换的台词。
+const LINES: &[&str] = &[
+    "在忙什么呀？",
+    "喝口水吧 💧",
+    "陪着你哦～",
+    "要加油鸭！",
+    "摸摸我呀",
+    "今天也辛苦啦",
+    "歇一会儿吧～",
+    "我一直都在 ✨",
+];
+
+// ===================== 配置（跨窗口全局单例，存 ~/.smelt/pet.json） =====================
+
+/// 桌面宠物配置。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct PetConfig {
+    /// 显示开关：关了就隐藏浮窗。
+    pub enabled: bool,
+    /// 通知播报开关：是否让宠物主动说出 agent 事件。
+    pub notify: bool,
+    /// 史莱姆身体颜色（0xRRGGBB）。
+    pub color: u32,
+    /// 整体缩放（0.8 小 / 1.0 中 / 1.25 大）。
+    pub scale: f32,
+}
+
+impl Default for PetConfig {
+    fn default() -> Self {
+        Self { enabled: true, notify: true, color: 0x6be3c9, scale: 1.0 }
+    }
+}
+
+impl Global for PetConfig {}
+
+fn pet_config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".smelt").join("pet.json"))
+}
+
+/// 读取宠物配置；缺失 / 损坏回退默认。
+pub fn load_pet_config() -> PetConfig {
+    pet_config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 写回宠物配置（失败静默忽略）。
+pub fn save_pet_config(c: &PetConfig) {
+    let Some(path) = pet_config_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(c) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+// ===================== 播报邮箱（主窗口投递 → 宠物窗口取用） =====================
+
+/// 跨窗口的宠物播报邮箱：主程序在通知触发点 push，宠物在 tick 里 poll。
+#[derive(Clone, Default)]
+pub struct PetMailbox(Arc<Mutex<VecDeque<SharedString>>>);
+
+impl Global for PetMailbox {}
+
+/// 给宠物投一句要说的话（供主程序在 agent 通知触发点调用）。
+pub fn push_pet_message(cx: &App, text: impl Into<SharedString>) {
+    if let Some(mb) = cx.try_global::<PetMailbox>() {
+        if let Ok(mut q) = mb.0.lock() {
+            // 防止积压：只保留最近若干条。
+            while q.len() >= 8 {
+                q.pop_front();
+            }
+            q.push_back(text.into());
+        }
+    }
+}
+
+// ===================== 视图 =====================
+
+pub struct PetView {
+    /// 单调递增的动画相位（弧度），驱动呼吸 / 浮动的 sin；每帧到 TAU 归零防精度漂移。
+    phase: f32,
+    /// 拖拽标志：mouse_down 置真，首次 mouse_move 触发原生窗口拖动后复位。
+    dragging: bool,
+    /// 点击互动余韵：按下时置 1.0，逐帧衰减到 0，期间宠物向上蹦并被拉长。
+    bounce: f32,
+    /// 连点鼓大值：每次戳 +0.2 并缓慢衰减；累到阈值就「噗」地弹回。驱动临时放大。
+    poke: f32,
+    /// 眨眼计时：逐帧递增，按周期取模决定何时闭眼。
+    blink: f32,
+    /// 当前说的话；None 表示不显示气泡。
+    speech: Option<SharedString>,
+    /// 气泡剩余帧数，逐帧递减到 0 时自动收起气泡。
+    speech_ttl: f32,
+    /// 台词轮换游标，点一下 +1。
+    line_idx: usize,
+    /// 是否已剥离原生窗口外框（只需在首帧做一次）。
+    chrome_stripped: bool,
+    /// 上次应用过的「显示开关」，用于检测变化后 order 窗口。
+    visible_applied: Option<bool>,
+    /// 上次设置的「点击穿透」状态，避免每帧重复调 setIgnoresMouseEvents。
+    click_through: Option<bool>,
+    /// 瞳孔当前平滑偏移（每帧缓动逼近鼠标目标方向，避免瞬移的生硬感）。
+    eye_x: f32,
+    eye_y: f32,
+}
+
+impl PetView {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        // 动画时钟：照抄 TerminalView 的 smol::Timer 循环，逐帧推进状态并 notify 重绘。
+        // this.update 返回 Err 表示视图已销毁，退出循环。
+        cx.spawn(async move |this, cx| loop {
+            Timer::after(FRAME).await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    this.phase += PHASE_STEP;
+                    if this.phase > TAU {
+                        this.phase -= TAU;
+                    }
+                    this.blink += 1.0;
+                    if this.bounce > 0.0 {
+                        this.bounce = (this.bounce - 0.06).max(0.0);
+                    }
+                    // 连点鼓大缓慢回落（停手就慢慢缩回原大小）。
+                    if this.poke > 0.0 {
+                        this.poke = (this.poke - 0.015).max(0.0);
+                    }
+                    // 气泡倒计时：到点收起。
+                    if this.speech_ttl > 0.0 {
+                        this.speech_ttl -= 1.0;
+                        if this.speech_ttl <= 0.0 {
+                            this.speech = None;
+                        }
+                    }
+                    // 播报：气泡空闲且开启通知时，从邮箱取一条说出来。
+                    let notify = cx.try_global::<PetConfig>().map(|c| c.notify).unwrap_or(true);
+                    if this.speech.is_none() && notify {
+                        let next = cx
+                            .try_global::<PetMailbox>()
+                            .and_then(|mb| mb.0.lock().ok().and_then(|mut q| q.pop_front()));
+                        if let Some(text) = next {
+                            this.say(text);
+                        }
+                    }
+                    cx.notify();
+                })
+                .is_ok();
+            if !alive {
+                break;
+            }
+        })
+        .detach();
+
+        Self {
+            phase: 0.0,
+            dragging: false,
+            bounce: 0.0,
+            poke: 0.0,
+            blink: 0.0,
+            // 启动先打个招呼。
+            speech: Some(SharedString::from("嗨～我在这儿陪你！")),
+            speech_ttl: SPEECH_FRAMES,
+            line_idx: 0,
+            chrome_stripped: false,
+            visible_applied: None,
+            click_through: None,
+            eye_x: 0.0,
+            eye_y: 0.0,
+        }
+    }
+
+    /// 让宠物说一句话，气泡停留 `SPEECH_FRAMES` 帧。
+    fn say(&mut self, text: impl Into<SharedString>) {
+        self.speech = Some(text.into());
+        self.speech_ttl = SPEECH_FRAMES;
+    }
+}
+
+impl Render for PetView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let cfg = cx.try_global::<PetConfig>().cloned().unwrap_or_default();
+
+        // 首帧剥离原生窗口外框（无边框 / 无阴影 / 透明）。
+        if !self.chrome_stripped {
+            strip_native_chrome(window);
+            self.chrome_stripped = true;
+        }
+        // 显示开关变化时，order 原生窗口显隐（关掉时窗口彻底不挡点击）。
+        if self.visible_applied != Some(cfg.enabled) {
+            set_window_visible(window, cfg.enabled);
+            self.visible_applied = Some(cfg.enabled);
+        }
+        if !cfg.enabled {
+            return div().size_full().into_any_element();
+        }
+
+        // 缩放：配置缩放 × 连点鼓大系数，乘到所有像素尺寸上。
+        let s = cfg.scale * (1.0 + self.poke);
+        let p = |v: f32| px(v * s);
+
+        // 一次原生取值：眼睛朝鼠标的目标偏移 + 光标是否落在宠物身体内（决定点击穿透）。
+        let (eye_tx, eye_ty, over_pet) = mouse_state(window, s);
+        // 缓动：当前瞳孔偏移逐帧逼近目标，避免瞬移的生硬感（≈0.2/帧，约 0.5s 到位）。
+        self.eye_x += (eye_tx - self.eye_x) * 0.2;
+        self.eye_y += (eye_ty - self.eye_y) * 0.2;
+        let (eye_ox, eye_oy) = (self.eye_x, self.eye_y);
+        // 身体外 → 窗口点击穿透（四周透明区放行点击）；身体上 → 接管交互。
+        if self.click_through != Some(!over_pet) {
+            set_click_through(window, !over_pet);
+            self.click_through = Some(!over_pet);
+        }
+
+        // 呼吸相位 [-1, 1]：正为「吸气」（拉高变窄），负为「呼气」（压扁变宽）。
+        let breathe = self.phase.sin();
+        // 垂直浮动：随呼吸上下漂 4px，叠加点击蹦跳的上冲（向上为负 margin）。
+        let bob = (breathe * 4.0 - self.bounce * 22.0) * s;
+        // 史莱姆身体：呼吸时宽高反向形变（squash & stretch），蹦跳时整体拉长。
+        let body_w = p(88.0 + breathe * -4.0 + self.bounce * -6.0);
+        let body_h = p(78.0 + breathe * 4.0 + self.bounce * 14.0);
+        // 每约 68 帧（~3.4s）闭眼 4 帧。
+        let eye_closed = (self.blink % 68.0) < 4.0;
+
+        // 配色：身体色可配置，五官固定深色。
+        let body_color = rgb(cfg.color);
+        let ink = rgb(0x14322c);
+
+        // 单只眼睛：睁眼是竖椭圆带高光，闭眼是一道横线。
+        let eye = move |closed: bool| {
+            if closed {
+                div()
+                    .w(px(11.0 * s))
+                    .h(px(3.0 * s))
+                    .rounded_full()
+                    .bg(ink)
+                    .into_any_element()
+            } else {
+                div()
+                    .w(px(10.0 * s))
+                    .h(px(14.0 * s))
+                    .rounded_full()
+                    .bg(ink)
+                    .child(
+                        // 眼球高光，让它更有神。
+                        div()
+                            .absolute()
+                            .top(px(2.0 * s))
+                            .left(px(2.0 * s))
+                            .w(px(3.5 * s))
+                            .h(px(3.5 * s))
+                            .rounded_full()
+                            .bg(rgb(0xffffff)),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        // 腮红。
+        let blush = move || {
+            div()
+                .w(px(8.0 * s))
+                .h(px(5.0 * s))
+                .rounded_full()
+                .bg(rgba(0xff8fa380))
+        };
+
+        // 身体：整体偏圆、底部略平的史莱姆轮廓，投影让它「浮」起来。
+        let body = div()
+            .relative()
+            .w(body_w)
+            .h(body_h)
+            .rounded_t(p(56.0))
+            .rounded_b(p(30.0))
+            .bg(body_color)
+            .shadow_lg()
+            // 五官容器：绝对定位在身体上部居中。
+            .child(
+                div()
+                    .absolute()
+                    .top(p(24.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(p(4.0))
+                    .child(
+                        // 眼睛整体朝鼠标方向平移几像素 → 「看向」鼠标。
+                        div()
+                            .relative()
+                            .left(px(eye_ox * s))
+                            .top(px(eye_oy * s))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(p(16.0))
+                            .child(eye(eye_closed))
+                            .child(eye(eye_closed)),
+                    )
+                    .child(
+                        // 小嘴：闭眼（眨眼）时张成 o 卖个萌。
+                        div()
+                            .w(px(if eye_closed { 8.0 } else { 10.0 } * s))
+                            .h(px(if eye_closed { 7.0 } else { 4.0 } * s))
+                            .rounded_full()
+                            .bg(ink),
+                    ),
+            )
+            // 两坨腮红，夹在嘴两侧。
+            .child(
+                div()
+                    .absolute()
+                    .top(p(38.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap(p(30.0))
+                    .child(blush())
+                    .child(blush()),
+            )
+            // —— 交互：按住拖动 / 轻点蹦跳说话 ——
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.dragging = true;
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _, window, _cx| {
+                // 按下后一旦移动即视为拖拽：交给原生窗口拖动，整个浮窗跟着鼠标走。
+                if this.dragging {
+                    this.dragging = false;
+                    window.start_window_move();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    // 未发生移动就抬起 = 一次轻点。
+                    if this.dragging {
+                        this.dragging = false;
+                        // 连点鼓大：每戳一下鼓一点，累到阈值就「噗」地弹回。
+                        this.poke += 0.2;
+                        if this.poke >= 1.0 {
+                            this.poke = 0.0;
+                            this.bounce = 1.6; // 大蹦一下
+                            this.say("噗——！");
+                        } else {
+                            this.bounce = 1.0;
+                            this.line_idx = (this.line_idx + 1) % LINES.len();
+                            this.say(LINES[this.line_idx]);
+                        }
+                        cx.notify();
+                    }
+                }),
+            );
+
+        // 说话气泡：白底圆角卡片 + 一个朝下的小尾巴，浮在宠物头顶。
+        let bubble = self.speech.clone().map(|text| {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .max_w(px(180.0))
+                        .px(px(11.0))
+                        .py(px(6.0))
+                        .rounded(px(13.0))
+                        .bg(rgb(0xffffff))
+                        .text_color(rgb(0x1f2937))
+                        .text_size(px(12.5))
+                        .shadow_lg()
+                        .child(text),
+                )
+                // 尾巴：一颗小白点，把气泡和脑袋连起来。
+                .child(
+                    div()
+                        .mt(px(-1.0))
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded_full()
+                        .bg(rgb(0xffffff)),
+                )
+        });
+
+        // 整窗透明：不设背景色，只有宠物本体可见；上方气泡、下方宠物。
+        let mut root = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_end()
+            .pb(px(12.0))
+            .gap(px(3.0));
+        if let Some(bubble) = bubble {
+            root = root.child(bubble);
+        }
+        root.child(div().mt(px(bob)).child(body)).into_any_element()
+    }
+}
+
+// ===================== 原生窗口操作（macOS） =====================
+
+/// 从 `Window` 拿到底层 `NSWindow` 指针（失败返回 null）。
+#[cfg(target_os = "macos")]
+fn ns_window_of(window: &Window) -> *mut objc::runtime::Object {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(&*window) else {
+        return std::ptr::null_mut();
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return std::ptr::null_mut();
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut Object;
+    unsafe { msg_send![ns_view, window] }
+}
+
+/// 去掉 GPUI 在 macOS 上强加的原生窗口外框：改成无边框、无阴影、`clearColor` 背景。
+///
+/// GPUI 的 mac 后端对 `titlebar: None` 仍会建成 Titled 窗口（必带圆角边框 + 阴影 + 一层
+/// 窗口材质），且没有任何 WindowOptions 能关掉。于是直接落到 AppKit 层改。首帧调一次。
+#[cfg(target_os = "macos")]
+fn strip_native_chrome(window: &Window) {
+    use objc::runtime::{Object, NO};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return;
+    }
+    unsafe {
+        // 仅保留「非激活面板」位（1<<7），去掉 Titled → 无边框、无系统圆角。
+        let borderless_nonactivating: usize = 1 << 7;
+        let _: () = msg_send![ns_window, setStyleMask: borderless_nonactivating];
+        let _: () = msg_send![ns_window, setHasShadow: NO];
+        let _: () = msg_send![ns_window, setOpaque: NO];
+        let clear: *mut Object = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![ns_window, setBackgroundColor: clear];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn strip_native_chrome(_window: &Window) {}
+
+/// 显隐原生窗口（显示开关关掉时 orderOut，彻底不挡点击）。
+#[cfg(target_os = "macos")]
+fn set_window_visible(window: &Window, visible: bool) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return;
+    }
+    let nil: *mut Object = std::ptr::null_mut();
+    unsafe {
+        if visible {
+            let _: () = msg_send![ns_window, orderFront: nil];
+        } else {
+            let _: () = msg_send![ns_window, orderOut: nil];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_window_visible(_window: &Window, _visible: bool) {}
+
+// AppKit 几何结构体（屏幕坐标，原点在左下、y 向上）。
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSSize {
+    width: f64,
+    height: f64,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSRect {
+    origin: NSPoint,
+    size: NSSize,
+}
+
+/// 一次性从全屏光标算出两件事：瞳孔朝鼠标的偏移 + 光标是否落在宠物身体范围内。
+///
+/// 宠物窗口很大且大半透明，`window.mouse_position()` 只在光标进窗时更新，无法追；且透明区
+/// 会拦截点击。于是用 `[NSEvent mouseLocation]` 取全屏光标（屏幕坐标）+ `NSWindow.frame`：
+/// - 眼睛偏移：屏幕坐标 y 向上、视图坐标 y 向下，故竖直分量取反。
+/// - 命中测试：宠物底部锚定，身体中心在窗口底边上方 `12 + 39*s`，用椭圆判定是否在身体内。
+///
+/// 返回 `(瞳孔x偏移, 瞳孔y偏移, 是否在身体内)`。
+#[cfg(target_os = "macos")]
+fn mouse_state(window: &Window, s: f32) -> (f32, f32, bool) {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return (0.0, 0.0, true);
+    }
+    let s = s as f64;
+    unsafe {
+        let frame: NSRect = msg_send![ns_window, frame];
+        let mouse: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let cx = frame.origin.x + frame.size.width / 2.0;
+
+        // 眼睛看向鼠标：眼睛中心在身体中上部（底边上方 54*s）。
+        let eye_y = frame.origin.y + 12.0 + 54.0 * s;
+        let vx = mouse.x - cx;
+        let vy = mouse.y - eye_y;
+        let len = (vx * vx + vy * vy).sqrt();
+        let (ox, oy) = if len < 1.0 {
+            (0.0, 0.0)
+        } else {
+            ((vx / len) as f32 * EYE_LOOK_MAX, -(vy / len) as f32 * EYE_LOOK_MAX)
+        };
+
+        // 命中测试：身体椭圆（含少量外扩，便于抓取）。
+        let body_cy = frame.origin.y + 12.0 + 39.0 * s;
+        let rx = 44.0 * s + 10.0;
+        let ry = 42.0 * s + 12.0;
+        let hx = (mouse.x - cx) / rx;
+        let hy = (mouse.y - body_cy) / ry;
+        let inside = hx * hx + hy * hy <= 1.0;
+
+        (ox, oy, inside)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mouse_state(_window: &Window, _s: f32) -> (f32, f32, bool) {
+    (0.0, 0.0, true)
+}
+
+/// 设置窗口是否「点击穿透」：`passthrough=true` 时整窗放行鼠标事件到下层。
+#[cfg(target_os = "macos")]
+fn set_click_through(window: &Window, passthrough: bool) {
+    use objc::runtime::{NO, YES};
+    use objc::{msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return;
+    }
+    let flag = if passthrough { YES } else { NO };
+    unsafe {
+        let _: () = msg_send![ns_window, setIgnoresMouseEvents: flag];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_click_through(_window: &Window, _passthrough: bool) {}
+
+// ===================== 开窗 =====================
+
+/// 打开桌面宠物浮窗：透明、无标题栏、置顶（PopUp/NSPanel）、不抢焦点，
+/// 初始停在主屏右下角（Dock 上方）。
+pub fn open_pet_window(cx: &mut App) {
+    // 主屏尺寸 → 右下角初始位置；取不到就退回一个常见分辨率。
+    let screen = cx
+        .primary_display()
+        .map(|d| d.bounds())
+        .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
+    let margin = px(28.0);
+    let x = screen.origin.x + screen.size.width - px(WIN_W) - margin;
+    // 底部再抬高一点，避开 Dock。
+    let y = screen.origin.y + screen.size.height - px(WIN_H) - px(90.0);
+    let bounds = Bounds::new(point(x, y), size(px(WIN_W), px(WIN_H)));
+
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: None,
+        // 不抢焦点：宠物出现时不打断用户当前操作。
+        focus: false,
+        show: true,
+        // PopUp → macOS 上是非激活 NSPanel，浮在所有窗口之上、跟随所有 Space。
+        kind: WindowKind::PopUp,
+        // 自定义拖拽（start_window_move），据官方建议关掉系统窗口移动。
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        // 透明背景：露出桌面，只显示宠物本体。
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    };
+
+    // 注意：不包 gpui-component 的 Root —— Root 会给整窗填主题背景色（深色）并加圆角
+    // 边框。宠物只用 GPUI 原生图元，直接渲染即可保持透明。
+    cx.open_window(options, |_window, cx| cx.new(|cx| PetView::new(cx)))
+        .expect("打开桌面宠物窗口失败");
+}

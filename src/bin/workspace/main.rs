@@ -5,13 +5,15 @@
 //!
 //! 运行： cargo run --bin workspace
 
+mod pet;
 mod terminal;
 mod terminal_view;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use gpui::*;
 use syntect::easy::HighlightLines;
@@ -234,6 +236,25 @@ impl Session {
         v.iter().any(|t| t.read(cx).has_attention())
     }
 
+    /// 会话内任一 pane 的待处理通知消息（供总览卡片显示「等你确认 xxx」）。
+    fn notification_msg(&self, cx: &App) -> Option<String> {
+        let mut v = Vec::new();
+        collect_leaves(&self.layout, &mut v);
+        v.iter().find_map(|t| t.read(cx).notification().map(|s| s.to_string()))
+    }
+
+    /// 活动 pane 末尾 n 行文本（总览卡片迷你预览）。
+    fn preview(&self, cx: &App, n: usize) -> Vec<String> {
+        self.active.read(cx).last_lines(n)
+    }
+
+    /// 会话内最近一次通知时刻（总览「N 分钟前」）。
+    fn notified_at(&self, cx: &App) -> Option<Instant> {
+        let mut v = Vec::new();
+        collect_leaves(&self.layout, &mut v);
+        v.iter().filter_map(|t| t.read(cx).notified_at()).max()
+    }
+
     /// 会话状态：需要处理 > 运行中 > 空闲。
     fn status(&self, cx: &App) -> AgentStatus {
         if self.has_attention(cx) {
@@ -248,6 +269,20 @@ impl Session {
             }
         }
         AgentStatus::Idle
+    }
+}
+
+/// 相对时间：「刚刚 / N 秒前 / N 分钟前 / N 小时前」。
+fn ago(t: Instant) -> String {
+    let s = t.elapsed().as_secs();
+    if s < 10 {
+        "刚刚".to_string()
+    } else if s < 60 {
+        format!("{s} 秒前")
+    } else if s < 3600 {
+        format!("{} 分钟前", s / 60)
+    } else {
+        format!("{} 小时前", s / 3600)
     }
 }
 
@@ -577,6 +612,8 @@ struct Workspace {
     sidebar_w: f32,
     /// 侧栏 resize 事件订阅（拖动完写回存档）；随视图存活。
     _resize_sub: Subscription,
+    /// git 信息缓存（cwd → (分支, 改动数)），总览页后台刷新、渲染读缓存。
+    git_cache: HashMap<String, (String, usize)>,
 }
 
 impl Workspace {
@@ -643,7 +680,46 @@ impl Workspace {
             root_resize,
             sidebar_w,
             _resize_sub,
+            git_cache: HashMap::new(),
         }
+    }
+
+    /// 后台刷新所有会话 cwd 的 git 信息（分支 + 改动数）到缓存，进总览时调用。
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let cwds: Vec<String> = self.sessions.iter().filter_map(|s| s.cwd(cx)).collect();
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut out: Vec<(String, String, usize)> = Vec::new();
+                    for cwd in cwds {
+                        let branch = std::process::Command::new("git")
+                            .args(["-C", &cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                        if let Some(branch) = branch {
+                            let changed = std::process::Command::new("git")
+                                .args(["-C", &cwd, "status", "--porcelain"])
+                                .output()
+                                .ok()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+                                .unwrap_or(0);
+                            out.push((cwd, branch, changed));
+                        }
+                    }
+                    out
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                for (cwd, branch, changed) in results {
+                    this.git_cache.insert(cwd, (branch, changed));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 当前活动会话（不可变引用）。
@@ -787,8 +863,7 @@ impl Workspace {
         if let Some(sess) = self.sessions.get_mut(self.active_session) {
             sess.active = e.clone();
         }
-        // 用户聚焦了它 → 清除「需要注意」。
-        e.update(cx, |t, _| t.clear_attention());
+        // 只聚焦、不清「需要注意」——查看≠处理，等用户实际输入回应了才清（见 TerminalView）。
         let h = e.read(cx).focus_handle();
         window.focus(&h, cx);
         self.save_state(cx);
@@ -811,10 +886,7 @@ impl Workspace {
             if self.view == MainView::Overview {
                 self.view = MainView::Terminal;
             }
-            // 切到的会话的活动 pane 已被查看 → 清除它的「需要注意」。
-            if let Some(sess) = self.sessions.get(ix) {
-                sess.active.update(cx, |t, _| t.clear_attention());
-            }
+            // 切过去只是查看，不清「需要注意」——等用户实际输入回应了才清。
             self.focus_active(window, cx);
             self.save_state(cx);
             cx.notify();
@@ -848,6 +920,15 @@ impl Workspace {
         let win_bg = ap.window_bg();
         cx.set_global(ap);
         window.set_background_appearance(win_bg);
+        cx.notify();
+    }
+
+    /// 修改桌面宠物配置：改全局 + 存盘 + 触发重绘。宠物窗口每帧读该全局，改动 ≤50ms 生效。
+    fn update_pet_config(&mut self, f: impl FnOnce(&mut pet::PetConfig), cx: &mut Context<Self>) {
+        let mut c = cx.global::<pet::PetConfig>().clone();
+        f(&mut c);
+        pet::save_pet_config(&c);
+        cx.set_global(c);
         cx.notify();
     }
 
@@ -1015,12 +1096,19 @@ impl Workspace {
             .child(div().text_color(rgb(0xef4444)).child(format!("{need} 需要处理")))
             .child(div().text_color(rgb(0x4a9eff)).child(format!("{running} 运行中")));
 
+        // 按状态排序：需要处理 > 运行中 > 空闲（同级保持原顺序）。
+        let mut order: Vec<usize> = (0..self.sessions.len()).collect();
+        order.sort_by_key(|&ix| match self.sessions[ix].status(cx) {
+            AgentStatus::NeedsAttention => 0,
+            AgentStatus::Running => 1,
+            AgentStatus::Idle => 2,
+        });
+
         // 会话卡片。
-        let cards: Vec<_> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(ix, s)| {
+        let cards: Vec<_> = order
+            .into_iter()
+            .map(|ix| {
+                let s = &self.sessions[ix];
                 let name = s.title(cx);
                 let cwd = s
                     .cwd(cx)
@@ -1036,9 +1124,14 @@ impl Workspace {
                     AgentStatus::Idle => (rgb(0x22c55e), "空闲"),
                 };
                 let panes = s.pane_count();
+                let notif = s.notification_msg(cx);
+                let when = s.notified_at(cx).map(ago);
+                let preview = s.preview(cx, 3);
+                let git = s.cwd(cx).and_then(|c| self.git_cache.get(&c).cloned());
+
                 div()
                     .id(("ov-card", ix))
-                    .w(px(240.))
+                    .w(px(260.))
                     .p_3()
                     .rounded_lg()
                     .border_1()
@@ -1053,7 +1146,7 @@ impl Workspace {
                         MouseButton::Left,
                         cx.listener(move |this, _ev, window, cx| this.activate(ix, window, cx)),
                     )
-                    // 状态点 + 会话名（任务）
+                    // 状态点 + 会话名（任务） + 最近时间
                     .child(
                         div()
                             .flex()
@@ -1069,20 +1162,59 @@ impl Workspace {
                                     .font_bold()
                                     .text_color(fg)
                                     .child(name),
-                            ),
+                            )
+                            .children(when.map(|w| {
+                                div().text_xs().text_color(muted).flex_shrink_0().child(w)
+                            })),
                     )
-                    // cwd 项目名
-                    .child(div().text_xs().text_color(muted).child(cwd))
-                    // 状态 + 窗格数
+                    // cwd + 状态 + 窗格数
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
                             .text_xs()
+                            .child(div().text_color(muted).child(cwd))
                             .child(div().text_color(dot).child(label))
                             .child(div().text_color(muted).child(format!("· {panes} 窗格"))),
                     )
+                    // git 分支 + 改动数
+                    .children(git.map(|(branch, changed)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("⎇ {branch}"))
+                            .children((changed > 0).then(|| {
+                                div().text_color(rgb(0xf59e0b)).child(format!("● {changed} 改动"))
+                            }))
+                    }))
+                    // 需要处理时显示通知消息
+                    .children(notif.map(|m| {
+                        div().text_xs().text_color(rgb(0xef4444)).truncate().child(m)
+                    }))
+                    // 迷你终端预览（末尾几行）
+                    .children((!preview.is_empty()).then(|| {
+                        div()
+                            .mt_1()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(0x0d0d10))
+                            .font_family(terminal_view::FONT_FAMILY)
+                            .text_xs()
+                            .text_color(muted)
+                            .flex()
+                            .flex_col()
+                            .children(preview.into_iter().map(|line| {
+                                div().truncate().whitespace_nowrap().child(if line.is_empty() {
+                                    " ".to_string()
+                                } else {
+                                    line
+                                })
+                            }))
+                    }))
             })
             .collect();
 
@@ -1102,9 +1234,9 @@ impl Workspace {
 
     /// 渲染外观设置浮层（标题栏齿轮打开）：背景色 / 背景图 / 不透明度 / 模糊。
     fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted, border, popover, ring) = {
+        let (fg, muted, border, popover) = {
             let t = cx.theme();
-            (t.foreground, t.muted_foreground, t.border, t.popover, t.ring)
+            (t.foreground, t.muted_foreground, t.border, t.popover)
         };
         let ap = cx.global::<Appearance>().clone();
 
@@ -1122,7 +1254,8 @@ impl Workspace {
                     .cursor_pointer()
                     .bg(rgb(color))
                     .border_2()
-                    .border_color(if sel { ring } else { border })
+                    // 选中用明确的蓝描边（不用 theme ring——深色下偏白，会被误看成白色块）。
+                    .border_color(if sel { Hsla::from(rgb(0x4a9eff)) } else { border })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -1216,6 +1349,86 @@ impl Workspace {
 
         let section = |title: &str| div().text_xs().text_color(muted).child(title.to_string());
 
+        // —— 桌面宠物设置 ——
+        let pc = cx.global::<pet::PetConfig>().clone();
+        // 开关胶囊（显示 / 播报）。
+        let toggle = |id: &'static str, on: bool, label: String, f: fn(&mut pet::PetConfig)| {
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(if on { fg } else { muted })
+                .bg(if on { border } else { popover })
+                .hover(|s| s.bg(border))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _w, cx| this.update_pet_config(f, cx)),
+                )
+        };
+        let pet_show_chip = toggle(
+            "pet-show",
+            pc.enabled,
+            if pc.enabled { "显示 · 开" } else { "显示 · 关" }.to_string(),
+            |c| c.enabled = !c.enabled,
+        );
+        let pet_notify_chip = toggle(
+            "pet-notify",
+            pc.notify,
+            if pc.notify { "播报 · 开" } else { "播报 · 关" }.to_string(),
+            |c| c.notify = !c.notify,
+        );
+        // 宠物颜色预设。
+        let pet_colors: [u32; 6] =
+            [0x6be3c9, 0xffb3c1, 0xffd166, 0x9bb8ff, 0xc3a6ff, 0xa0e57a];
+        let pet_swatches: Vec<_> = pet_colors
+            .iter()
+            .map(|&color| {
+                let sel = pc.color == color;
+                div()
+                    .id(("pet-color", color as usize))
+                    .size_6()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(rgb(color))
+                    .border_2()
+                    .border_color(if sel { Hsla::from(rgb(0x4a9eff)) } else { border })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _w, cx| {
+                            this.update_pet_config(move |c| c.color = color, cx)
+                        }),
+                    )
+            })
+            .collect();
+        // 宠物大小。
+        let pet_size_row: Vec<_> = [("小", 0.8f32), ("中", 1.0), ("大", 1.25)]
+            .iter()
+            .map(|&(label, val)| {
+                let sel = (pc.scale - val).abs() < 0.01;
+                div()
+                    .id(("pet-size", (val * 100.0) as usize))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(if sel { fg } else { muted })
+                    .bg(if sel { border } else { popover })
+                    .hover(|s| s.bg(border))
+                    .child(label.to_string())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _w, cx| {
+                            this.update_pet_config(move |c| c.scale = val, cx)
+                        }),
+                    )
+            })
+            .collect();
+
         // 点背景空白关闭；面板停在右上（齿轮下方）。
         div()
             .absolute()
@@ -1291,6 +1504,39 @@ impl Workspace {
                             .gap_1()
                             .child(section("背景模糊"))
                             .child(blur_chip),
+                    )
+                    // 桌面宠物：显示 / 播报开关 + 颜色 + 大小。
+                    .child(div().h(px(1.)).bg(border))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().font_bold().text_color(fg).child("桌面宠物"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(pet_show_chip)
+                                    .child(pet_notify_chip),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(section("颜色"))
+                                    .child(div().flex().gap_2().flex_wrap().children(pet_swatches)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(section("大小"))
+                                    .child(div().flex().gap_1().children(pet_size_row)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -1621,6 +1867,7 @@ impl Render for Workspace {
                             .on_click(move |_ev, _window, cx| {
                                 e_overview.update(cx, |ws, cx| {
                                     ws.view = MainView::Overview;
+                                    ws.refresh_git(cx); // 进总览 → 后台刷新 git
                                     cx.notify();
                                 });
                             }),
@@ -1788,6 +2035,8 @@ impl Render for Workspace {
                             h_flex()
                                 .items_center()
                                 .gap_1()
+                                // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
+                                .pr_2()
                                 .child(
                                     div()
                                         .id("notif-bell")
@@ -2778,6 +3027,11 @@ fn main() {
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         cx.set_global(appearance);
+
+        // 桌面宠物：配置 + 播报邮箱（跨窗口全局单例），再开独立透明置顶浮窗。
+        cx.set_global(pet::load_pet_config());
+        cx.set_global(pet::PetMailbox::default());
+        pet::open_pet_window(cx);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
