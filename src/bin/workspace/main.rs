@@ -24,8 +24,12 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
 };
+use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
+use gpui_component::radio::{Radio, RadioGroup};
+use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
+use gpui_component::switch::Switch;
 use gpui_component::resizable::{
     h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
 };
@@ -479,6 +483,13 @@ fn new_sid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Hsla → 0xRRGGBB（取色器回调把颜色写回 config 用）。
+fn hsla_to_rgb(c: Hsla) -> u32 {
+    let rgba = Rgba::from(c);
+    let q = |f: f32| ((f.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
+    (q(rgba.r) << 16) | (q(rgba.g) << 8) | q(rgba.b)
+}
+
 /// Split 方向的可序列化镜像（gpui::Axis 无法直接序列化）。
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 enum SplitAxis {
@@ -670,6 +681,14 @@ struct Workspace {
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
     llm_subs: Vec<Subscription>,
+    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 背景色 / 宠物色取色器。
+    opacity_slider: Option<Entity<SliderState>>,
+    bg_color_picker: Option<Entity<ColorPickerState>>,
+    pet_color_picker: Option<Entity<ColorPickerState>>,
+    /// 上面三个组件的变更订阅。
+    settings_subs: Vec<Subscription>,
+    /// 上次应用到窗口的背景外观：不透明度 / 模糊改了要 window 才能切，故在 render 里同步。
+    applied_window_bg: Option<WindowBackgroundAppearance>,
     /// git status 缓存（root → (取得时刻, 数据)）。Git 页后台刷新，render 只读，
     /// 避免每帧同步跑 git status（大仓要 ~90ms，是掉帧元凶）。
     git_status: HashMap<String, (Instant, GitStatusData)>,
@@ -760,6 +779,11 @@ impl Workspace {
             git_status_inflight: HashSet::new(),
             llm_inputs: None,
             llm_subs: Vec::new(),
+            opacity_slider: None,
+            bg_color_picker: None,
+            pet_color_picker: None,
+            settings_subs: Vec::new(),
+            applied_window_bg: None,
             debug_hud: false,
             last_frame: None,
             fps_ema: 0.0,
@@ -828,6 +852,52 @@ impl Workspace {
         }));
 
         self.llm_inputs = Some(LlmInputs { base_url, api_key, model, persona });
+
+        // —— 有状态组件：不透明度滑块 + 背景色 / 宠物色取色器 ——
+        let ap = cx.global::<Appearance>().clone();
+        let pc = cx.global::<pet::PetConfig>().clone();
+        let opacity_slider = cx.new(|_| {
+            SliderState::new().min(60.0).max(100.0).step(5.0).default_value(ap.opacity * 100.0)
+        });
+        let bg_color_picker =
+            cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(ap.bg_color)));
+        let pet_color_picker =
+            cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(pc.color)));
+
+        self.settings_subs.clear();
+        self.settings_subs.push(cx.subscribe(
+            &opacity_slider,
+            |this, _s, ev: &SliderEvent, cx| {
+                let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
+                if let SliderValue::Single(x) = v {
+                    let op = (*x / 100.0).clamp(0.3, 1.0);
+                    this.set_appearance(move |a| a.opacity = op, cx);
+                }
+            },
+        ));
+        self.settings_subs.push(cx.subscribe(
+            &bg_color_picker,
+            |this, _s, ev: &ColorPickerEvent, cx| {
+                let ColorPickerEvent::Change(c) = ev;
+                if let Some(hsla) = c {
+                    let color = hsla_to_rgb(*hsla);
+                    this.set_appearance(move |a| a.bg_color = color, cx);
+                }
+            },
+        ));
+        self.settings_subs.push(cx.subscribe(
+            &pet_color_picker,
+            |this, _s, ev: &ColorPickerEvent, cx| {
+                let ColorPickerEvent::Change(c) = ev;
+                if let Some(hsla) = c {
+                    let color = hsla_to_rgb(*hsla);
+                    this.update_pet_config(move |cfg| cfg.color = color, cx);
+                }
+            },
+        ));
+        self.opacity_slider = Some(opacity_slider);
+        self.bg_color_picker = Some(bg_color_picker);
+        self.pet_color_picker = Some(pet_color_picker);
     }
 
     /// 后台刷新所有会话 cwd 的 git 信息（分支 + 改动数）到缓存，进总览时调用。
@@ -1074,6 +1144,17 @@ impl Workspace {
         let win_bg = ap.window_bg();
         cx.set_global(ap);
         window.set_background_appearance(win_bg);
+        self.applied_window_bg = Some(win_bg);
+        cx.notify();
+    }
+
+    /// 无 window 版：改全局 + 存盘 + 重绘。窗口背景（透明/模糊）由 render 里的
+    /// applied_window_bg 同步——供 slider/color_picker 的订阅回调用（它们拿不到 window）。
+    fn set_appearance(&mut self, f: impl FnOnce(&mut Appearance), cx: &mut Context<Self>) {
+        let mut ap = cx.global::<Appearance>().clone();
+        f(&mut ap);
+        save_appearance(&ap);
+        cx.set_global(ap);
         cx.notify();
     }
 
@@ -1444,76 +1525,16 @@ impl Workspace {
             (t.foreground, t.muted_foreground, t.border, t.popover)
         };
         let ap = cx.global::<Appearance>().clone();
+        // 背景色 / 不透明度 / 宠物色改用 gpui-component 组件（ColorPicker / Slider），
+        // 组件实体在 init_llm_inputs 里懒创建，这里直接引用 self.* 渲染（旧的色板 / 档位
+        // chip 已删）。
 
-        // 预设背景色：名称仅作区分，值为 0xRRGGBB。
-        let presets: [u32; 6] =
-            [0x1a1b26, 0x000000, 0x1e1e1e, 0x0d1117, 0x1c1917, 0x0f1a17];
-        let swatches: Vec<_> = presets
-            .iter()
-            .map(|&color| {
-                let sel = ap.bg_color == color;
-                div()
-                    .id(("bg-swatch", color as usize))
-                    .size_6()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(rgb(color))
-                    .border_2()
-                    // 选中用明确的蓝描边（不用 theme ring——深色下偏白，会被误看成白色块）。
-                    .border_color(if sel { Hsla::from(rgb(0x4a9eff)) } else { border })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            this.update_appearance(window, move |a| a.bg_color = color, cx)
-                        }),
-                    )
-            })
-            .collect();
-
-        // 不透明度档位。
-        let opacity_row: Vec<_> = [100u32, 90, 80, 70, 60]
-            .iter()
-            .map(|&pct| {
-                let val = pct as f32 / 100.0;
-                let sel = (ap.opacity - val).abs() < 0.005;
-                div()
-                    .id(("op", pct as usize))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(if sel { fg } else { muted })
-                    .bg(if sel { border } else { popover })
-                    .hover(|s| s.bg(border))
-                    .child(format!("{pct}%"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            this.update_appearance(window, move |a| a.opacity = val, cx)
-                        }),
-                    )
-            })
-            .collect();
-
-        let blur_on = ap.blur;
-        let blur_chip = div()
-            .id("blur")
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_xs()
-            .text_color(if blur_on { fg } else { muted })
-            .bg(if blur_on { border } else { popover })
-            .hover(|s| s.bg(border))
-            .child(if blur_on { "毛玻璃 · 开" } else { "毛玻璃 · 关" }.to_string())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.update_appearance(window, |a| a.blur = !a.blur, cx)
-                }),
-            );
+        let blur_chip = Switch::new("blur").checked(ap.blur).label("毛玻璃").on_click(
+            cx.listener(|this, checked: &bool, window, cx| {
+                let v = *checked;
+                this.update_appearance(window, move |a| a.blur = v, cx)
+            }),
+        );
 
         let pick_btn = div()
             .id("pick-img")
@@ -1556,102 +1577,44 @@ impl Workspace {
 
         // —— 桌面宠物设置 ——
         let pc = cx.global::<pet::PetConfig>().clone();
-        // 开关胶囊（显示 / 播报）。
-        let toggle = |id: &'static str, on: bool, label: String, f: fn(&mut pet::PetConfig)| {
-            div()
-                .id(id)
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .text_xs()
-                .text_color(if on { fg } else { muted })
-                .bg(if on { border } else { popover })
-                .hover(|s| s.bg(border))
-                .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _w, cx| this.update_pet_config(f, cx)),
-                )
-        };
-        let pet_show_chip = toggle(
-            "pet-show",
-            pc.enabled,
-            if pc.enabled { "显示 · 开" } else { "显示 · 关" }.to_string(),
-            |c| c.enabled = !c.enabled,
+        let pet_show_chip = Switch::new("pet-show").checked(pc.enabled).label("显示").on_click(
+            cx.listener(|this, c: &bool, _w, cx| {
+                let v = *c;
+                this.update_pet_config(move |cfg| cfg.enabled = v, cx)
+            }),
         );
-        let pet_notify_chip = toggle(
-            "pet-notify",
-            pc.notify,
-            if pc.notify { "播报 · 开" } else { "播报 · 关" }.to_string(),
-            |c| c.notify = !c.notify,
+        let pet_notify_chip = Switch::new("pet-notify").checked(pc.notify).label("播报").on_click(
+            cx.listener(|this, c: &bool, _w, cx| {
+                let v = *c;
+                this.update_pet_config(move |cfg| cfg.notify = v, cx)
+            }),
         );
         // 宠物颜色预设。
-        let pet_colors: [u32; 6] =
-            [0x6be3c9, 0xffb3c1, 0xffd166, 0x9bb8ff, 0xc3a6ff, 0xa0e57a];
-        let pet_swatches: Vec<_> = pet_colors
-            .iter()
-            .map(|&color| {
-                let sel = pc.color == color;
-                div()
-                    .id(("pet-color", color as usize))
-                    .size_6()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .bg(rgb(color))
-                    .border_2()
-                    .border_color(if sel { Hsla::from(rgb(0x4a9eff)) } else { border })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _w, cx| {
-                            this.update_pet_config(move |c| c.color = color, cx)
-                        }),
-                    )
-            })
-            .collect();
+        // 宠物颜色改用 ColorPicker（self.pet_color_picker）。
         // 宠物大小。
-        let pet_size_row: Vec<_> = [("小", 0.8f32), ("中", 1.0), ("大", 1.25)]
-            .iter()
-            .map(|&(label, val)| {
-                let sel = (pc.scale - val).abs() < 0.01;
-                div()
-                    .id(("pet-size", (val * 100.0) as usize))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(if sel { fg } else { muted })
-                    .bg(if sel { border } else { popover })
-                    .hover(|s| s.bg(border))
-                    .child(label.to_string())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _w, cx| {
-                            this.update_pet_config(move |c| c.scale = val, cx)
-                        }),
-                    )
-            })
-            .collect();
+        // 宠物大小：单选组（小 0.8 / 中 1.0 / 大 1.25）。
+        const PET_SIZES: [f32; 3] = [0.8, 1.0, 1.25];
+        let size_ix = PET_SIZES.iter().position(|v| (pc.scale - v).abs() < 0.01);
+        let pet_size_group = RadioGroup::horizontal("pet-size")
+            .selected_index(size_ix)
+            .on_click(cx.listener(|this, ix: &usize, _w, cx| {
+                let val = PET_SIZES[*ix];
+                this.update_pet_config(move |c| c.scale = val, cx)
+            }))
+            .children([
+                Radio::new("sz-s").label("小"),
+                Radio::new("sz-m").label("中"),
+                Radio::new("sz-l").label("大"),
+            ]);
 
         // 宠物大脑（LLM）开关。key/model 暂存 ~/.smelt/llm.json（后续做面板内编辑）。
         let lc = cx.global::<agent::LlmConfig>().clone();
-        let llm_on = lc.enabled;
-        let llm_chip = div()
-            .id("pet-brain")
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_xs()
-            .text_color(if llm_on { fg } else { muted })
-            .bg(if llm_on { border } else { popover })
-            .hover(|s| s.bg(border))
-            .child(if llm_on { "大脑 · 开" } else { "大脑 · 关" }.to_string())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _w, cx| this.update_llm_config(|c| c.enabled = !c.enabled, cx)),
-            );
+        let llm_chip = Switch::new("pet-brain").checked(lc.enabled).label("大脑").on_click(
+            cx.listener(|this, c: &bool, _w, cx| {
+                let v = *c;
+                this.update_llm_config(move |cfg| cfg.enabled = v, cx)
+            }),
+        );
         // 大脑配置输入框（base_url / key / model / persona）；输入框已懒创建时才渲染。
         let llm_fields = self.llm_inputs.as_ref().map(|inp| {
             let field = |label: &str, state: &Entity<gpui_component::input::InputState>| {
@@ -1707,7 +1670,7 @@ impl Workspace {
                             .flex_col()
                             .gap_1()
                             .child(section("背景色"))
-                            .child(div().flex().gap_2().flex_wrap().children(swatches)),
+                            .children(self.bg_color_picker.as_ref().map(|p| ColorPicker::new(p).small())),
                     )
                     .child(
                         div()
@@ -1738,7 +1701,7 @@ impl Workspace {
                             .flex_col()
                             .gap_1()
                             .child(section("不透明度"))
-                            .child(div().flex().gap_1().children(opacity_row)),
+                            .children(self.opacity_slider.as_ref().map(Slider::new)),
                     )
                     .child(
                         div()
@@ -1779,7 +1742,7 @@ impl Workspace {
                                     .flex_col()
                                     .gap_1()
                                     .child(section("颜色"))
-                                    .child(div().flex().gap_2().flex_wrap().children(pet_swatches)),
+                                    .children(self.pet_color_picker.as_ref().map(|p| ColorPicker::new(p).small())),
                             )
                             .child(
                                 div()
@@ -1787,7 +1750,7 @@ impl Workspace {
                                     .flex_col()
                                     .gap_1()
                                     .child(section("大小"))
-                                    .child(div().flex().gap_1().children(pet_size_row)),
+                                    .child(pet_size_group),
                             ),
                     ),
             )
@@ -2060,6 +2023,14 @@ impl Render for Workspace {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
                 self.ensure_git_status(root, cx);
             }
+        }
+
+        // 同步窗口背景外观：不透明度 / 模糊改了（可能来自 slider/取色器的无 window 回调）
+        // → 这里用 window 切换透明/模糊。仅在变化时调，避免每帧重复。
+        let want_bg = cx.global::<Appearance>().window_bg();
+        if self.applied_window_bg != Some(want_bg) {
+            window.set_background_appearance(want_bg);
+            self.applied_window_bg = Some(want_bg);
         }
 
         // 调试 HUD：开启时用 request_animation_frame 驱动连续渲染，测真实帧率
