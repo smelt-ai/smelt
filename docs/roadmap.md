@@ -35,7 +35,8 @@
 
 现状：smeltd 用**内存 2MB 环形缓冲**存输出，守护重启即失忆。可借鉴 codex 的做法落盘：
 - 会话历史写 JSONL（`~/.smelt/sessions/<date>/<uuid>.jsonl`，每行带时间戳的 typed 事件）
-- SQLite（项目已有 rusqlite）做索引，支持会话列表分页 / 全文搜索
+- SQLite 做索引，支持会话列表分页 / 全文搜索（`rusqlite` 依赖已随 instincts 蒸馏链路一起
+  移除，真要做这条得重新加回来）
 - 好处：机器 / 守护重启后可恢复完整历史、总览页能列历史会话
 - 注：**不需要** PostgreSQL/TimescaleDB —— 本项目栈是 SQLite，本地单机 IPC 场景 SQLite 足够
 

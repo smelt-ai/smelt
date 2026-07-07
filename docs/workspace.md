@@ -1,7 +1,8 @@
 # smelt workspace
 
 基于 [GPUI](https://gpui.rs) 的个人工作台桌面应用：内嵌一个真正的终端，让你在自己的项目里跑
-`claude code` 等交互式命令，后续叠加 smelt 的「数字分身」能力（instincts / brief / 会话监控）。
+`claude code` 等交互式命令，定位是「AI coding 驾驶舱 / Claude Code 指挥中心」——多项目 × 多终端
+的外壳，后续叠加 agent 会话监控（读 `~/.claude/projects/*.jsonl`）。
 
 运行：
 
@@ -9,7 +10,8 @@
 cargo run --bin workspace
 ```
 
-> 注：GUI 是独立的 `workspace` 二进制，原有 `smelt` CLI 不受影响。
+> 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除；
+> 本仓库现在只有 `workspace`（GUI）和 `smeltd`（终端持久化守护）两个二进制。
 
 ---
 
@@ -90,7 +92,6 @@ UI 线程每 30ms 对网格做快照并重绘。
 
 - [ ] **可点击链接**：识别 URL、下划线、`Cmd+点击`用浏览器打开（进行中）
 - [ ] **每标签独立项目目录**：新建标签时可选不同项目
-- [ ] **接 smelt 大脑**：
-  - `~/.claude/projects/*.jsonl` 实时会话监控（token / 工具调用 / 进度）
-  - instincts / brief 侧栏
-- [ ] 更像 IDE：分屏、项目文件树、命令面板（`Cmd+K`）
+- [ ] **会话监控层**：`~/.claude/projects/*.jsonl` 实时解析各终端 agent 状态
+  （thinking / 等待输入 / 完成、token 用量、最近工具调用）
+- [ ] 更像 IDE：分屏、命令面板（`Cmd+K`）
