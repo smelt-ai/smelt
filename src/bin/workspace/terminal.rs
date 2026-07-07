@@ -16,15 +16,15 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 
-/// 默认前景 / 背景色（与窗口底色一致，Tokyo Night 风格）。
-const DEFAULT_FG: u32 = 0x00c0_caf5;
+/// 默认前景 / 背景色（前景取 iTerm2 风格灰白，正文不再偏紫）。
+pub const DEFAULT_FG: u32 = 0x00d8_d8d8;
 pub const DEFAULT_BG: u32 = 0x001a_1b26;
 
-/// 16 色 ANSI 调色板（Tokyo Night）。索引 0-7 常规、8-15 明亮。
+/// 16 色 ANSI 调色板。彩色沿用 Tokyo Night，白/亮白改为灰白/纯白（iTerm2 风格）。
 const PALETTE: [u32; 16] = [
     0x0015_161e, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7, 0x007d_cfff,
-    0x00a9_b1d6, 0x0041_4868, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7,
-    0x007d_cfff, 0x00c0_caf5,
+    0x00c7_c7c7, 0x0041_4868, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7,
+    0x007d_cfff, 0x00ff_ffff,
 ];
 
 /// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 粗体/下划线。

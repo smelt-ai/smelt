@@ -637,7 +637,7 @@ impl Render for TerminalView {
             .overflow_hidden()
             .min_w_0()
             .min_h_0()
-            .text_color(rgb(0xc0caf5))
+            .text_color(rgb(terminal::DEFAULT_FG))
             .font_family(FONT_FAMILY)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 let ks = &ev.keystroke;
