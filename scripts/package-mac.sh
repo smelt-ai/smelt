@@ -7,7 +7,7 @@
 #
 # 产物：
 #   dist/Smelt.app     —— 可双击运行的应用
-#   dist/Smelt.dmg     —— 发给同事的分发件（定制拖拽安装窗口）
+#   dist/Smelt.dmg     —— 分发件（定制拖拽安装窗口）
 set -euo pipefail
 
 APP_NAME="Smelt"
@@ -180,4 +180,4 @@ rm -f "$RW"; rm -rf "$STAGE"
 echo ""
 echo "✅ 完成"
 echo "   应用：   $APP"
-echo "   分发件： $DIST/$APP_NAME.dmg  （发这个给同事，双击挂载后拖进 Applications）"
+echo "   分发件： $DIST/$APP_NAME.dmg"
