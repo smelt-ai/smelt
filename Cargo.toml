@@ -21,7 +21,9 @@ uuid = { version = "1", features = ["v4"] }
 # zed commit，避免版本漂移；gpui_platform 开 runtime_shaders 免装完整 Xcode。
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+# tree-sitter-languages：文件树打开文件用组件自带的 Editor（CodeEditor 模式），
+# 语法高亮 + 行号 + 搜索都是组件自己做的，不再需要 syntect。
+gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
 # 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 # 内嵌终端：portable-pty 起 shell 子进程并拿到 PTY，alacritty_terminal 做
@@ -29,10 +31,10 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 portable-pty = "0.9"
 alacritty_terminal = { version = "0.26", default-features = false }
 smol = "2"  # 定时器：驱动终端网格的定时快照重绘
-# 文件查看器语法高亮：内置几十种语言语法+主题，用 fancy-regex 纯 Rust 免装 onig(C)。
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 # diff 行内高亮：对配对的删/增行做字符级 diff，标出具体变化的片段。
 similar = "2"
+# Git 状态改用文件监听而非轮询：macOS 走 FSEvents，仓库一有变化就标脏触发刷新。
+notify = "6"
 
 # macOS：桌面宠物浮窗需要绕过 GPUI（它在 mac 上只会建 Titled 窗口，必带圆角边框+
 # 阴影），直接操作底层 NSWindow 改成 Borderless/无阴影/透明。版本对齐 gpui 依赖树。

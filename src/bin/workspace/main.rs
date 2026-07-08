@@ -6,24 +6,27 @@
 //! 运行： cargo run --bin workspace
 
 mod agent;
+mod dock;
 mod hotspot;
 mod pet;
+mod session_history;
 mod terminal;
 mod terminal_view;
 mod updater;
+mod usage_stats;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use chrono::Datelike;
 use gpui::*;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
+use gpui::prelude::FluentBuilder;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::chart::{BarChart, LineChart};
 use gpui_component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
 };
@@ -40,6 +43,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::*;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use terminal_view::TerminalView;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
@@ -168,6 +172,8 @@ enum MainView {
     Files,
     Git,
     Hotspot,
+    History,
+    Usage,
     Settings,
 }
 
@@ -385,12 +391,29 @@ fn remove_leaf(pane: &mut Pane, target: EntityId) {
     }
 }
 
-/// 打开查看的文件：路径 + 预高亮的行。每行是若干 (颜色, 文本) 片段。
-/// 高亮在打开时一次算好并存起来，滚动时 uniform_list 只按可见范围取行渲染。
-/// 用 Rc 让 uniform_list 的 'static 闭包能廉价地共享这份数据。
+/// 打开查看的文件：路径 + 可编辑的代码编辑器状态（gpui-component 的 Editor：
+/// tree-sitter 语法高亮 + 行号 + 搜索，直接可编辑，不再是只读预览）。
 struct OpenFile {
     path: String,
-    lines: Rc<Vec<Vec<(Rgba, String)>>>,
+    editor: Entity<gpui_component::input::InputState>,
+    /// 磁盘上（或最近一次保存后）的内容快照，跟编辑器当前内容一比就知道是否有未保存
+    /// 改动——不用额外订阅 InputEvent::Change 维护一个脏标记，render 时比一下字符串就行。
+    saved_content: Rc<String>,
+    /// 最近一次保存失败 / 不允许保存的原因；成功保存或重新打开文件后清空。
+    save_error: Option<String>,
+    /// 文件是否按文本成功读取过。读取完成前 / 读取失败（比如二进制文件）时为 false，
+    /// 禁止保存——避免误按 Cmd+S 把「无法读取」占位文案写回去覆盖了原文件。
+    readable: bool,
+    /// 上次保存时检测到磁盘内容跟 saved_content 对不上（外部改过）。为 true 时
+    /// 再按一次 Cmd+S 会跳过冲突检查强制覆盖——用"再按一次"当作用户已确认覆盖。
+    conflict_pending: bool,
+}
+
+/// 保存一次的结果：分 Saved / 检测到外部改动的 Conflict / 其它 IO 错误。
+enum SaveOutcome {
+    Saved,
+    Conflict,
+    Error(String),
 }
 
 /// 文件树搜索的一条命中。
@@ -674,6 +697,12 @@ struct Workspace {
     open_file: Option<OpenFile>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
     file_gen: u64,
+    /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
+    /// 等用户选了"不保存"/"保存并切换"才真正打开，见 render_unsaved_file_confirm。
+    pending_file_switch: Option<String>,
+    /// 「保存并切换」选择后，等这次 save_open_file 存盘成功再打开的目标路径；
+    /// 存盘失败/冲突则放弃切换，留在当前文件上让用户处理。
+    pending_switch_after_save: Option<String>,
     /// Git 视图里当前查看的文件 diff；None 表示未选中任何文件。
     git_diff: Option<GitDiff>,
     /// 打开 diff 的自增序号（独立于 file_gen，避免和文件高亮任务互相取消）。
@@ -694,7 +723,6 @@ struct Workspace {
     /// 必须常驻（每帧新建会丢失滚动位置）。
     git_files_scroll: ScrollHandle,
     diff_scroll: UniformListScrollHandle,
-    file_scroll: UniformListScrollHandle,
     /// 文件树列表的滚动句柄（普通滚动，非虚拟滚动——见 file_tree 函数注释）。
     file_tree_scroll: ScrollHandle,
     /// 文件树顶部的过滤输入框；首次渲染文件树时懒创建（需要 window）。
@@ -731,11 +759,26 @@ struct Workspace {
     git_status: HashMap<String, (Instant, GitStatusData)>,
     /// 正在后台刷新 status 的 root（防重复并发 spawn）。
     git_status_inflight: HashSet<String>,
+    /// 文件监听标脏的 root 集合：notify 的回调跑在独立系统线程上，故用 Arc<Mutex<..>>
+    /// 跨线程共享；250ms 检查循环（见 ensure_git_watch）发现命中就清位 + 强制刷新。
+    git_dirty: Arc<Mutex<HashSet<String>>>,
+    /// 每个 root 常驻的文件监听器（root → watcher）。watcher 必须存活才会继续收事件，
+    /// 故存在 Workspace 里跟应用同生命周期；只建一次，见 ensure_git_watch。
+    git_watchers: HashMap<String, RecommendedWatcher>,
     /// 热力图缓存（root → (取得时刻, 数据)）：`git log` 扫 90 天历史比 status 更慢，
     /// 同样绝不在 render 里同步跑，后台算完缓存，render 只读。
     hotspot_data: HashMap<String, (Instant, Rc<Vec<hotspot::HotspotEntry>>)>,
     /// 正在后台计算热力的 root（防重复并发 spawn）。
     hotspot_inflight: HashSet<String>,
+    /// 历史会话列表缓存（cwd → (取得时刻, 数据)）：后台扫描该项目下的 transcript
+    /// 目录，render 只读。
+    session_list: HashMap<String, (Instant, Rc<Vec<session_history::SessionSummary>>)>,
+    /// 正在后台扫描历史会话列表的 cwd（防重复并发 spawn）。
+    session_list_inflight: HashSet<String>,
+    /// 当前选中查看的历史会话（路径 + 解析出的对话内容）；None 表示未选。
+    session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
+    /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
+    session_detail_gen: u64,
     /// 调试 HUD 开关（Cmd+Shift+F 切换）：开启时右上角显示帧率 + 帧耗时。
     debug_hud: bool,
     /// 上一帧渲染时刻（算帧间隔用）。
@@ -746,6 +789,14 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
     update_status: updater::UpdateStatus,
+    /// 上次同步给 Dock 角标的「需要关注」会话数；None 强制首帧同步一次。
+    /// 只在这个数变化时才调用 Cocoa API，避免每次 render 都发一遍。
+    dock_badge_count: Option<usize>,
+    /// 用量页数据缓存：(取得时刻, 数据)。扫全部本地 transcript 可能有几十毫秒，
+    /// 绝不在 render 里同步跑，后台算完缓存，render 只读。
+    usage_cache: Option<(Instant, Rc<usage_stats::UsageData>)>,
+    /// 正在后台扫描用量数据（防重复并发 spawn）。
+    usage_inflight: bool,
 }
 
 /// 宠物大脑配置的四个输入框（base_url / api_key / model / persona）。
@@ -808,6 +859,8 @@ impl Workspace {
             dir_inflight: HashSet::new(),
             open_file: None,
             file_gen: 0,
+            pending_file_switch: None,
+            pending_switch_after_save: None,
             git_diff: None,
             diff_gen: 0,
             diff_split: false,
@@ -818,7 +871,6 @@ impl Workspace {
             _palette_sub: None,
             git_files_scroll: ScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
-            file_scroll: UniformListScrollHandle::new(),
             file_tree_scroll: ScrollHandle::new(),
             file_filter: None,
             _file_filter_sub: None,
@@ -830,8 +882,14 @@ impl Workspace {
             git_cache: HashMap::new(),
             git_status: HashMap::new(),
             git_status_inflight: HashSet::new(),
+            git_dirty: Arc::new(Mutex::new(HashSet::new())),
+            git_watchers: HashMap::new(),
             hotspot_data: HashMap::new(),
             hotspot_inflight: HashSet::new(),
+            session_list: HashMap::new(),
+            session_list_inflight: HashSet::new(),
+            session_detail: None,
+            session_detail_gen: 0,
             llm_inputs: None,
             llm_subs: Vec::new(),
             opacity_slider: None,
@@ -844,6 +902,9 @@ impl Workspace {
             fps_ema: 0.0,
             show_quit_confirm: false,
             update_status: updater::UpdateStatus::default(),
+            dock_badge_count: None,
+            usage_cache: None,
+            usage_inflight: false,
         };
         // 立即写盘：把本次启动生成/沿用的会话 id 落到存档。否则首启（或旧存档迁移）
         // 生成的新 id 只在内存里，若用户不做任何布局操作就退出，重开会因无 id 而
@@ -1758,6 +1819,123 @@ impl Workspace {
             )
     }
 
+    /// 当前文件有未保存改动、又点了别的文件时弹的确认弹窗：取消 / 不保存直接切换 /
+    /// 保存并切换。与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
+    fn render_unsaved_file_confirm(&self, target: String, cx: &mut Context<Self>) -> Div {
+        let (fg, muted, border, popover) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground, t.border, t.popover)
+        };
+        let c_blue_tint: Hsla = rgba(0x4a9eff24).into();
+        let c_blue_hover: Hsla = rgba(0x4a9eff40).into();
+        let c_neutral_bg: Hsla = rgba(0xffffff0a).into();
+        let c_neutral_hover: Hsla = rgba(0xffffff1f).into();
+        let cur_name = self
+            .open_file
+            .as_ref()
+            .map(|of| of.path.rsplit('/').next().unwrap_or(of.path.as_str()).to_string())
+            .unwrap_or_default();
+        let target_name = target.rsplit('/').next().unwrap_or(target.as_str()).to_string();
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000aa))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                v_flex()
+                    .w(px(360.))
+                    .p_5()
+                    .bg(popover)
+                    .border_1()
+                    .border_color(border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .gap_4()
+                    .child(
+                        div()
+                            .font_bold()
+                            .text_color(fg)
+                            .text_lg()
+                            .child(format!("「{cur_name}」有未保存的改动")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(format!("要切换到「{target_name}」了，这些改动还没保存，要怎么处理？")),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("unsaved-cancel")
+                                    .px_3()
+                                    .py(px(5.))
+                                    .rounded_lg()
+                                    .bg(c_neutral_bg)
+                                    .border_1()
+                                    .border_color(rgba(0xffffff12))
+                                    .text_sm()
+                                    .text_color(fg)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(c_neutral_hover))
+                                    .child("取消")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.pending_file_switch = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("unsaved-discard")
+                                    .px_3()
+                                    .py(px(5.))
+                                    .rounded_lg()
+                                    .bg(c_neutral_bg)
+                                    .border_1()
+                                    .border_color(rgba(0xffffff12))
+                                    .text_sm()
+                                    .text_color(fg)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(c_neutral_hover))
+                                    .child("不保存，直接切换")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(target) = this.pending_file_switch.take() {
+                                            this.open_file_now(target, window, cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("unsaved-save-switch")
+                                    .px_3()
+                                    .py(px(5.))
+                                    .rounded_lg()
+                                    .bg(c_blue_tint)
+                                    .border_1()
+                                    .border_color(rgba(0xffffff12))
+                                    .text_sm()
+                                    .text_color(rgb(0x8fc7ff))
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(c_blue_hover))
+                                    .child("保存并切换")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(target) = this.pending_file_switch.take() {
+                                            this.pending_switch_after_save = Some(target);
+                                            this.save_open_file(cx);
+                                        }
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
     /// 渲染独立设置页面：铺满主区、居中限宽、支持滚动。
     fn render_settings_page(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border, popover) = {
@@ -2054,35 +2232,200 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 文件树：打开一个文件查看内容。读文本 + 语法高亮放到后台线程跑（大文件不卡 UI），
-    /// 算完回主线程写入。用自增 file_gen 丢弃过期结果（期间又切了别的文件）。
-    fn view_file(&mut self, path: String, cx: &mut Context<Self>) {
+    /// 文件树：打开一个文件查看/编辑内容。当前文件有未保存改动时不直接切换——先弹
+    /// 确认弹窗（见 pending_file_switch / render_unsaved_file_confirm），用户选了
+    /// "不保存"或"保存并切换"才真正调用 open_file_now。
+    fn view_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self
+            .open_file
+            .as_ref()
+            .is_some_and(|of| of.editor.read(cx).value().to_string() != *of.saved_content);
+        if dirty {
+            self.pending_file_switch = Some(path);
+            cx.notify();
+            return;
+        }
+        self.open_file_now(path, window, cx);
+    }
+
+    /// 实际打开文件：用 gpui-component 的 Editor（InputState 的 code_editor 模式）：
+    /// tree-sitter 语法高亮 + 行号 + 搜索，直接可编辑，Cmd+S（见 save_open_file）能
+    /// 存回磁盘。读文件本身放到后台线程跑（大文件不卡 UI），读完回主线程灌进编辑器；
+    /// 用自增 file_gen 丢弃过期结果（期间又切了别的文件）。
+    fn open_file_now(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::InputState;
+
         self.file_gen = self.file_gen.wrapping_add(1);
         let gen = self.file_gen;
-        // 先占位（清空旧内容 + 显示文件名），高亮完成后替换。
-        self.open_file = Some(OpenFile { path: path.clone(), lines: Rc::new(Vec::new()) });
+
+        let language = editor_language_for_path(&path);
+        let editor = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor(language)
+                .line_number(true)
+                .searchable(true)
+                // 超长行横向滚动而不是自动换行——代码这种东西换行会破坏缩进对齐，
+                // 多行输入默认开软换行，这里显式关掉。
+                .soft_wrap(false)
+        });
+        self.open_file = Some(OpenFile {
+            path: path.clone(),
+            editor: editor.clone(),
+            saved_content: Rc::new(String::new()),
+            save_error: None,
+            readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
+            conflict_pending: false,
+        });
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let p = path.clone();
-            let lines = cx
+            let read = cx.background_executor().spawn(async move { std::fs::read_to_string(&p) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // 只有当前仍是这次打开的文件才写入，避免旧任务覆盖新文件。
+                if this.file_gen != gen {
+                    return;
+                }
+                let Some(of) = this.open_file.as_mut() else { return };
+                match read {
+                    Ok(content) => {
+                        editor.update(cx, |state, cx| {
+                            state.set_value(content.clone(), window, cx);
+                        });
+                        of.saved_content = Rc::new(content);
+                        of.readable = true;
+                    }
+                    Err(_) => {
+                        editor.update(cx, |state, cx| {
+                            state.set_value(
+                                "（无法以文本方式读取：可能是二进制文件）",
+                                window,
+                                cx,
+                            );
+                        });
+                        of.readable = false;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Cmd+S：把当前打开文件的编辑器内容写回磁盘（仅 Files 页触发，见 on_key_down）。
+    /// 写之前先读一次磁盘现状跟 saved_content 比对——不一样说明文件被外部改过，
+    /// 这次先不写、把 conflict_pending 置位提示用户；用户再按一次 Cmd+S 就当作
+    /// 已确认覆盖，跳过这次检查直接写。写文件本身放后台线程；成功后把
+    /// saved_content 同步成刚写的内容（清掉"未保存"标记 + 错误提示），并且如果这
+    /// 次保存是「保存并切换」触发的，顺带打开 pending_switch_after_save 里存的目标
+    /// 文件；保存失败或起冲突则放弃这次切换，留在当前文件上让用户处理。
+    fn save_open_file(&mut self, cx: &mut Context<Self>) {
+        let Some(of) = &self.open_file else { return };
+        if !of.readable {
+            if let Some(of) = self.open_file.as_mut() {
+                of.save_error = Some("此文件未能正常读取为文本，不支持保存".to_string());
+            }
+            self.pending_switch_after_save = None;
+            cx.notify();
+            return;
+        }
+        let path = of.path.clone();
+        let content = of.editor.read(cx).value().to_string();
+        // Rc<String> 不是 Send，进不了 background_executor；克隆成普通 String 再带过去。
+        let expected_on_disk = (*of.saved_content).clone();
+        let force = of.conflict_pending;
+        let gen = self.file_gen;
+
+        cx.spawn(async move |this, cx| {
+            let check_path = path.clone();
+            let write_content = content.clone();
+            let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    match std::fs::read_to_string(&p) {
-                        Ok(text) => highlight_all(&p, &text),
-                        Err(_) => vec![vec![(
-                            rgb(0x808080),
-                            "（无法以文本方式读取：可能是二进制文件）".to_string(),
-                        )]],
+                    if !force {
+                        if let Ok(current) = std::fs::read_to_string(&check_path) {
+                            if current != expected_on_disk {
+                                return SaveOutcome::Conflict;
+                            }
+                        }
+                    }
+                    match std::fs::write(&check_path, write_content) {
+                        Ok(()) => SaveOutcome::Saved,
+                        Err(e) => SaveOutcome::Error(e.to_string()),
                     }
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                // 只有当前仍是这次打开的文件才写入，避免旧任务覆盖新文件。
-                if this.file_gen == gen {
-                    this.open_file = Some(OpenFile { path, lines: Rc::new(lines) });
-                    cx.notify();
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.file_gen != gen {
+                    return; // 写盘期间又切了别的文件，这次结果不再相关
                 }
+                let switch_target = this.pending_switch_after_save.take();
+                let Some(of) = this.open_file.as_mut() else { return };
+                match outcome {
+                    SaveOutcome::Saved => {
+                        of.saved_content = Rc::new(content);
+                        of.save_error = None;
+                        of.conflict_pending = false;
+                        if let Some(target) = switch_target {
+                            this.open_file_now(target, window, cx);
+                        }
+                    }
+                    SaveOutcome::Conflict => {
+                        of.conflict_pending = true;
+                        of.save_error =
+                            Some("文件已被外部修改；再按一次 Cmd+S 会强制覆盖磁盘上的改动".to_string());
+                    }
+                    SaveOutcome::Error(e) => of.save_error = Some(format!("保存失败：{e}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 历史会话页：确保当前项目的会话列表缓存新鲜（>10s 或缺失就后台重新扫描）。
+    fn ensure_session_list(&mut self, cwd: String, cx: &mut Context<Self>) {
+        let fresh = self
+            .session_list
+            .get(&cwd)
+            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(10));
+        if fresh || self.session_list_inflight.contains(&cwd) {
+            return;
+        }
+        self.session_list_inflight.insert(cwd.clone());
+        cx.spawn(async move |this, cx| {
+            let c = cwd.clone();
+            let sessions =
+                cx.background_executor().spawn(async move { session_history::list_sessions(&c) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.session_list_inflight.remove(&cwd);
+                this.session_list.insert(cwd, (Instant::now(), Rc::new(sessions)));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 历史会话页：点开一份会话，后台解析成 Turn 列表。用自增 gen 丢弃过期结果
+    /// （解析期间又点了别的会话）。
+    fn open_session_detail(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
+        let gen = self.session_detail_gen;
+        self.session_detail = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let detail =
+                cx.background_executor().spawn(async move { session_history::load_session_detail(&p) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_detail_gen != gen {
+                    return;
+                }
+                if let Some(detail) = detail {
+                    this.session_detail = Some((path, Rc::new(detail)));
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -2129,9 +2472,58 @@ impl Workspace {
         .detach();
     }
 
+    /// 给某个 root 建一次性的文件监听（notify crate，macOS 走 FSEvents）：仓库目录树
+    /// 里任何东西变了就在 git_dirty 里标脏，配合下面 250ms 一次的检查循环，git 页
+    /// 基本能做到「文件一变就刷新」而不是干等 1.5s 轮询窗口。
+    ///
+    /// 递归监听整棵目录树（含 .git/ 内部），没有按 .gitignore 过滤噪音——多余的唤醒
+    /// 顶多让 ensure_git_status 多跑一次（已用 GIT_OPTIONAL_LOCKS=0 保证很轻），
+    /// 250ms 的检查节流已经把最坏情况锁定在每秒最多 4 次，不会失控。
+    /// 只在这个 root 第一次进 Git 页时建一次；watcher 存进 git_watchers 常驻到应用退出
+    /// （必须持有 watcher 不被 drop，否则会停止收事件）。
+    fn ensure_git_watch(&mut self, root: String, cx: &mut Context<Self>) {
+        if self.git_watchers.contains_key(&root) {
+            return;
+        }
+        let dirty = self.git_dirty.clone();
+        let root_for_cb = root.clone();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
+                if let Ok(mut set) = dirty.lock() {
+                    set.insert(root_for_cb.clone());
+                }
+            }
+        });
+        let Ok(mut watcher) = watcher else { return };
+        if watcher.watch(Path::new(&root), RecursiveMode::Recursive).is_err() {
+            return;
+        }
+        self.git_watchers.insert(root.clone(), watcher);
+
+        let dirty = self.git_dirty.clone();
+        cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_millis(250)).await;
+            let hit = dirty.lock().is_ok_and(|mut set| set.remove(&root));
+            if !hit {
+                continue;
+            }
+            // 只标脏 + 唤醒重绘：真正的重新拉取仍交给 ensure_git_status（render 里
+            // 每帧都会调），这里不用重复实现一遍 git status 调用。
+            let r = this.update(cx, |this, cx| {
+                this.git_status.remove(&root);
+                cx.notify();
+            });
+            if r.is_err() {
+                break; // Workspace 已销毁
+            }
+        })
+        .detach();
+    }
+
     /// Git 视图：查看某个改动文件的 diff。已跟踪文件用 `git diff HEAD`，
     /// 未跟踪文件（??）用 `git diff --no-index` 展示全文（整体当作新增）。
-    /// 确保某 root 的 git status 缓存新鲜（>1.5s 或缺失就后台刷新）。
+    /// 确保某 root 的 git status 缓存新鲜（>1.5s 或缺失就后台刷新；ensure_git_watch
+    /// 建的监听命中时会主动清缓存，比 1.5s 轮询更快触发这里重新拉取）。
     /// 绝不阻塞 render：git status 在大仓要 ~90ms，同步跑就是掉帧元凶。
     fn ensure_git_status(&mut self, root: String, cx: &mut Context<Self>) {
         let fresh = self
@@ -2149,6 +2541,10 @@ impl Workspace {
                 .spawn(async move {
                     let out = std::process::Command::new("git")
                         .args(["-C", &r, "status", "--porcelain=v1", "-b"])
+                        // 避免刷新索引 stat 缓存去抢 .git/index.lock——之前吃过这个亏
+                        // （见 smeltd/GUI 并发跑 git 命令时的 index.lock 争用问题）；
+                        // 顺带也防止我们自己的 status 调用触发上面那个文件监听自扰。
+                        .env("GIT_OPTIONAL_LOCKS", "0")
                         .output();
                     let mut d = GitStatusData::default();
                     if let Ok(o) = out {
@@ -2197,6 +2593,27 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.hotspot_inflight.remove(&root);
                 this.hotspot_data.insert(root, (Instant::now(), Rc::new(entries)));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 确保用量数据缓存新鲜（>30s 或缺失就后台重新扫描全部本地 transcript）。
+    fn ensure_usage_data(&mut self, cx: &mut Context<Self>) {
+        let fresh = self
+            .usage_cache
+            .as_ref()
+            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(30));
+        if fresh || self.usage_inflight {
+            return;
+        }
+        self.usage_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let data = cx.background_executor().spawn(async move { usage_stats::scan() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.usage_inflight = false;
+                this.usage_cache = Some((Instant::now(), Rc::new(data)));
                 cx.notify();
             });
         })
@@ -2418,6 +2835,18 @@ impl Render for Workspace {
         let active = self.active_session;
         let can_close = self.sessions.len() > 1;
 
+        // Dock 角标：统计「等审批 + 需要处理」的会话数，变了才调 Cocoa API 更新
+        // （避免每次 render 都发一遍 setBadgeLabel）。
+        let attention_count = self
+            .sessions
+            .iter()
+            .filter(|s| matches!(s.status(cx), AgentStatus::WaitingApproval | AgentStatus::NeedsAttention))
+            .count();
+        if self.dock_badge_count != Some(attention_count) {
+            self.dock_badge_count = Some(attention_count);
+            dock::set_badge(attention_count);
+        }
+
         // 首次打开设置面板时懒创建宠物大脑配置的输入框（需要 window）。
         if self.view == MainView::Settings && self.llm_inputs.is_none() {
             self.init_llm_inputs(window, cx);
@@ -2426,6 +2855,7 @@ impl Render for Workspace {
         // Git 页：后台刷新改动列表（git status 慢，绝不在 render 里同步跑）。
         if self.view == MainView::Git {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                self.ensure_git_watch(root.clone(), cx);
                 self.ensure_git_status(root, cx);
             }
         }
@@ -2434,6 +2864,18 @@ impl Render for Workspace {
         if self.view == MainView::Hotspot {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
                 self.ensure_hotspot(root, cx);
+            }
+        }
+
+        // 用量页：后台刷新本地 Claude Code transcript 扫描结果。
+        if self.view == MainView::Usage {
+            self.ensure_usage_data(cx);
+        }
+
+        // 历史会话页：后台刷新当前项目的会话列表。
+        if self.view == MainView::History {
+            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                self.ensure_session_list(root, cx);
             }
         }
 
@@ -2816,6 +3258,9 @@ impl Render for Workspace {
                     }
                     // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）
                     "w" => this.close_active(window, cx),
+                    // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
+                    // 视图时背着用户悄悄写盘）。
+                    "s" if this.view == MainView::Files => this.save_open_file(cx),
                     // Cmd+Shift+F 切换调试 HUD（右上角帧率）
                     "f" if ks.modifiers.shift => {
                         this.debug_hud = !this.debug_hud;
@@ -2851,6 +3296,32 @@ impl Render for Workspace {
                                 .gap_1()
                                 // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
                                 .pr_2()
+                                .child(
+                                    div()
+                                        .id("usage-entry")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(c_muted)
+                                        .hover(|s| s.bg(c_border))
+                                        .child(Icon::new(IconName::ChartPie))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _w, cx| {
+                                                cx.stop_propagation();
+                                                if this.view == MainView::Usage {
+                                                    this.view = this.prev_view;
+                                                } else {
+                                                    this.prev_view = this.view;
+                                                    this.view = MainView::Usage;
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .id("notif-bell")
@@ -2938,7 +3409,10 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     // 会话视图 tab（终端/文件树/Git）——总览是全局视图，走侧栏入口，不在这排里。
-                    .children((self.view != MainView::Overview && self.view != MainView::Settings).then(|| {
+                    .children((self.view != MainView::Overview
+                        && self.view != MainView::Settings
+                        && self.view != MainView::Usage)
+                        .then(|| {
                         TabBar::new("main-view-tabs")
                             .underline()
                             // 左缩进 12px，与终端/文件内容左边基线对齐（不贴边）；
@@ -2948,14 +3422,16 @@ impl Render for Workspace {
                                 MainView::Terminal => 0,
                                 MainView::Files => 1,
                                 MainView::Git => 2,
-                                _ => 3,
+                                MainView::Hotspot => 3,
+                                _ => 4,
                             })
                             .on_click(cx.listener(|this, ix: &usize, _window, cx| {
                                 this.view = match *ix {
                                     0 => MainView::Terminal,
                                     1 => MainView::Files,
                                     2 => MainView::Git,
-                                    _ => MainView::Hotspot,
+                                    3 => MainView::Hotspot,
+                                    _ => MainView::History,
                                 };
                                 cx.notify();
                             }))
@@ -2963,6 +3439,7 @@ impl Render for Workspace {
                             .child(Tab::new().label("文件树"))
                             .child(Tab::new().label("Git"))
                             .child(Tab::new().label("热力图"))
+                            .child(Tab::new().label("历史会话"))
                     }))
                     .child(match self.view {
                         MainView::Overview => self.render_overview(cx),
@@ -2983,13 +3460,7 @@ impl Render for Workspace {
                                     None => div().flex_1().into_any_element(),
                                 }
                             } else {
-                                file_tree(
-                                    cwd,
-                                    &self.expanded,
-                                    &self.dir_cache,
-                                    &self.file_tree_scroll,
-                                    cx,
-                                )
+                                file_tree(cwd, &self.expanded, &self.dir_cache, &self.file_tree_scroll, cx)
                             };
                             // 顶部搜索框（file_filter 已在 render 顶部懒创建）。
                             let search_box = self.file_filter.as_ref().map(|state| {
@@ -3000,7 +3471,7 @@ impl Render for Workspace {
                                     .border_color(c_border)
                                     .child(Input::new(state).small())
                             });
-                            let content = file_content_pane(&self.open_file, &self.file_scroll, cx);
+                            let content = file_content_pane(&self.open_file, cx);
                             div()
                                 .flex_1()
                                 // min_h_0：否则这个 flex item 会被文件内容撑到整份文件那么高、
@@ -3041,6 +3512,16 @@ impl Render for Workspace {
                                 .and_then(|r| self.hotspot_data.get(r).map(|(_, d)| d.clone()));
                             hotspot_view(cwd, data, cx)
                         }
+                        MainView::History => {
+                            let cwd = self.cur().and_then(|s| s.cwd(cx));
+                            let sessions = cwd.as_ref().and_then(|r| self.session_list.get(r).map(|(_, d)| d.clone()));
+                            history_view(sessions, &self.session_detail, cx)
+                        }
+                        MainView::Usage => {
+                            let cur_project = self.cur().and_then(|s| s.cwd(cx));
+                            let data = self.usage_cache.as_ref().map(|(_, d)| d.clone());
+                            usage_view(cur_project, data, cx)
+                        }
                         MainView::Settings => self.render_settings_page(cx),
                     }),
                     )),
@@ -3050,6 +3531,12 @@ impl Render for Workspace {
             .children(palette_overlay)
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
+            // 文件未保存切换确认拦截弹层
+            .children(
+                self.pending_file_switch
+                    .clone()
+                    .map(|target| self.render_unsaved_file_confirm(target, cx)),
+            )
             // 通知面板浮层
             .children(self.notifications_open.then(|| self.render_notifications(cx)))
             // 调试 HUD：右上角帧率 + 帧耗时（Cmd+Shift+F 切换）
@@ -3174,12 +3661,12 @@ fn file_tree(
                 .text_sm()
                 .text_color(if is_dir { fg } else { muted })
                 .hover(move |s| s.bg(hover))
-                .on_click(move |_ev, _window, cx| {
+                .on_click(move |_ev, window, cx| {
                     this.update(cx, |ws, cx| {
                         if is_dir {
                             ws.toggle_expand(p.clone(), cx);
                         } else {
-                            ws.view_file(p.clone(), cx);
+                            ws.view_file(p.clone(), window, cx);
                         }
                     });
                 })
@@ -3202,6 +3689,306 @@ fn file_tree(
         .vertical_scrollbar(scroll)
         .children(rows)
         .into_any_element()
+}
+
+/// 历史会话页：左侧列出当前项目下 Claude Code 保存的历史会话，右侧显示选中会话的
+/// 对话内容（只读浏览，不支持 resume）。数据来自 session_history 模块，跟「用量」
+/// 页读的是同一份 `~/.claude/projects/**/*.jsonl`，但这里还原对话本身而非统计聚合。
+fn history_view(
+    sessions: Option<Rc<Vec<session_history::SessionSummary>>>,
+    detail: &Option<(PathBuf, Rc<session_history::SessionDetail>)>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let (muted, fg, c_border, accent) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.foreground, t.border, t.primary)
+    };
+    let selected_path = detail.as_ref().map(|(p, _)| p.clone());
+    let this = cx.entity();
+
+    let list_body: AnyElement = match &sessions {
+        None => placeholder_view("加载中…", muted).into_any_element(),
+        Some(sessions) if sessions.is_empty() => {
+            placeholder_view("这个项目还没有本地保存的历史会话", muted).into_any_element()
+        }
+        Some(sessions) => div()
+            .id("session-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .children(sessions.iter().enumerate().map(|(i, s)| {
+                let is_selected = selected_path.as_deref() == Some(s.path.as_path());
+                let this = this.clone();
+                let path = s.path.clone();
+                // 有明显跨度（>1 分钟）就顺带标一下这个会话跑了多久，纯单条消息的
+                // 会话就只显示时间点，不必画蛇添足展示"0 分钟"。
+                let when = match (s.started_at, s.last_active_at) {
+                    (Some(start), Some(last)) if (last - start).num_minutes() >= 1 => format!(
+                        "{} · 跑了 {} 分钟",
+                        last.with_timezone(&chrono::Local).format("%m-%d %H:%M"),
+                        (last - start).num_minutes()
+                    ),
+                    (_, Some(last)) => last.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string(),
+                    _ => String::new(),
+                };
+                div()
+                    .id(("session-row", i))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .px_3()
+                    .py_2()
+                    .cursor_pointer()
+                    .when(is_selected, |el| el.bg(c_border))
+                    .hover(move |s| s.bg(c_border))
+                    .on_click(move |_ev, _window, cx| {
+                        this.update(cx, |ws, cx| ws.open_session_detail(path.clone(), cx));
+                    })
+                    .child(div().text_sm().text_color(fg).child(s.title.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{when} · {} 条消息", s.message_count)),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    };
+
+    let detail_body: AnyElement = match detail {
+        None => placeholder_view("← 选择一个历史会话查看内容", muted).into_any_element(),
+        Some((_, d)) if d.turns.is_empty() => {
+            placeholder_view("这份会话没有可展示的对话内容", muted).into_any_element()
+        }
+        Some((_, d)) => div()
+            .id("session-detail")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .children(d.turns.iter().map(|t| {
+                let role = if t.is_user { "用户" } else { "Claude" };
+                let role_color = if t.is_user { accent } else { fg };
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_baseline()
+                            .child(div().font_semibold().text_sm().text_color(role_color).child(role))
+                            .children(t.timestamp.map(|ts| {
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(ts.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+                            })),
+                    )
+                    .child(div().text_sm().text_color(fg).child(t.text.clone()))
+                    .children((!t.tools.is_empty()).then(|| {
+                        h_flex().flex_wrap().gap_1().children(t.tools.iter().map(|tool| {
+                            div()
+                                .px_2()
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .bg(c_border)
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("🔧 {tool}"))
+                        }))
+                    }))
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    };
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .child(
+            div()
+                .w(px(280.))
+                .flex()
+                .flex_col()
+                .min_h_0()
+                .border_r_1()
+                .border_color(c_border)
+                .child(list_body),
+        )
+        .child(detail_body)
+}
+
+/// 用量页：本地 Claude Code 会话用量统计——今日走势 + 活动热力图（全局口径），
+/// 加当前项目 / 全局汇总各自的按模型、按工具拆分（全局汇总另加按项目拆分）。
+/// 数据来自 usage_stats::scan（后台扫描 `~/.claude/projects/**/*.jsonl` 缓存的结果）。
+fn usage_view(
+    cur_project: Option<String>,
+    data: Option<Rc<usage_stats::UsageData>>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let (muted, c_border, chart_1, chart_2) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.border, t.chart_1, t.chart_2)
+    };
+
+    let Some(data) = data else {
+        return placeholder_view("统计中…", muted);
+    };
+    if data.events.is_empty() {
+        return placeholder_view("没有找到本地 Claude Code 会话记录（~/.claude/projects）", muted);
+    }
+
+    // 今日半小时桶走势（全局口径）。
+    #[derive(Clone)]
+    struct Pt {
+        x: String,
+        y: f64,
+    }
+    let daily = usage_stats::daily_buckets(&data.events, 30);
+    let daily_total: u64 = daily.iter().map(|(_, v)| *v).sum();
+    let daily_pts: Vec<Pt> = daily.into_iter().map(|(x, y)| Pt { x, y: y as f64 }).collect();
+    let daily_section = usage_section(
+        "今日走势（每半小时）",
+        &format!("共 {daily_total} tokens"),
+        muted,
+        c_border,
+        div()
+            .h(px(200.))
+            .p_2()
+            .child(LineChart::new(daily_pts).x(|d: &Pt| d.x.clone()).y(|d: &Pt| d.y).stroke(chart_1).tick_margin(4))
+            .into_any_element(),
+    );
+
+    // 活动热力图：近 12 周，按周对齐成「列=周，行=周一到周日」的日历格（全局口径）。
+    let heat = usage_stats::daily_heatmap(&data.events, 12);
+    let heat_total: u64 = heat.iter().map(|(_, v)| *v).sum();
+    let max_heat = heat.iter().map(|(_, v)| *v).max().unwrap_or(0).max(1);
+    let lead = heat.first().map(|(d, _)| d.weekday().num_days_from_monday()).unwrap_or(0) as usize;
+    let mut cells: Vec<Option<u64>> =
+        std::iter::repeat(None).take(lead).chain(heat.iter().map(|(_, v)| Some(*v))).collect();
+    while cells.len() % 7 != 0 {
+        cells.push(None);
+    }
+    let week_columns: Vec<AnyElement> = cells
+        .chunks(7)
+        .map(|week| {
+            v_flex()
+                .gap(px(2.))
+                .children(week.iter().map(|cell| {
+                    div().size(px(11.)).rounded(px(2.)).bg(heat_cell_color(*cell, max_heat, chart_1))
+                }))
+                .into_any_element()
+        })
+        .collect();
+    let heatmap_section = usage_section(
+        "活动热力图（近 12 周）",
+        &format!("共 {heat_total} tokens"),
+        muted,
+        c_border,
+        h_flex().gap(px(2.)).p_2().children(week_columns).into_any_element(),
+    );
+
+    // 当前项目 / 全局汇总的按模型、按工具拆分（全局另加按项目拆分）。
+    let cur_model = cur_project.as_deref().map(|p| usage_stats::by_model(&data.events, Some(p))).unwrap_or_default();
+    let cur_tool = cur_project.as_deref().map(|p| usage_stats::by_tool(&data.tools, Some(p))).unwrap_or_default();
+    let global_model = usage_stats::by_model(&data.events, None);
+    let global_tool = usage_stats::by_tool(&data.tools, None);
+    let global_project = usage_stats::by_project(&data.events);
+
+    let cur_project_row = h_flex()
+        .gap_3()
+        .child(bar_section("当前项目 · 按模型", muted, c_border, chart_1, cur_model))
+        .child(bar_section("当前项目 · 按工具", muted, c_border, chart_2, cur_tool));
+
+    let global_row = h_flex()
+        .gap_3()
+        .child(bar_section("全局 · 按模型", muted, c_border, chart_1, global_model))
+        .child(bar_section("全局 · 按工具", muted, c_border, chart_2, global_tool))
+        .child(bar_section("全局 · 按项目", muted, c_border, chart_1, global_project));
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p_3()
+        .child(daily_section)
+        .child(heatmap_section)
+        .child(cur_project_row)
+        .child(global_row)
+}
+
+/// 用量页统一的卡片外壳：标题 + 右侧小字 caption + 内容。
+fn usage_section(title: &str, caption: &str, muted: Hsla, border: Hsla, body: AnyElement) -> Div {
+    v_flex()
+        .flex_1()
+        .gap_2()
+        .p_3()
+        .border_1()
+        .border_color(border)
+        .rounded(px(8.))
+        .child(
+            h_flex()
+                .justify_between()
+                .items_baseline()
+                .child(div().font_semibold().child(title.to_string()))
+                .child(div().text_xs().text_color(muted).child(caption.to_string())),
+        )
+        .child(body)
+}
+
+/// 用量页的一个「按 X 拆分」柱状图区块；data 为空时显示「无数据」占位。
+fn bar_section(title: &str, muted: Hsla, border: Hsla, color: Hsla, data: Vec<(String, u64)>) -> Div {
+    // 种类一多（尤其工具名，含各种 mcp__xxx__yyy 前缀）柱子会挤成一团、x 轴标签
+    // 叠在一起看不清，只画头部几项，其余合并成一根"其他"柱子。
+    let data = cap_top_n(data, 6);
+    let total: u64 = data.iter().map(|(_, v)| *v).sum();
+    let body = if data.is_empty() {
+        div().h(px(180.)).flex().items_center().justify_center().text_color(muted).text_sm().child("无数据")
+    } else {
+        div().h(px(180.)).child(
+            BarChart::new(data)
+                .band(|d: &(String, u64)| d.0.clone())
+                .value(|d: &(String, u64)| d.1 as f64)
+                .fill(move |_, _, _, _| color)
+                .tick_margin(1),
+        )
+    };
+    usage_section(title, &format!("共 {total}"), muted, border, body.into_any_element())
+}
+
+/// 只保留输入里的头部 N 项，其余合并成一项"其他"（调用方传入的 data 已经按值降序，
+/// 效果就是「前 N 大 + 其余汇总」）。用来防止种类过多时柱状图 x 轴标签挤在一起。
+fn cap_top_n(mut data: Vec<(String, u64)>, n: usize) -> Vec<(String, u64)> {
+    if data.len() <= n {
+        return data;
+    }
+    let rest: u64 = data.split_off(n).into_iter().map(|(_, v)| v).sum();
+    if rest > 0 {
+        data.push(("其他".to_string(), rest));
+    }
+    data
+}
+
+/// 热力格颜色：无数据用极淡的底色描边，有数据按 `sqrt(占比)` 映射透明度——避免线性
+/// 映射下小数值都挤成看不出深浅的一片。
+fn heat_cell_color(v: Option<u64>, max: u64, base: Hsla) -> Hsla {
+    match v {
+        None => base.opacity(0.0),
+        Some(0) => base.opacity(0.08),
+        Some(v) => {
+            let t = (v as f32 / max as f32).sqrt().clamp(0.25, 1.0);
+            base.opacity(t)
+        }
+    }
 }
 
 /// 文件树搜索结果视图：扁平命中列表（替代 query 非空时的树形浏览）。
@@ -3248,8 +4035,8 @@ fn search_results_view(
                 .px_2()
                 .py(px(2.0))
                 .hover(move |s| s.bg(hover))
-                .on_click(move |_ev, _window, cx| {
-                    this.update(cx, |ws, cx| ws.view_file(p.clone(), cx));
+                .on_click(move |_ev, window, cx| {
+                    this.update(cx, |ws, cx| ws.view_file(p.clone(), window, cx));
                 })
                 // 第一行：目录（弱）+ 文件名（强）。
                 .child(
@@ -3491,10 +4278,10 @@ fn hotspot_view(
                 .border_color(c_bg)
                 .bg(heat_color(heat))
                 .hover(|d| d.border_color(rgb(0x4a9eff)))
-                .on_click(move |_ev, _window, cx| {
+                .on_click(move |_ev, window, cx| {
                     this.update(cx, |ws, cx| {
                         ws.view = MainView::Files;
-                        ws.view_file(abs_path.clone(), cx);
+                        ws.view_file(abs_path.clone(), window, cx);
                     });
                 });
 
@@ -4120,116 +4907,57 @@ fn render_split_row(row: &SplitRow, lines: &[DiffLine]) -> Div {
     }
 }
 
-/// 语法集/主题集只加载一次（load_defaults 较重），进程内缓存复用。
-fn syntax_set() -> &'static SyntaxSet {
-    static SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SET.get_or_init(SyntaxSet::load_defaults_newlines)
-}
-fn theme_set() -> &'static ThemeSet {
-    static SET: OnceLock<ThemeSet> = OnceLock::new();
-    SET.get_or_init(ThemeSet::load_defaults)
-}
-
-/// syntect 颜色 → gpui 颜色。
-fn syn_color(c: syntect::highlighting::Color) -> Rgba {
-    rgb(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32)
-}
-
-/// 文件查看的固定行高（供 uniform_list 虚拟滚动，需每行等高）。
+/// 文件查看的固定行高（供 diff 视图 uniform_list 虚拟滚动，需每行等高）。
 const FILE_LINE_H: f32 = 20.0;
 
-/// 一次性把整份文本语法高亮成「行 → (颜色, 片段) 列表」。
-/// syntect 的高亮是有状态的（逐行累积），必须从头顺序处理，不能随机访问，
-/// 所以在打开文件时算好、存下来，滚动时只取可见行。最多 20000 行。
-fn highlight_all(path: &str, content: &str) -> Vec<Vec<(Rgba, String)>> {
-    let ss = syntax_set();
-    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
-    let syntax = ss
-        .find_syntax_by_extension(ext)
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let mut hl = HighlightLines::new(syntax, &theme_set().themes["base16-ocean.dark"]);
-    content
-        .lines()
-        .take(20000)
-        .map(|line| {
-            hl.highlight_line(line, ss)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(style, text)| (syn_color(style.foreground), text.to_string()))
-                .collect()
-        })
-        .collect()
+/// 文件扩展名 → Editor 的语法高亮语言名。gpui-component 的 `Language::from_name`
+/// 本身就认常见扩展名（"rs"/"py"/"md" 等），这里只需把扩展名传过去；识别不了的
+/// 名字组件会自动回退成纯文本，不会 panic。没有扩展名的文件（Makefile 等）退而
+/// 用文件名本身（能命中 "makefile" 这类按文件名匹配的语言）。
+fn editor_language_for_path(path: &str) -> String {
+    let p = Path::new(path);
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) => ext.to_lowercase(),
+        None => p.file_name().and_then(|n| n.to_str()).unwrap_or("text").to_lowercase(),
+    }
 }
 
-/// 文件内容查看面板：uniform_list 虚拟滚动，只渲染可见行（高亮已预计算）。
-fn file_content_pane(
-    open_file: &Option<OpenFile>,
-    file_scroll: &UniformListScrollHandle,
-    cx: &mut Context<Workspace>,
-) -> Div {
-    let (muted, fg, border) = {
+/// 文件内容查看/编辑面板：直接用 gpui-component 的 Editor（InputState code_editor
+/// 模式），自带语法高亮、行号、搜索、大文件下的增量编辑，不用再自己管虚拟滚动。
+fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspace>) -> Div {
+    let (muted, border, warning) = {
         let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.border)
+        (t.muted_foreground, t.border, t.warning)
     };
     match open_file {
         None => placeholder_view("← 从左侧选择文件查看内容", muted),
         Some(of) => {
             let name = of.path.rsplit('/').next().unwrap_or(of.path.as_str()).to_string();
-            let lines = of.lines.clone(); // Rc clone：闭包按可见范围取行
-            let count = lines.len();
-
-            let list = uniform_list("file-content", count, move |range, _window, _cx| {
-                range
-                    .map(|i| {
-                        let spans = &lines[i];
-                        let row = div().flex().whitespace_nowrap().h(px(FILE_LINE_H));
-                        if spans.is_empty() {
-                            // 空行放不间断空格占位，保持行高。
-                            row.child("\u{00a0}".to_string())
-                        } else {
-                            row.children(spans.iter().map(|(color, text)| {
-                                div().text_color(*color).child(text.clone())
-                            }))
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .p_2()
-            .font_family(terminal_view::FONT_FAMILY)
-            .text_sm()
-            .text_color(fg)
-            .track_scroll(file_scroll);
-
+            let dirty = of.editor.read(cx).value().to_string() != *of.saved_content;
+            let header = h_flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .border_b_1()
+                .border_color(border)
+                .child(div().text_sm().text_color(muted).child(name))
+                // 未保存改动：文件名后一个小圆点，Cmd+S 保存后消失。
+                .when(dirty, |el| {
+                    el.child(div().size(px(6.)).rounded_full().bg(warning))
+                })
+                // 保存失败 / 不支持保存的提示。
+                .children(
+                    of.save_error.clone().map(|msg| div().text_xs().text_color(warning).child(msg)),
+                );
             div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_sm()
-                        .text_color(muted)
-                        .border_b_1()
-                        .border_color(border)
-                        .child(name),
-                )
-                // relative 容器承载竖向滚动条。
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .child(list)
-                        .vertical_scrollbar(file_scroll),
-                )
+                .child(header)
+                .child(div().flex_1().min_h_0().child(Input::new(&of.editor).h_full()))
         }
     }
 }
