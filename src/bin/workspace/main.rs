@@ -26,7 +26,7 @@ use chrono::Datelike;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::chart::{BarChart, LineChart};
+use gpui_component::chart::BarChart;
 use gpui_component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
 };
@@ -34,8 +34,9 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerSta
 use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::radio::{Radio, RadioGroup};
+use gpui_component::setting::{Settings, SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
-use gpui_component::switch::Switch;
+use gpui_component::text::markdown;
 use gpui_component::resizable::{
     h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
 };
@@ -608,6 +609,12 @@ fn collect_leaf_ids(pane: &Pane, out: &mut Vec<EntityId>) {
     }
 }
 
+/// 老版本 appearance.json 没有 theme_mode 字段时的回退——保持升级前就有的深色观感，
+/// 不能落到 ThemeMode::default()（Light）。
+fn default_theme_mode() -> ThemeMode {
+    ThemeMode::Dark
+}
+
 /// 终端外观设置（全局单例，供所有终端渲染读取；存 ~/.smelt/appearance.json）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Appearance {
@@ -619,11 +626,20 @@ struct Appearance {
     opacity: f32,
     /// 毛玻璃模糊（macOS vibrancy，配合透明使用）。
     blur: bool,
+    /// 明暗主题模式。
+    #[serde(default = "default_theme_mode")]
+    theme_mode: ThemeMode,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
-        Self { bg_color: 0x1a1b26, bg_image: None, opacity: 1.0, blur: false }
+        Self {
+            bg_color: 0x1a1b26,
+            bg_image: None,
+            opacity: 1.0,
+            blur: false,
+            theme_mode: ThemeMode::Dark,
+        }
     }
 }
 
@@ -664,6 +680,35 @@ fn save_appearance(a: &Appearance) {
     if let Ok(json) = serde_json::to_string_pretty(a) {
         let _ = std::fs::write(path, json);
     }
+}
+
+/// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
+/// 供只有 `&mut App`（没有 `Context<Self>`）的场景用，比如设置页 SettingField 的 get/set 闭包。
+fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
+    let mut a = cx.global::<Appearance>().clone();
+    f(&mut a);
+    save_appearance(&a);
+    cx.set_global(a);
+}
+
+/// 改桌面宠物配置全局 + 存盘 + 显隐同步，不触发 view 重绘，用法同 [`apply_appearance`]。
+fn apply_pet_config(f: impl FnOnce(&mut pet::PetConfig), cx: &mut App) {
+    let mut c = cx.global::<pet::PetConfig>().clone();
+    let was_enabled = c.enabled;
+    f(&mut c);
+    pet::save_pet_config(&c);
+    if c.enabled != was_enabled {
+        pet::sync_pet_window_visibility(cx, c.enabled);
+    }
+    cx.set_global(c);
+}
+
+/// 改宠物大脑（LLM）配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
+fn apply_llm_config(f: impl FnOnce(&mut agent::LlmConfig), cx: &mut App) {
+    let mut c = cx.global::<agent::LlmConfig>().clone();
+    f(&mut c);
+    agent::save_llm_config(&c);
+    cx.set_global(c);
 }
 
 /// 存档文件路径：~/.smelt/workspace.json。
@@ -800,6 +845,7 @@ struct Workspace {
 }
 
 /// 宠物大脑配置的四个输入框（base_url / api_key / model / persona）。
+#[derive(Clone)]
 struct LlmInputs {
     base_url: Entity<gpui_component::input::InputState>,
     api_key: Entity<gpui_component::input::InputState>,
@@ -1272,63 +1318,28 @@ impl Workspace {
         }
     }
 
-    /// 修改外观设置：改全局 + 存盘 + 同步窗口背景（透明/模糊）+ 触发重绘。
-    fn update_appearance(
-        &mut self,
-        window: &mut Window,
-        f: impl FnOnce(&mut Appearance),
-        cx: &mut Context<Self>,
-    ) {
-        let mut ap = cx.global::<Appearance>().clone();
-        f(&mut ap);
-        save_appearance(&ap);
-        let win_bg = ap.window_bg();
-        cx.set_global(ap);
-        window.set_background_appearance(win_bg);
-        self.applied_window_bg = Some(win_bg);
-        cx.notify();
-    }
-
     /// 无 window 版：改全局 + 存盘 + 重绘。窗口背景（透明/模糊）由 render 里的
     /// applied_window_bg 同步——供 slider/color_picker 的订阅回调用（它们拿不到 window）。
     fn set_appearance(&mut self, f: impl FnOnce(&mut Appearance), cx: &mut Context<Self>) {
-        let mut ap = cx.global::<Appearance>().clone();
-        f(&mut ap);
-        save_appearance(&ap);
-        cx.set_global(ap);
+        apply_appearance(f, cx);
         cx.notify();
     }
 
     /// 修改桌面宠物配置：改全局 + 存盘 + 触发重绘。宠物窗口每帧读该全局，改动 ≤50ms 生效。
     fn update_pet_config(&mut self, f: impl FnOnce(&mut pet::PetConfig), cx: &mut Context<Self>) {
-        let mut c = cx.global::<pet::PetConfig>().clone();
-        let was_enabled = c.enabled;
-        f(&mut c);
-        pet::save_pet_config(&c);
-        if c.enabled != was_enabled {
-            // 显示开关翻转：直接同步原生窗口显隐，不能只靠宠物自己的渲染循环去响应
-            // ——那条循环在窗口 orderOut 后会被 GPUI 停掉，见 sync_pet_window_visibility 的注释。
-            pet::sync_pet_window_visibility(cx, c.enabled);
-        }
-        cx.set_global(c);
+        apply_pet_config(f, cx);
         cx.notify();
     }
 
     /// 修改宠物大脑（LLM）配置：改全局 + 存盘 + 重绘。
     fn update_llm_config(&mut self, f: impl FnOnce(&mut agent::LlmConfig), cx: &mut Context<Self>) {
-        let mut c = cx.global::<agent::LlmConfig>().clone();
-        f(&mut c);
-        agent::save_llm_config(&c);
-        cx.set_global(c);
+        apply_llm_config(f, cx);
         cx.notify();
     }
 
     /// 设置 / 清除背景图（不影响窗口透明度，故无需 window）。
     fn set_bg_image(&mut self, path: Option<String>, cx: &mut Context<Self>) {
-        let mut ap = cx.global::<Appearance>().clone();
-        ap.bg_image = path;
-        save_appearance(&ap);
-        cx.set_global(ap);
+        apply_appearance(|a| a.bg_image = path, cx);
         cx.notify();
     }
 
@@ -1527,7 +1538,7 @@ impl Workspace {
     }
 
     /// 总览页：所有会话的卡片网格（状态徽章 + 任务名 + cwd + 窗格数），点击跳转。
-    fn render_overview(&self, cx: &mut Context<Self>) -> Div {
+    fn render_overview(&mut self, cx: &mut Context<Self>) -> Div {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -1582,10 +1593,37 @@ impl Workspace {
         let cards: Vec<_> = order
             .into_iter()
             .map(|ix| {
+                // 会话卡片「运行了多久 / 当前 token 用量 / 最近工具调用」直接前移复用
+                // 历史会话页已有的扫描结果（ensure_session_list 有 10s 缓存，这里
+                // 只是触发+读缓存，不会每帧重新扫盘）——取该项目目录下最近活跃的
+                // 那份 transcript 当作"当前会话"的口径。
+                let cwd_opt = self.sessions[ix].cwd(cx);
+                if let Some(c) = cwd_opt.clone() {
+                    self.ensure_session_list(c, cx);
+                }
+                let live = cwd_opt
+                    .as_deref()
+                    .and_then(|c| self.session_list.get(c))
+                    .and_then(|(_, list)| list.first());
+                let mut live_parts: Vec<String> = Vec::new();
+                if let Some((a, b)) = live.and_then(|s| s.started_at.zip(s.last_active_at)) {
+                    let mins = (b - a).num_minutes().max(0);
+                    if mins > 0 {
+                        live_parts.push(format!("⏱ 跑了 {mins} 分钟"));
+                    }
+                }
+                if let Some(tokens) = live.map(|s| s.total_tokens).filter(|t| *t > 0) {
+                    live_parts.push(format!("🔢 {tokens} tokens"));
+                }
+                if let Some(tool) = live.and_then(|s| s.last_tool.clone()) {
+                    live_parts.push(format!("🔧 最近 {tool}"));
+                }
+                let live_line = (!live_parts.is_empty()).then(|| live_parts.join(" · "));
+
                 let s = &self.sessions[ix];
                 let name = s.title(cx);
-                let cwd = s
-                    .cwd(cx)
+                let cwd = cwd_opt
+                    .clone()
                     .unwrap_or_default()
                     .trim_end_matches('/')
                     .rsplit('/')
@@ -1603,7 +1641,7 @@ impl Workspace {
                 let notif = s.notification_msg(cx);
                 let when = s.notified_at(cx).map(ago);
                 let preview = s.preview(cx, 3);
-                let git = s.cwd(cx).and_then(|c| self.git_cache.get(&c).cloned());
+                let git = cwd_opt.as_ref().and_then(|c| self.git_cache.get(c).cloned());
 
                 div()
                     .id(("ov-card", ix))
@@ -1676,6 +1714,10 @@ impl Workspace {
                             .children((changed > 0).then(|| {
                                 div().text_color(c_amber).child(format!("● {changed} 改动"))
                             }))
+                    }))
+                    // 当前会话：跑了多久 / token 用量 / 最近工具调用
+                    .children(live_line.map(|line| {
+                        div().text_xs().text_color(muted).truncate().child(line)
                     }))
                     // 需要处理时显示通知消息（红底胶囊，更醒目）
                     .children(notif.map(|m| {
@@ -1942,17 +1984,12 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground, t.border, t.popover)
         };
-        let ap = cx.global::<Appearance>().clone();
-
-        let blur_chip = Switch::new("blur").checked(ap.blur).on_click(
-            cx.listener(|this, checked: &bool, window, cx| {
-                let v = *checked;
-                this.update_appearance(window, move |a| a.blur = v, cx)
-            }),
-        );
+        let entity = cx.entity();
 
         // 统一的小按钮：固定高度 + flex_none，避免被 flex 布局拉伸成大块。
-        let btn = |id: &'static str, label: String| {
+        // move 闭包：捕获的四个颜色都是 Copy，闭包本身因此也是 Copy，可以放心
+        // 塞进下面多个 SettingField::render 的 move 闭包里各用一份。
+        let btn = move |id: &'static str, label: String| {
             div()
                 .id(id)
                 .h(px(26.))
@@ -1970,257 +2007,283 @@ impl Workspace {
                 .hover(|s| s.bg(border))
                 .child(label)
         };
-        // 统一的设置行：左标签右控件，取代「标签在上、控件在下」的松散堆叠。
-        let row = |label: &str, control: AnyElement| {
-            h_flex()
-                .justify_between()
-                .items_center()
-                .gap_4()
-                .child(div().text_sm().text_color(fg).flex_none().child(label.to_string()))
-                .child(control)
-        };
-        // 每个分区一张圆角卡片：标题在外、内容带边框，取代原先的细分割线。
-        let card = |title: &str, body: Div| {
-            v_flex()
-                .gap_2()
-                .child(div().text_xs().font_semibold().text_color(muted).child(title.to_string()))
-                .child(body.p_4().rounded_lg().border_1().border_color(border))
-        };
-
-        let pick_btn = btn("pick-img", "选择图片…".into()).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _w, cx| this.pick_bg_image(cx)),
-        );
-        let clear_btn = btn("clear-img", "清除".into()).text_color(muted).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _w, cx| this.set_bg_image(None, cx)),
-        );
-        let img_name = ap
-            .bg_image
-            .as_deref()
-            .and_then(|p| p.rsplit('/').next())
-            .unwrap_or("无")
-            .to_string();
-
-        // —— 桌面宠物设置 ——
-        let pc = cx.global::<pet::PetConfig>().clone();
-        let pet_show_chip = Switch::new("pet-show").checked(pc.enabled).on_click(
-            cx.listener(|this, c: &bool, _w, cx| {
-                let v = *c;
-                this.update_pet_config(move |cfg| cfg.enabled = v, cx)
-            }),
-        );
-        let pet_notify_chip = Switch::new("pet-notify").checked(pc.notify).on_click(
-            cx.listener(|this, c: &bool, _w, cx| {
-                let v = *c;
-                this.update_pet_config(move |cfg| cfg.notify = v, cx)
-            }),
-        );
 
         const PET_SIZES: [f32; 3] = [0.8, 1.0, 1.25];
-        let size_ix = PET_SIZES.iter().position(|v| (pc.scale - v).abs() < 0.01);
-        let pet_size_group = RadioGroup::horizontal("pet-size")
-            .selected_index(size_ix)
-            .on_click(cx.listener(|this, ix: &usize, _w, cx| {
-                let val = PET_SIZES[*ix];
-                this.update_pet_config(move |c| c.scale = val, cx)
-            }))
-            .children([
-                Radio::new("sz-s").label("小"),
-                Radio::new("sz-m").label("中"),
-                Radio::new("sz-l").label("大"),
-            ]);
 
-        let lc = cx.global::<agent::LlmConfig>().clone();
-        let llm_chip = Switch::new("pet-brain").checked(lc.enabled).on_click(
-            cx.listener(|this, c: &bool, _w, cx| {
-                let v = *c;
-                this.update_llm_config(move |cfg| cfg.enabled = v, cx)
-            }),
+        // —— 外观 ——
+        let bg_color_picker = self.bg_color_picker.clone();
+        let opacity_slider = self.opacity_slider.clone();
+        let pick_entity = entity.clone();
+        let clear_entity = entity.clone();
+        let appearance_page = SettingPage::new("外观").default_open(true).group(
+            SettingGroup::new().items(vec![
+                SettingItem::new(
+                    "主题模式",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<Appearance>().theme_mode.is_dark(),
+                        |v: bool, cx: &mut App| {
+                            let mode = if v { ThemeMode::Dark } else { ThemeMode::Light };
+                            apply_appearance(|a| a.theme_mode = mode, cx);
+                            Theme::change(mode, None, cx);
+                            cx.refresh_windows();
+                        },
+                    )
+                    .default_value(true),
+                )
+                .description("开启为深色主题，关闭为浅色主题"),
+                SettingItem::new(
+                    "背景色",
+                    SettingField::render(move |_, _, _| {
+                        div().children(bg_color_picker.as_ref().map(|p| ColorPicker::new(p).small()))
+                    }),
+                ),
+                SettingItem::new(
+                    "背景图片",
+                    SettingField::render(move |_, _, cx: &mut App| {
+                        let img_name = cx
+                            .global::<Appearance>()
+                            .bg_image
+                            .as_deref()
+                            .and_then(|p| p.rsplit('/').next())
+                            .unwrap_or("无")
+                            .to_string();
+                        let pick_entity = pick_entity.clone();
+                        let clear_entity = clear_entity.clone();
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().text_color(muted).child(img_name))
+                            .child(btn("pick-img", "选择图片…".into()).on_mouse_down(
+                                MouseButton::Left,
+                                move |_, _window, cx: &mut App| {
+                                    pick_entity.update(cx, |this, cx| this.pick_bg_image(cx));
+                                },
+                            ))
+                            .child(
+                                btn("clear-img", "清除".into()).text_color(muted).on_mouse_down(
+                                    MouseButton::Left,
+                                    move |_, _window, cx: &mut App| {
+                                        clear_entity.update(cx, |this, cx| this.set_bg_image(None, cx));
+                                    },
+                                ),
+                            )
+                    }),
+                ),
+                SettingItem::new(
+                    "不透明度",
+                    SettingField::render(move |_, _, _| {
+                        div().children(opacity_slider.as_ref().map(Slider::new))
+                    }),
+                ),
+                SettingItem::new(
+                    "背景模糊",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<Appearance>().blur,
+                        |v: bool, cx: &mut App| {
+                            apply_appearance(|a| a.blur = v, cx);
+                            cx.refresh_windows();
+                        },
+                    )
+                    .default_value(false),
+                ),
+            ]),
         );
-        let llm_fields = self.llm_inputs.as_ref().map(|inp| {
-            let field = |label: &str, state: &Entity<gpui_component::input::InputState>| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_xs().text_color(muted).child(label.to_string()))
-                    .child(Input::new(state).small())
-            };
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(field("接口地址 base_url", &inp.base_url))
-                .child(field("API Key", &inp.api_key))
-                .child(field("模型 model", &inp.model))
-                .child(field("人设 persona", &inp.persona))
-        });
 
-        div().size_full().child(
-            div()
-                .id("settings-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .p_6()
-                .child(
+        // —— 桌面宠物 ——
+        let pet_color_picker = self.pet_color_picker.clone();
+        let llm_inputs = self.llm_inputs.clone();
+        let pet_page = SettingPage::new("桌面宠物").group(
+            SettingGroup::new().items(vec![
+                SettingItem::new(
+                    "显示宠物",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<pet::PetConfig>().enabled,
+                        |v: bool, cx: &mut App| apply_pet_config(|c| c.enabled = v, cx),
+                    ),
+                ),
+                SettingItem::new(
+                    "状态播报",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<pet::PetConfig>().notify,
+                        |v: bool, cx: &mut App| apply_pet_config(|c| c.notify = v, cx),
+                    ),
+                ),
+                SettingItem::new(
+                    "宠物大脑（LLM）",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<agent::LlmConfig>().enabled,
+                        |v: bool, cx: &mut App| apply_llm_config(|c| c.enabled = v, cx),
+                    ),
+                )
+                .description("接入 OpenAI 兼容接口，点击或通知宠物时将调用 LLM 主动说话。"),
+                SettingItem::render(move |_, _, _| {
+                    let field = |label: &str, state: &Entity<gpui_component::input::InputState>| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xs().text_color(muted).child(label.to_string()))
+                            .child(Input::new(state).small())
+                    };
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .children(llm_inputs.as_ref().map(|inp| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(field("接口地址 base_url", &inp.base_url))
+                                .child(field("API Key", &inp.api_key))
+                                .child(field("模型 model", &inp.model))
+                                .child(field("人设 persona", &inp.persona))
+                        }))
+                }),
+                SettingItem::new(
+                    "颜色",
+                    SettingField::render(move |_, _, _| {
+                        div().children(pet_color_picker.as_ref().map(|p| ColorPicker::new(p).small()))
+                    }),
+                ),
+                SettingItem::new(
+                    "大小",
+                    SettingField::render(move |_, _, cx: &mut App| {
+                        let scale = cx.global::<pet::PetConfig>().scale;
+                        let size_ix = PET_SIZES.iter().position(|v| (scale - v).abs() < 0.01);
+                        RadioGroup::horizontal("pet-size")
+                            .selected_index(size_ix)
+                            .on_click(|ix: &usize, _window, cx: &mut App| {
+                                let val = PET_SIZES[*ix];
+                                apply_pet_config(|c| c.scale = val, cx);
+                            })
+                            .children([
+                                Radio::new("sz-s").label("小"),
+                                Radio::new("sz-m").label("中"),
+                                Radio::new("sz-l").label("大"),
+                            ])
+                    }),
+                ),
+            ]),
+        );
+
+        // —— 更新：检查/下载全自动静默，生效推迟到退出时 ——
+        let update_entity = entity.clone();
+        let update_page = SettingPage::new("更新").resettable(false).group(
+            SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
+                let status = update_entity.read(cx).update_status.clone();
+                let status_text = match &status {
+                    updater::UpdateStatus::Idle => String::new(),
+                    updater::UpdateStatus::Checking => "检查中…".to_string(),
+                    updater::UpdateStatus::UpToDate => "已是最新版本".to_string(),
+                    updater::UpdateStatus::Downloading { version } => {
+                        format!("正在下载 v{version}…")
+                    }
+                    updater::UpdateStatus::ReadyToInstall { version, .. } => {
+                        format!("新版本 v{version} 已就绪，下次启动生效")
+                    }
+                    updater::UpdateStatus::Failed(e) => format!("检查失败：{e}"),
+                };
+                let busy = matches!(
+                    status,
+                    updater::UpdateStatus::Checking | updater::UpdateStatus::Downloading { .. }
+                );
+                let ready = matches!(status, updater::UpdateStatus::ReadyToInstall { .. });
+
+                let check_entity = update_entity.clone();
+                let check_btn = btn("check-update", if busy { "检查中…".into() } else { "检查更新".into() })
+                    .text_color(if busy { muted } else { fg })
+                    .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                        check_entity.update(cx, |this, cx| {
+                            if !matches!(
+                                this.update_status,
+                                updater::UpdateStatus::Checking | updater::UpdateStatus::Downloading { .. }
+                            ) {
+                                this.check_for_update(false, cx);
+                            }
+                        });
+                    });
+                let restart_btn = ready.then(|| {
+                    btn("restart-update", "立即重启更新".into())
+                        .text_color(rgb(0x8fc7ff))
+                        .bg(Hsla::from(rgba(0x4a9eff24)))
+                        .hover(|s| s.bg(Hsla::from(rgba(0x4a9eff40))))
+                        .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                            if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } = &status {
+                                if updater::finalize_pending_update(staged_app).is_ok() {
+                                    cx.quit();
+                                }
+                            }
+                        })
+                });
+
                 v_flex()
                     .w_full()
-                    .max_w(px(540.))
-                    .mx_auto()
-                    .gap_6()
-                    // 页面大标题与切回按钮
+                    .gap_3()
                     .child(
                         h_flex()
+                            .w_full()
                             .justify_between()
                             .items_center()
-                            .border_b_1()
-                            .border_color(border)
-                            .pb_3()
-                            .child(div().text_2xl().font_bold().text_color(fg).child("设置"))
                             .child(
                                 div()
-                                    .id("back-from-settings")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .border_1()
-                                    .border_color(border)
-                                    .hover(|s| s.bg(popover).text_color(fg))
-                                    .child("返回")
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .text_sm()
+                                    .text_color(fg)
+                                    .child(concat!("当前版本 v", env!("CARGO_PKG_VERSION"))),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(check_btn)
+                                    .children(restart_btn),
+                            ),
+                    )
+                    .children((!status_text.is_empty()).then(|| {
+                        div().text_xs().text_color(muted).child(status_text)
+                    }))
+            })),
+        );
+
+        let back_entity = entity.clone();
+        div().size_full().child(
+            v_flex()
+                .size_full()
+                .child(
+                    h_flex()
+                        .justify_end()
+                        .items_center()
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(border)
+                        .child(
+                            div()
+                                .id("back-from-settings")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(muted)
+                                .border_1()
+                                .border_color(border)
+                                .hover(|s| s.bg(popover).text_color(fg))
+                                .child("返回")
+                                .on_click(move |_, _window, cx: &mut App| {
+                                    back_entity.update(cx, |this, cx| {
                                         this.view = this.prev_view;
                                         cx.notify();
-                                    }))
-                            )
-                    )
-                    // —— 外观 ——
-                    .child(card(
-                        "外观",
-                        v_flex()
-                            .gap_4()
-                            .child(row(
-                                "背景色",
-                                div()
-                                    .children(self.bg_color_picker.as_ref().map(|p| ColorPicker::new(p).small()))
-                                    .into_any_element(),
-                            ))
-                            .child(row(
-                                "背景图片",
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().text_xs().text_color(muted).child(img_name))
-                                    .child(pick_btn)
-                                    .child(clear_btn)
-                                    .into_any_element(),
-                            ))
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .child(div().text_sm().text_color(fg).child("不透明度"))
-                                    .children(self.opacity_slider.as_ref().map(Slider::new)),
-                            )
-                            .child(row("背景模糊", blur_chip.into_any_element())),
-                    ))
-                    // —— 桌面宠物 ——
-                    .child(card(
-                        "桌面宠物",
-                        v_flex()
-                            .gap_4()
-                            .child(row("显示宠物", pet_show_chip.into_any_element()))
-                            .child(row("状态播报", pet_notify_chip.into_any_element()))
-                            .child(row("宠物大脑（LLM）", llm_chip.into_any_element()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child("大脑：接入 OpenAI 兼容接口，点击或通知宠物时将调用 LLM 主动说话。"),
-                            )
-                            .children(llm_fields)
-                            .child(row(
-                                "颜色",
-                                div()
-                                    .children(self.pet_color_picker.as_ref().map(|p| ColorPicker::new(p).small()))
-                                    .into_any_element(),
-                            ))
-                            .child(row("大小", pet_size_group.into_any_element())),
-                    ))
-                    // —— 在线更新部分：检查/下载全自动静默，生效推迟到退出时 ——
-                    .child({
-                        let status_text = match &self.update_status {
-                            updater::UpdateStatus::Idle => String::new(),
-                            updater::UpdateStatus::Checking => "检查中…".to_string(),
-                            updater::UpdateStatus::UpToDate => "已是最新版本".to_string(),
-                            updater::UpdateStatus::Downloading { version } => {
-                                format!("正在下载 v{version}…")
-                            }
-                            updater::UpdateStatus::ReadyToInstall { version, .. } => {
-                                format!("新版本 v{version} 已就绪，下次启动生效")
-                            }
-                            updater::UpdateStatus::Failed(e) => format!("检查失败：{e}"),
-                        };
-                        let busy = matches!(
-                            self.update_status,
-                            updater::UpdateStatus::Checking | updater::UpdateStatus::Downloading { .. }
-                        );
-                        let ready = matches!(self.update_status, updater::UpdateStatus::ReadyToInstall { .. });
-
-                        let check_btn = btn("check-update", if busy { "检查中…".into() } else { "检查更新".into() })
-                            .text_color(if busy { muted } else { fg })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _w, cx| {
-                                    if !matches!(
-                                        this.update_status,
-                                        updater::UpdateStatus::Checking
-                                            | updater::UpdateStatus::Downloading { .. }
-                                    ) {
-                                        this.check_for_update(false, cx);
-                                    }
+                                    });
                                 }),
-                            );
-                        let restart_btn = ready.then(|| {
-                            btn("restart-update", "立即重启更新".into())
-                                .text_color(rgb(0x8fc7ff))
-                                .bg(Hsla::from(rgba(0x4a9eff24)))
-                                .hover(|s| s.bg(Hsla::from(rgba(0x4a9eff40))))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _w, cx| {
-                                        if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } =
-                                            &this.update_status
-                                        {
-                                            if updater::finalize_pending_update(staged_app).is_ok() {
-                                                cx.quit();
-                                            }
-                                        }
-                                    }),
-                                )
-                        });
-
-                        card(
-                            "更新",
-                            v_flex()
-                                .gap_3()
-                                .child(row(
-                                    concat!("当前版本 v", env!("CARGO_PKG_VERSION")),
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(check_btn)
-                                        .children(restart_btn)
-                                        .into_any_element(),
-                                ))
-                                .children((!status_text.is_empty()).then(|| {
-                                    div().text_xs().text_color(muted).child(status_text)
-                                })),
-                        )
-                    })
-            )
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Settings::new("settings").pages(vec![appearance_page, pet_page, update_page])),
+                ),
         )
     }
 
@@ -3699,9 +3762,9 @@ fn history_view(
     detail: &Option<(PathBuf, Rc<session_history::SessionDetail>)>,
     cx: &mut Context<Workspace>,
 ) -> Div {
-    let (muted, fg, c_border, accent) = {
+    let (muted, fg, c_border, accent, secondary) = {
         let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.border, t.primary)
+        (t.muted_foreground, t.foreground, t.border, t.primary, t.secondary)
     };
     let selected_path = detail.as_ref().map(|(p, _)| p.clone());
     let this = cx.entity();
@@ -3775,8 +3838,34 @@ fn history_view(
             .children(d.turns.iter().map(|t| {
                 let role = if t.is_user { "用户" } else { "Claude" };
                 let role_color = if t.is_user { accent } else { fg };
+                let bubble_bg = if t.is_user { accent.opacity(0.12) } else { secondary };
+                // 工具名按出现顺序去重计数，多次调用同一工具合并成一行摘要
+                // （比如连续 3 次 Bash 就显示"Bash ×3"），不然长会话里全是重复胶囊。
+                let tool_summary = (!t.tools.is_empty()).then(|| {
+                    let mut order: Vec<&String> = Vec::new();
+                    let mut counts: HashMap<&String, usize> = HashMap::new();
+                    for tool in &t.tools {
+                        counts.entry(tool).and_modify(|c| *c += 1).or_insert_with(|| {
+                            order.push(tool);
+                            1
+                        });
+                    }
+                    order
+                        .into_iter()
+                        .map(|name| {
+                            let c = counts[name];
+                            if c > 1 { format!("{name} ×{c}") } else { name.clone() }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                });
                 v_flex()
                     .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .bg(bubble_bg)
+                    .when(t.is_user, |el| el.max_w(px(560.)))
                     .child(
                         h_flex()
                             .gap_2()
@@ -3789,18 +3878,9 @@ fn history_view(
                                     .child(ts.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
                             })),
                     )
-                    .child(div().text_sm().text_color(fg).child(t.text.clone()))
-                    .children((!t.tools.is_empty()).then(|| {
-                        h_flex().flex_wrap().gap_1().children(t.tools.iter().map(|tool| {
-                            div()
-                                .px_2()
-                                .py(px(1.))
-                                .rounded(px(4.))
-                                .bg(c_border)
-                                .text_xs()
-                                .text_color(muted)
-                                .child(format!("🔧 {tool}"))
-                        }))
+                    .child(div().text_sm().text_color(fg).child(markdown(t.text.clone())))
+                    .children(tool_summary.map(|s| {
+                        div().text_xs().text_color(muted).child(format!("🔧 {s}"))
                     }))
                     .into_any_element()
             }))
@@ -3843,27 +3923,6 @@ fn usage_view(
     if data.events.is_empty() {
         return placeholder_view("没有找到本地 Claude Code 会话记录（~/.claude/projects）", muted);
     }
-
-    // 今日半小时桶走势（全局口径）。
-    #[derive(Clone)]
-    struct Pt {
-        x: String,
-        y: f64,
-    }
-    let daily = usage_stats::daily_buckets(&data.events, 30);
-    let daily_total: u64 = daily.iter().map(|(_, v)| *v).sum();
-    let daily_pts: Vec<Pt> = daily.into_iter().map(|(x, y)| Pt { x, y: y as f64 }).collect();
-    let daily_section = usage_section(
-        "今日走势（每半小时）",
-        &format!("共 {daily_total} tokens"),
-        muted,
-        c_border,
-        div()
-            .h(px(200.))
-            .p_2()
-            .child(LineChart::new(daily_pts).x(|d: &Pt| d.x.clone()).y(|d: &Pt| d.y).stroke(chart_1).tick_margin(4))
-            .into_any_element(),
-    );
 
     // 活动热力图：近 12 周，按周对齐成「列=周，行=周一到周日」的日历格（全局口径）。
     let heat = usage_stats::daily_heatmap(&data.events, 12);
@@ -3920,7 +3979,6 @@ fn usage_view(
         .flex_col()
         .gap_3()
         .p_3()
-        .child(daily_section)
         .child(heatmap_section)
         .child(cur_project_row)
         .child(global_row)
@@ -5109,18 +5167,17 @@ fn main() {
                 include_bytes!("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf").as_slice(),
             )])
             .expect("加载图标 fallback 字体失败");
-        // 深色主题（与终端配色一致）
-        Theme::change(ThemeMode::Dark, None, cx);
-
         // 应用菜单栏 + Cmd+Q 退出：macOS 顶部「Smelt」菜单，含「退出 Smelt ⌘Q」。
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![
             Menu::new("Smelt").items([MenuItem::action("退出 Smelt", Quit)]),
         ]);
 
-        // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
+        // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）+ 明暗主题
+        // （默认深色，与终端配色一致；用户可在设置页切换，选择会持久化）。
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
+        Theme::change(appearance.theme_mode, None, cx);
         cx.set_global(appearance);
 
         // 桌面宠物：配置 + 播报邮箱 + LLM 大脑配置（跨窗口全局单例），再开独立透明浮窗。
