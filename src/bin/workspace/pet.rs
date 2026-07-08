@@ -23,6 +23,10 @@ use smol::Timer;
 
 /// 动画时钟间隔：约 20fps，足够顺滑且开销极低。
 const FRAME: Duration = Duration::from_millis(50);
+/// 拖拽跟手用的高帧率时钟间隔（~60fps）：拖动时窗口位置追踪单独用这个更快的
+/// 时钟驱动，不跟随上面 20fps 的慢时钟，跟手不卡顿；不拖时立刻判负返回，开销
+/// 可忽略，不影响空闲功耗。
+const DRAG_TICK: Duration = Duration::from_millis(16);
 /// 每帧相位步进（弧度）；一个完整呼吸周期约 TAU / 0.12 ≈ 52 帧 ≈ 2.6s。
 const PHASE_STEP: f32 = 0.12;
 /// 宠物窗口宽度：给气泡 + 连点鼓大的形变留足空间（周围透明区已点击穿透，不挡操作）。
@@ -140,12 +144,8 @@ enum Mood {
 pub struct PetView {
     /// 单调递增的动画相位（弧度），驱动呼吸 / 浮动的 sin；每帧到 TAU 归零防精度漂移。
     phase: f32,
-    /// 拖拽标志：mouse_down 置真，首次 mouse_move 触发原生窗口拖动后复位。
-    dragging: bool,
-    /// 点击互动余韵：按下时置 1.0，逐帧衰减到 0，期间宠物向上蹦并被拉长。
+    /// 点击互动余韵：按下时置 1.0，逐帧衰减到 0，期间宠物向上蹦。
     bounce: f32,
-    /// 连点鼓大值：每次戳 +0.2（封顶 1.0）并缓慢衰减，驱动临时放大；停手会慢慢缩回。
-    poke: f32,
     /// 眨眼计时：逐帧递增，按周期取模决定何时闭眼。
     blink: f32,
     /// 当前说的话；None 表示不显示气泡。
@@ -181,6 +181,13 @@ pub struct PetView {
     app_switch_cd: f32,
     /// 「忙碌值」：每次切 app 累加，逐帧衰减，用于推出情绪状态。
     switch_energy: f32,
+    /// 是否已确认进入真实拖动（按下后移动超过阈值才置真；跟"按下但没动=轻点"区分）。
+    native_drag: bool,
+    /// 手动拖动的锚点：(按下瞬间的全局光标 x/y, 按下瞬间的窗口原点 x/y)。按下时
+    /// 记录、松手时清空；mouse_move 里用它算出「这次该把窗口挪到哪」，不靠 AppKit
+    /// 的 `performWindowDragWithEvent`（那个会在拖动全程冻结 app 自己的重绘，见
+    /// mouse_down/mouse_move 的注释）。
+    drag_start: Option<(f32, f32, f32, f32)>,
 }
 
 impl PetView {
@@ -206,10 +213,6 @@ impl PetView {
                     this.blink += 1.0;
                     if this.bounce > 0.0 {
                         this.bounce = (this.bounce - 0.06).max(0.0);
-                    }
-                    // 连点鼓大缓慢回落（停手就慢慢缩回原大小）。
-                    if this.poke > 0.0 {
-                        this.poke = (this.poke - 0.015).max(0.0);
                     }
                     // 气泡倒计时：到点收起。
                     if this.speech_ttl > 0.0 {
@@ -301,11 +304,27 @@ impl PetView {
         })
         .detach();
 
+        // 拖拽跟手时钟：单独用更高帧率（DRAG_TICK）驱动位置追踪 + 滚动相位，
+        // 不跟随上面那个 20fps 的慢时钟——见 handle_drag_move 和 DRAG_TICK 的注释。
+        // 没在拖时这里立刻判负返回，几乎零开销，不影响空闲功耗。
+        cx.spawn(async move |this, cx| loop {
+            Timer::after(DRAG_TICK).await;
+            let alive = this
+                .update_in(cx, |this, window, cx| {
+                    if this.drag_start.is_some() {
+                        this.handle_drag_move(window, cx);
+                    }
+                })
+                .is_ok();
+            if !alive {
+                break;
+            }
+        })
+        .detach();
+
         Self {
             phase: 0.0,
-            dragging: false,
             bounce: 0.0,
-            poke: 0.0,
             blink: 0.0,
             // 启动先打个招呼。
             speech: Some(SharedString::from("嗨～我在这儿陪你！")),
@@ -325,6 +344,8 @@ impl PetView {
             last_app: None,
             app_switch_cd: 0.0,
             switch_energy: 0.0,
+            native_drag: false,
+            drag_start: None,
         }
     }
 
@@ -382,6 +403,59 @@ impl PetView {
         self.speech = Some(text.into());
         self.speech_ttl = SPEECH_FRAMES;
         self.idle_frames = 0.0;
+    }
+
+    /// 手动拖拽的移动处理：算位移、判定「是否已经算真实拖动」、挪窗口、累计滚动
+    /// 路程。由 DRAG_TICK 高帧率时钟轮询调用（固定节奏，不挂在原始 mouse move
+    /// 事件上——见 DRAG_TICK 的注释），没有正在按住（drag_start 为空）就什么都不做。
+    fn handle_drag_move(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some((sx, sy, swx, swy)) = self.drag_start else { return };
+        let (mx, my, _, _) = cursor_and_window_origin(window);
+        let (dx, dy) = (mx - sx, my - sy);
+        if !self.native_drag && (dx.abs() > 2.0 || dy.abs() > 2.0) {
+            self.native_drag = true;
+            self.proactive_say(
+                "主人一把抓起你、正在挪动位置，惊呼一声，别超过 10 字。".into(),
+                "哇！要去哪呀～",
+                cx,
+            );
+        }
+        if self.native_drag {
+            // 自己接住拖拽、手动挪窗口（而非交给会冻结 app 重绘的
+            // performWindowDragWithEvent），拖动全程 render() 都能正常跑。
+            set_window_origin(window, swx + dx, swy + dy);
+        }
+        cx.notify();
+    }
+
+    /// 手动拖拽的松手处理：区分「拖完放下」和「按下没动=轻点」两种收尾，清掉拖拽
+    /// 状态。由窗口级 MouseUpEvent 监听调用，drag_start 为空（这次 mouse up 跟我们
+    /// 的拖拽无关）就直接忽略。
+    fn handle_drag_up(&mut self, cx: &mut Context<Self>) {
+        if self.drag_start.is_none() {
+            return;
+        }
+        if self.native_drag {
+            self.native_drag = false;
+            self.bounce = 1.0;
+            self.proactive_say(
+                "刚被主人放下、安顿在新位置，俏皮地喘口气，别超过 10 字。".into(),
+                "稳啦～",
+                cx,
+            );
+        } else {
+            self.bounce = 1.0;
+            if Self::agent_on(cx) {
+                // 开了大脑 → LLM 即兴回应（带上当前 app 上下文），替代写死台词。
+                let ctx = self.app_ctx();
+                self.ask_agent(format!("主人戳了戳你{ctx}，俏皮地回应一句。"), cx);
+            } else {
+                self.line_idx = (self.line_idx + 1) % LINES.len();
+                self.say(LINES[self.line_idx]);
+            }
+        }
+        self.drag_start = None;
+        cx.notify();
     }
 
     /// 是否开启了 LLM 大脑。
@@ -456,23 +530,28 @@ impl Render for PetView {
             return div().size_full().into_any_element();
         }
 
-        // 缩放：配置缩放 × 连点鼓大系数，乘到所有像素尺寸上。
-        let s = cfg.scale * (1.0 + self.poke);
+        // 缩放：配置缩放，乘到所有像素尺寸上。
+        let s = cfg.scale;
         let p = |v: f32| px(v * s);
 
-        // 一次原生取值：眼睛朝鼠标的目标偏移 + 是否落在身体内（点击穿透）+ 全屏光标坐标。
-        let (eye_tx, eye_ty, over_pet, mx, my) = mouse_state(window, s);
+        // 一次原生取值：眼睛朝鼠标的目标偏移 + 是否落在身体内（点击穿透判定用）。
+        let (eye_tx, eye_ty, over_pet) = mouse_state(window, s);
         // 缓动：当前瞳孔偏移逐帧逼近目标，避免瞬移的生硬感（≈0.2/帧，约 0.5s 到位）。
         self.eye_x += (eye_tx - self.eye_x) * 0.2;
         self.eye_y += (eye_ty - self.eye_y) * 0.2;
         let (eye_ox, eye_oy) = (self.eye_x, self.eye_y);
-        // 身体外 → 窗口点击穿透（四周透明区放行点击）；身体上 → 接管交互。
-        if self.click_through != Some(!over_pet) {
-            set_click_through(window, !over_pet);
-            self.click_through = Some(!over_pet);
+        // 身体外 → 窗口点击穿透（四周透明区放行点击）；身体上、或鼠标按着正在拖 →
+        // 接管交互。拖动时强制不穿透：窗口快速移动时命中测试可能有一帧判到"光标
+        // 已经不在新位置的身体范围内"，这时如果切成穿透，会直接丢失后续鼠标事件、
+        // 拖拽卡死在半路——所以只要按着就无条件保持可交互。
+        let interactive = over_pet || self.drag_start.is_some();
+        if self.click_through != Some(!interactive) {
+            set_click_through(window, !interactive);
+            self.click_through = Some(!interactive);
         }
 
         // 用户离开检测：光标长时间不动 → 关心一句；一动就复位。
+        let (mx, my, _, _) = cursor_and_window_origin(window);
         let moved = self
             .last_mouse
             .map(|(lx, ly)| (mx - lx).abs() > 2.0 || (my - ly).abs() > 2.0)
@@ -497,9 +576,11 @@ impl Render for PetView {
         let breathe = self.phase.sin();
         // 垂直浮动：随呼吸上下漂 4px，叠加点击蹦跳的上冲（向上为负 margin）。
         let bob = (breathe * 4.0 - self.bounce * 22.0) * s;
-        // 史莱姆身体：呼吸时宽高反向形变（squash & stretch），蹦跳时整体拉长。
-        let body_w = p(88.0 + breathe * -4.0 + self.bounce * -6.0);
-        let body_h = p(78.0 + breathe * 4.0 + self.bounce * 14.0);
+        // 史莱姆身体：呼吸时宽高反向形变（squash & stretch）。抓起 / 拖动不再有
+        // 额外的形变动画——试过挤压拉伸、变球滚动几版都不理想，索性去掉，拖动时
+        // 身体保持原样跟着窗口走就好。
+        let body_w = p(88.0 + breathe * -4.0);
+        let body_h = p(78.0 + breathe * 4.0);
         // 每约 68 帧（~3.4s）闭眼 4 帧。
         let eye_closed = (self.blink % 68.0) < 4.0;
 
@@ -604,42 +685,48 @@ impl Render for PetView {
                     .child(blush()),
             )
             // —— 交互：按住拖动 / 轻点蹦跳说话 ——
-            .cursor_pointer()
+            // 悬停时张开手（可抓起来），实际拖动时合上手，跟系统拖拽的 grab/grabbing
+            // 语义一致。
+            .cursor(if self.native_drag { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.dragging = true;
+                cx.listener(|this, _, window, cx| {
+                    let (mx, my, wx, wy) = cursor_and_window_origin(window);
+                    this.drag_start = Some((mx, my, wx, wy));
                     cx.stop_propagation();
                 }),
             )
-            .on_mouse_move(cx.listener(|this, _, window, _cx| {
-                // 按下后一旦移动即视为拖拽：交给原生窗口拖动，整个浮窗跟着鼠标走。
-                if this.dragging {
-                    this.dragging = false;
-                    window.start_window_move();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    // 未发生移动就抬起 = 一次轻点。
-                    if this.dragging {
-                        this.dragging = false;
-                        // 连点鼓大：每戳一下鼓一点、封顶不鼓破，停手会慢慢缩回。
-                        this.poke = (this.poke + 0.2).min(1.0);
-                        this.bounce = 1.0;
-                        if Self::agent_on(cx) {
-                            // 开了大脑 → LLM 即兴回应（带上当前 app 上下文），替代写死台词。
-                            let ctx = this.app_ctx();
-                            this.ask_agent(format!("主人戳了戳你{ctx}，俏皮地回应一句。"), cx);
-                        } else {
-                            this.line_idx = (this.line_idx + 1) % LINES.len();
-                            this.say(LINES[this.line_idx]);
-                        }
-                        cx.notify();
-                    }
-                }),
-            );
+            // 松手改在下面的 canvas 里，用窗口级监听接住（见那里的注释）；移动改由
+            // 独立的 DRAG_TICK 高帧率时钟轮询处理（见 handle_drag_move），不再挂在
+            // 鼠标移动事件上——原始 mouse move 事件频率不稳（可能远高于/参差于渲染
+            // 需要的节奏），直接拿来驱动位置 + 滚动相位会导致「滚着走」在采样点之间
+            // 跳变一大截，看起来忽高忽低不连贯；改成固定节奏轮询后就稳定了。
+            .child({
+                let view = cx.entity();
+                canvas(
+                    |_, _, _| {},
+                    move |_bounds, _, window, _cx| {
+                        // 用 window.on_mouse_event 而不是 on_mouse_up 构建器：后者靠
+                        // hitbox.is_hovered() 判断要不要触发，而 hitbox id 是每帧重新
+                        // 分配的单调计数器，mouse_down 时 capture 的旧 id 下一帧就跟
+                        // 当前帧的 hitbox 对不上号——这正是"松手了还在跟着鼠标走"那个
+                        // bug 的根因（capture_pointer 只在同一帧内有效）。窗口级监听
+                        // 不依赖 hitbox，稳定收得到松手事件；参考 gpui-component 里
+                        // resizable 面板拖拽同款写法（ResizeHandle::paint 里的
+                        // window.on_mouse_event）。每帧重新注册，跟 GPUI 的预期用法
+                        // 一致（"next frame" 会自动清掉）。
+                        let view_up = view.clone();
+                        window.on_mouse_event(move |_ev: &MouseUpEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            view_up.update(cx, |this, cx| this.handle_drag_up(cx));
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0()
+            });
 
         // 说话气泡：白底圆角卡片 + 一个朝下的小尾巴，浮在宠物头顶。
         let bubble = self.speech.clone().map(|text| {
@@ -830,14 +917,15 @@ struct NSRect {
 /// - 眼睛偏移：屏幕坐标 y 向上、视图坐标 y 向下，故竖直分量取反。
 /// - 命中测试：宠物底部锚定，身体中心在窗口底边上方 `12 + 39*s`，用椭圆判定是否在身体内。
 ///
-/// 返回 `(瞳孔x偏移, 瞳孔y偏移, 是否在身体内)`。
+/// 返回 `(瞳孔x偏移, 瞳孔y偏移, 是否在身体内)`。窗口原点不在这返回了——手动拖拽
+/// 改用 `cursor_and_window_origin` 单独读，这个函数只服务眼神 + 点击穿透判定。
 #[cfg(target_os = "macos")]
-fn mouse_state(window: &Window, s: f32) -> (f32, f32, bool, f32, f32) {
+fn mouse_state(window: &Window, s: f32) -> (f32, f32, bool) {
     use objc::{class, msg_send, sel, sel_impl};
 
     let ns_window = ns_window_of(window);
     if ns_window.is_null() {
-        return (0.0, 0.0, true, 0.0, 0.0);
+        return (0.0, 0.0, true);
     }
     let s = s as f64;
     unsafe {
@@ -864,14 +952,55 @@ fn mouse_state(window: &Window, s: f32) -> (f32, f32, bool, f32, f32) {
         let hy = (mouse.y - body_cy) / ry;
         let inside = hx * hx + hy * hy <= 1.0;
 
-        (ox, oy, inside, mouse.x as f32, mouse.y as f32)
+        (ox, oy, inside)
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn mouse_state(_window: &Window, _s: f32) -> (f32, f32, bool, f32, f32) {
-    (0.0, 0.0, true, 0.0, 0.0)
+fn mouse_state(_window: &Window, _s: f32) -> (f32, f32, bool) {
+    (0.0, 0.0, true)
 }
+
+/// 全局光标坐标 + 窗口当前原点（都是屏幕坐标，y 向上）。手动拖拽用它算「这次要把
+/// 窗口挪到哪」，不依赖缩放，故跟 mouse_state 分开。
+#[cfg(target_os = "macos")]
+fn cursor_and_window_origin(window: &Window) -> (f32, f32, f32, f32) {
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    unsafe {
+        let frame: NSRect = msg_send![ns_window, frame];
+        let mouse: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        (mouse.x as f32, mouse.y as f32, frame.origin.x as f32, frame.origin.y as f32)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cursor_and_window_origin(_window: &Window) -> (f32, f32, f32, f32) {
+    (0.0, 0.0, 0.0, 0.0)
+}
+
+/// 手动挪窗口到给定的屏幕原点坐标——用来实现「自己接住拖拽」而不是把整个拖动过程
+/// 甩给会冻结重绘的 `performWindowDragWithEvent`（见 mouse_down/mouse_move 的注释）。
+#[cfg(target_os = "macos")]
+fn set_window_origin(window: &Window, x: f32, y: f32) {
+    use objc::{msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return;
+    }
+    let point = NSPoint { x: x as f64, y: y as f64 };
+    unsafe {
+        let _: () = msg_send![ns_window, setFrameOrigin: point];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_window_origin(_window: &Window, _x: f32, _y: f32) {}
 
 /// 当前前台 app 的名字（如 "Google Chrome" / "Xcode"）。
 /// 用 `[[NSWorkspace sharedWorkspace] frontmostApplication].localizedName`——只拿 app 名
