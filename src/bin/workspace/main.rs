@@ -54,7 +54,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use terminal_view::TerminalView;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
-gpui::actions!(smelt, [Quit, OpenSettings]);
+gpui::actions!(smelt, [Quit, OpenSettings, SendSelectionToTerminal]);
 
 /// 命令面板里的一个可执行动作。
 #[derive(Clone)]
@@ -513,6 +513,9 @@ struct OpenFile {
     /// 上次保存时检测到磁盘内容跟 saved_content 对不上（外部改过）。为 true 时
     /// 再按一次 Cmd+S 会跳过冲突检查强制覆盖——用"再按一次"当作用户已确认覆盖。
     conflict_pending: bool,
+    /// markdown 文件的「预览」开关（仅 .md 生效，见 file_content_pane）；切换打开的
+    /// 文件不带过去，open_file_now 每次都重置为 false（默认进编辑视图）。
+    preview: bool,
 }
 
 /// 保存一次的结果：分 Saved / 检测到外部改动的 Conflict / 其它 IO 错误。
@@ -2939,6 +2942,14 @@ impl Workspace {
         });
     }
 
+    /// 文件内容面板右上角「编辑 / 预览」切换（仅 markdown 生效）。
+    fn set_file_preview(&mut self, preview: bool, cx: &mut Context<Self>) {
+        if let Some(of) = self.open_file.as_mut() {
+            of.preview = preview;
+        }
+        cx.notify();
+    }
+
     /// 文件树：展开/收起一个文件夹。
     fn toggle_expand(&mut self, path: String, cx: &mut Context<Self>) {
         if !self.expanded.remove(&path) {
@@ -2990,6 +3001,7 @@ impl Workspace {
             save_error: None,
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
+            preview: false,
         });
         cx.notify();
 
@@ -3472,6 +3484,41 @@ impl Workspace {
             state.update(cx, |s, cx| s.set_value("", window, cx));
         }
         cx.notify();
+    }
+
+    /// 文件树右键「发送到终端」：把路径转成相对当前 cwd 的 @提及，写进当前激活终端
+    /// 的 PTY（不带回车，同 send_diff_comments 的做法）。
+    fn send_path_to_terminal(&mut self, path: String, cx: &mut Context<Self>) {
+        let root = self.cur().and_then(|s| s.cwd(cx));
+        let rel = root
+            .and_then(|root| {
+                Path::new(&path).strip_prefix(&root).ok().map(|p| p.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| path.clone());
+        let msg = format!("@{rel} ");
+        if let Some(view) = self.cur().map(|s| s.active.clone()) {
+            view.update(cx, |tv, cx| tv.send_text(&msg, cx));
+        }
+    }
+
+    /// 文件内容框选右键「发送选中内容到终端」：带上文件名 + 选中文字，写进当前激活
+    /// 终端的 PTY（不带回车）。
+    fn send_open_file_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(of) = &self.open_file else { return };
+        let selected = of.editor.read(cx).selected_value().to_string();
+        if selected.trim().is_empty() {
+            return;
+        }
+        let root = self.cur().and_then(|s| s.cwd(cx));
+        let rel = root
+            .and_then(|root| {
+                Path::new(&of.path).strip_prefix(&root).ok().map(|p| p.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| of.path.clone());
+        let msg = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
+        if let Some(view) = self.cur().map(|s| s.active.clone()) {
+            view.update(cx, |tv, cx| tv.send_text(&msg, cx));
+        }
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4345,6 +4392,10 @@ impl Render for Workspace {
                 }
                 this.open_settings_window(cx);
             }))
+            // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
+            .on_action(cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
+                this.send_open_file_selection(cx);
+            }))
             // 从 Finder 拖文件/文件夹进窗口 → 当作项目开新标签（文件取其父目录）。
             .on_drop::<ExternalPaths>(cx.listener(|this, ep: &ExternalPaths, _window, cx| {
                 this.open_paths(ep.paths(), cx);
@@ -4585,7 +4636,15 @@ impl Render for Workspace {
                                     None => div().flex_1().into_any_element(),
                                 }
                             } else {
-                                file_tree(cwd, &self.expanded, &self.dir_cache, &self.file_tree_scroll, cx)
+                                let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
+                                file_tree(
+                                    cwd,
+                                    &self.expanded,
+                                    &self.dir_cache,
+                                    &self.file_tree_scroll,
+                                    open_path,
+                                    cx,
+                                )
                             };
                             // 顶部搜索框（file_filter 已在 render 顶部懒创建）。
                             let search_box = self.file_filter.as_ref().map(|state| {
@@ -4725,11 +4784,12 @@ fn file_tree(
     expanded: &HashSet<String>,
     dir_cache: &HashMap<String, (Instant, Rc<Vec<(String, bool)>>)>,
     scroll: &ScrollHandle,
+    open_path: Option<&str>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let (muted, fg, hover) = {
+    let (muted, fg, hover, active_bg) = {
         let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.accent)
+        (t.muted_foreground, t.foreground, t.accent, t.border)
     };
     let Some(root) = cwd else {
         return placeholder_view("无项目目录", muted).into_any_element();
@@ -4782,6 +4842,10 @@ fn file_tree(
             .text_color(if is_dir { fg } else { muted });
             let this = this.clone();
             let p = path.clone();
+            let this_menu = this.clone();
+            let p_menu = p.clone();
+            // 当前在右侧内容面板打开的文件：文件树里对应行常驻高亮，不用靠记忆去找。
+            let is_open = !is_dir && open_path == Some(path.as_str());
             div()
                 .id(("file", i))
                 .flex()
@@ -4792,6 +4856,7 @@ fn file_tree(
                 .py(px(1.0))
                 .text_sm()
                 .text_color(if is_dir { fg } else { muted })
+                .when(is_open, |el| el.bg(active_bg))
                 .hover(move |s| s.bg(hover))
                 .on_click(move |_ev, window, cx| {
                     this.update(cx, |ws, cx| {
@@ -4801,6 +4866,15 @@ fn file_tree(
                             ws.view_file(p.clone(), window, cx);
                         }
                     });
+                })
+                .context_menu(move |menu, _window, _cx| {
+                    let this = this_menu.clone();
+                    let p = p_menu.clone();
+                    menu.item(
+                        PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
+                            this.update(cx, |ws, cx| ws.send_path_to_terminal(p.clone(), cx));
+                        }),
+                    )
                 })
                 .child(arrow)
                 .child(type_icon)
@@ -6147,31 +6221,108 @@ fn editor_language_for_path(path: &str) -> String {
 /// 文件内容查看/编辑面板：直接用 gpui-component 的 Editor（InputState code_editor
 /// 模式），自带语法高亮、行号、搜索、大文件下的增量编辑，不用再自己管虚拟滚动。
 fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspace>) -> Div {
-    let (muted, border, warning) = {
+    let (muted, fg, border, warning, accent) = {
         let t = cx.theme();
-        (t.muted_foreground, t.border, t.warning)
+        (t.muted_foreground, t.foreground, t.border, t.warning, t.accent)
     };
     match open_file {
         None => placeholder_view("← 从左侧选择文件查看内容", muted),
         Some(of) => {
             let name = of.path.rsplit('/').next().unwrap_or(of.path.as_str()).to_string();
             let dirty = of.editor.read(cx).value().to_string() != *of.saved_content;
+            // 只有 markdown 才给「编辑 / 预览」切换，其它文件类型没有预览这一说。
+            let is_md = editor_language_for_path(&of.path) == "md";
+            let preview = of.preview && is_md;
             let header = h_flex()
                 .items_center()
+                .justify_between()
                 .gap_2()
                 .px_3()
                 .py_1()
                 .border_b_1()
                 .border_color(border)
-                .child(div().text_sm().text_color(muted).child(name))
-                // 未保存改动：文件名后一个小圆点，Cmd+S 保存后消失。
-                .when(dirty, |el| {
-                    el.child(div().size(px(6.)).rounded_full().bg(warning))
-                })
-                // 保存失败 / 不支持保存的提示。
-                .children(
-                    of.save_error.clone().map(|msg| div().text_xs().text_color(warning).child(msg)),
-                );
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_sm().text_color(muted).child(name))
+                        // 未保存改动：文件名后一个小圆点，Cmd+S 保存后消失。
+                        .when(dirty, |el| {
+                            el.child(div().size(px(6.)).rounded_full().bg(warning))
+                        })
+                        // 保存失败 / 不支持保存的提示。
+                        .children(of.save_error.clone().map(|msg| {
+                            div().text_xs().text_color(warning).child(msg)
+                        })),
+                )
+                .when(is_md, |el| {
+                    let seg = |label: &'static str, active: bool, target: bool| {
+                        div()
+                            .id(label)
+                            .px_2()
+                            .py(px(2.))
+                            .rounded(px(6.))
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(active, |el| el.bg(accent.opacity(0.15)).text_color(fg))
+                            .when(!active, |el| el.text_color(muted))
+                            .child(label)
+                            .on_click(cx.listener(move |ws, _ev, _window, cx| {
+                                ws.set_file_preview(target, cx)
+                            }))
+                    };
+                    el.child(
+                        h_flex()
+                            .gap_1()
+                            .p(px(2.))
+                            .rounded(px(8.))
+                            .bg(border.opacity(0.3))
+                            .child(seg("编辑", !preview, false))
+                            .child(seg("预览", preview, true)),
+                    )
+                });
+            let body: AnyElement = if preview {
+                div()
+                    .id("md-preview")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .child(
+                        div().text_sm().text_color(fg).child(TextView::markdown(
+                            "md-preview-body",
+                            of.editor.read(cx).value().to_string(),
+                        )),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        // 自定义 context_menu 在 InputState 自身的右键事件回调里执行，此时
+                        // 该 entity 正处于 update 中——绝不能在这里 editor.read(cx)，否则
+                        // 触发 gpui 的重入借用 panic（在 FFI 边界不可 unwind，直接 abort
+                        // 崩整个 App）。剪切/复制/发送都在真正执行时（Cut/Copy 的默认实现、
+                        // send_open_file_selection）各自判空早退，这里不需要提前查询选中状态
+                        // 来控制 disabled，牺牲一点「没选中时置灰」的观感换取不崩。
+                        Input::new(&of.editor).h_full().context_menu(move |menu, _window, cx| {
+                            let has_paste = cx.read_from_clipboard().is_some();
+                            menu.menu("剪切", Box::new(gpui_component::input::Cut))
+                                .menu("复制", Box::new(gpui_component::input::Copy))
+                                .menu_with_disabled(
+                                    "粘贴",
+                                    !has_paste,
+                                    Box::new(gpui_component::input::Paste),
+                                )
+                                .separator()
+                                .menu("全选", Box::new(gpui_component::input::SelectAll))
+                                .separator()
+                                .menu("发送选中内容到终端", Box::new(SendSelectionToTerminal))
+                        }),
+                    )
+                    .into_any_element()
+            };
             div()
                 .flex_1()
                 .min_w_0()
@@ -6179,7 +6330,7 @@ fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspace>) 
                 .flex()
                 .flex_col()
                 .child(header)
-                .child(div().flex_1().min_h_0().child(Input::new(&of.editor).h_full()))
+                .child(body)
         }
     }
 }
