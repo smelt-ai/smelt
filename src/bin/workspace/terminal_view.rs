@@ -99,6 +99,8 @@ pub struct TerminalView {
     /// LINE_PX 取整会把大部分小增量截断成 0（滚了但没反应），造成"很不跟手"
     /// 的卡顿感。改为跨事件累加像素，攒够一整行再吐出、余数留到下次。
     scroll_accum: f32,
+    /// 建终端时的启动方式（侧栏行图标用，见 `LaunchKind`）。
+    launch_kind: LaunchKind,
 }
 
 /// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
@@ -142,6 +144,28 @@ fn title_is_running(title: Option<String>) -> bool {
 /// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。
 const STUCK_FRAMES: u32 = 8 * 60 * 1000 / 30;
 
+/// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里各项的图标对齐
+/// （新建终端/Claude Code/Codex/Copilot 一一对应），一眼认出这一行是哪种会话。
+/// 建好之后不变：daemon 重启触发的 `reconnect()` 只换底层连接，不重置这个。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LaunchKind {
+    Terminal,
+    Claude,
+    Codex,
+    Copilot,
+}
+
+/// 从 `launch` 命令行猜启动方式（见各「+」菜单项的 on_click：'claude'/'claude
+/// --dangerously-skip-permissions'/'codex'/'copilot'），用前缀匹配以后加参数不失配。
+fn classify_launch(launch: Option<&str>) -> LaunchKind {
+    match launch.map(str::trim) {
+        Some(l) if l.starts_with("claude") => LaunchKind::Claude,
+        Some(l) if l.starts_with("codex") => LaunchKind::Codex,
+        Some(l) if l.starts_with("copilot") => LaunchKind::Copilot,
+        _ => LaunchKind::Terminal,
+    }
+}
+
 impl TerminalView {
     pub fn new(
         cx: &mut Context<Self>,
@@ -151,6 +175,7 @@ impl TerminalView {
     ) -> Self {
         let terminal = Terminal::spawn(24, 80, cwd.as_deref(), &session_id, launch)
             .expect("启动内嵌终端失败");
+        let launch_kind = classify_launch(launch);
 
         // 定时重绘：后台读线程更新 Term 网格，这里每 30ms 通知 UI 刷新。
         // 顺便检查响铃：非活动会话也在跑此循环，故能在后台标记「需要注意」。
@@ -262,7 +287,13 @@ impl TerminalView {
             last_notified: None,
             last_appearance: None,
             scroll_accum: 0.0,
+            launch_kind,
         }
+    }
+
+    /// 建终端时的启动方式（侧栏行图标对齐「+」菜单用）。
+    pub fn launch_kind(&self) -> LaunchKind {
+        self.launch_kind
     }
 
     /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。

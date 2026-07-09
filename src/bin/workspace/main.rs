@@ -29,6 +29,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::chart::BarChart;
+use gpui_component::plot::shape::BarAlignment;
 use gpui_component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
 };
@@ -743,6 +744,53 @@ fn save_appearance(a: &Appearance) {
     if let Ok(json) = serde_json::to_string_pretty(a) {
         let _ = std::fs::write(path, json);
     }
+}
+
+/// Claude Code 快捷启动的权限模式（全局单例，存 ~/.smelt/launch.json）。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct LaunchConfig {
+    /// 开启后项目行「+」的 Claude Code 快捷入口改用
+    /// `claude --dangerously-skip-permissions` 启动，跳过所有权限确认。
+    claude_full_permissions: bool,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self { claude_full_permissions: false }
+    }
+}
+
+impl Global for LaunchConfig {}
+
+fn launch_config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".smelt").join("launch.json"))
+}
+
+/// 读取启动配置；缺失/损坏回退默认（默认不跳过权限确认，更安全）。
+fn load_launch_config() -> LaunchConfig {
+    launch_config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 写回启动配置（失败静默忽略）。
+fn save_launch_config(c: &LaunchConfig) {
+    let Some(path) = launch_config_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(c) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
+fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
+    let mut c = cx.global::<LaunchConfig>().clone();
+    f(&mut c);
+    save_launch_config(&c);
+    cx.set_global(c);
 }
 
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
@@ -1890,7 +1938,7 @@ impl Workspace {
 
                 div()
                     .id(("ov-card", ix))
-                    .w(px(300.))
+                    .w(px(380.))
                     .p_4()
                     .rounded(px(18.))
                     .border_1()
@@ -1960,9 +2008,10 @@ impl Workspace {
                                 div().text_color(c_amber).child(format!("● {changed} 改动"))
                             }))
                     }))
-                    // 当前会话：跑了多久 / token 用量 / 最近工具调用
+                    // 当前会话：跑了多久 / token 用量 / 最近工具调用。卡片加宽后仍装不下
+                    // 就换行，不再单行截断吞掉后半截（工具名常常最有用，之前恰恰被切没）。
                     .children(live_line.map(|line| {
-                        div().text_xs().text_color(muted).truncate().child(line)
+                        div().text_xs().text_color(muted).child(line)
                     }))
                     // 需要处理时显示通知消息（红底胶囊，更醒目）
                     .children(notif.map(|m| {
@@ -1976,7 +2025,9 @@ impl Workspace {
                             .truncate()
                             .child(m)
                     }))
-                    // 迷你终端预览（末尾几行）
+                    // 迷你终端预览（末尾几行）：改自动换行，装不下的原始终端行（尤其
+                    // starship/oh-my-posh 这类花哨 prompt）折成两三行也比单行截断吞了
+                    // 大半内容强，卡片高度跟着内容走，不再强行按住一行。
                     .children((!preview.is_empty()).then(|| {
                         div()
                             .p_2()
@@ -1987,8 +2038,9 @@ impl Workspace {
                             .text_color(muted)
                             .flex()
                             .flex_col()
+                            .gap_1()
                             .children(preview.into_iter().map(|line| {
-                                div().truncate().whitespace_nowrap().child(if line.is_empty() {
+                                div().child(if line.is_empty() {
                                     " ".to_string()
                                 } else {
                                     line
@@ -2497,6 +2549,26 @@ impl Workspace {
             ]),
         );
 
+        // —— 启动：项目「+」快捷启动 Claude Code 时用的参数 ——
+        let launch_page = SettingPage::new("启动").group(
+            SettingGroup::new().item(
+                SettingItem::new(
+                    "Claude Code 全权限启动",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<LaunchConfig>().claude_full_permissions,
+                        |v: bool, cx: &mut App| {
+                            apply_launch_config(|c| c.claude_full_permissions = v, cx)
+                        },
+                    ),
+                )
+                .description(
+                    "开启后项目行「+」的 Claude Code 快捷入口用 \
+                     claude --dangerously-skip-permissions 启动，跳过所有权限确认；\
+                     关闭则正常走 claude。",
+                ),
+            ),
+        );
+
         // —— 更新：检查/下载全自动静默，生效推迟到退出时 ——
         let update_entity = entity.clone();
         let daemon_entity = entity.clone();
@@ -2619,7 +2691,7 @@ impl Workspace {
 
         div()
             .size_full()
-            .child(Settings::new("settings").pages(vec![appearance_page, pet_page, update_page]))
+            .child(Settings::new("settings").pages(vec![appearance_page, pet_page, launch_page, update_page]))
     }
 
     /// 打开独立设置窗口：已经开着就聚焦提到前台，不重复开第二扇。窗口只是个薄壳
@@ -3517,8 +3589,16 @@ impl Render for Workspace {
                         // 闭包；hint 变化会 notify 重渲染，快照不会过期）。
                         let hint_before = self.sess_drop_hint == Some((entity_id, true));
                         let hint_after = self.sess_drop_hint == Some((entity_id, false));
+                        // 行图标跟建它时用的启动方式对齐（新建终端/Claude Code/Codex/
+                        // Copilot），跟「+」下拉菜单里的图标一一对应，见 LaunchKind。
+                        let row_icon = match self.sessions[ix].active.read(cx).launch_kind() {
+                            terminal_view::LaunchKind::Claude => IconName::Asterisk,
+                            terminal_view::LaunchKind::Codex => IconName::Bot,
+                            terminal_view::LaunchKind::Copilot => IconName::Github,
+                            terminal_view::LaunchKind::Terminal => IconName::SquareTerminal,
+                        };
                         let item = SidebarMenuItem::new(title)
-                            .icon(IconName::SquareTerminal)
+                            .icon(row_icon)
                             .active(ix == active)
                             .on_click(move |_ev, window, cx| {
                                 e_act.update(cx, |ws, cx| ws.activate(ix, window, cx));
@@ -3710,10 +3790,12 @@ impl Render for Workspace {
                                         let cwd = (!cwd.is_empty()).then(|| cwd.clone());
                                         let cwd_new = cwd.clone();
                                         let cwd_claude = cwd.clone();
-                                        let cwd_codex = cwd;
+                                        let cwd_codex = cwd.clone();
+                                        let cwd_copilot = cwd;
                                         let e_term = e_new.clone();
                                         let e_claude = e_new.clone();
                                         let e_codex = e_new.clone();
+                                        let e_copilot = e_new.clone();
                                         menu.item(
                                             PopupMenuItem::new("新建终端")
                                                 .icon(IconName::SquareTerminal)
@@ -3724,21 +3806,40 @@ impl Render for Workspace {
                                         )
                                         .item(
                                             PopupMenuItem::new("Claude Code")
-                                                .icon(IconName::Bot)
+                                                .icon(IconName::Asterisk)
                                                 .on_click(move |_ev, _window, cx| {
                                                     let cwd = cwd_claude.clone();
+                                                    // 是否跳过权限确认由设置页的开关决定，每次点击都读最新值。
+                                                    let full_perm = cx
+                                                        .try_global::<LaunchConfig>()
+                                                        .is_some_and(|c| c.claude_full_permissions);
+                                                    let launch = if full_perm {
+                                                        "claude --dangerously-skip-permissions"
+                                                    } else {
+                                                        "claude"
+                                                    };
                                                     e_claude.update(cx, |ws, cx| {
-                                                        ws.add_session_with_launch(cwd, Some("claude"), cx)
+                                                        ws.add_session_with_launch(cwd, Some(launch), cx)
                                                     });
                                                 }),
                                         )
                                         .item(
                                             PopupMenuItem::new("Codex")
-                                                .icon(IconName::SquareTerminal)
+                                                .icon(IconName::Bot)
                                                 .on_click(move |_ev, _window, cx| {
                                                     let cwd = cwd_codex.clone();
                                                     e_codex.update(cx, |ws, cx| {
                                                         ws.add_session_with_launch(cwd, Some("codex"), cx)
+                                                    });
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new("Copilot")
+                                                .icon(IconName::Github)
+                                                .on_click(move |_ev, _window, cx| {
+                                                    let cwd = cwd_copilot.clone();
+                                                    e_copilot.update(cx, |ws, cx| {
+                                                        ws.add_session_with_launch(cwd, Some("copilot"), cx)
                                                     });
                                                 }),
                                         )
@@ -4640,7 +4741,21 @@ fn usage_view(
     let cur_tool = cur_project.as_deref().map(|p| usage_stats::by_tool(&data.tools, Some(p))).unwrap_or_default();
     let global_model = usage_stats::by_model(&data.events, None);
     let global_tool = usage_stats::by_tool(&data.tools, None);
-    let global_project = usage_stats::by_project(&data.events);
+    // 展示用截短成目录末段：project_label 是完整 cwd 路径，横向条形图标签区虽然
+    // 不会叠字了，但整条路径依然又长又占地方，用不着的前缀部分不如省下来。
+    let global_project: Vec<(String, u64)> = usage_stats::by_project(&data.events)
+        .into_iter()
+        .map(|(path, tokens)| {
+            let short = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&path)
+                .to_string();
+            (short, tokens)
+        })
+        .collect();
 
     let cur_project_row = h_flex()
         .gap_3()
@@ -4686,9 +4801,13 @@ fn usage_section(title: &str, caption: &str, muted: Hsla, border: Hsla, body: An
 }
 
 /// 用量页的一个「按 X 拆分」柱状图区块；data 为空时显示「无数据」占位。
+///
+/// 横向条形图（`BarAlignment::Left`）：类目名沿 y 轴一行一个排开，标签区宽度按实际
+/// 文字量测预留，不会像竖向柱状图那样把长类目名（`mcp__xxx__yyy` 工具名、项目全路径）
+/// 挤在 x 轴上互相叠字看不清。
 fn bar_section(title: &str, muted: Hsla, border: Hsla, color: Hsla, data: Vec<(String, u64)>) -> Div {
-    // 种类一多（尤其工具名，含各种 mcp__xxx__yyy 前缀）柱子会挤成一团、x 轴标签
-    // 叠在一起看不清，只画头部几项，其余合并成一根"其他"柱子。
+    // 种类一多（尤其工具名，含各种 mcp__xxx__yyy 前缀）行会太挤，只画头部几项，
+    // 其余合并成一根"其他"条。
     let data = cap_top_n(data, 6);
     let total: u64 = data.iter().map(|(_, v)| *v).sum();
     let body = if data.is_empty() {
@@ -4699,6 +4818,7 @@ fn bar_section(title: &str, muted: Hsla, border: Hsla, color: Hsla, data: Vec<(S
                 .band(|d: &(String, u64)| d.0.clone())
                 .value(|d: &(String, u64)| d.1 as f64)
                 .fill(move |_, _, _, _| color)
+                .alignment(BarAlignment::Left)
                 .tick_margin(1),
         )
     };
@@ -6009,6 +6129,7 @@ fn main() {
         let window_bg = appearance.window_bg();
         Theme::change(appearance.theme_mode, None, cx);
         cx.set_global(appearance);
+        cx.set_global(load_launch_config());
 
         // 桌面宠物：配置 + 播报邮箱 + LLM 大脑配置（跨窗口全局单例），再开独立透明浮窗。
         cx.set_global(pet::load_pet_config());
