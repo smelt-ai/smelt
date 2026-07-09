@@ -193,6 +193,9 @@ pub struct PetView {
     /// 的 `performWindowDragWithEvent`（那个会在拖动全程冻结 app 自己的重绘，见
     /// mouse_down/mouse_move 的注释）。
     drag_start: Option<(f32, f32, f32, f32)>,
+    /// 当前所在屏幕的视觉大小补偿系数（见 `screen_scale_compensation`），乘到
+    /// `PetConfig.scale` 上；首帧 + 每次拖拽落下后重新计算一次。
+    display_scale: f32,
 }
 
 impl PetView {
@@ -351,6 +354,7 @@ impl PetView {
             switch_energy: 0.0,
             native_drag: false,
             drag_start: None,
+            display_scale: 1.0,
         }
     }
 
@@ -449,6 +453,8 @@ impl PetView {
             c.pos = Some((wx, wy));
             save_pet_config(&c);
             cx.set_global(c);
+            // 可能被拖到了另一块屏幕：重新算一次视觉大小补偿。
+            self.display_scale = screen_scale_compensation(window);
             self.proactive_say(
                 "刚被主人放下、安顿在新位置，俏皮地喘口气，别超过 10 字。".into(),
                 "稳啦～",
@@ -535,6 +541,8 @@ impl Render for PetView {
             if let Some((x, y)) = cfg.pos {
                 set_window_origin(window, x, y);
             }
+            // 首帧按当前所在屏幕算一次视觉大小补偿（见 screen_scale_compensation）。
+            self.display_scale = screen_scale_compensation(window);
         }
         // 显示开关变化时，order 原生窗口显隐（关掉时窗口彻底不挡点击）。
         if self.visible_applied != Some(cfg.enabled) {
@@ -545,8 +553,8 @@ impl Render for PetView {
             return div().size_full().into_any_element();
         }
 
-        // 缩放：配置缩放，乘到所有像素尺寸上。
-        let s = cfg.scale;
+        // 缩放：配置缩放 × 跨屏视觉大小补偿，乘到所有像素尺寸上。
+        let s = cfg.scale * self.display_scale;
         let p = |v: f32| px(v * s);
 
         // 一次原生取值：眼睛朝鼠标的目标偏移 + 是否落在身体内（点击穿透判定用）。
@@ -996,6 +1004,44 @@ fn cursor_and_window_origin(window: &Window) -> (f32, f32, f32, f32) {
 #[cfg(not(target_os = "macos"))]
 fn cursor_and_window_origin(_window: &Window) -> (f32, f32, f32, f32) {
     (0.0, 0.0, 0.0, 0.0)
+}
+
+/// 基准屏幕高度（points）：宠物窗口固定 point 尺寸，在这个高度的屏幕上视觉大小按
+/// 「所见即所得」处理，其余屏幕按高度比例反向补偿。
+const BASELINE_SCREEN_HEIGHT: f32 = 1080.0;
+
+/// 跨屏视觉大小补偿系数：不同屏幕的「看起来的分辨率」（points，跟 Retina/物理像素
+/// 无关）不一样——同样 260pt 宽的宠物窗口，在 point 分辨率更高的屏幕（比如 4K 屏
+/// 开原生 1:1、point 数很大）上占的视觉比例更小，看着就像变小了；反之在 point 分
+/// 辨率低的屏幕上看着变大。用宠物当前所在屏幕（`NSWindow.screen`）的高度相对基准
+/// 高度算一个系数乘到 `PetConfig.scale` 上抵消这个差异，让跨屏拖拽视觉大小基本一致。
+/// clamp 到 [0.6, 1.6] 防止极端屏幕配置把宠物缩得看不见或大到离谱。
+#[cfg(target_os = "macos")]
+fn screen_scale_compensation(window: &Window) -> f32 {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+
+    let ns_window = ns_window_of(window);
+    if ns_window.is_null() {
+        return 1.0;
+    }
+    unsafe {
+        let screen: *mut Object = msg_send![ns_window, screen];
+        if screen.is_null() {
+            return 1.0;
+        }
+        let frame: NSRect = msg_send![screen, frame];
+        let h = frame.size.height as f32;
+        if h <= 0.0 {
+            return 1.0;
+        }
+        (BASELINE_SCREEN_HEIGHT / h).clamp(0.6, 1.6)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_scale_compensation(_window: &Window) -> f32 {
+    1.0
 }
 
 /// 手动挪窗口到给定的屏幕原点坐标——用来实现「自己接住拖拽」而不是把整个拖动过程
