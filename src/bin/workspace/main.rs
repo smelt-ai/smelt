@@ -36,6 +36,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerSta
 use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::badge::Badge;
 use gpui_component::radio::{Radio, RadioGroup};
 use gpui_component::setting::{Settings, SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
@@ -51,7 +52,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use terminal_view::TerminalView;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
-gpui::actions!(smelt, [Quit]);
+gpui::actions!(smelt, [Quit, OpenSettings]);
 
 /// 命令面板里的一个可执行动作。
 #[derive(Clone)]
@@ -177,7 +178,6 @@ enum MainView {
     Git,
     Hotspot,
     History,
-    Usage,
 }
 
 /// 会话里 agent 的状态（用于总览页状态徽章）。借鉴 codex 的 ThreadStatus 细分：
@@ -823,8 +823,6 @@ struct Workspace {
     diff_comment_input: Option<Entity<gpui_component::input::InputState>>,
     /// 左侧会话侧栏是否展开（Cmd+B 切换）。
     sidebar_open: bool,
-    /// 上一次的视图（用于从设置返回）。
-    prev_view: MainView,
     /// 通知面板是否打开（标题栏铃铛切换）。
     notifications_open: bool,
     /// 命令面板（Cmd+K）；None 表示未打开。搜索/导航/确认由 ListState 负责。
@@ -990,7 +988,6 @@ impl Workspace {
             diff_selected: HashSet::new(),
             diff_comment_input: None,
             sidebar_open: true,
-            prev_view: MainView::Terminal,
             notifications_open: false,
             palette: None,
             _palette_sub: None,
@@ -2663,6 +2660,50 @@ impl Workspace {
         });
     }
 
+    /// 用量页内容：后台刷新扫描结果 + 取当前项目/全局数据拼视图。原先挂在
+    /// `MainView::Usage` 分支里，拆成独立窗口（[`UsageWindow`]）后单独抽出来，
+    /// 主窗口 render 循环里那个「用量页才刷新扫描」的判断也一并挪到这——独立窗口
+    /// 自己每次渲染都会调，不需要再靠 self.view 门控。
+    fn render_usage_page(&mut self, cx: &mut Context<Self>) -> Div {
+        self.ensure_usage_data(cx);
+        let cur_project = self.cur().and_then(|s| s.cwd(cx));
+        let data = self.usage_cache.as_ref().map(|(_, d)| d.clone());
+        // usage_view 内部用 flex_1/min_h_0 撑满，依赖外层是个 flex 容器（原先挂在
+        // 主窗口的 flex_col 主区里），独立窗口里補上这层容器它才能正确撑满。
+        div().size_full().flex().flex_col().child(usage_view(cur_project, data, cx))
+    }
+
+    /// 打开独立用量窗口：已经开着就聚焦提到前台，不重复开第二扇。跟
+    /// [`open_settings_window`] 同一套薄壳模式——真正状态（usage_cache 等）
+    /// 还挂在这个 Workspace 实体上，薄壳每次渲染转手调回来。
+    fn open_usage_window(&self, cx: &mut Context<Self>) {
+        let workspace = cx.entity();
+        cx.defer(move |cx| {
+            if let Some(handle) = cx.try_global::<UsageWindowHandle>().and_then(|h| h.0) {
+                if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+                    return;
+                }
+            }
+            let bounds = WindowBounds::centered(size(px(900.), px(700.)), cx);
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("用量".into()),
+                    ..Default::default()
+                }),
+                window_bounds: Some(bounds),
+                ..Default::default()
+            };
+            let handle = cx
+                .open_window(options, |window, cx| {
+                    window.set_rem_size(px(18.));
+                    let view = cx.new(|_cx| UsageWindow { workspace: workspace.clone() });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("打开用量窗口失败");
+            cx.set_global(UsageWindowHandle(Some(handle)));
+        });
+    }
+
     /// 文件树：展开/收起一个文件夹。
     fn toggle_expand(&mut self, path: String, cx: &mut Context<Self>) {
         if !self.expanded.remove(&path) {
@@ -3344,11 +3385,6 @@ impl Render for Workspace {
             }
         }
 
-        // 用量页：后台刷新本地 Claude Code transcript 扫描结果。
-        if self.view == MainView::Usage {
-            self.ensure_usage_data(cx);
-        }
-
         // 历史会话页：后台刷新当前项目的会话列表。
         if self.view == MainView::History {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
@@ -3915,6 +3951,13 @@ impl Render for Workspace {
                 this.show_quit_confirm = true;
                 cx.notify();
             }))
+            // Cmd+, / 应用菜单「设置…」：跟齿轮图标共用同一个独立设置窗口。
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                if this.llm_inputs.is_none() {
+                    this.init_llm_inputs(window, cx);
+                }
+                this.open_settings_window(cx);
+            }))
             // 从 Finder 拖文件/文件夹进窗口 → 当作项目开新标签（文件取其父目录）。
             .on_drop::<ExternalPaths>(cx.listener(|this, ep: &ExternalPaths, _window, cx| {
                 this.open_paths(ep.paths(), cx);
@@ -4004,13 +4047,7 @@ impl Render for Workspace {
                                             MouseButton::Left,
                                             cx.listener(|this, _, _w, cx| {
                                                 cx.stop_propagation();
-                                                if this.view == MainView::Usage {
-                                                    this.view = this.prev_view;
-                                                } else {
-                                                    this.prev_view = this.view;
-                                                    this.view = MainView::Usage;
-                                                }
-                                                cx.notify();
+                                                this.open_usage_window(cx);
                                             }),
                                         ),
                                 )
@@ -4040,7 +4077,20 @@ impl Render for Workspace {
                                             }),
                                         ),
                                 )
-                                .child(
+                                .child({
+                                    // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
+                                    // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
+                                    // 之前让整个图标变蓝，看着像常驻高亮状态，容易被当成卡住了。
+                                    let needs_attention = matches!(
+                                        self.update_status,
+                                        updater::UpdateStatus::Downloading { .. }
+                                            | updater::UpdateStatus::ReadyToInstall { .. }
+                                    ) || self.daemon_outdated == Some(true);
+                                    let gear: AnyElement = if needs_attention {
+                                        Badge::new().dot().child(Icon::new(IconName::Settings)).into_any_element()
+                                    } else {
+                                        Icon::new(IconName::Settings).into_any_element()
+                                    };
                                     div()
                                         .id("settings-gear")
                                         .flex()
@@ -4049,20 +4099,9 @@ impl Render for Workspace {
                                         .size_6()
                                         .rounded_md()
                                         .cursor_pointer()
-                                        // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮变蓝，
-                                        // 照抄铃铛的"有待处理事项"配色。
-                                        .text_color(if matches!(
-                                            self.update_status,
-                                            updater::UpdateStatus::Downloading { .. }
-                                                | updater::UpdateStatus::ReadyToInstall { .. }
-                                        ) || self.daemon_outdated == Some(true)
-                                        {
-                                            rgb(0x4a9eff).into()
-                                        } else {
-                                            c_muted
-                                        })
+                                        .text_color(c_muted)
                                         .hover(|s| s.bg(c_border))
-                                        .child(Icon::new(IconName::Settings))
+                                        .child(gear)
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, window, cx| {
@@ -4073,8 +4112,8 @@ impl Render for Workspace {
                                                 }
                                                 this.open_settings_window(cx);
                                             }),
-                                        ),
-                                ),
+                                        )
+                                }),
                         ),
                 ),
             )
@@ -4100,8 +4139,9 @@ impl Render for Workspace {
                             .min_w_0()
                     .flex()
                     .flex_col()
-                    // 会话视图 tab（终端/文件树/Git）——总览是全局视图，走侧栏入口，不在这排里。
-                    .children((self.view != MainView::Overview && self.view != MainView::Usage)
+                    // 会话视图 tab（终端/文件树/Git）——总览是全局视图，走侧栏入口，不在这排里；
+                    // 用量页已拆成独立窗口，不再是 self.view 的一种取值。
+                    .children((self.view != MainView::Overview)
                         .then(|| {
                         TabBar::new("main-view-tabs")
                             .underline()
@@ -4217,11 +4257,6 @@ impl Render for Workspace {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
                             let sessions = cwd.as_ref().and_then(|r| self.session_list.get(r).map(|(_, d)| d.clone()));
                             history_view(sessions, &self.session_detail, cx)
-                        }
-                        MainView::Usage => {
-                            let cur_project = self.cur().and_then(|s| s.cwd(cx));
-                            let data = self.usage_cache.as_ref().map(|(_, d)| d.clone());
-                            usage_view(cur_project, data, cx)
                         }
                     }),
                     )),
@@ -5868,6 +5903,21 @@ impl Render for SettingsWindow {
 struct SettingsWindowHandle(Option<WindowHandle<Root>>);
 impl Global for SettingsWindowHandle {}
 
+/// 独立用量窗口的根 view：同 [`SettingsWindow`]，薄壳转手调 `render_usage_page`。
+struct UsageWindow {
+    workspace: Entity<Workspace>,
+}
+
+impl Render for UsageWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.update(cx, |ws, cx| ws.render_usage_page(cx))
+    }
+}
+
+/// 独立用量窗口的单例句柄，同 [`SettingsWindowHandle`]。
+struct UsageWindowHandle(Option<WindowHandle<Root>>);
+impl Global for UsageWindowHandle {}
+
 /// 开一扇主工作台窗口（Workspace + Root 包装），返回其 weak 引用。
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档 + smeltd
 /// 重新拼出会话布局，跟正常重启应用效果一致。
@@ -5941,11 +5991,17 @@ fn main() {
                 include_bytes!("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf").as_slice(),
             )])
             .expect("加载图标 fallback 字体失败");
-        // 应用菜单栏 + Cmd+Q 退出：macOS 顶部「Smelt」菜单，含「退出 Smelt ⌘Q」。
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus(vec![
-            Menu::new("Smelt").items([MenuItem::action("退出 Smelt", Quit)]),
+        // 应用菜单栏：macOS 顶部「Smelt」菜单，含「设置… ⌘,」+「退出 Smelt ⌘Q」
+        // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
         ]);
+        cx.set_menus(vec![Menu::new("Smelt").items([
+            MenuItem::action("设置…", OpenSettings),
+            MenuItem::Separator,
+            MenuItem::action("退出 Smelt", Quit),
+        ])]);
 
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）+ 明暗主题
         // （默认深色，与终端配色一致；用户可在设置页切换，选择会持久化）。
