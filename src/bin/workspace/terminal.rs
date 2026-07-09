@@ -14,7 +14,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 /// 默认前景 / 背景色（前景取 iTerm2 风格灰白，正文不再偏紫）。
 pub const DEFAULT_FG: u32 = 0x00d8_d8d8;
@@ -148,12 +148,44 @@ impl Dimensions for TermSize {
 type NotifySlot = Arc<Mutex<Option<String>>>;
 
 /// 事件代理：alacritty 的 EventListener。终端响铃 Event::Bell → 写入一条默认通知；
-/// 其余事件暂忽略（重绘走 UI 定时快照）。
+/// PtyWrite / ColorRequest → 把 alacritty 算好的回应字节写回 PTY（见 write_pty）；
+/// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
     notify: NotifySlot,
     /// 终端标题（OSC 0/2）——Claude Code 用它实时报告「在干嘛」（任务名 + 状态符号）。
     title: Arc<Mutex<Option<String>>>,
+    /// 守护连接写端，跟 [`Terminal`] 自己发键盘输入共用同一把锁——两边都是往同一个
+    /// socket 写帧，混着写会把帧头/帧长/payload 交叉打乱，必须靠这把锁串行。
+    writer: Arc<Mutex<UnixStream>>,
+}
+
+impl EventProxy {
+    /// 把响应字节当作「PTY 输入」帧写回守护——对 shell/CLI 来说，终端主动应答的
+    /// 查询（光标位置、颜色）和用户敲键盘没有区别，都是它 stdin 收到的字节。
+    fn write_pty(&self, bytes: &[u8]) {
+        if let Ok(mut w) = self.writer.lock() {
+            write_frame(&mut w, 0, bytes);
+        }
+    }
+
+    /// alacritty 自己不记「当前实际渲染色」，查询颜色时要由我们把 RGB 值喂回去。
+    /// smelt 没有运行时改色的路径（无 OSC 4/10/11 set-color 场景），直接用固定的
+    /// 默认前景 / 背景 / 16 色板作答，覆盖 CLI 常见的「查一下背景色决定用什么灰」。
+    fn resolve_color(index: usize) -> Rgb {
+        let to_rgb = |hex: u32| Rgb {
+            r: ((hex >> 16) & 0xff) as u8,
+            g: ((hex >> 8) & 0xff) as u8,
+            b: (hex & 0xff) as u8,
+        };
+        if index < PALETTE.len() {
+            to_rgb(PALETTE[index])
+        } else if index == NamedColor::Background as usize {
+            to_rgb(DEFAULT_BG)
+        } else {
+            to_rgb(DEFAULT_FG)
+        }
+    }
 }
 
 impl EventListener for EventProxy {
@@ -168,6 +200,12 @@ impl EventListener for EventProxy {
                 if let Ok(mut g) = self.title.lock() {
                     *g = Some(t);
                 }
+            }
+            // 光标位置 / 设备属性等查询-应答协议：不回应会让依赖精确光标位置渲染
+            // 的 TUI（如 Claude Code 的输入框 ghost-text 补全）拿不到定位信息。
+            Event::PtyWrite(text) => self.write_pty(text.as_bytes()),
+            Event::ColorRequest(index, format) => {
+                self.write_pty(format(Self::resolve_color(index)).as_bytes())
             }
             _ => {}
         }
@@ -377,7 +415,9 @@ fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) {
 /// 一个内嵌终端：alacritty 的 Term（后台线程写、UI 线程读）+ 守护连接写端。
 pub struct Terminal {
     term: Arc<Mutex<Term<EventProxy>>>,
-    writer: UnixStream,
+    /// 写端加锁共享给 EventProxy（见其字段注释）：键盘输入和终端自动应答都从这
+    /// 发出，必须串行，不能各拿一个裸 fd 各写各的。
+    writer: Arc<Mutex<UnixStream>>,
     size: TermSize,
     /// 通知消息槽（响铃 / OSC 9 写入，UI 轮询 take_notification 取走）。
     notify: NotifySlot,
@@ -418,13 +458,15 @@ impl Terminal {
             cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
         };
 
-        // 2) alacritty 终端状态机（EventProxy 把响铃 / 标题写入共享槽）
+        // 2) alacritty 终端状态机（EventProxy 把响铃 / 标题写入共享槽，把 PTY 自动
+        //    应答写回下面这个共享写端）
         let notify: NotifySlot = Arc::new(Mutex::new(None));
         let title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let writer = Arc::new(Mutex::new(writer));
         let term = Term::new(
             Config::default(),
             &size,
-            EventProxy { notify: notify.clone(), title: title.clone() },
+            EventProxy { notify: notify.clone(), title: title.clone(), writer: writer.clone() },
         );
         let term = Arc::new(Mutex::new(term));
 
@@ -523,12 +565,26 @@ impl Terminal {
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&(cols as u32).to_be_bytes());
         payload[4..8].copy_from_slice(&(rows as u32).to_be_bytes());
-        write_frame(&mut self.writer, 1, &payload);
+        if let Ok(mut w) = self.writer.lock() {
+            write_frame(&mut w, 1, &payload);
+        }
     }
 
     /// 向 shell 写入字节（键盘输入用）：帧转发给守护。
     pub fn send_input(&mut self, bytes: &[u8]) {
-        write_frame(&mut self.writer, 0, bytes);
+        if let Ok(mut w) = self.writer.lock() {
+            write_frame(&mut w, 0, bytes);
+        }
+    }
+
+    /// 是否处于「应用光标键」模式（DECCKM）。像 Claude Code 里那种上下选列表的全屏
+    /// TUI，进入时会开这个模式，把方向键约定成 SS3（`ESC O A/B/C/D`）而非默认的
+    /// CSI（`ESC [ A/B/C/D`）——发错一种应用收不到方向键，见 keystroke_to_bytes。
+    pub fn app_cursor_mode(&self) -> bool {
+        match self.term.lock() {
+            Ok(term) => term.mode().contains(TermMode::APP_CURSOR),
+            Err(_) => false,
+        }
     }
 
     /// 快照当前可视网格 + 光标。用 renderable_content：尊重滚动偏移、带光标，
@@ -746,5 +802,71 @@ mod damage_gate_tests {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         format!("{}-{nanos}", std::process::id())
+    }
+}
+
+/// 验证 EventProxy 会把 PtyWrite / ColorRequest 这类「终端该怎么回应」的事件真的
+/// 写回去，不用起真实 shell/PTY——直接喂原始转义序列给 alacritty 的 Processor，
+/// 用 UnixStream::pair() 在另一头当"假守护"读回应帧即可，快且不 flaky。
+#[cfg(test)]
+mod event_proxy_answers_tests {
+    use super::*;
+
+    fn make_proxy() -> (EventProxy, UnixStream) {
+        let (probe, sock) = UnixStream::pair().expect("pair 失败");
+        probe.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let proxy = EventProxy {
+            notify: Arc::new(Mutex::new(None)),
+            title: Arc::new(Mutex::new(None)),
+            writer: Arc::new(Mutex::new(sock)),
+        };
+        (proxy, probe)
+    }
+
+    /// 读一帧 [type:u8][len:u32 BE][payload] 并返回 (type, payload 字符串)。
+    fn read_frame(probe: &mut UnixStream) -> (u8, String) {
+        let mut header = [0u8; 5];
+        probe.read_exact(&mut header).expect("应该收到回应帧，说明 PtyWrite 被丢了");
+        let len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; len];
+        probe.read_exact(&mut payload).expect("帧头声明的长度和实际 payload 对不上");
+        (header[0], String::from_utf8(payload).expect("回应应该是纯文本转义序列"))
+    }
+
+    /// `ESC[6n`（Cursor Position Report 查询）：alacritty 解析后应该通过
+    /// Event::PtyWrite 吐出 `ESC[row;colR`，之前这个事件被 `_ => {}` 吞掉，
+    /// Claude Code 输入框那类依赖精确光标定位的渲染（ghost-text 补全）就拿不到
+    /// 位置信息。
+    #[test]
+    fn cursor_position_query_gets_answered() {
+        let (proxy, mut probe) = make_proxy();
+        let size = TermSize { rows: 24, cols: 80 };
+        let mut term = Term::new(Config::default(), &size, proxy);
+        let mut parser: Processor = Processor::new();
+
+        parser.advance(&mut term, b"\x1b[6n");
+
+        let (ty, resp) = read_frame(&mut probe);
+        assert_eq!(ty, 0, "回应要走 type=0（PTY 输入）帧，跟键盘输入同一条路");
+        assert!(
+            resp.starts_with("\x1b[") && resp.ends_with('R'),
+            "应为 ESC[row;colR 格式的光标位置回应，实际收到: {resp:?}"
+        );
+    }
+
+    /// `OSC 11 ?`（查询当前背景色）：之前同样被吞掉，回应里应带上我们固定的
+    /// DEFAULT_BG（`0x1a1b26`）而不是空/无回应。
+    #[test]
+    fn background_color_query_gets_answered() {
+        let (proxy, mut probe) = make_proxy();
+        let size = TermSize { rows: 24, cols: 80 };
+        let mut term = Term::new(Config::default(), &size, proxy);
+        let mut parser: Processor = Processor::new();
+
+        parser.advance(&mut term, b"\x1b]11;?\x07");
+
+        let (ty, resp) = read_frame(&mut probe);
+        assert_eq!(ty, 0);
+        assert!(resp.contains("rgb:1a1a/1b1b/2626"), "应含 DEFAULT_BG 的 rgb 十六进制，实际: {resp:?}");
     }
 }

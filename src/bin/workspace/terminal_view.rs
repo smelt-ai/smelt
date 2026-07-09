@@ -739,7 +739,7 @@ impl Render for TerminalView {
                     cx.notify();
                     return;
                 }
-                if let Some(bytes) = keystroke_to_bytes(ks) {
+                if let Some(bytes) = keystroke_to_bytes(ks, this.terminal.app_cursor_mode()) {
                     this.terminal.send_input(&bytes);
                     this.terminal.scroll_to_bottom(); // 敲键盘即回到最新输出，跟真实终端一致
                     this.notification = None; // 用户按键回应 → 清「需要注意」
@@ -1174,7 +1174,11 @@ fn is_url_char(c: char) -> bool {
 
 /// 把一次「非文本按键」转成写给 PTY 的字节：特殊键和 Ctrl 组合。
 /// 可打印字符与空格走 IME 的 replace_text_in_range，不在这里处理。
-fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
+///
+/// `app_cursor`：终端是否处于 DECCKM「应用光标键」模式（见 Terminal::app_cursor_mode）。
+/// 方向键固定发 CSI（`ESC [ A`）之前，Claude Code 这类开了 DECCKM 的全屏 TUI 收不到
+/// 它期待的 SS3（`ESC O A`）序列，方向键在这类界面里就跟没按一样。
+fn keystroke_to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
 
     if m.platform {
@@ -1186,10 +1190,10 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
         "backspace" => Some(b"\x7f"),
         "tab" => Some(b"\t"),
         "escape" => Some(b"\x1b"),
-        "left" => Some(b"\x1b[D"),
-        "right" => Some(b"\x1b[C"),
-        "up" => Some(b"\x1b[A"),
-        "down" => Some(b"\x1b[B"),
+        "left" => Some(if app_cursor { b"\x1bOD" } else { b"\x1b[D" }),
+        "right" => Some(if app_cursor { b"\x1bOC" } else { b"\x1b[C" }),
+        "up" => Some(if app_cursor { b"\x1bOA" } else { b"\x1b[A" }),
+        "down" => Some(if app_cursor { b"\x1bOB" } else { b"\x1b[B" }),
         "home" => Some(b"\x1b[H"),
         "end" => Some(b"\x1b[F"),
         "delete" => Some(b"\x1b[3~"),
