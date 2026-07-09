@@ -74,11 +74,16 @@ pub struct PetConfig {
     pub color: u32,
     /// 整体缩放（0.8 小 / 1.0 中 / 1.25 大）。
     pub scale: f32,
+    /// 上次拖拽落点：原生窗口坐标 (x, y)（macOS AppKit 坐标系，左下角原点、y 向上），
+    /// 跟 `cursor_and_window_origin`/`set_window_origin` 用的是同一套坐标，直接互通、
+    /// 不用换算。None = 从未拖动过，回退默认的屏幕右下角。
+    #[serde(default)]
+    pub pos: Option<(f32, f32)>,
 }
 
 impl Default for PetConfig {
     fn default() -> Self {
-        Self { enabled: true, notify: true, color: 0x6be3c9, scale: 1.0 }
+        Self { enabled: true, notify: true, color: 0x6be3c9, scale: 1.0, pos: None }
     }
 }
 
@@ -431,13 +436,19 @@ impl PetView {
     /// 手动拖拽的松手处理：区分「拖完放下」和「按下没动=轻点」两种收尾，清掉拖拽
     /// 状态。由窗口级 MouseUpEvent 监听调用，drag_start 为空（这次 mouse up 跟我们
     /// 的拖拽无关）就直接忽略。
-    fn handle_drag_up(&mut self, cx: &mut Context<Self>) {
+    fn handle_drag_up(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.drag_start.is_none() {
             return;
         }
         if self.native_drag {
             self.native_drag = false;
             self.bounce = 1.0;
+            // 持久化这次的落点，下次开窗直接恢复到这——不然宠物永远焊在屏幕右下角。
+            let (_, _, wx, wy) = cursor_and_window_origin(window);
+            let mut c = cx.global::<PetConfig>().clone();
+            c.pos = Some((wx, wy));
+            save_pet_config(&c);
+            cx.set_global(c);
             self.proactive_say(
                 "刚被主人放下、安顿在新位置，俏皮地喘口气，别超过 10 字。".into(),
                 "稳啦～",
@@ -520,6 +531,10 @@ impl Render for PetView {
             self.chrome_stripped = true;
             #[cfg(target_os = "macos")]
             cx.set_global(PetWindowHandle(ns_window_of(window)));
+            // 开窗时默认停在右下角（见 open_pet_window），这里首帧恢复上次拖拽的落点。
+            if let Some((x, y)) = cfg.pos {
+                set_window_origin(window, x, y);
+            }
         }
         // 显示开关变化时，order 原生窗口显隐（关掉时窗口彻底不挡点击）。
         if self.visible_applied != Some(cfg.enabled) {
@@ -716,11 +731,11 @@ impl Render for PetView {
                         // window.on_mouse_event）。每帧重新注册，跟 GPUI 的预期用法
                         // 一致（"next frame" 会自动清掉）。
                         let view_up = view.clone();
-                        window.on_mouse_event(move |_ev: &MouseUpEvent, phase, _window, cx| {
+                        window.on_mouse_event(move |_ev: &MouseUpEvent, phase, window, cx| {
                             if phase != DispatchPhase::Bubble {
                                 return;
                             }
-                            view_up.update(cx, |this, cx| this.handle_drag_up(cx));
+                            view_up.update(cx, |this, cx| this.handle_drag_up(window, cx));
                         });
                     },
                 )
