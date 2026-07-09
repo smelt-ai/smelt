@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// 项目目录编码规则：Claude Code 把项目路径里的 `/` 和 `.` 都换成 `-`
@@ -27,6 +28,11 @@ pub struct SessionSummary {
     pub last_active_at: Option<DateTime<Utc>>,
     /// user + assistant 消息总数（不含被跳过的 tool_result / 内部记录）。
     pub message_count: usize,
+    /// 本份会话消耗的 token 总量（input+output+两种 cache 相加，算法跟 usage_stats
+    /// 一致），供总览卡片展示「当前会话」口径的用量——跟用量页的整项目累计口径不同。
+    pub total_tokens: u64,
+    /// 最近一次工具调用名（按文件行序，最后一个 tool_use 块），供总览卡片展示。
+    pub last_tool: Option<String>,
 }
 
 /// 一轮对话：用户发言 / Claude 回复（含它这轮调用了哪些工具）。
@@ -65,6 +71,9 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
     let mut started_at: Option<DateTime<Utc>> = None;
     let mut last_active_at: Option<DateTime<Utc>> = None;
     let mut message_count = 0usize;
+    let mut total_tokens = 0u64;
+    let mut last_tool: Option<String> = None;
+    let mut seen_uuids: HashSet<String> = HashSet::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -95,14 +104,35 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
                 }
             }
         } else {
-            // assistant：content 数组里只要有 text 块就算一条消息。
-            let has_text = row
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
+            // assistant：content 数组里只要有 text 块就算一条消息；同 uuid 只算一次
+            // （日志重写/追加异常会重复），token 累加算法跟 usage_stats 保持一致。
+            let dup = row
+                .get("uuid")
+                .and_then(|v| v.as_str())
+                .is_some_and(|u| !seen_uuids.insert(u.to_string()));
+            let blocks = row.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array());
+            let has_text = blocks
                 .is_some_and(|blocks| blocks.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text")));
             if has_text {
                 message_count += 1;
+            }
+            if let Some(blocks) = blocks {
+                for b in blocks {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
+                            last_tool = Some(name.to_string());
+                        }
+                    }
+                }
+            }
+            if !dup {
+                if let Some(usage) = row.get("message").and_then(|m| m.get("usage")) {
+                    let field = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                    total_tokens += field("input_tokens")
+                        + field("output_tokens")
+                        + field("cache_creation_input_tokens")
+                        + field("cache_read_input_tokens");
+                }
             }
         }
     }
@@ -113,6 +143,8 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
         started_at,
         last_active_at,
         message_count,
+        total_tokens,
+        last_tool,
     })
 }
 
