@@ -7,6 +7,8 @@
 //!   {"op":"open","id":"..","cwd":"..","cols":120,"rows":30}  → 进入流模式
 //!   {"op":"list"}                                            → 回 {"sessions":[..]} 后关闭
 //!   {"op":"kill","id":".."}                                  → 回 {"ok":true} 后关闭
+//!   {"op":"version"}                                         → 回 {"version":"..","exe_mtime":123} 后关闭
+//!   {"op":"shutdown"}                                        → 回 {"ok":true} 后进程退出（杀掉所有会话！）
 //!
 //! 流模式：
 //!   守护 → 客户端：原始 PTY 输出字节（attach 先重放缓冲，再实时转发）
@@ -31,6 +33,18 @@ fn sock_path() -> std::path::PathBuf {
     let dir = dirs::home_dir().unwrap_or_else(|| "/tmp".into()).join(".smelt");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("smeltd.sock")
+}
+
+/// 本进程可执行文件的 mtime（unix 秒）：作为「版本身份」上报给 GUI。GUI 拿磁盘上
+/// smeltd 二进制的当前 mtime 一比，就知道正在跑的守护是不是重装/重编译前的旧进程。
+fn exe_mtime_secs() -> u64 {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 会话控制端：PTY 输入 / resize / 杀进程。
@@ -72,15 +86,16 @@ fn main() {
     // socket 仅本用户可读写。
     let _ = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
 
+    let exe_mtime = exe_mtime_secs();
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
         let sessions = Arc::clone(&sessions);
-        thread::spawn(move || handle_conn(conn, sessions));
+        thread::spawn(move || handle_conn(conn, sessions, exe_mtime));
     }
 }
 
-fn handle_conn(conn: UnixStream, sessions: Sessions) {
+fn handle_conn(conn: UnixStream, sessions: Sessions, exe_mtime: u64) {
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。
     let Ok(rc) = conn.try_clone() else { return };
     let mut reader = BufReader::new(rc);
@@ -108,6 +123,22 @@ fn handle_conn(conn: UnixStream, sessions: Sessions) {
             }
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+        }
+        Some("version") => {
+            let mut c = conn;
+            let _ = writeln!(
+                c,
+                "{}",
+                serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "exe_mtime": exe_mtime })
+            );
+        }
+        Some("shutdown") => {
+            let mut c = conn;
+            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+            let _ = c.shutdown(Shutdown::Both);
+            // 直接退出：PTY 全归子进程持有，本进程一死子进程读端 EOF/SIGHUP，
+            // 所有会话随之终止 —— 这是「重启守护」明知故犯的代价，调用方必须先提示用户。
+            std::process::exit(0);
         }
         _ => {}
     }

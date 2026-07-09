@@ -267,6 +267,95 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "smeltd 未就绪"))
 }
 
+/// 探测正在跑的守护：连不上（守护没起，`connect_daemon` 会自己拉起磁盘上最新的）
+/// 判 `NotRunning`；连上了但读不出合法的 "version" 响应——老到连这个探测本身都不
+/// 认识——判 `Unresponsive`，这种必然过期；否则拿到对方自报的可执行文件 mtime
+/// （见 smeltd.rs::exe_mtime_secs）。
+enum DaemonProbe {
+    NotRunning,
+    Unresponsive,
+    ExeMtime(u64),
+}
+
+fn probe_daemon() -> DaemonProbe {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return DaemonProbe::NotRunning;
+    };
+    let mtime = (|| -> Option<u64> {
+        writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
+        let mut resp = String::new();
+        BufReader::new(s).read_line(&mut resp).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&resp).ok()?;
+        v["exe_mtime"].as_u64()
+    })();
+    match mtime {
+        Some(m) => DaemonProbe::ExeMtime(m),
+        None => DaemonProbe::Unresponsive,
+    }
+}
+
+/// 磁盘上 smeltd 二进制（GUI 同目录）的当前 mtime（秒）。
+fn disk_smeltd_mtime() -> Option<u64> {
+    let exe = std::env::current_exe().ok()?;
+    let daemon = exe.with_file_name("smeltd");
+    let modified = std::fs::metadata(daemon).ok()?.modified().ok()?;
+    modified.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+/// 守护是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见：旧守护不会自动重启，
+/// 新代码要等手动重启守护才生效）。守护没起 → false（没什么可重启的，交给
+/// `connect_daemon` 按需拉起最新的）；守护活着但连 "version" op 都不认识 → true
+/// （老到必然过期）；查得到 mtime 但磁盘那份查不到 → false（避免误报打扰用户）。
+pub fn daemon_outdated() -> bool {
+    match probe_daemon() {
+        DaemonProbe::NotRunning => false,
+        DaemonProbe::Unresponsive => true,
+        DaemonProbe::ExeMtime(running) => disk_smeltd_mtime().is_some_and(|disk| disk > running),
+    }
+}
+
+/// 让守护自己退出。**会杀掉它托管的所有 PTY 会话**（进程一死子进程 EOF/SIGHUP），
+/// 调用前必须先让用户明确知情确认。退出后调 ensure_daemon_running() 拉起磁盘上
+/// 最新的 smeltd 二进制。
+///
+/// "shutdown" op 本身也是新加的——老到连它都不认识的守护会照单全收地忽略这条消息，
+/// 连接照旧开着，优雅关闭形同没发生。等一小段时间探测它是否真的死了，没死就按
+/// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
+pub fn restart_daemon() {
+    let path = sock_path();
+    if let Ok(mut s) = UnixStream::connect(&path) {
+        let _ = writeln!(s, "{}", serde_json::json!({ "op": "shutdown" }));
+        let mut resp = String::new();
+        let _ = BufReader::new(s).read_line(&mut resp);
+    }
+    for _ in 0..10 {
+        if UnixStream::connect(&path).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    force_kill_socket_owner(&path);
+}
+
+/// 兜底：找到正监听着 `path` 的进程并 SIGKILL，再清掉残留 socket 文件。用于优雅
+/// shutdown 对老守护不生效的情况——`lsof -t` 直接按 socket 文件反查 pid，不经过
+/// 应用层协议，多老的守护都杀得掉。
+fn force_kill_socket_owner(path: &std::path::Path) {
+    let Ok(out) = std::process::Command::new("lsof").arg("-t").arg(path).output() else {
+        return;
+    };
+    for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+        let _ = std::process::Command::new("kill").arg("-9").arg(pid).status();
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+/// 确保守护活着，没有就拉起来（复用 connect_daemon 的探测+拉起+轮询逻辑）。
+/// 调用方（重启守护后想立刻刷新状态）负责扔到后台线程，避免卡 UI（最坏等 5s）。
+pub fn ensure_daemon_running() {
+    let _ = connect_daemon();
+}
+
 /// 让守护杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
 pub fn kill_remote(id: &str) {
     let Ok(mut s) = UnixStream::connect(sock_path()) else { return };
