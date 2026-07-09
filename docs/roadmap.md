@@ -44,6 +44,33 @@
 - smeltd 加 JSON-RPC 结构化控制通道：会话状态从「解析字节流猜」升级为「协议事实」
 - Claude Code hook → `smelt-notify` 小工具直写 smeltd socket（比解析 OSC 更可靠的第二信源）
 - 会话卡片「运行了多久」计时、token 用量 / 上下文余量展示
+
+## AgentHub 借鉴项（同类 macOS app，jamesrochabrun/AgentHub）
+
+### 🔲 会话监控：用 watcher 而非轮询，五态状态机
+验证过的实现路径，跟 smelt 已有的「agent 状态五态细分」（`1dd36fe`）思路一致，做「会话监控层」
+（解析 `~/.claude/projects/*.jsonl`）时可直接抄：
+- 文件系统 watcher 驱动，不轮询
+- 状态划分：`Thinking / Executing Tool / Awaiting Approval / Waiting for User / Idle`
+
+### 🔲 Git worktree 集成到 UI
+比「每标签独立项目目录」这条更进一步，不只是选目录：
+- 在 UI 里建 / 删 sibling worktree、在新分支上直接开会话
+- **Remix**：把当前会话 remix 到一个隔离 worktree 继续跑，可切换 provider（Claude ↔ Codex），
+  原会话的完整 transcript 作为上下文传给新会话——同一个任务想换个 provider 或分支试错，
+  不用从头给上下文
+
+### 🔲 交互式 diff（不只是只读 diff 视图）
+smelt 现在的 git diff 视图是看的；AgentHub 能在 diff 里选中改动、写行内评论，批量发回给
+agent 会话继续处理。把「审查」和「指挥」打通，符合 smelt「驾驶舱」定位——人看导航、下指令，
+不是自己去改代码。落地大概分两步：
+- diff 视图支持行内选区 + 评论输入（UI 层，在现有 `similar` 字符级 diff 基础上加交互）
+- 评论批量打包，通过 smeltd 写回对应会话的 PTY（或未来的结构化控制通道）
+
+### 不抄的一点
+AgentHub 卡片移除时会杀掉 shell 进程树防孤儿进程——跟 smeltd「GUI 退出/崩溃不影响 shell
+存活」的核心设计哲学相反，不借鉴。MCP Apps / iOS Simulator / Storybook 等偏 Swift 移动端
+生态的功能，跟 smelt 定位不搭，跳过。
 - macOS Seatbelt 沙箱（`sandbox-exec` + SBPL 模板）跑 agent 命令
 
 ## 宠物
