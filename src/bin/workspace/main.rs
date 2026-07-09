@@ -2630,10 +2630,27 @@ impl Workspace {
                             .justify_between()
                             .items_center()
                             .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(fg)
-                                    .child(concat!("当前版本 v", env!("CARGO_PKG_VERSION"))),
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(fg)
+                                            .child(concat!("当前版本 v", env!("CARGO_PKG_VERSION"))),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("settings-github-link")
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .text_color(muted)
+                                            .hover(|s| s.text_color(fg))
+                                            .child("GitHub ↗")
+                                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                                cx.open_url("https://github.com/zzfn/smelt");
+                                            }),
+                                    ),
                             )
                             .child(
                                 h_flex()
@@ -3950,15 +3967,21 @@ impl Render for Workspace {
                     .border_t_1()
                     .border_color(rgba(0xffffff0d))
                     .child(div().flex().w_full().child(open_project_button(cx)))
-                    // 版本号居中：编译期取 Cargo.toml 的 version。
+                    // 版本号居中：编译期取 Cargo.toml 的 version；点一下跳 GitHub 仓库。
                     .child(
                         div()
+                            .id("version-github-link")
                             .w_full()
                             .flex()
                             .justify_center()
+                            .cursor_pointer()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                            .hover(|s| s.text_color(cx.theme().foreground))
+                            .child(concat!("v", env!("CARGO_PKG_VERSION")))
+                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                cx.open_url("https://github.com/zzfn/smelt");
+                            }),
                     ),
             );
 
@@ -4121,9 +4144,17 @@ impl Render for Workspace {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(Icon::new(IconName::SquareTerminal))
-                                .child(div().font_bold().child("smelt"))
-                                .child(div().text_color(c_muted).child(active_title)),
+                                .child(
+                                    img(Arc::new(Image::from_bytes(
+                                        ImageFormat::Png,
+                                        include_bytes!("../../../assets/icon-1024.png").to_vec(),
+                                    )))
+                                    .w(px(16.))
+                                    .h(px(16.))
+                                    .rounded(px(4.)),
+                                )
+                                .child(div().text_sm().font_bold().child("smelt"))
+                                .child(div().text_sm().text_color(c_muted).child(active_title)),
                         )
                         // 右侧：铃铛（通知面板）+ 齿轮（外观设置）。stop_propagation 避免触发拖拽。
                         .child(
