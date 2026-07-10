@@ -11,11 +11,16 @@ use smol::Timer;
 
 use crate::terminal::{self, Terminal};
 
-/// 选区高亮背景色。
-const SEL_BG: u32 = 0x0033_4a6a;
+/// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
+/// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
+fn sel_bg() -> u32 {
+    if terminal::is_dark() { 0x0033_4a6a } else { 0x00ad_d6ff }
+}
 
-/// 悬停链接的高亮前景色。
-const LINK_FG: u32 = 0x007d_cfff;
+/// 悬停链接的高亮前景色：同上，浅色主题换成对比度够的蓝。
+fn link_fg() -> u32 {
+    if terminal::is_dark() { 0x007d_cfff } else { 0x0009_69da }
+}
 
 /// 终端字体：Nerd Font 的严格等宽变体（含图标/powerline 字形，且单格宽对齐）。
 pub const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
@@ -38,9 +43,39 @@ fn terminal_font() -> Font {
 /// 终端网格刷新间隔（后台线程在更新，UI 定时快照重绘）。
 const REFRESH: Duration = Duration::from_millis(30);
 
-/// 终端字体与网格度量（渲染与行列计算共用，保持一致）。
-pub const FONT_PX: f32 = 13.0;
-pub const LINE_PX: f32 = 18.0;
+// Tab / Shift-Tab 在终端聚焦时的专属动作。
+//
+// gpui-component 的 `Root` 全局把 "tab"/"shift-tab" 绑成了焦点跳转（`window.focus_next`），
+// context 是 "Root"——而 GPUI 按键分发时，keymap 匹配到的 action 会在
+// `on_key_down` 之类的原始按键监听器之前就被消费掉，根本轮不到终端自己处理，
+// 导致 Tab 补全在终端里形同虚设。这里在 "Terminal" 这个更贴近焦点的 context 上
+// 重新绑一份，深度更深的 context 按 GPUI 的 keymap 优先级规则会盖过 Root 那份，
+// 从而把 Tab/Shift-Tab 交还给终端本身（见下方 render 里的 `.on_action`）。
+gpui::actions!(smelt_terminal, [TerminalTab, TerminalBackTab]);
+
+/// 终端字号（px）：跟随设置页「字体大小」全局切换，见 `set_font_px`。单进程只有
+/// 一套终端字号，用全局原子量足够，不必给每处渲染/量measure 调用各传一份——
+/// 跟 terminal.rs 的 DARK_MODE 是同一路数。
+static FONT_PX_ATOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(13);
+/// 字号可调范围：太小认不清字形，太大一屏放不下几列，都没意义。
+pub const MIN_FONT_PX: u32 = 9;
+pub const MAX_FONT_PX: u32 = 22;
+
+/// 切换终端字号（px，自动夹到 [MIN_FONT_PX, MAX_FONT_PX]）。
+pub fn set_font_px(px: u32) {
+    FONT_PX_ATOM.store(px.clamp(MIN_FONT_PX, MAX_FONT_PX), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前终端字号（px）。
+pub fn font_px() -> f32 {
+    FONT_PX_ATOM.load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
+/// 行高：固定按原始 18/13 的比例跟字号一起缩放（原设计：13px 字对 18px 行高）。
+fn line_px() -> f32 {
+    font_px() * (18.0 / 13.0)
+}
+
 /// 等宽字宽 ≈ 字号 × 该比例（用于从窗口宽度估算列数）。
 const CELL_W_RATIO: f32 = 0.6;
 /// 终端内容的每侧内边距（避免文字贴边被裁）。canvas 覆盖层保持满尺寸，
@@ -417,7 +452,7 @@ impl TerminalView {
         let (ox, oy) = self.grid_origin.get();
         let x = (f32::from(pos.x) - ox).max(0.0);
         let y = (f32::from(pos.y) - oy).max(0.0);
-        let row = (y / LINE_PX).floor() as usize;
+        let row = (y / line_px()).floor() as usize;
         (row, self.col_for_x(row, x, window))
     }
 
@@ -448,7 +483,7 @@ impl TerminalView {
             underline: None,
             strikethrough: None,
         };
-        let layout = window.text_system().layout_line(&line, px(FONT_PX), &[run], None);
+        let layout = window.text_system().layout_line(&line, px(font_px()), &[run], None);
         match layout.index_for_x(px(x)) {
             // x 落在某个字形内 → 反查其字节偏移对应的网格列。
             Some(ix) => match byte_to_col.binary_search_by_key(&ix, |&(b, _)| b) {
@@ -500,6 +535,20 @@ impl TerminalView {
         } else {
             Some(out)
         }
+    }
+
+    /// 某行 [a, b) 两个网格列之间要按几次左右方向键才能跨过去——不能直接拿列号
+    /// 相减：宽字符（中/日/韩等）占两格但对 shell 的行编辑器来说只是一个字符，一次
+    /// 方向键跨的是「一个字符」而不是「一格」。按列差算会在宽字符行里按过头（见
+    /// Option+点击移动光标的调用处）。真正的字符数 = 该区间内非占位格（ch != '\0'）
+    /// 的格子数——占位格是 terminal.rs 里宽字符后面那个跳过的空壳格，不代表独立字符。
+    fn char_steps_between(&self, row: usize, a: usize, b: usize) -> usize {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let frame = self.terminal.snapshot();
+        let Some(cells) = frame.rows.get(row) else {
+            return hi - lo;
+        };
+        cells[lo..hi.min(cells.len())].iter().filter(|c| c.ch != '\0').count()
     }
 
     /// 双击选词：以点击单元为中心，向两侧扩展到空白为止。
@@ -631,10 +680,10 @@ impl EntityInputHandler for TerminalView {
         // 候选窗要摆在光标格子上：从网格原点按 列×字宽 / 行×行高 偏移。
         let (row, col) = self.cursor.unwrap_or((0, 0));
         let origin = element_bounds.origin
-            + point(px(PAD_X + col as f32 * self.cell_w), px(PAD_Y + row as f32 * LINE_PX));
+            + point(px(PAD_X + col as f32 * self.cell_w), px(PAD_Y + row as f32 * line_px()));
         Some(Bounds {
             origin,
-            size: size(px(2.0), px(LINE_PX)),
+            size: size(px(2.0), px(line_px())),
         })
     }
 
@@ -669,11 +718,11 @@ impl Render for TerminalView {
                 strikethrough: None,
             };
             let measured =
-                f32::from(window.text_system().layout_line("M", px(FONT_PX), &[run], None).width);
+                f32::from(window.text_system().layout_line("M", px(font_px()), &[run], None).width);
             let cell_w = if measured > 1.0 {
                 measured
             } else {
-                FONT_PX * CELL_W_RATIO
+                font_px() * CELL_W_RATIO
             };
             self.cell_w = cell_w; // 供鼠标坐标换算
             // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
@@ -681,7 +730,7 @@ impl Render for TerminalView {
             if w > 1.0 && h > 1.0 {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
-                let grid_rows = (((h - 2.0 * PAD_Y) / LINE_PX).floor() as usize).clamp(2, 1000);
+                let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
                 self.terminal.resize(grid_rows, cols);
             }
         }
@@ -699,9 +748,12 @@ impl Render for TerminalView {
         let size_cell = self.grid_size.clone();
 
         // 背景层：底色（带透明度）+ 可选背景图，铺在终端内容之下。
-        // 终端「默认底色」格子渲染时留空（见 render_row），故背景层能透出。
+        // 终端「默认底色」格子渲染时留空（见 render_row），故背景层能透出——所以这层
+        // 的颜色必须跟 terminal::default_bg() 是同一套逻辑：用户没手动选过背景色时
+        // 跟主题模式走，选过了就保留用户的选择（不因为切深浅色模式而被顶掉）。
         let ap = cx.global::<crate::Appearance>().clone();
-        let mut bg_layer = div().absolute().inset_0().bg(rgb(ap.bg_color));
+        let bg_color = if ap.bg_color_is_default() { terminal::default_bg() } else { ap.bg_color };
+        let mut bg_layer = div().absolute().inset_0().bg(rgb(bg_color));
         if let Some(path) = &ap.bg_image {
             bg_layer = bg_layer.child(
                 img(std::path::PathBuf::from(path))
@@ -716,14 +768,31 @@ impl Render for TerminalView {
         div()
             .relative()
             .track_focus(&self.focus_handle)
+            // 见 TerminalTab/TerminalBackTab 上的注释：让 Tab/Shift-Tab 在终端聚焦时
+            // 归终端自己处理，别被 Root 的全局焦点跳转吃掉。
+            .key_context("Terminal")
             .size_full()
             // 关键：裁剪溢出 + 允许收缩到 0，否则长行的 min-content 宽度会把
             // 容器越撑越宽，canvas 量到更大宽度 → 列数变多 → 行更长，形成放大循环。
             .overflow_hidden()
             .min_w_0()
             .min_h_0()
-            .text_color(rgb(terminal::DEFAULT_FG))
+            .text_color(rgb(terminal::default_fg()))
             .font_family(FONT_FAMILY)
+            .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
+                this.terminal.send_input(b"\t");
+                this.terminal.scroll_to_bottom();
+                this.notification = None;
+                this.completed_unread = false;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &TerminalBackTab, _window, cx| {
+                this.terminal.send_input(b"\x1b[Z"); // xterm 反向 Tab（back-tab）序列
+                this.terminal.scroll_to_bottom();
+                this.notification = None;
+                this.completed_unread = false;
+                cx.notify();
+            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 let ks = &ev.keystroke;
                 let m = &ks.modifiers;
@@ -769,13 +838,13 @@ impl Render for TerminalView {
                     this.scroll_accum = 0.0;
                 }
                 let delta_px = match ev.delta {
-                    ScrollDelta::Lines(p) => p.y * LINE_PX,
+                    ScrollDelta::Lines(p) => p.y * line_px(),
                     ScrollDelta::Pixels(p) => f32::from(p.y),
                 };
                 this.scroll_accum += delta_px;
-                let lines = (this.scroll_accum / LINE_PX).trunc();
+                let lines = (this.scroll_accum / line_px()).trunc();
                 if lines != 0.0 {
-                    this.scroll_accum -= lines * LINE_PX;
+                    this.scroll_accum -= lines * line_px();
                     // 按终端模式分流：TUI（Claude Code）转成鼠标滚轮事件，普通 shell 滚历史。
                     let (row, col) = this.pos_to_cell(ev.position, window);
                     this.terminal.scroll_wheel(lines as i32, row, col);
@@ -794,6 +863,32 @@ impl Render for TerminalView {
                             cx.open_url(&open_target(&url));
                             return;
                         }
+                    }
+                    // Option+点击：模拟 iTerm2/Terminal.app 的「点击移动光标」——只在
+                    // 点击的正是光标所在那一行时才生效（shell 当前输入行），发对应数量
+                    // 的左右方向键让 shell 的行编辑器（readline/zsh line editor）把光标
+                    // 挪过去。终端本身没法直接把光标「传送」到任意格：光标位置由 shell
+                    // 端的行编辑器状态决定，我们只能模拟按键让它自己移动。
+                    if ev.modifiers.alt {
+                        if let Some((cursor_row, cursor_col)) = this.cursor {
+                            if cell.0 == cursor_row && cell.1 != cursor_col {
+                                let app_cursor = this.terminal.app_cursor_mode();
+                                let step: &[u8] = if cell.1 > cursor_col {
+                                    if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
+                                } else if app_cursor {
+                                    b"\x1bOD"
+                                } else {
+                                    b"\x1b[D"
+                                };
+                                let count = this.char_steps_between(cell.0, cursor_col, cell.1);
+                                let mut bytes = Vec::with_capacity(step.len() * count);
+                                for _ in 0..count {
+                                    bytes.extend_from_slice(step);
+                                }
+                                this.terminal.send_input(&bytes);
+                            }
+                        }
+                        return;
                     }
                     this.sel = match ev.click_count {
                         2 => this.word_at(cell),         // 双击选词
@@ -869,8 +964,8 @@ impl Render for TerminalView {
                     .size_full()
                     .px(px(PAD_X))
                     .py(px(PAD_Y))
-                    .text_size(px(FONT_PX))
-                    .line_height(px(LINE_PX))
+                    .text_size(px(font_px()))
+                    .line_height(px(line_px()))
                     .children(frame.rows.into_iter().enumerate().map(move |(r, row)| {
                         let cc = match cursor {
                             Some((cr, cc)) if cr == r => Some(cc),
@@ -945,13 +1040,13 @@ fn render_row(
         let mut bg = c.bg;
         let mut underline = c.underline;
         if is_link(i) {
-            fg = LINK_FG;
+            fg = link_fg();
             underline = true;
         }
         if Some(i) == cursor_col {
             std::mem::swap(&mut fg, &mut bg);
         } else if is_sel(i) {
-            bg = SEL_BG;
+            bg = sel_bg();
         }
         (fg, bg, c.bold, underline)
     };
@@ -981,7 +1076,7 @@ fn render_row(
             font: fnt,
             color: Hsla::from(rgb(fg)),
             // 默认底色格子留空（不画背景），让下面的背景层 / 图片 / 桌面透出。
-            background_color: (bg != terminal::DEFAULT_BG).then(|| Hsla::from(rgb(bg))),
+            background_color: (bg != terminal::default_bg()).then(|| Hsla::from(rgb(bg))),
             underline: underline.then(|| UnderlineStyle {
                 thickness: px(1.0),
                 color: Some(Hsla::from(rgb(fg))),
@@ -992,7 +1087,7 @@ fn render_row(
     }
 
     div()
-        .h(px(LINE_PX))
+        .h(px(line_px()))
         .child(StyledText::new(line).with_runs(runs))
 }
 

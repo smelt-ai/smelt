@@ -276,18 +276,21 @@ impl Render for ProjectDrag {
 struct Session {
     layout: Pane,
     active: Entity<TerminalView>,
+    /// 用户手动改过的会话名（侧栏右键「重命名」）；None = 用下面 title() 的自动推导。
+    custom_title: Option<String>,
 }
 
 impl Session {
     /// 单终端会话。
     fn single(view: Entity<TerminalView>) -> Self {
-        Self { layout: Pane::Leaf(view.clone()), active: view }
+        Self { layout: Pane::Leaf(view.clone()), active: view, custom_title: None }
     }
 
-    /// 会话标题：仅当终端标题是 Claude Code 风格（✳ 或 Braille spinner 开头）时用它的
-    /// 任务名，否则回退 cwd 末段——避免把普通 shell 的 user@host:path 标题当任务名。
+    /// 会话标题：用户重命名过就用那个；否则仅当终端标题是 Claude Code 风格（✳ 或
+    /// Braille spinner 开头）时取它的任务名，再否则回退 cwd 末段——避免把普通 shell 的
+    /// user@host:path 标题当任务名。
     fn title(&self, cx: &App) -> String {
-        pane_title(&self.active, cx)
+        self.custom_title.clone().unwrap_or_else(|| pane_title(&self.active, cx))
     }
 
     /// 会话工作目录：活动终端的 cwd（侧栏分组用）。
@@ -610,11 +613,13 @@ struct WsState {
     active: usize,
 }
 
-/// 单个会话的持久化镜像：分屏树 + 会话内活动叶子（遍历序）。
+/// 单个会话的持久化镜像：分屏树 + 会话内活动叶子（遍历序）+ 用户重命名过的会话名。
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SessionState {
     layout: PaneState,
     active: usize,
+    #[serde(default)]
+    custom_title: Option<String>,
 }
 
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点。
@@ -737,16 +742,30 @@ struct Appearance {
     /// 明暗主题模式。
     #[serde(default = "default_theme_mode")]
     theme_mode: ThemeMode,
+    /// 终端字号（px）。
+    #[serde(default = "default_font_px")]
+    font_px: u32,
 }
+
+/// 老版本 appearance.json 没有 font_px 字段时的回退，跟 terminal_view::FONT_PX_ATOM
+/// 的出厂默认值保持一致。
+fn default_font_px() -> u32 {
+    13
+}
+
+/// `bg_color` 从未被用户改过时的出厂值——终端背景层要不要跟着主题模式自动换色，
+/// 就看当前值是不是还等于这个（见 `Appearance::bg_color_is_default`）。
+const DEFAULT_BG_COLOR: u32 = 0x1a1b26;
 
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            bg_color: 0x1a1b26,
+            bg_color: DEFAULT_BG_COLOR,
             bg_image: None,
             opacity: 1.0,
             blur: false,
             theme_mode: ThemeMode::Dark,
+            font_px: default_font_px(),
         }
     }
 }
@@ -763,6 +782,13 @@ impl Appearance {
         } else {
             WindowBackgroundAppearance::Opaque
         }
+    }
+
+    /// `bg_color` 是否还是没被用户碰过的出厂值。是的话终端背景层该跟主题模式自动
+    /// 切换（见 terminal_view.rs 的 bg_layer）；用户显式选过颜色后就不再跟随，
+    /// 保留其选择（深浅色模式来回切也不丢）。
+    fn bg_color_is_default(&self) -> bool {
+        self.bg_color == DEFAULT_BG_COLOR
     }
 }
 
@@ -996,8 +1022,9 @@ struct Workspace {
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
     llm_subs: Vec<Subscription>,
-    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 背景色 / 宠物色取色器。
+    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器。
     opacity_slider: Option<Entity<SliderState>>,
+    font_size_slider: Option<Entity<SliderState>>,
     bg_color_picker: Option<Entity<ColorPickerState>>,
     pet_color_picker: Option<Entity<ColorPickerState>>,
     /// 上面三个组件的变更订阅。
@@ -1049,6 +1076,9 @@ struct Workspace {
     /// 上次同步给 Dock 角标的「需要关注」会话数；None 强制首帧同步一次。
     /// 只在这个数变化时才调用 Cocoa API，避免每次 render 都发一遍。
     dock_badge_count: Option<usize>,
+    /// 上次同步给菜单栏下拉菜单的会话快照；None 强制首帧同步一次。只在快照真的变化
+    /// 时才重建 AppKit 菜单，避免每次 render 都拆了重建。
+    status_menu_snapshot: Option<Vec<status_item::SessionEntry>>,
     /// 用量页数据缓存：(取得时刻, 数据)。扫全部本地 transcript 可能有几十毫秒，
     /// 绝不在 render 里同步跑，后台算完缓存，render 只读。
     usage_cache: Option<(Instant, Rc<usage_stats::UsageData>)>,
@@ -1059,6 +1089,12 @@ struct Workspace {
     sess_drop_hint: Option<(EntityId, bool)>,
     /// 项目分组拖拽悬停中的目标项目名，作用同上。
     proj_drop_hint: Option<SharedString>,
+    /// 正在重命名的会话下标 + 弹窗里的文本框（None = 没在重命名）。见
+    /// `start_rename_session`/`confirm_rename_session`。
+    rename_session: Option<usize>,
+    rename_input: Option<Entity<gpui_component::input::InputState>>,
+    /// 重命名文本框的事件订阅句柄，随 rename_input 一起换（回车/失焦提交）。
+    _rename_sub: Option<Subscription>,
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
     daemon_outdated: Option<bool>,
@@ -1097,7 +1133,7 @@ impl Workspace {
                     let mut leaves = Vec::new();
                     let layout = rebuild_pane(&ss.layout, &mut leaves, cx);
                     if let Some(active) = leaves.get(ss.active).or_else(|| leaves.first()).cloned() {
-                        sessions.push(Session { layout, active });
+                        sessions.push(Session { layout, active, custom_title: ss.custom_title.clone() });
                     }
                 }
                 active_session = s.active_session;
@@ -1106,7 +1142,7 @@ impl Workspace {
                 let mut leaves = Vec::new();
                 let layout = rebuild_pane(ps, &mut leaves, cx);
                 if let Some(active) = leaves.get(s.active).or_else(|| leaves.first()).cloned() {
-                    sessions.push(Session { layout, active });
+                    sessions.push(Session { layout, active, custom_title: None });
                 }
             } else {
                 // 更旧格式：cwd 列表 → 每个 cwd 一个独立会话。
@@ -1173,6 +1209,7 @@ impl Workspace {
             llm_inputs: None,
             llm_subs: Vec::new(),
             opacity_slider: None,
+            font_size_slider: None,
             bg_color_picker: None,
             pet_color_picker: None,
             settings_subs: Vec::new(),
@@ -1183,10 +1220,14 @@ impl Workspace {
             show_quit_confirm: false,
             update_status: updater::UpdateStatus::default(),
             dock_badge_count: None,
+            status_menu_snapshot: None,
             usage_cache: None,
             usage_inflight: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
+            rename_session: None,
+            rename_input: None,
+            _rename_sub: None,
             daemon_outdated: None,
             show_daemon_restart_confirm: false,
             focus_handle: cx.focus_handle(),
@@ -1259,11 +1300,18 @@ impl Workspace {
 
         self.llm_inputs = Some(LlmInputs { base_url, api_key, model, persona });
 
-        // —— 有状态组件：不透明度滑块 + 背景色 / 宠物色取色器 ——
+        // —— 有状态组件：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器 ——
         let ap = cx.global::<Appearance>().clone();
         let pc = cx.global::<pet::PetConfig>().clone();
         let opacity_slider = cx.new(|_| {
             SliderState::new().min(60.0).max(100.0).step(5.0).default_value(ap.opacity * 100.0)
+        });
+        let font_size_slider = cx.new(|_| {
+            SliderState::new()
+                .min(terminal_view::MIN_FONT_PX as f32)
+                .max(terminal_view::MAX_FONT_PX as f32)
+                .step(1.0)
+                .default_value(ap.font_px as f32)
         });
         let bg_color_picker =
             cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(ap.bg_color)));
@@ -1278,6 +1326,20 @@ impl Workspace {
                 if let SliderValue::Single(x) = v {
                     let op = (*x / 100.0).clamp(0.3, 1.0);
                     this.set_appearance(move |a| a.opacity = op, cx);
+                }
+            },
+        ));
+        self.settings_subs.push(cx.subscribe(
+            &font_size_slider,
+            |this, _s, ev: &SliderEvent, cx| {
+                let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
+                if let SliderValue::Single(x) = v {
+                    let size = x.round().clamp(
+                        terminal_view::MIN_FONT_PX as f32,
+                        terminal_view::MAX_FONT_PX as f32,
+                    ) as u32;
+                    terminal_view::set_font_px(size);
+                    this.set_appearance(move |a| a.font_px = size, cx);
                 }
             },
         ));
@@ -1302,6 +1364,7 @@ impl Workspace {
             },
         ));
         self.opacity_slider = Some(opacity_slider);
+        self.font_size_slider = Some(font_size_slider);
         self.bg_color_picker = Some(bg_color_picker);
         self.pet_color_picker = Some(pet_color_picker);
     }
@@ -1504,7 +1567,7 @@ impl Workspace {
                     .iter()
                     .position(|x| *x == s.active.entity_id())
                     .unwrap_or(0);
-                SessionState { layout, active }
+                SessionState { layout, active, custom_title: s.custom_title.clone() }
             })
             .collect();
         let sidebar_w = self.root_resize.read(cx).sizes().first().copied().map(f32::from);
@@ -1687,6 +1750,49 @@ impl Workspace {
         if n > 0 {
             self.activate((self.active_session + n - 1) % n, window, cx);
         }
+    }
+
+    /// 侧栏右键「重命名」：弹出文本框，预填当前标题。回车 / 点「确定」提交，见
+    /// `confirm_rename_session`；提交前的输入放在独立的 rename_input，不影响 Session
+    /// 本身，点「取消」（走 cancel_rename_session）就等于什么都没发生。
+    ///
+    /// 注意：这里故意不监听 `InputEvent::Blur` 去自动提交——点「取消」按钮本身会先
+    /// 让输入框失焦，若失焦也提交，「取消」就会在关闭前先把文本框里的内容存下来，
+    /// 跟按钮的字面意思相反。所以提交只认 Enter 或显式点「确定」。
+    fn start_rename_session(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::{InputEvent, InputState};
+        let Some(current) = self.sessions.get(ix).map(|s| s.title(cx)) else { return };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self._rename_sub = Some(cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.confirm_rename_session(window, cx);
+            }
+        }));
+        self.rename_session = Some(ix);
+        self.rename_input = Some(input);
+        cx.notify();
+    }
+
+    /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题。
+    fn confirm_rename_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.rename_session.take() else { return };
+        let Some(input) = self.rename_input.take() else { return };
+        self._rename_sub = None;
+        let text = input.read(cx).value().trim().to_string();
+        if let Some(s) = self.sessions.get_mut(ix) {
+            s.custom_title = (!text.is_empty()).then_some(text);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// 取消重命名：不落地任何改动。
+    fn cancel_rename_session(&mut self, cx: &mut Context<Self>) {
+        self.rename_session = None;
+        self.rename_input = None;
+        self._rename_sub = None;
+        cx.notify();
     }
 
     /// 无 window 版：改全局 + 存盘 + 重绘。窗口背景（透明/模糊）由 render 里的
@@ -2278,6 +2384,85 @@ impl Workspace {
             )
     }
 
+    /// 侧栏「重命名」弹层：与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩），
+    /// 正文换成预填当前标题的文本框。仅在 self.rename_input 就绪时被调用（见
+    /// start_rename_session/上面 .children(self.rename_session.is_some()...)）。
+    fn render_rename_session(&self, cx: &mut Context<Self>) -> Div {
+        let (fg, muted, border, popover) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground, t.border, t.popover)
+        };
+        let c_blue_tint: Hsla = rgba(0x4a9eff24).into();
+        let c_blue_hover: Hsla = rgba(0x4a9eff40).into();
+        let c_neutral_bg: Hsla = rgba(0xffffff0a).into();
+        let c_neutral_hover: Hsla = rgba(0xffffff1f).into();
+        let Some(input) = self.rename_input.as_ref() else { return div() };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000aa))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                v_flex()
+                    .w(px(320.))
+                    .p_5()
+                    .bg(popover)
+                    .border_1()
+                    .border_color(border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .gap_4()
+                    .child(div().font_bold().text_color(fg).text_lg().child("重命名会话"))
+                    .child(div().text_sm().text_color(muted).child("留空则恢复自动识别的标题。"))
+                    .child(Input::new(input))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("cancel-rename")
+                                    .px_3()
+                                    .py(px(5.))
+                                    .rounded_lg()
+                                    .bg(c_neutral_bg)
+                                    .border_1()
+                                    .border_color(rgba(0xffffff12))
+                                    .text_sm()
+                                    .text_color(fg)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(c_neutral_hover))
+                                    .child("取消")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_rename_session(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("confirm-rename")
+                                    .px_3()
+                                    .py(px(5.))
+                                    .rounded_lg()
+                                    .bg(c_blue_tint)
+                                    .border_1()
+                                    .border_color(rgba(0xffffff12))
+                                    .text_sm()
+                                    .text_color(rgb(0x8fc7ff))
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(c_blue_hover))
+                                    .child("确定")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_rename_session(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
     /// 「重启守护进程」二次确认弹窗：明确告知会断开所有当前终端会话。与
     /// render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
     fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> Div {
@@ -2514,6 +2699,7 @@ impl Workspace {
         // —— 外观 ——
         let bg_color_picker = self.bg_color_picker.clone();
         let opacity_slider = self.opacity_slider.clone();
+        let font_size_slider = self.font_size_slider.clone();
         let pick_entity = entity.clone();
         let clear_entity = entity.clone();
         let appearance_page = SettingPage::new("外观").default_open(true).group(
@@ -2526,12 +2712,34 @@ impl Workspace {
                             let mode = if v { ThemeMode::Dark } else { ThemeMode::Light };
                             apply_appearance(|a| a.theme_mode = mode, cx);
                             Theme::change(mode, None, cx);
+                            terminal::set_dark_mode(mode.is_dark());
                             cx.refresh_windows();
                         },
                     )
                     .default_value(true),
                 )
                 .description("开启为深色主题，关闭为浅色主题"),
+                SettingItem::new(
+                    "字体大小",
+                    SettingField::render(move |_, _, cx: &mut App| {
+                        let size = cx.global::<Appearance>().font_px;
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(200.))
+                                    .children(font_size_slider.as_ref().map(Slider::new)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(32.))
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("{size}px")),
+                            )
+                    }),
+                ),
                 SettingItem::new(
                     "背景色",
                     SettingField::render(move |_, _, _| {
@@ -2573,7 +2781,7 @@ impl Workspace {
                 SettingItem::new(
                     "不透明度",
                     SettingField::render(move |_, _, _| {
-                        div().children(opacity_slider.as_ref().map(Slider::new))
+                        div().w(px(200.)).children(opacity_slider.as_ref().map(Slider::new))
                     }),
                 ),
                 SettingItem::new(
@@ -3692,16 +3900,43 @@ impl Render for Workspace {
         let active = self.active_session;
         let can_close = self.sessions.len() > 1;
 
-        // Dock 角标：统计「等审批 + 需要处理」的会话数，变了才调 Cocoa API 更新
-        // （避免每次 render 都发一遍 setBadgeLabel）。
-        let attention_count = self
-            .sessions
-            .iter()
-            .filter(|s| matches!(s.status(cx), AgentStatus::WaitingApproval | AgentStatus::NeedsAttention))
-            .count();
+        // Dock 角标 + 菜单栏图标角标/下拉菜单：同一份状态数据源（AgentStatus），
+        // 变了才调 Cocoa API 更新（避免每次 render 都发一遍）。
+        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
+        let attention_count =
+            statuses.iter().filter(|s| matches!(s, AgentStatus::WaitingApproval | AgentStatus::NeedsAttention)).count();
         if self.dock_badge_count != Some(attention_count) {
             self.dock_badge_count = Some(attention_count);
             dock::set_badge(attention_count);
+            status_item::set_badge(attention_count);
+        }
+
+        // 菜单栏下拉菜单：按状态优先级排的会话列表（等审批 > 需要处理 > 运行中 >
+        // 刚完成 > 空闲），跟总览页卡片同一套排序/配色口径。
+        let mut menu_order: Vec<usize> = (0..self.sessions.len()).collect();
+        menu_order.sort_by_key(|&ix| match statuses[ix] {
+            AgentStatus::WaitingApproval => 0,
+            AgentStatus::NeedsAttention => 1,
+            AgentStatus::Running => 2,
+            AgentStatus::Done => 3,
+            AgentStatus::Idle => 4,
+        });
+        let menu_snapshot: Vec<status_item::SessionEntry> = menu_order
+            .into_iter()
+            .map(|ix| {
+                let (color, status_text) = match statuses[ix] {
+                    AgentStatus::WaitingApproval => ((0xef, 0x44, 0x44), "等你批准"),
+                    AgentStatus::NeedsAttention => ((0xf5, 0x9e, 0x0b), "需要处理"),
+                    AgentStatus::Running => ((0x4a, 0x9e, 0xff), "运行中"),
+                    AgentStatus::Done => ((0x22, 0xc5, 0x5e), "已完成"),
+                    AgentStatus::Idle => ((0x8b, 0x93, 0xa7), "空闲"),
+                };
+                status_item::SessionEntry { title: self.sessions[ix].title(cx), status_text, color }
+            })
+            .collect();
+        if self.status_menu_snapshot.as_ref() != Some(&menu_snapshot) {
+            status_item::update_menu(&menu_snapshot);
+            self.status_menu_snapshot = Some(menu_snapshot);
         }
 
         // 组件 toast：app 前台但没在看的 pane 有新通知时弹一条（右上角浮层，5s
@@ -3860,6 +4095,7 @@ impl Render for Workspace {
                         let drag_title: SharedString = title.clone().into();
                         let e_drop = this.clone();
                         let e_close = this.clone();
+                        let e_rename = this.clone();
                         // 拖拽悬停指示：本行上/下边缘是否是当前插入位置（快照进 suffix
                         // 闭包；hint 变化会 notify 重渲染，快照不会过期）。
                         let hint_before = self.sess_drop_hint == Some((entity_id, true));
@@ -3921,6 +4157,16 @@ impl Render for Workspace {
                             .children(pane_items)
                             .on_click(move |_ev, window, cx| {
                                 e_act.update(cx, |ws, cx| ws.activate(ix, window, cx));
+                            })
+                            .context_menu(move |menu, _window, _cx| {
+                                let e_rename = e_rename.clone();
+                                menu.item(PopupMenuItem::new("重命名").on_click(
+                                    move |_ev, window, cx| {
+                                        e_rename.update(cx, |ws, cx| {
+                                            ws.start_rename_session(ix, window, cx)
+                                        });
+                                    },
+                                ))
                             })
                             // suffix：拖拽手柄（项目内排序）+ 状态点 + 关闭按钮。
                             .suffix(move |_w, cx| {
@@ -4793,6 +5039,8 @@ impl Render for Workspace {
             .children(palette_overlay)
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
+            // 会话重命名拦截弹层
+            .children(self.rename_session.is_some().then(|| self.render_rename_session(cx)))
             // 重启守护进程确认拦截弹层
             .children(self.show_daemon_restart_confirm.then(|| self.render_daemon_restart_confirm(cx)))
             // 文件未保存切换确认拦截弹层
@@ -6642,9 +6890,9 @@ fn main() {
     app.on_open_urls(move |urls| {
         let _ = url_tx.send_blocking(urls);
     });
-    // 菜单栏常驻图标点击：见 status_item.rs 顶部注释，回调发生在纯 AppKit 层
+    // 菜单栏常驻图标/下拉菜单点击：见 status_item.rs 顶部注释，回调发生在纯 AppKit 层
     // （没有 GPUI 的 cx），一样经 channel 转发到下面 run() 里 drain。
-    let (status_tx, status_rx) = smol::channel::unbounded::<()>();
+    let (status_tx, status_rx) = smol::channel::unbounded::<status_item::StatusItemEvent>();
 
     // 当前存活的主窗口（weak，随窗口关闭自然失效）。首启时在 run() 里写入；
     // URL 投递循环和「点 Dock 图标重开」都读它判断当前有没有主窗口。
@@ -6684,6 +6932,10 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
+            // 把 Tab/Shift-Tab 从 gpui-component Root 的全局焦点跳转手里要回来，
+            // 终端聚焦时改发给 shell（见 terminal_view.rs 里 TerminalTab 的注释）。
+            KeyBinding::new("tab", terminal_view::TerminalTab, Some("Terminal")),
+            KeyBinding::new("shift-tab", terminal_view::TerminalBackTab, Some("Terminal")),
         ]);
         cx.set_menus(vec![Menu::new("Smelt").items([
             MenuItem::action("设置…", OpenSettings),
@@ -6696,6 +6948,8 @@ fn main() {
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         Theme::change(appearance.theme_mode, None, cx);
+        terminal::set_dark_mode(appearance.theme_mode.is_dark());
+        terminal_view::set_font_px(appearance.font_px);
         cx.set_global(appearance);
         cx.set_global(load_launch_config());
 
@@ -6728,11 +6982,27 @@ fn main() {
         })
         .detach();
 
-        // 菜单栏图标点击：主窗口还活着就前置 app，没了就跟 on_reopen 一样重开一扇。
+        // 菜单栏图标/下拉菜单事件：主窗口还活着就前置 app（跳会话时顺带切过去），
+        // 没了就跟 on_reopen 一样重开一扇（此时会话下标已经没意义，只重开窗口）。
         cx.spawn(async move |cx| {
-            while status_rx.recv().await.is_ok() {
+            while let Ok(event) = status_rx.recv().await {
                 let alive = current_ws_status.borrow().as_ref().is_some_and(|w| w.upgrade().is_some());
                 if alive {
+                    if let status_item::StatusItemEvent::JumpToSession(ix) = event {
+                        let ws = current_ws_status.borrow().clone();
+                        if let Some(ws) = ws {
+                            let _ = ws.update(cx, |ws, cx| {
+                                if ix < ws.sessions.len() {
+                                    ws.active_session = ix;
+                                    if ws.view == MainView::Overview {
+                                        ws.view = MainView::Terminal;
+                                    }
+                                    ws.save_state(cx);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
                     status_item::activate_app();
                 } else {
                     cx.update(|cx| {

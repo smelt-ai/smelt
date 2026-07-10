@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -16,16 +17,50 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
-/// 默认前景 / 背景色（前景取 iTerm2 风格灰白，正文不再偏紫）。
-pub const DEFAULT_FG: u32 = 0x00d8_d8d8;
-pub const DEFAULT_BG: u32 = 0x001a_1b26;
+/// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
+/// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
+/// Appearance.theme_mode 变化时同步调用）与下面 `default_fg`/`default_bg`/`palette`。
+static DARK_MODE: AtomicBool = AtomicBool::new(true);
 
-/// 16 色 ANSI 调色板。彩色沿用 Tokyo Night，白/亮白改为灰白/纯白（iTerm2 风格）。
-const PALETTE: [u32; 16] = [
+/// 切换终端配色跟随的深浅色模式。
+pub fn set_dark_mode(dark: bool) {
+    DARK_MODE.store(dark, Ordering::Relaxed);
+}
+
+pub fn is_dark() -> bool {
+    DARK_MODE.load(Ordering::Relaxed)
+}
+
+/// 默认前景 / 背景色：深色取 iTerm2 风格灰白正文，浅色取近白底 + 深灰正文。
+const DEFAULT_FG_DARK: u32 = 0x00d8_d8d8;
+const DEFAULT_BG_DARK: u32 = 0x001a_1b26;
+const DEFAULT_FG_LIGHT: u32 = 0x0024_292e;
+const DEFAULT_BG_LIGHT: u32 = 0x00f6_f8fa;
+
+pub fn default_fg() -> u32 {
+    if is_dark() { DEFAULT_FG_DARK } else { DEFAULT_FG_LIGHT }
+}
+
+pub fn default_bg() -> u32 {
+    if is_dark() { DEFAULT_BG_DARK } else { DEFAULT_BG_LIGHT }
+}
+
+/// 16 色 ANSI 调色板：深色沿用 Tokyo Night（白/亮白改为灰白/纯白，iTerm2 风格）；
+/// 浅色是同色相压深/加饱和的对应版本，保证在浅底上仍有足够对比度。
+const PALETTE_DARK: [u32; 16] = [
     0x0015_161e, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7, 0x007d_cfff,
     0x00c7_c7c7, 0x002c_3149, 0x00f7_768e, 0x009e_ce6a, 0x00e0_af68, 0x007a_a2f7, 0x00bb_9af7,
     0x007d_cfff, 0x00ff_ffff,
 ];
+const PALETTE_LIGHT: [u32; 16] = [
+    0x0024_283b, 0x00c0_324a, 0x004e_8a2f, 0x00a1_690f, 0x0037_60bf, 0x0078_47bd, 0x000f_7b9e,
+    0x004a_4a4a, 0x006b_7089, 0x00d7_495f, 0x005f_ae3f, 0x00c4_8511, 0x002e_6fe0, 0x0091_61d9,
+    0x0010_93c2, 0x001a_1b26,
+];
+
+fn palette() -> &'static [u32; 16] {
+    if is_dark() { &PALETTE_DARK } else { &PALETTE_LIGHT }
+}
 
 /// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 粗体/下划线。
 pub struct Cell {
@@ -73,30 +108,31 @@ fn resolve(color: Color, is_fg: bool) -> u32 {
 
 fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
     use NamedColor::*;
+    let p = palette();
     match n {
-        Black => PALETTE[0],
-        Red => PALETTE[1],
-        Green => PALETTE[2],
-        Yellow => PALETTE[3],
-        Blue => PALETTE[4],
-        Magenta => PALETTE[5],
-        Cyan => PALETTE[6],
-        White => PALETTE[7],
-        BrightBlack => PALETTE[8],
-        BrightRed => PALETTE[9],
-        BrightGreen => PALETTE[10],
-        BrightYellow => PALETTE[11],
-        BrightBlue => PALETTE[12],
-        BrightMagenta => PALETTE[13],
-        BrightCyan => PALETTE[14],
-        BrightWhite => PALETTE[15],
-        Background => DEFAULT_BG,
+        Black => p[0],
+        Red => p[1],
+        Green => p[2],
+        Yellow => p[3],
+        Blue => p[4],
+        Magenta => p[5],
+        Cyan => p[6],
+        White => p[7],
+        BrightBlack => p[8],
+        BrightRed => p[9],
+        BrightGreen => p[10],
+        BrightYellow => p[11],
+        BrightBlue => p[12],
+        BrightMagenta => p[13],
+        BrightCyan => p[14],
+        BrightWhite => p[15],
+        Background => default_bg(),
         // Foreground / Cursor / Dim* / 未来新增变体统一回落到默认色
         _ => {
             if is_fg {
-                DEFAULT_FG
+                default_fg()
             } else {
-                DEFAULT_BG
+                default_bg()
             }
         }
     }
@@ -105,7 +141,7 @@ fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
 /// xterm 256 色索引 → rgb：0-15 用调色板，16-231 为 6×6×6 色立方，232-255 为灰阶。
 fn indexed_rgb(i: u8) -> u32 {
     match i {
-        0..=15 => PALETTE[i as usize],
+        0..=15 => palette()[i as usize],
         16..=231 => {
             let i = i - 16;
             let step = |v: u8| -> u32 {
@@ -170,20 +206,22 @@ impl EventProxy {
     }
 
     /// alacritty 自己不记「当前实际渲染色」，查询颜色时要由我们把 RGB 值喂回去。
-    /// smelt 没有运行时改色的路径（无 OSC 4/10/11 set-color 场景），直接用固定的
-    /// 默认前景 / 背景 / 16 色板作答，覆盖 CLI 常见的「查一下背景色决定用什么灰」。
+    /// smelt 没有运行时改色的路径（无 OSC 4/10/11 set-color 场景），直接用当前主题的
+    /// 默认前景 / 背景 / 16 色板作答，覆盖 CLI 常见的「查一下背景色决定用什么灰」——
+    /// 取的是 `palette()`/`default_fg`/`default_bg`，跟着 `set_dark_mode` 一起切换。
     fn resolve_color(index: usize) -> Rgb {
         let to_rgb = |hex: u32| Rgb {
             r: ((hex >> 16) & 0xff) as u8,
             g: ((hex >> 8) & 0xff) as u8,
             b: (hex & 0xff) as u8,
         };
-        if index < PALETTE.len() {
-            to_rgb(PALETTE[index])
+        let p = palette();
+        if index < p.len() {
+            to_rgb(p[index])
         } else if index == NamedColor::Background as usize {
-            to_rgb(DEFAULT_BG)
+            to_rgb(default_bg())
         } else {
-            to_rgb(DEFAULT_FG)
+            to_rgb(default_fg())
         }
     }
 }
@@ -858,6 +896,7 @@ mod event_proxy_answers_tests {
     /// DEFAULT_BG（`0x1a1b26`）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
+        set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
         let (proxy, mut probe) = make_proxy();
         let size = TermSize { rows: 24, cols: 80 };
         let mut term = Term::new(Config::default(), &size, proxy);
