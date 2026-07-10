@@ -119,6 +119,9 @@ pub struct TerminalView {
     /// 输入法合成中的预编辑文本（未提交），仅用于满足 IME 协议，不发给 PTY。
     marked_text: Option<String>,
     title: String,
+    /// 用户在侧栏子行右键改过的 pane 名；None = 用自动推导的标题。
+    /// 跟着 `PaneState::Leaf` 一起持久化，重开 GUI 按 session_id reattach 时灌回来。
+    custom_title: Option<String>,
     /// 初始工作目录（新建标签继承用）。
     cwd: Option<String>,
     /// 鼠标框选：(锚点, 当前端) 的 (行, 列)。
@@ -341,6 +344,7 @@ impl TerminalView {
             did_focus: false,
             marked_text: None,
             title,
+            custom_title: None,
             cwd,
             sel: None,
             cell_w: 8.0,
@@ -452,6 +456,16 @@ impl TerminalView {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// 用户给这个 pane 起的名字；None = 还没改过名。
+    pub fn custom_title(&self) -> Option<&str> {
+        self.custom_title.as_deref()
+    }
+
+    /// 改名。传 None（或提交空串）= 清掉自定义名，回退到自动推导的标题。
+    pub fn set_custom_title(&mut self, title: Option<String>) {
+        self.custom_title = title.filter(|s| !s.trim().is_empty());
     }
 
     pub fn cwd(&self) -> Option<String> {

@@ -30,7 +30,7 @@ use gpui::InteractiveElement;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::chart::BarChart;
 use gpui_component::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
+    Sidebar, SidebarCollapsible, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::Input;
@@ -40,7 +40,9 @@ use gpui_component::badge::Badge;
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::radio::{Radio, RadioGroup};
-use gpui_component::setting::{Settings, SettingField, SettingGroup, SettingItem, SettingPage};
+use gpui_component::setting::{
+    SelectIndex, Settings, SettingField, SettingGroup, SettingItem, SettingPage,
+};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_component::text::TextView;
@@ -291,7 +293,7 @@ impl Session {
     /// Braille spinner 开头）时取它的任务名，再否则回退 cwd 末段——避免把普通 shell 的
     /// user@host:path 标题当任务名。
     fn title(&self, cx: &App) -> String {
-        self.custom_title.clone().unwrap_or_else(|| pane_title(&self.active, cx))
+        self.custom_title.clone().unwrap_or_else(|| pane_auto_title(&self.active, cx))
     }
 
     /// 会话工作目录：活动终端的 cwd（侧栏分组用）。
@@ -373,9 +375,21 @@ fn status_color(status: AgentStatus) -> gpui::Rgba {
     }
 }
 
-/// 单个终端 pane 的标题：逻辑同 Session::title，但对任意 pane（不一定是会话活动
-/// pane）都能算——侧栏展开会话的分屏子行要分别显示每个 pane 的标题。
-fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
+/// 设置窗口 pages 列表里的页下标——调整 `render_settings_content` 末尾那个
+/// `pages(vec![...])` 的顺序时必须同步改这里，否则应用菜单「检查更新…」会跳错页。
+const SETTINGS_PAGE_APPEARANCE: usize = 0;
+const SETTINGS_PAGE_UPDATE: usize = 3;
+
+/// 重命名弹窗改的是谁：侧栏会话行改整个会话的名，分屏子行只改那一个 pane 的名。
+#[derive(Clone)]
+enum RenameTarget {
+    Session(usize),
+    Pane(Entity<TerminalView>),
+}
+
+/// 单个终端 pane 自动推导的标题：优先 agent 上报的任务名，回退建终端时的 cwd 名。
+/// 不看用户改的名字——`Session::title` 靠它拿活动 pane 的「客观」标题。
+fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
     let t = view.read(cx);
     if let Some(raw) = t.agent_title() {
         let head = raw.trim_start();
@@ -392,6 +406,18 @@ fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
         }
     }
     t.title().to_string()
+}
+
+/// 侧栏分屏子行显示的 pane 标题：用户改过名就用改的，否则走自动推导。
+///
+/// 跟 `pane_auto_title` 分开是有意的：`Session::title` 拿的是活动 pane 的自动标题，
+/// 若这里的自定义名漏进去，给活动 pane 改名会连带改掉侧栏父行（会话名），切换
+/// 活动 pane 后父行又跳回来——会话名和 pane 名得各归各的。
+fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
+    view.read(cx)
+        .custom_title()
+        .map(str::to_string)
+        .unwrap_or_else(|| pane_auto_title(view, cx))
 }
 
 /// 单个终端 pane 的状态：逻辑同 Session::status，但只看这一个 pane 自己
@@ -632,6 +658,9 @@ enum PaneState {
         cwd: Option<String>,
         #[serde(default)]
         id: Option<String>,
+        /// 用户给这个 pane 起的名字。旧存档没有这个字段 → None，行为不变。
+        #[serde(default)]
+        custom_title: Option<String>,
     },
     Split { axis: SplitAxis, children: Vec<PaneState> },
 }
@@ -680,6 +709,7 @@ fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
         Pane::Leaf(t) => PaneState::Leaf {
             cwd: t.read(cx).cwd(),
             id: Some(t.read(cx).session_id().to_string()),
+            custom_title: t.read(cx).custom_title().map(str::to_string),
         },
         Pane::Split { axis, children, .. } => PaneState::Split {
             axis: (*axis).into(),
@@ -696,10 +726,15 @@ fn rebuild_pane(
     cx: &mut Context<Workspace>,
 ) -> Pane {
     match ps {
-        PaneState::Leaf { cwd, id } => {
+        PaneState::Leaf { cwd, id, custom_title } => {
             // 有存档 id → reattach 守护里还活着的会话；旧存档无 id → 开新会话。
             let sid = id.clone().unwrap_or_else(new_sid);
-            let v = cx.new(|cx| TerminalView::new(cx, cwd.clone(), sid, None));
+            let v = cx.new(|cx| {
+                let mut view = TerminalView::new(cx, cwd.clone(), sid, None);
+                // 自定义名跟着同一条 Leaf 存取，reattach 后灌回来，否则重开就丢。
+                view.set_custom_title(custom_title.clone());
+                view
+            });
             tabs.push(v.clone());
             Pane::Leaf(v)
         }
@@ -1079,6 +1114,22 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
     update_status: updater::UpdateStatus,
+    /// 设置窗口打开时要停在第几页（索引对应 `render_settings_content` 里 pages 的顺序）。
+    settings_page_ix: usize,
+    /// 每请求跳一次页就 +1，用来变更 `Settings` 元素的 id。
+    ///
+    /// `Settings` 把当前选中页存在 `use_keyed_state` 里，只有该 id 首次出现时才读
+    /// `default_selected_index`——窗口已经开着时改字段是不起作用的。把这个自增序号
+    /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
+    /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
+    settings_page_nonce: usize,
+    /// 设置页「终端字体」下拉的选项，首次渲染时算一次就缓存住。
+    ///
+    /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
+    /// 再逐个 CopyAttribute 取 family name，实测约 50ms/次——远超 60fps 的 16.6ms 预算。
+    /// 它原先直接写在 `render_settings_content` 里，设置窗口每帧都要重算一遍，下拉一
+    /// 展开就肉眼可见掉帧。字体列表在进程生命周期内几乎不变，不值得每帧重扫。
+    font_options: std::cell::OnceCell<Vec<(SharedString, SharedString)>>,
     /// 上次同步给 Dock 角标的「需要关注」会话数；None 强制首帧同步一次。
     /// 只在这个数变化时才调用 Cocoa API，避免每次 render 都发一遍。
     dock_badge_count: Option<usize>,
@@ -1095,15 +1146,19 @@ struct Workspace {
     sess_drop_hint: Option<(EntityId, bool)>,
     /// 项目分组拖拽悬停中的目标项目名，作用同上。
     proj_drop_hint: Option<SharedString>,
-    /// 正在重命名的会话下标 + 弹窗里的文本框（None = 没在重命名）。见
-    /// `start_rename_session`/`confirm_rename_session`。
-    rename_session: Option<usize>,
+    /// 正在重命名的对象 + 弹窗里的文本框（None = 没在重命名）。见
+    /// `start_rename`/`confirm_rename`。
+    rename_target: Option<RenameTarget>,
     rename_input: Option<Entity<gpui_component::input::InputState>>,
     /// 重命名文本框的事件订阅句柄，随 rename_input 一起换（回车/失焦提交）。
     _rename_sub: Option<Subscription>,
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
     daemon_outdated: Option<bool>,
+    /// 最近一次无缝升级的结果提示（设置页守护分区显示；None = 没试过）。
+    daemon_upgrade_msg: Option<String>,
+    /// 无缝升级进行中（按钮置灰防连点）。
+    daemon_upgrading: bool,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
     /// 根节点自己的焦点句柄：总览/文件树/Git/热力图/历史会话这些页面自身没有可
@@ -1225,16 +1280,21 @@ impl Workspace {
             fps_ema: 0.0,
             show_quit_confirm: false,
             update_status: updater::UpdateStatus::default(),
+            settings_page_ix: 0,
+            settings_page_nonce: 0,
+            font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_menu_snapshot: None,
             usage_cache: None,
             usage_inflight: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
-            rename_session: None,
+            rename_target: None,
             rename_input: None,
             _rename_sub: None,
             daemon_outdated: None,
+            daemon_upgrade_msg: None,
+            daemon_upgrading: false,
             show_daemon_restart_confirm: false,
             focus_handle: cx.focus_handle(),
         };
@@ -1759,43 +1819,56 @@ impl Workspace {
     }
 
     /// 侧栏右键「重命名」：弹出文本框，预填当前标题。回车 / 点「确定」提交，见
-    /// `confirm_rename_session`；提交前的输入放在独立的 rename_input，不影响 Session
-    /// 本身，点「取消」（走 cancel_rename_session）就等于什么都没发生。
+    /// `confirm_rename`；提交前的输入放在独立的 rename_input，不影响目标对象
+    /// 本身，点「取消」（走 cancel_rename）就等于什么都没发生。
     ///
     /// 注意：这里故意不监听 `InputEvent::Blur` 去自动提交——点「取消」按钮本身会先
     /// 让输入框失焦，若失焦也提交，「取消」就会在关闭前先把文本框里的内容存下来，
     /// 跟按钮的字面意思相反。所以提交只认 Enter 或显式点「确定」。
-    fn start_rename_session(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_rename(&mut self, target: RenameTarget, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::{InputEvent, InputState};
-        let Some(current) = self.sessions.get(ix).map(|s| s.title(cx)) else { return };
+        let current = match &target {
+            RenameTarget::Session(ix) => {
+                let Some(s) = self.sessions.get(*ix) else { return };
+                s.title(cx)
+            }
+            RenameTarget::Pane(view) => pane_title(view, cx),
+        };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |s, cx| s.focus(window, cx));
         self._rename_sub = Some(cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
-                this.confirm_rename_session(window, cx);
+                this.confirm_rename(window, cx);
             }
         }));
-        self.rename_session = Some(ix);
+        self.rename_target = Some(target);
         self.rename_input = Some(input);
         cx.notify();
     }
 
     /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题。
-    fn confirm_rename_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.rename_session.take() else { return };
+    fn confirm_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.rename_target.take() else { return };
         let Some(input) = self.rename_input.take() else { return };
         self._rename_sub = None;
         let text = input.read(cx).value().trim().to_string();
-        if let Some(s) = self.sessions.get_mut(ix) {
-            s.custom_title = (!text.is_empty()).then_some(text);
+        match target {
+            RenameTarget::Session(ix) => {
+                if let Some(s) = self.sessions.get_mut(ix) {
+                    s.custom_title = (!text.is_empty()).then_some(text);
+                }
+            }
+            RenameTarget::Pane(view) => {
+                view.update(cx, |t, _| t.set_custom_title(Some(text)));
+            }
         }
         self.save_state(cx);
         cx.notify();
     }
 
     /// 取消重命名：不落地任何改动。
-    fn cancel_rename_session(&mut self, cx: &mut Context<Self>) {
-        self.rename_session = None;
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        self.rename_target = None;
         self.rename_input = None;
         self._rename_sub = None;
         cx.notify();
@@ -1824,6 +1897,18 @@ impl Workspace {
     fn set_bg_image(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         apply_appearance(|a| a.bg_image = path, cx);
         cx.notify();
+    }
+
+    /// 有新版本待处理（正在下载 / 安装中 / 已就绪待重启）。发现新版本会立即转入静默下载，
+    /// 所以这三态合起来就等价于「有新版本」；`Checking`/`UpToDate` 不算。
+    /// 侧栏版本号与设置齿轮共用它决定要不要缀红点。
+    fn update_available(&self) -> bool {
+        matches!(
+            self.update_status,
+            updater::UpdateStatus::Downloading { .. }
+                | updater::UpdateStatus::Installing { .. }
+                | updater::UpdateStatus::ReadyToInstall { .. }
+        )
     }
 
     /// 检查是否有新版本。`silent` 区分启动时的后台静默检查（离线/失败时不打扰用户，
@@ -1914,6 +1999,67 @@ impl Workspace {
             let outdated = cx.background_executor().spawn(async { terminal::daemon_outdated() }).await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_outdated = Some(outdated);
+                // 落后就自动无缝升级——「随版本更新且不中断」：exec 交接保留所有会话；
+                // 正在跑的守护太旧不支持时，结果提示会引导到设置页手动重启。
+                if outdated {
+                    this.upgrade_daemon_seamless(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 逐 pane 调 reconnect()：会话 id 都还在，走正常 reattach + 重放恢复画面。
+    /// 无缝升级（Upgraded/Failed，见下）和硬重启都要用同一套。
+    fn reconnect_all_terminals(&self, cx: &mut Context<Self>) {
+        for sess in &self.sessions {
+            let mut leaves = Vec::new();
+            collect_leaves(&sess.layout, &mut leaves);
+            for leaf in leaves {
+                leaf.update(cx, |view, cx| view.reconnect(cx));
+            }
+        }
+    }
+
+    /// 无缝升级守护：守护 exec 新二进制、PTY fd 原地交接，会话不中断（smeltd.rs 头注释）。
+    /// 成功后逐 pane reconnect——会话 id 都还在，走正常 reattach + 重放，画面最多闪一下。
+    /// 正在跑的守护太旧不认识 upgrade op 时提示改用下面的硬重启。
+    fn upgrade_daemon_seamless(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_upgrading {
+            return;
+        }
+        self.daemon_upgrading = true;
+        self.daemon_upgrade_msg = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome =
+                cx.background_executor().spawn(async { terminal::upgrade_daemon() }).await;
+            let outdated =
+                cx.background_executor().spawn(async { terminal::daemon_outdated() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon_upgrading = false;
+                this.daemon_outdated = Some(outdated);
+                this.daemon_upgrade_msg = Some(match outcome {
+                    terminal::UpgradeOutcome::Upgraded => {
+                        this.reconnect_all_terminals(cx);
+                        "已无缝升级，所有会话保持运行。".to_string()
+                    }
+                    terminal::UpgradeOutcome::Unsupported => {
+                        // 守护完全没认这个 op，控制连接以外的东西没被碰过，各 pane
+                        // 的流式连接照常连着，不需要重连。
+                        "正在跑的守护版本过旧，不支持无缝升级；请用「重启守护进程」（会断开会话）。"
+                            .to_string()
+                    }
+                    terminal::UpgradeOutcome::Failed => {
+                        // 守护回了 ok:true 才会 exec：只要走到这一步，exec 大概率已经
+                        // 发生、旧连接已经随之断开，只是我们没能在轮询窗口内确认新
+                        // 进程的 mtime 追平——按"可能已断"保守重连，好过让用户以为
+                        // 终端只是卡了一下、实际连接早就死了却不知道要重开。
+                        this.reconnect_all_terminals(cx);
+                        "升级结果未确认（可能已生效但检测超时），已尝试重连各终端；如仍无响应可重试或改用重启。".to_string()
+                    }
+                });
                 cx.notify();
             });
         })
@@ -1939,13 +2085,7 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_outdated = Some(outdated);
-                for sess in &this.sessions {
-                    let mut leaves = Vec::new();
-                    collect_leaves(&sess.layout, &mut leaves);
-                    for leaf in leaves {
-                        leaf.update(cx, |view, cx| view.reconnect(cx));
-                    }
-                }
+                this.reconnect_all_terminals(cx);
                 cx.notify();
             });
         })
@@ -2412,7 +2552,7 @@ impl Workspace {
 
     /// 侧栏「重命名」弹层：与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩），
     /// 正文换成预填当前标题的文本框。仅在 self.rename_input 就绪时被调用（见
-    /// start_rename_session/上面 .children(self.rename_session.is_some()...)）。
+    /// start_rename/上面 .children(self.rename_target.is_some()...)）。
     fn render_rename_session(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border, popover) = {
             let t = cx.theme();
@@ -2423,6 +2563,11 @@ impl Workspace {
         let c_neutral_bg: Hsla = rgba(0xffffff0a).into();
         let c_neutral_hover: Hsla = rgba(0xffffff1f).into();
         let Some(input) = self.rename_input.as_ref() else { return div() };
+        // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
+        let heading = match self.rename_target {
+            Some(RenameTarget::Pane(_)) => "重命名终端",
+            _ => "重命名会话",
+        };
 
         div()
             .absolute()
@@ -2442,7 +2587,7 @@ impl Workspace {
                     .rounded_lg()
                     .shadow_lg()
                     .gap_4()
-                    .child(div().font_bold().text_color(fg).text_lg().child("重命名会话"))
+                    .child(div().font_bold().text_color(fg).text_lg().child(heading))
                     .child(div().text_sm().text_color(muted).child("留空则恢复自动识别的标题。"))
                     .child(Input::new(input))
                     .child(
@@ -2464,7 +2609,7 @@ impl Workspace {
                                     .hover(move |s| s.bg(c_neutral_hover))
                                     .child("取消")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel_rename_session(cx);
+                                        this.cancel_rename(cx);
                                     })),
                             )
                             .child(
@@ -2482,7 +2627,7 @@ impl Workspace {
                                     .hover(move |s| s.bg(c_blue_hover))
                                     .child("确定")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_rename_session(window, cx);
+                                        this.confirm_rename(window, cx);
                                     })),
                             ),
                     ),
@@ -2731,17 +2876,31 @@ impl Workspace {
         // 终端字体下拉的选项：内嵌默认置顶（值为空 = 用默认），其后按字母序列出系统
         // 已装的全部字体族。不做等宽过滤——系统没有可靠的「是否等宽」元数据，漏判
         // 误判都更糟；选了非等宽的后果只是难看，fallback 链保证不会渲染错乱。
-        let font_options: Vec<(SharedString, SharedString)> = {
-            let mut names = cx.text_system().all_font_names();
-            names.sort();
-            names.dedup();
-            std::iter::once((
-                SharedString::from(""),
-                SharedString::from(format!("默认（{}）", terminal_view::DEFAULT_FONT_FAMILY)),
-            ))
-            .chain(names.into_iter().map(|n| (SharedString::from(n.clone()), SharedString::from(n))))
-            .collect()
-        };
+        //
+        // 扫字体贵（见 `font_options` 字段注释），只在第一次渲染设置页时做一次。
+        let font_options = self
+            .font_options
+            .get_or_init(|| {
+                let mut names = cx.text_system().all_font_names();
+                names.sort();
+                names.dedup();
+                // 选项 label 同时也是下拉按钮上的文字，而 Button 既不截断也不收缩，
+                // 全名「JetBrainsMono Nerd Font Mono」会把按钮顶出设置页右边界。
+                // 这里只取第一段，完整名字放在 description 里。
+                let short = terminal_view::DEFAULT_FONT_FAMILY
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(terminal_view::DEFAULT_FONT_FAMILY);
+                std::iter::once((
+                    SharedString::from(""),
+                    SharedString::from(format!("默认（{short}）")),
+                ))
+                .chain(
+                    names.into_iter().map(|n| (SharedString::from(n.clone()), SharedString::from(n))),
+                )
+                .collect()
+            })
+            .clone();
         let appearance_page = SettingPage::new("外观").default_open(true).group(
             SettingGroup::new().items(vec![
                 SettingItem::new(
@@ -2791,9 +2950,15 @@ impl Workspace {
                             apply_appearance(move |a| a.font_family = name, cx);
                             cx.refresh_windows();
                         },
-                    ),
+                    )
+                    // 系统里总有名字长得离谱的字体，选中后同样会顶爆按钮，这里封顶兜住。
+                    .max_w(px(220.))
+                    .overflow_hidden(),
                 )
-                .description("终端使用的字体；建议选等宽字体，图标缺字自动回落内嵌默认"),
+                .description(concat!(
+                    "终端使用的字体；建议选等宽字体，图标缺字自动回落内嵌默认（",
+                    "JetBrainsMono Nerd Font Mono）",
+                )),
                 SettingItem::new(
                     "背景色",
                     SettingField::render(move |_, _, _| {
@@ -2815,15 +2980,31 @@ impl Workspace {
                         h_flex()
                             .items_center()
                             .gap_2()
-                            .child(div().text_xs().text_color(muted).child(img_name))
-                            .child(btn("pick-img", "选择图片…".into()).on_mouse_down(
+                            .child(
+                                // 文件名长度不可控，必须自己封顶：SettingItem 外层是
+                                // overflow_hidden，撑爆的部分不会换行，只会把右边的按钮
+                                // 顶出可视区，导致「选择图片…／清除」点都点不到。
+                                // 中间省略号保留开头和扩展名，比末尾截断更容易认出是哪张图。
+                                div()
+                                    .max_w(px(140.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis_middle()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(img_name),
+                            )
+                            .child(btn("pick-img", "选择图片…".into()).flex_shrink_0().on_mouse_down(
                                 MouseButton::Left,
                                 move |_, _window, cx: &mut App| {
                                     pick_entity.update(cx, |this, cx| this.pick_bg_image(cx));
                                 },
                             ))
                             .child(
-                                btn("clear-img", "清除".into()).text_color(muted).on_mouse_down(
+                                btn("clear-img", "清除".into())
+                                    .flex_shrink_0()
+                                    .text_color(muted)
+                                    .on_mouse_down(
                                     MouseButton::Left,
                                     move |_, _window, cx: &mut App| {
                                         clear_entity.update(cx, |this, cx| this.set_bg_image(None, cx));
@@ -3136,7 +3317,25 @@ impl Workspace {
             }))
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
                     let outdated = daemon_entity.read(cx).daemon_outdated;
+                    let upgrading = daemon_entity.read(cx).daemon_upgrading;
+                    let upgrade_msg = daemon_entity.read(cx).daemon_upgrade_msg.clone();
+                    let upgrade_entity = daemon_entity.clone();
                     let restart_entity = daemon_entity.clone();
+                    // 首选：无缝升级（exec 交接，会话不中断）。
+                    let upgrade_daemon_btn = (outdated == Some(true)).then(|| {
+                        btn(
+                            "upgrade-daemon",
+                            if upgrading { "升级中…".into() } else { "无缝升级".into() },
+                        )
+                        .when(!upgrading, |b| {
+                            b.on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                                upgrade_entity.update(cx, |this, cx| {
+                                    this.upgrade_daemon_seamless(cx);
+                                });
+                            })
+                        })
+                    });
+                    // 兜底：硬重启（旧守护不支持无缝升级时的唯一出路，会断会话）。
                     let restart_daemon_btn = (outdated == Some(true)).then(|| {
                         btn("restart-daemon", "重启守护进程".into())
                             .text_color(rgb(0xff8f8f))
@@ -3150,8 +3349,8 @@ impl Workspace {
                             })
                     });
                     let status_text = match outdated {
-                        Some(true) => "版本落后于当前安装包，新功能/修复需手动重启守护才生效。".to_string(),
-                        Some(false) => "已是最新，无需重启。".to_string(),
+                        Some(true) => "版本落后于当前安装包，升级守护后新功能/修复才生效。".to_string(),
+                        Some(false) => "已是最新。".to_string(),
                         None => "检测中…".to_string(),
                     };
 
@@ -3164,21 +3363,34 @@ impl Workspace {
                                 .justify_between()
                                 .items_center()
                                 .child(div().text_sm().text_color(fg).child("守护进程（smeltd）"))
-                                .children(restart_daemon_btn),
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .children(upgrade_daemon_btn)
+                                        .children(restart_daemon_btn),
+                                ),
                         )
                         .child(div().text_xs().text_color(muted).child(status_text))
+                        .children(upgrade_msg.map(|m| div().text_xs().text_color(muted).child(m)))
                         .children((outdated == Some(true)).then(|| {
                             div()
                                 .text_xs()
-                                .text_color(rgb(0xff8f8f))
-                                .child("重启会立即断开并终止当前所有终端会话（含正在跑的 agent），无法恢复。")
+                                .text_color(muted)
+                                .child("「无缝升级」保留所有会话不中断；「重启守护进程」会断开并终止当前所有终端会话（含正在跑的 agent），仅当无缝升级不可用时使用。")
                         }))
                 })),
         );
 
-        div()
-            .size_full()
-            .child(Settings::new("settings").pages(vec![appearance_page, pet_page, launch_page, update_page]))
+        div().size_full().child(
+            // id 里带 nonce：见 `settings_page_nonce`，用来强制跳到 settings_page_ix。
+            Settings::new(("settings", self.settings_page_nonce))
+                .default_selected_index(SelectIndex {
+                    page_ix: self.settings_page_ix,
+                    group_ix: None,
+                })
+                .pages(vec![appearance_page, pet_page, launch_page, update_page]),
+        )
     }
 
     /// 打开独立设置窗口：已经开着就聚焦提到前台，不重复开第二扇。窗口只是个薄壳
@@ -4223,7 +4435,9 @@ impl Render for Workspace {
                                     let p_dot = (p_status != AgentStatus::Idle && !is_current_view)
                                         .then(|| status_color(p_status));
                                     let e_pane_act = this.clone();
+                                    let e_pane_rename = this.clone();
                                     let pane = view.clone();
+                                    let rename_pane = view.clone();
                                     SidebarMenuItem::new(p_title)
                                         .icon(IconName::SquareTerminal)
                                         .active(is_current_view)
@@ -4232,6 +4446,21 @@ impl Render for Workspace {
                                             e_pane_act.update(cx, |ws, cx| {
                                                 ws.activate_session_pane(ix, pane, window, cx)
                                             });
+                                        })
+                                        // 分屏子行也能改名，写到 pane 自己的 custom_title，
+                                        // 不影响所属会话（父行）的名字。
+                                        .context_menu(move |menu, _window, _cx| {
+                                            let e_pane_rename = e_pane_rename.clone();
+                                            let rename_pane = rename_pane.clone();
+                                            menu.item(PopupMenuItem::new("重命名").on_click(
+                                                move |_ev, window, cx| {
+                                                    let target =
+                                                        RenameTarget::Pane(rename_pane.clone());
+                                                    e_pane_rename.update(cx, |ws, cx| {
+                                                        ws.start_rename(target, window, cx)
+                                                    });
+                                                },
+                                            ))
                                         })
                                         .suffix(move |_w, _cx| {
                                             div().children(
@@ -4260,7 +4489,7 @@ impl Render for Workspace {
                                 menu.item(PopupMenuItem::new("重命名").on_click(
                                     move |_ev, window, cx| {
                                         e_rename.update(cx, |ws, cx| {
-                                            ws.start_rename_session(ix, window, cx)
+                                            ws.start_rename(RenameTarget::Session(ix), window, cx)
                                         });
                                     },
                                 ))
@@ -4626,6 +4855,17 @@ impl Render for Workspace {
 
         let overview_active = self.view == MainView::Overview;
         let e_overview = this.clone();
+        // 总览行右侧的状态摘要：四态各自的会话数，零的不显示。侧栏折起来看不到会话行的
+        // 状态点，agent 一多也懒得逐行扫——「有几个在等我」应该在第一眼落点上直接答完。
+        // 顺序即紧急度（等审批 → 需处理 → 运行中 → 已完成），与 AgentStatus 声明序一致。
+        let status_counts: [(AgentStatus, usize); 4] = [
+            AgentStatus::WaitingApproval,
+            AgentStatus::NeedsAttention,
+            AgentStatus::Running,
+            AgentStatus::Done,
+        ]
+        .map(|st| (st, statuses.iter().filter(|s| **s == st).count()));
+
         let sidebar_el = Sidebar::new("workspace-sidebar")
             .collapsible(SidebarCollapsible::Offcanvas)
             // 宽度交给外层 resizable_panel 控制（可拖），这里填满 panel。
@@ -4634,24 +4874,54 @@ impl Render for Workspace {
             // 总览：不挂在任何项目下的全局入口，跟当前在哪个项目无关，随时点得到。
             // 新建终端挪到底部跟「打开项目」放一起了（见 footer），都是「开个新地方干活」
             // 这一类操作，归在一块更好找。
-            .child(
-                SidebarGroup::new("").child(
-                    SidebarMenu::new().children([
-                        SidebarMenuItem::new("总览")
-                            .icon(IconName::LayoutDashboard)
-                            .active(overview_active)
-                            .on_click(move |_ev, window, cx| {
-                                e_overview.update(cx, |ws, cx| {
-                                    ws.view = MainView::Overview;
-                                    ws.refresh_git(cx); // 进总览 → 后台刷新 git
-                                    cx.notify();
-                                });
-                                // 总览页没有可聚焦元素，focus 显式认领到根节点，
-                                // 不然 Cmd+Shift+F 等全局快捷键在这页会收不到事件。
-                                let h = e_overview.read(cx).focus_handle.clone();
-                                window.focus(&h, cx);
-                            }),
-                    ]),
+            //
+            // 放 header 而不是 `SidebarGroup::new("")`：SidebarGroup 无条件渲染分组标题行
+            // 且写死 h_8，空标题也照占 32px，「总览」上方会白白空出一大块。header 没有这个
+            // 标题行，左右内边距（px_3）跟下面的分组内容一致，视觉照样对齐。
+            .header(
+                // 外面包一层 w_full：header 容器是 h_flex，不撑宽的话「总览」行只有文字那么宽，
+                // hover 高亮和点击热区都缩成一小条，跟下面的会话行对不齐。
+                div().w_full().child(
+                SidebarMenu::new()
+                    .children([SidebarMenuItem::new("总览")
+                        .icon(IconName::LayoutDashboard)
+                        .active(overview_active)
+                        .on_click(move |_ev, window, cx| {
+                            e_overview.update(cx, |ws, cx| {
+                                ws.view = MainView::Overview;
+                                ws.refresh_git(cx); // 进总览 → 后台刷新 git
+                                cx.notify();
+                            });
+                            // 总览页没有可聚焦元素，focus 显式认领到根节点，
+                            // 不然 Cmd+Shift+F 等全局快捷键在这页会收不到事件。
+                            let h = e_overview.read(cx).focus_handle.clone();
+                            window.focus(&h, cx);
+                        })
+                        .suffix(move |_w, cx: &mut App| {
+                            let muted = cx.theme().muted_foreground;
+                            h_flex().gap_2().items_center().children(
+                                status_counts.into_iter().filter(|(_, n)| *n > 0).map(
+                                    |(st, n)| {
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .size_2()
+                                                    .rounded_full()
+                                                    .bg(status_color(st)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(n.to_string()),
+                                            )
+                                    },
+                                ),
+                            )
+                        })])
+                    .render("sidebar-overview", window, cx),
                 ),
             )
             .child(SidebarGroup::new("会话").child(SidebarMenu::new().children(menu_items)))
@@ -4677,7 +4947,17 @@ impl Render for Workspace {
                             .child(scratch_terminal_button(cx)),
                     )
                     // 版本号居中：编译期取 Cargo.toml 的 version；点一下跳 GitHub 仓库。
-                    .child(
+                    // 有新版本时缀红点（跟设置齿轮同一信号），点击改跳 Releases 看更新内容。
+                    .child({
+                        let has_update = self.update_available();
+                        let version: AnyElement = if has_update {
+                            Badge::new()
+                                .dot()
+                                .child(concat!("v", env!("CARGO_PKG_VERSION")))
+                                .into_any_element()
+                        } else {
+                            concat!("v", env!("CARGO_PKG_VERSION")).into_any_element()
+                        };
                         div()
                             .id("version-github-link")
                             .w_full()
@@ -4687,11 +4967,15 @@ impl Render for Workspace {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .hover(|s| s.text_color(cx.theme().foreground))
-                            .child(concat!("v", env!("CARGO_PKG_VERSION")))
-                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
-                                cx.open_url("https://github.com/zzfn/smelt");
-                            }),
-                    ),
+                            .child(version)
+                            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                cx.open_url(if has_update {
+                                    "https://github.com/zzfn/smelt/releases"
+                                } else {
+                                    "https://github.com/zzfn/smelt"
+                                });
+                            })
+                    }),
             );
 
         // 主内容：有会话就渲染当前会话的分屏布局树；无会话显示空状态引导。
@@ -4792,9 +5076,12 @@ impl Render for Workspace {
                 if this.llm_inputs.is_none() {
                     this.init_llm_inputs(window, cx);
                 }
+                // 不动 nonce：窗口已开着就保持用户当前所在页，只是把它提到前台；
+                // 但下次新开窗口得回到外观页，不能停在「检查更新…」跳过去的那页。
+                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
                 this.open_settings_window(cx);
             }))
-            // 应用菜单「检查更新…」：顺手发起一次检查，再开设置窗口看「更新」页的进度。
+            // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
             .on_action(cx.listener(|this, _: &CheckForUpdate, window, cx| {
                 if this.llm_inputs.is_none() {
                     this.init_llm_inputs(window, cx);
@@ -4807,6 +5094,8 @@ impl Render for Workspace {
                 ) {
                     this.check_for_update(false, cx);
                 }
+                this.settings_page_ix = SETTINGS_PAGE_UPDATE;
+                this.settings_page_nonce += 1;
                 this.open_settings_window(cx);
             }))
             // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
@@ -4944,12 +5233,8 @@ impl Render for Workspace {
                                     // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
                                     // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
                                     // 之前让整个图标变蓝，看着像常驻高亮状态，容易被当成卡住了。
-                                    let needs_attention = matches!(
-                                        self.update_status,
-                                        updater::UpdateStatus::Downloading { .. }
-                                            | updater::UpdateStatus::Installing { .. }
-                                            | updater::UpdateStatus::ReadyToInstall { .. }
-                                    ) || self.daemon_outdated == Some(true);
+                                    let needs_attention =
+                                        self.update_available() || self.daemon_outdated == Some(true);
                                     let gear: AnyElement = if needs_attention {
                                         Badge::new().dot().child(Icon::new(IconName::Settings)).into_any_element()
                                     } else {
@@ -4974,6 +5259,8 @@ impl Render for Workspace {
                                                 if this.llm_inputs.is_none() {
                                                     this.init_llm_inputs(window, cx);
                                                 }
+                                                // 同 OpenSettings：新开的窗口回到外观页。
+                                                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
                                                 this.open_settings_window(cx);
                                             }),
                                         )
@@ -5153,7 +5440,7 @@ impl Render for Workspace {
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
             // 会话重命名拦截弹层
-            .children(self.rename_session.is_some().then(|| self.render_rename_session(cx)))
+            .children(self.rename_target.is_some().then(|| self.render_rename_session(cx)))
             // 重启守护进程确认拦截弹层
             .children(self.show_daemon_restart_confirm.then(|| self.render_daemon_restart_confirm(cx)))
             // 文件未保存切换确认拦截弹层
@@ -7149,4 +7436,43 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(test)]
+mod pane_state_tests {
+    use super::PaneState;
+
+    /// pane 自定义名必须能跟着 Leaf 存下来、读回来（否则重开 GUI 就丢名字）。
+    #[test]
+    fn leaf_custom_title_roundtrips() {
+        let leaf = PaneState::Leaf {
+            cwd: Some("/tmp/x".into()),
+            id: Some("sid-1".into()),
+            custom_title: Some("跑测试的终端".into()),
+        };
+        let json = serde_json::to_string(&leaf).unwrap();
+        let back: PaneState = serde_json::from_str(&json).unwrap();
+        match back {
+            PaneState::Leaf { custom_title, id, cwd } => {
+                assert_eq!(custom_title.as_deref(), Some("跑测试的终端"));
+                assert_eq!(id.as_deref(), Some("sid-1"));
+                assert_eq!(cwd.as_deref(), Some("/tmp/x"));
+            }
+            _ => panic!("应当反序列化成 Leaf"),
+        }
+    }
+
+    /// 旧存档没有 custom_title 字段，必须读成 None 而不是解析失败。
+    #[test]
+    fn old_archive_without_custom_title_still_loads() {
+        let old = r#"{"Leaf":{"cwd":"/tmp/x","id":"sid-1"}}"#;
+        let back: PaneState = serde_json::from_str(old).unwrap();
+        match back {
+            PaneState::Leaf { custom_title, id, .. } => {
+                assert!(custom_title.is_none(), "旧存档不该凭空冒出自定义名");
+                assert_eq!(id.as_deref(), Some("sid-1"));
+            }
+            _ => panic!("应当反序列化成 Leaf"),
+        }
+    }
 }
