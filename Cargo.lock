@@ -6368,6 +6368,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "libc",
  "notify 6.1.1",
  "objc",
  "portable-pty",

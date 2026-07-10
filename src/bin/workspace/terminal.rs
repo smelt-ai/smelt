@@ -390,6 +390,69 @@ pub fn daemon_outdated() -> bool {
     }
 }
 
+/// 无缝升级的结果。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeOutcome {
+    /// 交接完成，会话全部保留；或守护本来没跑、直接拉起了最新版。
+    Upgraded,
+    /// 正在跑的守护太旧，不认识 "upgrade" op（静默断连），只能走硬重启。
+    Unsupported,
+    /// 守护接了单但升级没生效（exec 失败等），版本还是旧的。
+    Failed,
+}
+
+/// 无缝升级守护：发 "upgrade" op，守护 exec 磁盘上的新二进制、PTY fd 原地交接，
+/// **所有会话不中断**（协议与流程见 smeltd.rs 头注释）。调用方在成功后应对每个
+/// 终端调 reconnect()——会话 id 都还在，走的是正常 reattach + 重放恢复。
+///
+/// `read_line` 前设了读超时：守护万一卡住（比如某个 out 锁被冻结客户端占住），不能
+/// 让这次调用永久挂起——上层 `daemon_upgrading` 标志会跟着卡死，整个功能失效。
+pub fn upgrade_daemon() -> UpgradeOutcome {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        // 守护没跑：拉起磁盘上最新的等于升级完成，但要探测确认它真的起来了再报
+        // 成功——ensure_daemon_running 的失败是静默的，不确认就报 Upgraded 会让
+        // UI 显示"已升级"而守护其实没起来。
+        ensure_daemon_running();
+        return if matches!(probe_daemon(), DaemonProbe::ExeMtime(_)) {
+            UpgradeOutcome::Upgraded
+        } else {
+            UpgradeOutcome::Failed
+        };
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "upgrade" })).is_err() {
+        return UpgradeOutcome::Failed;
+    }
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    // 三种读结果分开判断，不能混为一谈：
+    // - Ok(0)（EOF，没读到任何字节）＝老守护完全不认识这个 op，直接断连 → Unsupported；
+    // - Err（超时/IO 错误）＝守护接了但迟迟不回（可能卡住），不代表版本问题 → Failed；
+    // - Ok(n>0) 但解析不出 JSON，或解析出来 ok!=true（比如 current_exe/写交接文件
+    //   失败的显式回执）＝守护是新版本、只是这次没成功，同样是 Failed，不能引导
+    //   用户去做「版本过旧只能硬重启」这种更破坏性的操作。
+    let mut resp = String::new();
+    match BufReader::new(s).read_line(&mut resp) {
+        Ok(0) => return UpgradeOutcome::Unsupported,
+        Ok(_) => {}
+        Err(_) => return UpgradeOutcome::Failed,
+    }
+    let acked = serde_json::from_str::<serde_json::Value>(resp.trim())
+        .is_ok_and(|v| v["ok"].as_bool() == Some(true));
+    if !acked {
+        return UpgradeOutcome::Failed;
+    }
+    // exec + 交接在百毫秒量级；轮询到新进程的 exe_mtime 追平磁盘为止。
+    let disk = disk_smeltd_mtime();
+    for _ in 0..25 {
+        thread::sleep(Duration::from_millis(200));
+        if let DaemonProbe::ExeMtime(running) = probe_daemon() {
+            if disk.is_none_or(|d| running >= d) {
+                return UpgradeOutcome::Upgraded;
+            }
+        }
+    }
+    UpgradeOutcome::Failed
+}
+
 /// 让守护自己退出。**会杀掉它托管的所有 PTY 会话**（进程一死子进程 EOF/SIGHUP），
 /// 调用前必须先让用户明确知情确认。退出后调 ensure_daemon_running() 拉起磁盘上
 /// 最新的 smeltd 二进制。
@@ -463,6 +526,11 @@ pub struct Terminal {
     title: Arc<Mutex<Option<String>>>,
 }
 
+/// 新建/reattach 握手失败时的重试次数与间隔：守护无缝升级 exec 交接的一次性抖动是
+/// 百毫秒到 1 秒量级，这个预算（5 次 × 300ms ≈ 1.2s，含首次尝试共 5 次）足够盖过去。
+const HANDSHAKE_RETRIES: u32 = 5;
+const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
+
 impl Terminal {
     /// 打开（或重连）守护里 id 对应的会话：shell 环境由 smeltd 负责（-l / TERM /
     /// iTerm2 伪装 / LANG 兜底，见 smeltd.rs）。id 已存在 → attach，守护先重放输出
@@ -475,26 +543,35 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
-        // 1) 连守护（不在则自动拉起）并声明要打开的会话
-        let mut writer = connect_daemon()?;
-        writeln!(
-            writer,
-            "{}",
-            serde_json::json!({ "op": "open", "id": id, "cwd": cwd, "cols": cols, "rows": rows, "launch": launch })
-        )?;
-
-        // 守护先回报 PTY 当前尺寸（reattach 时是断开前的实际尺寸）：本地终端必须建成
-        // 同尺寸再解析重放字节，否则行宽错位（zsh 行尾 % 盖不掉、Claude Code 布局撕裂）。
-        // 之后 GUI 布局就绪会正常 resize 到新尺寸，alacritty reflow 会重排。
-        // 注意：重放字节可能已被 BufReader 预读，读线程必须复用它，不能再从裸流读。
-        let mut buffered = BufReader::new(writer.try_clone()?);
-        let mut line = String::new();
-        buffered.read_line(&mut line)?;
-        let v: serde_json::Value = serde_json::from_str(line.trim())?;
-        let size = TermSize {
-            rows: v["rows"].as_u64().unwrap_or(rows as u64) as usize,
-            cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
+        // 1) 连守护（不在则自动拉起）并声明要打开的会话，握手失败带几次短重试。
+        //
+        // 守护无缝升级 exec 交接期间，恰好在这一瞬间新开的 pane 可能撞上这个连接
+        // 被接受、但握手线程卡在守护内部的 SPAWN_GATE（跟 upgrade 互斥，见 smeltd.rs）
+        // 上——exec 一发生，这条连接（普通客户端 fd 默认带 CLOEXEC）就被无声关闭，
+        // 我们这边会读到 EOF/解析失败。整个交接是百毫秒到 1 秒量级的一次性抖动，
+        // 短重试几次基本能把这个窗口盖掉，调用方不必为这种瞬时性错误崩溃整个 GUI
+        // （调用方目前对失败仍是 `.expect()`，见 terminal_view.rs 的注释）。
+        let (buffered, size) = {
+            let mut last_err = None;
+            let mut result = None;
+            for attempt in 0..HANDSHAKE_RETRIES {
+                if attempt > 0 {
+                    thread::sleep(HANDSHAKE_RETRY_DELAY);
+                }
+                match Self::handshake(rows, cols, cwd, id, launch) {
+                    Ok(x) => {
+                        result = Some(x);
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            match result {
+                Some(x) => x,
+                None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("握手失败"))),
+            }
         };
+        let writer = buffered.get_ref().try_clone()?;
 
         // 2) alacritty 终端状态机（EventProxy 把响铃 / 标题写入共享槽，把 PTY 自动
         //    应答写回下面这个共享写端）
@@ -543,6 +620,31 @@ impl Terminal {
             notify,
             title,
         })
+    }
+
+    /// 一次性握手：连守护 + 声明会话 + 读首行尺寸，不重试（重试策略在 `spawn` 里）。
+    fn handshake(
+        rows: usize,
+        cols: usize,
+        cwd: Option<&str>,
+        id: &str,
+        launch: Option<&str>,
+    ) -> anyhow::Result<(BufReader<UnixStream>, TermSize)> {
+        let mut writer = connect_daemon()?;
+        writeln!(
+            writer,
+            "{}",
+            serde_json::json!({ "op": "open", "id": id, "cwd": cwd, "cols": cols, "rows": rows, "launch": launch })
+        )?;
+        let mut buffered = BufReader::new(writer);
+        let mut line = String::new();
+        buffered.read_line(&mut line)?;
+        let v: serde_json::Value = serde_json::from_str(line.trim())?;
+        let size = TermSize {
+            rows: v["rows"].as_u64().unwrap_or(rows as u64) as usize,
+            cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
+        };
+        Ok((buffered, size))
     }
 
     /// 取走最新通知消息（读并清）：响铃或 OSC 9/777 上报的「需要注意」文本。
