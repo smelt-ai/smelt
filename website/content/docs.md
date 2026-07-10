@@ -7,7 +7,11 @@ prototype，接口和默认行为可能会变。
 ## 快速开始
 
 从 [GitHub Releases](https://github.com/zzfn/smelt/releases) 下载 `Smelt.dmg`，拖进
-应用程序文件夹即可，只支持 Apple Silicon Mac。
+应用程序文件夹，打开即可，只支持 Apple Silicon Mac。持久化守护 `smeltd` 已经打包
+在 `Smelt.app` 里，GUI 需要时会自己找到同目录的它并拉起，不用你手动运行任何命令。
+
+`smeltd` 是类 tmux 的终端持久化守护：GUI 退出或崩溃不影响里面的 shell 存活，重开
+GUI 会按会话 id 自动 reattach，不用重新 `cd` 进项目、重新跑 `claude`。
 
 **从源码构建**（需要 Rust 工具链和 Xcode Command Line Tools，不需要完整 Xcode）：
 
@@ -15,14 +19,16 @@ prototype，接口和默认行为可能会变。
 cargo run --bin workspace   # GUI 主程序
 ```
 
-后台还有一个可选的持久化守护进程，建议一起跑：
+GUI 启动时会自动去可执行文件同目录找 `smeltd` 并拉起（找不到就静默跳过，不影响
+正常使用，见下面 FAQ）。只跑过 `cargo run --bin workspace` 的话，`target/debug/`
+下还没有 `smeltd`，自动拉起会落空；想要持久化能力，先单独构建一次：
 
 ```sh
-cargo run --bin smeltd
+cargo build --bin smeltd
 ```
 
-`smeltd` 是类 tmux 的终端持久化守护：GUI 退出或崩溃不影响里面的 shell 存活，重开
-GUI 会按会话 id 自动 reattach，不用重新 `cd` 进项目、重新跑 `claude`。
+之后 workspace 启动时就能在同目录找到它并自动拉起，不需要再手动 `cargo run --bin
+smeltd` 常驻一个终端（除非你想单独盯着它的日志调试）。
 
 ## 打开项目
 
