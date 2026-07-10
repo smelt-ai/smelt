@@ -22,21 +22,47 @@ fn link_fg() -> u32 {
     if terminal::is_dark() { 0x007d_cfff } else { 0x0009_69da }
 }
 
-/// 终端字体：Nerd Font 的严格等宽变体（含图标/powerline 字形，且单格宽对齐）。
-pub const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+/// 出厂默认终端字体：Nerd Font 的严格等宽变体（含图标/powerline 字形，且单格宽对齐）。
+pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
-/// 图标 fallback：内嵌的 Nerd Font Symbols-only 字体（见 main.rs 里的 add_fonts）。
-/// FONT_FAMILY 本身查不到的码位（比如装的是非 Nerd Font 版本、或某些较新图标）会落到这里，
-/// 不必强求用户机器上装的必须是打了 Nerd Font 补丁的那个变体。
-const SYMBOLS_FALLBACK_FONT: &str = "Symbols Nerd Font Mono";
+/// 用户配置的终端字体族（设置页可改，持久化在 Appearance；跟 FONT_PX_ATOM 同一路数：
+/// 单进程一套配置，全局量足够）。None/空 = 用出厂默认。
+static FONT_FAMILY_CONF: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
-/// 终端字体（主字体 + 图标 fallback）。渲染和测量都应该用这个，保持字形来源一致——
-/// 否则测量用的字体和实际渲染用的字体对某个字符的 fallback 结果不一样，会导致
-/// 列宽计算和实际显示对不上（拖选/鼠标定位跑偏）。
+/// 设置终端字体族（空白等同恢复默认）。
+pub fn set_font_family(name: &str) {
+    let name = name.trim();
+    if let Ok(mut g) = FONT_FAMILY_CONF.write() {
+        *g = if name.is_empty() { None } else { Some(name.to_string()) };
+    }
+}
+
+/// 当前终端字体族。
+pub fn font_family() -> String {
+    FONT_FAMILY_CONF
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
+}
+
+/// 兜底等宽字体：macOS 系统自带，必定存在。放在 fallback 链末尾做最后防线，
+/// 保证 cell_w 与实际字形宽度同源——否则测量和渲染各自 fallback 到不同字体，
+/// 列数按错误的字宽算出来，终端内容只占窗格的一个恒定比例（用户实测约一半宽）。
+const MONO_FALLBACK_FONT: &str = "Menlo";
+
+/// 终端字体（用户配置的主字体 + 内嵌默认字体 + 系统等宽兜底）。渲染和测量都必须
+/// 用这个，保持字形来源一致——否则测量用的字体和实际渲染用的字体对某个字符的
+/// fallback 结果不一样，会导致列宽计算和实际显示对不上（拖选/鼠标定位跑偏、内容
+/// 占宽错误）。DEFAULT_FONT_FAMILY 已内嵌进二进制（见 main.rs 的 add_fonts）且
+/// 自带全部 Nerd Font 图标码位：用户自选字体缺图标时落到它，不必单独嵌图标字体。
 fn terminal_font() -> Font {
     Font {
-        fallbacks: Some(FontFallbacks::from_fonts(vec![SYMBOLS_FALLBACK_FONT.to_string()])),
-        ..font(FONT_FAMILY)
+        fallbacks: Some(FontFallbacks::from_fonts(vec![
+            DEFAULT_FONT_FAMILY.to_string(),
+            MONO_FALLBACK_FONT.to_string(),
+        ])),
+        ..font(font_family())
     }
 }
 
@@ -709,9 +735,11 @@ impl Render for TerminalView {
         {
             let (w, h) = self.grid_size.get();
             // 精确测量等宽字符宽度（量一个 'M'）；异常时回退到 0.6 估算。
+            // 必须用 terminal_font()（带 fallback 链）而非裸字体族：主字体没装时，
+            // 裸字体和渲染各自 fallback 到不同字体，cell_w 就跟实际画出来的字宽脱节。
             let run = TextRun {
                 len: 1,
-                font: font(FONT_FAMILY),
+                font: terminal_font(),
                 color: hsla(0.0, 0.0, 1.0, 1.0),
                 background_color: None,
                 underline: None,
@@ -778,7 +806,7 @@ impl Render for TerminalView {
             .min_w_0()
             .min_h_0()
             .text_color(rgb(terminal::default_fg()))
-            .font_family(FONT_FAMILY)
+            .font_family(font_family())
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
                 this.terminal.send_input(b"\t");
                 this.terminal.scroll_to_bottom();

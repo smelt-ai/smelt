@@ -38,6 +38,7 @@ use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::badge::Badge;
 use gpui_component::notification::Notification;
+use gpui_component::progress::Progress;
 use gpui_component::radio::{Radio, RadioGroup};
 use gpui_component::setting::{Settings, SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
@@ -54,7 +55,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use terminal_view::TerminalView;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
-gpui::actions!(smelt, [Quit, OpenSettings, SendSelectionToTerminal]);
+gpui::actions!(smelt, [Quit, OpenSettings, CheckForUpdate, SendSelectionToTerminal]);
 
 /// 命令面板里的一个可执行动作。
 #[derive(Clone)]
@@ -745,6 +746,10 @@ struct Appearance {
     /// 终端字号（px）。
     #[serde(default = "default_font_px")]
     font_px: u32,
+    /// 终端字体族。空 = 出厂默认（terminal_view::DEFAULT_FONT_FAMILY）；填了但机器上
+    /// 没装时，渲染/测量会一致地落到 Menlo 兜底（见 terminal_view::terminal_font）。
+    #[serde(default)]
+    font_family: String,
 }
 
 /// 老版本 appearance.json 没有 font_px 字段时的回退，跟 terminal_view::FONT_PX_ATOM
@@ -766,6 +771,7 @@ impl Default for Appearance {
             blur: false,
             theme_mode: ThemeMode::Dark,
             font_px: default_font_px(),
+            font_family: String::new(),
         }
     }
 }
@@ -1855,20 +1861,40 @@ impl Workspace {
     }
 
     /// 后台静默下载新版 dmg 并暂存好 `.app`，完成后置 `ReadyToInstall`（不重启、不打断）。
+    /// 下载线程通过 channel 往回推字节进度，UI 线程照单刷新状态；发送端随下载任务结束而
+    /// drop，`recv` 收到 Err 即代表下载收尾，此时再 `await` 任务拿最终结果。
     fn start_update_download(&mut self, version: String, url: String, cx: &mut Context<Self>) {
-        self.update_status = updater::UpdateStatus::Downloading { version: version.clone() };
+        self.update_status =
+            updater::UpdateStatus::Downloading { version: version.clone(), received: 0, total: None };
         cx.notify();
         cx.spawn(async move |this, cx| {
+            let (tx, rx) = smol::channel::unbounded::<updater::DownloadProgress>();
             let v = version.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?
-                        .block_on(updater::download_and_stage(&url, &v))
-                })
-                .await;
+            let task = cx.background_executor().spawn(async move {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(updater::download_and_stage(&url, &v, |p| {
+                        let _ = tx.try_send(p);
+                    }))
+            });
+
+            while let Ok(progress) = rx.recv().await {
+                let version = version.clone();
+                let _ = this.update(cx, |this, cx| {
+                    this.update_status = match progress {
+                        updater::DownloadProgress::Bytes { received, total } => {
+                            updater::UpdateStatus::Downloading { version, received, total }
+                        }
+                        updater::DownloadProgress::Installing => {
+                            updater::UpdateStatus::Installing { version }
+                        }
+                    };
+                    cx.notify();
+                });
+            }
+
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.update_status = match result {
                     Ok(staged_app) => updater::UpdateStatus::ReadyToInstall { version, staged_app },
@@ -2260,7 +2286,7 @@ impl Workspace {
                             .p_2()
                             .rounded_lg()
                             .bg(rgb(0x0d0d10))
-                            .font_family(terminal_view::FONT_FAMILY)
+                            .font_family(terminal_view::font_family())
                             .text_xs()
                             .text_color(muted)
                             .flex()
@@ -2702,6 +2728,20 @@ impl Workspace {
         let font_size_slider = self.font_size_slider.clone();
         let pick_entity = entity.clone();
         let clear_entity = entity.clone();
+        // 终端字体下拉的选项：内嵌默认置顶（值为空 = 用默认），其后按字母序列出系统
+        // 已装的全部字体族。不做等宽过滤——系统没有可靠的「是否等宽」元数据，漏判
+        // 误判都更糟；选了非等宽的后果只是难看，fallback 链保证不会渲染错乱。
+        let font_options: Vec<(SharedString, SharedString)> = {
+            let mut names = cx.text_system().all_font_names();
+            names.sort();
+            names.dedup();
+            std::iter::once((
+                SharedString::from(""),
+                SharedString::from(format!("默认（{}）", terminal_view::DEFAULT_FONT_FAMILY)),
+            ))
+            .chain(names.into_iter().map(|n| (SharedString::from(n.clone()), SharedString::from(n))))
+            .collect()
+        };
         let appearance_page = SettingPage::new("外观").default_open(true).group(
             SettingGroup::new().items(vec![
                 SettingItem::new(
@@ -2740,6 +2780,20 @@ impl Workspace {
                             )
                     }),
                 ),
+                SettingItem::new(
+                    "终端字体",
+                    SettingField::scrollable_dropdown(
+                        font_options,
+                        |cx: &App| cx.global::<Appearance>().font_family.clone().into(),
+                        |v: SharedString, cx: &mut App| {
+                            let name = v.trim().to_string();
+                            terminal_view::set_font_family(&name);
+                            apply_appearance(move |a| a.font_family = name, cx);
+                            cx.refresh_windows();
+                        },
+                    ),
+                )
+                .description("终端使用的字体；建议选等宽字体，图标缺字自动回落内嵌默认"),
                 SettingItem::new(
                     "背景色",
                     SettingField::render(move |_, _, _| {
@@ -2952,32 +3006,69 @@ impl Workspace {
             SettingGroup::new()
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
                 let status = update_entity.read(cx).update_status.clone();
+                // 字节数换算成 MB 展示，只在拿得到 Content-Length 时才有百分比。
+                let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
                 let status_text = match &status {
                     updater::UpdateStatus::Idle => String::new(),
                     updater::UpdateStatus::Checking => "检查中…".to_string(),
                     updater::UpdateStatus::UpToDate => "已是最新版本".to_string(),
-                    updater::UpdateStatus::Downloading { version } => {
-                        format!("正在下载 v{version}…")
+                    updater::UpdateStatus::Downloading { version, received, total } => match total {
+                        Some(total) if *total > 0 => format!(
+                            "正在下载 v{version}… {:.0}%（{:.1} / {:.1} MB）",
+                            *received as f64 / *total as f64 * 100.0,
+                            mb(*received),
+                            mb(*total),
+                        ),
+                        _ => format!("正在下载 v{version}…（已下载 {:.1} MB）", mb(*received)),
+                    },
+                    updater::UpdateStatus::Installing { version } => {
+                        format!("正在安装 v{version}…")
                     }
                     updater::UpdateStatus::ReadyToInstall { version, .. } => {
                         format!("新版本 v{version} 已就绪，下次启动生效")
                     }
                     updater::UpdateStatus::Failed(e) => format!("检查失败：{e}"),
                 };
+                // 进度条：能算出百分比就走确定进度，否则跑不确定的滑动动画。
+                let progress_bar = match &status {
+                    updater::UpdateStatus::Downloading { received, total: Some(total), .. }
+                        if *total > 0 =>
+                    {
+                        Some(
+                            Progress::new("update-progress")
+                                .value(*received as f32 / *total as f32 * 100.0),
+                        )
+                    }
+                    updater::UpdateStatus::Downloading { .. }
+                    | updater::UpdateStatus::Installing { .. } => {
+                        Some(Progress::new("update-progress").loading(true))
+                    }
+                    _ => None,
+                };
                 let busy = matches!(
                     status,
-                    updater::UpdateStatus::Checking | updater::UpdateStatus::Downloading { .. }
+                    updater::UpdateStatus::Checking
+                        | updater::UpdateStatus::Downloading { .. }
+                        | updater::UpdateStatus::Installing { .. }
                 );
                 let ready = matches!(status, updater::UpdateStatus::ReadyToInstall { .. });
 
+                let check_label: String = match &status {
+                    updater::UpdateStatus::Checking => "检查中…".into(),
+                    updater::UpdateStatus::Downloading { .. } => "下载中…".into(),
+                    updater::UpdateStatus::Installing { .. } => "安装中…".into(),
+                    _ => "检查更新".into(),
+                };
                 let check_entity = update_entity.clone();
-                let check_btn = btn("check-update", if busy { "检查中…".into() } else { "检查更新".into() })
+                let check_btn = btn("check-update", check_label)
                     .text_color(if busy { muted } else { fg })
                     .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                         check_entity.update(cx, |this, cx| {
                             if !matches!(
                                 this.update_status,
-                                updater::UpdateStatus::Checking | updater::UpdateStatus::Downloading { .. }
+                                updater::UpdateStatus::Checking
+                                    | updater::UpdateStatus::Downloading { .. }
+                                    | updater::UpdateStatus::Installing { .. }
                             ) {
                                 this.check_for_update(false, cx);
                             }
@@ -2991,6 +3082,8 @@ impl Workspace {
                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                             if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } = &status {
                                 if updater::finalize_pending_update(staged_app).is_ok() {
+                                    // 排好重启再退；拉不起来也只是退化成手动打开，不该拦着退出。
+                                    let _ = updater::relaunch();
                                     cx.quit();
                                 }
                             }
@@ -3039,6 +3132,7 @@ impl Workspace {
                     .children((!status_text.is_empty()).then(|| {
                         div().text_xs().text_color(muted).child(status_text)
                     }))
+                    .children(progress_bar)
             }))
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
                     let outdated = daemon_entity.read(cx).daemon_outdated;
@@ -3117,7 +3211,10 @@ impl Workspace {
             let handle = cx
                 .open_window(options, |window, cx| {
                     window.set_rem_size(px(18.));
-                    let view = cx.new(|_cx| SettingsWindow { workspace: workspace.clone() });
+                    let view = cx.new(|cx| SettingsWindow {
+                        _observe_workspace: cx.observe(&workspace, |_, _, cx| cx.notify()),
+                        workspace: workspace.clone(),
+                    });
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("打开设置窗口失败");
@@ -4682,7 +4779,7 @@ impl Render for Workspace {
             .flex_col()
             .size_full()
             .bg(c_bg)
-            .font_family(terminal_view::FONT_FAMILY)
+            .font_family(terminal_view::font_family())
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
             // window 的 focus 兜底钉在这层，保证下面的全局 on_key_down 收得到事件。
             .track_focus(&self.focus_handle)
@@ -4694,6 +4791,21 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 if this.llm_inputs.is_none() {
                     this.init_llm_inputs(window, cx);
+                }
+                this.open_settings_window(cx);
+            }))
+            // 应用菜单「检查更新…」：顺手发起一次检查，再开设置窗口看「更新」页的进度。
+            .on_action(cx.listener(|this, _: &CheckForUpdate, window, cx| {
+                if this.llm_inputs.is_none() {
+                    this.init_llm_inputs(window, cx);
+                }
+                if !matches!(
+                    this.update_status,
+                    updater::UpdateStatus::Checking
+                        | updater::UpdateStatus::Downloading { .. }
+                        | updater::UpdateStatus::Installing { .. }
+                ) {
+                    this.check_for_update(false, cx);
                 }
                 this.open_settings_window(cx);
             }))
@@ -4835,6 +4947,7 @@ impl Render for Workspace {
                                     let needs_attention = matches!(
                                         self.update_status,
                                         updater::UpdateStatus::Downloading { .. }
+                                            | updater::UpdateStatus::Installing { .. }
                                             | updater::UpdateStatus::ReadyToInstall { .. }
                                     ) || self.daemon_outdated == Some(true);
                                     let gear: AnyElement = if needs_attention {
@@ -5073,7 +5186,7 @@ impl Render for Workspace {
                     .bg(rgba(0x000000cc))
                     .border_1()
                     .border_color(rgba(0xffffff22))
-                    .font_family(terminal_view::FONT_FAMILY)
+                    .font_family(terminal_view::font_family())
                     .text_xs()
                     .text_color(color)
                     .child(format!("{fps:.0} FPS · {ms:.1} ms"))
@@ -6137,7 +6250,7 @@ fn git_diff_pane(
             .min_h_0()
             .w_full()
             .py_1()
-            .font_family(terminal_view::FONT_FAMILY)
+            .font_family(terminal_view::font_family())
             .text_sm()
             .track_scroll(diff_scroll);
 
@@ -6824,9 +6937,14 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
 }
 
 /// 独立设置窗口的根 view：只是个薄壳，真正状态都还在传进来的 Workspace 实体上，
-/// 每次渲染转手调 `render_settings_content`，天然跟主窗口设置页保持同步。
+/// 每次渲染转手调 `render_settings_content`。
+///
+/// 但「转手调」不等于「跟着刷新」：`cx.notify()` 标脏的是 Workspace，设置窗口不在它
+/// 的观察者名单里，不会因此重绘。所以得显式 observe 一把，否则后台改的状态——更新
+/// 下载进度、守护进程检测结果——在设置窗口里会一直停在打开那一刻的样子。
 struct SettingsWindow {
     workspace: Entity<Workspace>,
+    _observe_workspace: Subscription,
 }
 
 impl Render for SettingsWindow {
@@ -6920,13 +7038,23 @@ fn main() {
     app.run(move |cx| {
         // 用任何 gpui-component 功能前必须先初始化。
         gpui_component::init(cx);
-        // 内嵌 Nerd Font 图标 fallback 字体：主字体查不到的图标码位会落到这里
-        // （terminal_view::terminal_font），不必强求用户机器装了打过 Nerd Font 补丁的字体。
+        // 内嵌终端默认字体 JetBrainsMono Nerd Font Mono（Regular/Bold），Ghostty 同款
+        // 思路：默认字体自己带，不赌用户装没装——任何机器上默认字体族都能解析成功，
+        // 杜绝"没装字体 → 测量/渲染各自 fallback 到不同字体 → 列宽错乱"。它是打过
+        // Nerd Font 补丁的完整版，自带全部图标码位，兼任图标 fallback（用户在设置页
+        // 自选的字体缺图标时落到它，见 terminal_view::terminal_font）。
         cx.text_system()
-            .add_fonts(vec![std::borrow::Cow::Borrowed(
-                include_bytes!("../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf").as_slice(),
-            )])
-            .expect("加载图标 fallback 字体失败");
+            .add_fonts(vec![
+                std::borrow::Cow::Borrowed(
+                    include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf")
+                        .as_slice(),
+                ),
+                std::borrow::Cow::Borrowed(
+                    include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf")
+                        .as_slice(),
+                ),
+            ])
+            .expect("加载内嵌字体失败");
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含「设置… ⌘,」+「退出 Smelt ⌘Q」
         // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
         cx.bind_keys([
@@ -6938,6 +7066,8 @@ fn main() {
             KeyBinding::new("shift-tab", terminal_view::TerminalBackTab, Some("Terminal")),
         ]);
         cx.set_menus(vec![Menu::new("Smelt").items([
+            MenuItem::action("检查更新…", CheckForUpdate),
+            MenuItem::Separator,
             MenuItem::action("设置…", OpenSettings),
             MenuItem::Separator,
             MenuItem::action("退出 Smelt", Quit),
@@ -6950,6 +7080,7 @@ fn main() {
         Theme::change(appearance.theme_mode, None, cx);
         terminal::set_dark_mode(appearance.theme_mode.is_dark());
         terminal_view::set_font_px(appearance.font_px);
+        terminal_view::set_font_family(&appearance.font_family);
         cx.set_global(appearance);
         cx.set_global(load_launch_config());
 
