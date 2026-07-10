@@ -7,28 +7,14 @@ prototype，接口和默认行为可能会变。
 ## 快速开始
 
 从 [GitHub Releases](https://github.com/zzfn/smelt/releases) 下载 `Smelt.dmg`，拖进
-应用程序文件夹，打开即可，只支持 Apple Silicon Mac。持久化守护 `smeltd` 已经打包
-在 `Smelt.app` 里，GUI 需要时会自己找到同目录的它并拉起，不用你手动运行任何命令。
+应用程序文件夹，打开即可，只支持 Apple Silicon Mac。
 
-`smeltd` 是类 tmux 的终端持久化守护：GUI 退出或崩溃不影响里面的 shell 存活，重开
-GUI 会按会话 id 自动 reattach，不用重新 `cd` 进项目、重新跑 `claude`。
+退出 smelt 甚至它崩溃了，里面跑着的 shell（包括正在干活的 `claude`）不会被杀掉，
+后台继续活着；重新打开 smelt，之前的分屏布局和终端会话都会自动恢复，不用重新
+`cd` 进项目、重新跑一遍命令。注意这只扛得住"关 smelt"，扛不住重启电脑——重启会
+把所有进程一起带走。
 
-**从源码构建**（需要 Rust 工具链和 Xcode Command Line Tools，不需要完整 Xcode）：
-
-```sh
-cargo run --bin workspace   # GUI 主程序
-```
-
-GUI 启动时会自动去可执行文件同目录找 `smeltd` 并拉起（找不到就静默跳过，不影响
-正常使用，见下面 FAQ）。只跑过 `cargo run --bin workspace` 的话，`target/debug/`
-下还没有 `smeltd`，自动拉起会落空；想要持久化能力，先单独构建一次：
-
-```sh
-cargo build --bin smeltd
-```
-
-之后 workspace 启动时就能在同目录找到它并自动拉起，不需要再手动 `cargo run --bin
-smeltd` 常驻一个终端（除非你想单独盯着它的日志调试）。
+想从源码构建、或者想搞清楚内部是怎么拼起来的，看[开发文档](/develop)。
 
 ## 打开项目
 
@@ -47,18 +33,6 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 首次启动、还没有任何存档会话时，界面是空态页，提供"新建会话"和"打开项目…"两个
 入口。侧栏里的项目分组是根据各会话的 cwd 动态派生、去重展示的，随会话一起存进
 `~/.smelt/workspace.json`，下次打开原样恢复。
-
-## 核心概念
-
-smelt 只有两个二进制：
-
-- **workspace** —— GUI 本体，多项目 × 多标签的外壳，负责渲染、文件树、git diff、
-  桌面宠物这些"看得见"的部分。
-- **smeltd** —— 后台守护，管 PTY 生命周期，跟 GUI 之间靠字节流通信。就算 GUI 挂了，
-  `smeltd` 照样把 shell 养着。
-
-两者是解耦的：`workspace` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以
-接上 `smeltd` 拿到跨重启的会话持久化。
 
 ## 功能一览
 
@@ -208,10 +182,6 @@ Claude Code 自己写在 `~/.claude/projects/**/*.jsonl` 里的记录，不是 s
 
 ## 常见问题
 
-**必须先跑 `smeltd` 才能用吗？**
-不需要。单独跑 `workspace` 完全可用，只是这种情况下关掉 GUI 相当于关掉里面所有终端。
-想要"GUI 崩了 shell 还在"这种持久化能力，才需要额外起 `smeltd`。
-
 **历史会话页能恢复/继续某次历史对话吗？**
 不能，目前只读展示 Claude Code 保存下来的历史记录，看完还是得去开一个新会话。
 
@@ -221,3 +191,6 @@ Claude Code 自己写在 `~/.claude/projects/**/*.jsonl` 里的记录，不是 s
 **在哪反馈问题？**
 仓库还没有开放稳定的 issue 流程，先看 [README](https://github.com/zzfn/smelt) 或直接
 去看源码。
+
+**想从源码构建、了解内部架构、或者参与开发？**
+这些不算"怎么用"，单独整理在[开发文档](/develop)里。

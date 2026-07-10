@@ -2,7 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const SECTIONS = ["快速开始", "核心概念", "功能一览", "数据与配置", "常见问题"];
+const SECTIONS = [
+  "快速开始",
+  "打开项目",
+  "功能一览",
+  "设置窗口",
+  "快捷键",
+  "数据与配置",
+  "常见问题",
+];
 
 function scrollToId(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });

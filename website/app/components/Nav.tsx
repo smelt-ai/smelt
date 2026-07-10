@@ -55,6 +55,9 @@ export function Nav() {
           <Link href="/docs" className="transition-colors hover:text-foreground">
             文档
           </Link>
+          <Link href="/develop" className="transition-colors hover:text-foreground">
+            开发
+          </Link>
         </nav>
 
         <a
