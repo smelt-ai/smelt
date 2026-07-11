@@ -216,9 +216,327 @@ fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
+// ===================== GPUI 面板 =====================
+//
+// 以上是纯逻辑（无 GPUI 依赖，好单测）；以下是从 main.rs 拆过来的面板部分——
+// `impl Workspace` 方法 + 渲染函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
+
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
+use gpui_component::text::TextView;
+use gpui_component::*;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::Instant;
+
+use crate::usage_stats::format_count;
+use crate::{placeholder_view, Workspace};
+
+/// 历史会话表格「时间」列文案：有明显跨度（>1 分钟）就顺带标一下这个会话跑了多久，
+/// 纯单条消息的会话就只显示时间点，不必画蛇添足展示"0 分钟"。
+fn session_when(s: &SessionSummary) -> String {
+    match (s.started_at, s.last_active_at) {
+        (Some(start), Some(last)) if (last - start).num_minutes() >= 1 => format!(
+            "{} · 跑了 {} 分钟",
+            last.with_timezone(&chrono::Local).format("%m-%d %H:%M"),
+            (last - start).num_minutes()
+        ),
+        (_, Some(last)) => last.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 历史会话表格的数据委托：持有当前项目的会话列表 + 列定义，渲染/排序都在这实现。
+pub struct SessionHistoryDelegate {
+    pub sessions: Rc<Vec<SessionSummary>>,
+    columns: Vec<Column>,
+}
+
+impl SessionHistoryDelegate {
+    fn new(sessions: Rc<Vec<SessionSummary>>) -> Self {
+        Self {
+            sessions,
+            columns: vec![
+                Column::new("title", "标题").width(px(260.)),
+                Column::new("when", "时间").width(px(180.)).sortable(),
+                Column::new("messages", "消息数").width(px(90.)).sortable(),
+                Column::new("tokens", "Tokens").width(px(90.)).sortable(),
+            ],
+        }
+    }
+}
+
+impl TableDelegate for SessionHistoryDelegate {
+    fn columns_count(&self, _cx: &App) -> usize {
+        self.columns.len()
+    }
+
+    fn rows_count(&self, _cx: &App) -> usize {
+        self.sessions.len()
+    }
+
+    fn column(&self, col_ix: usize, _cx: &App) -> Column {
+        self.columns[col_ix].clone()
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let s = &self.sessions[row_ix];
+        let (fg, muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        match self.columns[col_ix].key.as_ref() {
+            "title" => div().text_color(fg).child(s.title.clone()).into_any_element(),
+            "when" => div().text_color(muted).child(session_when(s)).into_any_element(),
+            "messages" => {
+                div().text_color(muted).child(s.message_count.to_string()).into_any_element()
+            }
+            "tokens" => div().text_color(muted).child(format_count(s.total_tokens)).into_any_element(),
+            _ => Empty.into_any_element(),
+        }
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) {
+        let key = self.columns[col_ix].key.clone();
+        let rows = Rc::make_mut(&mut self.sessions);
+        match (key.as_ref(), sort) {
+            ("when", ColumnSort::Ascending) => rows.sort_by_key(|s| s.last_active_at),
+            ("when", ColumnSort::Descending) => rows.sort_by_key(|s| std::cmp::Reverse(s.last_active_at)),
+            ("messages", ColumnSort::Ascending) => rows.sort_by_key(|s| s.message_count),
+            ("messages", ColumnSort::Descending) => rows.sort_by_key(|s| std::cmp::Reverse(s.message_count)),
+            ("tokens", ColumnSort::Ascending) => rows.sort_by_key(|s| s.total_tokens),
+            ("tokens", ColumnSort::Descending) => rows.sort_by_key(|s| std::cmp::Reverse(s.total_tokens)),
+            // Default：不重排，维持 list_sessions 原始顺序（按时间新→旧）。
+            _ => {}
+        }
+    }
+}
+
+/// 历史会话列表的三种状态：还没扫描完 / 扫描完但没有历史会话 / 拿到数据（表格 Entity
+/// 已经就绪，见 Workspace::ensure_session_table）。
+pub enum HistoryListState {
+    Loading,
+    Empty,
+    Ready(Entity<TableState<SessionHistoryDelegate>>),
+}
+
+/// 历史会话页：左侧列出当前项目下 Claude Code 保存的历史会话，右侧显示选中会话的
+/// 对话内容（只读浏览，不支持 resume）。数据来自 session_history 模块，跟「用量」
+/// 页读的是同一份 `~/.claude/projects/**/*.jsonl`，但这里还原对话本身而非统计聚合。
+pub fn history_view(
+    list: HistoryListState,
+    detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let (muted, fg, c_border, accent, secondary) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.foreground, t.border, t.primary, t.secondary)
+    };
+
+    let list_body: AnyElement = match list {
+        HistoryListState::Loading => placeholder_view("加载中…", muted).into_any_element(),
+        HistoryListState::Empty => {
+            placeholder_view("这个项目还没有本地保存的历史会话", muted).into_any_element()
+        }
+        HistoryListState::Ready(table) => {
+            div().flex_1().min_h_0().child(DataTable::new(&table).stripe(true)).into_any_element()
+        }
+    };
+
+    let detail_body: AnyElement = match detail {
+        None => placeholder_view("← 选择一个历史会话查看内容", muted).into_any_element(),
+        Some((_, d)) if d.turns.is_empty() => {
+            placeholder_view("这份会话没有可展示的对话内容", muted).into_any_element()
+        }
+        Some((_, d)) => div()
+            .id("session-detail")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .children(d.turns.iter().enumerate().map(|(i, t)| {
+                let role = if t.is_user { "用户" } else { "Claude" };
+                let role_color = if t.is_user { accent } else { fg };
+                let bubble_bg = if t.is_user { accent.opacity(0.12) } else { secondary };
+                // 工具名按出现顺序去重计数，多次调用同一工具合并成一行摘要
+                // （比如连续 3 次 Bash 就显示"Bash ×3"），不然长会话里全是重复胶囊。
+                let tool_summary = (!t.tools.is_empty()).then(|| {
+                    let mut order: Vec<&String> = Vec::new();
+                    let mut counts: HashMap<&String, usize> = HashMap::new();
+                    for tool in &t.tools {
+                        counts.entry(tool).and_modify(|c| *c += 1).or_insert_with(|| {
+                            order.push(tool);
+                            1
+                        });
+                    }
+                    order
+                        .into_iter()
+                        .map(|name| {
+                            let c = counts[name];
+                            if c > 1 { format!("{name} ×{c}") } else { name.clone() }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                });
+                v_flex()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .bg(bubble_bg)
+                    .when(t.is_user, |el| el.max_w(px(560.)))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_baseline()
+                            .child(div().font_semibold().text_sm().text_color(role_color).child(role))
+                            .children(t.timestamp.map(|ts| {
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(ts.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+                            })),
+                    )
+                    // 必须逐气泡给唯一 id：便捷函数 text::markdown() 拿调用处代码位置
+                    // 当 id，循环里所有气泡会共享同一份 TextView 状态（文本互踩、高度
+                    // 测量错乱，气泡整个叠在一起）。
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(fg)
+                            .child(TextView::markdown(("turn-md", i), t.text.clone())),
+                    )
+                    .children(tool_summary.map(|s| {
+                        div().text_xs().text_color(muted).child(format!("🔧 {s}"))
+                    }))
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    };
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .child(
+            div()
+                .w(px(280.))
+                .flex()
+                .flex_col()
+                .min_h_0()
+                .border_r_1()
+                .border_color(c_border)
+                .child(list_body),
+        )
+        .child(detail_body)
+}
+
+impl Workspace {
+    /// 历史会话页：确保当前项目的会话列表缓存新鲜（>10s 或缺失就后台重新扫描）。
+    pub fn ensure_session_list(&mut self, cwd: String, cx: &mut Context<Self>) {
+        let fresh = self
+            .session_list
+            .get(&cwd)
+            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(10));
+        if fresh || self.session_list_inflight.contains(&cwd) {
+            return;
+        }
+        self.session_list_inflight.insert(cwd.clone());
+        cx.spawn(async move |this, cx| {
+            let c = cwd.clone();
+            let sessions =
+                cx.background_executor().spawn(async move { list_sessions(&c) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.session_list_inflight.remove(&cwd);
+                this.session_list.insert(cwd, (Instant::now(), Rc::new(sessions)));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 历史会话页：点开一份会话，后台解析成 Turn 列表。用自增 gen 丢弃过期结果
+    /// （解析期间又点了别的会话）。
+    pub fn open_session_detail(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
+        let gen = self.session_detail_gen;
+        self.session_detail = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let detail =
+                cx.background_executor().spawn(async move { load_session_detail(&p) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_detail_gen != gen {
+                    return;
+                }
+                if let Some(detail) = detail {
+                    this.session_detail = Some((path, Rc::new(detail)));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 历史会话表格懒建 / 刷新：同项目（key 不变）只换 delegate 里的数据（保留排序/
+    /// 滚动/选中状态）；换项目（key 变）整个重建 Entity（重置这些状态，体感上是
+    /// "进了一个新页面"）。
+    pub fn ensure_session_table(
+        &mut self,
+        key: &str,
+        sessions: Rc<Vec<SessionSummary>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TableState<SessionHistoryDelegate>> {
+        if self.session_table_key.as_deref() == Some(key) {
+            if let Some(table) = &self.session_table {
+                table.update(cx, |t, cx| {
+                    t.delegate_mut().sessions = sessions;
+                    t.refresh(cx);
+                });
+                return table.clone();
+            }
+        }
+        let table = cx.new(|cx| TableState::new(SessionHistoryDelegate::new(sessions), window, cx));
+        self.session_table_sub =
+            Some(cx.subscribe_in(&table, window, |this, table, ev: &TableEvent, _window, cx| {
+                if let TableEvent::SelectRow(ix) = ev {
+                    if let Some(s) = table.read(cx).delegate().sessions.get(*ix) {
+                        this.open_session_detail(s.path.clone(), cx);
+                    }
+                }
+            }));
+        self.session_table_key = Some(key.to_string());
+        self.session_table = Some(table.clone());
+        table
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不用 `use super::*;`：本文件后半段引入了 gpui/gpui_component 的 glob 导入，
+    // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
+    // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
+    use super::{list_sessions, load_session_detail, project_dir};
+    use std::path::Path;
 
     fn write(dir: &Path, name: &str, lines: &[&str]) {
         std::fs::write(dir.join(name), lines.join("\n")).unwrap();

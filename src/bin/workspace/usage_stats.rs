@@ -205,9 +205,266 @@ pub fn daily_heatmap(events: &[UsageEvent], weeks: i64) -> Vec<(NaiveDate, u64)>
     days
 }
 
+// ===================== GPUI 面板 =====================
+//
+// 以上是纯逻辑（无 GPUI 依赖，好单测）；以下是从 main.rs 拆过来的面板部分——
+// `impl Workspace` 方法 + 渲染函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
+
+use chrono::Datelike;
+use gpui::*;
+use gpui_component::chart::BarChart;
+use gpui_component::*;
+use std::rc::Rc;
+use std::time::Instant;
+
+use crate::{placeholder_view, Workspace};
+
+/// 大数字加 K/M 单位（千/百万才简化，保留一位小数），token 数 / 调用数这类展示都拿它过一遍。
+pub fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// 只保留输入里的头部 N 项，其余合并成一项"其他"（调用方传入的 data 已经按值降序，
+/// 效果就是「前 N 大 + 其余汇总」）。用来防止种类过多时柱状图 x 轴标签挤在一起。
+fn cap_top_n(mut data: Vec<(String, u64)>, n: usize) -> Vec<(String, u64)> {
+    if data.len() <= n {
+        return data;
+    }
+    let rest: u64 = data.split_off(n).into_iter().map(|(_, v)| v).sum();
+    if rest > 0 {
+        data.push(("其他".to_string(), rest));
+    }
+    data
+}
+
+/// 热力格颜色：无数据用极淡的底色描边，有数据按 `sqrt(占比)` 映射透明度——避免线性
+/// 映射下小数值都挤成看不出深浅的一片。
+fn heat_cell_color(v: Option<u64>, max: u64, base: Hsla) -> Hsla {
+    match v {
+        None => base.opacity(0.0),
+        Some(0) => base.opacity(0.08),
+        Some(v) => {
+            let t = (v as f32 / max as f32).sqrt().clamp(0.25, 1.0);
+            base.opacity(t)
+        }
+    }
+}
+
+/// 用量页统一的卡片外壳：标题 + 右侧小字 caption + 内容。
+fn usage_section(title: &str, caption: &str, muted: Hsla, border: Hsla, body: AnyElement) -> Div {
+    v_flex()
+        .flex_1()
+        .gap_2()
+        .p_3()
+        .border_1()
+        .border_color(border)
+        .rounded(px(8.))
+        .child(
+            h_flex()
+                .justify_between()
+                .items_baseline()
+                .child(div().font_semibold().child(title.to_string()))
+                .child(div().text_xs().text_color(muted).child(caption.to_string())),
+        )
+        .child(body)
+}
+
+/// 用量页的一个「按 X 拆分」柱状图区块；data 为空时显示「无数据」占位。
+fn bar_section(title: &str, muted: Hsla, border: Hsla, color: Hsla, data: Vec<(String, u64)>) -> Div {
+    // 种类一多（尤其工具名，含各种 mcp__xxx__yyy 前缀）柱子会挤成一团、x 轴标签
+    // 叠在一起看不清，只画头部几项，其余合并成一根"其他"柱子。
+    let data = cap_top_n(data, 6);
+    let total: u64 = data.iter().map(|(_, v)| *v).sum();
+    let body = if data.is_empty() {
+        div().h(px(180.)).flex().items_center().justify_center().text_color(muted).text_sm().child("无数据")
+    } else {
+        div().h(px(180.)).child(
+            BarChart::new(data)
+                .band(|d: &(String, u64)| d.0.clone())
+                .value(|d: &(String, u64)| d.1 as f64)
+                .fill(move |_, _, _, _| color)
+                .tick_margin(1),
+        )
+    };
+    usage_section(title, &format!("共 {}", format_count(total)), muted, border, body.into_any_element())
+}
+
+/// 用量页：本地 Claude Code 会话用量统计——今日走势 + 活动热力图（全局口径），
+/// 加当前项目 / 全局汇总各自的按模型、按工具拆分（全局汇总另加按项目拆分）。
+/// 数据来自 usage_stats::scan（后台扫描 `~/.claude/projects/**/*.jsonl` 缓存的结果）。
+pub fn usage_view(
+    cur_project: Option<String>,
+    data: Option<Rc<UsageData>>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let (muted, c_border, chart_1, chart_2) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.border, t.chart_1, t.chart_2)
+    };
+
+    let Some(data) = data else {
+        return placeholder_view("统计中…", muted);
+    };
+    if data.events.is_empty() {
+        return placeholder_view("没有找到本地 Claude Code 会话记录（~/.claude/projects）", muted);
+    }
+
+    // 活动热力图：近 12 周，按周对齐成「列=周，行=周一到周日」的日历格（全局口径）。
+    let heat = daily_heatmap(&data.events, 12);
+    let heat_total: u64 = heat.iter().map(|(_, v)| *v).sum();
+    let max_heat = heat.iter().map(|(_, v)| *v).max().unwrap_or(0).max(1);
+    let lead = heat.first().map(|(d, _)| d.weekday().num_days_from_monday()).unwrap_or(0) as usize;
+    let mut cells: Vec<Option<u64>> =
+        std::iter::repeat(None).take(lead).chain(heat.iter().map(|(_, v)| Some(*v))).collect();
+    while cells.len() % 7 != 0 {
+        cells.push(None);
+    }
+    let week_columns: Vec<AnyElement> = cells
+        .chunks(7)
+        .map(|week| {
+            v_flex()
+                .gap(px(2.))
+                .children(week.iter().map(|cell| {
+                    div().size(px(11.)).rounded(px(2.)).bg(heat_cell_color(*cell, max_heat, chart_1))
+                }))
+                .into_any_element()
+        })
+        .collect();
+    let heatmap_section = usage_section(
+        "活动热力图（近 12 周）",
+        &format!("共 {} tokens", format_count(heat_total)),
+        muted,
+        c_border,
+        h_flex().gap(px(2.)).p_2().children(week_columns).into_any_element(),
+    );
+
+    // 当前项目 / 全局汇总的按模型、按工具拆分（全局另加按项目拆分）。
+    let cur_model = cur_project.as_deref().map(|p| by_model(&data.events, Some(p))).unwrap_or_default();
+    let cur_tool = cur_project.as_deref().map(|p| by_tool(&data.tools, Some(p))).unwrap_or_default();
+    let global_model = by_model(&data.events, None);
+    let global_tool = by_tool(&data.tools, None);
+    let global_project = by_project(&data.events);
+
+    let cur_project_row = h_flex()
+        .gap_3()
+        .child(bar_section("当前项目 · 按模型", muted, c_border, chart_1, cur_model))
+        .child(bar_section("当前项目 · 按工具", muted, c_border, chart_2, cur_tool));
+
+    let global_row = h_flex()
+        .gap_3()
+        .child(bar_section("全局 · 按模型", muted, c_border, chart_1, global_model))
+        .child(bar_section("全局 · 按工具", muted, c_border, chart_2, global_tool))
+        .child(bar_section("全局 · 按项目", muted, c_border, chart_1, global_project));
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p_3()
+        .child(heatmap_section)
+        .child(cur_project_row)
+        .child(global_row)
+}
+
+/// 独立用量窗口的根 view：同 [`crate::settings::SettingsWindow`]，薄壳转手调 `render_usage_page`。
+pub struct UsageWindow {
+    workspace: Entity<Workspace>,
+}
+
+impl Render for UsageWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.update(cx, |ws, cx| ws.render_usage_page(cx))
+    }
+}
+
+/// 独立用量窗口的单例句柄，同 [`crate::settings::SettingsWindowHandle`]。
+pub struct UsageWindowHandle(pub Option<WindowHandle<Root>>);
+impl Global for UsageWindowHandle {}
+
+impl Workspace {
+    /// 确保用量数据缓存新鲜（>30s 或缺失就后台重新扫描全部本地 transcript）。
+    pub fn ensure_usage_data(&mut self, cx: &mut Context<Self>) {
+        let fresh = self
+            .usage_cache
+            .as_ref()
+            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(30));
+        if fresh || self.usage_inflight {
+            return;
+        }
+        self.usage_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let data = cx.background_executor().spawn(async move { scan() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.usage_inflight = false;
+                this.usage_cache = Some((Instant::now(), Rc::new(data)));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 用量页内容：后台刷新扫描结果 + 取当前项目/全局数据拼视图。原先挂在
+    /// `MainView::Usage` 分支里，拆成独立窗口（[`UsageWindow`]）后单独抽出来，
+    /// 主窗口 render 循环里那个「用量页才刷新扫描」的判断也一并挪到这——独立窗口
+    /// 自己每次渲染都会调，不需要再靠 self.view 门控。
+    pub fn render_usage_page(&mut self, cx: &mut Context<Self>) -> Div {
+        self.ensure_usage_data(cx);
+        let cur_project = self.cur().and_then(|s| s.cwd(cx));
+        let data = self.usage_cache.as_ref().map(|(_, d)| d.clone());
+        // usage_view 内部用 flex_1/min_h_0 撑满，依赖外层是个 flex 容器（原先挂在
+        // 主窗口的 flex_col 主区里），独立窗口里補上这层容器它才能正确撑满。
+        div().size_full().flex().flex_col().child(usage_view(cur_project, data, cx))
+    }
+
+    /// 打开独立用量窗口：已经开着就聚焦提到前台，不重复开第二扇。跟
+    /// [`crate::settings::Workspace::open_settings_window`] 同一套薄壳模式——真正状态
+    /// （usage_cache 等）还挂在这个 Workspace 实体上，薄壳每次渲染转手调回来。
+    pub fn open_usage_window(&self, cx: &mut Context<Self>) {
+        let workspace = cx.entity();
+        cx.defer(move |cx| {
+            if let Some(handle) = cx.try_global::<UsageWindowHandle>().and_then(|h| h.0) {
+                if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+                    return;
+                }
+            }
+            let bounds = WindowBounds::centered(size(px(900.), px(700.)), cx);
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("用量".into()),
+                    ..Default::default()
+                }),
+                window_bounds: Some(bounds),
+                ..Default::default()
+            };
+            let handle = cx
+                .open_window(options, |window, cx| {
+                    window.set_rem_size(px(18.));
+                    let view = cx.new(|_cx| UsageWindow { workspace: workspace.clone() });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("打开用量窗口失败");
+            cx.set_global(UsageWindowHandle(Some(handle)));
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不用 `use super::*;`：本文件后面会加入 gpui/gpui_component 的 glob 导入，
+    // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期会撞
+    // rustc 的递归限制甚至直接崩溃——只导入测试真正用到的几个名字就够了。
+    use super::{by_model, by_project, by_tool, daily_heatmap, scan_root, UsageEvent};
+    use chrono::{Local, Utc};
+    use std::path::Path;
 
     fn write_transcript(dir: &Path, name: &str, lines: &[&str]) {
         std::fs::write(dir.join(name), lines.join("\n")).unwrap();

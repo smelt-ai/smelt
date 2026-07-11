@@ -95,21 +95,12 @@ fn pet_config_path() -> Option<std::path::PathBuf> {
 
 /// 读取宠物配置；缺失 / 损坏回退默认。
 pub fn load_pet_config() -> PetConfig {
-    pet_config_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    crate::json_store::load_json(pet_config_path())
 }
 
 /// 写回宠物配置（失败静默忽略）。
 pub fn save_pet_config(c: &PetConfig) {
-    let Some(path) = pet_config_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(c) {
-        let _ = std::fs::write(path, json);
-    }
+    crate::json_store::save_json(pet_config_path(), c)
 }
 
 // ===================== 播报邮箱（主窗口投递 → 宠物窗口取用） =====================

@@ -46,21 +46,12 @@ fn llm_config_path() -> Option<std::path::PathBuf> {
 
 /// 读取宠物大脑配置；缺失 / 损坏回退默认。
 pub fn load_llm_config() -> LlmConfig {
-    llm_config_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    crate::json_store::load_json(llm_config_path())
 }
 
 /// 写回宠物大脑配置（失败静默忽略）。
 pub fn save_llm_config(c: &LlmConfig) {
-    let Some(path) = llm_config_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(c) {
-        let _ = std::fs::write(path, json);
-    }
+    crate::json_store::save_json(llm_config_path(), c)
 }
 
 /// 解析出可用的 API key：配置优先 → 环境变量 `DEEPSEEK_API_KEY` → `~/.smelt/config.toml`

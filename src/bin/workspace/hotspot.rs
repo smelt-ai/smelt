@@ -174,9 +174,226 @@ fn worst_ratio(row: &[f64], row_sum: f64, side: f64) -> f64 {
     ((side2 * max) / sum2).max(sum2 / (side2 * min))
 }
 
+// ===================== GPUI 面板 =====================
+//
+// 以上是纯逻辑（无 GPUI 依赖，好单测）；以下是从 main.rs 拆过来的面板部分——
+// `impl Workspace` 方法 + 渲染函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
+
+use gpui::*;
+use gpui_component::*;
+use std::rc::Rc;
+use std::time::Instant;
+
+use crate::{placeholder_view, MainView, Workspace};
+
+/// 冷→热配色：t∈[0,1]（由排名百分位归一化，见 hotspot_view）从冷蓝经琥珀到警示红。
+fn heat_color(t: f32) -> Hsla {
+    let t = t.clamp(0.0, 1.0);
+    let stops: [(u8, u8, u8); 3] = [(0x2a, 0x41, 0x5c), (0xd9, 0x8a, 0x2e), (0xe0, 0x38, 0x38)];
+    let (lo, hi, local_t) = if t < 0.5 { (stops[0], stops[1], t / 0.5) } else { (stops[1], stops[2], (t - 0.5) / 0.5) };
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * local_t).round() as u32;
+    let packed = (lerp(lo.0, hi.0) << 16) | (lerp(lo.1, hi.1) << 8) | lerp(lo.2, hi.2);
+    rgb(packed).into()
+}
+
+/// 热力图视图：squarified treemap——每个矩形是一个近 90 天内改动过的文件。
+/// 面积 = 热力分数（改动频率 × 时间衰减，见 hotspot::compute）；颜色则按热力排名百分位
+/// 取色（而非分数原始值直接映射）——分数分布是指数衰减的长尾，直接按分数取色会导致只有
+/// 前一两名亮红/亮橙、其余瞬间跌成同一片暗色，按排名取色才能让整张图有连续的冷暖梯度。
+/// 右上角小圆点额外标出「最近改动」（2 天内）的文件；点击某块直接在文件树里打开对应文件。
+pub fn hotspot_view(
+    cwd: Option<String>,
+    data: Option<Rc<Vec<HotspotEntry>>>,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let (muted, c_bg) = {
+        let t = cx.theme();
+        (t.muted_foreground, t.background)
+    };
+    let Some(root) = cwd else {
+        return placeholder_view("无项目目录", muted);
+    };
+    let Some(entries) = data else {
+        return placeholder_view("计算改动热力中…", muted);
+    };
+    if entries.is_empty() {
+        return placeholder_view(
+            &format!(
+                "近 {} 天无改动记录（非 git 仓库，或近期无改动）",
+                WINDOW_DAYS
+            ),
+            muted,
+        );
+    }
+
+    // 只画热力最高的一批：太多小方块既放不下标签也没有辨识度。
+    const MAX_TILES: usize = 80;
+    let total = entries.len();
+    let shown: Vec<&HotspotEntry> = entries.iter().take(MAX_TILES).collect();
+    let weights: Vec<f64> = shown.iter().map(|e| e.score.max(1e-6)).collect();
+    let rects = squarify(&weights);
+    let last_ix = shown.len().saturating_sub(1).max(1) as f32;
+
+    let this = cx.entity();
+    let tiles: Vec<AnyElement> = shown
+        .iter()
+        .zip(rects.iter())
+        .enumerate()
+        .map(|(i, (entry, rect))| {
+            // 排名百分位（0 = 最热）取色，与面积（真实分数）解耦，避免长尾把色阶压平。
+            let heat = 1.0 - (i as f32 / last_ix);
+            let recent = entry.days_since < 2.0;
+            let name = std::path::Path::new(&entry.rel_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry.rel_path.clone());
+            let abs_path = std::path::Path::new(&root).join(&entry.rel_path).to_string_lossy().into_owned();
+            let this = this.clone();
+            let show_label = rect.w > 0.05 && rect.h > 0.06;
+
+            let mut tile = div()
+                .id(("hotspot-tile", i))
+                .absolute()
+                .left(relative(rect.x))
+                .top(relative(rect.y))
+                .w(relative(rect.w))
+                .h(relative(rect.h))
+                .overflow_hidden()
+                .cursor_pointer()
+                .rounded(px(4.))
+                .border_2()
+                .border_color(c_bg)
+                .bg(heat_color(heat))
+                .hover(|d| d.border_color(rgb(0x4a9eff)))
+                .on_click(move |_ev, window, cx| {
+                    this.update(cx, |ws, cx| {
+                        ws.view = MainView::Files;
+                        ws.view_file(abs_path.clone(), window, cx);
+                    });
+                    // 见总览入口同款注释：文件树页没有可聚焦元素，focus 显式
+                    // 认领到根节点，不然全局快捷键在这页会收不到事件。
+                    let h = this.read(cx).focus_handle.clone();
+                    window.focus(&h, cx);
+                });
+
+            // 太小的方块放不下文字，索性留白，靠颜色传达信息即可。
+            if show_label {
+                tile = tile
+                    // 底部暗角渐变：不管方块本身冷暖，文字永远压在深色底上，保证可读。
+                    .child(
+                        div().absolute().inset_0().bg(linear_gradient(
+                            180.,
+                            linear_color_stop(rgba(0x00000000), 0.0),
+                            linear_color_stop(rgba(0x00000099), 1.0),
+                        )),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .p(px(4.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .text_xs()
+                            .text_color(rgb(0xf3f5f8))
+                            .child(div().overflow_hidden().whitespace_nowrap().child(name))
+                            .child(
+                                div()
+                                    .text_color(rgba(0xffffffa8))
+                                    .child(format!("×{} · {:.0}d", entry.commits, entry.days_since)),
+                            ),
+                    );
+            }
+            // 最近改动：右上角一颗小圆点，不影响整体边框/网格的干净观感。
+            if recent {
+                tile = tile.child(
+                    div()
+                        .absolute()
+                        .top(px(4.))
+                        .right(px(4.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(0x4a9eff))
+                        .shadow_sm(),
+                );
+            }
+            tile.into_any_element()
+        })
+        .collect();
+
+    let caption = if total > MAX_TILES {
+        format!(
+            "改动热力 · 近 {} 天 · 显示热力最高的 {} / 共 {} 个文件 · 🔵 圆点 = 最近 2 天内改动",
+            WINDOW_DAYS, MAX_TILES, total
+        )
+    } else {
+        format!(
+            "改动热力 · 近 {} 天 · 共 {} 个文件 · 🔵 圆点 = 最近 2 天内改动",
+            WINDOW_DAYS, total
+        )
+    };
+
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .text_xs()
+                .text_color(muted)
+                .child(caption),
+        )
+        .child(
+            div()
+                .id("hotspot-canvas")
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .m_2()
+                .children(tiles),
+        )
+}
+
+impl Workspace {
+    /// 确保某 root 的热力图数据缓存新鲜（>20s 或缺失就后台刷新）。`git log --since=90.days`
+    /// 比 `git status` 慢得多，缓存窗口相应拉长，避免切换到热力图页就反复重算。
+    pub fn ensure_hotspot(&mut self, root: String, cx: &mut Context<Self>) {
+        let fresh = self
+            .hotspot_data
+            .get(&root)
+            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(20));
+        if fresh || self.hotspot_inflight.contains(&root) {
+            return;
+        }
+        self.hotspot_inflight.insert(root.clone());
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let entries = cx
+                .background_executor()
+                .spawn(async move { compute(&r) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.hotspot_inflight.remove(&root);
+                this.hotspot_data.insert(root, (Instant::now(), Rc::new(entries)));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不用 `use super::*;`：本文件后面会加入 gpui/gpui_component 的 glob 导入，
+    // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期会撞
+    // rustc 的递归限制甚至直接崩溃——只导入测试真正用到的这一个名字就够了。
+    use super::squarify;
 
     #[test]
     fn squarify_covers_full_area_and_preserves_order() {
