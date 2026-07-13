@@ -3712,9 +3712,14 @@ impl Render for Workspace {
                                 };
                                 // 切到非终端页面时把 focus 认领到根节点：这几页自己
                                 // 没有可聚焦元素，不然全局快捷键在这些页面会失灵。
-                                // 终端页留给 TerminalView 自己的点击/激活逻辑去抢焦点。
+                                // 切回终端页要显式把 focus 还给当前活动 pane——TerminalView
+                                // 的首帧自动聚焦（did_focus）只在它第一次渲染时触发一次，
+                                // 从文件树/Git 页切回来时它早就渲染过了，不会再抢，不然
+                                // 焦点会一直留在根节点上，得手动点一下终端才能输入。
                                 if this.view != MainView::Terminal {
                                     window.focus(&this.focus_handle, cx);
+                                } else {
+                                    this.focus_active(window, cx);
                                 }
                                 cx.notify();
                             }))
