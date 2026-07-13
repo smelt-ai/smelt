@@ -822,10 +822,21 @@ fn ns_window_of(window: &Window) -> *mut objc::runtime::Object {
     unsafe { msg_send![ns_view, window] }
 }
 
-/// 去掉 GPUI 在 macOS 上强加的原生窗口外框：改成无边框、无阴影、`clearColor` 背景。
+/// 去掉 GPUI 在 macOS 上强加的原生窗口外框：改成无边框、无阴影、`clearColor` 背景；
+/// 顺带把窗口层级从 `WindowKind::PopUp` 默认的 `NSPopUpWindowLevel`（101，系统弹出
+/// 菜单/提示条用的层级）降到 `NSFloatingWindowLevel`（3）。
 ///
 /// GPUI 的 mac 后端对 `titlebar: None` 仍会建成 Titled 窗口（必带圆角边框 + 阴影 + 一层
 /// 窗口材质），且没有任何 WindowOptions 能关掉。于是直接落到 AppKit 层改。首帧调一次。
+///
+/// 层级这一改是修一个「切到 smelt 时闪一下又跳回原来那个 app」的 bug：宠物这扇窗口是
+/// `NonactivatingPanel`（本来就设计成永远抢不了焦点），常驻在 `NSPopUpWindowLevel`——
+/// 全局层级里数一数二高，跟正常窗口的 0 差了两个数量级。用户切到 smelt 时，AppKit 会把
+/// 「这个进程层级最高的窗口」当成待激活对象，选中的偏偏是这扇既最靠前、又永远当不了
+/// key window 的面板：进程短暂被激活（这就是那一下「闪」），但没有任何窗口真正拿到
+/// key 状态，系统于是又把前台还给了原来的 app。降到 `NSFloatingWindowLevel` 后依然
+/// 浮在所有普通窗口（层级 0）之上，只是不再抢那个专供瞬时弹出内容用的极端层级，主窗口
+/// 的正常激活流程就不会被它截胡了。
 #[cfg(target_os = "macos")]
 fn strip_native_chrome(window: &Window) {
     use objc::runtime::{Object, NO};
@@ -839,6 +850,8 @@ fn strip_native_chrome(window: &Window) {
         // 仅保留「非激活面板」位（1<<7），去掉 Titled → 无边框、无系统圆角。
         let borderless_nonactivating: usize = 1 << 7;
         let _: () = msg_send![ns_window, setStyleMask: borderless_nonactivating];
+        let ns_floating_window_level: isize = 3;
+        let _: () = msg_send![ns_window, setLevel: ns_floating_window_level];
         let _: () = msg_send![ns_window, setHasShadow: NO];
         let _: () = msg_send![ns_window, setOpaque: NO];
         let clear: *mut Object = msg_send![class!(NSColor), clearColor];
