@@ -1466,6 +1466,26 @@ impl Workspace {
         }
     }
 
+    /// Cmd+[ / Cmd+] 在当前会话的分屏树里循环切换活动 pane（对齐 iTerm2 默认键位：
+    /// 这两个键管「同一会话内切哪个格子」，会话本身的切换交给 Cmd+1~9）。
+    /// 只有一个 pane（没分屏）时什么都不做。
+    fn cycle_pane(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sess) = self.cur() else { return };
+        let mut leaves = Vec::new();
+        collect_leaves(&sess.layout, &mut leaves);
+        if leaves.len() < 2 {
+            return;
+        }
+        let cur_id = sess.active.entity_id();
+        let Some(ix) = leaves.iter().position(|l| l.entity_id() == cur_id) else {
+            return;
+        };
+        let n = leaves.len() as i32;
+        let next = (ix as i32 + delta).rem_euclid(n) as usize;
+        let target = leaves[next].clone();
+        self.activate_pane(&target, window, cx);
+    }
+
     /// 侧栏右键「重命名」：弹出文本框，预填当前标题。回车 / 点「确定」提交，见
     /// `confirm_rename`；提交前的输入放在独立的 rename_input，不影响目标对象
     /// 本身，点「取消」（走 cancel_rename）就等于什么都没发生。
@@ -3471,7 +3491,8 @@ impl Render for Workspace {
             .on_drop::<ExternalPaths>(cx.listener(|this, ep: &ExternalPaths, _window, cx| {
                 this.open_paths(ep.paths(), cx);
             }))
-            // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+\ 布局 / Cmd+[ ] 切换
+            // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+[ ] 切当前会话内的 pane /
+            // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
                 if !ks.modifiers.platform {
@@ -3489,8 +3510,18 @@ impl Render for Workspace {
                         this.sidebar_open = !this.sidebar_open;
                         cx.notify();
                     }
-                    "[" => this.prev_active(window, cx),
-                    "]" => this.next_active(window, cx),
+                    // 切当前会话内的活动 pane（分屏），不是切会话——切会话见下面的 Cmd+1~9。
+                    "[" => this.cycle_pane(-1, window, cx),
+                    "]" => this.cycle_pane(1, window, cx),
+                    // Cmd+1~9：直接跳到侧栏第 N 个会话（对齐 iTerm2），超出现有会话数就
+                    // 什么都不做。
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                        let n = ks.key.as_bytes()[0] - b'1';
+                        let ix = n as usize;
+                        if ix < this.sessions.len() {
+                            this.activate(ix, window, cx);
+                        }
+                    }
                     // Cmd+D 竖切（右侧并排）/ Cmd+Shift+D 横切（下方堆叠）
                     "d" => {
                         let axis = if ks.modifiers.shift {
