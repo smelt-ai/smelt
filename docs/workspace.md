@@ -88,7 +88,8 @@ UI 线程每 30ms 对网格做快照并重绘。
 |---|---|
 | `Cmd+K` | 命令面板 |
 | `Cmd+B` | 切换侧栏 |
-| `Cmd+[` / `Cmd+]` | 切换上/下一个会话 |
+| `Cmd+[` / `Cmd+]` | 循环切换当前会话内的 pane（分屏） |
+| `Cmd+1` ~ `Cmd+9` | 跳到侧栏第 N 个会话 |
 | `Cmd+D` | 竖切分屏（右侧并排） |
 | `Cmd+Shift+D` | 横切分屏（下方堆叠） |
 | `Cmd+W` | 关闭当前 pane（会话只剩一个 pane 时关掉整个会话） |
@@ -116,6 +117,14 @@ UI 线程每 30ms 对网格做快照并重绘。
 - **IME 走 `EntityInputHandler`**：中文等合成输入不经 `on_key_down`，必须实现输入处理器
   并在 paint 阶段用 `window.handle_input` 注册；同一 canvas 顺便记录网格原点供鼠标换算。
 - **整行 `StyledText`**：解决「逐格定宽 span」带来的子像素抖动与截断，是终端网格渲染的正确姿势。
+- **桌面宠物窗口层级用 floating，不用 popup**：`WindowKind::PopUp` 默认落在
+  `NSPopUpWindowLevel`（系统弹出菜单/提示条的层级，全局数一数二高）。宠物这种非激活、
+  常驻可见的面板留在这个层级，会被 AppKit 当成「进程里层级最高的窗口」去参与激活判断，
+  导致切到主窗口时闪一下又被切回去。手动把 level 降到 `NSFloatingWindowLevel` 才不会
+  截胡主窗口的正常激活流程（见 `pet.rs` 的 `strip_native_chrome`）。
+- **IME 的 `selectedRange` 必须返回有效折叠区间，不能恒为 `None`**：一直返回 `None` 会
+  桥接成 AppKit 的 `{NSNotFound, 0}`，等于告诉系统「这里没有文字光标」——系统切换输入法
+  时的提示气泡就不会出现（候选窗本身走 `hasMarkedText`/`setMarkedText`，不受影响）。
 
 ---
 
