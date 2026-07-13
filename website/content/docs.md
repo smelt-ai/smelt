@@ -24,10 +24,9 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 - **拖拽**：把项目文件夹（或文件）直接拖进窗口，会以该目录为 cwd 开一个新会话。
 - **侧栏底部"打开项目"按钮**，或 `Cmd+K` 命令面板里的"打开项目…"：弹系统原生的
   文件夹选择框，选中后开新会话。
-- **项目分组行右侧的 `+`**：在这个项目已有的 cwd 下继续开新的终端 /
-  Claude Code / Codex / Copilot 会话。其中"继续上次会话"目前**只有 Codex（`codex
-  resume --last`）和 Copilot（`copilot --continue`）提供，Claude Code 没有对应
-  入口**。
+- **项目分组行右侧的 `+`**：在这个项目已有的 cwd 下继续开新的终端，或执行设置里
+  配置的启动命令（默认含 Claude Code / Codex / Copilot）。
+  启动项在设置 →「启动」里按 `显示名 + 命令` 自由增删改。
 - 顶栏的 `+` 新建标签：不弹选择框，直接继承当前会话的 cwd。
 
 首次启动、还没有任何存档会话时，界面是空态页，提供"新建会话"和"打开项目…"两个
@@ -119,11 +118,10 @@ smelt 没有独立的"项目列表"——项目就是某个会话的工作目录
 - **桌面宠物**：显示开关、状态播报开关、"宠物大脑（LLM）"开关及接口地址 /
   API Key / 模型 / 人设四个输入框（默认接 DeepSeek）、宠物颜色、宠物大小
   （小/中/大）。
-- **启动**：Claude Code / Copilot / Codex 各自的"全权限启动"开关（分别等价
-  `--dangerously-skip-permissions` / `--allow-all` /
-  `--dangerously-bypass-approvals-and-sandbox`，跳过权限确认）；以及 Copilot
-  响铃通知开关——**这个开关改的是 `~/.copilot/settings.json`，会影响这台机器上
-  所有场合（不止 smelt 内）用到的 Copilot CLI**，不是 smelt 私有配置。
+- **启动**：项目行「+」菜单的快捷启动项列表（每项是显示名 + shell 命令，可自由增删改；
+  需要全权限就把参数写进命令，例如 `claude --dangerously-skip-permissions`）；
+  以及 Copilot 响铃通知开关——**这个开关改的是 `~/.copilot/settings.json`，会
+  影响这台机器上所有场合（不止 smelt 内）用到的 Copilot CLI**，不是 smelt 私有配置。
 - **更新**：启动时会自动静默检查一次，这里的"检查更新"按钮用于手动触发；状态
   文案会显示检查中 / 已是最新 / 下载中 / 新版本已就绪 / 失败，就绪后有"立即重启
   更新"按钮（不点也会在下次正常退出后自动生效）。另有 `smeltd` 守护进程版本
@@ -175,7 +173,7 @@ smelt 不建数据库，状态都是本地小文件：
 | `~/.smelt/appearance.json` | 终端外观设置（配色、字体等），所有终端共享一份 |
 | `~/.smelt/pet.json` | 桌面宠物是否显示、播报、颜色、大小等设置 |
 | `~/.smelt/llm.json` | 桌面宠物"大脑"LLM 配置（接口地址 / API Key / 模型 / 人设） |
-| `~/.smelt/launch.json` | Claude Code / Copilot / Codex 的"全权限启动"等开关 |
+| `~/.smelt/launch.json` | 项目「+」菜单的快捷启动项列表（`entries: [{label, command}, …]`） |
 | `~/.smelt/smeltd.sock` | `smeltd` 的 Unix socket，`workspace` 靠它跟守护通信 |
 
 都是本地文件，没有任何数据会离开这台机器。「历史会话」和「用量统计」两个视图读的是

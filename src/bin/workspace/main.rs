@@ -11,6 +11,7 @@ mod file_tree;
 mod git_panel;
 mod hotspot;
 mod json_store;
+mod mem_usage;
 mod pet;
 mod session_history;
 mod settings;
@@ -25,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -59,7 +60,10 @@ use git_panel::{
 };
 use hotspot::hotspot_view;
 use session_history::{history_view, HistoryListState, SessionHistoryDelegate};
-use settings::{load_appearance, load_launch_config, Appearance, LaunchConfig, LlmInputs};
+use settings::{
+    active_launch_entries, icon_for_launch_command, load_appearance, load_launch_config, Appearance,
+    LlmInputs,
+};
 use usage_stats::format_count;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
@@ -393,8 +397,9 @@ enum RenameTarget {
     Pane(Entity<TerminalView>),
 }
 
-/// 单个终端 pane 自动推导的标题：优先 agent 上报的任务名，回退建终端时的 cwd 名。
-/// 不看用户改的名字——`Session::title` 靠它拿活动 pane 的「客观」标题。
+/// 单个终端 pane 自动推导的标题：优先 agent 上报的任务名，其次快捷启动显示名，
+/// 再回退建终端时的 cwd 名。不看用户改的名字——`Session::title` 靠它拿活动 pane
+/// 的「客观」标题。
 fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
     let t = view.read(cx);
     if let Some(raw) = t.agent_title() {
@@ -406,10 +411,17 @@ fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
                 .is_some_and(|c| ('\u{2801}'..='\u{28FF}').contains(&c));
         if is_agent {
             let task = strip_status(&raw);
+            // agent 默认标题（"Claude Code" / "claude"）不算任务名，继续往下回退。
             if !task.is_empty() && task != "Claude Code" && task != "claude" {
-                return task;
+                // 也别跟启动项显示名撞车（例如菜单叫 Claude Code，agent 也只报这个）。
+                if t.launch_label().is_none_or(|l| l != task) {
+                    return task;
+                }
             }
         }
+    }
+    if let Some(label) = t.launch_label() {
+        return label.to_string();
     }
     t.title().to_string()
 }
@@ -582,6 +594,9 @@ enum PaneState {
         /// 用户给这个 pane 起的名字。旧存档没有这个字段 → None，行为不变。
         #[serde(default)]
         custom_title: Option<String>,
+        /// 快捷启动项显示名。旧存档没有 → None，回退 cwd 末段。
+        #[serde(default)]
+        launch_label: Option<String>,
     },
     Split { axis: SplitAxis, children: Vec<PaneState> },
 }
@@ -620,11 +635,15 @@ impl From<SplitAxis> for Axis {
 /// 把渲染用的布局树导出成可序列化镜像（叶子读取各终端当前 cwd）。
 fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
     match pane {
-        Pane::Leaf(t) => PaneState::Leaf {
-            cwd: t.read(cx).cwd(),
-            id: Some(t.read(cx).session_id().to_string()),
-            custom_title: t.read(cx).custom_title().map(str::to_string),
-        },
+        Pane::Leaf(t) => {
+            let t = t.read(cx);
+            PaneState::Leaf {
+                cwd: t.cwd(),
+                id: Some(t.session_id().to_string()),
+                custom_title: t.custom_title().map(str::to_string),
+                launch_label: t.launch_label().map(str::to_string),
+            }
+        }
         Pane::Split { axis, children, .. } => PaneState::Split {
             axis: (*axis).into(),
             children: children.iter().map(|c| pane_to_state(c, cx)).collect(),
@@ -640,11 +659,18 @@ fn rebuild_pane(
     cx: &mut Context<Workspace>,
 ) -> Pane {
     match ps {
-        PaneState::Leaf { cwd, id, custom_title } => {
+        PaneState::Leaf {
+            cwd,
+            id,
+            custom_title,
+            launch_label,
+        } => {
             // 有存档 id → reattach 守护里还活着的会话；旧存档无 id → 开新会话。
+            // reattach 不再带 launch 命令（shell 已在跑），只恢复显示名与自定义名。
             let sid = id.clone().unwrap_or_else(new_sid);
+            let label = launch_label.clone();
             let v = cx.new(|cx| {
-                let mut view = TerminalView::new(cx, cwd.clone(), sid, None);
+                let mut view = TerminalView::new(cx, cwd.clone(), sid, None, label.as_deref());
                 // 自定义名跟着同一条 Leaf 存取，reattach 后灌回来，否则重开就丢。
                 view.set_custom_title(custom_title.clone());
                 view
@@ -766,6 +792,8 @@ struct Workspace {
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
     llm_subs: Vec<Subscription>,
+    /// 启动项列表编辑器（设置页「启动」分组懒创建）。
+    launch_inputs: Option<settings::LaunchInputs>,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器。
     opacity_slider: Option<Entity<SliderState>>,
     font_size_slider: Option<Entity<SliderState>>,
@@ -812,12 +840,16 @@ struct Workspace {
     session_table_key: Option<String>,
     /// TableEvent 订阅句柄，session_table 重建时一起换。
     session_table_sub: Option<Subscription>,
-    /// 调试 HUD 开关（Cmd+Shift+F 切换）：开启时右上角显示帧率 + 帧耗时。
+    /// 调试 HUD 开关（Cmd+Shift+F 切换）：开启时右上角显示帧率 + 帧耗时 + RSS。
     debug_hud: bool,
     /// 上一帧渲染时刻（算帧间隔用）。
     last_frame: Option<Instant>,
     /// 平滑后的帧率（EMA）。
     fps_ema: f32,
+    /// 调试 HUD 上次采样的 RSS（字节）；约每秒刷新一次，避免每帧调系统 API。
+    debug_mem_rss: Option<u64>,
+    /// 调试 HUD 上次内存采样时刻。
+    debug_mem_sampled_at: Option<Instant>,
     /// 退出确认拦截弹窗开关
     show_quit_confirm: bool,
     /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
@@ -923,7 +955,7 @@ impl Workspace {
             } else {
                 // 更旧格式：cwd 列表 → 每个 cwd 一个独立会话。
                 for cwd in s.tabs.clone() {
-                    let v = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), None));
+                    let v = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), None, None));
                     sessions.push(Session::single(v));
                 }
                 active_session = s.active;
@@ -998,6 +1030,7 @@ impl Workspace {
             session_table_sub: None,
             llm_inputs: None,
             llm_subs: Vec::new(),
+            launch_inputs: None,
             opacity_slider: None,
             font_size_slider: None,
             bg_color_picker: None,
@@ -1006,6 +1039,8 @@ impl Workspace {
             applied_window_bg: None,
             debug_hud: false,
             last_frame: None,
+            debug_mem_rss: None,
+            debug_mem_sampled_at: None,
             fps_ema: 0.0,
             show_quit_confirm: false,
             update_status: updater::UpdateStatus::default(),
@@ -1211,19 +1246,19 @@ impl Workspace {
 
     /// 「+」/新建：开一个独立新会话（单终端），并切过去。
     fn add_session(&mut self, cwd: Option<String>, cx: &mut Context<Self>) {
-        self.add_session_with_launch(cwd, None, cx);
+        self.add_session_with_launch(cwd, None, None, cx);
     }
 
-    /// 项目行「+」下拉菜单的 Claude Code / Codex 快捷入口：`launch` 编进 shell 的
-    /// 启动命令行（见 terminal.rs::spawn / smeltd.rs::spawn_session），不是等
-    /// shell 起来后再补发按键，从根上没有时序竞态。
+    /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
+    /// terminal.rs::spawn / smeltd.rs::spawn_session），`label` 用作侧栏初始显示名。
     fn add_session_with_launch(
         &mut self,
         cwd: Option<String>,
         launch: Option<&str>,
+        label: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let view = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), launch));
+        let view = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), launch, label));
         self.sessions.push(Session::single(view));
         self.active_session = self.sessions.len() - 1;
         self.save_state(cx);
@@ -1235,7 +1270,7 @@ impl Workspace {
         let Some(sess) = self.cur() else { return };
         let cwd = sess.active.read(cx).cwd().or_else(current_dir);
         let old = sess.active.entity_id();
-        let view = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), None));
+        let view = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), None, None));
         let state = cx.new(|_| ResizableState::default());
         let sess = &mut self.sessions[self.active_session];
         split_leaf(&mut sess.layout, old, axis, state, view.clone());
@@ -2674,9 +2709,18 @@ impl Render for Workspace {
                 }
             }
             self.last_frame = Some(now);
+            let mem_due = self
+                .debug_mem_sampled_at
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
+            if mem_due {
+                self.debug_mem_rss = mem_usage::current_rss_bytes();
+                self.debug_mem_sampled_at = Some(now);
+            }
             window.request_animation_frame();
         } else {
             self.last_frame = None;
+            self.debug_mem_rss = None;
+            self.debug_mem_sampled_at = None;
         }
 
         // 主题色 token（跟随 gpui-component 主题，替代硬编码）
@@ -3020,126 +3064,49 @@ impl Render for Workspace {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Plus)
-                                    .dropdown_menu(move |menu, _window, _cx| {
+                                    .dropdown_menu(move |menu, _window, cx| {
                                         let raw_cwd = cwd.clone();
                                         let repo_label = repo_label.clone();
                                         let e_worktree = e_new.clone();
                                         let cwd = (!cwd.is_empty()).then(|| cwd.clone());
                                         let cwd_new = cwd.clone();
-                                        let cwd_claude = cwd.clone();
-                                        let cwd_codex = cwd.clone();
-                                        let cwd_codex_resume = cwd.clone();
-                                        let cwd_copilot = cwd.clone();
-                                        let cwd_copilot_resume = cwd;
                                         let e_term = e_new.clone();
-                                        let e_claude = e_new.clone();
-                                        let e_codex = e_new.clone();
-                                        let e_codex_resume = e_new.clone();
-                                        let e_copilot = e_new.clone();
-                                        let e_copilot_resume = e_new.clone();
-                                        menu.item(
+                                        let entries = active_launch_entries(cx);
+                                        let mut menu = menu.item(
                                             PopupMenuItem::new("新建终端")
                                                 .icon(IconName::SquareTerminal)
                                                 .on_click(move |_ev, _window, cx| {
                                                     let cwd = cwd_new.clone();
                                                     e_term.update(cx, |ws, cx| ws.add_session(cwd, cx));
                                                 }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Claude Code")
-                                                .icon(IconName::Asterisk)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let cwd = cwd_claude.clone();
-                                                    // 是否跳过权限确认由设置页的开关决定，每次点击都读最新值。
-                                                    let full_perm = cx
-                                                        .try_global::<LaunchConfig>()
-                                                        .is_some_and(|c| c.claude_full_permissions);
-                                                    let launch = if full_perm {
-                                                        "claude --dangerously-skip-permissions"
-                                                    } else {
-                                                        "claude"
-                                                    };
-                                                    e_claude.update(cx, |ws, cx| {
-                                                        ws.add_session_with_launch(cwd, Some(launch), cx)
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Codex")
-                                                .icon(IconName::Bot)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let cwd = cwd_codex.clone();
-                                                    // 是否跳过权限确认由设置页的开关决定，每次点击都读最新值。
-                                                    let full_perm = cx
-                                                        .try_global::<LaunchConfig>()
-                                                        .is_some_and(|c| c.codex_full_permissions);
-                                                    let launch = if full_perm {
-                                                        "codex --dangerously-bypass-approvals-and-sandbox"
-                                                    } else {
-                                                        "codex"
-                                                    };
-                                                    e_codex.update(cx, |ws, cx| {
-                                                        ws.add_session_with_launch(cwd, Some(launch), cx)
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Codex（继续上次）")
-                                                .icon(IconName::Bot)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let cwd = cwd_codex_resume.clone();
-                                                    let full_perm = cx
-                                                        .try_global::<LaunchConfig>()
-                                                        .is_some_and(|c| c.codex_full_permissions);
-                                                    let launch = if full_perm {
-                                                        "codex resume --last --dangerously-bypass-approvals-and-sandbox"
-                                                    } else {
-                                                        "codex resume --last"
-                                                    };
-                                                    e_codex_resume.update(cx, |ws, cx| {
-                                                        ws.add_session_with_launch(cwd, Some(launch), cx)
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Copilot")
-                                                .icon(IconName::Github)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let cwd = cwd_copilot.clone();
-                                                    // 是否跳过权限确认由设置页的开关决定，每次点击都读最新值。
-                                                    let full_perm = cx
-                                                        .try_global::<LaunchConfig>()
-                                                        .is_some_and(|c| c.copilot_full_permissions);
-                                                    let launch = if full_perm {
-                                                        "copilot --allow-all"
-                                                    } else {
-                                                        "copilot"
-                                                    };
-                                                    e_copilot.update(cx, |ws, cx| {
-                                                        ws.add_session_with_launch(cwd, Some(launch), cx)
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Copilot（继续上次）")
-                                                .icon(IconName::Github)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let cwd = cwd_copilot_resume.clone();
-                                                    let full_perm = cx
-                                                        .try_global::<LaunchConfig>()
-                                                        .is_some_and(|c| c.copilot_full_permissions);
-                                                    let launch = if full_perm {
-                                                        "copilot --continue --allow-all"
-                                                    } else {
-                                                        "copilot --continue"
-                                                    };
-                                                    e_copilot_resume.update(cx, |ws, cx| {
-                                                        ws.add_session_with_launch(cwd, Some(launch), cx)
-                                                    });
-                                                }),
-                                        )
+                                        );
+                                        for entry in entries {
+                                            let label = entry.label;
+                                            let command = entry.command;
+                                            let cwd_launch = cwd.clone();
+                                            let e_launch = e_new.clone();
+                                            let icon = icon_for_launch_command(&command);
+                                            menu = menu.item(
+                                                PopupMenuItem::new(label.clone())
+                                                    .icon(icon)
+                                                    .on_click(move |_ev, _window, cx| {
+                                                        let cwd = cwd_launch.clone();
+                                                        let cmd = command.clone();
+                                                        let name = label.clone();
+                                                        e_launch.update(cx, |ws, cx| {
+                                                            ws.add_session_with_launch(
+                                                                cwd,
+                                                                Some(cmd.as_str()),
+                                                                Some(name.as_str()),
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }),
+                                            );
+                                        }
                                         // 临时终端（$HOME）不是真项目，建不了 worktree；空 cwd
                                         // 同理（会话还没上报出目录）。
+                                        menu
                                         .when(!is_scratch_group && !raw_cwd.is_empty(), |menu| {
                                             menu.separator().item(
                                                 PopupMenuItem::new("新建 Worktree…")
@@ -3541,11 +3508,13 @@ impl Render for Workspace {
                     // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
                     // 视图时背着用户悄悄写盘）。
                     "s" if this.view == MainView::Files => this.save_open_file(cx),
-                    // Cmd+Shift+F 切换调试 HUD（右上角帧率）
+                    // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
                     "f" if ks.modifiers.shift => {
                         this.debug_hud = !this.debug_hud;
                         this.fps_ema = 0.0;
                         this.last_frame = None;
+                        this.debug_mem_rss = None;
+                        this.debug_mem_sampled_at = None;
                         cx.notify();
                     }
                     // Cmd+Q 退出交给应用菜单的 Quit action（全局绑定，见 main）
@@ -3898,10 +3867,14 @@ impl Render for Workspace {
             )
             // 通知面板浮层
             .children(self.notifications_open.then(|| self.render_notifications(cx)))
-            // 调试 HUD：右上角帧率 + 帧耗时（Cmd+Shift+F 切换）
+            // 调试 HUD：右上角帧率 + 帧耗时 + RSS（Cmd+Shift+F 切换）
             .children(self.debug_hud.then(|| {
                 let fps = self.fps_ema;
                 let ms = if fps > 0.0 { 1000.0 / fps } else { 0.0 };
+                let mem = self
+                    .debug_mem_rss
+                    .map(mem_usage::format_rss)
+                    .unwrap_or_else(|| "—".into());
                 // 帧率健康度着色：≥55 绿、≥30 黄、否则红。
                 let color = if fps >= 55.0 {
                     rgb(0x22c55e)
@@ -3923,7 +3896,7 @@ impl Render for Workspace {
                     .font_family(terminal_view::font_family())
                     .text_xs()
                     .text_color(color)
-                    .child(format!("{fps:.0} FPS · {ms:.1} ms"))
+                    .child(format!("{fps:.0} FPS · {ms:.1} ms · RSS {mem}"))
             }))
     }
 }
@@ -4238,12 +4211,19 @@ mod pane_state_tests {
             cwd: Some("/tmp/x".into()),
             id: Some("sid-1".into()),
             custom_title: Some("跑测试的终端".into()),
+            launch_label: Some("Claude Code".into()),
         };
         let json = serde_json::to_string(&leaf).unwrap();
         let back: PaneState = serde_json::from_str(&json).unwrap();
         match back {
-            PaneState::Leaf { custom_title, id, cwd } => {
+            PaneState::Leaf {
+                custom_title,
+                launch_label,
+                id,
+                cwd,
+            } => {
                 assert_eq!(custom_title.as_deref(), Some("跑测试的终端"));
+                assert_eq!(launch_label.as_deref(), Some("Claude Code"));
                 assert_eq!(id.as_deref(), Some("sid-1"));
                 assert_eq!(cwd.as_deref(), Some("/tmp/x"));
             }
@@ -4251,14 +4231,20 @@ mod pane_state_tests {
         }
     }
 
-    /// 旧存档没有 custom_title 字段，必须读成 None 而不是解析失败。
+    /// 旧存档没有 custom_title / launch_label 字段，必须读成 None 而不是解析失败。
     #[test]
     fn old_archive_without_custom_title_still_loads() {
         let old = r#"{"Leaf":{"cwd":"/tmp/x","id":"sid-1"}}"#;
         let back: PaneState = serde_json::from_str(old).unwrap();
         match back {
-            PaneState::Leaf { custom_title, id, .. } => {
+            PaneState::Leaf {
+                custom_title,
+                launch_label,
+                id,
+                ..
+            } => {
                 assert!(custom_title.is_none(), "旧存档不该凭空冒出自定义名");
+                assert!(launch_label.is_none(), "旧存档不该凭空冒出启动项名");
                 assert_eq!(id.as_deref(), Some("sid-1"));
             }
             _ => panic!("应当反序列化成 Leaf"),

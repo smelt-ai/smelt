@@ -38,7 +38,7 @@ smelt 把终端——agent 真正干活的地方——变成主战场。
 
 **工作台**
 - 多项目 × 多标签内嵌真终端，`claude`、`codex`、`copilot`、`vim`、`htop` 等交互式程序与全屏 TUI 都能跑
-- 快捷启动：项目「+」菜单直接开 Claude Code / Codex / Copilot，各自可配「全权限」模式
+- 快捷启动：项目「+」菜单的启动项可在设置里自定义（名称 + 命令列表），默认含 Claude Code / Codex / Copilot
 - 分屏：竖切 / 横切，一个会话里并排看多个 agent
 - 命令面板（`Cmd+K`）、可折叠侧栏
 

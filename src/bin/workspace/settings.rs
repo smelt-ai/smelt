@@ -113,31 +113,70 @@ fn save_appearance(a: &Appearance) {
     crate::json_store::save_json(appearance_path(), a)
 }
 
-/// Claude Code / Copilot / Codex 快捷启动的权限模式（全局单例，存 ~/.smelt/launch.json）。
+/// 项目行「+」下拉菜单里的一条可配置启动项：显示名 + shell 启动命令。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct LaunchEntry {
+    pub label: String,
+    pub command: String,
+}
+
+/// 出厂默认启动项：与当前常用配置对齐（各 agent 默认带全权限参数）。
+/// 用户可在设置里增删改；需要更保守时把参数删掉即可。
+/// 「继续上次」不放默认里，需要的人自己在设置里加。
+pub fn default_launch_entries() -> Vec<LaunchEntry> {
+    vec![
+        LaunchEntry {
+            label: "Claude Code".into(),
+            command: "claude --dangerously-skip-permissions".into(),
+        },
+        LaunchEntry {
+            label: "Codex".into(),
+            command: "codex --dangerously-bypass-approvals-and-sandbox".into(),
+        },
+        LaunchEntry {
+            label: "Copilot".into(),
+            command: "copilot --allow-all".into(),
+        },
+    ]
+}
+
+/// 项目行「+」可配置启动项列表（全局单例，存 ~/.smelt/launch.json）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LaunchConfig {
-    /// 开启后项目行「+」的 Claude Code 快捷入口改用
-    /// `claude --dangerously-skip-permissions` 启动，跳过所有权限确认。
-    pub claude_full_permissions: bool,
-    /// 开启后项目行「+」的 Copilot 快捷入口改用 `copilot --allow-all` 启动
-    /// （等价于同时开 --allow-all-tools/--allow-all-paths/--allow-all-urls），
-    /// 跳过所有权限确认。新增字段用 serde(default)，读旧存档缺这个键不报错。
-    #[serde(default)]
-    pub copilot_full_permissions: bool,
-    /// 开启后项目行「+」的 Codex 快捷入口改用
-    /// `codex --dangerously-bypass-approvals-and-sandbox` 启动，跳过所有确认+沙箱。
-    #[serde(default)]
-    pub codex_full_permissions: bool,
+    /// 除固定的「新建终端」「新建 Worktree…」外，下拉菜单里的启动项。
+    pub entries: Vec<LaunchEntry>,
 }
 
 impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
-            claude_full_permissions: false,
-            copilot_full_permissions: false,
-            codex_full_permissions: false,
+            entries: default_launch_entries(),
         }
     }
+}
+
+/// 按命令前缀猜侧栏/菜单图标（自定义 agent 走通用终端图标）。
+pub fn icon_for_launch_command(command: &str) -> IconName {
+    let cmd = command.trim();
+    if cmd.starts_with("claude") {
+        IconName::Asterisk
+    } else if cmd.starts_with("codex") {
+        IconName::Bot
+    } else if cmd.starts_with("copilot") {
+        IconName::Github
+    } else {
+        IconName::SquareTerminal
+    }
+}
+
+/// 过滤出可展示的启动项（名/命令非空）。
+pub fn active_launch_entries(cx: &App) -> Vec<LaunchEntry> {
+    cx.global::<LaunchConfig>()
+        .entries
+        .iter()
+        .filter(|e| !e.label.trim().is_empty() && !e.command.trim().is_empty())
+        .cloned()
+        .collect()
 }
 
 impl Global for LaunchConfig {}
@@ -146,9 +185,35 @@ fn launch_config_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".smelt").join("launch.json"))
 }
 
-/// 读取启动配置；缺失/损坏回退默认（默认不跳过权限确认，更安全）。
+/// 磁盘上的原始形状：兼容旧版「全权限」三开关，也兼容新版 `entries` 列表。
+/// `entries: None` 表示文件里没写这个键（旧格式）→ 迁到出厂默认并回写；
+/// `Some([])` 表示用户清空了列表，照用。
+#[derive(serde::Deserialize)]
+struct LaunchConfigFile {
+    #[serde(default)]
+    entries: Option<Vec<LaunchEntry>>,
+}
+
+/// 读取启动配置；缺失/损坏/旧格式（无 `entries`）回退出厂默认并写成新格式。
 pub fn load_launch_config() -> LaunchConfig {
-    crate::json_store::load_json(launch_config_path())
+    let Some(path) = launch_config_path() else {
+        return LaunchConfig::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return LaunchConfig::default();
+    };
+    let Ok(file) = serde_json::from_str::<LaunchConfigFile>(&raw) else {
+        return LaunchConfig::default();
+    };
+    match file.entries {
+        Some(entries) => LaunchConfig { entries },
+        None => {
+            // 旧版只有全权限开关：直接用出厂默认（已含全权限参数）并回写。
+            let c = LaunchConfig::default();
+            save_launch_config(&c);
+            c
+        }
+    }
 }
 
 /// 写回启动配置（失败静默忽略）。
@@ -244,6 +309,12 @@ pub struct LlmInputs {
     api_key: Entity<gpui_component::input::InputState>,
     model: Entity<gpui_component::input::InputState>,
     persona: Entity<gpui_component::input::InputState>,
+}
+
+/// 启动项列表编辑器：每项一对 label/command 输入框。
+pub struct LaunchInputs {
+    rows: Vec<(Entity<gpui_component::input::InputState>, Entity<gpui_component::input::InputState>)>,
+    _subs: Vec<Subscription>,
 }
 
 /// 独立设置窗口的根 view：只是个薄壳，真正状态都还在传进来的 Workspace 实体上，
@@ -413,6 +484,84 @@ impl Workspace {
     /// 修改宠物大脑（LLM）配置：改全局 + 存盘 + 重绘。
     pub fn update_llm_config(&mut self, f: impl FnOnce(&mut agent::LlmConfig), cx: &mut Context<Self>) {
         apply_llm_config(f, cx);
+        cx.notify();
+    }
+
+    /// 启动项条数变了就重建输入框（增删后调用）。
+    pub fn reset_launch_inputs(&mut self) {
+        self.launch_inputs = None;
+    }
+
+    /// 懒创建启动项列表编辑器（需要 window）。
+    pub fn ensure_launch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = cx.global::<LaunchConfig>().entries.len();
+        let stale = self.launch_inputs.as_ref().is_none_or(|i| i.rows.len() != count);
+        if stale {
+            self.init_launch_inputs(window, cx);
+        }
+    }
+
+    fn init_launch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::{InputEvent, InputState};
+
+        let entries = cx.global::<LaunchConfig>().entries.clone();
+        let save_on = |ev: &InputEvent| matches!(ev, InputEvent::Change | InputEvent::Blur);
+        let mut rows = Vec::new();
+        let mut subs = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let label_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("显示名称")
+                    .default_value(entry.label.clone())
+            });
+            let command_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("启动命令，如 claude")
+                    .default_value(entry.command.clone())
+            });
+            subs.push(cx.subscribe(&label_input, move |_, s, ev: &InputEvent, cx| {
+                if save_on(ev) {
+                    let v = s.read(cx).value().to_string();
+                    apply_launch_config(|c| {
+                        if let Some(e) = c.entries.get_mut(i) {
+                            e.label = v;
+                        }
+                    }, cx);
+                }
+            }));
+            subs.push(cx.subscribe(&command_input, move |_, s, ev: &InputEvent, cx| {
+                if save_on(ev) {
+                    let v = s.read(cx).value().to_string();
+                    apply_launch_config(|c| {
+                        if let Some(e) = c.entries.get_mut(i) {
+                            e.command = v;
+                        }
+                    }, cx);
+                }
+            }));
+            rows.push((label_input, command_input));
+        }
+        self.launch_inputs = Some(LaunchInputs { rows, _subs: subs });
+    }
+
+    pub fn add_launch_entry(&mut self, cx: &mut Context<Self>) {
+        apply_launch_config(|c| {
+            c.entries.push(LaunchEntry {
+                label: "新启动项".into(),
+                command: String::new(),
+            });
+        }, cx);
+        self.reset_launch_inputs();
+        cx.notify();
+    }
+
+    pub fn remove_launch_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        apply_launch_config(|c| {
+            if index < c.entries.len() {
+                c.entries.remove(index);
+            }
+        }, cx);
+        self.reset_launch_inputs();
         cx.notify();
     }
 
@@ -721,56 +870,140 @@ impl Workspace {
             ]),
         );
 
-        // —— 启动：项目「+」快捷启动 Claude Code / Copilot 时用的参数 ——
+        // —— 启动：项目「+」下拉菜单的可配置启动项 ——
+        // Settings 的 list 测量项高度时，百分比宽度（w_full）经常解析不到确定父宽，
+        // 卡片会缩成「内容宽」——输入框只露出几个字。这里用窗口视口算绝对像素宽。
+        let launch_editor_entity = entity.clone();
         let launch_page = SettingPage::new("启动").group(
             SettingGroup::new()
                 .item(
-                    SettingItem::new(
-                        "Claude Code 全权限启动",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<LaunchConfig>().claude_full_permissions,
-                            |v: bool, cx: &mut App| {
-                                apply_launch_config(|c| c.claude_full_permissions = v, cx)
-                            },
-                        ),
-                    )
-                    .description(
-                        "开启后项目行「+」的 Claude Code 快捷入口用 \
-                         claude --dangerously-skip-permissions 启动，跳过所有权限确认；\
-                         关闭则正常走 claude。",
-                    ),
-                )
-                .item(
-                    SettingItem::new(
-                        "Copilot 全权限启动",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<LaunchConfig>().copilot_full_permissions,
-                            |v: bool, cx: &mut App| {
-                                apply_launch_config(|c| c.copilot_full_permissions = v, cx)
-                            },
-                        ),
-                    )
-                    .description(
-                        "开启后项目行「+」的 Copilot 快捷入口用 copilot --allow-all 启动\
-                         （等价于 --allow-all-tools --allow-all-paths --allow-all-urls），\
-                         跳过所有权限确认；关闭则正常走 copilot。",
-                    ),
-                )
-                .item(
-                    SettingItem::new(
-                        "Codex 全权限启动",
-                        SettingField::switch(
-                            |cx: &App| cx.global::<LaunchConfig>().codex_full_permissions,
-                            |v: bool, cx: &mut App| {
-                                apply_launch_config(|c| c.codex_full_permissions = v, cx)
-                            },
-                        ),
-                    )
-                    .description(
-                        "开启后项目行「+」的 Codex 快捷入口用 \
-                         codex --dangerously-bypass-approvals-and-sandbox 启动，跳过所有确认\
-                         和沙箱限制；关闭则正常走 codex。",
-                    ),
+                    SettingItem::render(move |_, window, cx: &mut App| {
+                        let muted = cx.theme().muted_foreground;
+                        let border = cx.theme().border;
+                        let fg = cx.theme().foreground;
+                        let popover = cx.theme().popover;
+                        let secondary = cx.theme().secondary;
+                        // 侧栏默认 250 + 左右 padding/滚动条余量；再夹到合理区间。
+                        let field_w = {
+                            let vw = f32::from(window.viewport_size().width);
+                            let w = (vw - 250. - 80.).clamp(360., 720.);
+                            px(w)
+                        };
+                        launch_editor_entity.update(cx, |ws, cx| {
+                            ws.ensure_launch_inputs(window, cx);
+                            let Some(inputs) = ws.launch_inputs.as_ref() else {
+                                return div().into_any_element();
+                            };
+                            let mut col = v_flex()
+                                .w(field_w)
+                                .gap_3()
+                                .child(
+                                    v_flex()
+                                        .w(field_w)
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .text_color(fg)
+                                                .child("快捷启动项"),
+                                        )
+                                        .child(
+                                            div().w(field_w).text_sm().text_color(muted).child(
+                                                "项目行「+」菜单里除「新建终端」「新建 Worktree…」外的项。\
+                                                 显示名会出现在菜单上；命令是在该项目目录下执行的 shell 命令\
+                                                 （可含参数）。",
+                                            ),
+                                        ),
+                                );
+                            for (ix, (label, command)) in inputs.rows.iter().enumerate() {
+                                let del_entity = launch_editor_entity.clone();
+                                let row_ix = ix;
+                                col = col.child(
+                                    v_flex()
+                                        .id(("launch-card", row_ix))
+                                        .w(field_w)
+                                        .gap_2()
+                                        .p_3()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(border)
+                                        .bg(secondary)
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("名称"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(("del-launch", row_ix))
+                                                        .h(px(28.))
+                                                        .px_3()
+                                                        .flex()
+                                                        .flex_none()
+                                                        .items_center()
+                                                        .rounded_md()
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .bg(popover)
+                                                        .border_1()
+                                                        .border_color(border)
+                                                        .hover(|s| s.bg(border).text_color(fg))
+                                                        .child("删除")
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_, _, cx: &mut App| {
+                                                                del_entity.update(cx, |ws, cx| {
+                                                                    ws.remove_launch_entry(
+                                                                        row_ix, cx,
+                                                                    );
+                                                                });
+                                                            },
+                                                        ),
+                                                ),
+                                        )
+                                        // 卡片 p_3 ≈ 12px*2，输入框再略缩一点免得顶边。
+                                        .child(Input::new(label).w(field_w - px(24.)))
+                                        .child(
+                                            div().text_xs().text_color(muted).child("命令"),
+                                        )
+                                        .child(Input::new(command).w(field_w - px(24.))),
+                                );
+                            }
+                            let add_entity = launch_editor_entity.clone();
+                            col.child(
+                                div()
+                                    .id("add-launch")
+                                    .h(px(36.))
+                                    .w(field_w)
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(fg)
+                                    .bg(popover)
+                                    .border_1()
+                                    .border_color(border)
+                                    .hover(|s| s.bg(border))
+                                    .child("+ 添加启动项")
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
+                                        add_entity.update(cx, |ws, cx| ws.add_launch_entry(cx));
+                                    }),
+                            )
+                            .into_any_element()
+                        })
+                    })
+                    .keywords(["快捷启动", "launch", "命令", "claude", "codex", "copilot"]),
                 )
                 .item(
                     SettingItem::new(
@@ -1020,7 +1253,8 @@ impl Workspace {
                     return;
                 }
             }
-            let bounds = WindowBounds::centered(size(px(640.), px(560.)), cx);
+            // 启动项编辑需要较宽的命令输入区；侧栏约 250，内容区至少要能放下长命令。
+            let bounds = WindowBounds::centered(size(px(900.), px(700.)), cx);
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("设置".into()),

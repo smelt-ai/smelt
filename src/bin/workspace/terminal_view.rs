@@ -169,6 +169,9 @@ pub struct TerminalView {
     scroll_accum: f32,
     /// 建终端时的启动方式（侧栏行图标用，见 `LaunchKind`）。
     launch_kind: LaunchKind,
+    /// 快捷启动项的显示名（设置里配的 label）。侧栏标题在 agent 还没上报任务名时
+    /// 回退到它，而不是 cwd 末段——否则「+ → Claude Code」建出来却显示项目名。
+    launch_label: Option<String>,
 }
 
 /// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
@@ -240,10 +243,15 @@ impl TerminalView {
         cwd: Option<String>,
         session_id: String,
         launch: Option<&str>,
+        launch_label: Option<&str>,
     ) -> Self {
         let terminal = Terminal::spawn(24, 80, cwd.as_deref(), &session_id, launch)
             .expect("启动内嵌终端失败");
         let launch_kind = classify_launch(launch);
+        let launch_label = launch_label
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
         // 定时重绘：后台读线程更新 Term 网格，这里每 30ms 通知 UI 刷新。
         // 顺便检查响铃：非活动会话也在跑此循环，故能在后台标记「需要注意」。
@@ -364,12 +372,18 @@ impl TerminalView {
             last_appearance: None,
             scroll_accum: 0.0,
             launch_kind,
+            launch_label,
         }
     }
 
     /// 建终端时的启动方式（侧栏行图标对齐「+」菜单用）。
     pub fn launch_kind(&self) -> LaunchKind {
         self.launch_kind
+    }
+
+    /// 快捷启动项显示名（见字段注释）；普通「新建终端」为 None。
+    pub fn launch_label(&self) -> Option<&str> {
+        self.launch_label.as_deref()
     }
 
     /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。
