@@ -2,7 +2,7 @@
 
 *内部技术分享稿 · 2026-07-09*
 
-> 一个基于 GPUI 的桌面工作台，内嵌真终端，专为「同时指挥多个 Claude Code / Codex agent 干活」设计——多项目 × 多标签，会话状态一目了然。
+> 一个基于 GPUI 的桌面工作台，内嵌真终端，专为「同时指挥多个 Claude Code / Codex agent 干活」设计——多项目 × 多标签，会话状态一目了然，关掉 GUI 也不打断正在跑的 agent。
 
 **状态**：working prototype · 持续迭代中
 **语言**：Rust 2021 ｜ **GUI**：GPUI
