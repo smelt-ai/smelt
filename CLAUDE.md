@@ -7,8 +7,10 @@ Mac 上的 AI coding 驾驶舱：一个专为「同时指挥多个 CLI coding ag
 - **通用终端层**：外壳、分屏、快捷启动（Claude Code / Codex / Copilot 都有入口）。
 - **状态感知层**：靠终端标题（OSC 0/2）+ OSC 9/777 通知 + 响铃，是终端协议而非某家私有
   格式，任何遵守约定的 agent 都能被识别。别在这层写死 Claude Code 假设。
-- **Claude Code 专属**：用量统计、历史会话浏览，读 `~/.claude/projects/**/*.jsonl`
-  （只有 `usage_stats.rs` / `session_history.rs` 该碰这份数据）。
+- **Claude Code 专属**：用量统计、历史会话浏览、记忆浏览，读 `~/.claude/projects/**`
+  下的 `*.jsonl`（会话）和 `memory/*.md`（长期记忆）。只有 `usage_stats.rs` /
+  `session_history.rs` / `claude_memory.rs` 该碰这份数据；项目路径→目录名的编码规则
+  只有 `session_history.rs` 一份，别再复制。
 
 ## 二进制
 - `workspace`（`src/bin/workspace/`）—— GUI 主程序，`cargo run --bin workspace`

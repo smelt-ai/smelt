@@ -6,6 +6,7 @@
 //! 运行： cargo run --bin workspace
 
 mod agent;
+mod claude_memory;
 mod dock;
 mod file_tree;
 mod git_panel;
@@ -59,7 +60,7 @@ use git_panel::{
     DeleteWorktreeTarget, GitDiff, GitStatusData, NewWorktreeTarget, RepoInfo,
 };
 use hotspot::hotspot_view;
-use session_history::{history_view, HistoryListState, SessionHistoryDelegate};
+use session_history::{history_view, HistoryListState, HistoryPane, SessionHistoryDelegate};
 use settings::{
     active_launch_entries, icon_for_launch_command, load_appearance, load_launch_config, Appearance,
     LlmInputs,
@@ -840,6 +841,14 @@ struct Workspace {
     session_table_key: Option<String>,
     /// TableEvent 订阅句柄，session_table 重建时一起换。
     session_table_sub: Option<Subscription>,
+    /// 历史会话页当前显示的是「会话」还是「记忆」（同一套左列表 + 右详情布局）。
+    history_pane: HistoryPane,
+    /// 记忆列表缓存（cwd → (取得时刻, 数据)），跟 session_list 同一套 TTL 模板。
+    memory_list: HashMap<String, (Instant, Rc<Vec<claude_memory::MemoryEntry>>)>,
+    /// 正在后台扫描记忆的 cwd（防重复并发 spawn）。
+    memory_list_inflight: HashSet<String>,
+    /// 当前选中查看的记忆，存在列表里的下标；切项目/切列表时会被清掉。
+    memory_selected: Option<usize>,
     /// 调试 HUD 开关（Cmd+Shift+F 切换）：开启时右上角显示帧率 + 帧耗时 + RSS。
     debug_hud: bool,
     /// 上一帧渲染时刻（算帧间隔用）。
@@ -1028,6 +1037,10 @@ impl Workspace {
             session_table: None,
             session_table_key: None,
             session_table_sub: None,
+            history_pane: HistoryPane::Sessions,
+            memory_list: HashMap::new(),
+            memory_list_inflight: HashSet::new(),
+            memory_selected: None,
             llm_inputs: None,
             llm_subs: Vec::new(),
             launch_inputs: None,
@@ -2641,10 +2654,13 @@ impl Render for Workspace {
             }
         }
 
-        // 历史会话页：后台刷新当前项目的会话列表。
+        // 历史会话页：后台刷新当前项目的会话列表 / 记忆列表（看当前是哪个子页）。
         if self.view == MainView::History {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                self.ensure_session_list(root, cx);
+                match self.history_pane {
+                    HistoryPane::Sessions => self.ensure_session_list(root, cx),
+                    HistoryPane::Memories => self.ensure_memory_list(root, cx),
+                }
             }
         }
 
@@ -3839,7 +3855,19 @@ impl Render for Workspace {
                                 }
                                 (None, _) => HistoryListState::Empty,
                             };
-                            history_view(list_state, &self.session_detail, cx)
+                            // 没选项目时给 Some(空表)，走「还没有记忆」而不是一直转圈。
+                            let memories = match &cwd {
+                                Some(root) => self.memory_list.get(root).map(|(_, d)| d.clone()),
+                                None => Some(Rc::new(Vec::new())),
+                            };
+                            history_view(
+                                self.history_pane,
+                                list_state,
+                                &self.session_detail,
+                                memories,
+                                self.memory_selected,
+                                cx,
+                            )
                         }
                     }),
                     )),

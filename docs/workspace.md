@@ -53,6 +53,15 @@ UI 线程每 30ms 对网格做快照并重绘。
 - **多标签 / 多终端**：每个标签是一个独立的 `TerminalView`（各自的 PTY、历史、焦点、状态）
 - **标签栏**：点击切换、`+` 新建、`×` 关闭（至少保留一个）
 
+### 历史会话页（Claude Code 专属）
+页内有「会话 / 记忆」两个子页，共用「左列表 + 右详情」骨架，数据都在
+`~/.claude/projects/<编码后的项目路径>/` 下：
+- **会话**：`*.jsonl`，还原完整对话（只读浏览，不支持 resume），见 `session_history.rs`
+- **记忆**：`memory/*.md`，Claude Code 攒下的长期记忆——每个 md 是一条（YAML
+  frontmatter 的 `name`/`description` + markdown 正文），左列表显示标题和一句话描述，
+  右侧渲染全文。见 `claude_memory.rs`。目录里的 `MEMORY.md` 是索引（内容 = 各条
+  description 汇总），列出来纯属重复，故跳过。
+
 ### 终端能力
 - **内嵌真终端**：能跑交互式程序与全屏 TUI（`claude`、`htop`、`vim` 等）
 - **随窗口 resize**：网格行列跟随窗口大小，同步 alacritty 与 PTY（`SIGWINCH`）

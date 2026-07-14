@@ -19,6 +19,12 @@ fn projects_root() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".claude").join("projects")
 }
 
+/// 某个项目的记忆目录（`<项目目录>/memory`）。编码规则只有这一份，claude_memory.rs
+/// 从这里取，别再复制一遍 project_dir——规则一旦变，两处会悄悄不一致。
+pub(crate) fn memory_dir(cwd: &str) -> PathBuf {
+    projects_root().join(project_dir(cwd)).join("memory")
+}
+
 /// 一份历史会话的概览（列表用）。
 #[derive(Clone)]
 pub struct SessionSummary {
@@ -230,6 +236,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
+use crate::claude_memory::MemoryEntry;
 use crate::usage_stats::format_count;
 use crate::{placeholder_view, Workspace};
 
@@ -333,18 +340,52 @@ pub enum HistoryListState {
     Ready(Entity<TableState<SessionHistoryDelegate>>),
 }
 
+/// 历史会话页的两个子页，共用「左列表 + 右详情」的骨架：
+/// - `Sessions`：Claude Code 存的历史对话（`*.jsonl`）
+/// - `Memories`：Claude Code 攒的长期记忆（`memory/*.md`，见 claude_memory.rs）
+///
+/// 两者是同一个目录下的邻居数据，都属于「Claude Code 专属层」。
+#[derive(Clone, Copy, PartialEq)]
+pub enum HistoryPane {
+    Sessions,
+    Memories,
+}
+
 /// 历史会话页：左侧列出当前项目下 Claude Code 保存的历史会话，右侧显示选中会话的
 /// 对话内容（只读浏览，不支持 resume）。数据来自 session_history 模块，跟「用量」
 /// 页读的是同一份 `~/.claude/projects/**/*.jsonl`，但这里还原对话本身而非统计聚合。
 pub fn history_view(
+    pane: HistoryPane,
     list: HistoryListState,
     detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
+    memories: Option<Rc<Vec<MemoryEntry>>>,
+    memory_selected: Option<usize>,
     cx: &mut Context<Workspace>,
 ) -> Div {
     let (muted, fg, c_border, accent, secondary) = {
         let t = cx.theme();
         (t.muted_foreground, t.foreground, t.border, t.primary, t.secondary)
     };
+
+    // 「会话 / 记忆」切换：两块数据是同一个项目的两种视角，共用下面的左右布局，
+    // 所以做成页内切换而不是各占一个顶层 tab。
+    let switcher = h_flex()
+        .flex_none()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .border_b_1()
+        .border_color(c_border)
+        .child(pane_button("会话", HistoryPane::Sessions, pane, accent, fg, muted, cx))
+        .child(pane_button("记忆", HistoryPane::Memories, pane, accent, fg, muted, cx));
+
+    if pane == HistoryPane::Memories {
+        return v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(switcher)
+            .child(memory_body(memories, memory_selected, muted, fg, c_border, accent, cx));
+    }
 
     let list_body: AnyElement = match list {
         HistoryListState::Loading => placeholder_view("加载中…", muted).into_any_element(),
@@ -427,6 +468,143 @@ pub fn history_view(
                     }))
                     .into_any_element()
             }))
+            .into_any_element(),
+    };
+
+    v_flex().flex_1().min_h_0().child(switcher).child(
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(
+                div()
+                    .w(px(280.))
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .border_r_1()
+                    .border_color(c_border)
+                    .child(list_body),
+            )
+            .child(detail_body),
+    )
+}
+
+/// 切换条上的一个按钮。选中态用 accent 底色标出来。
+#[allow(clippy::too_many_arguments)]
+fn pane_button(
+    label: &'static str,
+    target: HistoryPane,
+    current: HistoryPane,
+    accent: Hsla,
+    fg: Hsla,
+    muted: Hsla,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    let selected = target == current;
+    div()
+        .id(label)
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(if selected { fg } else { muted })
+        .when(selected, |d| d.bg(accent.opacity(0.18)))
+        .when(!selected, |d| d.hover(|s| s.text_color(fg)))
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                if this.history_pane != target {
+                    this.history_pane = target;
+                    // 换子页时清掉右边的选中项，免得显示上一个子页残留的详情。
+                    this.memory_selected = None;
+                    cx.notify();
+                }
+            }),
+        )
+}
+
+/// 记忆子页：左列表（标题 + 一句话描述）+ 右详情（markdown 全文）。
+#[allow(clippy::too_many_arguments)]
+fn memory_body(
+    memories: Option<Rc<Vec<MemoryEntry>>>,
+    selected: Option<usize>,
+    muted: Hsla,
+    fg: Hsla,
+    c_border: Hsla,
+    accent: Hsla,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let list_body: AnyElement = match &memories {
+        None => placeholder_view("加载中…", muted).into_any_element(),
+        Some(list) if list.is_empty() => placeholder_view(
+            "这个项目还没有记忆。Claude Code 会把值得长期记住的事写进 ~/.claude 下的 memory 目录。",
+            muted,
+        )
+        .into_any_element(),
+        Some(list) => {
+            let mut col = v_flex().id("memory-list").flex_1().min_h_0().overflow_y_scroll().p_2().gap_1();
+            for (ix, m) in list.iter().enumerate() {
+                let is_sel = selected == Some(ix);
+                col = col.child(
+                    v_flex()
+                        .id(("memory-row", ix))
+                        .w_full()
+                        .gap_0p5()
+                        .px_2()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
+                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
+                        .child(div().text_sm().text_color(fg).child(m.name.clone()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(truncate(&m.description, 60)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.memory_selected = Some(ix);
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+            col.into_any_element()
+        }
+    };
+
+    let detail_body: AnyElement = match memories.as_ref().and_then(|l| selected.and_then(|ix| l.get(ix))) {
+        None => placeholder_view("← 选择一条记忆查看内容", muted).into_any_element(),
+        Some(m) => v_flex()
+            .id("memory-detail")
+            .flex_1()
+            .min_h_0()
+            // min_w_0 不能省：flex item 的默认 min-width 是 auto，即「不收缩到比内容更窄」。
+            // 少了它，这一栏会被记忆正文里最长的那行撑开，超出窗口的部分被直接裁掉，
+            // 文本也永远不会换行（会话那边没踩到，是因为气泡上有 max_w 兜着）。
+            .min_w_0()
+            .overflow_y_scroll()
+            .p_4()
+            .gap_2()
+            .child(div().text_lg().text_color(fg).child(m.name.clone()))
+            .children((!m.description.is_empty()).then(|| {
+                div().text_sm().text_color(muted).child(m.description.clone())
+            }))
+            // markdown 得给唯一 id，否则跟别处的 TextView 共享状态互踩（同 turn 气泡的坑）。
+            // 外面这层 w_full + min_w_0 是给正文定死一个「可用宽度」，长行才会在这个宽度
+            // 上折行；不设的话它按内容宽度铺开，撑破整栏被裁掉。
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(TextView::markdown("memory-md", m.body.clone())),
+            )
             .into_any_element(),
     };
 
