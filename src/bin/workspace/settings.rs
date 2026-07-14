@@ -883,6 +883,8 @@ impl Workspace {
                         let fg = cx.theme().foreground;
                         let popover = cx.theme().popover;
                         let secondary = cx.theme().secondary;
+                        let danger = cx.theme().danger;
+                        let danger_fg = cx.theme().danger_foreground;
                         // 侧栏默认 250 + 左右 padding/滚动条余量；再夹到合理区间。
                         let field_w = {
                             let vw = f32::from(window.viewport_size().width);
@@ -916,67 +918,83 @@ impl Workspace {
                                             ),
                                         ),
                                 );
+                            // 名称和命令并排成两列，而不是上下堆叠：之前两个输入框同宽同字体，
+                            // 只靠上方一行小灰字区分，扫视时根本分不出哪个是哪个。改成
+                            // 「窄名称列 + 宽命令列 + 命令用等宽字体」——列位置、宽度、字体三重
+                            // 区分，比标签文字有效得多，顺带把每项从 4 行压到 1 行。
+                            // 名称短（"Claude Code" 这种）、命令长（带一串参数），宽度按
+                            // 信息量分：名称够放就行，剩下的全给命令。
+                            let name_w = px(140.);
+                            let del_w = px(28.);
+                            // 容器 p_3（12*2）+ 行内两个 gap_2（8*2）。
+                            let cmd_w = field_w - name_w - del_w - px(40.);
+                            let mono = terminal_view::font_family();
+
+                            let mut list = v_flex()
+                                .w(field_w)
+                                .gap_2()
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(border)
+                                .bg(secondary)
+                                // 列名只在表头出现一次，不必每项重复一遍「名称」「命令」。
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .gap_2()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(div().w(name_w).child("名称"))
+                                        .child(div().w(cmd_w).child("命令"))
+                                        // 占位：让表头两列跟下面的行严格对齐（删除按钮那一列）。
+                                        .child(div().w(del_w)),
+                                );
                             for (ix, (label, command)) in inputs.rows.iter().enumerate() {
                                 let del_entity = launch_editor_entity.clone();
                                 let row_ix = ix;
-                                col = col.child(
-                                    v_flex()
-                                        .id(("launch-card", row_ix))
-                                        .w(field_w)
+                                list = list.child(
+                                    h_flex()
+                                        .id(("launch-row", row_ix))
+                                        .w_full()
                                         .gap_2()
-                                        .p_3()
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(border)
-                                        .bg(secondary)
+                                        .items_center()
+                                        .child(Input::new(label).w(name_w))
+                                        // 命令是 shell 代码，用终端同款等宽字体——参数里的
+                                        // `-`/`_` 对齐后好读，也一眼跟左边的显示名区分开。
                                         .child(
-                                            h_flex()
-                                                .w_full()
+                                            Input::new(command)
+                                                .w(cmd_w)
+                                                .font_family(mono.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("del-launch", row_ix))
+                                                .size(del_w)
+                                                .flex()
+                                                .flex_none()
                                                 .items_center()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .child("名称"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id(("del-launch", row_ix))
-                                                        .h(px(28.))
-                                                        .px_3()
-                                                        .flex()
-                                                        .flex_none()
-                                                        .items_center()
-                                                        .rounded_md()
-                                                        .cursor_pointer()
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .bg(popover)
-                                                        .border_1()
-                                                        .border_color(border)
-                                                        .hover(|s| s.bg(border).text_color(fg))
-                                                        .child("删除")
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            move |_, _, cx: &mut App| {
-                                                                del_entity.update(cx, |ws, cx| {
-                                                                    ws.remove_launch_entry(
-                                                                        row_ix, cx,
-                                                                    );
-                                                                });
-                                                            },
-                                                        ),
+                                                .justify_center()
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .text_sm()
+                                                .text_color(muted)
+                                                // 删除是破坏性操作，hover 时给红底明示。
+                                                .hover(|s| s.bg(danger).text_color(danger_fg))
+                                                .child("×")
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |_, _, cx: &mut App| {
+                                                        del_entity.update(cx, |ws, cx| {
+                                                            ws.remove_launch_entry(row_ix, cx);
+                                                        });
+                                                    },
                                                 ),
-                                        )
-                                        // 卡片 p_3 ≈ 12px*2，输入框再略缩一点免得顶边。
-                                        .child(Input::new(label).w(field_w - px(24.)))
-                                        .child(
-                                            div().text_xs().text_color(muted).child("命令"),
-                                        )
-                                        .child(Input::new(command).w(field_w - px(24.))),
+                                        ),
                                 );
                             }
+                            col = col.child(list);
                             let add_entity = launch_editor_entity.clone();
                             col.child(
                                 div()
