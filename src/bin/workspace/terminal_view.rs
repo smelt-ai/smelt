@@ -499,59 +499,18 @@ impl TerminalView {
     }
 
     /// 窗口像素坐标 → 网格单元 (行, 列)。
-    /// 列号不能用均匀格宽 x/cell_w：中文等全角字符走系统回退字体（PingFang），
-    /// 实际字宽 ≠ 2×cell_w，行内中文越多偏差越大 → 框选高亮落后鼠标一大截。
-    /// 改为把该行文本按渲染同款方式整形，用 x 反查字符位置再映射回网格列。
-    fn pos_to_cell(&self, pos: Point<Pixels>, window: &mut Window) -> (usize, usize) {
+    ///
+    /// 直接按均匀格宽换算即可：render_row 已经把每一批文本钉死在 col * cell_w 上，
+    /// 画面就是标准网格。（早先渲染靠字体 advance 自由流，中文一多就整体左漂，这里不得不
+    /// 「重新整形一遍该行、用 index_for_x 反查列号」去复现那个歪掉的几何——渲染掰正之后
+    /// 那套 workaround 反而会让鼠标跟画面对不上，已随之删除。）
+    fn pos_to_cell(&self, pos: Point<Pixels>, _window: &mut Window) -> (usize, usize) {
         let (ox, oy) = self.grid_origin.get();
         let x = (f32::from(pos.x) - ox).max(0.0);
         let y = (f32::from(pos.y) - oy).max(0.0);
         let row = (y / line_px()).floor() as usize;
-        (row, self.col_for_x(row, x, window))
-    }
-
-    /// 视觉 x 偏移（相对网格原点）→ 该行的网格列。
-    fn col_for_x(&self, row_ix: usize, x: f32, window: &mut Window) -> usize {
-        let uniform = || (x / self.cell_w.max(1.0)).floor() as usize;
-        let frame = self.terminal.snapshot();
-        let Some(cells) = frame.rows.get(row_ix) else {
-            return uniform();
-        };
-        // 与 render_row 同规则构造行文本（'\0' 占位跳过），记录 字节偏移 → 网格列。
-        let mut line = String::new();
-        let mut byte_to_col: Vec<(usize, usize)> = Vec::new();
-        for (col, cell) in cells.iter().enumerate() {
-            if cell.ch != '\0' {
-                byte_to_col.push((line.len(), col));
-                line.push(cell.ch);
-            }
-        }
-        if line.is_empty() {
-            return uniform();
-        }
-        let run = TextRun {
-            len: line.len(),
-            font: terminal_font(),
-            color: Hsla::default(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let layout = window.text_system().layout_line(&line, px(font_px()), &[run], None);
-        match layout.index_for_x(px(x)) {
-            // x 落在某个字形内 → 反查其字节偏移对应的网格列。
-            Some(ix) => match byte_to_col.binary_search_by_key(&ix, |&(b, _)| b) {
-                Ok(i) => byte_to_col[i].1,
-                Err(0) => 0,
-                Err(i) => byte_to_col[i - 1].1,
-            },
-            // 超出行尾 → 从最后一列起按均匀格宽外推（拖过行尾继续选）。
-            None => {
-                let last_col = byte_to_col.last().map_or(0, |&(_, c)| c);
-                let overflow = (x - f32::from(layout.width)).max(0.0);
-                last_col + 1 + (overflow / self.cell_w.max(1.0)).floor() as usize
-            }
-        }
+        let col = (x / self.cell_w.max(1.0)).floor() as usize;
+        (row, col)
     }
 
     /// 提取当前选区文本（用于复制）。按 (行,列) 字典序规范化。
@@ -804,6 +763,8 @@ impl Render for TerminalView {
         let hover_url = self.hover_url;
         let has_hover = hover_url.is_some();
         let base_font = terminal_font();
+        // 网格列宽：render_row 用它把每一批文本钉到 col * cell_w 上（见 render_row 头注）。
+        let cell_w = self.cell_w;
         let fh = self.focus_handle.clone();
         let entity = cx.entity();
         let origin_cell = self.grid_origin.clone();
@@ -1042,7 +1003,7 @@ impl Render for TerminalView {
                             Some((hr, a, b)) if hr == r => Some((a, b)),
                             _ => None,
                         };
-                        render_row(row, cc, sr, &base_font, hl)
+                        render_row(row, cc, sr, &base_font, hl, cell_w)
                     })),
             )
             // 透明覆盖层：paint 阶段注册 IME 输入处理器，并记录网格原点。
@@ -1076,27 +1037,26 @@ impl Render for TerminalView {
     }
 }
 
-/// 渲染一行：整行作为一个 StyledText，逐段用 TextRun 上色（前景+背景+粗体+下划线）。
-/// 整行只整形一次 —— 拖选拆分不抖、宽度精确不截断。光标单元反色、选区单元高亮。
+/// 渲染一行。**终端是网格，第 N 列就必须画在 N × cell_w**——字体的字形宽度只决定
+/// 「字长什么样」，不决定「它在哪」。
+///
+/// 之前整行拼成一个 StyledText 交给排版器自由流，位置就由字体的 advance 说了算：
+/// 主字体（JetBrains Mono，advance 0.6em）没有中文字形，中文 fallback 到 PingFang
+/// （advance 1.0em），而两格 = 1.2em ——每个中文字亏 0.2em，误差沿行累积，于是 Claude
+/// Code 输出的表格里，含中文的行比纯 `─` 横线短，`│` 一路往左漂。
+///
+/// 现在照 Zed 终端的做法（同为 GPUI 栈）：按「样式相同 + 列号连续」把一行切成若干批，
+/// 每批绝对定位在自己的起始列上。宽字符的第二格是 '\0' 占位，跳过它但列号照常前进，
+/// 于是宽字符后面的内容列号对不上、自动断成新的一批——每个全角字各自成批、各自钉在
+/// 自己的列上。字形窄于两格只是自己画窄一点，绝不会把后面的字符往左推。
 fn render_row(
-    mut row: Vec<terminal::Cell>,
+    row: Vec<terminal::Cell>,
     cursor_col: Option<usize>,
     sel: Option<(usize, usize)>,
     base_font: &Font,
     hover_link: Option<(usize, usize)>,
+    cell_w: f32,
 ) -> Div {
-    // 去掉行尾的填充空格 / 宽字符占位：终端每行都被补空格到满列宽（如 167 格），
-    // 整行丢给 StyledText 会因字体自由排版累计宽度超容器而「自动折行」。只渲染到
-    // 内容末尾（或光标处）即可，宽度远小于容器，不再折行。
-    let mut end = row
-        .iter()
-        .rposition(|c| c.ch != ' ' && c.ch != '\0')
-        .map_or(0, |i| i + 1);
-    if let Some(cc) = cursor_col {
-        end = end.max(cc + 1);
-    }
-    row.truncate(end.min(row.len()));
-
     let is_sel = |i: usize| sel.map_or(false, |(lo, hi)| i >= lo && i <= hi);
     let is_link = |i: usize| hover_link.map_or(false, |(a, b)| i >= a && i <= b);
     // 悬停链接：高亮色 + 下划线；再叠加光标反色 / 选区背景。
@@ -1117,44 +1077,113 @@ fn render_row(
         (fg, bg, c.bold, underline)
     };
 
-    let mut line = String::new();
-    let mut runs: Vec<TextRun> = Vec::new();
+    // 只渲染到内容末尾（或光标处）：终端每行都被补空格到满列宽，尾部空格没什么可画的。
+    let mut end = row
+        .iter()
+        .rposition(|c| c.ch != ' ' && c.ch != '\0')
+        .map_or(0, |i| i + 1);
+    if let Some(cc) = cursor_col {
+        end = end.max(cc + 1);
+    }
+    let end = end.min(row.len());
+
+    let x_of = |col: usize| px(col as f32 * cell_w);
+
+    // 背景层：按「连续同底色」的列区间画矩形。**必须走列区间而不是靠文字的
+    // background_color**——后者只覆盖字形的实际宽度，中文字形窄于两格时选区高亮会露出
+    // 缝隙，且宽字符占位格根本没有对应的字符去承载底色。
+    let mut bg_rects: Vec<(usize, usize, u32)> = Vec::new(); // (起始列, 占几格, 颜色)
     let mut i = 0;
-    while i < row.len() {
-        let style = style_of(i);
-        let (fg, bg, bold, underline) = style;
-        let mut seg_len = 0usize;
-        while i < row.len() && style_of(i) == style {
-            let ch = row[i].ch;
-            // 宽字符占位（'\0'）不输出：让前一个全角字形自然占满两格。
-            if ch != '\0' {
-                line.push(ch);
-                seg_len += ch.len_utf8();
-            }
+    while i < end {
+        let bg = style_of(i).1;
+        let start = i;
+        while i < end && style_of(i).1 == bg {
             i += 1;
         }
-        let mut fnt = base_font.clone();
-        if bold {
-            fnt.weight = FontWeight::BOLD;
+        // 默认底色不画，让下面的背景层 / 图片 / 桌面透出。
+        if bg != terminal::default_bg() {
+            bg_rects.push((start, i - start, bg));
         }
-        runs.push(TextRun {
-            len: seg_len,
-            font: fnt,
-            color: Hsla::from(rgb(fg)),
-            // 默认底色格子留空（不画背景），让下面的背景层 / 图片 / 桌面透出。
-            background_color: (bg != terminal::default_bg()).then(|| Hsla::from(rgb(bg))),
-            underline: underline.then(|| UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(Hsla::from(rgb(fg))),
-                wavy: false,
-            }),
-            strikethrough: None,
-        });
     }
 
+    let batches = text_batches(&row, end, &style_of);
+
     div()
+        .relative()
         .h(px(line_px()))
-        .child(StyledText::new(line).with_runs(runs))
+        .children(bg_rects.into_iter().map(move |(col, span, bg)| {
+            div()
+                .absolute()
+                .left(x_of(col))
+                .w(px(span as f32 * cell_w))
+                .h_full()
+                .bg(rgb(bg))
+        }))
+        .children(batches.into_iter().map(move |(col, text, (fg, _, bold, underline))| {
+            let mut fnt = base_font.clone();
+            if bold {
+                fnt.weight = FontWeight::BOLD;
+            }
+            let run = TextRun {
+                len: text.len(),
+                font: fnt,
+                color: Hsla::from(rgb(fg)),
+                // 底色交给上面的 bg_rects 画，这里不重复。
+                background_color: None,
+                underline: underline.then(|| UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(Hsla::from(rgb(fg))),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            };
+            div()
+                .absolute()
+                .left(x_of(col))
+                .child(StyledText::new(text).with_runs(vec![run]))
+        }))
+}
+
+/// 单元格样式：(前景, 背景, 粗体, 下划线)。
+type CellStyle = (u32, u32, bool, bool);
+
+/// 把一行切成若干「批」：(起始网格列, 文本, 样式)。每批之后会被绝对定位到
+/// `起始列 × cell_w`，所以这里算出的列号就是画面上的位置，是对齐的唯一依据。
+///
+/// 续接一批的条件（跟 Zed 终端一致）：**样式相同，且这一格紧接着本批已占的格子**。
+/// 宽字符的第二格是 '\0'，跳过它但不跳过列号，于是它后面的字符「对不上列号」而断批——
+/// 每个全角字因此各自成批、各自钉在自己的列上，字形宽窄再也推不动后面的字符。
+fn text_batches(
+    row: &[terminal::Cell],
+    end: usize,
+    style_of: &dyn Fn(usize) -> CellStyle,
+) -> Vec<(usize, String, CellStyle)> {
+    let mut out: Vec<(usize, String, CellStyle)> = Vec::new();
+    // (起始列, 已占格数, 文本, 样式)
+    let mut cur: Option<(usize, usize, String, CellStyle)> = None;
+    for i in 0..end.min(row.len()) {
+        let ch = row[i].ch;
+        if ch == '\0' {
+            continue; // 宽字符占位格：不产生字形，但列号照常前进
+        }
+        let style = style_of(i);
+        match cur.as_mut() {
+            Some((start, count, text, st)) if *st == style && *start + *count == i => {
+                text.push(ch);
+                *count += 1;
+            }
+            _ => {
+                if let Some((col, _, text, st)) = cur.take() {
+                    out.push((col, text, st));
+                }
+                cur = Some((i, 1, ch.to_string(), style));
+            }
+        }
+    }
+    if let Some((col, _, text, st)) = cur {
+        out.push((col, text, st));
+    }
+    out
 }
 
 /// 计算某行落在选区内的列范围（按 (行,列) 字典序规范化）。
@@ -1419,8 +1448,98 @@ fn csi_u_modifiers(m: &Modifiers) -> u8 {
 #[cfg(test)]
 mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
-    use super::keystroke_to_bytes;
+    use super::{keystroke_to_bytes, text_batches, CellStyle};
+    use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
+
+    const PLAIN: CellStyle = (0xffffff, 0x000000, false, false);
+
+    /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。
+    fn row(s: &str) -> Vec<Cell> {
+        let mut out = Vec::new();
+        for ch in s.chars() {
+            let wide = (ch as u32) >= 0x1100 && !ch.is_ascii();
+            out.push(Cell { ch, fg: 0xffffff, bg: 0x000000, bold: false, underline: false });
+            if wide {
+                out.push(Cell {
+                    ch: '\0',
+                    fg: 0xffffff,
+                    bg: 0x000000,
+                    bold: false,
+                    underline: false,
+                });
+            }
+        }
+        out
+    }
+
+    fn batches(cells: &[Cell]) -> Vec<(usize, String)> {
+        text_batches(cells, cells.len(), &|_| PLAIN)
+            .into_iter()
+            .map(|(col, text, _)| (col, text))
+            .collect()
+    }
+
+    /// 核心不变量：每个全角字各自成批，且起始列 = 它在网格里的真实列号。
+    /// 这正是表格错位的修复点——「明细条数」这样的中文后面跟着的 `│`，其列号必须是
+    /// 按「每个中文占 2 格」算出来的，而不是由字体的实际字形宽度累积出来的。
+    #[test]
+    fn wide_chars_each_get_their_own_batch_at_grid_columns() {
+        // 网格：中(0,1) 文(2,3) a(4) b(5)
+        let cells = row("中文ab");
+        assert_eq!(
+            batches(&cells),
+            vec![(0, "中".into()), (2, "文".into()), (4, "ab".into())],
+            "两个中文各自成批、列号 0 和 2；后面的 ascii 从第 4 列起连成一批"
+        );
+    }
+
+    /// **整个方案成立的关键性质：宽字符永远落在一批的末尾。**
+    ///
+    /// 因为它后面必跟一个 '\0' 占位格，使得再后面的字符列号一定对不上 `start + count`
+    /// 而断批。于是一批里除了最后那个字符，其余全是 advance 恰好等于 cell_w 的窄字符
+    /// （等宽字体保证），批内位置天然正确；宽字符自己那点亏空（PingFang 的 1.0em vs
+    /// 两格的 1.2em）后面再没有字符可推，于是推不动任何东西——旧渲染里正是这 0.2em
+    /// 沿行累积，把表格的 `│` 一路往左拽。
+    ///
+    /// 所以 "a中x" 应该是 a 和 中 合成一批（中在批尾），x 断批后重新钉在第 3 列。
+    #[test]
+    fn wide_char_always_lands_at_end_of_its_batch() {
+        // 网格：a(0) 中(1,2) x(3)
+        let cells = row("a中x");
+        assert_eq!(batches(&cells), vec![(0, "a中".into()), (3, "x".into())]);
+
+        // 多个窄字符在前也一样：宽字符照样收尾，后面的 ascii 重新按列定位。
+        let cells = row("ab中cd");
+        assert_eq!(batches(&cells), vec![(0, "ab中".into()), (4, "cd".into())]);
+    }
+
+    /// 纯 ascii 不该被切碎——一整段连续同样式的文本仍然只有一批（保住性能）。
+    #[test]
+    fn plain_ascii_stays_one_batch() {
+        let cells = row("hello world");
+        assert_eq!(batches(&cells), vec![(0, "hello world".into())]);
+    }
+
+    /// 样式变了就断批，且新批的列号要对（否则上色段会整体错位）。
+    #[test]
+    fn style_change_splits_batch_at_right_column() {
+        let cells = row("abcd");
+        // 前两格一种颜色，后两格另一种。
+        let got: Vec<(usize, String)> = text_batches(&cells, cells.len(), &|i| {
+            if i < 2 { PLAIN } else { (0xff0000, 0x000000, false, false) }
+        })
+        .into_iter()
+        .map(|(col, text, _)| (col, text))
+        .collect();
+        assert_eq!(got, vec![(0, "ab".into()), (2, "cd".into())]);
+    }
+
+    /// 空行不该产出任何批。
+    #[test]
+    fn empty_row_yields_no_batches() {
+        assert!(batches(&[]).is_empty());
+    }
 
     fn enter(shift: bool, alt: bool, control: bool) -> Keystroke {
         Keystroke {
