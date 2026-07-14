@@ -13,9 +13,13 @@ use std::time::Duration;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use alacritty_terminal::term::{
+    viewport_to_point, Config, Term, TermDamage, TermMode, SEMANTIC_ESCAPE_CHARS,
+};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 
 /// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
 /// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
@@ -62,19 +66,36 @@ fn palette() -> &'static [u32; 16] {
     if is_dark() { &PALETTE_DARK } else { &PALETTE_LIGHT }
 }
 
-/// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 粗体/下划线。
+/// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 粗体/下划线 + 是否在选区内。
 pub struct Cell {
     pub ch: char,
     pub fg: u32,
     pub bg: u32,
     pub bold: bool,
     pub underline: bool,
+    pub selected: bool,
 }
 
-/// 一帧终端快照：网格行 + 光标位置（行, 列）。cursor 为 None 表示已上滚离开可视区。
+/// 选区类型（对 terminal_view 屏蔽 alacritty 的 SelectionType）：
+/// Simple=普通拖选，Word=双击选词（语义边界），Line=三击选整行。
+#[derive(Clone, Copy)]
+pub enum SelectionKind {
+    Simple,
+    Word,
+    Line,
+}
+
+/// 一帧终端快照：网格行 + 光标。
 pub struct Frame {
     pub rows: Vec<Vec<Cell>>,
+    /// **可见**光标 (行, 列)，渲染层画反色块用。None = 已上滚离开可视区，或应用
+    /// 用 `CSI ?25l` 隐藏了光标——全屏 TUI（Cursor CLI / Claude Code 等）常隐藏
+    /// 真实光标、在自己的输入框里画反色假光标，这时真实光标往往停在角落，照画
+    /// 会多出一个孤立色块。
     pub cursor: Option<(usize, usize)>,
+    /// 光标**位置** (行, 列)，含被隐藏的情况；None 仅表示不在可视区内。
+    /// IME 候选窗 / 预编辑串定位用——光标藏没藏，输入法都得知道往哪落。
+    pub cursor_pos: Option<(usize, usize)>,
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
@@ -484,6 +505,22 @@ pub fn kill_remote(id: &str) {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
+/// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
+/// - kitty_keyboard：默认 false 时 alacritty 会把 `CSI > 1 u` 静默丢掉
+///   （push_keyboard_mode 里直接 return），DISAMBIGUATE_ESC_CODES 永远置不上，
+///   Shift+Enter 也就永远退化成裸 Enter。见 kitty_keyboard_mode / keystroke_to_bytes。
+/// - semantic_escape_chars：双击选词的断词字符。默认集合只有半角标点，中文场景下
+///   全角标点也该断词（双击「数据层：字段」不该整段连选），追加常用全角标点。
+fn term_config() -> Config {
+    Config {
+        kitty_keyboard: true,
+        semantic_escape_chars: format!(
+            "{SEMANTIC_ESCAPE_CHARS}：，。；！？、（）「」『』【】《》“”‘’"
+        ),
+        ..Config::default()
+    }
+}
+
 /// 客户端 → 守护的帧：[type:u8][len:u32 BE][payload]。type 0=输入，1=resize。
 fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) {
     let mut frame = Vec::with_capacity(5 + payload.len());
@@ -558,12 +595,8 @@ impl Terminal {
         let notify: NotifySlot = Arc::new(Mutex::new(None));
         let title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let writer = Arc::new(Mutex::new(writer));
-        // kitty_keyboard 默认是 false，而且关着的时候 alacritty 会把 `CSI > 1 u` 静默丢掉
-        // （push_keyboard_mode 里直接 return），DISAMBIGUATE_ESC_CODES 永远置不上，
-        // Shift+Enter 也就永远退化成裸 Enter。见 kitty_keyboard_mode / keystroke_to_bytes。
-        let config = Config { kitty_keyboard: true, ..Config::default() };
         let term = Term::new(
-            config,
+            term_config(),
             &size,
             EventProxy { notify: notify.clone(), title: title.clone(), writer: writer.clone() },
         );
@@ -659,9 +692,9 @@ impl Terminal {
     /// 自上次调用以来，终端网格内容是否真的变化了（读并清 alacritty 自带的
     /// damage tracking）。涵盖：PTY 写入的字符/颜色、光标移动、翻滚历史、
     /// 进出备用屏幕（vim/less 等全屏 TUI）、resize 等——这些都由 alacritty 自动
-    /// 判定。**不**涵盖：用户拖选（Selection）、Cmd 悬停链接高亮——这两个是
-    /// TerminalView 自己维护的 UI 状态，跟 Term 无关，各自的鼠标事件处理里已经
-    /// 各自调用 cx.notify()，不依赖这里。
+    /// 判定。**不**涵盖：用户拖选（Term.selection 的变化 alacritty 不计入 damage，
+    /// 它认为选区高亮是渲染层的事）、Cmd 悬停链接高亮——这两个在 TerminalView
+    /// 各自的鼠标事件处理里已经各自调用 cx.notify()，不依赖这里。
     ///
     /// 只应由每个 TerminalView 自己的定时刷新循环调用（每个 Terminal 独占一个
     /// Term，不会有多个消费者互相"偷"对方读到的脏区）。
@@ -746,12 +779,16 @@ impl Terminal {
                 return Frame {
                     rows: Vec::new(),
                     cursor: None,
+                    cursor_pos: None,
                 }
             }
         };
         let content = term.renderable_content();
         let cursor_pt = content.cursor.point;
         let display_offset = content.display_offset;
+        // 选区范围由 alacritty 维护（滚动跟随、新输出漂移、宽字符边界都是它处理），
+        // 这里只做逐 cell 的 contains 判定——indexed.point 与 SelectionRange 坐标同源，直接比。
+        let sel_range = content.selection;
 
         let cols = self.size.cols;
         let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(self.size.rows);
@@ -759,6 +796,7 @@ impl Terminal {
         let mut count = 0usize;
         for indexed in content.display_iter {
             let cell = indexed.cell;
+            let selected = sel_range.as_ref().is_some_and(|r| r.contains(indexed.point));
             let flags = cell.flags;
             let mut fg = resolve(cell.fg, true);
             let mut bg = resolve(cell.bg, false);
@@ -777,6 +815,7 @@ impl Terminal {
                 bg,
                 bold: flags.contains(Flags::BOLD),
                 underline: flags.contains(Flags::UNDERLINE),
+                selected,
             });
             count += 1;
             if count % cols == 0 {
@@ -787,8 +826,8 @@ impl Terminal {
             rows.push(row);
         }
 
-        // 仅在未上滚（offset==0）且光标行在可视范围内时显示光标。
-        let cursor = if display_offset == 0 {
+        // 光标位置：仅在未上滚（offset==0）且光标行在可视范围内时有值。
+        let cursor_pos = if display_offset == 0 {
             let r = cursor_pt.line.0;
             if r >= 0 && (r as usize) < rows.len() {
                 Some((r as usize, cursor_pt.column.0))
@@ -798,8 +837,10 @@ impl Terminal {
         } else {
             None
         };
+        // 可见光标：应用没用 CSI ?25l 隐藏时才交给渲染层画反色块（见 Frame 字段注释）。
+        let cursor = if content.cursor.shape == CursorShape::Hidden { None } else { cursor_pos };
 
-        Frame { rows, cursor }
+        Frame { rows, cursor, cursor_pos }
     }
 
     /// 上下滚动历史缓冲：正数向上翻看历史，负数向下。（Shift+PageUp 用，强制本地历史。）
@@ -898,6 +939,54 @@ impl Terminal {
         self.send_input(&buf);
         true
     }
+
+    /// 可视区 (行, 列) → 缓冲区绝对坐标：行列先夹进可视范围，再按**当前**
+    /// display_offset 换算。选区跟随滚动的关键就是每次都用当前偏移重算。
+    fn grid_point(&self, term: &Term<EventProxy>, row: usize, col: usize) -> Point {
+        let row = row.min(self.size.rows.saturating_sub(1));
+        let col = col.min(self.size.cols.saturating_sub(1));
+        viewport_to_point(term.grid().display_offset(), Point::new(row, Column(col)))
+    }
+
+    /// 开始一段选区。`left_side`：起点落在单元格左半还是右半（alacritty 用它决定
+    /// 该格是否纳入选区——同格同侧的空 Simple 选区不产出内容，单击/微抖不会误选）。
+    pub fn selection_start(&mut self, row: usize, col: usize, left_side: bool, kind: SelectionKind) {
+        let Ok(mut term) = self.term.lock() else { return };
+        let ty = match kind {
+            SelectionKind::Simple => SelectionType::Simple,
+            SelectionKind::Word => SelectionType::Semantic,
+            SelectionKind::Line => SelectionType::Lines,
+        };
+        let point = self.grid_point(&term, row, col);
+        let side = if left_side { Side::Left } else { Side::Right };
+        term.selection = Some(Selection::new(ty, point, side));
+    }
+
+    /// 拖动更新选区活动端。坐标按当前 display_offset 重算，所以滚动后再拖、
+    /// 或拖着不动光滚动（拖边缘自动滚动）都落在正确的缓冲区行上。
+    pub fn selection_update(&mut self, row: usize, col: usize, left_side: bool) {
+        let Ok(mut term) = self.term.lock() else { return };
+        let point = self.grid_point(&term, row, col);
+        let side = if left_side { Side::Left } else { Side::Right };
+        if let Some(sel) = term.selection.as_mut() {
+            sel.update(point, side);
+        }
+    }
+
+    /// 清除选区。
+    pub fn selection_clear(&mut self) {
+        if let Ok(mut term) = self.term.lock() {
+            term.selection = None;
+        }
+    }
+
+    /// 当前选区文本：委托 alacritty 按缓冲区绝对行遍历（含已滚出可视区的
+    /// scrollback），宽字符占位/软换行由它处理。空选区（单击未拖动）返回 None。
+    pub fn selection_text(&self) -> Option<String> {
+        let term = self.term.lock().ok()?;
+        term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
 }
 
 #[cfg(test)]
@@ -960,6 +1049,80 @@ mod damage_gate_tests {
             term.kitty_keyboard_mode(),
             "真实 PTY 上收到 CSI > 1 u 后应置位——没置位说明 spawn 的 Config 没开 kitty_keyboard"
         );
+
+        kill_remote(&id);
+    }
+
+    /// 全屏 TUI（Cursor CLI / Claude Code）用 `CSI ?25l` 藏真实光标、在输入框自画
+    /// 假光标，真实光标常停在屏幕角落——snapshot 照画就会多出一个孤立反色块。
+    /// 隐藏时 cursor（渲染用）必须为 None，cursor_pos（IME 定位用）必须保留。
+    /// 直接往 Term 注入序列（不经 shell），避免时序 flaky；注入前等启动输出沉淀。
+    #[test]
+    fn hidden_cursor_not_rendered_but_position_kept() {
+        let dir = std::env::temp_dir().join(format!("smelt-cursor-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let id = format!("cursor-test-{}", uuid_like());
+
+        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀，避免并发 advance 干扰
+
+        let frame = term.snapshot();
+        assert!(frame.cursor.is_some(), "shell 正常状态光标应可见");
+        assert_eq!(frame.cursor, frame.cursor_pos, "光标可见时两个字段应一致");
+
+        let inject = |bytes: &[u8]| {
+            let mut parser: Processor = Processor::new();
+            let mut t = term.term.lock().unwrap();
+            parser.advance(&mut *t, bytes);
+        };
+
+        inject(b"\x1b[?25l");
+        let frame = term.snapshot();
+        assert!(frame.cursor.is_none(), "CSI ?25l 隐藏后不该再交给渲染层画反色块");
+        assert!(frame.cursor_pos.is_some(), "隐藏光标的位置（IME 定位用）不该丢");
+
+        inject(b"\x1b[?25h");
+        assert!(term.snapshot().cursor.is_some(), "CSI ?25h 后光标应恢复可见");
+
+        kill_remote(&id);
+    }
+
+    /// 用户报告：框选后滚动，选区高亮消失。选区跟随滚动是本次重构的核心目标——
+    /// 选区存缓冲区绝对坐标，滚动只改 display_offset，snapshot 的逐 cell contains
+    /// 判定应该继续命中。直接注入内容+滚动（不经 shell 时序），确定性复现。
+    #[test]
+    fn selection_survives_scrolling() {
+        let dir = std::env::temp_dir().join(format!("smelt-selscroll-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let id = format!("selscroll-test-{}", uuid_like());
+
+        let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀
+
+        // 注入 40 行，把内容顶进 scrollback（24 行屏高）。
+        {
+            let mut parser: Processor = Processor::new();
+            let mut t = term.term.lock().unwrap();
+            for i in 0..40 {
+                parser.advance(&mut *t, format!("content-{i}\r\n").as_bytes());
+            }
+        }
+
+        // 在可视区第 5 行选中前 9 列（"content-N" 长度 9）。
+        term.selection_start(5, 0, true, SelectionKind::Simple);
+        term.selection_update(5, 8, false);
+        let text_before = term.selection_text().expect("建完选区应有文本");
+        assert!(text_before.starts_with("content-"), "选到的应是注入的内容行，实际: {text_before:?}");
+        let frame = term.snapshot();
+        let sel_row_before = frame.rows.iter().position(|r| r.iter().any(|c| c.selected));
+        assert_eq!(sel_row_before, Some(5), "选区高亮应画在第 5 行");
+
+        // 向上滚 3 行：高亮应跟着内容下移到第 8 行，文本不变。
+        term.scroll(3);
+        let frame = term.snapshot();
+        let sel_row_after = frame.rows.iter().position(|r| r.iter().any(|c| c.selected));
+        assert_eq!(sel_row_after, Some(8), "滚动 3 行后选区高亮应跟随内容移到第 8 行");
+        assert_eq!(term.selection_text().as_deref(), Some(text_before.as_str()), "滚动不该改变选区文本");
 
         kill_remote(&id);
     }
@@ -1048,8 +1211,7 @@ mod event_proxy_answers_tests {
         let size = TermSize { rows: 24, cols: 80 };
         // 跟 Terminal::spawn 用同一份 config：kitty_keyboard 关着的话 alacritty 会把
         // CSI u 全静默丢掉，这个测试就成了摆设。
-        let config = Config { kitty_keyboard: true, ..Config::default() };
-        let mut term = Term::new(config, &size, proxy);
+        let mut term = Term::new(term_config(), &size, proxy);
         let mut parser: Processor = Processor::new();
 
         assert!(

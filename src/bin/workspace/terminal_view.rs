@@ -124,8 +124,16 @@ pub struct TerminalView {
     custom_title: Option<String>,
     /// 初始工作目录（新建标签继承用）。
     cwd: Option<String>,
-    /// 鼠标框选：(锚点, 当前端) 的 (行, 列)。
-    sel: Option<((usize, usize), (usize, usize))>,
+    /// 是否正在拖动框选（mouse_down 置位、mouse_up 清）。选区本体存在 alacritty 的
+    /// Term.selection 里（缓冲区绝对坐标，滚动跟随/新输出漂移由它维护），这里只记
+    /// 「拖没拖着」这个交互态。
+    selecting: bool,
+    /// 拖到可视区上/下边缘时的自动滚动方向：0 不滚，正=向上看历史，负=向下。
+    drag_scroll: i32,
+    /// 自动滚动期间选区活动端使用的列（沿用最后一次拖动事件的列）。
+    drag_scroll_col: usize,
+    /// 自动滚动定时器是否已在跑（防重复 spawn）。
+    drag_scroll_running: bool,
     /// 上次测得的等宽字符像素宽（鼠标坐标换算用）。
     cell_w: f32,
     /// 网格原点（含内边距）的窗口像素坐标，由 canvas 在 paint 时写入。
@@ -354,7 +362,10 @@ impl TerminalView {
             title,
             custom_title: None,
             cwd,
-            sel: None,
+            selecting: false,
+            drag_scroll: 0,
+            drag_scroll_col: 0,
+            drag_scroll_running: false,
             cell_w: 8.0,
             grid_origin: Rc::new(StdCell::new((0.0, 0.0))),
             grid_size: Rc::new(StdCell::new((0.0, 0.0))),
@@ -419,7 +430,9 @@ impl TerminalView {
         self.stuck_notified = false;
         self.completed_unread = false;
         self.last_notified = None;
-        self.sel = None;
+        // 新 Terminal 自带空选区，只需重置本视图的拖选交互态。
+        self.selecting = false;
+        self.drag_scroll = 0;
         self.cursor = None;
         cx.notify();
     }
@@ -513,41 +526,44 @@ impl TerminalView {
         (row, col)
     }
 
-    /// 提取当前选区文本（用于复制）。按 (行,列) 字典序规范化。
-    fn selected_text(&self) -> Option<String> {
-        let (a, b) = self.sel?;
-        let (s, e) = if a <= b { (a, b) } else { (b, a) };
-        let frame = self.terminal.snapshot();
-        if frame.rows.is_empty() {
-            return None;
+    /// 窗口像素 x 落在其网格单元的左半还是右半：选区端点的 Side。alacritty 用它
+    /// 决定端点格是否纳入选区（同格同侧 = 空选区），于是单击/同格微抖不会误选出
+    /// 一格——否则 mouse_up 会把这次点击当成拖选，不再转发给开了鼠标上报的 TUI。
+    fn pos_in_left_half(&self, pos: Point<Pixels>) -> bool {
+        let (ox, _) = self.grid_origin.get();
+        let x = (f32::from(pos.x) - ox).max(0.0);
+        (x / self.cell_w.max(1.0)).fract() < 0.5
+    }
+
+    /// 拖选拖出可视区上/下边缘后的自动滚动循环：每 60ms 按 drag_scroll 方向滚一行，
+    /// 并把选区活动端钉在对应边缘行（行传 0 / usize::MAX，由 selection_update 夹回
+    /// 可视区），一边滚一边扩选。松开鼠标或拖回区内即停，定时器自行退出。
+    fn start_drag_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.drag_scroll_running {
+            return;
         }
-        let last_row = e.0.min(frame.rows.len() - 1);
-        let mut out = String::new();
-        for r in s.0..=last_row {
-            let row = &frame.rows[r];
-            if !row.is_empty() {
-                let lo = if r == s.0 { s.1 } else { 0 };
-                let hi = (if r == e.0 { e.1 } else { row.len() - 1 }).min(row.len() - 1);
-                let mut line = String::new();
-                if lo <= hi {
-                    for c in lo..=hi {
-                        // 跳过宽字符占位（'\0'），避免复制出空字符。
-                        if row[c].ch != '\0' {
-                            line.push(row[c].ch);
-                        }
-                    }
+        self.drag_scroll_running = true;
+        cx.spawn(async move |this, cx| loop {
+            Timer::after(Duration::from_millis(60)).await;
+            let go = this.update(cx, |this, cx| {
+                if !this.selecting || this.drag_scroll == 0 {
+                    this.drag_scroll_running = false;
+                    return false;
                 }
-                out.push_str(line.trim_end());
+                let dir = this.drag_scroll;
+                this.terminal.scroll(dir);
+                // 向上滚活动端钉在首行（扩向更早内容），向下钉在末行；Side 取
+                // 扩选方向的外侧，保证边缘行的端点格被选进来。
+                let row = if dir > 0 { 0 } else { usize::MAX };
+                this.terminal.selection_update(row, this.drag_scroll_col, dir > 0);
+                cx.notify();
+                true
+            });
+            if !matches!(go, Ok(true)) {
+                break;
             }
-            if r != last_row {
-                out.push('\n');
-            }
-        }
-        if out.trim().is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+        })
+        .detach();
     }
 
     /// 某行 [a, b) 两个网格列之间要按几次左右方向键才能跨过去——不能直接拿列号
@@ -562,35 +578,6 @@ impl TerminalView {
             return hi - lo;
         };
         cells[lo..hi.min(cells.len())].iter().filter(|c| c.ch != '\0').count()
-    }
-
-    /// 双击选词：以点击单元为中心，向两侧扩展到空白为止。
-    fn word_at(&self, (r, c): (usize, usize)) -> Option<((usize, usize), (usize, usize))> {
-        let frame = self.terminal.snapshot();
-        let row = frame.rows.get(r)?;
-        if c >= row.len() || row[c].ch.is_whitespace() {
-            return Some(((r, c), (r, c)));
-        }
-        let mut lo = c;
-        while lo > 0 && !row[lo - 1].ch.is_whitespace() {
-            lo -= 1;
-        }
-        let mut hi = c;
-        while hi + 1 < row.len() && !row[hi + 1].ch.is_whitespace() {
-            hi += 1;
-        }
-        Some(((r, lo), (r, hi)))
-    }
-
-    /// 三击选行：整行到最后一个非空白字符。
-    fn line_at(&self, (r, _c): (usize, usize)) -> Option<((usize, usize), (usize, usize))> {
-        let frame = self.terminal.snapshot();
-        let row = frame.rows.get(r)?;
-        let last = row
-            .iter()
-            .rposition(|cell| !cell.ch.is_whitespace())
-            .unwrap_or(0);
-        Some(((r, 0), (r, last)))
     }
 
     /// 点击单元处若落在某个 URL / 本地文件路径上，返回该目标（未做 file:// 转换，
@@ -757,9 +744,11 @@ impl Render for TerminalView {
         }
 
         let frame = self.terminal.snapshot();
+        // 画反色块用可见光标（应用 CSI ?25l 藏光标时为 None）；IME 候选窗定位、
+        // Option+点击移光标用**位置**（cursor_pos，含隐藏）——TUI 藏了光标输入法
+        // 照样要知道往哪落。
         let cursor = frame.cursor;
-        self.cursor = cursor; // 存下来供 IME 候选窗定位
-        let sel = self.sel;
+        self.cursor = frame.cursor_pos;
         let hover_url = self.hover_url;
         let has_hover = hover_url.is_some();
         let base_font = terminal_font();
@@ -819,9 +808,9 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 let ks = &ev.keystroke;
                 let m = &ks.modifiers;
-                // Cmd+C 复制选区
+                // Cmd+C 复制选区（alacritty 按缓冲区绝对行取文本，跨屏选区也完整）
                 if m.platform && ks.key == "c" {
-                    if let Some(text) = this.selected_text() {
+                    if let Some(text) = this.terminal.selection_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                     return;
@@ -917,19 +906,45 @@ impl Render for TerminalView {
                         }
                         return;
                     }
-                    this.sel = match ev.click_count {
-                        2 => this.word_at(cell),         // 双击选词
-                        n if n >= 3 => this.line_at(cell), // 三击选行
-                        _ => Some((cell, cell)),
+                    let kind = match ev.click_count {
+                        2 => terminal::SelectionKind::Word,          // 双击选词（语义边界）
+                        n if n >= 3 => terminal::SelectionKind::Line, // 三击选整行
+                        _ => terminal::SelectionKind::Simple,
                     };
+                    this.terminal.selection_start(
+                        cell.0,
+                        cell.1,
+                        this.pos_in_left_half(ev.position),
+                        kind,
+                    );
+                    this.selecting = true;
                     cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
                 if ev.pressed_button == Some(MouseButton::Left) {
-                    if let Some((a, _)) = this.sel {
-                        let head = this.pos_to_cell(ev.position, window);
-                        this.sel = Some((a, head));
+                    if this.selecting {
+                        let (row, col) = this.pos_to_cell(ev.position, window);
+                        this.terminal.selection_update(
+                            row,
+                            col,
+                            this.pos_in_left_half(ev.position),
+                        );
+                        // 拖出可视区上/下边缘 → 记方向并启动自动滚动（一边滚一边扩选）。
+                        let (_, oy) = this.grid_origin.get();
+                        let (_, h) = this.grid_size.get();
+                        let y = f32::from(ev.position.y) - oy;
+                        this.drag_scroll = if y < 0.0 {
+                            1
+                        } else if y > h - 2.0 * PAD_Y {
+                            -1
+                        } else {
+                            0
+                        };
+                        this.drag_scroll_col = col;
+                        if this.drag_scroll != 0 {
+                            this.start_drag_scroll(cx);
+                        }
                         cx.notify();
                     }
                 } else {
@@ -960,10 +975,18 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseUpEvent, window, cx| {
-                    // 锚点 != 端点：真的拖出了选区，保留本地框选、不转发给应用——拖拽选字
+                    this.selecting = false;
+                    this.drag_scroll = 0;
+                    // 真的拖出了非空选区：保留本地框选、不转发给应用——拖拽选字
                     // 的意图比应用的鼠标点击上报优先级更高，这样才跟真实终端行为一致
                     // （之前版本按下就转发，导致开了鼠标上报的应用里完全没法拖拽选字）。
-                    if this.sel.is_some_and(|(a, b)| a != b) {
+                    //
+                    // 并且**选中即复制**（iTerm2 的 copy-on-select）：TUI（Claude Code
+                    // 等）随时会重绘界面，重绘一碰到选区 alacritty 就把它清掉（内容变了
+                    // 选区作废，防复制到错内容），等用户滚动完再按 Cmd+C 多半已经丢了——
+                    // 松手瞬间文本就进剪贴板，之后界面怎么刷新都不影响已拿到的内容。
+                    if let Some(text) = this.terminal.selection_text() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
                         return;
                     }
                     // 未拖动 = 单纯点击。应用开了鼠标点击上报（比如 Claude Code 里可点的
@@ -977,7 +1000,7 @@ impl Render for TerminalView {
                         }
                     }
                     // 单击（未拖动）清除选区
-                    this.sel = None;
+                    this.terminal.selection_clear();
                     cx.notify();
                 }),
             )
@@ -998,12 +1021,11 @@ impl Render for TerminalView {
                             Some((cr, cc)) if cr == r => Some(cc),
                             _ => None,
                         };
-                        let sr = sel_range_for_row(r, sel, row.len());
                         let hl = match hover_url {
                             Some((hr, a, b)) if hr == r => Some((a, b)),
                             _ => None,
                         };
-                        render_row(row, cc, sr, &base_font, hl, cell_w)
+                        render_row(row, cc, &base_font, hl, cell_w)
                     })),
             )
             // 透明覆盖层：paint 阶段注册 IME 输入处理器，并记录网格原点。
@@ -1052,12 +1074,10 @@ impl Render for TerminalView {
 fn render_row(
     row: Vec<terminal::Cell>,
     cursor_col: Option<usize>,
-    sel: Option<(usize, usize)>,
     base_font: &Font,
     hover_link: Option<(usize, usize)>,
     cell_w: f32,
 ) -> Div {
-    let is_sel = |i: usize| sel.map_or(false, |(lo, hi)| i >= lo && i <= hi);
     let is_link = |i: usize| hover_link.map_or(false, |(a, b)| i >= a && i <= b);
     // 悬停链接：高亮色 + 下划线；再叠加光标反色 / 选区背景。
     let style_of = |i: usize| -> (u32, u32, bool, bool) {
@@ -1071,7 +1091,7 @@ fn render_row(
         }
         if Some(i) == cursor_col {
             std::mem::swap(&mut fg, &mut bg);
-        } else if is_sel(i) {
+        } else if c.selected {
             bg = sel_bg();
         }
         (fg, bg, c.bold, underline)
@@ -1184,26 +1204,6 @@ fn text_batches(
         out.push((col, text, st));
     }
     out
-}
-
-/// 计算某行落在选区内的列范围（按 (行,列) 字典序规范化）。
-fn sel_range_for_row(
-    r: usize,
-    sel: Option<((usize, usize), (usize, usize))>,
-    row_len: usize,
-) -> Option<(usize, usize)> {
-    let (a, b) = sel?;
-    let (s, e) = if a <= b { (a, b) } else { (b, a) };
-    if r < s.0 || r > e.0 || row_len == 0 {
-        return None;
-    }
-    let lo = if r == s.0 { s.1 } else { 0 };
-    let hi = (if r == e.0 { e.1 } else { row_len - 1 }).min(row_len - 1);
-    if lo > hi {
-        None
-    } else {
-        Some((lo, hi))
-    }
 }
 
 /// 弹一条 macOS 系统通知（osascript，无额外依赖）。title 固定 smelt、
@@ -1459,7 +1459,14 @@ mod tests {
         let mut out = Vec::new();
         for ch in s.chars() {
             let wide = (ch as u32) >= 0x1100 && !ch.is_ascii();
-            out.push(Cell { ch, fg: 0xffffff, bg: 0x000000, bold: false, underline: false });
+            out.push(Cell {
+                ch,
+                fg: 0xffffff,
+                bg: 0x000000,
+                bold: false,
+                underline: false,
+                selected: false,
+            });
             if wide {
                 out.push(Cell {
                     ch: '\0',
@@ -1467,6 +1474,7 @@ mod tests {
                     bg: 0x000000,
                     bold: false,
                     underline: false,
+                    selected: false,
                 });
             }
         }
