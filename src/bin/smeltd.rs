@@ -25,6 +25,10 @@
 //!                                                              见下「内嵌远程网关」（bind/port 可省，默认回环随机口）
 //!   {"op":"remote_stop"}                                     → 回 {"ok":true} 后关闭
 //!   {"op":"remote_status"}                                   → 回 {"running":bool,"token":"..","addr":".."} 后关闭
+//!   {"op":"tunnel_start"}                                     → 回 {"ok":true,"url":".."}，spawn cloudflared
+//!                                                              把远程网关暴露到公网（见下「Cloudflare Tunnel」）
+//!   {"op":"tunnel_stop"}                                     → 回 {"ok":true} 后关闭
+//!   {"op":"tunnel_status"}                                   → 回 {"running":bool,"url":".."} 后关闭
 //!
 //! 流模式：
 //!   守护 → 客户端：先发 JSON 尺寸行（含 replay_len=快照字节数）→ ANSI 网格快照
@@ -78,6 +82,24 @@
 //! `upgrade` 之后如果之前开着远程网关，会随旧进程退出而关闭，新进程里默认是关的
 //! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
 //! 默认关闭、绑回环，见 collaboration.md 的安全底线。
+//!
+//! ## Cloudflare Tunnel（`tunnel_start`/`tunnel_stop`/`tunnel_status`）
+//!
+//! 解决"内嵌远程网关默认绑回环，手机切到蜂窝网络就连不上"这个问题（见
+//! docs/remote-ops-roadmap.md Phase 3）。`tunnel_start` 会先确保内嵌远程网关已经
+//! 开着（没开就用默认参数开一个），再 spawn `cloudflared tunnel --url` 子进程把它
+//! 暴露到一个 `*.trycloudflare.com` 公网地址——**不是自建信令 + WebRTC**，是走
+//! Cloudflare 的隧道中转，权衡理由见 roadmap 文档。
+//!
+//! `cloudflared` 是外部二进制，不 vendor 进仓库；没装时 `tunnel_start` 会明确报错
+//! （提示 `brew install cloudflared`），不是静默失败。子进程的 stdout/stderr 全程
+//! 有专门线程持续读干净（不只是为了扒事件，也是为了不让管道写满反过来卡住
+//! cloudflared）。同样不参与无缝升级交接，同样默认关闭。
+//!
+//! **强制 `--protocol http2`**（实测踩过的坑）：quick tunnel 默认先试 QUIC，网络挡
+//! UDP/QUIC 时会反复重试好几轮才退化到 http2；而且 cloudflared 打印"隧道已创建"
+//! 的 URL 早于连接真正建好——只看到 URL 就上报成功，实测会先给出一个访问 530 的
+//! 死链接。`start_tunnel` 因此额外等一条 `Registered tunnel connection` 日志才算数。
 
 #[path = "../remote_gateway.rs"]
 mod remote_gateway;
@@ -310,6 +332,155 @@ fn stop_remote_gateway(state: &RemoteState) {
     }
 }
 
+/// Cloudflare Tunnel（Phase 3，见 docs/remote-ops-roadmap.md）：spawn `cloudflared`
+/// 子进程把本机远程网关暴露到公网，不是 P2P，是走 Cloudflare 中转——见 roadmap 里
+/// 放弃自建信令+WebRTC 的理由。持有子进程句柄，`tunnel_stop` 时负责杀干净。
+struct Tunnel {
+    child: std::process::Child,
+    url: String,
+}
+
+type TunnelState = Arc<Mutex<Option<Tunnel>>>;
+
+/// 从 cloudflared 的一行日志里认出公网 URL（形如
+/// `https://xxx-xxx-xxx.trycloudflare.com`，混在 box-drawing 字符和时间戳里）。
+fn extract_tunnel_url(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|tok| tok.starts_with("https://") && tok.contains(".trycloudflare.com"))
+        .map(|s| s.trim_matches('|').to_string())
+}
+
+/// URL 打印出来 ≠ 隧道真的能用——cloudflared 注册完 hostname 就先打 URL，实际到
+/// Cloudflare 边缘的连接（尤其网络挡了 QUIC、要退化到 http2 时）可能还要再等一会。
+/// 必须等到这条"已建好连接"的日志才算数（实测：只看 URL 会拿到一个暂时 530 的死链接）。
+enum TunnelEvent {
+    Url(String),
+    Connected,
+}
+
+const TUNNEL_CONNECTED_MARKER: &str = "Registered tunnel connection";
+
+/// 持续把 cloudflared 的一路输出（stdout 或 stderr）读干净，**贯穿整个子进程生命
+/// 周期**，不是只读到握手成功为止：不只是为了扒事件（不读干净会把管道缓冲区写满，
+/// 反过来卡住 cloudflared），也是因为断线重连之后 cloudflared 理论上可能重新申请
+/// 一个新域名（官方对 quick tunnel 只保证"进程存活期间"这一件事，没有更强的承诺）。
+/// 一旦扫到新的 URL，直接更新 `tunnel_state` 里存的那份——不这样做的话，一旦真的
+/// 发生重新分配，GUI 会一直显示一条已经失效的旧链接，且没有任何信号能让它自己发现。
+fn spawn_tunnel_output_scanner(
+    reader: impl Read + Send + 'static,
+    tx: std::sync::mpsc::Sender<TunnelEvent>,
+    tunnel_state: TunnelState,
+) {
+    thread::spawn(move || {
+        let buf = BufReader::new(reader);
+        for line in buf.lines().map_while(Result::ok) {
+            if let Some(url) = extract_tunnel_url(&line) {
+                let _ = tx.send(TunnelEvent::Url(url.clone()));
+                // 握手阶段这里还是 None（Tunnel 还没存进去），交给下面 start_tunnel
+                // 里的 rx 去处理首次握手；这行只对"握手完成之后又冒出新 URL"生效。
+                if let Some(t) = tunnel_state.lock().unwrap().as_mut() {
+                    t.url = url;
+                }
+            }
+            if line.contains(TUNNEL_CONNECTED_MARKER) {
+                let _ = tx.send(TunnelEvent::Connected);
+            }
+        }
+    });
+}
+
+/// 幂等：已经开着直接回现有 URL。会先确保本机远程网关已经开着（隧道要转发给它），
+/// 没开会顺带用默认参数（回环 + 随机端口）开一个。
+///
+/// 强制 `--protocol http2`：quick tunnel 默认先试 QUIC，网络挡 UDP/QUIC 时（不少
+/// 企业网/部分云环境如此）要退化重试好几轮才会换协议，直接指定 http2 跳过这段
+/// 摸索，换一点 QUIC 本可能带来的延迟优势，换更快、更可预期的建连。
+fn start_tunnel(tunnel_state: &TunnelState, remote_state: &RemoteState) -> Result<String, String> {
+    {
+        let guard = tunnel_state.lock().unwrap();
+        if let Some(t) = guard.as_ref() {
+            return Ok(t.url.clone());
+        }
+    } // 提前放锁：下面 start_remote_gateway 可能涉及绑端口，不需要一直攥着这把锁
+
+    let (_, addr) = start_remote_gateway(remote_state, "127.0.0.1", 0)?;
+
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("cloudflared")
+        .arg("tunnel")
+        .arg("--protocol")
+        .arg("http2")
+        .arg("--url")
+        .arg(format!("http://{addr}"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "没找到 cloudflared，先装一下：brew install cloudflared".to_string()
+            } else {
+                format!("启动 cloudflared 失败：{e}")
+            }
+        })?;
+
+    let (tx, rx) = std::sync::mpsc::channel::<TunnelEvent>();
+    if let Some(out) = child.stdout.take() {
+        spawn_tunnel_output_scanner(out, tx.clone(), Arc::clone(tunnel_state));
+    }
+    if let Some(err) = child.stderr.take() {
+        spawn_tunnel_output_scanner(err, tx, Arc::clone(tunnel_state));
+    }
+
+    // 30s 内必须同时等到 URL 和"已连接"确认，缺一都当失败处理，不让调用方无限期卡着。
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut url: Option<String> = None;
+    let mut connected = false;
+    let url = loop {
+        if connected {
+            if let Some(u) = url {
+                break u;
+            }
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本".to_string());
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(TunnelEvent::Url(u)) => url = Some(u),
+            Ok(TunnelEvent::Connected) => connected = true,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本".to_string());
+            }
+        }
+    };
+
+    *tunnel_state.lock().unwrap() = Some(Tunnel { child, url: url.clone() });
+    Ok(url)
+}
+
+fn stop_tunnel(state: &TunnelState) {
+    if let Some(mut t) = state.lock().unwrap().take() {
+        let _ = t.child.kill();
+        let _ = t.child.wait(); // 收尸，避免僵尸进程
+    }
+}
+
+/// 顺带自愈：cloudflared 意外退出（网络问题/被 Cloudflare 断开）时，`try_wait` 能
+/// 发现进程已经死了，这里直接清状态，不让 GUI 一直显示一个其实已经失效的 URL。
+fn tunnel_status(state: &TunnelState) -> Option<String> {
+    let mut guard = state.lock().unwrap();
+    let dead = matches!(guard.as_mut().map(|t| t.child.try_wait()), Some(Ok(Some(_))));
+    if dead {
+        *guard = None;
+        return None;
+    }
+    guard.as_ref().map(|t| t.url.clone())
+}
+
 fn main() {
     // 无缝升级交接：上一代进程 exec 本二进制前写好交接文件并把路径放在环境变量里。
     // 立即摘掉环境变量：它只对"本次 exec 交接"有意义，不能传染给之后 spawn 的 shell。
@@ -351,13 +522,15 @@ fn main() {
     let listen_fd = listener.as_raw_fd();
     let exe_mtime = exe_mtime_secs();
     // 不参与无缝升级交接：每次进程启动（含 upgrade 后的新进程）都是全新的 None，
-    // 见 RemoteGateway 定义处注释。
+    // 见 RemoteGateway / Tunnel 定义处注释。
     let remote_state: RemoteState = Arc::new(Mutex::new(None));
+    let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
         let sessions = Arc::clone(&sessions);
         let remote_state = Arc::clone(&remote_state);
-        thread::spawn(move || handle_conn(conn, sessions, exe_mtime, listen_fd, remote_state));
+        let tunnel_state = Arc::clone(&tunnel_state);
+        thread::spawn(move || handle_conn(conn, sessions, exe_mtime, listen_fd, remote_state, tunnel_state));
     }
 }
 
@@ -504,12 +677,45 @@ mod handoff_tests {
     }
 }
 
+#[cfg(test)]
+mod tunnel_tests {
+    use super::*;
+
+    /// 真实抓过的 cloudflared 输出（`cloudflared tunnel --url` 本地实测）：URL 混在
+    /// box-drawing 字符、时间戳、日志级别里，前后有一堆空格垫着对齐画框。
+    #[test]
+    fn extract_tunnel_url_from_real_cloudflared_log_line() {
+        let line = "2026-07-15T08:22:32Z INF |  https://loved-ran-principles-mailto.trycloudflare.com                                     |";
+        assert_eq!(
+            extract_tunnel_url(line).as_deref(),
+            Some("https://loved-ran-principles-mailto.trycloudflare.com")
+        );
+    }
+
+    #[test]
+    fn extract_tunnel_url_ignores_unrelated_lines() {
+        assert_eq!(extract_tunnel_url("2026-07-15T08:22:22Z INF Requesting new quick Tunnel on trycloudflare.com..."), None);
+        assert_eq!(extract_tunnel_url("2026-07-15T08:25:01Z ERR Failed to dial a quic connection"), None);
+        assert_eq!(extract_tunnel_url(""), None);
+    }
+
+    /// 真实抓过的"已连接"确认行（`--protocol http2` 实测）：URL 早就打印过了，
+    /// 但真正能访问是等到这一行才确认——只看 URL 那次拿到的是暂时 530 的死链接，
+    /// 这条测试锁死这个 marker 字符串跟真实日志一致，不能悄悄改错。
+    #[test]
+    fn connected_marker_matches_real_cloudflared_log_line() {
+        let line = "2026-07-15T08:26:46Z INF Registered tunnel connection connIndex=0 connection=0cc8452d-281b-43d2-892a-a60480f845d9 event=0 ip=198.18.20.145 location=lax07 protocol=http2";
+        assert!(line.contains(TUNNEL_CONNECTED_MARKER));
+    }
+}
+
 fn handle_conn(
     conn: UnixStream,
     sessions: Sessions,
     exe_mtime: u64,
     listen_fd: RawFd,
     remote_state: RemoteState,
+    tunnel_state: TunnelState,
 ) {
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。
     let Ok(rc) = conn.try_clone() else { return };
@@ -591,6 +797,30 @@ fn handle_conn(
                 Some(g) => {
                     serde_json::json!({ "running": true, "token": g.token, "addr": g.addr.to_string() })
                 }
+                None => serde_json::json!({ "running": false }),
+            };
+            let _ = writeln!(c, "{}", body);
+        }
+        Some("tunnel_start") => {
+            let mut c = conn;
+            match start_tunnel(&tunnel_state, &remote_state) {
+                Ok(url) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true, "url": url }));
+                }
+                Err(e) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": e }));
+                }
+            }
+        }
+        Some("tunnel_stop") => {
+            stop_tunnel(&tunnel_state);
+            let mut c = conn;
+            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+        }
+        Some("tunnel_status") => {
+            let mut c = conn;
+            let body = match tunnel_status(&tunnel_state) {
+                Some(url) => serde_json::json!({ "running": true, "url": url }),
                 None => serde_json::json!({ "running": false }),
             };
             let _ = writeln!(c, "{}", body);
