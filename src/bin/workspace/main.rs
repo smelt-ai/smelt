@@ -4217,8 +4217,12 @@ fn main() {
         // 不能卡首帧渲染。settings.rs 的「远程」设置页读 RemoteRuntimeState 展示。
         let remote_config = settings::load_remote_config();
         let want_remote = remote_config.enabled;
+        // 隧道依赖本机网关；配置里 tunnel_enabled=true 时 enabled 理应也是 true
+        // （apply_tunnel_toggle 存盘时就是这么同步的），但独立判断一次更保险。
+        let want_tunnel = remote_config.tunnel_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
+        cx.set_global(settings::TunnelRuntimeState::default());
         if want_remote {
             cx.spawn(async move |cx| {
                 let status = cx
@@ -4236,6 +4240,37 @@ fn main() {
                         }
                     };
                     cx.set_global(rt);
+                });
+            })
+            .detach();
+        }
+        if want_tunnel {
+            cx.set_global(settings::TunnelRuntimeState { connecting: true, url: None, error: None });
+            cx.spawn(async move |cx| {
+                let status = cx
+                    .background_executor()
+                    .spawn(async {
+                        terminal::ensure_daemon_running();
+                        terminal::tunnel_start()
+                    })
+                    .await;
+                let _ = cx.update(|cx| {
+                    let rt = match status {
+                        Ok(s) => settings::TunnelRuntimeState { connecting: false, url: s.url, error: None },
+                        Err(e) => settings::TunnelRuntimeState {
+                            connecting: false,
+                            url: None,
+                            error: Some(e),
+                        },
+                    };
+                    cx.set_global(rt);
+                    // tunnel_start 顺带把本机网关也开了（如果之前没开），回填一下。
+                    let remote = terminal::remote_status();
+                    cx.set_global(settings::RemoteRuntimeState {
+                        token: remote.token,
+                        addr: remote.addr,
+                        error: None,
+                    });
                 });
             })
             .detach();

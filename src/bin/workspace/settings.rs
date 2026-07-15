@@ -237,11 +237,15 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub enabled: bool,
+    /// Cloudflare Tunnel 开关（Phase 3，见 smeltd.rs）。`#[serde(default)]`：
+    /// 这个字段比 `enabled` 晚加，旧的 collab.json 里没有这个键，缺省按关闭处理。
+    #[serde(default)]
+    pub tunnel_enabled: bool,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
-        Self { enabled: false }
+        Self { enabled: false, tunnel_enabled: false }
     }
 }
 
@@ -292,6 +296,59 @@ pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
     c.enabled = enabled;
     save_remote_config(&c);
     cx.set_global(c);
+}
+
+/// Cloudflare Tunnel 运行时状态（不落盘）：`connecting` 是"cloudflared 起来了但
+/// 还没等到结果"这个中间态——`tunnel_start` 可能要跑好几秒到 ~30s，UI 得显示
+/// "连接中…"而不是看起来卡住没反应。
+#[derive(Clone, Default)]
+pub struct TunnelRuntimeState {
+    pub connecting: bool,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
+impl Global for TunnelRuntimeState {}
+
+/// 开关"跨网络访问（Cloudflare Tunnel）"：跟 [`apply_remote_toggle`] 不同，
+/// `tunnel_start` 可能耗时数秒到 ~30s（spawn cloudflared + 等它连上 Cloudflare
+/// 边缘），**必须扔进后台任务**，同步调用会冻住 UI 线程。
+///
+/// 开启隧道隐含把本机远程访问也打开（隧道就是转发给它的，见 smeltd.rs 的
+/// `start_tunnel`），这里把 `enabled` 也同步成 true，避免"远程访问"那个开关
+/// 显示关闭、但隧道其实活着"这种不一致。关闭隧道不反过来关本机访问——用户
+/// 可能就是想留着局域网可访问，只是不想再对公网暴露。
+pub fn apply_tunnel_toggle(enabled: bool, cx: &mut App) {
+    let mut c = cx.global::<RemoteConfig>().clone();
+    c.tunnel_enabled = enabled;
+    if enabled {
+        c.enabled = true;
+    }
+    save_remote_config(&c);
+    cx.set_global(c);
+
+    if !enabled {
+        terminal::tunnel_stop();
+        cx.set_global(TunnelRuntimeState::default());
+        return;
+    }
+
+    cx.set_global(TunnelRuntimeState { connecting: true, url: None, error: None });
+    cx.spawn(async move |cx| {
+        let result = cx.background_executor().spawn(async { terminal::tunnel_start() }).await;
+        let _ = cx.update(|cx| {
+            let rt = match result {
+                Ok(status) => TunnelRuntimeState { connecting: false, url: status.url, error: None },
+                Err(e) => TunnelRuntimeState { connecting: false, url: None, error: Some(e) },
+            };
+            cx.set_global(rt);
+            // tunnel_start 内部顺带开了本机网关，回填一下运行时状态，让"远程访问"
+            // 那个开关下面的链接展示也跟着刷新。
+            let remote = terminal::remote_status();
+            cx.set_global(RemoteRuntimeState { token: remote.token, addr: remote.addr, error: None });
+        });
+    })
+    .detach();
 }
 
 /// Copilot CLI 自己的配置文件路径（不是 smelt 的配置——这是 Copilot 全局设置，
@@ -1353,6 +1410,58 @@ impl Workspace {
                                 .child(link),
                         )
                         .child(btn("copy-remote-link", "复制链接".into()).flex_shrink_0().on_mouse_down(
+                            MouseButton::Left,
+                            move |_, _window, cx: &mut App| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link_for_copy.clone()));
+                            },
+                        ))
+                }),
+                SettingItem::new(
+                    "跨网络访问（Cloudflare Tunnel）",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<RemoteConfig>().tunnel_enabled,
+                        |v: bool, cx: &mut App| apply_tunnel_toggle(v, cx),
+                    ),
+                )
+                .description(
+                    "手机切到蜂窝网络、不在同一个局域网时也能连回这台电脑——原理是通过 \
+                     Cloudflare 中转（不是真正点对点），需要本机装了 cloudflared \
+                     （brew install cloudflared）。开启会连带打开上面的远程访问。",
+                ),
+                SettingItem::render(move |_, _, cx: &mut App| {
+                    let tunnel_enabled = cx.global::<RemoteConfig>().tunnel_enabled;
+                    let rt = cx.global::<TunnelRuntimeState>().clone();
+                    if !tunnel_enabled {
+                        return div().text_xs().text_color(muted).child("关闭时不建立公网隧道。");
+                    }
+                    if let Some(err) = &rt.error {
+                        let danger = cx.theme().danger;
+                        return div().text_xs().text_color(danger).child(format!("启动失败：{err}"));
+                    }
+                    if rt.connecting {
+                        return div().text_xs().text_color(muted).child("连接中…（cloudflared 建隧道，最多约 30s）");
+                    }
+                    let Some(url) = rt.url.clone() else {
+                        return div().text_xs().text_color(muted).child("启动中…");
+                    };
+                    // 公网链接同样得带上远程访问那把 token，从同一个全局状态读。
+                    let token = cx.global::<RemoteRuntimeState>().token.clone().unwrap_or_default();
+                    let link = format!("{url}/?token={token}");
+                    let link_for_copy = link.clone();
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .max_w(px(280.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_middle()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(link),
+                        )
+                        .child(btn("copy-tunnel-link", "复制链接".into()).flex_shrink_0().on_mouse_down(
                             MouseButton::Left,
                             move |_, _window, cx: &mut App| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(link_for_copy.clone()));

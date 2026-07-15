@@ -675,6 +675,61 @@ pub fn remote_status() -> RemoteStatus {
     }
 }
 
+/// Cloudflare Tunnel（见 smeltd.rs「Cloudflare Tunnel」一节）的运行状态。
+#[derive(Clone, Debug, Default)]
+pub struct TunnelStatus {
+    pub running: bool,
+    pub url: Option<String>,
+}
+
+/// 让守护开启 Cloudflare Tunnel（幂等）。**这个调用可能耗时数秒到 ~30s**
+/// （spawn cloudflared 子进程 + 等它连上 Cloudflare 边缘）——调用方必须扔进
+/// 后台任务，不能直接在 UI 线程/事件回调里同步调用，否则界面会冻住。
+pub fn tunnel_start() -> Result<TunnelStatus, String> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return Err("连不上守护".to_string());
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "tunnel_start" })).is_err() {
+        return Err("发送请求失败".to_string());
+    }
+    // 守护那边最多等 30s 建隧道，这里的读超时要留够余量。
+    let _ = s.set_read_timeout(Some(Duration::from_secs(35)));
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Err("守护没有响应（等隧道建好超时）".to_string());
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
+    if v["ok"].as_bool() == Some(true) {
+        Ok(TunnelStatus { running: true, url: v["url"].as_str().map(String::from) })
+    } else {
+        Err(v["err"].as_str().unwrap_or("未知错误").to_string())
+    }
+}
+
+/// 关掉 Cloudflare Tunnel（不影响本机远程网关本身）。
+pub fn tunnel_stop() {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else { return };
+    let _ = writeln!(s, "{}", serde_json::json!({ "op": "tunnel_stop" }));
+    let mut resp = String::new();
+    let _ = BufReader::new(s).read_line(&mut resp);
+}
+
+/// 查当前 Cloudflare Tunnel 状态。
+pub fn tunnel_status() -> TunnelStatus {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return TunnelStatus::default();
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "tunnel_status" })).is_err() {
+        return TunnelStatus::default();
+    }
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return TunnelStatus::default();
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
+    TunnelStatus { running: v["running"].as_bool().unwrap_or(false), url: v["url"].as_str().map(String::from) }
+}
+
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
 /// - kitty_keyboard：默认 false 时 alacritty 会把 `CSI > 1 u` 静默丢掉
 ///   （push_keyboard_mode 里直接 return），DISAMBIGUATE_ESC_CODES 永远置不上，
