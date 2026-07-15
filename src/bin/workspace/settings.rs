@@ -229,6 +229,71 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
     cx.set_global(c);
 }
 
+// ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
+
+/// 远程操作网关的持久化开关（全局单例，存 ~/.smelt/collab.json）。只记「用户希望
+/// 它是开是关」这一件事——具体的 token/绑定地址是运行时状态，不落盘（见
+/// [`RemoteRuntimeState`]），GUI 启动时按这个字段决定要不要主动 remote_start。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteConfig {
+    pub enabled: bool,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl Global for RemoteConfig {}
+
+fn remote_config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".smelt").join("collab.json"))
+}
+
+/// 读取远程网关开关；缺失/损坏回退默认（关闭）。
+pub fn load_remote_config() -> RemoteConfig {
+    crate::json_store::load_json(remote_config_path())
+}
+
+fn save_remote_config(c: &RemoteConfig) {
+    crate::json_store::save_json(remote_config_path(), c)
+}
+
+/// 内嵌远程网关的运行时状态（不落盘，纯展示用）：token/绑定地址是当次 remote_start
+/// 成功后守护回的实际值；error 是启动失败时的原因（比如端口被占）。
+#[derive(Clone, Default)]
+pub struct RemoteRuntimeState {
+    pub token: Option<String>,
+    pub addr: Option<String>,
+    pub error: Option<String>,
+}
+
+impl Global for RemoteRuntimeState {}
+
+/// 开关"远程访问"：调 terminal::remote_start/remote_stop 同步守护实际状态，
+/// 再存盘持久化这个开关本身。暂不开放自定义绑定地址——默认回环，见
+/// collaboration.md 的安全底线；真要跨机器访问是 P2P/信令服务器那条路，另计。
+pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
+    if enabled {
+        match terminal::remote_start("127.0.0.1") {
+            Ok(status) => cx.set_global(RemoteRuntimeState {
+                token: status.token,
+                addr: status.addr,
+                error: None,
+            }),
+            Err(e) => cx.set_global(RemoteRuntimeState { token: None, addr: None, error: Some(e) }),
+        }
+    } else {
+        terminal::remote_stop();
+        cx.set_global(RemoteRuntimeState::default());
+    }
+    let mut c = cx.global::<RemoteConfig>().clone();
+    c.enabled = enabled;
+    save_remote_config(&c);
+    cx.set_global(c);
+}
+
 /// Copilot CLI 自己的配置文件路径（不是 smelt 的配置——这是 Copilot 全局设置，
 /// 改了会影响你在任何地方用 copilot，不只是 smelt 里）。
 fn copilot_settings_path() -> Option<std::path::PathBuf> {
@@ -1242,6 +1307,61 @@ impl Workspace {
                 })),
         );
 
+        // —— 远程操作网关 ——
+        let remote_page = SettingPage::new("远程").group(
+            SettingGroup::new().items(vec![
+                SettingItem::new(
+                    "开启远程访问",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<RemoteConfig>().enabled,
+                        |v: bool, cx: &mut App| apply_remote_toggle(v, cx),
+                    ),
+                )
+                .description(
+                    "开启后，知道分享链接的人能在浏览器里只读查看这台机器上的全部终端会话\
+                     （默认只绑本机回环地址，跨机器访问需要你自己的网：Tailscale / SSH 隧道）。",
+                ),
+                SettingItem::render(move |_, _, cx: &mut App| {
+                    let enabled = cx.global::<RemoteConfig>().enabled;
+                    let rt = cx.global::<RemoteRuntimeState>().clone();
+                    if !enabled {
+                        return div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("关闭时不生成分享链接。");
+                    }
+                    if let Some(err) = &rt.error {
+                        let danger = cx.theme().danger;
+                        return div().text_xs().text_color(danger).child(format!("启动失败：{err}"));
+                    }
+                    let (Some(token), Some(addr)) = (rt.token.clone(), rt.addr.clone()) else {
+                        return div().text_xs().text_color(muted).child("启动中…");
+                    };
+                    let link = format!("http://{addr}/?token={token}");
+                    let link_for_copy = link.clone();
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .max_w(px(280.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_middle()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(link),
+                        )
+                        .child(btn("copy-remote-link", "复制链接".into()).flex_shrink_0().on_mouse_down(
+                            MouseButton::Left,
+                            move |_, _window, cx: &mut App| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link_for_copy.clone()));
+                            },
+                        ))
+                }),
+            ]),
+        );
+
         div().size_full().child(
             // id 里带 nonce：见 `settings_page_nonce`，用来强制跳到 settings_page_ix。
             Settings::new(("settings", self.settings_page_nonce))
@@ -1249,7 +1369,7 @@ impl Workspace {
                     page_ix: self.settings_page_ix,
                     group_ix: None,
                 })
-                .pages(vec![appearance_page, pet_page, launch_page, update_page]),
+                .pages(vec![appearance_page, pet_page, launch_page, update_page, remote_page]),
         )
     }
 

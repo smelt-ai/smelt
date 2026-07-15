@@ -4211,6 +4211,35 @@ fn main() {
         cx.set_global(pet::PetMailbox::default());
         cx.set_global(agent::load_llm_config());
         pet::open_pet_window(cx);
+
+        // 远程操作网关：只记「用户上次希望它开着」这个开关；真去问/让守护开的部分
+        // 扔进后台任务——涉及连 unix socket、可能要等守护自己起来（最坏几秒），
+        // 不能卡首帧渲染。settings.rs 的「远程」设置页读 RemoteRuntimeState 展示。
+        let remote_config = settings::load_remote_config();
+        let want_remote = remote_config.enabled;
+        cx.set_global(remote_config);
+        cx.set_global(settings::RemoteRuntimeState::default());
+        if want_remote {
+            cx.spawn(async move |cx| {
+                let status = cx
+                    .background_executor()
+                    .spawn(async {
+                        terminal::ensure_daemon_running();
+                        terminal::remote_start("127.0.0.1")
+                    })
+                    .await;
+                let _ = cx.update(|cx| {
+                    let rt = match status {
+                        Ok(s) => settings::RemoteRuntimeState { token: s.token, addr: s.addr, error: None },
+                        Err(e) => {
+                            settings::RemoteRuntimeState { token: None, addr: None, error: Some(e) }
+                        }
+                    };
+                    cx.set_global(rt);
+                });
+            })
+            .detach();
+        }
         // 菜单栏常驻图标：点击唤出/前置主窗口，见 status_item.rs。
         status_item::setup(status_tx);
 

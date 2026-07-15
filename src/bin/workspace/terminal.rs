@@ -612,6 +612,69 @@ pub fn kill_remote(id: &str) {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
+/// 内嵌远程网关（见 smeltd.rs「内嵌远程网关」一节）的运行状态，供设置页「远程」
+/// 标签页展示用。
+#[derive(Clone, Debug, Default)]
+pub struct RemoteStatus {
+    pub running: bool,
+    pub token: Option<String>,
+    pub addr: Option<String>,
+}
+
+/// 让守护开启内嵌远程网关（幂等：已经开着直接回现状原 token，不重启不换 token）。
+/// 绑定非法地址/端口绑不上时把守护回的错误原样透传出去。
+pub fn remote_start(bind: &str) -> Result<RemoteStatus, String> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return Err("连不上守护".to_string());
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "remote_start", "bind": bind })).is_err() {
+        return Err("发送请求失败".to_string());
+    }
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Err("守护没有响应".to_string());
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
+    if v["ok"].as_bool() == Some(true) {
+        Ok(RemoteStatus {
+            running: true,
+            token: v["token"].as_str().map(String::from),
+            addr: v["addr"].as_str().map(String::from),
+        })
+    } else {
+        Err(v["err"].as_str().unwrap_or("未知错误").to_string())
+    }
+}
+
+/// 关掉内嵌远程网关。
+pub fn remote_stop() {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else { return };
+    let _ = writeln!(s, "{}", serde_json::json!({ "op": "remote_stop" }));
+    let mut resp = String::new();
+    let _ = BufReader::new(s).read_line(&mut resp);
+}
+
+/// 查当前内嵌远程网关的状态——GUI 刚启动时用它对齐"设置里记的开关"和"守护实际
+/// 是不是真开着"（比如上次异常退出、守护单独重启过）。
+pub fn remote_status() -> RemoteStatus {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return RemoteStatus::default();
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "remote_status" })).is_err() {
+        return RemoteStatus::default();
+    }
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return RemoteStatus::default();
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
+    RemoteStatus {
+        running: v["running"].as_bool().unwrap_or(false),
+        token: v["token"].as_str().map(String::from),
+        addr: v["addr"].as_str().map(String::from),
+    }
+}
+
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
 /// - kitty_keyboard：默认 false 时 alacritty 会把 `CSI > 1 u` 静默丢掉
 ///   （push_keyboard_mode 里直接 return），DISAMBIGUATE_ESC_CODES 永远置不上，
