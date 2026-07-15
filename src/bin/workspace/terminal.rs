@@ -358,62 +358,7 @@ fn os_clipboard_read() -> String {
     String::new()
 }
 
-/// OSC 9 / 777 通知扫描：alacritty 不解析这两个序列，我们在 reader 线程自己扫字节流
-/// 提取 `ESC ] 9 ; 消息 (BEL|ST)`（跟 cmux 同协议），跨 read 边界保持状态。
-#[derive(Default)]
-struct OscScan {
-    prev_esc: bool,
-    in_osc: bool,
-    buf: Vec<u8>,
-}
-
-impl OscScan {
-    fn feed(&mut self, b: u8, notify: &Mutex<Option<String>>) {
-        if self.in_osc {
-            if b == 0x07 {
-                self.finish(notify); // BEL 结束
-            } else if self.prev_esc && b == 0x5c {
-                self.buf.pop(); // 去掉刚推入的 ESC，ST（ESC \）结束
-                self.finish(notify);
-            } else {
-                self.buf.push(b);
-                self.prev_esc = b == 0x1b;
-                if self.buf.len() > 4096 {
-                    self.reset(); // 异常超长，丢弃
-                }
-            }
-        } else if self.prev_esc && b == 0x5d {
-            self.in_osc = true; // ESC ] 进入 OSC
-            self.buf.clear();
-            self.prev_esc = false;
-        } else {
-            self.prev_esc = b == 0x1b;
-        }
-    }
-
-    fn finish(&mut self, notify: &Mutex<Option<String>>) {
-        if let Ok(s) = std::str::from_utf8(&self.buf) {
-            if let Some((ps, pt)) = s.split_once(';') {
-                if ps == "9" || ps == "777" {
-                    // OSC 777 常见格式 `777;notify;title;body`，取最后一段作正文。
-                    let msg = pt.rsplit(';').next().unwrap_or(pt).trim().to_string();
-                    if !msg.is_empty() {
-                        if let Ok(mut g) = notify.lock() {
-                            *g = Some(msg);
-                        }
-                    }
-                }
-            }
-        }
-        self.reset();
-    }
-
-    fn reset(&mut self) {
-        self.in_osc = false;
-        self.prev_esc = false;
-        self.buf.clear();
-    }
-}
+// OSC 9/777 扫描（`OscScan`）挪到 crate::osc 了，跟守护共用一份，不在这再复制。
 
 // ===================== smeltd 守护连接层 =====================
 
@@ -983,7 +928,7 @@ impl Terminal {
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
-            let mut osc = OscScan::default();
+            let mut osc = crate::osc::OscScan::default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
             // 重放缓冲里的历史字节可能藏着早就处理完的 OSC 9/777 通知（比如 Claude
@@ -1002,7 +947,11 @@ impl Terminal {
                         for (i, &b) in buf[..n].iter().enumerate() {
                             let target =
                                 if bytes_seen + i < replay_len { &sink } else { &notify_reader };
-                            osc.feed(b, target);
+                            if let Some(msg) = osc.feed(b) {
+                                if let Ok(mut g) = target.lock() {
+                                    *g = Some(msg);
+                                }
+                            }
                         }
                         bytes_seen += n;
                         if let Ok(mut term) = term_reader.lock() {

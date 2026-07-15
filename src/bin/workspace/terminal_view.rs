@@ -236,10 +236,7 @@ const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
 
 /// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
 fn title_is_running(title: Option<String>) -> bool {
-    title
-        .and_then(|t| t.chars().next())
-        .map(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
-        .unwrap_or(false)
+    title.is_some_and(|t| crate::osc::title_starts_with_spinner(&t))
 }
 
 /// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。

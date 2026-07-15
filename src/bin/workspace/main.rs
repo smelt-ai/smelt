@@ -13,6 +13,8 @@ mod git_panel;
 mod hotspot;
 mod json_store;
 mod mem_usage;
+#[path = "../../osc.rs"]
+mod osc;
 mod pet;
 mod session_history;
 mod settings;
@@ -360,10 +362,8 @@ impl Session {
         }
         // 活动终端标题以 Braille spinner（非空盲文块）开头 → 运行中。
         if let Some(raw) = self.active.read(cx).agent_title() {
-            if let Some(c) = raw.trim_start().chars().next() {
-                if ('\u{2801}'..='\u{28FF}').contains(&c) {
-                    return AgentStatus::Running;
-                }
+            if crate::osc::title_starts_with_spinner(raw.trim_start()) {
+                return AgentStatus::Running;
             }
         }
         // 有 pane 刚跑完还没被回应 → 提示「有结果可看」。
@@ -405,11 +405,7 @@ fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
     let t = view.read(cx);
     if let Some(raw) = t.agent_title() {
         let head = raw.trim_start();
-        let is_agent = head.starts_with('✳')
-            || head
-                .chars()
-                .next()
-                .is_some_and(|c| ('\u{2801}'..='\u{28FF}').contains(&c));
+        let is_agent = head.starts_with('✳') || crate::osc::title_starts_with_spinner(head);
         if is_agent {
             let task = strip_status(&raw);
             // agent 默认标题（"Claude Code" / "claude"）不算任务名，继续往下回退。
@@ -449,10 +445,8 @@ fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
         None => {}
     }
     if let Some(raw) = t.agent_title() {
-        if let Some(c) = raw.trim_start().chars().next() {
-            if ('\u{2801}'..='\u{28FF}').contains(&c) {
-                return AgentStatus::Running;
-            }
+        if crate::osc::title_starts_with_spinner(raw.trim_start()) {
+            return AgentStatus::Running;
         }
     }
     if t.completed_unread() {
