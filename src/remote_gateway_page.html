@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>smelt 观战席（只读）</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #111; }
+  #term { height: 100%; padding: 4px; box-sizing: border-box; }
+  #status {
+    position: fixed; top: 4px; right: 8px; font: 12px monospace; color: #888;
+    background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 4px;
+  }
+  #back {
+    position: fixed; top: 4px; left: 8px; font: 12px monospace; color: #6cf;
+    background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 4px; text-decoration: none;
+  }
+</style>
+</head>
+<body>
+<a id="back" href="#">← 会话列表</a>
+<div id="status">连接中…</div>
+<div id="term"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script>
+  // ID/TOKEN 由网关渲染页面时服务端替换进来：JSON 转义后，尖括号还会被转成
+  // Unicode 转义序列，防止 session id/token 里带闭合 script 标签的字符提前
+  // 把这段脚本切断，造成反射型 XSS。
+  const ID = __ID_JSON__;
+  const TOKEN = __TOKEN_JSON__;
+  const statusEl = document.getElementById('status');
+  document.getElementById('back').href = `/?token=${encodeURIComponent(TOKEN)}`;
+
+  const term = new Terminal({ convertEol: true, disableStdin: true, cursorBlink: false });
+  term.open(document.getElementById('term'));
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${proto}://${location.host}/s/${encodeURIComponent(ID)}/stream?token=${encodeURIComponent(TOKEN)}`;
+
+  // 断线重连：指数退避（1s→2s→4s→8s 封顶），连上一次就把退避重置回 1s。
+  // 每次重连拿到的是全新的 ANSI 整屏快照，先 term.reset() 清掉旧画面再写，
+  // 不然重连后的快照会跟断线前残留的内容叠在一起。
+  let retryDelay = 1000;
+  const MAX_RETRY_DELAY = 8000;
+
+  function connect() {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      term.reset();
+      statusEl.textContent = '只读观战';
+      retryDelay = 1000;
+    };
+    ws.onclose = () => {
+      const s = Math.round(retryDelay / 1000);
+      statusEl.textContent = `连接断开，${s}s 后重连…`;
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
+    };
+    ws.onerror = () => { ws.close(); }; // 统一走 onclose 的重连路径，不重复写逻辑
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        // 首帧：{"cols":..,"rows":..} —— 落地尺寸后再写快照，否则历史行宽会错位。
+        const meta = JSON.parse(ev.data);
+        if (meta.cols && meta.rows) term.resize(meta.cols, meta.rows);
+        return;
+      }
+      term.write(new Uint8Array(ev.data));
+    };
+  }
+
+  connect();
+</script>
+</body>
+</html>
