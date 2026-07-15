@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 const REFERENCE_PAGE: &str = include_str!("remote_gateway_page.html");
 const LIST_PAGE: &str = include_str!("remote_gateway_list_page.html");
+const CONSOLE_PAGE: &str = include_str!("remote_gateway_console_page.html");
 
 pub fn sock_path() -> std::path::PathBuf {
     let dir = dirs::home_dir().unwrap_or_else(|| "/tmp".into()).join(".smelt");
@@ -47,6 +48,8 @@ pub fn build_router(token: String) -> Router {
         .route("/sessions", get(sessions_json_handler))
         .route("/s/{id}", get(page_handler))
         .route("/s/{id}/stream", get(stream_handler))
+        .route("/s/{id}/console", get(console_handler))
+        .route("/s/{id}/state-stream", get(state_stream_handler))
         .with_state(state)
 }
 
@@ -64,9 +67,19 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// 问 smeltd 要当前活会话 id 列表（复用既有的 `list` op，不碰 smeltd 主协议）。
-/// 阻塞 IO，调用方需要丢进 `spawn_blocking`。
-fn list_sessions() -> Vec<String> {
+/// 会话列表页/JSON 接口要展示的最小信息集——从 smeltd `list` op 回的 `states`
+/// 里挑几个字段，不是完整搬 SessionState（列表页不需要 dirty_files/tokens_used
+/// 这些，作战地图那类场景才要）。
+#[derive(Clone, serde::Serialize)]
+struct SessionInfo {
+    id: String,
+    phase: String,
+    pending_question: Option<String>,
+}
+
+/// 问 smeltd 要当前活会话列表 + 状态（复用既有的 `list` op，Task 9 已经让它带上
+/// `states` 字段，不碰 smeltd 主协议）。阻塞 IO，调用方需要丢进 `spawn_blocking`。
+fn list_sessions_info() -> Vec<SessionInfo> {
     let Ok(conn) = UnixStream::connect(sock_path()) else { return Vec::new() };
     let Ok(mut writer) = conn.try_clone() else { return Vec::new() };
     if writeln!(writer, "{}", serde_json::json!({ "op": "list" })).is_err() {
@@ -77,25 +90,63 @@ fn list_sessions() -> Vec<String> {
     if reader.read_line(&mut line).is_err() {
         return Vec::new();
     }
-    serde_json::from_str::<serde_json::Value>(&line)
-        .ok()
-        .and_then(|v| {
-            v["sessions"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { return Vec::new() };
+    let empty = Vec::new();
+    let ids = v["sessions"].as_array().unwrap_or(&empty);
+    let states = v["states"].as_array().unwrap_or(&empty);
+    ids.iter()
+        .zip(states.iter().map(Some).chain(std::iter::repeat(None)))
+        .filter_map(|(id, state)| {
+            let id = id.as_str()?.to_string();
+            let phase = state.and_then(|s| s["phase"].as_str()).unwrap_or("idle").to_string();
+            let pending_question =
+                state.and_then(|s| s["pending_question"].as_str()).map(String::from);
+            Some(SessionInfo { id, phase, pending_question })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
-fn render_session_list(ids: &[String], token: &str) -> String {
-    let rows = if ids.is_empty() {
+/// phase → (中文标签, 状态点颜色)，跟 remote_gateway_console_page.html 里 JS 那份
+/// PHASE_LABEL 手动保持一致（一个是服务端渲染列表页用，一个是操作台页面
+/// 实时刷新用，没法共用一份代码——不同语言）。
+fn phase_label(phase: &str) -> (&'static str, &'static str) {
+    match phase {
+        "thinking" => ("思考中…", "#4a9eff"),
+        "executing_tool" => ("执行工具中…", "#4a9eff"),
+        "awaiting_approval" => ("等你批准", "#ef4444"),
+        "waiting_for_user" => ("等你说话", "#f59e0b"),
+        "dead" => ("已结束", "#666"),
+        _ => ("空闲", "#666"),
+    }
+}
+
+fn render_session_list(infos: &[SessionInfo], token: &str) -> String {
+    let rows = if infos.is_empty() {
         "<li class=\"empty\">目前没有活会话</li>".to_string()
     } else {
-        ids.iter()
-            .map(|id| {
-                let id = html_escape(id);
+        infos
+            .iter()
+            .map(|info| {
+                let id = html_escape(&info.id);
                 let token = html_escape(token);
-                format!("<li><a href=\"/s/{id}?token={token}\">{id}</a></li>")
+                let (label, color) = phase_label(&info.phase);
+                let question = info
+                    .pending_question
+                    .as_deref()
+                    .map(|q| format!("<div class=\"question\">{}</div>", html_escape(q)))
+                    .unwrap_or_default();
+                format!(
+                    "<li class=\"session\" data-phase=\"{phase}\">\
+                       <div class=\"row\">\
+                         <span class=\"dot\" style=\"background:{color}\"></span>\
+                         <a class=\"primary\" href=\"/s/{id}/console?token={token}\">{id}</a>\
+                         <span class=\"label\">{label}</span>\
+                       </div>\
+                       {question}\
+                       <a class=\"secondary\" href=\"/s/{id}?token={token}\">完整终端 →</a>\
+                     </li>",
+                    phase = html_escape(&info.phase),
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -107,8 +158,8 @@ async fn list_page_handler(Query(q): Query<AuthQuery>, State(state): State<AppSt
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    let ids = tokio::task::spawn_blocking(list_sessions).await.unwrap_or_default();
-    Html(render_session_list(&ids, &q.token)).into_response()
+    let infos = tokio::task::spawn_blocking(list_sessions_info).await.unwrap_or_default();
+    Html(render_session_list(&infos, &q.token)).into_response()
 }
 
 async fn sessions_json_handler(
@@ -118,8 +169,8 @@ async fn sessions_json_handler(
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    let ids = tokio::task::spawn_blocking(list_sessions).await.unwrap_or_default();
-    Json(serde_json::json!({ "sessions": ids })).into_response()
+    let infos = tokio::task::spawn_blocking(list_sessions_info).await.unwrap_or_default();
+    Json(serde_json::json!({ "sessions": infos })).into_response()
 }
 
 async fn page_handler(
@@ -146,6 +197,80 @@ async fn stream_handler(
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
     ws.on_upgrade(move |socket| pump_watch(socket, id)).into_response()
+}
+
+/// Phase 5：手机友好的"操作台"——大状态 + 问题文案，不嵌 xterm（roadmap 原则 3：
+/// 「不绑死 xterm.js」）。只读，Phase 6 才加 approve/deny 按钮。
+async fn console_handler(
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if q.token != *state.token {
+        return (StatusCode::FORBIDDEN, "token 不对").into_response();
+    }
+    let page = CONSOLE_PAGE
+        .replace("__ID_JSON__", &js_string_literal(&id))
+        .replace("__TOKEN_JSON__", &js_string_literal(&q.token));
+    Html(page).into_response()
+}
+
+async fn state_stream_handler(
+    ws: WebSocketUpgrade,
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if q.token != *state.token {
+        return (StatusCode::FORBIDDEN, "token 不对").into_response();
+    }
+    ws.on_upgrade(move |socket| pump_state(socket, id)).into_response()
+}
+
+/// 操作台的状态流：连 smeltd 的 `subscribe`（全量订阅），按 id 过滤只转发这一个
+/// 会话的变化。首帧快照里如果已经有这个 id，也转发一次，页面一打开就有内容，
+/// 不用干等下一次状态变化。
+async fn pump_state(mut socket: WebSocket, id: String) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(16);
+    let task = tokio::task::spawn_blocking(move || subscribe_and_forward(&id, tx));
+
+    while let Some(state) = rx.recv().await {
+        if socket.send(Message::Text(state.to_string().into())).await.is_err() {
+            break;
+        }
+    }
+    let _ = task.await;
+    drop(socket);
+}
+
+/// 阻塞线程里跑：连 smeltd 的 subscribe，逐行解析，只把匹配这个 id 的状态塞进
+/// channel——subscribe 本身是全量订阅（见 smeltd.rs 的 Subscribers），过滤是
+/// 网关自己做的，不改 smeltd 协议。
+fn subscribe_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<serde_json::Value>) {
+    let Ok(conn) = UnixStream::connect(sock_path()) else { return };
+    let Ok(mut writer) = conn.try_clone() else { return };
+    if writeln!(writer, "{}", serde_json::json!({ "op": "subscribe" })).is_err() {
+        return;
+    }
+    let reader = BufReader::new(conn);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) {
+            if let Some(state) =
+                sessions.iter().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(id))
+            {
+                if tx.blocking_send(state.clone()).is_err() {
+                    return;
+                }
+            }
+        } else if let Some(session) = v.get("session") {
+            if session.get("id").and_then(|i| i.as_str()) == Some(id) {
+                if tx.blocking_send(session.clone()).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// 从阻塞的 smeltd watch 连接搬到这条 WS 上的一帧：Header 只在开头发一次，
@@ -261,9 +386,37 @@ mod tests {
         let empty = render_session_list(&[], "tok");
         assert!(empty.contains("没有活会话"));
 
-        let evil_id = "<script>alert(1)</script>".to_string();
-        let page = render_session_list(&[evil_id], "tok");
+        let evil = SessionInfo {
+            id: "<script>alert(1)</script>".to_string(),
+            phase: "idle".to_string(),
+            pending_question: Some("<b>问题</b>".to_string()),
+        };
+        let page = render_session_list(&[evil], "tok");
         assert!(!page.contains("<script>alert(1)</script>"), "未转义的 id 混进了列表页：{page}");
         assert!(page.contains("&lt;script&gt;"), "转义后的 id 应该出现在列表里：{page}");
+        assert!(!page.contains("<b>问题</b>"), "未转义的 pending_question 混进了列表页：{page}");
+    }
+
+    /// 未知 phase（比如以后 smeltd 加了新枚举值，网关还没更新）不该 panic，
+    /// 退化成一个能看的默认值。
+    #[test]
+    fn phase_label_falls_back_on_unknown_phase() {
+        let (label, _color) = phase_label("some_future_phase_we_dont_know_yet");
+        assert!(!label.is_empty());
+    }
+
+    #[test]
+    fn phase_label_covers_all_known_phases() {
+        for phase in [
+            "thinking",
+            "executing_tool",
+            "awaiting_approval",
+            "waiting_for_user",
+            "idle",
+            "dead",
+        ] {
+            let (label, color) = phase_label(phase);
+            assert!(!label.is_empty() && color.starts_with('#'), "phase={phase}");
+        }
     }
 }

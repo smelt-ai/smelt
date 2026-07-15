@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smelt 操作台</title>
+<style>
+  html, body { margin: 0; min-height: 100%; background: #111; color: #ddd; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    padding: 1.2rem; max-width: 480px; margin: 0 auto;
+  }
+  #back { color: #6cf; text-decoration: none; font-size: .85rem; }
+  h1 {
+    font-size: .85rem; color: #888; margin: 1.2rem 0 .3rem; word-break: break-all;
+    font-family: monospace; font-weight: normal;
+  }
+  #badge {
+    display: inline-block; padding: .5rem 1rem; border-radius: 8px; font-size: 1.1rem;
+    font-weight: 600; margin: .8rem 0; color: #fff; background: #333;
+  }
+  #question {
+    font-size: 1rem; line-height: 1.6; margin: 1rem 0; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #meta { color: #888; font-size: .8rem; margin-top: 2rem; }
+  #term-link {
+    display: inline-block; margin-top: 1.5rem; color: #6cf; text-decoration: none;
+    font-size: .95rem;
+  }
+  #term-link:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<a id="back" href="#">← 会话列表</a>
+<h1 id="session-id"></h1>
+<div id="badge">连接中…</div>
+<div id="question"></div>
+<div id="meta"></div>
+<a id="term-link" href="#">查看完整终端 →</a>
+<script>
+  // ID/TOKEN 由网关渲染页面时服务端替换进来，转义方式见 gateway_page.html 的注释
+  // （同一套 js_string_literal，防反射型 XSS）。
+  const ID = __ID_JSON__;
+  const TOKEN = __TOKEN_JSON__;
+
+  document.getElementById('session-id').textContent = ID;
+  document.getElementById('back').href = `/?token=${encodeURIComponent(TOKEN)}`;
+  document.getElementById('term-link').href =
+    `/s/${encodeURIComponent(ID)}?token=${encodeURIComponent(TOKEN)}`;
+
+  // 跟 remote_gateway.rs 里的 phase_label() 手动保持一致——服务端渲染列表页
+  // 用一份，这里操作台实时刷新用另一份，Rust/JS 没法共用同一份代码。
+  const PHASE_LABEL = {
+    thinking: ['思考中…', '#4a9eff'],
+    executing_tool: ['执行工具中…', '#4a9eff'],
+    awaiting_approval: ['等你批准', '#ef4444'],
+    waiting_for_user: ['等你说话', '#f59e0b'],
+    idle: ['空闲', '#666'],
+    dead: ['已结束', '#666'],
+  };
+
+  const badge = document.getElementById('badge');
+  const questionEl = document.getElementById('question');
+  const metaEl = document.getElementById('meta');
+
+  function render(state) {
+    const [label, color] = PHASE_LABEL[state.phase] || [state.phase || '未知', '#666'];
+    badge.textContent = label;
+    badge.style.background = color;
+    questionEl.textContent = state.pending_question || '';
+    metaEl.textContent = state.phase_since
+      ? `状态更新于 ${new Date(state.phase_since * 1000).toLocaleTimeString()}`
+      : '';
+  }
+
+  let retryDelay = 1000;
+  const MAX_RETRY_DELAY = 8000;
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = `${proto}://${location.host}/s/${encodeURIComponent(ID)}/state-stream?token=${encodeURIComponent(TOKEN)}`;
+    const ws = new WebSocket(url);
+
+    ws.onopen = () => { retryDelay = 1000; };
+    ws.onmessage = (ev) => {
+      try {
+        render(JSON.parse(ev.data));
+      } catch (e) {
+        // 忽略解析失败的行，不让一条坏消息炸掉整个页面
+      }
+    };
+    ws.onclose = () => {
+      const s = Math.round(retryDelay / 1000);
+      badge.textContent = `连接断开，${s}s 后重连…`;
+      badge.style.background = '#333';
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
+    };
+    ws.onerror = () => { ws.close(); };
+  }
+
+  connect();
+</script>
+</body>
+</html>

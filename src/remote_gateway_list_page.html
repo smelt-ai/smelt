@@ -2,24 +2,49 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>smelt 远程操作 —— 会话列表</title>
 <style>
   html, body { margin: 0; background: #111; color: #ddd; }
-  body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, sans-serif; padding: 2rem; }
-  h1 { font-size: 1.1rem; color: #fff; }
-  ul { padding-left: 1.2rem; }
-  li { margin-bottom: .4rem; }
-  a { color: #6cf; text-decoration: none; font-family: monospace; }
+  body { font: 14px/1.6 -apple-system, BlinkMacSystemFont, sans-serif; padding: 1.5rem; }
+  h1 { font-size: 1.1rem; color: #fff; margin-bottom: .8rem; }
+  label.filter { display: inline-flex; align-items: center; gap: .4rem; color: #aaa; font-size: .9rem; margin-bottom: 1rem; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li.session {
+    border: 1px solid #2a2a2a; border-radius: 8px; padding: .6rem .8rem;
+    margin-bottom: .6rem;
+  }
+  li.empty { color: #888; font-family: -apple-system, sans-serif; list-style: none; }
+  .row { display: flex; align-items: center; gap: .5rem; }
+  .dot { width: .6rem; height: .6rem; border-radius: 50%; flex-shrink: 0; }
+  a { color: #6cf; text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .empty { color: #888; font-family: -apple-system, sans-serif; }
-  .hint { color: #888; font-size: .85rem; margin-top: 2rem; }
+  a.primary { font-family: monospace; font-size: .95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .label { color: #888; font-size: .8rem; margin-left: auto; flex-shrink: 0; }
+  .question { color: #ccc; font-size: .85rem; margin: .4rem 0 .3rem 1.1rem; }
+  a.secondary { font-size: .8rem; margin-left: 1.1rem; }
+  .hint { color: #888; font-size: .85rem; margin-top: 1.5rem; }
 </style>
 </head>
 <body>
-<h1>smelt 远程操作 —— 只读观战</h1>
-<ul>
+<h1>smelt 远程操作 —— 会话列表</h1>
+<label class="filter">
+  <input type="checkbox" id="filter-waiting">
+  只看等你处理的
+</label>
+<ul id="list">
 __ROWS__
 </ul>
 <p class="hint">这条链接能看到这台机器上的全部活会话——分享前想清楚给谁看。</p>
+<script>
+  const WAITING = new Set(['awaiting_approval', 'waiting_for_user']);
+  const checkbox = document.getElementById('filter-waiting');
+  checkbox.addEventListener('change', () => {
+    document.querySelectorAll('#list li.session').forEach((li) => {
+      const show = !checkbox.checked || WAITING.has(li.dataset.phase);
+      li.style.display = show ? '' : 'none';
+    });
+  });
+</script>
 </body>
 </html>
