@@ -136,8 +136,9 @@
 
 #[path = "../remote_gateway.rs"]
 mod remote_gateway;
-#[path = "../osc.rs"]
-mod osc;
+// 只需要 spinner 判定；OSC 扫描整包留给 workspace（见 src/osc.rs / title_spinner.rs）。
+#[path = "../title_spinner.rs"]
+mod title_spinner;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -149,7 +150,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use alacritty_terminal::event::{Event, EventListener, VoidListener};
+use alacritty_terminal::event::{Event, EventListener};
+#[cfg(test)]
+use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
@@ -309,7 +312,7 @@ impl EventListener for StateListener {
             let Ok(mut st) = self.state.lock() else { return };
             match event {
                 Event::Title(t) => {
-                    if osc::title_starts_with_spinner(t.trim_start()) {
+                    if title_spinner::title_starts_with_spinner(t.trim_start()) {
                         st.phase = Phase::Thinking;
                         st.phase_since = now_unix();
                     }
