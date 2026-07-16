@@ -657,7 +657,7 @@ struct WsState {
 }
 
 /// 单个会话的持久化镜像：分屏树 + 会话内活动叶子（遍历序）+ 用户重命名过的会话名。
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SessionState {
     layout: PaneState,
     active: usize,
@@ -668,7 +668,7 @@ struct SessionState {
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点。
 /// 拖动比例暂不持久化，重开按均分；结构 / 嵌套 / 方向完整恢复。
 /// id 用于重开 GUI 时 reattach smeltd 里还活着的会话（旧存档无 id → 开新会话）。
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum PaneState {
     Leaf {
         cwd: Option<String>,
@@ -680,6 +680,10 @@ enum PaneState {
         /// 快捷启动项显示名。旧存档没有 → None，回退 cwd 末段。
         #[serde(default)]
         launch_label: Option<String>,
+        /// 快捷启动实际命令行（硬重启守护 / 冷启动新建时用来重跑 agent）。
+        /// 旧存档没有 → None，只开裸 shell。
+        #[serde(default)]
+        launch_cmd: Option<String>,
     },
     Split { axis: SplitAxis, children: Vec<PaneState> },
 }
@@ -725,6 +729,7 @@ fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
                 id: Some(t.session_id().to_string()),
                 custom_title: t.custom_title().map(str::to_string),
                 launch_label: t.launch_label().map(str::to_string),
+                launch_cmd: t.launch_cmd().map(str::to_string),
             }
         }
         Pane::Split { axis, children, .. } => PaneState::Split {
@@ -748,6 +753,7 @@ fn rebuild_pane(
             id,
             custom_title,
             launch_label,
+            launch_cmd,
         } => {
             // 守护已探明不可达：别再逐叶子重付「拉起守护 + 等 5s」的代价（启动在
             // 主线程同步跑，多个会话串行累加就是分钟级 beachball）。
@@ -755,14 +761,22 @@ fn rebuild_pane(
                 return None;
             }
             // 有存档 id → reattach 守护里还活着的会话；旧存档无 id → 开新会话。
-            // reattach 不再带 launch 命令（shell 已在跑），只恢复显示名与自定义名。
+            // 硬重启守护后 id 不存在，走新建分支：带上 launch_cmd 才能把 agent 拉回来
+            // （reattach 到仍活着的 shell 时 smeltd 会忽略 launch）。
             //
             // spawn 可失败（守护起不来/握手超时），失败就剪掉这个叶子——绝不 panic：
             // 这里在 did_finish_launching 的 FFI 回调栈上，panic 不能 unwind，等于
             // abort 整个 app（「重启就崩」的根因，terminal_view.rs 的 expect 曾在此引爆）。
             let sid = id.clone().unwrap_or_else(new_sid);
             let label = launch_label.clone();
-            let terminal = match terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None) {
+            let launch = launch_cmd.clone();
+            let terminal = match terminal::Terminal::spawn(
+                24,
+                80,
+                cwd.as_deref(),
+                &sid,
+                launch.as_deref(),
+            ) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败，跳过：{e:#}");
@@ -780,7 +794,7 @@ fn rebuild_pane(
                     terminal,
                     cwd.clone(),
                     sid,
-                    None,
+                    launch.as_deref(),
                     label.as_deref(),
                 );
                 // 自定义名跟着同一条 Leaf 存取，reattach 后灌回来，否则重开就丢。
@@ -1077,6 +1091,9 @@ struct Workspace {
     daemon_upgrading: bool,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
+    /// 启动时从存档恢复失败的会话（守护未就绪等）。仍写回 workspace.json，避免
+    /// 「恢复失败 → 写空盘 → 会话永久蒸发」。侧栏本帧看不到它们，下次冷启动会重试。
+    restore_orphans: Vec<SessionState>,
     /// 根节点自己的焦点句柄：总览/文件树/Git/热力图/历史会话这些页面自身没有可
     /// 聚焦的元素，切过去后如果谁都不 focus，窗口的 focus 仍停在切走前那个（可能
     /// 已经不在当前渲染树里的）终端上——GPUI 找不到就把 focus 兜底纠正到 window 的
@@ -1095,21 +1112,25 @@ impl Workspace {
         let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
 
         let mut sessions: Vec<Session> = Vec::new();
+        let mut restore_orphans: Vec<SessionState> = Vec::new();
         let mut active_session = 0;
         if let Some(s) = saved.as_ref() {
             // 守护不可达标记：第一个会话探明后，其余全部短路（见 rebuild_pane）。
             let mut daemon_ok = true;
             if !s.sessions.is_empty() {
-                // 单个会话恢复失败（守护挂了/超时）只丢它自己，其余照常——启动
-                // 在 FFI 回调栈上，任何 panic 都是整个 app abort。
+                // 单个会话恢复失败（守护挂了/超时）不 panic，但要进 orphans 以免
+                // 随后 save_state 把存档写成空、会话永久蒸发（硬重启守护后冷启动常见）。
                 for ss in &s.sessions {
                     let mut leaves = Vec::new();
                     let Some(layout) = rebuild_pane(&ss.layout, &mut leaves, &mut daemon_ok, cx)
                     else {
+                        restore_orphans.push(ss.clone());
                         continue;
                     };
                     if let Some(active) = leaves.get(ss.active).or_else(|| leaves.first()).cloned() {
                         sessions.push(Session { layout, active, custom_title: ss.custom_title.clone() });
+                    } else {
+                        restore_orphans.push(ss.clone());
                     }
                 }
                 active_session = s.active_session;
@@ -1119,13 +1140,37 @@ impl Workspace {
                 if let Some(layout) = rebuild_pane(ps, &mut leaves, &mut daemon_ok, cx) {
                     if let Some(active) = leaves.get(s.active).or_else(|| leaves.first()).cloned() {
                         sessions.push(Session { layout, active, custom_title: None });
+                    } else {
+                        restore_orphans.push(SessionState {
+                            layout: ps.clone(),
+                            active: s.active,
+                            custom_title: None,
+                        });
                     }
+                } else {
+                    restore_orphans.push(SessionState {
+                        layout: ps.clone(),
+                        active: s.active,
+                        custom_title: None,
+                    });
                 }
             } else {
                 // 更旧格式：cwd 列表 → 每个 cwd 一个独立会话。失败同样只跳过。
                 for cwd in s.tabs.clone() {
                     if !daemon_ok {
-                        break;
+                        // 剩余 cwd 一律 orphan，等下次启动重试。
+                        restore_orphans.push(SessionState {
+                            layout: PaneState::Leaf {
+                                cwd: cwd.clone(),
+                                id: None,
+                                custom_title: None,
+                                launch_label: None,
+                                launch_cmd: None,
+                            },
+                            active: 0,
+                            custom_title: None,
+                        });
+                        continue;
                     }
                     let sid = new_sid();
                     let terminal =
@@ -1135,6 +1180,17 @@ impl Workspace {
                                 if e.to_string().contains("smeltd 未就绪") {
                                     daemon_ok = false;
                                 }
+                                restore_orphans.push(SessionState {
+                                    layout: PaneState::Leaf {
+                                        cwd: cwd.clone(),
+                                        id: Some(sid),
+                                        custom_title: None,
+                                        launch_label: None,
+                                        launch_cmd: None,
+                                    },
+                                    active: 0,
+                                    custom_title: None,
+                                });
                                 continue;
                             }
                         };
@@ -1144,6 +1200,12 @@ impl Workspace {
                     sessions.push(Session::single(v));
                 }
                 active_session = s.active;
+            }
+            if !restore_orphans.is_empty() {
+                eprintln!(
+                    "[workspace] {} 个会话未能恢复（守护可能未就绪），已保留在存档中，下次启动会重试",
+                    restore_orphans.len()
+                );
             }
         }
         // 默认零会话：由用户自行「+ / 打开项目」创建，不再兜底建默认终端。
@@ -1271,11 +1333,13 @@ impl Workspace {
             daemon_upgrade_msg: None,
             daemon_upgrading: false,
             show_daemon_restart_confirm: false,
+            restore_orphans,
             focus_handle: cx.focus_handle(),
         };
         // 立即写盘：把本次启动生成/沿用的会话 id 落到存档。否则首启（或旧存档迁移）
         // 生成的新 id 只在内存里，若用户不做任何布局操作就退出，重开会因无 id 而
         // 新开 shell，守护里旧会话成孤儿 —— reattach 全靠这一步。
+        // 恢复失败的会话走 restore_orphans 一并写回，绝不会把存档抹成空。
         ws.save_state(cx);
         updater::cleanup_stale_backup();
         ws.check_for_update(true, cx);
@@ -1507,7 +1571,7 @@ impl Workspace {
     /// workspace.json（失败静默忽略）。
     fn save_state(&self, cx: &mut Context<Self>) {
         let Some(path) = ws_state_path() else { return };
-        let sessions: Vec<SessionState> = self
+        let mut sessions: Vec<SessionState> = self
             .sessions
             .iter()
             .map(|s| {
@@ -1521,6 +1585,26 @@ impl Workspace {
                 SessionState { layout, active, custom_title: s.custom_title.clone() }
             })
             .collect();
+        // 启动时恢复失败的会话继续挂在存档里，下次冷启动重试。
+        sessions.extend(self.restore_orphans.iter().cloned());
+
+        // 安全阀：内存里一个会话都没有、也没有 orphan，但磁盘上还有旧存档 → 绝不
+        // 用空列表覆盖（历史上「守护未就绪 → 恢复全失败 → save_state 抹盘」会把
+        // 用户所有侧栏会话永久清掉）。
+        if sessions.is_empty() {
+            if let Some(existing) = load_ws_state() {
+                let had = !existing.sessions.is_empty()
+                    || existing.layout.is_some()
+                    || !existing.tabs.is_empty();
+                if had {
+                    eprintln!(
+                        "[workspace] 内存会话为空但磁盘存档有数据，跳过写盘以免抹掉 workspace.json"
+                    );
+                    return;
+                }
+            }
+        }
+
         let sidebar_w = self.root_resize.read(cx).sizes().first().copied().map(f32::from);
         let file_tree_w = self.file_tree_resize.read(cx).sizes().first().copied().map(f32::from);
         let state = WsState {
@@ -2024,15 +2108,20 @@ impl Workspace {
     fn confirm_restart_daemon(&mut self, cx: &mut Context<Self>) {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;
-        // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）
-        let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
+        // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）。
+        // launch_cmd 必须带上：硬重启会清掉守护里的会话，同 id 走新建分支，
+        // 不带 launch 就只剩裸 shell，agent 会话等于全丢。
+        let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String, Option<String>)> =
+            Vec::new();
         for sess in &self.sessions {
             let mut leaves = Vec::new();
             collect_leaves(&sess.layout, &mut leaves);
             for leaf in leaves {
-                let cwd = leaf.read(cx).cwd();
-                let sid = leaf.read(cx).session_id().to_string();
-                jobs.push((leaf, cwd, sid));
+                let view = leaf.read(cx);
+                let cwd = view.cwd();
+                let sid = view.session_id().to_string();
+                let launch = view.launch_cmd().map(str::to_string);
+                jobs.push((leaf, cwd, sid, launch));
             }
         }
         cx.notify();
@@ -2051,13 +2140,13 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
-                    for (entity, cwd, sid) in jobs {
+                    for (entity, cwd, sid, launch) in jobs {
                         let term = terminal::Terminal::spawn(
                             24,
                             80,
                             cwd.as_deref(),
                             &sid,
-                            None,
+                            launch.as_deref(),
                         );
                         out.push((entity, term));
                     }
@@ -2067,11 +2156,28 @@ impl Workspace {
 
             let _ = this.update(cx, |this, cx| {
                 this.daemon_outdated = Some(outdated);
+                let mut failed = 0usize;
                 for (entity, term) in built {
-                    if let Ok(t) = term {
-                        entity.update(cx, |view, cx| view.adopt_terminal(t, cx));
+                    match term {
+                        Ok(t) => {
+                            entity.update(cx, |view, cx| view.adopt_terminal(t, cx));
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            eprintln!("[workspace] 硬重启后重开终端失败：{e:#}");
+                        }
                     }
                 }
+                if failed > 0 {
+                    this.background_error = Some(format!(
+                        "守护已重启，但有 {failed} 个终端没能重开（侧栏会话仍在，可关了再开）"
+                    ));
+                } else {
+                    this.daemon_upgrade_msg =
+                        Some("守护已硬重启，会话已按原目录/启动命令重建。".into());
+                }
+                // 布局没变，写盘刷新 launch_cmd 等字段即可。
+                this.save_state(cx);
                 cx.notify();
             });
         })
@@ -5040,6 +5146,7 @@ mod pane_state_tests {
             id: Some("sid-1".into()),
             custom_title: Some("跑测试的终端".into()),
             launch_label: Some("Claude Code".into()),
+            launch_cmd: Some("claude --dangerously-skip-permissions".into()),
         };
         let json = serde_json::to_string(&leaf).unwrap();
         let back: PaneState = serde_json::from_str(&json).unwrap();
@@ -5047,11 +5154,16 @@ mod pane_state_tests {
             PaneState::Leaf {
                 custom_title,
                 launch_label,
+                launch_cmd,
                 id,
                 cwd,
             } => {
                 assert_eq!(custom_title.as_deref(), Some("跑测试的终端"));
                 assert_eq!(launch_label.as_deref(), Some("Claude Code"));
+                assert_eq!(
+                    launch_cmd.as_deref(),
+                    Some("claude --dangerously-skip-permissions")
+                );
                 assert_eq!(id.as_deref(), Some("sid-1"));
                 assert_eq!(cwd.as_deref(), Some("/tmp/x"));
             }
@@ -5059,7 +5171,7 @@ mod pane_state_tests {
         }
     }
 
-    /// 旧存档没有 custom_title / launch_label 字段，必须读成 None 而不是解析失败。
+    /// 旧存档没有 custom_title / launch_label / launch_cmd 字段，必须读成 None 而不是解析失败。
     #[test]
     fn old_archive_without_custom_title_still_loads() {
         let old = r#"{"Leaf":{"cwd":"/tmp/x","id":"sid-1"}}"#;
@@ -5068,11 +5180,13 @@ mod pane_state_tests {
             PaneState::Leaf {
                 custom_title,
                 launch_label,
+                launch_cmd,
                 id,
                 ..
             } => {
                 assert!(custom_title.is_none(), "旧存档不该凭空冒出自定义名");
                 assert!(launch_label.is_none(), "旧存档不该凭空冒出启动项名");
+                assert!(launch_cmd.is_none(), "旧存档不该凭空冒出启动命令");
                 assert_eq!(id.as_deref(), Some("sid-1"));
             }
             _ => panic!("应当反序列化成 Leaf"),

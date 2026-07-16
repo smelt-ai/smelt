@@ -208,6 +208,9 @@ pub struct TerminalView {
     /// 快捷启动项的显示名（设置里配的 label）。侧栏标题在 agent 还没上报任务名时
     /// 回退到它，而不是 cwd 末段——否则「+ → Claude Code」建出来却显示项目名。
     launch_label: Option<String>,
+    /// 快捷启动实际命令行（硬重启守护 / 冷启动 id 不存在时用来重跑 agent）。
+    /// 与 launch_label 分离：label 给人看，cmd 给 shell 跑。
+    launch_cmd: Option<String>,
 }
 
 /// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
@@ -511,6 +514,10 @@ impl TerminalView {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
         Self::drive_redraws(terminal.redraw_channel(), cx);
         let launch_kind = classify_launch(launch);
+        let launch_cmd = launch
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let launch_label = launch_label
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -660,6 +667,7 @@ impl TerminalView {
             scroll_accum: 0.0,
             launch_kind,
             launch_label,
+            launch_cmd,
         }
     }
 
@@ -671,6 +679,11 @@ impl TerminalView {
     /// 快捷启动项显示名（见字段注释）；普通「新建终端」为 None。
     pub fn launch_label(&self) -> Option<&str> {
         self.launch_label.as_deref()
+    }
+
+    /// 快捷启动实际命令行（硬重启守护时重跑 agent 用）；裸终端为 None。
+    pub fn launch_cmd(&self) -> Option<&str> {
+        self.launch_cmd.as_deref()
     }
 
     /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。
@@ -722,8 +735,14 @@ impl TerminalView {
     /// **注意**：`Terminal::spawn` 内部会 sleep 重试，禁止在 UI 线程对多 pane 连环调用；
     /// 硬重启请走 [`Self::adopt_terminal`]（后台建好再塞进来）。
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        let Ok(terminal) = Terminal::spawn(24, 80, self.cwd.as_deref(), &self.session_id, None)
-        else {
+        // 带 launch_cmd：硬重启后守护里 id 已不存在，新建会话时要重跑 agent。
+        let Ok(terminal) = Terminal::spawn(
+            24,
+            80,
+            self.cwd.as_deref(),
+            &self.session_id,
+            self.launch_cmd.as_deref(),
+        ) else {
             return;
         };
         self.adopt_terminal(terminal, cx);
