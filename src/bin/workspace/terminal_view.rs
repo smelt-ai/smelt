@@ -744,11 +744,19 @@ impl TerminalView {
     /// 的新建分支，等效于重开一个终端。旧网格尺寸不丢：grid_size 仍是上次量到的值，
     /// 下一帧 render() 会照常把新终端 resize 到位，用户侧只是内容被清空重开。
     /// 连不上守护就原地不动（仍是冻结的旧终端），不 panic。
+    ///
+    /// **注意**：`Terminal::spawn` 内部会 sleep 重试，禁止在 UI 线程对多 pane 连环调用；
+    /// 硬重启请走 [`Self::adopt_terminal`]（后台建好再塞进来）。
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         let Ok(terminal) = Terminal::spawn(24, 80, self.cwd.as_deref(), &self.session_id, None)
         else {
             return;
         };
+        self.adopt_terminal(terminal, cx);
+    }
+
+    /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
+    pub fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
         self.terminal = terminal;
         // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
         // 自行退出；这里给新连接挂一个新的重绘任务。

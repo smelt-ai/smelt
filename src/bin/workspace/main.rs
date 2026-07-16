@@ -1932,12 +1932,25 @@ impl Workspace {
     }
 
     /// 用户在弹窗里点了「确定重启」：让守护退出（断开所有会话）、拉起磁盘上最新的
-    /// smeltd、再刷新状态。三步都涉及阻塞 IO（socket 往返 + 最坏 5s 轮询），全扔
-    /// 后台线程，不卡 UI。新守护起来后，旧会话已经全死了（网格冻结、敲键盘没反应），
-    /// 逐个 pane 调 reconnect() 换新会话顶上，不然只能靠用户手动发现、重开 GUI 才恢复。
+    /// smeltd、再刷新状态。
+    ///
+    /// **禁止**在 `update` 里同步 `Terminal::spawn`：握手含 sleep/轮询，多 pane 会把
+    /// UI 卡死（「点重启守护就假死」）。流程：后台杀+拉起守护 → 后台按 cwd/sid 建
+    /// Terminal → 主线程 `adopt_terminal` 挂回各 pane。
     fn confirm_restart_daemon(&mut self, cx: &mut Context<Self>) {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;
+        // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）
+        let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
+        for sess in &self.sessions {
+            let mut leaves = Vec::new();
+            collect_leaves(&sess.layout, &mut leaves);
+            for leaf in leaves {
+                let cwd = leaf.read(cx).cwd();
+                let sid = leaf.read(cx).session_id().to_string();
+                jobs.push((leaf, cwd, sid));
+            }
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let outdated = cx
@@ -1948,9 +1961,33 @@ impl Workspace {
                     terminal::daemon_outdated()
                 })
                 .await;
+
+            // 握手/重试全在后台；主线程只接结果
+            let built = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut out = Vec::with_capacity(jobs.len());
+                    for (entity, cwd, sid) in jobs {
+                        let term = terminal::Terminal::spawn(
+                            24,
+                            80,
+                            cwd.as_deref(),
+                            &sid,
+                            None,
+                        );
+                        out.push((entity, term));
+                    }
+                    out
+                })
+                .await;
+
             let _ = this.update(cx, |this, cx| {
                 this.daemon_outdated = Some(outdated);
-                this.reconnect_all_terminals(cx);
+                for (entity, term) in built {
+                    if let Ok(t) = term {
+                        entity.update(cx, |view, cx| view.adopt_terminal(t, cx));
+                    }
+                }
                 cx.notify();
             });
         })

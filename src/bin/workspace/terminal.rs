@@ -513,34 +513,81 @@ pub fn upgrade_daemon() -> UpgradeOutcome {
 /// 调用前必须先让用户明确知情确认。退出后调 ensure_daemon_running() 拉起磁盘上
 /// 最新的 smeltd 二进制。
 ///
+/// **必须在后台线程调用**：内部有 sleep / 可能跑 lsof，禁止在 UI 线程直接跑。
+///
 /// "shutdown" op 本身也是新加的——老到连它都不认识的守护会照单全收地忽略这条消息，
 /// 连接照旧开着，优雅关闭形同没发生。等一小段时间探测它是否真的死了，没死就按
 /// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
 pub fn restart_daemon() {
     let path = sock_path();
-    if let Ok(mut s) = UnixStream::connect(&path) {
+    if let Ok(s) = UnixStream::connect(&path) {
+        // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
+        let mut s = s;
         let _ = writeln!(s, "{}", serde_json::json!({ "op": "shutdown" }));
         let mut resp = String::new();
         let _ = BufReader::new(s).read_line(&mut resp);
     }
+    // 等守护退出（最多 ~1s）；socket 仍能连上再强杀，**不要**提前 return 漏掉残留 sock。
     for _ in 0..10 {
         if UnixStream::connect(&path).is_err() {
-            return;
+            break;
         }
         thread::sleep(Duration::from_millis(100));
     }
-    force_kill_socket_owner(&path);
+    if UnixStream::connect(&path).is_ok() {
+        force_kill_socket_owner(&path);
+        thread::sleep(Duration::from_millis(150));
+    }
+    // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
+    if UnixStream::connect(&path).is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// 兜底：找到正监听着 `path` 的进程并 SIGKILL，再清掉残留 socket 文件。用于优雅
 /// shutdown 对老守护不生效的情况——`lsof -t` 直接按 socket 文件反查 pid，不经过
 /// 应用层协议，多老的守护都杀得掉。
+///
+/// `lsof` 在 macOS 上偶发长时间无响应：用 spawn + 轮询 wait，超时就 kill 掉 lsof，
+/// 避免「重启守护」整条链路跟着卡死。
 fn force_kill_socket_owner(path: &std::path::Path) {
-    let Ok(out) = std::process::Command::new("lsof").arg("-t").arg(path).output() else {
-        return;
+    let mut child = match std::process::Command::new("lsof")
+        .arg("-t")
+        .arg(path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
     };
-    for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-        let _ = std::process::Command::new("kill").arg("-9").arg(pid).status();
+    // 最多等 ~2s
+    let mut done = false;
+    for _ in 0..20 {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                done = true;
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    if !done {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    if let Ok(out) = child.wait_with_output() {
+        for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+            let _ = std::process::Command::new("kill").arg("-9").arg(pid).status();
+        }
     }
     let _ = std::fs::remove_file(path);
 }
