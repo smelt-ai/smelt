@@ -1,5 +1,8 @@
 # Smelt 打包与开发入口。打包重活在 scripts/package-mac.sh 里。
+# GUI 会拉起同目录的 smeltd；只编 workspace 会留下过期/缺失的守护，表现为
+# 「新建终端 / 打开项目没反应」。
 BIN := workspace
+DAEMON := smeltd
 
 .PHONY: help build run icon dist dist-build clean remote-web remote-web-dev
 
@@ -7,11 +10,12 @@ help: ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## 编译 release 二进制
-	cargo build --release --bin $(BIN)
+build: ## 编译 release 二进制（GUI + 守护必须一起）
+	cargo build --release --bin $(BIN) --bin $(DAEMON)
 
-run: ## 本地直接跑 GUI（开发用）
-	cargo run --release --bin $(BIN)
+run: ## 本地直接跑 GUI（开发用；先保证 smeltd 与 workspace 同编）
+	cargo build --bin $(BIN) --bin $(DAEMON)
+	cargo run --bin $(BIN)
 
 remote-web: ## 构建远程 H5（Preact CLI 面板 → remote-web/dist）
 	cd remote-web && npm install && npm run build

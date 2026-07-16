@@ -369,26 +369,60 @@ fn sock_path() -> std::path::PathBuf {
 }
 
 /// 连接守护；连不上就拉起同目录的 smeltd（独立进程组，GUI / 终端退出都不波及）再重试。
+///
+/// **这里绝不删 sock 文件。** connect 失败分不清两种情况：守护真死了只剩僵尸 sock，
+/// 还是守护活着只是这一下没连上——Unix socket 的 backlog 满时 connect 同样返回
+/// ECONNREFUSED，跟没人监听一模一样。误删活守护的 sock，就是把它变成谁也连不上的
+/// 僵尸，它手里所有 shell 会话当场失联。
+/// 僵尸 sock 的清理是 bind 方的活，smeltd 启动时自己做（见 smeltd.rs 的单实例检查：
+/// 先 connect 探活，连得上就自己退出，连不上才 unlink 重 bind）——只有 bind 方
+/// 才有权威判断，且误判也伤不到活守护。
 fn connect_daemon() -> std::io::Result<UnixStream> {
     let path = sock_path();
     if let Ok(s) = UnixStream::connect(&path) {
         return Ok(s);
     }
+
+    // 拉不起来也不立刻返回：守护可能已被别人（.app / 上一次 GUI / 测试）拉起，本进程
+    // 同目录没有 smeltd 不代表连不上。原因先记下，等重试全轮空了再一并报。
     let exe = std::env::current_exe()?;
     let daemon = exe.with_file_name("smeltd");
-    {
+    let spawn_err: Option<String> = if daemon.is_file() {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
-        let _ = std::process::Command::new(&daemon)
-            .process_group(0)
-            // 由 GUI 拉起 → smeltd 继承登录会话、连得上 WindowServer，才允许它挂菜单栏
-            // 图标（见 smeltd.rs::menubar）。命令行直接跑 smeltd 时没这个 env，纯 headless。
-            .env("SMELT_MENUBAR", "1")
+        // 仅 .app 包内才开菜单栏：cargo run 时 NSApplication 经常未加载，旧版会 panic
+        // 拖死守护；新版虽已兜底 headless，仍没必要在 dev 路径上碰 AppKit。
+        let in_app_bundle = exe
+            .components()
+            .any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with(".app")));
+        let mut cmd = std::process::Command::new(&daemon);
+        cmd.process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
+            .stderr(Stdio::null());
+        if in_app_bundle {
+            // 由 .app 拉起 → 继承登录会话、连得上 WindowServer，菜单栏才有意义。
+            cmd.env("SMELT_MENUBAR", "1");
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                eprintln!(
+                    "[workspace] 已拉起 smeltd pid={} ({}) menubar={}",
+                    child.id(),
+                    daemon.display(),
+                    in_app_bundle
+                );
+                None
+            }
+            Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", daemon.display())),
+        }
+    } else {
+        Some(format!(
+            "找不到守护二进制 {}（cargo 请先 `cargo build --bin smeltd`）",
+            daemon.display()
+        ))
+    };
+
     // 守护 bind 很快，通常首轮就连上；给足 5s 兜底。
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
@@ -396,7 +430,17 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
             return Ok(s);
         }
     }
-    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "smeltd 未就绪"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        match spawn_err {
+            Some(why) => format!("smeltd 未就绪：{why}；5s 内未监听 {}", path.display()),
+            None => format!(
+                "smeltd 未就绪（已拉起 {}，5s 内未监听 {}）",
+                daemon.display(),
+                path.display()
+            ),
+        },
+    ))
 }
 
 /// 探测正在跑的守护：连不上（守护没起，`connect_daemon` 会自己拉起磁盘上最新的）
