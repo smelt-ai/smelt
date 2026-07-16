@@ -3064,7 +3064,10 @@ impl Workspace {
 
     /// 「重启守护进程」二次确认弹窗：明确告知会断开所有当前终端会话。与
     /// render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
-    fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> Div {
+    ///
+    /// 入口只在设置窗「更新」页；弹层挂在设置窗上（见 `SettingsWindow::render`），
+    /// 不再画到主窗口，避免「按钮在设置、确认框跑到主界面」的割裂感。
+    pub(crate) fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -4778,8 +4781,7 @@ impl Render for Workspace {
             .children(self.delete_worktree_target.is_some().then(|| self.render_delete_worktree_confirm(cx)))
             // 删除文件二次确认拦截弹层
             .children(self.delete_file_target.is_some().then(|| self.render_delete_file_confirm(cx)))
-            // 重启守护进程确认拦截弹层
-            .children(self.show_daemon_restart_confirm.then(|| self.render_daemon_restart_confirm(cx)))
+            // 重启守护确认弹层改挂在设置窗（SettingsWindow::render），不在主窗口画。
             // Finder 拖文件/文件夹：只在有拖拽时叠全窗 drop 层。
             // 常驻 hitbox 会盖住按钮（「新建终端」像没反应）；对齐「有 drag 才出现」。
             // 终端 hitbox 会挡住根 on_drop，所以必须用上层目标接 ExternalPaths。

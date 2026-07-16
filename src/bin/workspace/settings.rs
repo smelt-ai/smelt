@@ -579,7 +579,18 @@ pub struct SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.workspace.update(cx, |ws, cx| ws.render_settings_content(cx))
+        // 设置内容 +（可选）重启守护确认层：弹层必须画在本窗，不能只改 Workspace 上的
+        // flag 却在主窗口 render——用户点的是设置里的按钮，确认框却跑到主界面。
+        self.workspace.update(cx, |ws, cx| {
+            div()
+                .relative()
+                .size_full()
+                .child(ws.render_settings_content(cx))
+                .children(
+                    ws.show_daemon_restart_confirm
+                        .then(|| ws.render_daemon_restart_confirm(cx)),
+                )
+        })
     }
 }
 
@@ -853,7 +864,10 @@ impl Workspace {
         // 统一的小按钮：固定高度 + flex_none，避免被 flex 布局拉伸成大块。
         // move 闭包：捕获的四个颜色都是 Copy，闭包本身因此也是 Copy，可以放心
         // 塞进下面多个 SettingField::render 的 move 闭包里各用一份。
-        let btn = move |id: &'static str, label: String| {
+        //
+        // 注意：GPUI 的 `.hover()` 只能挂一次（debug_assert「hover style already set」），
+        // 所以默认 hover 写在这里；需要换 hover 色的按钮请用 `btn_hover`，别再链式 `.hover()`。
+        let btn_base = move |id: &'static str, label: String| {
             div()
                 .id(id)
                 .h(px(26.))
@@ -868,8 +882,13 @@ impl Workspace {
                 .bg(popover)
                 .border_1()
                 .border_color(border)
-                .hover(|s| s.bg(border))
                 .child(label)
+        };
+        let btn = move |id: &'static str, label: String| {
+            btn_base(id, label).hover(|s| s.bg(border))
+        };
+        let btn_hover = move |id: &'static str, label: String, hover_bg: Hsla| {
+            btn_base(id, label).hover(move |s| s.bg(hover_bg))
         };
 
         const PET_SIZES: [f32; 3] = [0.8, 1.0, 1.25];
@@ -1365,10 +1384,13 @@ impl Workspace {
                         });
                     });
                 let restart_btn = ready.then(|| {
-                    btn("restart-update", "立即重启更新".into())
+                    btn_hover(
+                        "restart-update",
+                        "立即重启更新".into(),
+                        Hsla::from(rgba(0x4a9eff40)),
+                    )
                         .text_color(rgb(0x8fc7ff))
                         .bg(Hsla::from(rgba(0x4a9eff24)))
-                        .hover(|s| s.bg(Hsla::from(rgba(0x4a9eff40))))
                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                             if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } = &status {
                                 if updater::finalize_pending_update(staged_app).is_ok() {
@@ -1446,10 +1468,14 @@ impl Workspace {
                     });
                     // 硬重启：常驻入口（守护卡死 / 想强制换二进制时用），会断会话。
                     // 不受版本是否落后限制；点击走二次确认弹窗兜底。
-                    let restart_daemon_btn = btn("restart-daemon", "重启守护进程".into())
+                    // 用 btn_hover：自定义 hover 色，避免在已有 hover 的 btn 上再链式 .hover() 崩。
+                    let restart_daemon_btn = btn_hover(
+                        "restart-daemon",
+                        "重启守护进程".into(),
+                        Hsla::from(rgba(0xef444440)),
+                    )
                         .text_color(rgb(0xff8f8f))
                         .bg(Hsla::from(rgba(0xef444424)))
-                        .hover(|s| s.bg(Hsla::from(rgba(0xef444440))))
                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                             restart_entity.update(cx, |this, cx| {
                                 this.show_daemon_restart_confirm = true;
