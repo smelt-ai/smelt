@@ -1519,6 +1519,10 @@ impl Workspace {
 
     /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
     /// terminal.rs::spawn / smeltd.rs::spawn_session），`label` 用作侧栏初始显示名。
+    ///
+    /// **禁止**在 UI/`update`/拖放 FFI 回调里同步 `Terminal::spawn`：连守护 + 握手
+    /// 含 sleep/超时，拖文件夹进窗口会整窗 beachball（见 `confirm_restart_daemon`）。
+    /// 专用 OS 线程做阻塞 spawn，主线程只接结果建 Entity（比塞进 async executor 更稳）。
     fn add_session_with_launch(
         &mut self,
         cwd: Option<String>,
@@ -1526,22 +1530,81 @@ impl Workspace {
         label: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        // spawn 可失败（守护挂了）。这里在用户事件的 FFI 回调栈上，panic 不能
-        // unwind 会直接 abort 整个 app（拖放开项目曾这么崩过）——失败就不开，
-        // 留日志。守护端有自动拉起，用户重试一次通常就好。
         let sid = new_sid();
-        let terminal = match terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, launch) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[workspace] 新建会话失败（{cwd:?}）：{e:#}");
-                return;
-            }
-        };
-        let view = cx.new(|cx| TerminalView::from_terminal(cx, terminal, cwd, sid, launch, label));
-        self.sessions.push(Session::single(view));
-        self.active_session = self.sessions.len() - 1;
-        self.save_state(cx);
+        let cwd_bg = cwd.clone();
+        let launch_owned = launch.map(str::to_string);
+        let label_owned = label.map(str::to_string);
+        let sid_bg = sid.clone();
+        let launch_bg = launch_owned.clone();
+        // 立刻给反馈，避免「点了像没点」。
+        self.view = MainView::Terminal;
+        eprintln!(
+            "[workspace] 新建会话 cwd={cwd:?} launch={launch:?} sid={sid}"
+        );
         cx.notify();
+
+        let (tx, rx) = smol::channel::bounded(1);
+        std::thread::Builder::new()
+            .name("smelt-spawn-session".into())
+            .spawn(move || {
+                let r = terminal::Terminal::spawn(
+                    24,
+                    80,
+                    cwd_bg.as_deref(),
+                    &sid_bg,
+                    launch_bg.as_deref(),
+                );
+                let _ = tx.send_blocking(r);
+            })
+            .expect("spawn smelt-spawn-session 线程");
+
+        cx.spawn(async move |this, cx| {
+            let result = match rx.recv().await {
+                Ok(r) => r,
+                Err(_) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.background_error =
+                            Some("新建会话内部通道断开，请重试".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let terminal = match result {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[workspace] 新建会话失败（{cwd:?}）：{e:#}");
+                    let msg = format!("新建会话失败：{e:#}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.background_error = Some(msg);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let view = cx.new(|cx| {
+                    TerminalView::from_terminal(
+                        cx,
+                        terminal,
+                        cwd,
+                        sid,
+                        launch_owned.as_deref(),
+                        label_owned.as_deref(),
+                    )
+                });
+                this.sessions.push(Session::single(view));
+                this.active_session = this.sessions.len() - 1;
+                this.view = MainView::Terminal;
+                this.save_state(cx);
+                eprintln!(
+                    "[workspace] 新建会话成功，当前共 {} 个",
+                    this.sessions.len()
+                );
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 在当前会话的活动 pane 上分屏：Horizontal=右侧并排，Vertical=下方堆叠。
@@ -1549,22 +1612,45 @@ impl Workspace {
         let Some(sess) = self.cur() else { return };
         let cwd = sess.active.read(cx).cwd().or_else(current_dir);
         let old = sess.active.entity_id();
-        // 同 add_session_with_launch：FFI 回调栈上不许 panic，失败就不分屏。
+        let session_ix = self.active_session;
         let sid = new_sid();
-        let terminal = match terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[workspace] 分屏失败（{cwd:?}）：{e:#}");
-                return;
-            }
-        };
-        let view = cx.new(|cx| TerminalView::from_terminal(cx, terminal, cwd, sid, None, None));
-        let state = cx.new(|_| ResizableState::default());
-        let sess = &mut self.sessions[self.active_session];
-        split_leaf(&mut sess.layout, old, axis, state, view.clone());
-        sess.active = view;
-        self.save_state(cx);
-        cx.notify();
+        let cwd_bg = cwd.clone();
+        let sid_bg = sid.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    terminal::Terminal::spawn(24, 80, cwd_bg.as_deref(), &sid_bg, None)
+                })
+                .await;
+            let terminal = match result {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[workspace] 分屏失败（{cwd:?}）：{e:#}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                // 分屏目标会话可能在握手期间被关掉——对不上就丢弃这个终端。
+                if session_ix >= this.sessions.len() {
+                    eprintln!("[workspace] 分屏目标会话已不存在，丢弃");
+                    return;
+                }
+                let view =
+                    cx.new(|cx| TerminalView::from_terminal(cx, terminal, cwd, sid, None, None));
+                let state = cx.new(|_| ResizableState::default());
+                let sess = &mut this.sessions[session_ix];
+                // old 叶子若已被拆掉/关掉，split_leaf 找不到就不动。
+                if !split_leaf(&mut sess.layout, old, axis, state, view.clone()) {
+                    eprintln!("[workspace] 分屏目标 pane 已不存在，丢弃");
+                    return;
+                }
+                sess.active = view;
+                this.save_state(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 把所有会话（各自分屏树 + 活动叶子遍历序）+ 侧栏宽度 + 文件树列宽写入
@@ -1636,17 +1722,20 @@ impl Workspace {
 
     /// 顶部「新建终端」入口：已有临时终端就切过去，没有才新开一个
     /// （避免每次点这个常驻入口都新建一个空终端）。这个入口能从总览/设置页直接点，
-    /// `activate`/`add_session` 都不管 `self.view`，这里补上，否则点了但看不到终端。
+    /// `add_session` 异步完成后会把 `view` 切到 Terminal；已有会话则这里立刻切过去。
     fn activate_or_new_scratch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let home = scratch_dir();
         let existing = self.sessions.iter().position(|s| s.cwd(cx) == home);
         match existing {
-            Some(ix) => self.activate(ix, window, cx),
+            Some(ix) => {
+                self.activate(ix, window, cx);
+                self.view = MainView::Terminal;
+                self.focus_active(window, cx);
+                cx.notify();
+            }
+            // 新建是异步的（后台 spawn）；完成后 add_session_with_launch 会切到 Terminal。
             None => self.new_scratch_session(cx),
         }
-        self.view = MainView::Terminal;
-        self.focus_active(window, cx);
-        cx.notify();
     }
 
     /// 「打开项目」：弹原生选择框选一个目录，在其中开新会话。
@@ -1669,13 +1758,106 @@ impl Workspace {
     }
 
     /// 从 Finder 拖入的路径各开一个会话：文件夹直接用，文件取其父目录。
+    ///
+    /// 整段路径判定 + `Terminal::spawn` 都在后台跑——`on_drop` / `on_open_urls` 在
+    /// ObjC FFI 栈上，同步 spawn 会把整个窗口卡成 beachball（拖多文件更甚）。
     fn open_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        for p in paths {
-            let dir = if p.is_dir() { Some(p.as_path()) } else { p.parent() };
-            if let Some(d) = dir.and_then(|d| d.to_str()) {
-                self.add_session(Some(d.to_string()), cx);
-            }
+        if paths.is_empty() {
+            eprintln!("[workspace] open_paths: 空路径列表，忽略");
+            return;
         }
+        eprintln!(
+            "[workspace] open_paths: 收到 {} 条路径 {:?}",
+            paths.len(),
+            paths
+        );
+        // 立刻切到终端页并提示，避免用户以为拖了没反应（spawn 在后台要几百毫秒～数秒）。
+        self.view = MainView::Terminal;
+        cx.notify();
+
+        let paths: Vec<std::path::PathBuf> = paths.to_vec();
+        let (tx, rx) = smol::channel::bounded(1);
+        std::thread::Builder::new()
+            .name("smelt-open-paths".into())
+            .spawn(move || {
+                let mut out = Vec::with_capacity(paths.len());
+                for p in paths {
+                    let dir = if p.is_dir() {
+                        p
+                    } else {
+                        match p.parent() {
+                            Some(parent) => parent.to_path_buf(),
+                            None => continue,
+                        }
+                    };
+                    let Some(cwd) = dir.to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    let sid = new_sid();
+                    let result = terminal::Terminal::spawn(24, 80, Some(&cwd), &sid, None);
+                    out.push((cwd, sid, result));
+                }
+                let _ = tx.send_blocking(out);
+            })
+            .expect("spawn smelt-open-paths 线程");
+
+        cx.spawn(async move |this, cx| {
+            let built = match rx.recv().await {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.background_error = Some("打开路径内部通道断开".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let _ = this.update(cx, |this, cx| {
+                let mut ok_n = 0usize;
+                let mut err_msgs: Vec<String> = Vec::new();
+                for (cwd, sid, result) in built {
+                    match result {
+                        Ok(terminal) => {
+                            let view = cx.new(|cx| {
+                                TerminalView::from_terminal(
+                                    cx,
+                                    terminal,
+                                    Some(cwd),
+                                    sid,
+                                    None,
+                                    None,
+                                )
+                            });
+                            this.sessions.push(Session::single(view));
+                            this.active_session = this.sessions.len() - 1;
+                            ok_n += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("[workspace] 拖入打开失败（{cwd}）：{e:#}");
+                            err_msgs.push(format!("{cwd}: {e:#}"));
+                        }
+                    }
+                }
+                if ok_n > 0 {
+                    this.view = MainView::Terminal;
+                    this.save_state(cx);
+                }
+                if !err_msgs.is_empty() {
+                    let head = err_msgs.into_iter().take(2).collect::<Vec<_>>().join("；");
+                    this.background_error = Some(if ok_n > 0 {
+                        format!("已打开 {ok_n} 个，另有失败：{head}")
+                    } else {
+                        format!("拖入打开失败：{head}")
+                    });
+                } else if ok_n == 0 {
+                    this.background_error =
+                        Some("拖入的路径无法作为项目目录打开".into());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 关闭第 ix 个会话（至少保留一个）。用户主动关 → 让守护杀掉这些 shell
@@ -4147,10 +4329,6 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
                 this.send_open_file_selection(cx);
             }))
-            // 从 Finder 拖文件/文件夹进窗口 → 当作项目开新标签（文件取其父目录）。
-            .on_drop::<ExternalPaths>(cx.listener(|this, ep: &ExternalPaths, _window, cx| {
-                this.open_paths(ep.paths(), cx);
-            }))
             // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+[ ] 切当前会话内的 pane /
             // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -4602,6 +4780,25 @@ impl Render for Workspace {
             .children(self.delete_file_target.is_some().then(|| self.render_delete_file_confirm(cx)))
             // 重启守护进程确认拦截弹层
             .children(self.show_daemon_restart_confirm.then(|| self.render_daemon_restart_confirm(cx)))
+            // Finder 拖文件/文件夹：只在有拖拽时叠全窗 drop 层。
+            // 常驻 hitbox 会盖住按钮（「新建终端」像没反应）；对齐「有 drag 才出现」。
+            // 终端 hitbox 会挡住根 on_drop，所以必须用上层目标接 ExternalPaths。
+            .when(cx.has_active_drag(), |root| {
+                root.child(
+                    div()
+                        .id("file-drop-overlay")
+                        .absolute()
+                        .inset_0()
+                        .bg(rgba(0x4a9eff28))
+                        .border_2()
+                        .border_color(rgb(0x4a9eff))
+                        .on_drop::<ExternalPaths>(cx.listener(
+                            |this, ep: &ExternalPaths, _window, cx| {
+                                this.open_paths(ep.paths(), cx);
+                            },
+                        )),
+                )
+            })
             // 文件未保存切换确认拦截弹层
             .children(
                 self.pending_file_switch
