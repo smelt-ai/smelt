@@ -18,7 +18,7 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # 打包链路依赖这些文件真的进了 git；缺任何一个就一次性列全并失败，
       # 而不是跑到一半才炸（历史教训：本地能打包 ≠ 文件都入了库）。
@@ -112,7 +112,7 @@ jobs:
           [[ -n "${KEYCHAIN_PATH:-}" ]] && security delete-keychain "$KEYCHAIN_PATH" || true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/Smelt.dmg
           generate_release_notes: true

@@ -731,6 +731,138 @@ fn tunnel_status(state: &TunnelState) -> Option<String> {
     guard.as_ref().map(|t| t.url.clone())
 }
 
+/// macOS 顶部状态栏常驻图标（accessory 模式：**没有 Dock 图标、不进 ⌘Tab**，只在菜单栏
+/// 留一枚图标）。smeltd 本是无 UI 的守护，但被 GUI 拉起时继承了登录会话、连得上
+/// WindowServer，于是在这里挂个图标当常驻入口——即便 workspace 主窗口关了、图标仍在。
+/// 跟 `workspace/status_item.rs` 同一路数（绕开框架直接摸 AppKit），但更简单：菜单是
+/// 静态两项，不随会话状态重建。仅在 `SMELT_MENUBAR` 存在（即由 GUI 拉起）时才被调用。
+#[cfg(target_os = "macos")]
+mod menubar {
+    use objc::declare::ClassDecl;
+    use objc::runtime::{Class, Object, Sel};
+    use objc::{class, msg_send, sel, sel_impl};
+    use std::sync::OnceLock;
+
+    /// 应用图标母图，编进二进制当菜单栏图标（跟 workspace 用的是同一张）。
+    const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon-1024.png");
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSSize {
+        width: f64,
+        height: f64,
+    }
+
+    /// 点「打开 smelt」：拉起同目录的 workspace GUI。已在跑的话，由 workspace 自己的
+    /// 单实例逻辑负责前置窗口，这里只管发起。
+    extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
+        if let Ok(exe) = std::env::current_exe() {
+            use std::process::Stdio;
+            let gui = exe.with_file_name("workspace");
+            let _ = std::process::Command::new(gui)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+    }
+
+    /// 点「退出 smelt」：整个守护进程退出。注意这会关掉所有 PTY——所有会话（含正在
+    /// 跑的 agent）随之结束。后果已写进菜单项文案里。
+    extern "C" fn on_quit(_this: &Object, _cmd: Sel, _sender: *mut Object) {
+        std::process::exit(0);
+    }
+
+    /// 注册（仅一次）点击靶子类：AppKit 菜单项只认 target-action，不认 Rust 闭包，
+    /// 得声明一个最小的 `NSObject` 子类当靶子（同 status_item.rs 的做法）。
+    fn target_class() -> &'static Class {
+        static CLASS: OnceLock<&'static Class> = OnceLock::new();
+        *CLASS.get_or_init(|| {
+            let mut decl = ClassDecl::new("SmeltdMenubarTarget", class!(NSObject))
+                .expect("SmeltdMenubarTarget 类重复注册");
+            unsafe {
+                decl.add_method(
+                    sel!(smeltdOpen:),
+                    on_open as extern "C" fn(&Object, Sel, *mut Object),
+                );
+                decl.add_method(
+                    sel!(smeltdQuit:),
+                    on_quit as extern "C" fn(&Object, Sel, *mut Object),
+                );
+            }
+            decl.register()
+        })
+    }
+
+    /// `&str` → 临时 `NSString*`（autorelease，仅供本次调用当参数用）。
+    unsafe fn nsstring(s: &str) -> *mut Object {
+        let c = std::ffi::CString::new(s).unwrap_or_default();
+        msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()]
+    }
+
+    /// 建菜单栏图标 + 静态菜单，然后跑 AppKit runloop（阻塞到进程退出）。
+    /// **必须在主线程调用。** 图标、菜单、靶子实例都常驻到进程退出，故意不释放。
+    pub fn run_event_loop() {
+        unsafe {
+            let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+            // accessory：不占 Dock、不进 ⌘Tab，只在菜单栏留一枚图标。
+            // NSApplicationActivationPolicyAccessory == 1。
+            let _: bool = msg_send![app, setActivationPolicy: 1i64];
+
+            let bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
+            // NSVariableStatusItemLength == -1.0，按内容自适应宽度。
+            let item: *mut Object = msg_send![bar, statusItemWithLength: -1.0f64];
+            let _: () = msg_send![item, retain]; // 常驻单例，自己按住
+
+            let button: *mut Object = msg_send![item, button];
+            let data: *mut Object = msg_send![
+                class!(NSData),
+                dataWithBytes: APP_ICON_PNG.as_ptr() as *const std::ffi::c_void
+                length: APP_ICON_PNG.len()
+            ];
+            let image: *mut Object = msg_send![class!(NSImage), alloc];
+            let image: *mut Object = msg_send![image, initWithData: data];
+            if !image.is_null() {
+                // 母图 1024×1024，菜单栏按 18pt 显示（跟系统自带图标观感对齐）。
+                let _: () = msg_send![image, setSize: NSSize { width: 18.0, height: 18.0 }];
+                let _: () = msg_send![button, setImage: image];
+            } else {
+                let _: () = msg_send![button, setTitle: nsstring("smelt")];
+            }
+
+            let target: *mut Object = msg_send![target_class(), new]; // +1，永不 release
+            let menu: *mut Object = msg_send![class!(NSMenu), new]; // +1，永不 release
+
+            let open_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
+            let open_item: *mut Object = msg_send![open_item,
+                initWithTitle: nsstring("打开 smelt")
+                action: sel!(smeltdOpen:)
+                keyEquivalent: nsstring("")];
+            let _: () = msg_send![open_item, setTarget: target];
+            let _: () = msg_send![menu, addItem: open_item];
+            let _: () = msg_send![open_item, release];
+
+            let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
+            let _: () = msg_send![menu, addItem: sep];
+
+            let quit_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
+            let quit_item: *mut Object = msg_send![quit_item,
+                initWithTitle: nsstring("退出 smelt（结束所有会话）")
+                action: sel!(smeltdQuit:)
+                keyEquivalent: nsstring("")];
+            let _: () = msg_send![quit_item, setTarget: target];
+            let _: () = msg_send![menu, addItem: quit_item];
+            let _: () = msg_send![quit_item, release];
+
+            let _: () = msg_send![item, setMenu: menu];
+
+            // 阻塞跑 runloop：菜单点击的 target-action 全靠它派发。
+            let _: () = msg_send![app, run];
+        }
+    }
+}
+
+
 fn main() {
     // 无缝升级交接：上一代进程 exec 本二进制前写好交接文件并把路径放在环境变量里。
     // 立即摘掉环境变量：它只对"本次 exec 交接"有意义，不能传染给之后 spawn 的 shell。
@@ -779,16 +911,42 @@ fn main() {
     // 见 RemoteGateway / Tunnel 定义处注释。
     let remote_state: RemoteState = Arc::new(Mutex::new(None));
     let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
-    for conn in listener.incoming() {
-        let Ok(conn) = conn else { continue };
-        let sessions = Arc::clone(&sessions);
-        let remote_state = Arc::clone(&remote_state);
-        let tunnel_state = Arc::clone(&tunnel_state);
-        let subscribers = Arc::clone(&subscribers);
-        thread::spawn(move || {
-            handle_conn(conn, sessions, exe_mtime, listen_fd, remote_state, tunnel_state, subscribers)
-        });
+
+    // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
+    // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
+    let accept_loop = move || {
+        for conn in listener.incoming() {
+            let Ok(conn) = conn else { continue };
+            let sessions = Arc::clone(&sessions);
+            let remote_state = Arc::clone(&remote_state);
+            let tunnel_state = Arc::clone(&tunnel_state);
+            let subscribers = Arc::clone(&subscribers);
+            thread::spawn(move || {
+                handle_conn(
+                    conn,
+                    sessions,
+                    exe_mtime,
+                    listen_fd,
+                    remote_state,
+                    tunnel_state,
+                    subscribers,
+                )
+            });
+        }
+    };
+
+    // 只有被 GUI 拉起时（SMELT_MENUBAR=1，说明继承了登录会话、连得上 WindowServer）
+    // 才在顶部状态栏挂图标；命令行 / 无 GUI 会话下老老实实 headless 跑，绝不让「图标」
+    // 这个锦上添花的东西把守护本身拖垮。
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("SMELT_MENUBAR").is_some() {
+        let daemon = thread::spawn(accept_loop);
+        menubar::run_event_loop(); // 阻塞：跑到用户从菜单选「退出」为止
+        let _ = daemon.join(); // 兜底：runloop 万一提前返回，也别让守护跟着没
+        return;
     }
+
+    accept_loop();
 }
 
 /// 交接文件路径（跟 socket 同目录）。
