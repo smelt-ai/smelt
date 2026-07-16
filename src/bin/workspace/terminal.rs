@@ -790,21 +790,12 @@ pub fn tunnel_status() -> TunnelStatus {
 // main.rs 处理，这里只管纯数据结构和阻塞的 socket 通信，跟文件里其它daemon 通信
 // 函数保持同一种分工。
 
-/// GUI 侧的 SessionState 镜像。字段名/含义必须跟 smeltd.rs 的 `SessionState`
-/// 一一对应（走 serde 反序列化，不是共享类型——两个 bin 没有共同的 lib crate）。
+/// GUI 侧订阅状态通道时用的精简镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
+/// 目前只用到 `id`（map key）和 `phase`（审批/状态点）；要展示更多再按需加字段。
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct DaemonSessionState {
     pub id: String,
-    pub cwd: Option<String>,
-    pub launch: Option<String>,
-    pub title: Option<String>,
     pub phase: DaemonPhase,
-    pub phase_since: u64,
-    pub pending_question: Option<String>,
-    pub tokens_used: Option<u64>,
-    pub branch: Option<String>,
-    pub dirty_files: Vec<String>,
-    pub updated_at: u64,
 }
 
 /// 跟 smeltd.rs 的 `Phase` 对应，同样 `rename_all = "snake_case"`。
@@ -1085,8 +1076,6 @@ pub struct Terminal {
     /// 那个「底部画不出来、一敲键盘/框选才好」的 bug。`bounded(1)` 天然合并突发：
     /// 空闲无输出＝无唤醒（保住 P0 那条空闲不重绘的优化），有输出才唤醒。
     redraw_rx: smol::channel::Receiver<()>,
-    /// 读线程 EOF/出错后置 true：无头任务 job 用来判定 oneshot 结束。
-    finished: Arc<AtomicBool>,
 }
 
 /// 新建/reattach 握手失败时的重试次数与间隔：守护无缝升级 exec 交接的一次性抖动是
@@ -1195,8 +1184,6 @@ impl Terminal {
         let mut reader = buffered;
         let term_reader = Arc::clone(&term);
         let notify_reader = notify.clone();
-        let finished = Arc::new(AtomicBool::new(false));
-        let finished_w = finished.clone();
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
@@ -1247,7 +1234,6 @@ impl Terminal {
                     Err(_) => break,
                 }
             }
-            finished_w.store(true, Ordering::SeqCst);
             // 读线程退出（EOF/守护离线）：主动关掉发送端，让 UI 侧的 recv 任务收到
             // Err 而退出，不空转。
             drop(redraw_tx);
@@ -1265,14 +1251,7 @@ impl Terminal {
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
             redraw_rx,
-            finished,
         })
-    }
-
-    /// 读线程是否已结束（shell 退出或守护断连）。
-    #[allow(dead_code)]
-    pub fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::Relaxed)
     }
 
     /// 重绘唤醒的接收端（clone 一份给 UI 侧的 `cx.spawn` 任务 await）。见 `redraw_rx` 字段。
@@ -2329,7 +2308,6 @@ mod search_resync_tests {
                 let (_, rx) = smol::channel::bounded::<()>(1);
                 rx
             },
-            finished: Arc::new(AtomicBool::new(false)),
         }
     }
 
