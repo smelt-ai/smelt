@@ -241,11 +241,17 @@ pub struct RemoteConfig {
     /// 这个字段比 `enabled` 晚加，旧的 collab.json 里没有这个键，缺省按关闭处理。
     #[serde(default)]
     pub tunnel_enabled: bool,
+    /// 这条链接是否允许 approve/deny/reply（Phase 6，见 smeltd.rs「远程操控」）。
+    /// `#[serde(default)]`：比前两个字段更晚加，旧配置缺省按只读处理——不能让
+    /// 老用户的配置在升级后突然变成可写。链接分享出去本身就是授权，这里没有
+    /// 额外的"当面确认"一说，开这个开关前的取舍由用户自己判断。
+    #[serde(default)]
+    pub write_enabled: bool,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
-        Self { enabled: false, tunnel_enabled: false }
+        Self { enabled: false, tunnel_enabled: false, write_enabled: false }
     }
 }
 
@@ -271,6 +277,10 @@ pub struct RemoteRuntimeState {
     pub token: Option<String>,
     pub addr: Option<String>,
     pub error: Option<String>,
+    /// 当前这条链接是否可写——来自守护对 `remote_start`/`remote_status` 的实际
+    /// 回执，不是直接照抄 [`RemoteConfig::write_enabled`]（写权限是烤进 token
+    /// 里的，配置改了但网关还没重开时，这里应该继续显示"旧链接"的真实权限）。
+    pub write: bool,
 }
 
 impl Global for RemoteRuntimeState {}
@@ -280,13 +290,17 @@ impl Global for RemoteRuntimeState {}
 /// collaboration.md 的安全底线；真要跨机器访问是 P2P/信令服务器那条路，另计。
 pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
     if enabled {
-        match terminal::remote_start("127.0.0.1") {
+        let write = cx.global::<RemoteConfig>().write_enabled;
+        match terminal::remote_start("127.0.0.1", write) {
             Ok(status) => cx.set_global(RemoteRuntimeState {
                 token: status.token,
                 addr: status.addr,
+                write: status.write,
                 error: None,
             }),
-            Err(e) => cx.set_global(RemoteRuntimeState { token: None, addr: None, error: Some(e) }),
+            Err(e) => {
+                cx.set_global(RemoteRuntimeState { token: None, addr: None, write: false, error: Some(e) })
+            }
         }
     } else {
         terminal::remote_stop();
@@ -306,6 +320,8 @@ pub struct TunnelRuntimeState {
     pub connecting: bool,
     pub url: Option<String>,
     pub error: Option<String>,
+    /// 同 [`RemoteRuntimeState::write`]：这条公网链接实际的写权限，来自守护回执。
+    pub write: bool,
 }
 
 impl Global for TunnelRuntimeState {}
@@ -325,7 +341,7 @@ pub fn apply_tunnel_toggle(enabled: bool, cx: &mut App) {
         c.enabled = true;
     }
     save_remote_config(&c);
-    cx.set_global(c);
+    cx.set_global(c.clone());
 
     if !enabled {
         terminal::tunnel_stop();
@@ -333,22 +349,51 @@ pub fn apply_tunnel_toggle(enabled: bool, cx: &mut App) {
         return;
     }
 
-    cx.set_global(TunnelRuntimeState { connecting: true, url: None, error: None });
+    cx.set_global(TunnelRuntimeState { connecting: true, url: None, error: None, write: false });
+    let write = c.write_enabled;
     cx.spawn(async move |cx| {
-        let result = cx.background_executor().spawn(async { terminal::tunnel_start() }).await;
+        let result = cx.background_executor().spawn(async move { terminal::tunnel_start(write) }).await;
         let _ = cx.update(|cx| {
             let rt = match result {
-                Ok(status) => TunnelRuntimeState { connecting: false, url: status.url, error: None },
-                Err(e) => TunnelRuntimeState { connecting: false, url: None, error: Some(e) },
+                Ok(status) => {
+                    TunnelRuntimeState { connecting: false, url: status.url, error: None, write: status.write }
+                }
+                Err(e) => TunnelRuntimeState { connecting: false, url: None, error: Some(e), write: false },
             };
             cx.set_global(rt);
             // tunnel_start 内部顺带开了本机网关，回填一下运行时状态，让"远程访问"
             // 那个开关下面的链接展示也跟着刷新。
             let remote = terminal::remote_status();
-            cx.set_global(RemoteRuntimeState { token: remote.token, addr: remote.addr, error: None });
+            cx.set_global(RemoteRuntimeState {
+                token: remote.token,
+                addr: remote.addr,
+                write: remote.write,
+                error: None,
+            });
         });
     })
     .detach();
+}
+
+/// 开关"允许写入"（approve/deny/reply，见 smeltd.rs「远程操控」）。这个 write
+/// 位是在网关/隧道启动时烤进 token 里的，不能对一条活链接热切换——切换后如果
+/// 网关/隧道正跑着，得停了用新的 write 值重开，换一条新链接（旧链接因此失效，
+/// 这是故意的：权限变化必须体现在新链接上，不能让旧链接的人静默获得新权限）。
+pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
+    let mut c = cx.global::<RemoteConfig>().clone();
+    c.write_enabled = enabled;
+    save_remote_config(&c);
+    cx.set_global(c.clone());
+
+    if c.tunnel_enabled {
+        terminal::tunnel_stop();
+        cx.set_global(TunnelRuntimeState::default());
+        apply_tunnel_toggle(true, cx);
+    } else if c.enabled {
+        terminal::remote_stop();
+        cx.set_global(RemoteRuntimeState::default());
+        apply_remote_toggle(true, cx);
+    }
 }
 
 /// Copilot CLI 自己的配置文件路径（不是 smelt 的配置——这是 Copilot 全局设置，
@@ -1375,7 +1420,7 @@ impl Workspace {
                     ),
                 )
                 .description(
-                    "开启后，知道分享链接的人能在浏览器里只读查看这台机器上的全部终端会话\
+                    "开启后，知道分享链接的人能在浏览器里查看这台机器上的全部终端会话\
                      （默认只绑本机回环地址，跨机器访问需要你自己的网：Tailscale / SSH 隧道）。",
                 ),
                 SettingItem::render(move |_, _, cx: &mut App| {
@@ -1396,6 +1441,7 @@ impl Workspace {
                     };
                     let link = format!("http://{addr}/?token={token}");
                     let link_for_copy = link.clone();
+                    let write_hint = if rt.write { "可写：approve/deny/reply" } else { "只读观战" };
                     h_flex()
                         .items_center()
                         .gap_2()
@@ -1415,7 +1461,21 @@ impl Workspace {
                                 cx.write_to_clipboard(ClipboardItem::new_string(link_for_copy.clone()));
                             },
                         ))
+                        .child(div().text_xs().text_color(muted).child(format!("（{write_hint}）")))
                 }),
+                SettingItem::new(
+                    "允许写入（approve/deny/reply）",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<RemoteConfig>().write_enabled,
+                        |v: bool, cx: &mut App| apply_write_toggle(v, cx),
+                    ),
+                )
+                .description(
+                    "开启后，分享出去的链接不仅能看，还能替你批准/拒绝 Claude Code 的权限确认、\
+                     直接回复它的提问——链接分享出去这件事本身就是授权，没有额外的\"当面确认\"。\
+                     这个权限是烤进链接里的，切换后如果远程访问/隧道已经开着，会用新权限重新生成\
+                     一条链接（旧链接失效）。",
+                ),
                 SettingItem::new(
                     "跨网络访问（Cloudflare Tunnel）",
                     SettingField::switch(
@@ -1448,6 +1508,7 @@ impl Workspace {
                     let token = cx.global::<RemoteRuntimeState>().token.clone().unwrap_or_default();
                     let link = format!("{url}/?token={token}");
                     let link_for_copy = link.clone();
+                    let write_hint = if rt.write { "可写：approve/deny/reply" } else { "只读观战" };
                     h_flex()
                         .items_center()
                         .gap_2()
@@ -1467,6 +1528,7 @@ impl Workspace {
                                 cx.write_to_clipboard(ClipboardItem::new_string(link_for_copy.clone()));
                             },
                         ))
+                        .child(div().text_xs().text_color(muted).child(format!("（{write_hint}）")))
                 }),
             ]),
         );

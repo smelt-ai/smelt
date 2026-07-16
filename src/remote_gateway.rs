@@ -32,6 +32,11 @@ pub fn sock_path() -> std::path::PathBuf {
 #[derive(Clone)]
 struct AppState {
     token: Arc<String>,
+    /// 这个 token 是否有写权限（approve/deny/reply）。链接分享出去那一刻就是
+    /// 授权动作，这里不再加一层"每次点击都要主人当面确认"——见
+    /// smeltd.rs「远程操控」一节的授权模型说明。开没开由生成链接时的 GUI 开关
+    /// 决定，`build_router` 只是如实转达。
+    write_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -39,10 +44,17 @@ struct AuthQuery {
     token: String,
 }
 
+#[derive(Deserialize)]
+struct ActionBody {
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
 /// 组好整个网关的路由，鉴权用这一个 token（见 collaboration.md：一个网关/token 管
 /// 这台机器上的全部活会话，泄漏一条链接的代价是明确的，不是没想到的疏漏）。
-pub fn build_router(token: String) -> Router {
-    let state = AppState { token: Arc::new(token) };
+pub fn build_router(token: String, write_enabled: bool) -> Router {
+    let state = AppState { token: Arc::new(token), write_enabled };
     Router::new()
         .route("/", get(list_page_handler))
         .route("/sessions", get(sessions_json_handler))
@@ -50,6 +62,7 @@ pub fn build_router(token: String) -> Router {
         .route("/s/{id}/stream", get(stream_handler))
         .route("/s/{id}/console", get(console_handler))
         .route("/s/{id}/state-stream", get(state_stream_handler))
+        .route("/s/{id}/action", axum::routing::post(action_handler))
         .with_state(state)
 }
 
@@ -199,8 +212,9 @@ async fn stream_handler(
     ws.on_upgrade(move |socket| pump_watch(socket, id)).into_response()
 }
 
-/// Phase 5：手机友好的"操作台"——大状态 + 问题文案，不嵌 xterm（roadmap 原则 3：
-/// 「不绑死 xterm.js」）。只读，Phase 6 才加 approve/deny 按钮。
+/// Phase 5+6：手机友好的"操作台"——大状态 + 问题文案，不嵌 xterm（roadmap 原则 3：
+/// 「不绑死 xterm.js」）。`write_enabled` 决定页面要不要显示 approve/deny/reply
+/// 按钮——纯布尔值，不是用户输入，直接拼字面量，不走 js_string_literal。
 async fn console_handler(
     Path(id): Path<String>,
     Query(q): Query<AuthQuery>,
@@ -211,7 +225,8 @@ async fn console_handler(
     }
     let page = CONSOLE_PAGE
         .replace("__ID_JSON__", &js_string_literal(&id))
-        .replace("__TOKEN_JSON__", &js_string_literal(&q.token));
+        .replace("__TOKEN_JSON__", &js_string_literal(&q.token))
+        .replace("__WRITE_ENABLED__", if state.write_enabled { "true" } else { "false" });
     Html(page).into_response()
 }
 
@@ -271,6 +286,45 @@ fn subscribe_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<serde_json::Val
             }
         }
     }
+}
+
+/// Phase 6：approve/deny/reply，转发给 smeltd 的 `action` op（门闩/字节映射都在
+/// 那边，见 smeltd.rs「远程操控」一节）。这里只多做一层网关自己的授权检查——
+/// 这个 token 有没有写权限，跟 phase 门闩是两件独立的事：没写权限直接 403，
+/// 不去问 smeltd；有写权限但 phase 不对，由 smeltd 用 `{"ok":false,"err":..}`
+/// 正常回复，原样透传给客户端。
+async fn action_handler(
+    Path(id): Path<String>,
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+    Json(body): Json<ActionBody>,
+) -> impl IntoResponse {
+    if q.token != *state.token {
+        return (StatusCode::FORBIDDEN, "token 不对").into_response();
+    }
+    if !state.write_enabled {
+        return (StatusCode::FORBIDDEN, "这条链接没有写权限").into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || send_action(&id, &body.kind, body.text.as_deref()))
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "ok": false, "err": "内部错误" }));
+    Json(result).into_response()
+}
+
+/// 阻塞：连 smeltd 发一次 `action` op，读一行回执。
+fn send_action(id: &str, kind: &str, text: Option<&str>) -> serde_json::Value {
+    let Ok(mut conn) = UnixStream::connect(sock_path()) else {
+        return serde_json::json!({ "ok": false, "err": "连不上守护" });
+    };
+    let req = serde_json::json!({ "op": "action", "id": id, "kind": kind, "text": text });
+    if writeln!(conn, "{req}").is_err() {
+        return serde_json::json!({ "ok": false, "err": "发送失败" });
+    }
+    let mut line = String::new();
+    if BufReader::new(conn).read_line(&mut line).is_err() {
+        return serde_json::json!({ "ok": false, "err": "守护没有响应" });
+    }
+    serde_json::from_str(&line).unwrap_or_else(|_| serde_json::json!({ "ok": false, "err": "响应解析失败" }))
 }
 
 /// 从阻塞的 smeltd watch 连接搬到这条 WS 上的一帧：Header 只在开头发一次，

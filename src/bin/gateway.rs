@@ -5,18 +5,21 @@
 //! 解析 `--bind`/`--port`、生成 token、绑端口、打印分享链接。
 //!
 //! 用法：
-//!   gateway [--bind 127.0.0.1] [--port 0]
+//!   gateway [--bind 127.0.0.1] [--port 0] [--write]
 //! 默认绑回环地址，不监听 `0.0.0.0`；跨机器访问交给用户自己的网
-//! （Tailscale/SSH 隧道），网关自己不做中继、不做公网暴露。
+//! （Tailscale/SSH 隧道），网关自己不做中继、不做公网暴露。`--write` 开启后
+//! 这条链接也能 approve/deny/reply（见 remote_gateway.rs「远程操控」，
+//! 链接本身就是授权，不再额外要求当面确认）。
 
 #[path = "../remote_gateway.rs"]
 mod remote_gateway;
 
 use std::net::{IpAddr, Ipv4Addr};
 
-fn parse_args() -> (IpAddr, u16) {
+fn parse_args() -> (IpAddr, u16, bool) {
     let mut bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let mut port: u16 = 0;
+    let mut write = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -34,19 +37,20 @@ fn parse_args() -> (IpAddr, u16) {
                     port = v.parse().unwrap_or(0);
                 }
             }
+            "--write" => write = true,
             _ => {}
         }
     }
-    (bind_ip, port)
+    (bind_ip, port, write)
 }
 
 #[tokio::main]
 async fn main() {
-    let (bind_ip, port) = parse_args();
+    let (bind_ip, port, write) = parse_args();
 
     // 128 位随机 token，一次性打印在 stdout；不落盘、不设过期。
     let token = uuid::Uuid::new_v4().simple().to_string();
-    let app = remote_gateway::build_router(token.clone());
+    let app = remote_gateway::build_router(token.clone(), write);
 
     let listener = match tokio::net::TcpListener::bind((bind_ip, port)).await {
         Ok(l) => l,
@@ -57,7 +61,7 @@ async fn main() {
     };
     let addr = listener.local_addr().unwrap();
 
-    println!("smelt 远程操作网关（只读观战）");
+    println!("smelt 远程操作网关（{}）", if write { "可写：approve/deny/reply" } else { "只读观战" });
     println!("绑定：{addr}（默认只回环，不监听 0.0.0.0；跨机器访问用你自己的网：Tailscale / SSH 隧道）");
     println!("分享链接（会话列表）：http://{addr}/?token={token}");
 

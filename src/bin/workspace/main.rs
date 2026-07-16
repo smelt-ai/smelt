@@ -4296,6 +4296,7 @@ fn main() {
         // 隧道依赖本机网关；配置里 tunnel_enabled=true 时 enabled 理应也是 true
         // （apply_tunnel_toggle 存盘时就是这么同步的），但独立判断一次更保险。
         let want_tunnel = remote_config.tunnel_enabled;
+        let want_write = remote_config.write_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
         cx.set_global(settings::TunnelRuntimeState::default());
@@ -4303,17 +4304,25 @@ fn main() {
             cx.spawn(async move |cx| {
                 let status = cx
                     .background_executor()
-                    .spawn(async {
+                    .spawn(async move {
                         terminal::ensure_daemon_running();
-                        terminal::remote_start("127.0.0.1")
+                        terminal::remote_start("127.0.0.1", want_write)
                     })
                     .await;
                 let _ = cx.update(|cx| {
                     let rt = match status {
-                        Ok(s) => settings::RemoteRuntimeState { token: s.token, addr: s.addr, error: None },
-                        Err(e) => {
-                            settings::RemoteRuntimeState { token: None, addr: None, error: Some(e) }
-                        }
+                        Ok(s) => settings::RemoteRuntimeState {
+                            token: s.token,
+                            addr: s.addr,
+                            write: s.write,
+                            error: None,
+                        },
+                        Err(e) => settings::RemoteRuntimeState {
+                            token: None,
+                            addr: None,
+                            write: false,
+                            error: Some(e),
+                        },
                     };
                     cx.set_global(rt);
                 });
@@ -4321,22 +4330,33 @@ fn main() {
             .detach();
         }
         if want_tunnel {
-            cx.set_global(settings::TunnelRuntimeState { connecting: true, url: None, error: None });
+            cx.set_global(settings::TunnelRuntimeState {
+                connecting: true,
+                url: None,
+                error: None,
+                write: false,
+            });
             cx.spawn(async move |cx| {
                 let status = cx
                     .background_executor()
-                    .spawn(async {
+                    .spawn(async move {
                         terminal::ensure_daemon_running();
-                        terminal::tunnel_start()
+                        terminal::tunnel_start(want_write)
                     })
                     .await;
                 let _ = cx.update(|cx| {
                     let rt = match status {
-                        Ok(s) => settings::TunnelRuntimeState { connecting: false, url: s.url, error: None },
+                        Ok(s) => settings::TunnelRuntimeState {
+                            connecting: false,
+                            url: s.url,
+                            error: None,
+                            write: s.write,
+                        },
                         Err(e) => settings::TunnelRuntimeState {
                             connecting: false,
                             url: None,
                             error: Some(e),
+                            write: false,
                         },
                     };
                     cx.set_global(rt);
@@ -4345,6 +4365,7 @@ fn main() {
                     cx.set_global(settings::RemoteRuntimeState {
                         token: remote.token,
                         addr: remote.addr,
+                        write: remote.write,
                         error: None,
                     });
                 });

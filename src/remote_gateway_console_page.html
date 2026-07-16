@@ -23,6 +23,23 @@
     font-size: 1rem; line-height: 1.6; margin: 1rem 0; white-space: pre-wrap;
     word-break: break-word;
   }
+  #actions { display: none; gap: .6rem; margin: 1rem 0; }
+  #actions.visible { display: flex; flex-wrap: wrap; }
+  .btn {
+    border: none; border-radius: 8px; padding: .7rem 1.2rem; font-size: 1rem;
+    font-weight: 600; cursor: pointer; color: #fff;
+  }
+  #approve-btn { background: #22c55e; }
+  #deny-btn { background: #ef4444; }
+  #reply-row { display: none; gap: .5rem; margin: .8rem 0; }
+  #reply-row.visible { display: flex; }
+  #reply-input {
+    flex: 1; background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+    padding: .6rem .8rem; color: #ddd; font-size: 1rem;
+  }
+  #reply-btn { background: #4a9eff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  #action-status { font-size: .85rem; color: #888; min-height: 1.2rem; margin-top: .3rem; }
   #meta { color: #888; font-size: .8rem; margin-top: 2rem; }
   #term-link {
     display: inline-block; margin-top: 1.5rem; color: #6cf; text-decoration: none;
@@ -36,13 +53,24 @@
 <h1 id="session-id"></h1>
 <div id="badge">连接中…</div>
 <div id="question"></div>
+<div id="actions">
+  <button class="btn" id="approve-btn">批准</button>
+  <button class="btn" id="deny-btn">拒绝</button>
+</div>
+<div id="reply-row">
+  <input id="reply-input" type="text" placeholder="回复 agent…">
+  <button class="btn" id="reply-btn">发送</button>
+</div>
+<div id="action-status"></div>
 <div id="meta"></div>
 <a id="term-link" href="#">查看完整终端 →</a>
 <script>
   // ID/TOKEN 由网关渲染页面时服务端替换进来，转义方式见 gateway_page.html 的注释
-  // （同一套 js_string_literal，防反射型 XSS）。
+  // （同一套 js_string_literal，防反射型 XSS）。WRITE_ENABLED 是纯布尔值，
+  // 不经过用户输入，不需要转义。
   const ID = __ID_JSON__;
   const TOKEN = __TOKEN_JSON__;
+  const WRITE_ENABLED = __WRITE_ENABLED__;
 
   document.getElementById('session-id').textContent = ID;
   document.getElementById('back').href = `/?token=${encodeURIComponent(TOKEN)}`;
@@ -59,12 +87,24 @@
     idle: ['空闲', '#666'],
     dead: ['已结束', '#666'],
   };
+  // 跟 smeltd.rs 的门闩条件一致：只有这两种 phase 才允许发 action。
+  const ACTIONABLE = new Set(['awaiting_approval', 'waiting_for_user']);
 
   const badge = document.getElementById('badge');
   const questionEl = document.getElementById('question');
   const metaEl = document.getElementById('meta');
+  const actionsEl = document.getElementById('actions');
+  const replyRowEl = document.getElementById('reply-row');
+  const actionStatusEl = document.getElementById('action-status');
+  const approveBtn = document.getElementById('approve-btn');
+  const denyBtn = document.getElementById('deny-btn');
+  const replyBtn = document.getElementById('reply-btn');
+  const replyInput = document.getElementById('reply-input');
+
+  let currentPhase = null;
 
   function render(state) {
+    currentPhase = state.phase;
     const [label, color] = PHASE_LABEL[state.phase] || [state.phase || '未知', '#666'];
     badge.textContent = label;
     badge.style.background = color;
@@ -72,7 +112,45 @@
     metaEl.textContent = state.phase_since
       ? `状态更新于 ${new Date(state.phase_since * 1000).toLocaleTimeString()}`
       : '';
+
+    const actionable = WRITE_ENABLED && ACTIONABLE.has(state.phase);
+    actionsEl.classList.toggle('visible', actionable);
+    replyRowEl.classList.toggle('visible', actionable);
+    if (actionable) actionStatusEl.textContent = '';
   }
+
+  async function sendAction(kind, text) {
+    [approveBtn, denyBtn, replyBtn].forEach((b) => (b.disabled = true));
+    actionStatusEl.textContent = '发送中…';
+    try {
+      const resp = await fetch(
+        `/s/${encodeURIComponent(ID)}/action?token=${encodeURIComponent(TOKEN)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, text }),
+        }
+      );
+      const data = await resp.json();
+      actionStatusEl.textContent = data.ok ? '已发送' : `失败：${data.err || resp.status}`;
+    } catch (e) {
+      actionStatusEl.textContent = '发送失败（网络问题）';
+    } finally {
+      [approveBtn, denyBtn, replyBtn].forEach((b) => (b.disabled = false));
+    }
+  }
+
+  approveBtn.addEventListener('click', () => sendAction('approve'));
+  denyBtn.addEventListener('click', () => sendAction('deny'));
+  replyBtn.addEventListener('click', () => {
+    const text = replyInput.value.trim();
+    if (!text) return;
+    sendAction('reply', text);
+    replyInput.value = '';
+  });
+  replyInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') replyBtn.click();
+  });
 
   let retryDelay = 1000;
   const MAX_RETRY_DELAY = 8000;

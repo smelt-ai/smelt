@@ -564,15 +564,19 @@ pub struct RemoteStatus {
     pub running: bool,
     pub token: Option<String>,
     pub addr: Option<String>,
+    pub write: bool,
 }
 
-/// 让守护开启内嵌远程网关（幂等：已经开着直接回现状原 token，不重启不换 token）。
+/// 让守护开启内嵌远程网关（幂等：已经开着直接回现状原 token/write，不重启不换
+/// token——`write` 传入值在这种情况下会被忽略，见 smeltd.rs `start_remote_gateway`）。
 /// 绑定非法地址/端口绑不上时把守护回的错误原样透传出去。
-pub fn remote_start(bind: &str) -> Result<RemoteStatus, String> {
+pub fn remote_start(bind: &str, write: bool) -> Result<RemoteStatus, String> {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         return Err("连不上守护".to_string());
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "remote_start", "bind": bind })).is_err() {
+    if writeln!(s, "{}", serde_json::json!({ "op": "remote_start", "bind": bind, "write": write }))
+        .is_err()
+    {
         return Err("发送请求失败".to_string());
     }
     let mut resp = String::new();
@@ -585,6 +589,7 @@ pub fn remote_start(bind: &str) -> Result<RemoteStatus, String> {
             running: true,
             token: v["token"].as_str().map(String::from),
             addr: v["addr"].as_str().map(String::from),
+            write: v["write"].as_bool().unwrap_or(false),
         })
     } else {
         Err(v["err"].as_str().unwrap_or("未知错误").to_string())
@@ -617,6 +622,7 @@ pub fn remote_status() -> RemoteStatus {
         running: v["running"].as_bool().unwrap_or(false),
         token: v["token"].as_str().map(String::from),
         addr: v["addr"].as_str().map(String::from),
+        write: v["write"].as_bool().unwrap_or(false),
     }
 }
 
@@ -625,16 +631,17 @@ pub fn remote_status() -> RemoteStatus {
 pub struct TunnelStatus {
     pub running: bool,
     pub url: Option<String>,
+    pub write: bool,
 }
 
 /// 让守护开启 Cloudflare Tunnel（幂等）。**这个调用可能耗时数秒到 ~30s**
 /// （spawn cloudflared 子进程 + 等它连上 Cloudflare 边缘）——调用方必须扔进
 /// 后台任务，不能直接在 UI 线程/事件回调里同步调用，否则界面会冻住。
-pub fn tunnel_start() -> Result<TunnelStatus, String> {
+pub fn tunnel_start(write: bool) -> Result<TunnelStatus, String> {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         return Err("连不上守护".to_string());
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "tunnel_start" })).is_err() {
+    if writeln!(s, "{}", serde_json::json!({ "op": "tunnel_start", "write": write })).is_err() {
         return Err("发送请求失败".to_string());
     }
     // 守护那边最多等 30s 建隧道，这里的读超时要留够余量。
@@ -645,7 +652,11 @@ pub fn tunnel_start() -> Result<TunnelStatus, String> {
     }
     let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
     if v["ok"].as_bool() == Some(true) {
-        Ok(TunnelStatus { running: true, url: v["url"].as_str().map(String::from) })
+        Ok(TunnelStatus {
+            running: true,
+            url: v["url"].as_str().map(String::from),
+            write: v["write"].as_bool().unwrap_or(false),
+        })
     } else {
         Err(v["err"].as_str().unwrap_or("未知错误").to_string())
     }
@@ -672,7 +683,11 @@ pub fn tunnel_status() -> TunnelStatus {
         return TunnelStatus::default();
     }
     let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
-    TunnelStatus { running: v["running"].as_bool().unwrap_or(false), url: v["url"].as_str().map(String::from) }
+    TunnelStatus {
+        running: v["running"].as_bool().unwrap_or(false),
+        url: v["url"].as_str().map(String::from),
+        write: v["write"].as_bool().unwrap_or(false),
+    }
 }
 
 // ===================== 状态通道（见 docs/state-channel-plan.md） =====================

@@ -21,16 +21,21 @@
 //!   {"op":"shutdown"}                                        → 回 {"ok":true} 后进程退出（杀掉所有会话！）
 //!   {"op":"upgrade"}                                         → 回 {"ok":true} 后 exec 磁盘上的新二进制，
 //!                                                              PTY fd 原地交接，**所有会话不中断**（见下）
-//!   {"op":"remote_start","bind":"..","port":0}               → 回 {"ok":true,"token":"..","addr":".."}，
-//!                                                              见下「内嵌远程网关」（bind/port 可省，默认回环随机口）
+//!   {"op":"remote_start","bind":"..","port":0,"write":false}  → 回 {"ok":true,"token":"..","addr":"..","write":bool}，
+//!                                                              见下「内嵌远程网关」（bind/port/write 都可省，
+//!                                                              默认回环随机口 + 只读）
 //!   {"op":"remote_stop"}                                     → 回 {"ok":true} 后关闭
-//!   {"op":"remote_status"}                                   → 回 {"running":bool,"token":"..","addr":".."} 后关闭
-//!   {"op":"tunnel_start"}                                     → 回 {"ok":true,"url":".."}，spawn cloudflared
-//!                                                              把远程网关暴露到公网（见下「Cloudflare Tunnel」）
+//!   {"op":"remote_status"}                                   → 回 {"running":bool,"token":"..","addr":"..","write":bool} 后关闭
+//!   {"op":"tunnel_start","write":false}                       → 回 {"ok":true,"url":"..","write":bool}，
+//!                                                              spawn cloudflared 把远程网关暴露到公网
+//!                                                              （见下「Cloudflare Tunnel」）
 //!   {"op":"tunnel_stop"}                                     → 回 {"ok":true} 后关闭
-//!   {"op":"tunnel_status"}                                   → 回 {"running":bool,"url":".."} 后关闭
+//!   {"op":"tunnel_status"}                                   → 回 {"running":bool,"url":"..","write":bool} 后关闭
 //!   {"op":"state","id":"..","phase":"..","question":".."}    → 回 {"ok":true} 后关闭，hook 直写（见下
 //!                                                              「状态通道」），question 可省
+//!   {"op":"action","id":"..","kind":"approve|deny|reply","text":".."}
+//!                                                            → 回 {"ok":true}/{"ok":false,"err":".."} 后关闭，
+//!                                                              见下「远程操控」（text 仅 reply 需要）
 //!
 //! 流模式：
 //!   守护 → 客户端：先发 JSON 尺寸行（含 replay_len=快照字节数）→ ANSI 网格快照
@@ -102,6 +107,23 @@
 //! UDP/QUIC 时会反复重试好几轮才退化到 http2；而且 cloudflared 打印"隧道已创建"
 //! 的 URL 早于连接真正建好——只看到 URL 就上报成功，实测会先给出一个访问 530 的
 //! 死链接。`start_tunnel` 因此额外等一条 `Registered tunnel connection` 日志才算数。
+//!
+//! ## 远程操控（`action` op）
+//!
+//! Phase 6：手机操作台点"批准"/"拒绝"/"回复"，最终落地成往 PTY 里写几个字节。
+//! 门闩（`phase` 必须是 `AwaitingApproval`/`WaitingForUser`）是**正确性**保护，
+//! 不是权限保护——agent 正在思考/执行工具时写入字节会被当成别的东西的输入，把
+//! 会话状态搞乱（这是真会发生的坑，不是假设）；不满足门闩直接拒绝，不排队。
+//!
+//! `kind` → 字节的映射刻意不猜终端 UI 的具体菜单结构（选项数量不是常数，数
+//! 方向键次数这条路本身就不成立，实测验证过）：
+//! - `approve` → `\r`（回车，接受当前高亮的默认项）
+//! - `deny` → `\x1b`（Esc，不管菜单形状直接取消/拒绝）
+//! - `reply` → 文本 + `\r`（自由文本回复）
+//!
+//! 授权模型：这一版**没有**"可写模式必须主人当面点头"这条独立确认——链接本身
+//! 已经是一次授权动作，开没开写权限由生成链接时的开关决定（GUI 的"允许写入"
+//! 开关），不对每次 approve/deny 再加一层实时确认。
 
 #[path = "../remote_gateway.rs"]
 mod remote_gateway;
@@ -370,22 +392,30 @@ struct Session {
 
 type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 
-/// 内嵌远程网关开着时的状态：token、绑定地址、喊停用的信号。见文件头「内嵌远程
-/// 网关」一节——这条不参与无缝升级交接，`upgrade` 后新进程里永远是 None。
+/// 内嵌远程网关开着时的状态：token、绑定地址、写权限、喊停用的信号。见文件头
+/// 「内嵌远程网关」一节——这条不参与无缝升级交接，`upgrade` 后新进程里永远是 None。
 struct RemoteGateway {
     token: String,
     addr: std::net::SocketAddr,
+    write: bool,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
 type RemoteState = Arc<Mutex<Option<RemoteGateway>>>;
 
-/// 幂等：已经开着直接回现有 token/addr，不重启、不换 token。
+/// 幂等：已经开着直接回现有 token/addr/write，不重启、不换 token——包括 `write`
+/// 参数：想改写权限得先 `remote_stop` 再 `remote_start`，不支持热切换（跟其余
+/// 参数如 bind/port 一样，改配置就是重开一次，这个项目里没有"热更新"这个概念）。
 /// bind 非法 / 端口绑不上都走 Err，调用方原样透传给客户端。
-fn start_remote_gateway(state: &RemoteState, bind: &str, port: u16) -> Result<(String, std::net::SocketAddr), String> {
+fn start_remote_gateway(
+    state: &RemoteState,
+    bind: &str,
+    port: u16,
+    write: bool,
+) -> Result<(String, std::net::SocketAddr, bool), String> {
     let mut guard = state.lock().unwrap();
     if let Some(g) = guard.as_ref() {
-        return Ok((g.token.clone(), g.addr));
+        return Ok((g.token.clone(), g.addr, g.write));
     }
 
     let ip: std::net::IpAddr = bind.parse().map_err(|e| format!("非法绑定地址 {bind}：{e}"))?;
@@ -414,7 +444,7 @@ fn start_remote_gateway(state: &RemoteState, bind: &str, port: u16) -> Result<(S
                     return;
                 }
             };
-            let app = remote_gateway::build_router(token_for_thread);
+            let app = remote_gateway::build_router(token_for_thread, write);
             let serve = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
@@ -425,8 +455,8 @@ fn start_remote_gateway(state: &RemoteState, bind: &str, port: u16) -> Result<(S
         });
     });
 
-    *guard = Some(RemoteGateway { token: token.clone(), addr, shutdown_tx });
-    Ok((token, addr))
+    *guard = Some(RemoteGateway { token: token.clone(), addr, write, shutdown_tx });
+    Ok((token, addr, write))
 }
 
 fn stop_remote_gateway(state: &RemoteState) {
@@ -498,15 +528,22 @@ fn spawn_tunnel_output_scanner(
 /// 强制 `--protocol http2`：quick tunnel 默认先试 QUIC，网络挡 UDP/QUIC 时（不少
 /// 企业网/部分云环境如此）要退化重试好几轮才会换协议，直接指定 http2 跳过这段
 /// 摸索，换一点 QUIC 本可能带来的延迟优势，换更快、更可预期的建连。
-fn start_tunnel(tunnel_state: &TunnelState, remote_state: &RemoteState) -> Result<String, String> {
+fn start_tunnel(
+    tunnel_state: &TunnelState,
+    remote_state: &RemoteState,
+    write: bool,
+) -> Result<(String, bool), String> {
     {
         let guard = tunnel_state.lock().unwrap();
         if let Some(t) = guard.as_ref() {
-            return Ok(t.url.clone());
+            // 幂等分支：跟 start_remote_gateway 一样，已经开着就如实回现状的
+            // write（可能跟这次调用传入的值不同），不悄悄改成新值。
+            let effective_write = remote_state.lock().unwrap().as_ref().map(|g| g.write).unwrap_or(write);
+            return Ok((t.url.clone(), effective_write));
         }
     } // 提前放锁：下面 start_remote_gateway 可能涉及绑端口，不需要一直攥着这把锁
 
-    let (_, addr) = start_remote_gateway(remote_state, "127.0.0.1", 0)?;
+    let (_, addr, effective_write) = start_remote_gateway(remote_state, "127.0.0.1", 0, write)?;
 
     use std::process::{Command, Stdio};
     let mut child = Command::new("cloudflared")
@@ -562,7 +599,7 @@ fn start_tunnel(tunnel_state: &TunnelState, remote_state: &RemoteState) -> Resul
     };
 
     *tunnel_state.lock().unwrap() = Some(Tunnel { child, url: url.clone() });
-    Ok(url)
+    Ok((url, effective_write))
 }
 
 fn stop_tunnel(state: &TunnelState) {
@@ -896,6 +933,163 @@ mod state_listener_tests {
     }
 }
 
+/// `action` op 的 kind → PTY 字节映射。`text` 只有 `reply` 用得上。返回 `None`
+/// 表示不认识的 kind——调用方应该报错，不是当成某种默认行为。
+fn action_payload(kind: Option<&str>, text: Option<&str>) -> Option<Vec<u8>> {
+    match kind {
+        Some("approve") => Some(b"\r".to_vec()),
+        Some("deny") => Some(b"\x1b".to_vec()),
+        Some("reply") => {
+            let mut bytes = text.unwrap_or_default().as_bytes().to_vec();
+            bytes.push(b'\r');
+            Some(bytes)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn approve_is_bare_enter() {
+        assert_eq!(action_payload(Some("approve"), None), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn deny_is_bare_escape_not_arrow_navigation() {
+        // 故意不测"按几次下方向键"——这条路本身就不成立（菜单选项数量不是常数，
+        // 见模块注释「远程操控」一节）。Esc 不依赖菜单结构。
+        assert_eq!(action_payload(Some("deny"), None), Some(b"\x1b".to_vec()));
+    }
+
+    #[test]
+    fn reply_appends_enter_after_text() {
+        assert_eq!(
+            action_payload(Some("reply"), Some("不用了，换个方式")),
+            Some("不用了，换个方式\r".as_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn reply_without_text_is_just_enter() {
+        assert_eq!(action_payload(Some("reply"), None), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn unknown_kind_returns_none() {
+        assert_eq!(action_payload(Some("do_a_barrel_roll"), None), None);
+        assert_eq!(action_payload(None, None), None);
+    }
+}
+
+/// 端到端走真实的 `handle_conn` 分发，而不是只测 action_payload 这个纯函数——
+/// 门闩逻辑（phase 不对就拒绝、不实际写入）本身也得有测试盯着，不能只信任
+/// action_payload 测过就够了。
+#[cfg(test)]
+mod action_integration_tests {
+    use super::*;
+
+    /// `Ctl.master` 用一根真管道（不是 /dev/null）：这样能从另一头读回真正写
+    /// 进去的字节，验证 action 落地的到底是不是预期的按键序列，不是只看 `ok`。
+    fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::fs::File) {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");
+        let read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let master = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        drop(child); // 留成 zombie，这个测试不需要真的收尸
+
+        let state = Arc::new(Mutex::new(SessionState { phase, ..Default::default() }));
+        let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+        let listener = StateListener { state: Arc::clone(&state), subscribers };
+        let sess = Arc::new(Session {
+            ctl: Mutex::new(Ctl { master, pid, jolt: false, cols, rows, cwd: None }),
+            out: Mutex::new(Out { buf: Vec::new(), client: None, watchers: Vec::new() }),
+            term: Mutex::new(new_daemon_term(rows, cols, listener)),
+            state,
+        });
+        (sess, read_end)
+    }
+
+    /// 直接走 handle_conn 的真实分发（不是绕过去调内部函数）：action 是一次性
+    /// 请求-响应，不像 watch/open 那样要开线程陪它跑一辈子。
+    fn call_action(sessions: &Sessions, id: &str, kind: &str) -> serde_json::Value {
+        let (server, client) = UnixStream::pair().unwrap();
+        let remote_state: RemoteState = Arc::new(Mutex::new(None));
+        let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+        let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+        let mut client = client;
+        writeln!(client, "{}", serde_json::json!({ "op": "action", "id": id, "kind": kind }))
+            .unwrap();
+        handle_conn(server, Arc::clone(sessions), 0, -1, remote_state, tunnel_state, subscribers);
+        let mut resp = String::new();
+        BufReader::new(client).read_line(&mut resp).unwrap();
+        serde_json::from_str(&resp).unwrap()
+    }
+
+    #[test]
+    fn approve_writes_bare_enter_when_awaiting_approval() {
+        let (sess, mut read_end) = make_pipe_session(24, 80, Phase::AwaitingApproval);
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        sessions.lock().unwrap().insert("a".to_string(), sess);
+
+        let resp = call_action(&sessions, "a", "approve");
+        assert_eq!(resp["ok"], true, "resp={resp}");
+
+        let mut buf = [0u8; 8];
+        let n = read_end.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"\r");
+    }
+
+    #[test]
+    fn deny_writes_bare_escape_when_waiting_for_user() {
+        let (sess, mut read_end) = make_pipe_session(24, 80, Phase::WaitingForUser);
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        sessions.lock().unwrap().insert("b".to_string(), sess);
+
+        let resp = call_action(&sessions, "b", "deny");
+        assert_eq!(resp["ok"], true, "resp={resp}");
+
+        let mut buf = [0u8; 8];
+        let n = read_end.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"\x1b");
+    }
+
+    /// 门闩：phase 是 Thinking（agent 正忙）时，action 必须被拒绝，且**真的没有
+    /// 写入任何字节**——不能只是回错误但底下偷偷写了。
+    #[test]
+    fn action_rejected_and_no_bytes_written_when_agent_busy() {
+        let (sess, mut read_end) = make_pipe_session(24, 80, Phase::Thinking);
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        sessions.lock().unwrap().insert("c".to_string(), sess);
+
+        let resp = call_action(&sessions, "c", "approve");
+        assert_eq!(resp["ok"], false);
+        assert!(resp["err"].as_str().unwrap().contains("不是在等你"), "resp={resp}");
+
+        // 管道写端没收到任何字节：把它设成非阻塞读一下，读不到东西才对。
+        use std::os::fd::AsRawFd;
+        unsafe {
+            let flags = libc::fcntl(read_end.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(read_end.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let mut buf = [0u8; 8];
+        let result = read_end.read(&mut buf);
+        assert!(result.is_err(), "门闩失效：agent 忙的时候还是写进去了字节");
+    }
+
+    #[test]
+    fn action_on_unknown_session_is_rejected() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let resp = call_action(&sessions, "does-not-exist", "approve");
+        assert_eq!(resp["ok"], false);
+    }
+}
+
 fn handle_conn(
     conn: UnixStream,
     sessions: Sessions,
@@ -966,13 +1160,16 @@ fn handle_conn(
         Some("remote_start") => {
             let bind = v["bind"].as_str().unwrap_or("127.0.0.1").to_string();
             let port = v["port"].as_u64().unwrap_or(0) as u16;
+            let write = v["write"].as_bool().unwrap_or(false);
             let mut c = conn;
-            match start_remote_gateway(&remote_state, &bind, port) {
-                Ok((token, addr)) => {
+            match start_remote_gateway(&remote_state, &bind, port, write) {
+                Ok((token, addr, write)) => {
                     let _ = writeln!(
                         c,
                         "{}",
-                        serde_json::json!({ "ok": true, "token": token, "addr": addr.to_string() })
+                        serde_json::json!({
+                            "ok": true, "token": token, "addr": addr.to_string(), "write": write
+                        })
                     );
                 }
                 Err(e) => {
@@ -988,18 +1185,19 @@ fn handle_conn(
         Some("remote_status") => {
             let mut c = conn;
             let body = match remote_state.lock().unwrap().as_ref() {
-                Some(g) => {
-                    serde_json::json!({ "running": true, "token": g.token, "addr": g.addr.to_string() })
-                }
+                Some(g) => serde_json::json!({
+                    "running": true, "token": g.token, "addr": g.addr.to_string(), "write": g.write
+                }),
                 None => serde_json::json!({ "running": false }),
             };
             let _ = writeln!(c, "{}", body);
         }
         Some("tunnel_start") => {
+            let write = v["write"].as_bool().unwrap_or(false);
             let mut c = conn;
-            match start_tunnel(&tunnel_state, &remote_state) {
-                Ok(url) => {
-                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true, "url": url }));
+            match start_tunnel(&tunnel_state, &remote_state, write) {
+                Ok((url, write)) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true, "url": url, "write": write }));
                 }
                 Err(e) => {
                     let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": e }));
@@ -1014,7 +1212,10 @@ fn handle_conn(
         Some("tunnel_status") => {
             let mut c = conn;
             let body = match tunnel_status(&tunnel_state) {
-                Some(url) => serde_json::json!({ "running": true, "url": url }),
+                Some(url) => {
+                    let write = remote_state.lock().unwrap().as_ref().map(|g| g.write).unwrap_or(false);
+                    serde_json::json!({ "running": true, "url": url, "write": write })
+                }
                 None => serde_json::json!({ "running": false }),
             };
             let _ = writeln!(c, "{}", body);
@@ -1039,6 +1240,46 @@ fn handle_conn(
             }
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+        }
+        Some("action") => {
+            let id = v["id"].as_str().unwrap_or_default();
+            let mut c = conn;
+            let Some(sess) = sessions.lock().unwrap().get(id).cloned() else {
+                let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": "会话不存在" }));
+                return;
+            };
+
+            // 门闩：只有 agent 真的在等你的时候才允许写入——不然这几个字节会被当成
+            // agent 当前正在做的别的事情的输入，把会话搞乱（见 collaboration.md
+            // 「联机 review」一节的坑）。不排队，直接拒绝：Phase 5 的操作台本来就是
+            // 状态驱动渲染按钮，正常点击时机不该落到这个分支。
+            let phase = sess.state.lock().unwrap().phase;
+            if !matches!(phase, Phase::AwaitingApproval | Phase::WaitingForUser) {
+                let _ = writeln!(
+                    c,
+                    "{}",
+                    serde_json::json!({ "ok": false, "err": "agent 现在不是在等你，稍后再试" })
+                );
+                return;
+            }
+
+            let Some(payload) = action_payload(v["kind"].as_str(), v["text"].as_str()) else {
+                let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": "未知 kind" }));
+                return;
+            };
+
+            let write_result = {
+                let ctl = sess.ctl.lock().unwrap();
+                (&ctl.master).write_all(&payload)
+            };
+            match write_result {
+                Ok(()) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+                }
+                Err(e) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": e.to_string() }));
+                }
+            }
         }
         _ => {}
     }
