@@ -1439,7 +1439,10 @@ impl Workspace {
                         .bg(Hsla::from(rgba(0x4a9eff24)))
                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                             if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } = &status {
-                                if updater::finalize_pending_update(staged_app).is_ok() {
+                                // 先 handoff smeltd 再换 .app，避免会话全灭后对话被「重新初始化」。
+                                if crate::terminal::install_app_preserving_sessions(staged_app)
+                                    .is_ok()
+                                {
                                     // 排好重启再退；拉不起来也只是退化成手动打开，不该拦着退出。
                                     let _ = updater::relaunch();
                                     cx.quit();

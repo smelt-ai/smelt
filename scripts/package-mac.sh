@@ -158,132 +158,67 @@ codesign --force --deep --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP" && echo "  ✓ 签名校验通过"
 
 echo "▶ 打 dmg（定制安装窗口）…"
-# staging：app + 指向 /Applications 的软链 + 隐藏背景图。挂载后是一个固定尺寸、
-# 带背景箭头的窗口，把 app 拖到「应用程序」即完成安装（精致拖拽安装体验）。
-STAGE="$DIST/.dmg_stage"
-rm -rf "$STAGE"; mkdir -p "$STAGE/.background"
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
+# 挂载后是一个固定尺寸、带背景箭头的窗口，把 app 拖到「应用程序」即完成安装。
+#
+# 这些定制（窗口尺寸 / 背景 / 图标坐标）最终只落在卷根目录的 .DS_Store 一个文件里。
+# dmgbuild 靠 ds_store + mac_alias 直接把它写出来，全程不碰 Finder，因此本地与 CI
+# （headless、没有 Finder 自动化授权）走的是同一条路径——本地打出来什么样，Release
+# 就是什么样。旧版靠 AppleScript 指挥 Finder 定制，CI 上做不了只能整段跳过，发出去的
+# 一直是没有背景和图标摆位的朴素 dmg。
+#
+# 换掉 AppleScript 顺带消掉两个旧坑：
+#   - 旧脚本认死卷名做定制，撞上同名残留卷（上次没 detach 干净）会把新盘挤成
+#     "Smelt 1"、定制悄悄写到旧盘上；dmgbuild 读 hdiutil 返回的真实挂载点，天然没
+#     这个问题，那段「清理残留卷」也就不必要了（它还会误弹同名外置盘）。
+#   - .DS_Store 由 Finder 异步写盘，旧脚本得轮询等它大小稳定才敢 detach；现在是同步
+#     写文件，等待逻辑一并删掉。
 
-# 背景图（@1x + @2x 合成 retina 多分辨率 tiff）；缺 Pillow 则退化为无背景。
-BG1="$DIST/.dmgbg.png"; BG2="$DIST/.dmgbg@2x.png"
-if python3 "$ROOT/scripts/make-dmg-bg.py" "$BG1" "$BG2" >/dev/null 2>&1; then
-  tiffutil -cathidpicheck "$BG1" "$BG2" -out "$STAGE/.background/bg.tiff" >/dev/null 2>&1 || true
+# 打包工具链装进独立 venv：不污染系统 python，也绕开 PEP 668 externally-managed
+# 限制（CI runner 的 python 多半是 Homebrew 装的，直接 pip install 会被拒）。
+# 已经装好就复用（dist/ 在 .gitignore 里，不入库）。
+VENV="$DIST/.dmgvenv"
+if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
+  echo "  … 准备打包工具链（dmgbuild + Pillow）"
+  rm -rf "$VENV"
+  python3 -m venv "$VENV"
+  "$VENV/bin/pip" install --quiet --upgrade pip
+  # dmgbuild 钉死版本：这是发布链路，上游发新版不该让某天的 tag 突然打不出包（它纯
+  # python，钉版本不会有 wheel 问题）。Pillow 只给下界——CI runner 的 python 版本会随
+  # 镜像变，钉死可能撞上没有对应 wheel、退化成本地编译。
+  "$VENV/bin/pip" install --quiet "dmgbuild==1.6.7" "Pillow>=10"
 fi
+
+# 背景图：@1x + @2x 合成 retina 多分辨率 tiff，retina 屏上才不糊。
+# Pillow 就在上面那个 venv 里，所以这里不再容错——过去是「缺 Pillow 就静默退化成
+# 无背景」，而 CI runner 恰恰没有 Pillow，等于永远没背景还不报错。现在直接报错。
+BG1="$DIST/.dmgbg.png"; BG2="$DIST/.dmgbg@2x.png"; BG_TIFF="$DIST/.dmgbg.tiff"
+rm -f "$BG_TIFF"
+"$VENV/bin/python" "$ROOT/scripts/make-dmg-bg.py" "$BG1" "$BG2" >/dev/null
+tiffutil -cathidpicheck "$BG1" "$BG2" -out "$BG_TIFF" >/dev/null
 rm -f "$BG1" "$BG2"
+[[ -f "$BG_TIFF" ]] || { echo "✗ 背景图生成失败，没产出 $BG_TIFF" >&2; exit 1; }
 
 VOL="$APP_NAME"
-RW="$DIST/.rw.dmg"
-
-# 上次若中途失败没 detach 干净，残留挂载会把这次的新盘挤成 "Smelt 1"，下面认死
-# "$VOL" 这个名字的 AppleScript 会定制到旧盘上，新盘反而悄悄产出朴素无定制的 dmg——
-# 这是「有时候定制没效果」的一个真实根因。开工前先清掉同名残留，保证这次 attach
-# 出来的就是 "/Volumes/$VOL"。（极端情况下若你真有块外置盘恰好也叫 Smelt 会被一并
-# 弹出，但这种命名巧合概率极低，权衡后可接受。）
-if [[ -d "/Volumes/$VOL" ]]; then
-  echo "  … 清理上次残留的挂载 /Volumes/$VOL"
-  hdiutil detach "/Volumes/$VOL" -force >/dev/null 2>&1 || true
-fi
-
-# CI 里没有 Finder/GUI session，下面那套 AppleScript 窗口定制本来就做不了（只会走到
-# 「⚠ Finder 定制失败」那条容错分支），产出的必然是朴素 dmg。既然定制不可能生效，就
-# 没必要为它走「建可写映像 → attach → 定制 → detach → convert」这条挂载链：runner 上
-# hdiutil 的挂载/卸载会偶发撞车——v0.4.5 两次发布分别挂在 `create failed - Resource
-# busy` 和 `convert failed - Resource temporarily unavailable`，失败在不同步骤，是典型
-# 的资源竞争而非固定 bug。CI 直接一步压出只读 dmg：不 attach、无中间可写映像，把竞争
-# 面砍掉。本地打包不受影响，仍走下面的定制流程。
-if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
-  echo "  … CI 环境：跳过 Finder 窗口定制（无 GUI session，本来也不生效），直接压制只读 dmg"
-  rm -f "$DIST/$APP_NAME.dmg"
-  hdiutil create -volname "$VOL" -srcfolder "$STAGE" -fs HFS+ -format UDZO \
-    -imagekey zlib-level=9 -ov "$DIST/$APP_NAME.dmg" >/dev/null
-  rm -rf "$STAGE"
-  echo ""
-  echo "✅ 完成（CI 朴素 dmg）"
-  echo "   应用：   $APP"
-  echo "   分发件： $DIST/$APP_NAME.dmg"
-  exit 0
-fi
-
-rm -f "$RW"
-hdiutil create -volname "$VOL" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" >/dev/null
-
-DEV="$(hdiutil attach -readwrite -noverify -noautoopen "$RW" | grep -E '^/dev/' | head -1 | awk '{print $1}')"
-MOUNT="/Volumes/$VOL"
-
-# attach 到 Finder 认出这个卷中间有个空档，固定 sleep 1 机器一忙就可能不够——
-# 轮询等挂载点真的出现，比赌一个固定时长靠谱。
-for _ in $(seq 1 20); do
-  [[ -d "$MOUNT" ]] && break
-  sleep 0.5
-done
-if [[ ! -d "$MOUNT" ]]; then
-  echo "✗ 挂载卷 $MOUNT 迟迟没出现，打包终止" >&2
-  hdiutil detach "$DEV" -force >/dev/null 2>&1 || true
-  exit 1
-fi
-
-# 有背景 tiff 才设背景，否则只做布局定制。
-if [[ -f "$STAGE/.background/bg.tiff" ]]; then
-  BG_CMD='set background picture of theViewOptions to file ".background:bg.tiff"'
-else
-  BG_CMD=''
-fi
-
-# AppleScript 定制挂载窗口：隐藏工具栏/状态栏、固定尺寸、图标摆位（app 左 / 应用程序 右）。
-# 用 2>&1 >/dev/null 只留错误文本（osascript 正常路径没有 stdout 输出可看），
-# 失败原因直接打出来，别再让"可能需要授权"这种猜测式提示背锅。
-if ! OSA_ERR="$(osascript <<EOA 2>&1 >/dev/null
-tell application "Finder"
-  tell disk "$VOL"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {200, 120, 840, 548}
-    set theViewOptions to the icon view options of container window
-    set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 128
-    $BG_CMD
-    set position of item "$APP_NAME.app" of container window to {160, 210}
-    set position of item "Applications" of container window to {480, 210}
-    update without registering applications
-    delay 1
-    close
-  end tell
-end tell
-EOA
-)"; then
-  echo "  ⚠ Finder 定制失败，dmg 仍会正常产出，只是没有背景/图标摆位。原因：${OSA_ERR:-未知}"
-  echo "    （常见原因：首次运行需在「系统设置→隐私与安全性→自动化」允许终端控制 Finder）"
-fi
-
-# .DS_Store（背景/布局/图标坐标全存这里）是 Finder 异步写盘的，AppleScript 的
-# close 只是发了指令，不代表已经落盘。轮询等它出现、且连续两次读到的大小不变
-# 再 sync + detach，否则赶上机器忙，写一半就被卸载，定制悄悄丢失且没有任何报错。
-DS_STORE="$MOUNT/.DS_Store"
-prev_size=-1
-stable=0
-for _ in $(seq 1 20); do
-  if [[ -f "$DS_STORE" ]]; then
-    cur_size="$(stat -f%z "$DS_STORE" 2>/dev/null || echo -1)"
-    if [[ "$cur_size" == "$prev_size" && "$cur_size" -gt 0 ]]; then
-      stable=$((stable + 1))
-      [[ $stable -ge 2 ]] && break
-    else
-      stable=0
-    fi
-    prev_size="$cur_size"
-  fi
-  sleep 0.3
-done
-sync
-
-hdiutil detach "$DEV" >/dev/null 2>&1 || { sleep 2; hdiutil detach "$DEV" -force >/dev/null 2>&1 || true; }
-
 rm -f "$DIST/$APP_NAME.dmg"
-hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DIST/$APP_NAME.dmg" >/dev/null
-rm -f "$RW"; rm -rf "$STAGE"
+
+# dmgbuild 内部仍要 attach 一个可写映像来放文件，hdiutil 的挂载/卸载在 runner 上会
+# 偶发撞车——v0.4.5 两次发布分别挂在 `create failed - Resource busy` 和 `convert
+# failed - Resource temporarily unavailable`，失败在不同步骤，是典型的资源竞争而非
+# 固定 bug。竞争面消不掉，用重试兜住。
+export SMELT_APP="$APP"
+export SMELT_DMG_BG="$BG_TIFF"
+built=0
+for attempt in 1 2 3; do
+  if "$VENV/bin/dmgbuild" -s "$ROOT/scripts/dmg-settings.py" "$VOL" "$DIST/$APP_NAME.dmg"; then
+    built=1
+    break
+  fi
+  echo "  ⚠ 第 ${attempt}/3 次打 dmg 失败（多半是 hdiutil 挂载竞争），3s 后重试 …"
+  hdiutil detach "/Volumes/$VOL" -force >/dev/null 2>&1 || true
+  sleep 3
+done
+rm -f "$BG_TIFF"
+[[ "$built" == 1 ]] || { echo "✗ dmg 打包连续 3 次失败" >&2; exit 1; }
 
 echo ""
 echo "✅ 完成"

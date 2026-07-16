@@ -188,6 +188,10 @@ fn run(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
 /// 从当前可执行文件路径反推 `Smelt.app` 的位置：
 /// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
 /// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
+pub fn current_app_bundle_path() -> anyhow::Result<PathBuf> {
+    current_app_bundle()
+}
+
 fn current_app_bundle() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let bundle = exe

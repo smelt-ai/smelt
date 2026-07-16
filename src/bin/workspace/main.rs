@@ -739,14 +739,24 @@ fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
     }
 }
 
-/// 按存档镜像重建布局树：深度优先遍历，遇叶子就新建终端并 push 到 tabs
-/// （push 顺序即「遍历序」，与存档里的 active 索引一致）。
-fn rebuild_pane(
-    ps: &PaneState,
-    tabs: &mut Vec<Entity<TerminalView>>,
-    daemon_ok: &mut bool,
-    cx: &mut Context<Workspace>,
-) -> Option<Pane> {
+/// 后台线程里已经 spawn/reattach 好的叶子终端（尚未挂 GPUI Entity）。
+struct SpawnedLeaf {
+    terminal: terminal::Terminal,
+    sid: String,
+    cwd: Option<String>,
+    launch: Option<String>,
+    label: Option<String>,
+    custom_title: Option<String>,
+}
+
+/// 阻塞：按 DFS 顺序 spawn 一棵布局树的全部叶子（**只**在后台线程调用）。
+fn spawn_layout_leaves(ps: &PaneState) -> Result<Vec<SpawnedLeaf>, String> {
+    let mut out = Vec::new();
+    spawn_layout_leaves_rec(ps, &mut out)?;
+    Ok(out)
+}
+
+fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result<(), String> {
     match ps {
         PaneState::Leaf {
             cwd,
@@ -755,50 +765,57 @@ fn rebuild_pane(
             launch_label,
             launch_cmd,
         } => {
-            // 守护已探明不可达：别再逐叶子重付「拉起守护 + 等 5s」的代价（启动在
-            // 主线程同步跑，多个会话串行累加就是分钟级 beachball）。
-            if !*daemon_ok {
-                return None;
-            }
-            // 有存档 id → reattach 守护里还活着的会话；旧存档无 id → 开新会话。
-            // 硬重启守护后 id 不存在，走新建分支：带上 launch_cmd 才能把 agent 拉回来
-            // （reattach 到仍活着的 shell 时 smeltd 会忽略 launch）。
-            //
-            // spawn 可失败（守护起不来/握手超时），失败就剪掉这个叶子——绝不 panic：
-            // 这里在 did_finish_launching 的 FFI 回调栈上，panic 不能 unwind，等于
-            // abort 整个 app（「重启就崩」的根因，terminal_view.rs 的 expect 曾在此引爆）。
             let sid = id.clone().unwrap_or_else(new_sid);
-            let label = launch_label.clone();
-            let launch = launch_cmd.clone();
-            let terminal = match terminal::Terminal::spawn(
+            let terminal = terminal::Terminal::spawn(
                 24,
                 80,
                 cwd.as_deref(),
                 &sid,
-                launch.as_deref(),
-            ) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败，跳过：{e:#}");
-                    // "smeltd 未就绪" = connect_daemon 拉起守护都失败了，环境级
-                    // 问题，后续叶子必然同样失败，全部短路。
-                    if e.to_string().contains("smeltd 未就绪") {
-                        *daemon_ok = false;
-                    }
-                    return None;
-                }
-            };
+                launch_cmd.as_deref(),
+            )
+            .map_err(|e| {
+                eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
+                e.to_string()
+            })?;
+            out.push(SpawnedLeaf {
+                terminal,
+                sid,
+                cwd: cwd.clone(),
+                launch: launch_cmd.clone(),
+                label: launch_label.clone(),
+                custom_title: custom_title.clone(),
+            });
+            Ok(())
+        }
+        PaneState::Split { children, .. } => {
+            for c in children {
+                spawn_layout_leaves_rec(c, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 用已 spawn 的叶子（DFS 序）重建布局树；**只**在 UI 线程建 Entity。
+fn rebuild_pane_ready(
+    ps: &PaneState,
+    leaves: &mut std::vec::IntoIter<SpawnedLeaf>,
+    tabs: &mut Vec<Entity<TerminalView>>,
+    cx: &mut Context<Workspace>,
+) -> Option<Pane> {
+    match ps {
+        PaneState::Leaf { .. } => {
+            let leaf = leaves.next()?;
             let v = cx.new(|cx| {
                 let mut view = TerminalView::from_terminal(
                     cx,
-                    terminal,
-                    cwd.clone(),
-                    sid,
-                    launch.as_deref(),
-                    label.as_deref(),
+                    leaf.terminal,
+                    leaf.cwd,
+                    leaf.sid,
+                    leaf.launch.as_deref(),
+                    leaf.label.as_deref(),
                 );
-                // 自定义名跟着同一条 Leaf 存取，reattach 后灌回来，否则重开就丢。
-                view.set_custom_title(custom_title.clone());
+                view.set_custom_title(leaf.custom_title);
                 view
             });
             tabs.push(v.clone());
@@ -807,11 +824,10 @@ fn rebuild_pane(
         PaneState::Split { axis, children } => {
             let mut kept: Vec<Pane> = children
                 .iter()
-                .filter_map(|c| rebuild_pane(c, tabs, daemon_ok, cx))
+                .filter_map(|c| rebuild_pane_ready(c, leaves, tabs, cx))
                 .collect();
             match kept.len() {
                 0 => None,
-                // 只剩一个孩子：解包成它本身，不留单孩子 Split。
                 1 => Some(kept.remove(0)),
                 _ => Some(Pane::Split {
                     axis: (*axis).into(),
@@ -821,6 +837,39 @@ fn rebuild_pane(
             }
         }
     }
+}
+
+/// 把存档里的会话列表规范成 `Vec<SessionState>`（兼容旧 layout / tabs 字段）。
+fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
+    if !s.sessions.is_empty() {
+        return (s.sessions.clone(), s.active_session);
+    }
+    if let Some(ps) = &s.layout {
+        return (
+            vec![SessionState {
+                layout: ps.clone(),
+                active: s.active,
+                custom_title: None,
+            }],
+            0,
+        );
+    }
+    let sessions: Vec<SessionState> = s
+        .tabs
+        .iter()
+        .map(|cwd| SessionState {
+            layout: PaneState::Leaf {
+                cwd: cwd.clone(),
+                id: None,
+                custom_title: None,
+                launch_label: None,
+                launch_cmd: None,
+            },
+            active: 0,
+            custom_title: None,
+        })
+        .collect();
+    (sessions, s.active)
 }
 
 /// 收集布局树所有叶子终端的 EntityId，顺序 = 深度优先遍历序（= 存档 active 基准）。
@@ -1109,110 +1158,19 @@ struct Workspace {
 
 impl Workspace {
     fn new(cx: &mut Context<Self>) -> Self {
-        // 优先按存档的会话列表重建；旧存档（单树 / cwd 列表）迁移，无存档则默认单会话。
+        // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
+        // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let saved = load_ws_state();
         let sidebar_w = saved.as_ref().and_then(|s| s.sidebar_w).unwrap_or(230.);
         let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
 
-        let mut sessions: Vec<Session> = Vec::new();
-        let mut restore_orphans: Vec<SessionState> = Vec::new();
-        let mut active_session = 0;
-        if let Some(s) = saved.as_ref() {
-            // 守护不可达标记：第一个会话探明后，其余全部短路（见 rebuild_pane）。
-            let mut daemon_ok = true;
-            if !s.sessions.is_empty() {
-                // 单个会话恢复失败（守护挂了/超时）不 panic，但要进 orphans 以免
-                // 随后 save_state 把存档写成空、会话永久蒸发（硬重启守护后冷启动常见）。
-                for ss in &s.sessions {
-                    let mut leaves = Vec::new();
-                    let Some(layout) = rebuild_pane(&ss.layout, &mut leaves, &mut daemon_ok, cx)
-                    else {
-                        restore_orphans.push(ss.clone());
-                        continue;
-                    };
-                    if let Some(active) = leaves.get(ss.active).or_else(|| leaves.first()).cloned() {
-                        sessions.push(Session { layout, active, custom_title: ss.custom_title.clone() });
-                    } else {
-                        restore_orphans.push(ss.clone());
-                    }
-                }
-                active_session = s.active_session;
-            } else if let Some(ps) = &s.layout {
-                // 旧格式：单棵树 → 一个会话。
-                let mut leaves = Vec::new();
-                if let Some(layout) = rebuild_pane(ps, &mut leaves, &mut daemon_ok, cx) {
-                    if let Some(active) = leaves.get(s.active).or_else(|| leaves.first()).cloned() {
-                        sessions.push(Session { layout, active, custom_title: None });
-                    } else {
-                        restore_orphans.push(SessionState {
-                            layout: ps.clone(),
-                            active: s.active,
-                            custom_title: None,
-                        });
-                    }
-                } else {
-                    restore_orphans.push(SessionState {
-                        layout: ps.clone(),
-                        active: s.active,
-                        custom_title: None,
-                    });
-                }
-            } else {
-                // 更旧格式：cwd 列表 → 每个 cwd 一个独立会话。失败同样只跳过。
-                for cwd in s.tabs.clone() {
-                    if !daemon_ok {
-                        // 剩余 cwd 一律 orphan，等下次启动重试。
-                        restore_orphans.push(SessionState {
-                            layout: PaneState::Leaf {
-                                cwd: cwd.clone(),
-                                id: None,
-                                custom_title: None,
-                                launch_label: None,
-                                launch_cmd: None,
-                            },
-                            active: 0,
-                            custom_title: None,
-                        });
-                        continue;
-                    }
-                    let sid = new_sid();
-                    let terminal =
-                        match terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None) {
-                            Ok(t) => t,
-                            Err(e) => {
-                                if e.to_string().contains("smeltd 未就绪") {
-                                    daemon_ok = false;
-                                }
-                                restore_orphans.push(SessionState {
-                                    layout: PaneState::Leaf {
-                                        cwd: cwd.clone(),
-                                        id: Some(sid),
-                                        custom_title: None,
-                                        launch_label: None,
-                                        launch_cmd: None,
-                                    },
-                                    active: 0,
-                                    custom_title: None,
-                                });
-                                continue;
-                            }
-                        };
-                    let v = cx.new(|cx| {
-                        TerminalView::from_terminal(cx, terminal, cwd, sid, None, None)
-                    });
-                    sessions.push(Session::single(v));
-                }
-                active_session = s.active;
-            }
-            if !restore_orphans.is_empty() {
-                eprintln!(
-                    "[workspace] {} 个会话未能恢复（守护可能未就绪），已保留在存档中，下次启动会重试",
-                    restore_orphans.len()
-                );
-            }
-        }
-        // 默认零会话：由用户自行「+ / 打开项目」创建，不再兜底建默认终端。
-        active_session = active_session.min(sessions.len().saturating_sub(1));
+        let (pending_sessions, active_session) = saved
+            .as_ref()
+            .map(normalize_saved_sessions)
+            .unwrap_or_default();
+        // 恢复完成前先放进 orphans：save_state 会合并 orphans，避免空 sessions 窗口期抹盘。
+        let restore_orphans = pending_sessions.clone();
+        let sessions: Vec<Session> = Vec::new();
 
         // 订阅侧栏 resize：拖动完 emit Resized，写回存档以持久化宽度。
         let root_resize = cx.new(|_| ResizableState::default());
@@ -1340,15 +1298,124 @@ impl Workspace {
             restore_orphans,
             focus_handle: cx.focus_handle(),
         };
-        // 立即写盘：把本次启动生成/沿用的会话 id 落到存档。否则首启（或旧存档迁移）
-        // 生成的新 id 只在内存里，若用户不做任何布局操作就退出，重开会因无 id 而
-        // 新开 shell，守护里旧会话成孤儿 —— reattach 全靠这一步。
-        // 恢复失败的会话走 restore_orphans 一并写回，绝不会把存档抹成空。
+        // orphans 已挂上全部待恢复会话 → 写盘不会抹掉存档。
         ws.save_state(cx);
         updater::cleanup_stale_backup();
         ws.check_for_update(true, cx);
-        ws.check_daemon_outdated(cx);
+        // 有待恢复会话：ensure+reattach 在 restore 线程串行做完后再 check_daemon_outdated，
+        // 避免与 ensure handoff 三线并行踩踏。无会话则直接查守护状态。
+        if !pending_sessions.is_empty() {
+            eprintln!(
+                "[workspace] 后台恢复 {} 个会话（不堵 UI）…",
+                pending_sessions.len()
+            );
+            ws.schedule_session_restore(pending_sessions, active_session, cx);
+        } else {
+            ws.check_daemon_outdated(cx);
+        }
         ws
+    }
+
+    /// 冷启动：专用 OS 线程里 **先 ensure managed 守护，再 reattach 全部会话**。
+    /// 完成后才 `check_daemon_outdated`（不与 restore 并行 upgrade）。
+    fn schedule_session_restore(
+        &mut self,
+        pending: Vec<SessionState>,
+        active_session: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let (tx, rx) = smol::channel::bounded(1);
+        std::thread::Builder::new()
+            .name("smelt-restore-sessions".into())
+            .spawn(move || {
+                // 1) 完整 ensure（可能 handoff）→ 2) 再 reattach。禁止与 UI 侧并行 upgrade。
+                let _ = terminal::ensure_managed_daemon_current();
+                terminal::ensure_daemon_running();
+                let mut daemon_ok = true;
+                let mut outcomes: Vec<(SessionState, Result<Vec<SpawnedLeaf>, String>)> =
+                    Vec::with_capacity(pending.len());
+                for ss in pending {
+                    if !daemon_ok {
+                        outcomes.push((
+                            ss,
+                            Err("smeltd 未就绪（先前会话已失败）".into()),
+                        ));
+                        continue;
+                    }
+                    match spawn_layout_leaves(&ss.layout) {
+                        Ok(leaves) => outcomes.push((ss, Ok(leaves))),
+                        Err(e) => {
+                            if e.contains("smeltd 未就绪") {
+                                daemon_ok = false;
+                            }
+                            outcomes.push((ss, Err(e)));
+                        }
+                    }
+                }
+                let _ = tx.send_blocking(outcomes);
+            })
+            .expect("spawn smelt-restore-sessions 线程");
+
+        cx.spawn(async move |this, cx| {
+            let outcomes = match rx.recv().await {
+                Ok(o) => o,
+                Err(_) => {
+                    eprintln!("[workspace] 会话恢复通道断开");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let mut failed: Vec<SessionState> = Vec::new();
+                let mut restored = 0usize;
+                for (ss, result) in outcomes {
+                    match result {
+                        Ok(leaves) => {
+                            let mut leaf_iter = leaves.into_iter();
+                            let mut tabs = Vec::new();
+                            let Some(layout) =
+                                rebuild_pane_ready(&ss.layout, &mut leaf_iter, &mut tabs, cx)
+                            else {
+                                failed.push(ss);
+                                continue;
+                            };
+                            if let Some(active) =
+                                tabs.get(ss.active).or_else(|| tabs.first()).cloned()
+                            {
+                                this.sessions.push(Session {
+                                    layout,
+                                    active,
+                                    custom_title: ss.custom_title,
+                                });
+                                restored += 1;
+                            } else {
+                                failed.push(ss);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[workspace] 会话恢复失败，保留 orphan：{e}");
+                            failed.push(ss);
+                        }
+                    }
+                }
+                this.restore_orphans = failed;
+                this.active_session = active_session.min(this.sessions.len().saturating_sub(1));
+                this.save_state(cx);
+                if !this.restore_orphans.is_empty() {
+                    eprintln!(
+                        "[workspace] {} 个会话未能恢复，已保留在存档中，下次启动会重试",
+                        this.restore_orphans.len()
+                    );
+                }
+                eprintln!(
+                    "[workspace] 后台恢复完成：成功 {restored}，失败 {}",
+                    this.restore_orphans.len()
+                );
+                // restore 完成后再查/升级守护，避免与 reattach 并行 handoff
+                this.check_daemon_outdated(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 后台刷新所有会话 cwd 的 git 信息（分支 + 改动数）到缓存，进总览时调用。
@@ -2215,7 +2282,8 @@ impl Workspace {
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
     fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            // 版本落后判定和运行信息一次问完：两者都要连守护，分两趟等于白跑一次握手。
+            // 只探测状态，不再在此 ensure/handoff（冷启动 ensure 由 restore 线程串行做完）。
+            // 仍落后则无缝升级到磁盘最新 smeltd。
             let (outdated, info) = cx
                 .background_executor()
                 .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
@@ -2223,8 +2291,6 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                // 落后就自动无缝升级——「随版本更新且不中断」：exec 交接保留所有会话；
-                // 正在跑的守护太旧不支持时，结果提示会引导到设置页手动重启。
                 if outdated {
                     this.upgrade_daemon_seamless(cx);
                 }
@@ -2270,7 +2336,9 @@ impl Workspace {
                 this.daemon_outdated = Some(outdated);
                 this.daemon_upgrade_msg = Some(match outcome {
                     terminal::UpgradeOutcome::Upgraded => {
-                        this.reconnect_all_terminals(cx);
+                        // 交接后守护侧 jolt 要等客户端 resize；略延迟再 reconnect，
+                        // 避免刚 exec 完就 attach 撞上空 Term + jolt 还没完成。
+                        this.schedule_reconnect_all_terminals(cx);
                         "已无缝升级，所有会话保持运行。".to_string()
                     }
                     terminal::UpgradeOutcome::Unsupported => {
@@ -2284,11 +2352,24 @@ impl Workspace {
                         // 发生、旧连接已经随之断开，只是我们没能在轮询窗口内确认新
                         // 进程的 mtime 追平——按"可能已断"保守重连，好过让用户以为
                         // 终端只是卡了一下、实际连接早就死了却不知道要重开。
-                        this.reconnect_all_terminals(cx);
+                        this.schedule_reconnect_all_terminals(cx);
                         "升级结果未确认（可能已生效但检测超时），已尝试重连各终端；如仍无响应可重试或改用重启。".to_string()
                     }
                 });
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// upgrade 完成后延迟 reattach：给守护 handoff 泵线程 / jolt 一点时间。
+    fn schedule_reconnect_all_terminals(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.reconnect_all_terminals(cx);
             });
         })
         .detach();
@@ -3021,7 +3102,9 @@ impl Workspace {
                             if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } =
                                 &this.update_status
                             {
-                                let _ = updater::finalize_pending_update(staged_app);
+                                // 与设置页「立即重启更新」相同：先 handoff 守护再换包。
+                                let _ =
+                                    crate::terminal::install_app_preserving_sessions(staged_app);
                             }
                             cx.quit();
                         },

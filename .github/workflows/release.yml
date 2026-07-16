@@ -29,6 +29,7 @@ jobs:
             Makefile \
             scripts/package-mac.sh \
             scripts/make-dmg-bg.py \
+            scripts/dmg-settings.py \
             assets/AppIcon.icns \
             Cargo.toml; do
             if [[ ! -f "$f" ]]; then
@@ -93,8 +94,9 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" $EXISTING
 
       # 一步到位：cargo build --release + 组装 .app + 打 dmg。
-      # 注：headless CI 下 dmg 的 AppleScript 定制窗口会被脚本跳过（|| echo 兜住），
-      # dmg 仍正常产出，只是没有定制背景/图标摆位——属预期，别当失败。
+      # dmg 的定制窗口（背景/图标摆位）由 dmgbuild 直接写 .DS_Store 完成，不依赖
+      # Finder，headless runner 上和本地打出来的完全一致——定制没生效就是 bug，
+      # 别再当成 CI 的预期行为。工具链由 package-mac.sh 自建 venv 装，无需在此预装。
       - name: Build & package
         env:
           SMELT_CODESIGN_IDENTITY: "Smelt Local Signing"

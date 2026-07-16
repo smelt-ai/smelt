@@ -9,7 +9,8 @@
 //! 一边 `parser.advance` 进这份网格。attach 时**不**依赖可能被环形缓冲腰斩的原始
 //! 字节重放，而是把当前网格序列化成一段自洽的 ANSI「整屏快照」发给客户端——空 Term
 //! 解析后即当前画面，避免长 detach 后 Ctrl+C 大重绘错位（见 docs/roadmap.md）。
-//! 仍保留一小段原始字节缓冲，仅供无缝 upgrade 交接后尽量重建 Term 状态。
+//! 仍保留一小段原始字节环形缓冲，**只**给尚未 attach 的瞬间攒实时输出；
+//! **绝不**用它在 upgrade 后重建 Term（环形缓冲会在 CSI 中间腰斩，feed 必花屏）。
 //!
 //! 协议（Unix socket ~/.smelt/smeltd.sock）——连接后客户端先发一行 JSON：
 //!   {"op":"open","id":"..","cwd":"..","cols":120,"rows":30}  → 进入流模式（唯一 client，
@@ -21,6 +22,9 @@
 //!   {"op":"shutdown"}                                        → 回 {"ok":true} 后进程退出（杀掉所有会话！）
 //!   {"op":"upgrade"}                                         → 回 {"ok":true} 后 exec 磁盘上的新二进制，
 //!                                                              PTY fd 原地交接，**所有会话不中断**（见下）
+//!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，但 exec 指定路径（装 DMG 时先
+//!                                                              handoff 到暂存包，再替换 .app，避免
+//!                                                              整包覆盖把旧守护 SIGKILL、会话全灭）
 //!   {"op":"remote_start","bind":"..","port":0,"write":false}  → 回 {"ok":true,"token":"..","addr":"..","write":bool}，
 //!                                                              见下「内嵌远程网关」（bind/port/write 都可省，
 //!                                                              默认回环随机口 + 只读）
@@ -43,7 +47,8 @@
 //!                                                              （SIGWINCH，供手机端按视口重排 TUI）
 //!
 //! 流模式：
-//!   守护 → 客户端：先发 JSON 尺寸行（含 replay_len=快照字节数）→ ANSI 网格快照
+//!   守护 → 客户端：先发 JSON 尺寸行（含 replay_len=快照字节数）→ Codux 风格 keyframe
+//!                   ANSI（模式前缀 + 按行 CUP + 绝对 SGR，见 snapshot_ansi）
 //!                   → 再实时转发 PTY 输出
 //!   客户端 → 守护：帧 [type:u8][len:u32 BE][payload]
 //!     type 0 = 键盘输入字节；type 1 = resize
@@ -68,13 +73,13 @@
 //! 1. 短暂持一下 sessions 锁，只做「克隆一份 Arc 列表」这一步就放开——不长期占着，
 //!    避免这期间 open/list/kill/version 全部卡死；随后拿 SPAWN_GATE 独占锁挡住新
 //!    shell 的 fork（防止 fork 意外继承正被清 CLOEXEC 的 fd，见 SPAWN_GATE 注释）；
-//! 2. 逐会话拿 ctl/out 锁做快照（master fd / shell pid / 尺寸 / 重放缓冲）——out 锁
-//!    在 handle_open 里配了写超时（CLIENT_WRITE_TIMEOUT），泵线程不会无限期攥着；
-//! 3. 给 master fd 和监听 socket fd 清掉 CLOEXEC，快照写入交接文件（fd 号 + 元数据，
-//!    0600 权限——里面是全部会话的回放缓冲明文）；
+//! 2. 逐会话拿 ctl/out 锁做快照（master fd / shell pid / 尺寸 / **Term 可视区 keyframe**）
+//!    ——out 锁在 handle_open 里配了写超时（CLIENT_WRITE_TIMEOUT），泵线程不会无限期攥着；
+//! 3. 给 master fd 和监听 socket fd 清掉 CLOEXEC，快照写入交接文件（fd 号 + grid ANSI，
+//!    0600）；**画面恢复只认 grid**，与 shell/TUI/agent 无关，同一条路径；
 //! 4. 回 {"ok":true} 后 `exec()` 磁盘上的 smeltd（同路径新内容），带 SMELTD_HANDOFF 环境变量；
-//! 5. 新进程启动时发现交接文件：from_raw_fd 认领监听 socket 和各会话的 master fd，
-//!    重建会话表并重启泵线程（jolt=true，GUI 重连后首个 resize 触发 SIGWINCH 全屏重绘）。
+//! 5. 新进程：认领 fd → 空 Term → **只 feed grid keyframe** → 开泵（jolt=true）。
+//!    环形 `buf` 若写在交接文件里也**不** feed（历史字段，兼容旧 handoff 文件）。
 //! exec 失败则回滚（恢复 CLOEXEC、删交接文件、继续服务，释放 SPAWN_GATE）。客户端连接
 //! 是 CLOEXEC 的，随 exec 断开，GUI 按会话 id 重连即恢复——跟 GUI 自己重启走的是同一条
 //! reattach 路。shell 子进程的父进程关系不受 exec 影响（同 PID），收尸的 waitpid 照常
@@ -158,10 +163,6 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-
-/// 每会话原始字节缓冲上限（**仅**供 upgrade 交接后尽量重建 Term，不再作为 attach 主路径）。
-/// 主路径是常驻 Term 的网格快照。容量小于旧 2MB，降低交接文件体积。
-const BUF_CAP: usize = 256 * 1024;
 
 /// 常驻 Term 的 scrollback 行数（状态机 history-limit）。
 const TERM_HISTORY: usize = 10_000;
@@ -307,9 +308,10 @@ fn broadcast_state(subscribers: &Subscribers, state: &SessionState) {
 /// 常驻 Term 的事件监听：接住 alacritty 解析出的 `Event::Title`/`Event::Bell`，
 /// 写进共享的 `SessionState`，顺带广播给所有 `subscribe` 连接。**只在这里猜
 /// phase**（OSC 0/2 标题 spinner，最低可信度信源）——`state` op 是协议事实，
-/// 之后接进来的写入应该覆盖这里猜出来的值；这条 listener 因此保守地只在检测到
-/// spinner 时置 `Thinking`，标题不是 spinner 时**不**反过来猜别的 phase（缺乏
-/// 证据不代表 idle，瞎猜比不猜更容易把 hook 刚写好的准确状态带偏）。
+/// 可信度最高。spinner 只允许在 `Idle`/`Thinking` 上升为 `Thinking`；绝不能盖掉
+/// hook 已写好的 `AwaitingApproval`/`WaitingForUser`/`ExecutingTool`/`Dead`（否则
+/// 远程 action 门闩会误拒、操作台按钮错态）。标题不是 spinner 时**不**反过来猜
+/// 别的 phase（缺乏证据不代表 idle）。
 #[derive(Clone)]
 struct StateListener {
     state: Arc<Mutex<SessionState>>,
@@ -322,7 +324,9 @@ impl EventListener for StateListener {
             let Ok(mut st) = self.state.lock() else { return };
             match event {
                 Event::Title(t) => {
-                    if title_spinner::title_starts_with_spinner(t.trim_start()) {
+                    if title_spinner::title_starts_with_spinner(t.trim_start())
+                        && matches!(st.phase, Phase::Idle | Phase::Thinking)
+                    {
                         st.phase = Phase::Thinking;
                         st.phase_since = now_unix();
                     }
@@ -400,14 +404,12 @@ fn dup_file(fd: RawFd) -> anyhow::Result<std::fs::File> {
     Ok(unsafe { std::fs::File::from_raw_fd(d) })
 }
 
-/// 会话输出端：原始字节旁路缓冲 + 当前 attach 的客户端。
+/// 会话输出端：当前 attach 的客户端 + watch 旁观者。
 /// 「快照→接管」与实时转发共用这把锁，严格串行。
+/// 画面恢复只靠常驻 Term 的 keyframe，**不再**维护环形字节缓冲。
 struct Out {
-    /// upgrade 交接用；attach 主路径已改走网格快照。
-    buf: Vec<u8>,
     client: Option<UnixStream>,
     /// `watch` 连接：只读旁观，不参与 client 的顶替逻辑，可多个并存。
-    /// 复用 `out` 这把已有的锁（不新增锁），锁序与顶替逻辑因此天然保持一致。
     watchers: Vec<UnixStream>,
 }
 
@@ -472,7 +474,10 @@ type RemoteState = Arc<Mutex<Option<RemoteGateway>>>;
 /// 幂等：已经开着直接回现有 token/addr/write，不重启、不换 token——包括 `write`
 /// 参数：想改写权限得先 `remote_stop` 再 `remote_start`，不支持热切换（跟其余
 /// 参数如 bind/port 一样，改配置就是重开一次，这个项目里没有"热更新"这个概念）。
-/// bind 非法 / 端口绑不上都走 Err，调用方原样透传给客户端。
+/// bind 非法 / 端口绑不上 / 服务线程起不来都走 Err，调用方原样透传给客户端。
+///
+/// **先等 serve 就绪再写 `RemoteState`**：以前 spawn 后立刻标 running，子线程
+/// `Runtime::new`/`from_std` 失败时状态假活，幂等路径永远回死 token。
 fn start_remote_gateway(
     state: &RemoteState,
     bind: &str,
@@ -492,13 +497,17 @@ fn start_remote_gateway(
 
     let token = uuid::Uuid::new_v4().simple().to_string();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // 子线程认领 listener / 建 runtime 成功才算 ready；失败则本函数 Err 且不写 state。
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
     let token_for_thread = token.clone();
     thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("远程网关起不了 tokio runtime：{e}");
+                let msg = format!("远程网关起不了 tokio runtime：{e}");
+                eprintln!("{msg}");
+                let _ = ready_tx.send(Err(msg));
                 return;
             }
         };
@@ -506,10 +515,14 @@ fn start_remote_gateway(
             let listener = match tokio::net::TcpListener::from_std(std_listener) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("远程网关认领监听 fd 失败：{e}");
+                    let msg = format!("远程网关认领监听 fd 失败：{e}");
+                    eprintln!("{msg}");
+                    let _ = ready_tx.send(Err(msg));
                     return;
                 }
             };
+            // listener 已就绪，即将 serve——此时可以对外报 running。
+            let _ = ready_tx.send(Ok(()));
             let app = remote_gateway::build_router(token_for_thread, write);
             let serve = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
@@ -521,8 +534,19 @@ fn start_remote_gateway(
         });
     });
 
-    *guard = Some(RemoteGateway { token: token.clone(), addr, write, shutdown_tx });
-    Ok((token, addr, write))
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {
+            *guard = Some(RemoteGateway {
+                token: token.clone(),
+                addr,
+                write,
+                shutdown_tx,
+            });
+            Ok((token, addr, write))
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("远程网关启动超时（5s）".into()),
+    }
 }
 
 fn stop_remote_gateway(state: &RemoteState) {
@@ -534,12 +558,35 @@ fn stop_remote_gateway(state: &RemoteState) {
 /// Cloudflare Tunnel（Phase 3，见 docs/remote-ops-roadmap.md）：spawn `cloudflared`
 /// 子进程把本机远程网关暴露到公网，不是 P2P，是走 Cloudflare 中转——见 roadmap 里
 /// 放弃自建信令+WebRTC 的理由。持有子进程句柄，`tunnel_stop` 时负责杀干净。
-struct Tunnel {
-    child: std::process::Child,
-    url: String,
+///
+/// `Starting` 占位：挡住并发 `tunnel_start` 在「已确认 None → 等 cloudflared 30s」
+/// 窗口里各起一个子进程、后写覆盖导致前者泄漏的竞态。
+enum TunnelSlot {
+    Starting,
+    Up {
+        child: std::process::Child,
+        url: String,
+    },
 }
 
-type TunnelState = Arc<Mutex<Option<Tunnel>>>;
+type TunnelState = Arc<Mutex<Option<TunnelSlot>>>;
+
+/// 进程退出 / upgrade exec 前清理远程网关与 tunnel。菜单栏 quit 与 accept 线程
+/// 不同线程，靠这份 OnceLock 共享 Arc（main 启动时 register）。
+static LIFECYCLE: std::sync::OnceLock<(RemoteState, TunnelState)> = std::sync::OnceLock::new();
+
+fn register_lifecycle(remote: RemoteState, tunnel: TunnelState) {
+    let _ = LIFECYCLE.set((remote, tunnel));
+}
+
+/// 杀 cloudflared、关内嵌网关。exit/exec 前必须调——否则子进程孤儿化或
+/// exec 后 PID 仍在但 `TunnelState` 已丢句柄。
+fn cleanup_sidecar_services() {
+    if let Some((remote, tunnel)) = LIFECYCLE.get() {
+        stop_tunnel(tunnel);
+        stop_remote_gateway(remote);
+    }
+}
 
 /// 从 cloudflared 的一行日志里认出公网 URL（形如
 /// `https://xxx-xxx-xxx.trycloudflare.com`，混在 box-drawing 字符和时间戳里）。
@@ -575,10 +622,12 @@ fn spawn_tunnel_output_scanner(
         for line in buf.lines().map_while(Result::ok) {
             if let Some(url) = extract_tunnel_url(&line) {
                 let _ = tx.send(TunnelEvent::Url(url.clone()));
-                // 握手阶段这里还是 None（Tunnel 还没存进去），交给下面 start_tunnel
-                // 里的 rx 去处理首次握手；这行只对"握手完成之后又冒出新 URL"生效。
-                if let Some(t) = tunnel_state.lock().unwrap().as_mut() {
-                    t.url = url;
+                // 握手阶段是 Starting/None，交给 start_tunnel 的 rx 处理首次握手；
+                // 这行只对「握手完成之后又冒出新 URL」更新已上线的槽位。
+                if let Some(TunnelSlot::Up { url: slot_url, .. }) =
+                    tunnel_state.lock().unwrap().as_mut()
+                {
+                    *slot_url = url;
                 }
             }
             if line.contains(TUNNEL_CONNECTED_MARKER) {
@@ -676,91 +725,134 @@ fn start_tunnel(
     write: bool,
 ) -> Result<(String, bool), String> {
     {
-        let guard = tunnel_state.lock().unwrap();
-        if let Some(t) = guard.as_ref() {
-            // 幂等分支：隧道已开就不重启 cloudflared。write 以**网关现状**为准
-            // （隧道只是转发层）；想改写权限必须先 tunnel_stop + remote_stop 再开。
-            let effective_write = remote_state.lock().unwrap().as_ref().map(|g| g.write).unwrap_or(write);
-            return Ok((t.url.clone(), effective_write));
-        }
-    } // 提前放锁：下面 ensure 可能涉及绑端口，不需要一直攥着这把锁
-
-    let (_, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
-
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("cloudflared")
-        .arg("tunnel")
-        .arg("--protocol")
-        .arg("http2")
-        .arg("--url")
-        .arg(format!("http://{addr}"))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "没找到 cloudflared，先装一下：brew install cloudflared".to_string()
-            } else {
-                format!("启动 cloudflared 失败：{e}")
+        let mut guard = tunnel_state.lock().unwrap();
+        match guard.as_ref() {
+            Some(TunnelSlot::Up { url, .. }) => {
+                // 幂等：已开就不重启。write 以网关现状为准；想改权限得先 stop 再开。
+                let effective_write =
+                    remote_state.lock().unwrap().as_ref().map(|g| g.write).unwrap_or(write);
+                return Ok((url.clone(), effective_write));
             }
-        })?;
-
-    let (tx, rx) = std::sync::mpsc::channel::<TunnelEvent>();
-    if let Some(out) = child.stdout.take() {
-        spawn_tunnel_output_scanner(out, tx.clone(), Arc::clone(tunnel_state));
-    }
-    if let Some(err) = child.stderr.take() {
-        spawn_tunnel_output_scanner(err, tx, Arc::clone(tunnel_state));
-    }
-
-    // 30s 内必须同时等到 URL 和"已连接"确认，缺一都当失败处理，不让调用方无限期卡着。
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut url: Option<String> = None;
-    let mut connected = false;
-    let url = loop {
-        if connected {
-            if let Some(u) = url {
-                break u;
+            Some(TunnelSlot::Starting) => {
+                return Err("隧道正在启动，请稍后再试".into());
+            }
+            None => {
+                // 占位：挡住并发 start 在放锁后各起一个 cloudflared 的竞态。
+                *guard = Some(TunnelSlot::Starting);
             }
         }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本".to_string());
+    }
+
+    let start_result = (|| {
+        let (_, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
+
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("cloudflared")
+            .arg("tunnel")
+            .arg("--protocol")
+            .arg("http2")
+            .arg("--url")
+            .arg(format!("http://{addr}"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "没找到 cloudflared，先装一下：brew install cloudflared".to_string()
+                } else {
+                    format!("启动 cloudflared 失败：{e}")
+                }
+            })?;
+
+        let (tx, rx) = std::sync::mpsc::channel::<TunnelEvent>();
+        if let Some(out) = child.stdout.take() {
+            spawn_tunnel_output_scanner(out, tx.clone(), Arc::clone(tunnel_state));
         }
-        match rx.recv_timeout(remaining) {
-            Ok(TunnelEvent::Url(u)) => url = Some(u),
-            Ok(TunnelEvent::Connected) => connected = true,
-            Err(_) => {
+        if let Some(err) = child.stderr.take() {
+            spawn_tunnel_output_scanner(err, tx, Arc::clone(tunnel_state));
+        }
+
+        // 30s 内必须同时等到 URL 和"已连接"确认，缺一都当失败。
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut url: Option<String> = None;
+        let mut connected = false;
+        let url = loop {
+            if connected {
+                if let Some(u) = url {
+                    break u;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本".to_string());
+                return Err(
+                    "等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本".to_string(),
+                );
             }
-        }
-    };
+            match rx.recv_timeout(remaining) {
+                Ok(TunnelEvent::Url(u)) => url = Some(u),
+                Ok(TunnelEvent::Connected) => connected = true,
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(
+                        "等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本"
+                            .to_string(),
+                    );
+                }
+            }
+        };
 
-    *tunnel_state.lock().unwrap() = Some(Tunnel { child, url: url.clone() });
-    Ok((url, effective_write))
+        Ok((child, url, effective_write))
+    })();
+
+    match start_result {
+        Ok((child, url, effective_write)) => {
+            *tunnel_state.lock().unwrap() = Some(TunnelSlot::Up {
+                child,
+                url: url.clone(),
+            });
+            Ok((url, effective_write))
+        }
+        Err(e) => {
+            // 清掉 Starting 占位，允许下次重试；若中途被 stop_tunnel 清过则保持 None。
+            let mut guard = tunnel_state.lock().unwrap();
+            if matches!(guard.as_ref(), Some(TunnelSlot::Starting)) {
+                *guard = None;
+            }
+            Err(e)
+        }
+    }
 }
 
 fn stop_tunnel(state: &TunnelState) {
-    if let Some(mut t) = state.lock().unwrap().take() {
-        let _ = t.child.kill();
-        let _ = t.child.wait(); // 收尸，避免僵尸进程
+    match state.lock().unwrap().take() {
+        Some(TunnelSlot::Up { mut child, .. }) => {
+            let _ = child.kill();
+            let _ = child.wait(); // 收尸，避免僵尸进程
+        }
+        Some(TunnelSlot::Starting) | None => {
+            // Starting：start_tunnel 失败路径会自己清；这里 take 掉占位可打断并发等待方的假设
+        }
     }
 }
 
-/// 顺带自愈：cloudflared 意外退出（网络问题/被 Cloudflare 断开）时，`try_wait` 能
-/// 发现进程已经死了，这里直接清状态，不让 GUI 一直显示一个其实已经失效的 URL。
+/// 顺带自愈：cloudflared 意外退出时 `try_wait` 清状态，不让 GUI 一直显示死链。
 fn tunnel_status(state: &TunnelState) -> Option<String> {
     let mut guard = state.lock().unwrap();
-    let dead = matches!(guard.as_mut().map(|t| t.child.try_wait()), Some(Ok(Some(_))));
-    if dead {
-        *guard = None;
-        return None;
+    match guard.as_mut() {
+        Some(TunnelSlot::Up { child, url }) => {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                *guard = None;
+                None
+            } else {
+                Some(url.clone())
+            }
+        }
+        Some(TunnelSlot::Starting) => None, // 还没 URL，对外等同未运行
+        None => None,
     }
-    guard.as_ref().map(|t| t.url.clone())
 }
 
 /// macOS 顶部状态栏常驻图标（accessory 模式：**没有 Dock 图标、不进 ⌘Tab**，只在菜单栏
@@ -800,8 +892,10 @@ mod menubar {
     }
 
     /// 点「退出 smelt」：整个守护进程退出。注意这会关掉所有 PTY——所有会话（含正在
-    /// 跑的 agent）随之结束。后果已写进菜单项文案里。
+    /// 跑的 agent）随之结束。后果已写进菜单项文案里。先清 tunnel/远程网关，避免
+    /// cloudflared 孤儿化。
     extern "C" fn on_quit(_this: &Object, _cmd: Sel, _sender: *mut Object) {
+        super::cleanup_sidecar_services();
         std::process::exit(0);
     }
 
@@ -977,6 +1071,8 @@ fn main() {
     // 见 RemoteGateway / Tunnel 定义处注释。
     let remote_state: RemoteState = Arc::new(Mutex::new(None));
     let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+    // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
+    register_lifecycle(Arc::clone(&remote_state), Arc::clone(&tunnel_state));
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
@@ -1077,36 +1173,61 @@ fn resume_handoff(path: &str, subscribers: &Subscribers) -> Option<(UnixListener
             });
             continue;
         };
-        let buf = item["buf"].as_str().and_then(hex_decode).unwrap_or_default();
         let cols = item["cols"].as_u64().unwrap_or(80) as u16;
         let rows = item["rows"].as_u64().unwrap_or(24) as u16;
         let cwd = item["cwd"].as_str().map(String::from);
-        // 状态通道不参与交接：新进程里全新一份 SessionState，hook/OSC 很快会
-        // 重新填上（跟 out.client/watchers 一样，网络层面的东西本就不该假装还在）。
+        let launch = item["launch"].as_str().map(String::from);
+        let alt_flag = item["alt_screen"].as_bool().unwrap_or(false);
+        // 旧 handoff 文件可能仍带 "buf"（环形原始字节）——**忽略，永不 feed**。
+        // 状态通道不参与交接：新进程里全新一份 SessionState（launch 会写回，便于
+        // snapshot 识别 agent）。hook/OSC 很快会补 phase/title。
         let state = Arc::new(Mutex::new(SessionState {
             id: id.to_string(),
             cwd: cwd.clone(),
+            launch: launch.clone(),
             ..Default::default()
         }));
-        // 尽量用交接带来的字节重建 Term（可能腰斩，仅 best-effort）；jolt 会让 TUI 再刷。
-        let listener = StateListener { state: Arc::clone(&state), subscribers: Arc::clone(subscribers) };
+        // —— 画面恢复：全会话同一条路径，不按 shell/TUI/agent 分支 ——
+        //
+        // 唯一信源：upgrade 时从常驻 Term 导出的 viewport keyframe（`grid`）。
+        // 环形字节可能在 CSI 中间腰斩，**永远不 feed**（按类型特判 ring = 拆东墙补西墙）。
+        //
+        // 无 grid（极老交接文件）：若交接前在备用屏，只注 1049h 模式位；其余空白 + jolt。
+        let listener =
+            StateListener { state: Arc::clone(&state), subscribers: Arc::clone(subscribers) };
         let mut term = new_daemon_term(rows, cols, listener);
-        if !buf.is_empty() {
-            feed_term(&mut term, &buf);
+        let grid = item["grid"].as_str().and_then(hex_decode).unwrap_or_default();
+        let was_alt = alt_flag || buf_looks_like_alt_screen(&grid);
+        if !grid.is_empty() {
+            feed_term(&mut term, &grid);
+            dlog(&format!(
+                "handoff: 恢复会话 id={id} rows={rows} cols={cols} alt={was_alt} launch={:?} grid_len={} (feed keyframe)",
+                launch,
+                grid.len()
+            ));
+        } else if was_alt || alt_flag {
+            feed_term(&mut term, b"\x1b[?1049h");
+            dlog(&format!(
+                "handoff: 恢复会话 id={id} rows={rows} cols={cols} alt=true launch={:?} (无 grid，仅 1049h + jolt)",
+                launch
+            ));
+        } else {
+            dlog(&format!(
+                "handoff: 恢复会话 id={id} rows={rows} cols={cols} alt=false launch={:?} (无 grid，空 Term + jolt)",
+                launch
+            ));
         }
         let sess = Arc::new(Session {
             ctl: Mutex::new(Ctl {
                 master,
                 pid,
-                // 交接后 GUI 会重连，首个 resize 抖动出 SIGWINCH 让 TUI 全屏重绘，
-                // 顺带盖掉交接窗口内可能没进缓冲/Term 的零星输出。
+                // 一律 jolt：有 grid 时对齐真 cell 尺寸；无 grid 时逼进程自绘。
                 jolt: true,
                 cols,
                 rows,
                 cwd,
             }),
             out: Mutex::new(Out {
-                buf,
                 client: None,
                 watchers: Vec::new(),
             }),
@@ -1127,7 +1248,11 @@ fn feed_term<T: EventListener>(term: &mut Term<T>, bytes: &[u8]) {
     }));
 }
 
-/// 重放缓冲的交接编码：hex 简单无依赖，BUF_CAP 上限的缓冲编成 2× 文本，一次性开销可接受。
+fn buf_looks_like_alt_screen(buf: &[u8]) -> bool {
+    buf.windows(8).any(|w| w == b"\x1b[?1049h")
+}
+
+/// keyframe / 交接 payload 的二进制字段编码（hex，无额外依赖）。
 fn hex_encode(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for byte in b {
@@ -1136,10 +1261,8 @@ fn hex_encode(b: &[u8]) -> String {
     s
 }
 
-/// 按字节而非按 `str` 下标解码——交接文件是外部数据（可能损坏/被篡改），`buf` 字段
-/// 一旦混入非 ASCII 内容，`&s[i..i+2]` 这种字符串切片会在非字符边界 panic（此函数跑
-/// 在 resume_handoff/主线程，此时上一代进程已经 exec 没了，panic 就是全会话陪葬）。
-/// 全程只做字节级 match，不触碰任何字符串切片 API，天然不可能因编码问题 panic。
+/// 按字节解码 hex——交接文件是外部数据（可能损坏/被篡改）；全程字节级 match，
+/// 不用 `&s[i..i+2]`，避免非字符边界 panic（resume 时 panic = 全会话陪葬）。
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     fn nibble(b: u8) -> Option<u8> {
         match b {
@@ -1160,7 +1283,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 mod handoff_tests {
     use super::*;
 
-    /// 重放缓冲跨交接必须逐字节还原——含 0x00/0xff/转义序列这类非文本字节。
+    /// grid keyframe 的 hex 字段必须逐字节还原。
     #[test]
     fn hex_roundtrip() {
         let data: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
@@ -1170,14 +1293,18 @@ mod handoff_tests {
         assert_eq!(hex_decode("zz"), None, "非 hex 字符应判非法");
     }
 
-    /// 交接文件被损坏/篡改后 buf 字段混入多字节 UTF-8 字符（如中文，恰好偶数字节，
-    /// 能通过 len%2 检查）：曾经按 &s[i..i+2] 字符串切片会在非字符边界 panic，
-    /// 此时上一代进程已 exec 没了，panic 即全会话陪葬。必须只判非法、绝不 panic。
+    /// 损坏的 hex 字段（多字节 UTF-8）只判非法、绝不 panic。
     #[test]
     fn hex_decode_never_panics_on_multibyte_utf8() {
         assert_eq!(hex_decode("中文"), None); // 6 字节，偶数，非 hex 字符
         assert_eq!(hex_decode("a中"), None); // 1 + 3 字节，奇偶交叉
         assert_eq!(hex_decode("ab中c"), None);
+    }
+
+    #[test]
+    fn buf_detects_alt_screen() {
+        assert!(buf_looks_like_alt_screen(b"\x1b[?1049hTUI"));
+        assert!(!buf_looks_like_alt_screen(b"plain shell"));
     }
 }
 
@@ -1250,6 +1377,38 @@ mod state_listener_tests {
         assert_eq!(st.title.as_deref(), Some("zsh %"));
     }
 
+    /// spinner 是最低可信度信源：不得盖掉 hook 已写入的等待/审批/执行态，
+    /// 否则远程 action 门闩会误判「agent 不在等你」。
+    #[test]
+    fn spinner_title_does_not_override_awaiting_approval() {
+        let state = Arc::new(Mutex::new(SessionState {
+            phase: Phase::AwaitingApproval,
+            phase_since: 1,
+            ..Default::default()
+        }));
+        let listener = StateListener { state: Arc::clone(&state), subscribers: no_subscribers() };
+        listener.send_event(Event::Title("⠋ waiting for permission".to_string()));
+
+        let st = state.lock().unwrap();
+        assert_eq!(st.phase, Phase::AwaitingApproval, "spinner 不得覆盖 AwaitingApproval");
+        assert_eq!(st.phase_since, 1, "phase_since 也不该被 spinner 刷新");
+        assert_eq!(st.title.as_deref(), Some("⠋ waiting for permission"));
+    }
+
+    #[test]
+    fn spinner_title_does_not_override_executing_tool_or_dead() {
+        for phase in [Phase::ExecutingTool, Phase::WaitingForUser, Phase::Dead] {
+            let state = Arc::new(Mutex::new(SessionState {
+                phase,
+                ..Default::default()
+            }));
+            let listener =
+                StateListener { state: Arc::clone(&state), subscribers: no_subscribers() };
+            listener.send_event(Event::Title("⠋ busy".to_string()));
+            assert_eq!(state.lock().unwrap().phase, phase, "{phase:?} 不得被 spinner 覆盖");
+        }
+    }
+
     /// Bell 只更新时间戳，不改 phase——单独响铃太不可靠，只能当辅助信号。
     #[test]
     fn bell_touches_timestamp_without_changing_phase() {
@@ -1289,18 +1448,23 @@ fn input_payload(v: &serde_json::Value) -> Option<Vec<u8>> {
     Some(s.as_bytes().to_vec())
 }
 
-/// `action` op 的 kind → PTY 字节映射。`text` 只有 `reply` 用得上。返回 `None`
-/// 表示不认识的 kind——调用方应该报错，不是当成某种默认行为。
-fn action_payload(kind: Option<&str>, text: Option<&str>) -> Option<Vec<u8>> {
+/// `action` op 的 kind → PTY 字节映射。`text` 只有 `reply` 用得上。
+/// `Err` 是给客户端看的错误文案——未知 kind / 空 reply 都走这里，不是默认行为。
+fn action_payload(kind: Option<&str>, text: Option<&str>) -> Result<Vec<u8>, &'static str> {
     match kind {
-        Some("approve") => Some(b"\r".to_vec()),
-        Some("deny") => Some(b"\x1b".to_vec()),
+        Some("approve") => Ok(b"\r".to_vec()),
+        Some("deny") => Ok(b"\x1b".to_vec()),
         Some("reply") => {
-            let mut bytes = text.unwrap_or_default().as_bytes().to_vec();
+            // 空 reply 若退化成单独 `\r` 就和 approve 一样——误点会当成批准。
+            let t = text.unwrap_or("");
+            if t.is_empty() {
+                return Err("需要非空 text");
+            }
+            let mut bytes = t.as_bytes().to_vec();
             bytes.push(b'\r');
-            Some(bytes)
+            Ok(bytes)
         }
-        _ => None,
+        _ => Err("未知 kind"),
     }
 }
 
@@ -1310,33 +1474,34 @@ mod action_tests {
 
     #[test]
     fn approve_is_bare_enter() {
-        assert_eq!(action_payload(Some("approve"), None), Some(b"\r".to_vec()));
+        assert_eq!(action_payload(Some("approve"), None), Ok(b"\r".to_vec()));
     }
 
     #[test]
     fn deny_is_bare_escape_not_arrow_navigation() {
         // 故意不测"按几次下方向键"——这条路本身就不成立（菜单选项数量不是常数，
         // 见模块注释「远程操控」一节）。Esc 不依赖菜单结构。
-        assert_eq!(action_payload(Some("deny"), None), Some(b"\x1b".to_vec()));
+        assert_eq!(action_payload(Some("deny"), None), Ok(b"\x1b".to_vec()));
     }
 
     #[test]
     fn reply_appends_enter_after_text() {
         assert_eq!(
             action_payload(Some("reply"), Some("不用了，换个方式")),
-            Some("不用了，换个方式\r".as_bytes().to_vec())
+            Ok("不用了，换个方式\r".as_bytes().to_vec())
         );
     }
 
     #[test]
-    fn reply_without_text_is_just_enter() {
-        assert_eq!(action_payload(Some("reply"), None), Some(b"\r".to_vec()));
+    fn reply_without_text_is_rejected() {
+        assert_eq!(action_payload(Some("reply"), None), Err("需要非空 text"));
+        assert_eq!(action_payload(Some("reply"), Some("")), Err("需要非空 text"));
     }
 
     #[test]
-    fn unknown_kind_returns_none() {
-        assert_eq!(action_payload(Some("do_a_barrel_roll"), None), None);
-        assert_eq!(action_payload(None, None), None);
+    fn unknown_kind_returns_err() {
+        assert_eq!(action_payload(Some("do_a_barrel_roll"), None), Err("未知 kind"));
+        assert_eq!(action_payload(None, None), Err("未知 kind"));
     }
 }
 
@@ -1389,7 +1554,7 @@ mod action_integration_tests {
         let listener = StateListener { state: Arc::clone(&state), subscribers };
         let sess = Arc::new(Session {
             ctl: Mutex::new(Ctl { master, pid, jolt: false, cols, rows, cwd: None }),
-            out: Mutex::new(Out { buf: Vec::new(), client: None, watchers: Vec::new() }),
+            out: Mutex::new(Out { client: None, watchers: Vec::new() }),
             term: Mutex::new(new_daemon_term(rows, cols, listener)),
             state,
         });
@@ -1490,7 +1655,7 @@ mod input_integration_tests {
         let listener = StateListener { state: Arc::clone(&state), subscribers };
         let sess = Arc::new(Session {
             ctl: Mutex::new(Ctl { master, pid, jolt: false, cols, rows, cwd: None }),
-            out: Mutex::new(Out { buf: Vec::new(), client: None, watchers: Vec::new() }),
+            out: Mutex::new(Out { client: None, watchers: Vec::new() }),
             term: Mutex::new(new_daemon_term(rows, cols, listener)),
             state,
         });
@@ -1622,11 +1787,15 @@ fn handle_conn(
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
         }
-        Some("upgrade") => handle_upgrade(conn, &sessions, listen_fd),
+        Some("upgrade") => handle_upgrade(conn, &v, &sessions, listen_fd),
         Some("version") => {
-            // pid/started_at/session_count 是后加的：旧 GUI 只读 version/exe_mtime，
+            // pid/started_at/session_count/exe 是后加的：旧 GUI 只读 version/exe_mtime，
             // 多出来的字段它直接忽略，协议向后兼容。
+            // `exe`：GUI 用来判断守护是否仍住在 .app 内（装 DMG 会被 SIGKILL）。
             let session_count = sessions.lock().map(|s| s.len()).unwrap_or(0);
+            let exe_path = std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
             let mut c = conn;
             let _ = writeln!(
                 c,
@@ -1634,6 +1803,7 @@ fn handle_conn(
                 serde_json::json!({
                     "version": env!("CARGO_PKG_VERSION"),
                     "exe_mtime": exe_mtime,
+                    "exe": exe_path,
                     "pid": std::process::id(),
                     "started_at": started_at(),
                     "session_count": session_count,
@@ -1644,8 +1814,9 @@ fn handle_conn(
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
             let _ = c.shutdown(Shutdown::Both);
-            // 直接退出：PTY 全归子进程持有，本进程一死子进程读端 EOF/SIGHUP，
-            // 所有会话随之终止 —— 这是「重启守护」明知故犯的代价，调用方必须先提示用户。
+            // 先收尸 cloudflared / 远程网关，再 exit——否则隧道子进程会孤儿化并继续
+            // 转发到已死端口。PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
+            cleanup_sidecar_services();
             std::process::exit(0);
         }
         Some("remote_start") => {
@@ -1754,9 +1925,12 @@ fn handle_conn(
                 return;
             }
 
-            let Some(payload) = action_payload(v["kind"].as_str(), v["text"].as_str()) else {
-                let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": "未知 kind" }));
-                return;
+            let payload = match action_payload(v["kind"].as_str(), v["text"].as_str()) {
+                Ok(p) => p,
+                Err(err) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": err }));
+                    return;
+                }
             };
 
             let write_result = {
@@ -1857,9 +2031,11 @@ fn handle_open(
 
     // 取既有会话（reattach）或新建。
     let existing = sessions.lock().unwrap().get(&id).cloned();
+    let reattach = existing.is_some();
     let sess = match existing {
         Some(s) => {
-            // reattach：下个 resize 抖动触发 SIGWINCH 重绘。
+            // reattach：等客户端首帧 resize（含真实 cell 像素）再 jolt，避免在错误
+            // 尺寸下 SIGWINCH → Claude「显示不全」。见下方 delayed jolt 注释。
             s.ctl.lock().unwrap().jolt = true;
             s
         }
@@ -1887,6 +2063,7 @@ fn handle_open(
         let ctl = sess.ctl.lock().unwrap();
         (ctl.cols, ctl.rows)
     };
+    let launch_for_snap = sess.state.lock().unwrap().launch.clone();
     let attached_fd = {
         let Ok(mut c) = conn.try_clone() else { return };
         let fd = c.as_raw_fd();
@@ -1896,7 +2073,8 @@ fn handle_open(
         let (snapshot, mut out) = {
             let term = sess.term.lock().unwrap();
             let out = sess.out.lock().unwrap();
-            let snapshot = snapshot_ansi(&term);
+            // launch 参与判定：Grok 等未必进 1049 备用屏，但仍是 TUI，灌网格会顶行乱码。
+            let snapshot = snapshot_ansi(&term, launch_for_snap.as_deref());
             drop(term);
             (snapshot, out)
         };
@@ -1922,6 +2100,38 @@ fn handle_open(
         out.client = Some(c);
         fd
     };
+
+    // reattach jolt 策略（修 Claude 显示不全 / Grok 半残）：
+    // **不要**在 attach 当下立刻 SIGWINCH——此时 GUI 往往还是守护旧 cols/rows、cell=0，
+    // TUI 按错误尺寸整屏重画 → 显示不全。正确顺序：等客户端 force_resize（真 cell
+    // 像素）走 type-1 帧，resize_session 里 jolt 才触发。
+    // 兜底：350ms 内若 jolt 仍 true（客户端没发 resize），再强制抖一次。
+    if reattach {
+        sess.ctl.lock().unwrap().jolt = true;
+        let sess2 = Arc::clone(&sess);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(350));
+            let (c, r, still) = {
+                let Ok(ctl) = sess2.ctl.lock() else { return };
+                (ctl.cols, ctl.rows, ctl.jolt)
+            };
+            if still {
+                if let Ok(mut ctl) = sess2.ctl.lock() {
+                    ctl.jolt = true;
+                }
+                resize_session(&sess2, c, r, 0, 0);
+            }
+            // 再补一枪：部分 TUI（Claude）第一次 SIGWINCH 只重排半屏
+            thread::sleep(Duration::from_millis(200));
+            if let Ok(mut ctl) = sess2.ctl.lock() {
+                ctl.jolt = true;
+                let c = ctl.cols;
+                let r = ctl.rows;
+                drop(ctl);
+                resize_session(&sess2, c, r, 0, 0);
+            }
+        });
+    }
 
     // 帧循环：输入 / resize，直到客户端断开。
     loop {
@@ -1999,7 +2209,8 @@ fn handle_watch(
 
         let term = sess.term.lock().unwrap();
         let mut out = sess.out.lock().unwrap();
-        let snapshot = snapshot_ansi(&term);
+        let launch = sess.state.lock().unwrap().launch.clone();
+        let snapshot = snapshot_ansi(&term, launch.as_deref());
         drop(term);
 
         let replay_len = snapshot.len();
@@ -2034,6 +2245,8 @@ fn handle_watch(
 fn handle_subscribe(conn: UnixStream, sessions: &Sessions, subscribers: &Subscribers) {
     let Ok(mut c) = conn.try_clone() else { return };
     let fd = c.as_raw_fd();
+    // 与 open/watch 一致：冻结订阅者不能无限期占着 broadcast_state 的 subscribers 锁。
+    let _ = c.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
 
     // snapshot 写出去、push 进订阅列表之间不能放 subscribers 锁：否则中间这个空隙里
     // 一次 broadcast_state 可能两头都漏掉——快照里没有它（早于快照），也没收到广播
@@ -2067,11 +2280,36 @@ fn handle_subscribe(conn: UnixStream, sessions: &Sessions, subscribers: &Subscri
 /// CLIENT_WRITE_TIMEOUT 那么久也会因写超时放手，不会无限期挂死。
 /// （极小残余窗口：某泵线程恰好已 read 出 ≤8KB 还没拿到锁，这部分随 exec 丢失。
 /// 丢的只是"显示字节"不是输入；重连后的 jolt 全屏重绘会盖掉，可接受。）
-fn handle_upgrade(conn: UnixStream, sessions: &Sessions, listen_fd: RawFd) {
+fn handle_upgrade(
+    conn: UnixStream,
+    req: &serde_json::Value,
+    sessions: &Sessions,
+    listen_fd: RawFd,
+) {
     let mut c = conn;
-    let Ok(exe) = std::env::current_exe() else {
-        let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": "current_exe 失败" }));
-        return;
+    // 可选 `"exe":"/path/to/smeltd"`：装 DMG 时先 exec 暂存目录里的新二进制，
+    // 再替换 .app，避免「整包覆盖把旧 smeltd SIGKILL、会话全灭再新建」。
+    // 未传则 exec current_exe（同路径更新）。
+    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        let path = std::path::PathBuf::from(p);
+        if !path.is_file() {
+            let _ = writeln!(
+                c,
+                "{}",
+                serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) })
+            );
+            return;
+        }
+        path
+    } else {
+        match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => {
+                let _ =
+                    writeln!(c, "{}", serde_json::json!({ "ok": false, "err": "current_exe 失败" }));
+                return;
+            }
+        }
     };
 
     let session_list: Vec<(String, Arc<Session>)> =
@@ -2086,9 +2324,16 @@ fn handle_upgrade(conn: UnixStream, sessions: &Sessions, listen_fd: RawFd) {
     let mut items = Vec::new();
     let mut fds = vec![listen_fd];
     for (id, sess) in &session_list {
+        // 锁序 term → out，与泵线程一致，避免死锁。
         let ctl = sess.ctl.lock().unwrap();
+        let term = sess.term.lock().unwrap();
         let out = sess.out.lock().unwrap();
         let fd = ctl.master.as_raw_fd();
+        let launch = sess.state.lock().unwrap().launch.clone();
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        // 全会话同一套：可视区 keyframe（可再 feed 进同尺寸 Term，round-trip 安全）。
+        // 不写 ring：resume 侧永不 feed ring，写进去只会误导后人再加特判。
+        let grid = snapshot_ansi_for_handoff(&term, launch.as_deref());
         items.push(serde_json::json!({
             "id": id,
             "fd": fd,
@@ -2096,9 +2341,12 @@ fn handle_upgrade(conn: UnixStream, sessions: &Sessions, listen_fd: RawFd) {
             "cols": ctl.cols,
             "rows": ctl.rows,
             "cwd": ctl.cwd,
-            "buf": hex_encode(&out.buf),
+            "launch": launch,
+            "alt_screen": alt_screen,
+            "grid": hex_encode(&grid),
         }));
         fds.push(fd);
+        drop(term);
         drop(ctl);
         out_guards.push(out);
     }
@@ -2117,14 +2365,17 @@ fn handle_upgrade(conn: UnixStream, sessions: &Sessions, listen_fd: RawFd) {
         let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": "写交接文件失败" }));
         return;
     }
-    // 含全部会话的回放缓冲明文（可能有粘贴过的密钥/token），跟 socket 一样仅本用户可读写；
-    // 正常路径下 resume_handoff 读到就删，这里只是缩小落盘期间的暴露窗口。
+    // 含会话 keyframe（屏幕内容），仅本用户可读写；resume 读到即删。
     let _ =
         std::fs::set_permissions(&hp, std::os::unix::fs::PermissionsExt::from_mode(0o600));
 
     // 先回执再 exec：客户端连接是 CLOEXEC 的，exec 后立即断开，回执必须赶在前面。
     // exec 失败的情况客户端会看到 ok:true 但轮询版本发现没变，按"升级未生效"处理。
     let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+
+    // tunnel/远程网关不参与交接：exec 后新进程状态是空的，必须先杀 cloudflared，
+    // 否则旧子进程仍挂在同一 PID 下却无人 stop，且转发的本机端口已随旧线程消失。
+    cleanup_sidecar_services();
 
     // 死前留痕：exec 可能不返回也不失败——被 macOS 内核 SIGKILL（新二进制以
     // cp 覆盖方式安装、同 inode 改写破坏签名时）。日志停在这一行而没有后续的
@@ -2135,6 +2386,7 @@ fn handle_upgrade(conn: UnixStream, sessions: &Sessions, listen_fd: RawFd) {
     let err = std::process::Command::new(&exe).env("SMELTD_HANDOFF", &hp).exec();
 
     // 走到这里说明 exec 失败（新二进制没法执行）：回滚，守护继续用旧版本服务。
+    // 注意：sidecar 已停，调用方若仍需要远程/隧道得再 remote_start/tunnel_start。
     let _ = std::fs::remove_file(&hp);
     for &fd in &fds {
         set_cloexec(fd, true);
@@ -2221,7 +2473,6 @@ fn spawn_session(
             cwd: cwd.map(String::from),
         }),
         out: Mutex::new(Out {
-            buf: Vec::new(),
             client: None,
             watchers: Vec::new(),
         }),
@@ -2235,7 +2486,7 @@ fn spawn_session(
     Ok((sess, Box::new(pty_reader)))
 }
 
-/// PTY 输出泵：读 PTY → advance 常驻 Term → 旁路缓冲 → 转发当前客户端。
+/// PTY 输出泵：读 PTY → advance 常驻 Term → 转发 client / watchers。
 /// shell 退出（EOF）：移除会话、断开客户端、收割子进程。
 fn start_pty_pump(
     sess: Arc<Session>,
@@ -2258,11 +2509,6 @@ fn start_pty_pump(
                         }));
                     }
                     let mut out = sess.out.lock().unwrap();
-                    out.buf.extend_from_slice(chunk);
-                    if out.buf.len() > BUF_CAP {
-                        let cut = out.buf.len() - BUF_CAP;
-                        out.buf.drain(..cut);
-                    }
                     if let Some(c) = out.client.as_mut() {
                         if c.write_all(chunk).is_err() {
                             out.client = None; // 客户端已断，会话继续养着
@@ -2296,53 +2542,158 @@ fn start_pty_pump(
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Cell;
 
-/// 当前 SGR 状态（只发变化，压缩快照体积）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SgrState {
-    fg: Color,
-    bg: Color,
-    bold: bool,
-    dim: bool,
-    italic: bool,
-    /// 0=无，1=单线，2=双线，3=波浪，4=点，5=虚线
-    underline: u8,
-    strike: bool,
-    inverse: bool,
-    /// OSC 8 当前挂着的 URI（None = 未开链接）。
-    link: Option<u64>, // 用指针地址当身份，避免克隆字符串比相等
+/// 快捷启动 / 命令行是否像 agent TUI（未必进 1049 备用屏，但灌网格会花屏）。
+fn is_agent_tui_launch(launch: Option<&str>) -> bool {
+    let Some(l) = launch.map(|s| s.to_ascii_lowercase()) else {
+        return false;
+    };
+    [
+        "claude", "grok", "codex", "gemini", "copilot", "aider", "opencode", "cursor agent",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
 }
 
-impl Default for SgrState {
-    fn default() -> Self {
-        Self {
-            fg: Color::Named(NamedColor::Foreground),
-            bg: Color::Named(NamedColor::Background),
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: 0,
-            strike: false,
-            inverse: false,
-            link: None,
+/// 是否按 TUI 处理（备用屏或 agent 启动命令）。
+fn is_tui_session<T: EventListener>(term: &Term<T>, launch: Option<&str>) -> bool {
+    term.mode().contains(TermMode::ALT_SCREEN) || is_agent_tui_launch(launch)
+}
+
+/// GUI 客户端 reattach 用：TUI 只画可视区；主屏 shell 带 scrollback history。
+fn snapshot_ansi<T: EventListener>(term: &Term<T>, launch: Option<&str>) -> Vec<u8> {
+    if is_tui_session(term, launch) {
+        snapshot_viewport(term)
+    } else {
+        snapshot_with_history(term)
+    }
+}
+
+/// 写入 handoff.json 的 grid：全会话统一**仅可视区**，可再 feed 进同尺寸空 Term。
+fn snapshot_ansi_for_handoff<T: EventListener>(term: &Term<T>, _launch: Option<&str>) -> Vec<u8> {
+    snapshot_viewport(term)
+}
+
+fn snapshot_viewport<T: EventListener>(term: &Term<T>) -> Vec<u8> {
+    let mut out = snapshot_mode_prefix(term, /*clear_scrollback=*/ false);
+    paint_viewport_keyframe(&mut out, term);
+    snapshot_cursor_suffix(term, &mut out);
+    out
+}
+
+fn snapshot_with_history<T: EventListener>(term: &Term<T>) -> Vec<u8> {
+    let mut out = snapshot_mode_prefix(term, /*clear_scrollback=*/ true);
+    paint_history_keyframe(&mut out, term);
+    snapshot_cursor_suffix(term, &mut out);
+    out
+}
+
+fn snapshot_mode_prefix<T: EventListener>(term: &Term<T>, clear_scrollback: bool) -> Vec<u8> {
+    let mode = *term.mode();
+    let cols = term.columns().max(1);
+    let screen_lines = term.screen_lines().max(1);
+    let mut out = Vec::with_capacity(cols.saturating_mul(screen_lines).saturating_mul(8));
+    out.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+    if mode.contains(TermMode::ALT_SCREEN) {
+        out.extend_from_slice(b"\x1b[?1049h");
+    } else {
+        out.extend_from_slice(b"\x1b[?1049l");
+    }
+    if mode.contains(TermMode::LINE_WRAP) {
+        out.extend_from_slice(b"\x1b[?7h");
+    } else {
+        out.extend_from_slice(b"\x1b[?7l");
+    }
+    append_mode_restores(&mut out, mode);
+    out.extend_from_slice(b"\x1b[?25l\x1b[0m\x1b[H\x1b[2J");
+    if clear_scrollback {
+        out.extend_from_slice(b"\x1b[3J");
+    }
+    out
+}
+
+fn snapshot_cursor_suffix<T: EventListener>(term: &Term<T>, out: &mut Vec<u8>) {
+    let cols = term.columns().max(1);
+    let screen_lines = term.screen_lines().max(1);
+    let content = term.renderable_content();
+    let cursor = content.cursor.point;
+    let display_offset = term.grid().display_offset();
+    let cursor_row = cursor.line.0 + display_offset as i32;
+    if cursor_row >= 0 && (cursor_row as usize) < screen_lines {
+        let col = cursor.column.0.min(cols.saturating_sub(1));
+        let _ = write!(out, "\x1b[{};{}H", cursor_row as usize + 1, col + 1);
+        match content.cursor.shape {
+            CursorShape::Hidden => out.extend_from_slice(b"\x1b[?25l"),
+            CursorShape::Underline => out.extend_from_slice(b"\x1b[4 q\x1b[?25h"),
+            CursorShape::Beam => out.extend_from_slice(b"\x1b[6 q\x1b[?25h"),
+            CursorShape::HollowBlock => out.extend_from_slice(b"\x1b[0 q\x1b[?25h"),
+            CursorShape::Block => out.extend_from_slice(b"\x1b[2 q\x1b[?25h"),
         }
     }
 }
 
-/// 把常驻 Term 编成自洽 ANSI 快照：
-/// - **主缓冲**：有限 scrollback（`SNAPSHOT_MAX_LINES`）+ 可视区，客户端可上滚看历史
-/// - **备用屏**：整屏重画（TUI 场景）
-/// - 恢复光标形状/可见性、常用私有模式（bracketed paste / app cursor / 鼠标）
-///
-/// 不依赖可能被环形缓冲腰斩的原始字节流。
-fn snapshot_ansi<T: EventListener>(term: &Term<T>) -> Vec<u8> {
-    let grid = term.grid();
+/// TUI 可视区 keyframe：按行 CUP + 绝对 SGR（Codux `terminal_snapshot_data` 同构）。
+fn paint_viewport_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>) {
     let cols = term.columns().max(1);
-    let screen_lines = term.screen_lines().max(1);
-    let mode = *term.mode();
+    let rows = term.screen_lines().max(1);
+    let display_offset = term.grid().display_offset();
 
+    // row → (col → cell 引用通过复制字符+样式)
+    let mut grid: Vec<Vec<Option<KeyframeCell>>> = vec![vec![None; cols]; rows];
+    for indexed in term.renderable_content().display_iter {
+        let row = indexed.point.line.0 + display_offset as i32;
+        if row < 0 || row as usize >= rows {
+            continue;
+        }
+        let col = indexed.point.column.0;
+        if col >= cols {
+            continue;
+        }
+        let cell = indexed.cell;
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        let mut text = String::new();
+        if cell.c != '\0' && !cell.c.is_control() {
+            text.push(cell.c);
+        }
+        if let Some(zw) = cell.zerowidth() {
+            for &ch in zw {
+                if !ch.is_control() {
+                    text.push(ch);
+                }
+            }
+        }
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
+        // 空白且默认样式：跳过，让主题底透出（Codux 同策略）
+        if text.trim().is_empty()
+            && is_default_fg(cell.fg)
+            && is_default_bg(cell.bg)
+            && !cell_has_visuals(cell)
+        {
+            continue;
+        }
+        grid[row as usize][col] = Some(KeyframeCell {
+            text,
+            width,
+            style: CellStyle::from_cell(cell),
+        });
+    }
+
+    emit_keyframe_rows(out, &grid);
+}
+
+/// Shell：history + 可视区，按缓冲行顺序硬换行推进（绝对 SGR）。
+fn paint_history_keyframe<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>) {
+    let cols = term.columns().max(1);
     let top = term.topmost_line();
     let bottom = term.bottommost_line();
-    // 从 bottom 往上最多 SNAPSHOT_MAX_LINES 行
     let span = (bottom.0 - top.0 + 1).max(0) as usize;
     let start = if span > SNAPSHOT_MAX_LINES {
         Line(bottom.0 - SNAPSHOT_MAX_LINES as i32 + 1)
@@ -2350,122 +2701,270 @@ fn snapshot_ansi<T: EventListener>(term: &Term<T>) -> Vec<u8> {
         top
     };
 
-    let lines_to_emit = (bottom.0 - start.0 + 1).max(0) as usize;
-    let mut out = Vec::with_capacity(lines_to_emit.saturating_mul(cols).saturating_mul(4));
-
-    // —— 缓冲 / 私有模式前缀 ——
-    if mode.contains(TermMode::ALT_SCREEN) {
-        out.extend_from_slice(b"\x1b[?1049h");
-    }
-    // 清屏 + 清客户端旧 scrollback，再由我们的 history 重新灌入
-    out.extend_from_slice(b"\x1b[H\x1b[2J\x1b[3J\x1b[0m");
-
-    // 自动换行：默认开着，显式对齐
-    if mode.contains(TermMode::LINE_WRAP) {
-        out.extend_from_slice(b"\x1b[?7h");
-    } else {
-        out.extend_from_slice(b"\x1b[?7l");
-    }
-
-    let mut sgr = SgrState::default();
+    let mut rows: Vec<Vec<Option<KeyframeCell>>> = Vec::new();
     let mut line = start;
     while line <= bottom {
-        let row = &grid[line];
-        let wrap = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
-
+        let row = &term.grid()[line];
+        let mut cells = vec![None; cols];
         for col in 0..cols {
             let cell = &row[Column(col)];
-            let flags = cell.flags;
-
-            if flags.contains(Flags::WIDE_CHAR_SPACER)
-                || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
             {
                 continue;
             }
-
-            // OSC 8 超链接开/关（按 URI 变）
-            let link_id = cell.hyperlink().map(|h| {
-                // 用 uri 指针稳定比较：同一 hyperlink Arc 地址相同
-                h.uri().as_ptr() as u64 ^ (h.uri().len() as u64)
-            });
-            if link_id != sgr.link {
-                // 先关旧
-                if sgr.link.is_some() {
-                    out.extend_from_slice(b"\x1b]8;;\x1b\\");
-                }
-                if let Some(h) = cell.hyperlink() {
-                    out.extend_from_slice(b"\x1b]8;;");
-                    out.extend_from_slice(h.uri().as_bytes());
-                    out.extend_from_slice(b"\x1b\\");
-                }
-                sgr.link = link_id;
+            let mut text = String::new();
+            if cell.c != '\0' && !cell.c.is_control() {
+                text.push(cell.c);
             }
-
-            append_sgr(&mut out, &mut sgr, cell);
-
-            if !flags.contains(Flags::HIDDEN) {
-                let ch = cell.c;
-                if ch != '\0' {
-                    push_char(&mut out, ch);
-                }
-                if let Some(zw) = cell.zerowidth() {
-                    for &z in zw {
-                        push_char(&mut out, z);
+            if let Some(zw) = cell.zerowidth() {
+                for &ch in zw {
+                    if !ch.is_control() {
+                        text.push(ch);
                     }
                 }
             }
-        }
-
-        // 行尾：软换行不插 \r\n（下一行是续行）；硬换行才换行。
-        // 最后一行后也不要多余 \r\n，靠后面的 CUP 定位光标。
-        if line < bottom && !wrap {
-            // 换行前关 OSC 8，避免链接跨行粘连
-            if sgr.link.is_some() {
-                out.extend_from_slice(b"\x1b]8;;\x1b\\");
-                sgr.link = None;
+            let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            };
+            if text.trim().is_empty()
+                && is_default_fg(cell.fg)
+                && is_default_bg(cell.bg)
+                && !cell_has_visuals(cell)
+            {
+                continue;
             }
-            out.extend_from_slice(b"\r\n");
+            cells[col] = Some(KeyframeCell {
+                text,
+                width,
+                style: CellStyle::from_cell(cell),
+            });
         }
+        rows.push(cells);
         line += 1;
     }
+    emit_keyframe_rows(out, &rows);
+}
 
-    // 关闭可能仍开着的 OSC 8
-    if sgr.link.is_some() {
-        out.extend_from_slice(b"\x1b]8;;\x1b\\");
+fn cell_has_visuals(cell: &Cell) -> bool {
+    let f = cell.flags;
+    f.intersects(
+        Flags::BOLD
+            | Flags::DIM
+            | Flags::ITALIC
+            | Flags::UNDERLINE
+            | Flags::DOUBLE_UNDERLINE
+            | Flags::UNDERCURL
+            | Flags::DOTTED_UNDERLINE
+            | Flags::DASHED_UNDERLINE
+            | Flags::INVERSE
+            | Flags::HIDDEN
+            | Flags::STRIKEOUT
+            | Flags::BOLD_ITALIC
+            | Flags::DIM_BOLD,
+    ) || cell.hyperlink().is_some()
+}
+
+#[derive(Clone, PartialEq)]
+struct CellStyle {
+    fg: Color,
+    bg: Color,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: u8,
+    inverse: bool,
+    hidden: bool,
+    strike: bool,
+    link: Option<String>,
+}
+
+impl CellStyle {
+    fn default_style() -> Self {
+        Self {
+            fg: Color::Named(NamedColor::Foreground),
+            bg: Color::Named(NamedColor::Background),
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: 0,
+            inverse: false,
+            hidden: false,
+            strike: false,
+            link: None,
+        }
     }
-    out.extend_from_slice(b"\x1b[0m");
 
-    // —— 光标：吐完 history 后客户端应在底部；CUP 用可视区 1 基坐标 ——
-    // alacritty：display_offset=0 时 cursor.line 为 0..screen_lines-1。
-    let cursor = grid.cursor.point;
-    let viewport_row = if cursor.line.0 >= 0 {
-        cursor.line.0 as usize
-    } else {
-        0
+    fn from_cell(cell: &Cell) -> Self {
+        let f = cell.flags;
+        Self {
+            fg: cell.fg,
+            bg: cell.bg,
+            bold: f.contains(Flags::BOLD) || f.contains(Flags::BOLD_ITALIC),
+            dim: f.contains(Flags::DIM) || f.contains(Flags::DIM_BOLD),
+            italic: f.contains(Flags::ITALIC) || f.contains(Flags::BOLD_ITALIC),
+            underline: underline_kind(f),
+            inverse: f.contains(Flags::INVERSE),
+            hidden: f.contains(Flags::HIDDEN),
+            strike: f.contains(Flags::STRIKEOUT),
+            link: cell.hyperlink().map(|h| h.uri().to_string()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct KeyframeCell {
+    text: String,
+    width: usize,
+    style: CellStyle,
+}
+
+/// 按行 `\x1b[row;1H` + 绝对 SGR 吐出（Codux `terminal_snapshot_data`）。
+/// 每行画完后 `\x1b[K`（EL）清掉行尾残留，避免长输出软换行后 prompt 盖不干净。
+fn emit_keyframe_rows(out: &mut Vec<u8>, rows: &[Vec<Option<KeyframeCell>>]) {
+    let mut current = CellStyle::default_style();
+    for (row_index, row_cells) in rows.iter().enumerate() {
+        let Some(last_col) = row_cells.iter().rposition(|c| {
+            c.as_ref().is_some_and(|cell| {
+                !cell.text.trim().is_empty() || cell.style != CellStyle::default_style()
+            })
+        }) else {
+            // 空行也 CUP + EL，清掉可能残留的旧内容
+            let _ = write!(out, "\x1b[{};1H\x1b[K", row_index + 1);
+            continue;
+        };
+        let _ = write!(out, "\x1b[{};1H", row_index + 1);
+        let mut col = 0;
+        while col <= last_col {
+            match &row_cells[col] {
+                Some(cell) => {
+                    if cell.style != current {
+                        if cell.style.link != current.link {
+                            emit_link_osc(out, cell.style.link.as_deref());
+                        }
+                        emit_absolute_sgr(out, &cell.style);
+                        current = cell.style.clone();
+                    }
+                    if cell.text.is_empty() {
+                        for _ in 0..cell.width.max(1) {
+                            out.push(b' ');
+                        }
+                    } else {
+                        for ch in cell.text.chars() {
+                            push_char(out, ch);
+                        }
+                    }
+                    col += cell.width.max(1);
+                }
+                None => {
+                    if current != CellStyle::default_style() {
+                        if current.link.is_some() {
+                            emit_link_osc(out, None);
+                        }
+                        out.extend_from_slice(b"\x1b[0m");
+                        current = CellStyle::default_style();
+                    }
+                    out.push(b' ');
+                    col += 1;
+                }
+            }
+        }
+        // 行尾 EL：抹掉该行 last_col 之后的旧字符（长 cargo 行糊进 prompt 的主因）
+        if current != CellStyle::default_style() {
+            if current.link.is_some() {
+                emit_link_osc(out, None);
+            }
+            out.extend_from_slice(b"\x1b[0m");
+            current = CellStyle::default_style();
+        }
+        out.extend_from_slice(b"\x1b[K");
+    }
+    if current != CellStyle::default_style() {
+        if current.link.is_some() {
+            emit_link_osc(out, None);
+        }
+        out.extend_from_slice(b"\x1b[0m");
+    }
+}
+
+fn emit_link_osc(out: &mut Vec<u8>, uri: Option<&str>) {
+    out.extend_from_slice(b"\x1b]8;;");
+    if let Some(u) = uri {
+        out.extend_from_slice(u.as_bytes());
+    }
+    out.extend_from_slice(b"\x1b\\");
+}
+
+/// 绝对 SGR：始终以 `0` 开头（Codux `snapshot_style_sgr`），杜绝差分状态机半截泄漏。
+fn emit_absolute_sgr(out: &mut Vec<u8>, style: &CellStyle) {
+    let mut params = Vec::with_capacity(32);
+    params.push(b'0');
+    let push = |params: &mut Vec<u8>, code: u8| {
+        params.push(b';');
+        push_u8(params, code);
     };
-    let viewport_row = viewport_row.min(screen_lines.saturating_sub(1));
-    let viewport_col = cursor.column.0.min(cols.saturating_sub(1));
-    let _ = write!(
-        out,
-        "\x1b[{};{}H",
-        viewport_row + 1,
-        viewport_col + 1
-    );
-
-    // 光标形状（DECSCUSR）+ 显隐
-    let content = term.renderable_content();
-    match content.cursor.shape {
-        CursorShape::Hidden => out.extend_from_slice(b"\x1b[?25l"),
-        CursorShape::Underline => out.extend_from_slice(b"\x1b[4 q\x1b[?25h"),
-        CursorShape::Beam => out.extend_from_slice(b"\x1b[6 q\x1b[?25h"),
-        CursorShape::HollowBlock => out.extend_from_slice(b"\x1b[0 q\x1b[?25h"),
-        CursorShape::Block => out.extend_from_slice(b"\x1b[2 q\x1b[?25h"),
+    if style.bold {
+        push(&mut params, 1);
     }
+    if style.dim {
+        push(&mut params, 2);
+    }
+    if style.italic {
+        push(&mut params, 3);
+    }
+    if style.underline != 0 {
+        params.push(b';');
+        match style.underline {
+            1 => params.extend_from_slice(b"4"),
+            2 => params.extend_from_slice(b"4:2"),
+            3 => params.extend_from_slice(b"4:3"),
+            4 => params.extend_from_slice(b"4:4"),
+            5 => params.extend_from_slice(b"4:5"),
+            _ => params.extend_from_slice(b"4"),
+        }
+    }
+    if style.inverse {
+        push(&mut params, 7);
+    }
+    if style.hidden {
+        push(&mut params, 8);
+    }
+    if style.strike {
+        push(&mut params, 9);
+    }
+    // 颜色：绝对模式下总是写上（含默认 39/49），与 Codux 一致
+    append_color_params_abs(&mut params, true, style.fg);
+    append_color_params_abs(&mut params, false, style.bg);
 
-    // —— 常用模式：TUI 在 jolt 重绘前也能收到正确的输入约定 ——
-    append_mode_restores(&mut out, mode);
+    out.extend_from_slice(b"\x1b[");
+    out.extend_from_slice(&params);
+    out.push(b'm');
+}
 
-    out
+fn append_color_params_abs(params: &mut Vec<u8>, is_fg: bool, color: Color) {
+    params.push(b';');
+    match color {
+        Color::Named(n) => {
+            push_u8(params, named_sgr_code(n, is_fg));
+        }
+        Color::Indexed(i) => {
+            push_u8(params, if is_fg { 38 } else { 48 });
+            params.extend_from_slice(b";5;");
+            push_u8(params, i);
+        }
+        Color::Spec(rgb) => {
+            push_u8(params, if is_fg { 38 } else { 48 });
+            params.extend_from_slice(b";2;");
+            push_u8(params, rgb.r);
+            params.push(b';');
+            push_u8(params, rgb.g);
+            params.push(b';');
+            push_u8(params, rgb.b);
+        }
+    }
 }
 
 fn push_char(out: &mut Vec<u8>, ch: char) {
@@ -2516,112 +3015,6 @@ fn underline_kind(flags: Flags) -> u8 {
     }
 }
 
-fn append_sgr(out: &mut Vec<u8>, state: &mut SgrState, cell: &Cell) {
-    let flags = cell.flags;
-    let bold = flags.contains(Flags::BOLD) || flags.contains(Flags::BOLD_ITALIC);
-    let dim = flags.contains(Flags::DIM) || flags.contains(Flags::DIM_BOLD);
-    let italic = flags.contains(Flags::ITALIC) || flags.contains(Flags::BOLD_ITALIC);
-    let underline = underline_kind(flags);
-    let strike = flags.contains(Flags::STRIKEOUT);
-    let inverse = flags.contains(Flags::INVERSE);
-
-    let next_attrs = (bold, dim, italic, underline, strike, inverse, cell.fg, cell.bg);
-    let cur_attrs = (
-        state.bold,
-        state.dim,
-        state.italic,
-        state.underline,
-        state.strike,
-        state.inverse,
-        state.fg,
-        state.bg,
-    );
-    if next_attrs == cur_attrs {
-        return;
-    }
-
-    let need_reset = state.bold && !bold
-        || state.dim && !dim
-        || state.italic && !italic
-        || state.underline != 0 && underline == 0
-        || state.underline != 0 && underline != 0 && state.underline != underline
-        || state.strike && !strike
-        || state.inverse && !inverse
-        || (state.fg != cell.fg && is_default_fg(cell.fg))
-        || (state.bg != cell.bg && is_default_bg(cell.bg));
-
-    let mut params = Vec::new();
-    let push_code = |params: &mut Vec<u8>, code: u8| {
-        if !params.is_empty() {
-            params.push(b';');
-        }
-        push_u8(params, code);
-    };
-
-    if need_reset {
-        params.push(b'0');
-        state.bold = false;
-        state.dim = false;
-        state.italic = false;
-        state.underline = 0;
-        state.strike = false;
-        state.inverse = false;
-        state.fg = Color::Named(NamedColor::Foreground);
-        state.bg = Color::Named(NamedColor::Background);
-    }
-
-    if bold && !state.bold {
-        push_code(&mut params, 1);
-    }
-    if dim && !state.dim {
-        push_code(&mut params, 2);
-    }
-    if italic && !state.italic {
-        push_code(&mut params, 3);
-    }
-    if underline != 0 && underline != state.underline {
-        // SGR 4 / 4:2 / 4:3 / 4:4 / 4:5
-        if !params.is_empty() {
-            params.push(b';');
-        }
-        match underline {
-            1 => params.extend_from_slice(b"4"),
-            2 => params.extend_from_slice(b"4:2"),
-            3 => params.extend_from_slice(b"4:3"),
-            4 => params.extend_from_slice(b"4:4"),
-            5 => params.extend_from_slice(b"4:5"),
-            _ => params.extend_from_slice(b"4"),
-        }
-    }
-    if inverse && !state.inverse {
-        push_code(&mut params, 7);
-    }
-    if strike && !state.strike {
-        push_code(&mut params, 9);
-    }
-    if cell.fg != state.fg {
-        append_color_params(&mut params, true, cell.fg);
-    }
-    if cell.bg != state.bg {
-        append_color_params(&mut params, false, cell.bg);
-    }
-
-    if !params.is_empty() {
-        out.extend_from_slice(b"\x1b[");
-        out.extend_from_slice(&params);
-        out.push(b'm');
-    }
-
-    state.bold = bold;
-    state.dim = dim;
-    state.italic = italic;
-    state.underline = underline;
-    state.strike = strike;
-    state.inverse = inverse;
-    state.fg = cell.fg;
-    state.bg = cell.bg;
-}
-
 fn push_u8(params: &mut Vec<u8>, n: u8) {
     if n >= 100 {
         params.push(b'0' + n / 100);
@@ -2640,40 +3033,6 @@ fn is_default_fg(c: Color) -> bool {
 }
 fn is_default_bg(c: Color) -> bool {
     matches!(c, Color::Named(NamedColor::Background))
-}
-
-fn append_color_params(params: &mut Vec<u8>, is_fg: bool, color: Color) {
-    let sep = |params: &mut Vec<u8>| {
-        if !params.is_empty() {
-            params.push(b';');
-        }
-    };
-    match color {
-        Color::Named(n) => {
-            sep(params);
-            push_u8(params, named_sgr_code(n, is_fg));
-        }
-        Color::Indexed(i) => {
-            sep(params);
-            push_u8(params, if is_fg { 38 } else { 48 });
-            params.push(b';');
-            params.push(b'5');
-            params.push(b';');
-            push_u8(params, i);
-        }
-        Color::Spec(rgb) => {
-            sep(params);
-            push_u8(params, if is_fg { 38 } else { 48 });
-            params.push(b';');
-            params.push(b'2');
-            params.push(b';');
-            push_u8(params, rgb.r);
-            params.push(b';');
-            push_u8(params, rgb.g);
-            params.push(b';');
-            push_u8(params, rgb.b);
-        }
-    }
 }
 
 fn named_sgr_code(n: NamedColor, is_fg: bool) -> u8 {
@@ -2783,7 +3142,7 @@ mod snapshot_tests {
         let mut pa: Processor = Processor::new();
         pa.advance(&mut a, input.as_bytes());
 
-        let snap = snapshot_ansi(&a);
+        let snap = snapshot_ansi(&a, None);
 
         let mut b = Term::new(daemon_term_config(), &size, VoidListener);
         let mut pb: Processor = Processor::new();
@@ -2890,7 +3249,7 @@ mod snapshot_tests {
         let mut parser: Processor = Processor::new();
         parser.advance(&mut term, b"\x1b[31mhello\x1b[0m\r\nworld");
 
-        let snap = snapshot_ansi(&term);
+        let snap = snapshot_ansi(&term, None);
         assert!(snap.windows(5).any(|w| w == b"hello"));
         assert!(snap.windows(5).any(|w| w == b"world"));
 
@@ -2908,9 +3267,67 @@ mod snapshot_tests {
         let mut term = Term::new(daemon_term_config(), &size, VoidListener);
         let mut parser: Processor = Processor::new();
         parser.advance(&mut term, b"\x1b[?1049hTUI");
-        let snap = snapshot_ansi(&term);
+        let snap = snapshot_ansi(&term, None);
         assert!(snap.windows(8).any(|w| w == b"\x1b[?1049h"));
-        assert!(snap.windows(3).any(|w| w == b"TUI"));
+        // Codux 风格 keyframe：备用屏也画可视区内容
+        assert!(
+            snap.windows(3).any(|w| w == b"TUI"),
+            "TUI keyframe 应含可视区文字, got {}",
+            String::from_utf8_lossy(&snap)
+        );
+        assert!(snap.windows(4).any(|w| w == b"\x1b[2J"), "应清屏");
+        // 绝对 SGR：每个样式序列以 ESC[0 开头
+        assert!(
+            snap.windows(4).any(|w| w == b"\x1b[0m") || snap.windows(4).any(|w| w == b"\x1b[0;"),
+            "应有绝对 SGR"
+        );
+    }
+
+    /// agent launch 走 TUI keyframe（可视区），不是空骨架。
+    #[test]
+    fn snapshot_agent_launch_paints_viewport_keyframe() {
+        let size = DaemonTermSize { rows: 4, cols: 20 };
+        let mut term = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"hello-grok-grid");
+        let snap = snapshot_ansi(&term, Some("grok"));
+        assert!(
+            snap.windows(10).any(|w| w == b"hello-grok"),
+            "agent keyframe 应含可视区: {}",
+            String::from_utf8_lossy(&snap)
+        );
+        // 按行 CUP
+        assert!(snap.windows(4).any(|w| w == b"\x1b[1;"), "应按行 CUP 定位");
+    }
+
+    /// 真彩 SGR 必须以完整 `\x1b[0;…48;2;…m` 形式出现（Codux 绝对 SGR）。
+    #[test]
+    fn snapshot_truecolor_sgr_always_has_esc_prefix() {
+        let size = DaemonTermSize { rows: 3, cols: 20 };
+        let mut term = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[48;2;20;20;20mX\x1b[0m");
+        let snap = snapshot_ansi(&term, None);
+        let s = String::from_utf8_lossy(&snap);
+        // 实际形如 \x1b[0;39;48;2;20;20;20m
+        assert!(
+            s.contains("\u{1b}[0;39;48;2;20;20;20m") || s.contains("\u{1b}[0;") && s.contains("48;2;20;20;20m"),
+            "绝对 SGR 应含完整真彩序列: {s}"
+        );
+        // 重放后字符仍在
+        let mut term2 = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut p2: Processor = Processor::new();
+        p2.advance(&mut term2, &snap);
+        assert!(visible_text(&term2).contains('X'));
+    }
+
+    #[test]
+    fn is_agent_tui_launch_matches_common_agents() {
+        assert!(is_agent_tui_launch(Some("grok")));
+        assert!(is_agent_tui_launch(Some("claude --dangerously-skip-permissions")));
+        assert!(is_agent_tui_launch(Some("codex")));
+        assert!(!is_agent_tui_launch(Some("zsh")));
+        assert!(!is_agent_tui_launch(None));
     }
 
     #[test]
@@ -2923,7 +3340,7 @@ mod snapshot_tests {
             parser.advance(&mut term, format!("line-{i:02}\r\n").as_bytes());
         }
         // 可视区只有最后几行；快照必须仍带上更早的 line-00
-        let snap = snapshot_ansi(&term);
+        let snap = snapshot_ansi(&term, None);
         assert!(
             snap.windows(7).any(|w| w == b"line-00"),
             "完整快照应含 scrollback 里的 line-00，实际: {}",
@@ -2958,7 +3375,7 @@ mod snapshot_tests {
         let mut term = Term::new(daemon_term_config(), &size, VoidListener);
         let mut parser: Processor = Processor::new();
         parser.advance(&mut term, b"\x1b[?2004hhi");
-        let snap = snapshot_ansi(&term);
+        let snap = snapshot_ansi(&term, None);
         assert!(
             snap.windows(8).any(|w| w == b"\x1b[?2004h"),
             "开了 bracketed paste 的会话快照应恢复该模式"
@@ -2974,7 +3391,7 @@ mod snapshot_tests {
             &mut term,
             b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
         );
-        let snap = snapshot_ansi(&term);
+        let snap = snapshot_ansi(&term, None);
         let s = String::from_utf8_lossy(&snap);
         assert!(
             s.contains("https://example.com"),
@@ -3004,7 +3421,7 @@ mod watch_tests {
         let listener = StateListener { state: Arc::clone(&state), subscribers };
         Arc::new(Session {
             ctl: Mutex::new(Ctl { master, pid, jolt: false, cols, rows, cwd: None }),
-            out: Mutex::new(Out { buf: Vec::new(), client: None, watchers: Vec::new() }),
+            out: Mutex::new(Out { client: None, watchers: Vec::new() }),
             term: Mutex::new(new_daemon_term(rows, cols, listener)),
             state,
         })

@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -368,40 +369,356 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
-/// 连接守护；连不上就拉起同目录的 smeltd（独立进程组，GUI / 终端退出都不波及）再重试。
+/// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
+/// 避免 macOS 对签名文件覆盖时 SIGKILL smeltd → 会话全灭 → 对话被「重新初始化」。
 ///
-/// **这里绝不删 sock 文件。** connect 失败分不清两种情况：守护真死了只剩僵尸 sock，
-/// 还是守护活着只是这一下没连上——Unix socket 的 backlog 满时 connect 同样返回
-/// ECONNREFUSED，跟没人监听一模一样。误删活守护的 sock，就是把它变成谁也连不上的
-/// 僵尸，它手里所有 shell 会话当场失联。
-/// 僵尸 sock 的清理是 bind 方的活，smeltd 启动时自己做（见 smeltd.rs 的单实例检查：
-/// 先 connect 探活，连得上就自己退出，连不上才 unlink 重 bind）——只有 bind 方
-/// 才有权威判断，且误判也伤不到活守护。
+/// **硬约束**：smeltd 进程的 `current_exe` 必须是 `~/.smelt/bin/smeltd`，绝不能是
+/// `Smelt.app/Contents/MacOS/smeltd`。否则用户用 Finder 拖 DMG 覆盖 App 时内核会
+/// 干掉守护，所有 Claude/Grok PTY 死掉，GUI 重开只能 spawn 新进程 → 对话「重新初始化」。
+fn managed_daemon_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| "/tmp".into())
+        .join(".smelt")
+        .join("bin")
+}
+
+pub fn managed_daemon_path() -> std::path::PathBuf {
+    managed_daemon_dir().join("smeltd")
+}
+
+/// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
+fn path_inside_app_bundle(p: &std::path::Path) -> bool {
+    p.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| s.ends_with(".app"))
+    })
+}
+
+/// 规范化路径后比较是否指向同一文件（symlink / 相对路径）。
+fn same_daemon_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// 进程是否已住在 managed 目录（正式名 smeltd 或交接中的 smeltd.next 都算）。
+/// rename next→smeltd 后 macOS 上 current_exe 可能仍报旧路径名，不能只比文件名。
+fn exe_is_managed(exe: &std::path::Path) -> bool {
+    let managed = managed_daemon_path();
+    if same_daemon_path(exe, &managed) {
+        return true;
+    }
+    let dir = managed_daemon_dir();
+    if exe.starts_with(&dir) {
+        return true;
+    }
+    // current_exe 仍写 smeltd.next 但文件已 rename：比 inode
+    if let (Ok(em), Ok(mm)) = (std::fs::metadata(exe), std::fs::metadata(&managed)) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if em.dev() == mm.dev() && em.ino() == mm.ino() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// App 包 / cargo 同目录下的 smeltd（分发物，不是常驻运行路径）。
+fn bundled_daemon_path() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|e| e.with_file_name("smeltd"))
+        .filter(|p| p.is_file())
+}
+
+fn file_mtime_secs(p: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(p)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// 两份 smeltd 是否视为同一构建（只比 size，热路径禁止全文 read）。
+/// 真升级几乎总会改文件大小；同 size 不同构建的漏升级可接受。
+fn same_daemon_binary_size(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.len() == mb.len(),
+        _ => false,
+    }
+}
+
+/// 把 `src` 装到 `~/.smelt/bin/smeltd`（size 不同或目标不存在才拷）。
+/// 先写 `smeltd.next` 再 rename；覆盖正在执行的 managed 时进程仍握旧 inode。
+fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dir)?;
+    let managed = managed_daemon_path();
+    let need = !managed.is_file() || !same_daemon_binary_size(src, &managed);
+    if need {
+        stage_daemon_binary(src, &dir.join("smeltd.next"))?;
+        let _ = std::fs::remove_file(&managed);
+        std::fs::rename(dir.join("smeltd.next"), &managed)?;
+        eprintln!(
+            "[workspace] 已同步守护 {} → {}",
+            src.display(),
+            managed.display()
+        );
+    }
+    if managed.is_file() {
+        Ok(managed)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("无法安装 smeltd 到 {}", managed.display()),
+        ))
+    }
+}
+
+fn stage_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(dest);
+    std::fs::copy(src, dest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dest, perms)?;
+    }
+    Ok(())
+}
+
+/// 把正在跑的守护 **一次** exec 到 `~/.smelt/bin/smeltd`（会话 PTY 保留）。
+///
+/// 若目标路径正是当前 running 的文件，先落到 `smeltd.next` 再 rename（不二次 exec）；
+/// `exe_is_managed` 认 managed 目录内任意名，rename 后无需再 handoff。
+fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
+    let managed = managed_daemon_path();
+    let dir = managed_daemon_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[workspace] 创建 managed 目录失败：{e}");
+        return UpgradeOutcome::Failed;
+    }
+
+    // 正在跑的是否已在 managed 路径上（覆盖同路径必须用 .next）。
+    let running_on_managed = match probe_daemon_detail() {
+        DaemonProbe::Running { exe_path: Some(ref p), .. } => {
+            exe_is_managed(std::path::Path::new(p))
+        }
+        _ => false,
+    };
+
+    let target = if running_on_managed {
+        dir.join("smeltd.next")
+    } else {
+        managed.clone()
+    };
+    if let Err(e) = stage_daemon_binary(src, &target) {
+        eprintln!("[workspace] 暂存守护失败（{}）：{e}", target.display());
+        return UpgradeOutcome::Failed;
+    }
+
+    match upgrade_daemon_exe(Some(&target)) {
+        UpgradeOutcome::Upgraded => {
+            thread::sleep(Duration::from_millis(250));
+            if target != managed {
+                let _ = std::fs::remove_file(&managed);
+                if let Err(e) = std::fs::rename(&target, &managed) {
+                    eprintln!("[workspace] rename → managed 失败：{e}（进程仍在 next inode）");
+                }
+            }
+            eprintln!("[workspace] 守护已迁入 managed：{}", managed.display());
+            UpgradeOutcome::Upgraded
+        }
+        other => {
+            // 失败时尽量把文件落到正式名，供下次冷启动
+            if target != managed {
+                let _ = std::fs::remove_file(&managed);
+                let _ = std::fs::rename(&target, &managed);
+            }
+            eprintln!(
+                "[workspace] handoff 到 managed 失败（{other:?}），文件：{}",
+                managed.display()
+            );
+            other
+        }
+    }
+}
+
+/// 多 pane 同时 connect 时串行化迁移，避免并发 upgrade 踩踏。
+static MANAGED_DAEMON_GATE: Mutex<()> = Mutex::new(());
+
+/// 确保守护跑在 `~/.smelt/bin/smeltd` 且不旧于 App 内分发物。
+///
+/// GUI 启动 / 连守护 / 装包后 **必须** 调用。返回 managed 路径（可能尚未有进程，
+/// 但文件应已就位）。
+pub fn ensure_managed_daemon_current() -> std::io::Result<std::path::PathBuf> {
+    let _gate = MANAGED_DAEMON_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    ensure_managed_daemon_current_locked()
+}
+
+fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf> {
+    let bundled = bundled_daemon_path();
+    let managed = managed_daemon_path();
+
+    // 无分发物：仅依赖已有 managed（开发机偶发）。
+    let Some(bundled) = bundled else {
+        return if managed.is_file() {
+            // 仍可能需要把「跑在 .app 里」的旧守护迁走
+            let _ = migrate_running_daemon_off_app(&managed);
+            Ok(managed)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "找不到 smeltd（App 包与 ~/.smelt/bin 皆无）",
+            ))
+        };
+    };
+
+    match probe_daemon_detail() {
+        DaemonProbe::NotRunning => {
+            install_managed_daemon_from(&bundled)?;
+            Ok(managed_daemon_path())
+        }
+        DaemonProbe::Unresponsive => {
+            // 连得上但无 version：只更新磁盘，不强杀（可能丢会话）
+            let _ = install_managed_daemon_from(&bundled);
+            Ok(managed_daemon_path())
+        }
+        DaemonProbe::Running {
+            exe_mtime,
+            exe_path,
+        } => {
+            let on_managed = exe_path
+                .as_ref()
+                .map(|p| exe_is_managed(std::path::Path::new(p)))
+                .unwrap_or(false);
+            let inside_app = exe_path
+                .as_ref()
+                .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
+                .unwrap_or(!on_managed); // 老守护无 exe：若已在 managed 目录则别瞎迁
+            let bundled_m = file_mtime_secs(&bundled);
+            // 路径不对（仍在 .app / 非 managed）→ 必须迁。
+            // 二进制升级：仅当「跑的比 App 旧」且**文件内容实质不同**——
+            // 禁止仅因 cp 造成 mtime+1s 就 handoff（会清空 Term → 对话像被重初始化）。
+            let size_differs = !managed.is_file() || !same_daemon_binary_size(&managed, &bundled);
+            // 已在 managed 且 running 比 App 分发物旧、size 也不同 → 真升级
+            let needs_binary_upgrade = on_managed
+                && !inside_app
+                && size_differs
+                && bundled_m.is_some_and(|b| b > exe_mtime.saturating_add(1));
+            let must_relocate = inside_app || !on_managed;
+            if must_relocate || needs_binary_upgrade {
+                eprintln!(
+                    "[workspace] 迁移守护 → managed（inside_app={inside_app} on_managed={on_managed} upgrade={needs_binary_upgrade} exe={exe_path:?}）"
+                );
+                let outcome = handoff_daemon_to_managed(&bundled);
+                if !matches!(outcome, UpgradeOutcome::Upgraded) {
+                    let _ = install_managed_daemon_from(&bundled);
+                }
+            } else if size_differs {
+                // 路径正确、无需 exec：只静默对齐磁盘文件
+                let _ = install_managed_daemon_from(&bundled);
+            }
+            Ok(managed_daemon_path())
+        }
+    }
+}
+
+/// 守护已在跑但路径未知/在 App 内时，用已有 managed 文件尝试迁出。
+fn migrate_running_daemon_off_app(managed: &std::path::Path) -> UpgradeOutcome {
+    if !managed.is_file() {
+        return UpgradeOutcome::Failed;
+    }
+    match probe_daemon_detail() {
+        DaemonProbe::Running { exe_path, .. } => {
+            let on_managed = exe_path
+                .as_ref()
+                .map(|p| exe_is_managed(std::path::Path::new(p)))
+                .unwrap_or(false);
+            let inside_app = exe_path
+                .as_ref()
+                .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
+                .unwrap_or(!on_managed);
+            if on_managed && !inside_app {
+                return UpgradeOutcome::Upgraded;
+            }
+            handoff_daemon_to_managed(managed)
+        }
+        DaemonProbe::NotRunning | DaemonProbe::Unresponsive => UpgradeOutcome::Failed,
+    }
+}
+
+/// 进程内 connect 路径是否已 ensure 过（多 pane 只付一次代价）。
+/// 冷启动完整 ensure 由 `schedule_session_restore` 串行完成，不与此竞态升级。
+static CONNECT_MANAGED_ENSURED: AtomicBool = AtomicBool::new(false);
+
+/// 连接守护。进程内**首次**连上时 ensure 一次 managed 路径；之后只 connect。
+/// 连不上则拉起 `~/.smelt/bin/smeltd`（独立进程组）再重试。
+///
+/// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd.rs。）
 fn connect_daemon() -> std::io::Result<UnixStream> {
     let path = sock_path();
+
+    // 已有守护：进程内只 ensure 一次。
+    if UnixStream::connect(&path).is_ok() {
+        if !CONNECT_MANAGED_ENSURED.load(Ordering::Relaxed) {
+            let _ = ensure_managed_daemon_current();
+            CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
+        }
+        if let Ok(s) = UnixStream::connect(&path) {
+            return Ok(s);
+        }
+        // handoff 后短暂窗口：下面走拉起/轮询
+    }
+
+    // 优先 managed 路径；没有则从 App/cargo 同目录同步一份。
+    CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
+    let daemon = match ensure_managed_daemon_current() {
+        Ok(p) => p,
+        Err(e) => {
+            let exe = std::env::current_exe()?;
+            let fallback = exe.with_file_name("smeltd");
+            if fallback.is_file() {
+                fallback
+            } else {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("smeltd 不可用：{e}"),
+                ));
+            }
+        }
+    };
+
+    // 二次确认：若 sock 已因 handoff 起来，直接连
     if let Ok(s) = UnixStream::connect(&path) {
         return Ok(s);
     }
 
-    // 拉不起来也不立刻返回：守护可能已被别人（.app / 上一次 GUI / 测试）拉起，本进程
-    // 同目录没有 smeltd 不代表连不上。原因先记下，等重试全轮空了再一并报。
-    let exe = std::env::current_exe()?;
-    let daemon = exe.with_file_name("smeltd");
-    let spawn_err: Option<String> = if daemon.is_file() {
+    let spawn_err: Option<String> = {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
-        // 仅 .app 包内才开菜单栏：cargo run 时 NSApplication 经常未加载，旧版会 panic
-        // 拖死守护；新版虽已兜底 headless，仍没必要在 dev 路径上碰 AppKit。
+        let exe = std::env::current_exe().ok();
         let in_app_bundle = exe
-            .components()
-            .any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with(".app")));
+            .as_ref()
+            .is_some_and(|e| path_inside_app_bundle(e));
         let mut cmd = std::process::Command::new(&daemon);
         cmd.process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if in_app_bundle {
-            // 由 .app 拉起 → 继承登录会话、连得上 WindowServer，菜单栏才有意义。
             cmd.env("SMELT_MENUBAR", "1");
         }
         match cmd.spawn() {
@@ -416,14 +733,8 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
             }
             Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", daemon.display())),
         }
-    } else {
-        Some(format!(
-            "找不到守护二进制 {}（cargo 请先 `cargo build --bin smeltd`）",
-            daemon.display()
-        ))
     };
 
-    // 守护 bind 很快，通常首轮就连上；给足 5s 兜底。
     for _ in 0..50 {
         thread::sleep(Duration::from_millis(100));
         if let Ok(s) = UnixStream::connect(&path) {
@@ -445,27 +756,39 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
 
 /// 探测正在跑的守护：连不上（守护没起，`connect_daemon` 会自己拉起磁盘上最新的）
 /// 判 `NotRunning`；连上了但读不出合法的 "version" 响应——老到连这个探测本身都不
-/// 认识——判 `Unresponsive`，这种必然过期；否则拿到对方自报的可执行文件 mtime
-/// （见 smeltd.rs::exe_mtime_secs）。
+/// 认识——判 `Unresponsive`；否则带 mtime + 可选 exe 路径。
 enum DaemonProbe {
     NotRunning,
     Unresponsive,
-    ExeMtime(u64),
+    Running {
+        exe_mtime: u64,
+        /// 守护自报的 current_exe；老守护无此字段则为 None。
+        exe_path: Option<String>,
+    },
 }
 
 fn probe_daemon() -> DaemonProbe {
+    probe_daemon_detail()
+}
+
+fn probe_daemon_detail() -> DaemonProbe {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         return DaemonProbe::NotRunning;
     };
-    let mtime = (|| -> Option<u64> {
+    let parsed = (|| -> Option<(u64, Option<String>)> {
         writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
         let mut resp = String::new();
         BufReader::new(s).read_line(&mut resp).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&resp).ok()?;
-        v["exe_mtime"].as_u64()
+        let v: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
+        let mtime = v["exe_mtime"].as_u64()?;
+        let exe = v["exe"].as_str().map(str::to_string);
+        Some((mtime, exe))
     })();
-    match mtime {
-        Some(m) => DaemonProbe::ExeMtime(m),
+    match parsed {
+        Some((m, exe)) => DaemonProbe::Running {
+            exe_mtime: m,
+            exe_path: exe,
+        },
         None => DaemonProbe::Unresponsive,
     }
 }
@@ -502,12 +825,12 @@ pub fn daemon_info() -> Option<DaemonInfo> {
     })
 }
 
-/// 磁盘上 smeltd 二进制（GUI 同目录）的当前 mtime（秒）。
+/// 磁盘上「期望」的 smeltd mtime：优先 App/cargo 同目录分发物，其次 managed。
+/// 用于判断正在跑的守护是否落后（装 DMG 后 App 更新了，但 ~/.smelt/bin 还旧）。
 fn disk_smeltd_mtime() -> Option<u64> {
-    let exe = std::env::current_exe().ok()?;
-    let daemon = exe.with_file_name("smeltd");
-    let modified = std::fs::metadata(daemon).ok()?.modified().ok()?;
-    modified.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+    bundled_daemon_path()
+        .and_then(|p| file_mtime_secs(&p))
+        .or_else(|| file_mtime_secs(&managed_daemon_path()))
 }
 
 /// 守护是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见：旧守护不会自动重启，
@@ -518,12 +841,36 @@ pub fn daemon_outdated() -> bool {
     match probe_daemon() {
         DaemonProbe::NotRunning => false,
         DaemonProbe::Unresponsive => true,
-        DaemonProbe::ExeMtime(running) => disk_smeltd_mtime().is_some_and(|disk| disk > running),
+        DaemonProbe::Running {
+            exe_mtime,
+            exe_path,
+        } => {
+            // 仍住在 .app 内 / 不在 managed = 必须迁（装 DMG 会死）
+            let inside_app = exe_path
+                .as_ref()
+                .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
+                .unwrap_or(false);
+            let on_managed = exe_path
+                .as_ref()
+                .map(|p| exe_is_managed(std::path::Path::new(p)))
+                .unwrap_or(false);
+            if inside_app || !on_managed {
+                return true;
+            }
+            // 已在 managed：App 与 managed **size 相同** 视为已对齐（避免 cp mtime+1s 误报）
+            if let Some(bundled) = bundled_daemon_path() {
+                let managed = managed_daemon_path();
+                if managed.is_file() && same_daemon_binary_size(&bundled, &managed) {
+                    return false;
+                }
+            }
+            disk_smeltd_mtime().is_some_and(|disk| disk > exe_mtime)
+        }
     }
 }
 
 /// 无缝升级的结果。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpgradeOutcome {
     /// 交接完成，会话全部保留；或守护本来没跑、直接拉起了最新版。
     Upgraded,
@@ -540,21 +887,33 @@ pub enum UpgradeOutcome {
 /// `read_line` 前设了读超时：守护万一卡住（比如某个 out 锁被冻结客户端占住），不能
 /// 让这次调用永久挂起——上层 `daemon_upgrading` 标志会跟着卡死，整个功能失效。
 pub fn upgrade_daemon() -> UpgradeOutcome {
+    upgrade_daemon_exe(None)
+}
+
+/// 无缝升级守护。`new_exe` 为 `Some` 时让守护 **exec 指定路径**（装 DMG：先 exec
+/// 暂存包里的 smeltd，会话不丢，再替换 .app）；`None` 则 exec `current_exe`。
+pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         // 守护没跑：拉起磁盘上最新的等于升级完成，但要探测确认它真的起来了再报
         // 成功——ensure_daemon_running 的失败是静默的，不确认就报 Upgraded 会让
         // UI 显示"已升级"而守护其实没起来。
         ensure_daemon_running();
-        return if matches!(probe_daemon(), DaemonProbe::ExeMtime(_)) {
+        return if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
             UpgradeOutcome::Upgraded
         } else {
             UpgradeOutcome::Failed
         };
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "upgrade" })).is_err() {
+    let msg = match new_exe {
+        Some(p) => serde_json::json!({ "op": "upgrade", "exe": p.to_string_lossy() }),
+        None => serde_json::json!({ "op": "upgrade" }),
+    };
+    if writeln!(s, "{msg}").is_err() {
         return UpgradeOutcome::Failed;
     }
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    // 守护 upgrade 在回 ok 前要逐会话拿 out 锁；每个冻结 client 最多卡
+    // CLIENT_WRITE_TIMEOUT(3s)。会话多时 5s 不够——会误报 Failed 而守护稍后仍 exec。
+    let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
     // 三种读结果分开判断，不能混为一谈：
     // - Ok(0)（EOF，没读到任何字节）＝老守护完全不认识这个 op，直接断连 → Unsupported；
     // - Err（超时/IO 错误）＝守护接了但迟迟不回（可能卡住），不代表版本问题 → Failed；
@@ -572,17 +931,78 @@ pub fn upgrade_daemon() -> UpgradeOutcome {
     if !acked {
         return UpgradeOutcome::Failed;
     }
-    // exec + 交接在百毫秒量级；轮询到新进程的 exe_mtime 追平磁盘为止。
-    let disk = disk_smeltd_mtime();
+    // exec + 交接在百毫秒量级；轮询到新进程的 exe_mtime 追平目标二进制为止。
+    let target_mtime = new_exe
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .or_else(disk_smeltd_mtime);
     for _ in 0..25 {
         thread::sleep(Duration::from_millis(200));
-        if let DaemonProbe::ExeMtime(running) = probe_daemon() {
-            if disk.is_none_or(|d| running >= d) {
+        if let DaemonProbe::Running {
+            exe_mtime: running,
+            exe_path,
+        } = probe_daemon()
+        {
+            let mtime_ok = target_mtime.is_none_or(|d| running >= d);
+            // 指定了 new_exe 时尽量确认进程已落到该路径；老守护无 exe 字段只信 mtime。
+            // managed 目录内的 next/smeltd 互相 rename 后 path 可能短暂不一致，放宽为目录级。
+            let path_ok = match new_exe {
+                Some(target) => match &exe_path {
+                    Some(p) => {
+                        let pe = std::path::Path::new(p);
+                        same_daemon_path(pe, target)
+                            || (path_inside_app_bundle(target) == false
+                                && exe_is_managed(pe)
+                                && target.starts_with(managed_daemon_dir().as_path()))
+                    }
+                    None => true,
+                },
+                None => true,
+            };
+            if mtime_ok && path_ok {
                 return UpgradeOutcome::Upgraded;
             }
         }
     }
     UpgradeOutcome::Failed
+}
+
+/// 装新版 `.app`（在线更新）时保留 smeltd 会话：
+/// 1. **先**把暂存包里的 smeltd handoff 到 `~/.smelt/bin/smeltd`（离开即将被删的 .app）
+/// 2. 再替换 `/Applications/Smelt.app`
+/// 3. 再 ensure managed 与新 App 内 smeltd 对齐
+///
+/// 顺序绝不能反：若先整包覆盖，App 内 smeltd 会被 SIGKILL → 会话全灭 → 对话「重新初始化」。
+pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::Result<()> {
+    let staged_smeltd = staged_app.join("Contents/MacOS/smeltd");
+    if staged_smeltd.is_file() {
+        match handoff_daemon_to_managed(&staged_smeltd) {
+            UpgradeOutcome::Upgraded => {
+                thread::sleep(Duration::from_millis(300));
+            }
+            UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
+                eprintln!(
+                    "[workspace] 装包前 handoff→managed 未成功，继续替换 .app（会话可能丢失）"
+                );
+            }
+        }
+    }
+
+    crate::updater::finalize_pending_update(staged_app)?;
+
+    // 新包落盘后：managed 与 App 内 smeltd 对齐
+    if let Ok(app) = crate::updater::current_app_bundle_path() {
+        let app_smeltd = app.join("Contents/MacOS/smeltd");
+        if app_smeltd.is_file() {
+            match ensure_managed_daemon_current() {
+                Ok(p) => eprintln!("[workspace] 装包后 managed 守护：{}", p.display()),
+                Err(e) => eprintln!("[workspace] 装包后同步 managed 失败：{e}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 让守护自己退出。**会杀掉它托管的所有 PTY 会话**（进程一死子进程 EOF/SIGHUP），
@@ -952,8 +1372,11 @@ fn encode_wheel_x10(up: bool, count: usize, row: usize, col: usize) -> Vec<u8> {
 ///
 /// **回归点**：alacritty 默认 `TermMode` 含 `ALTERNATE_SCROLL`。主屏上绝不能把它
 /// 当成「发方向键」——否则 shell / `make dev` 会打印 `^[[A`，滚动条却仍正常
-/// （滚动条走 `set_scroll_offset`，不经过这里）。备用屏 + 丢 mouse 位时发 SGR，
-/// 保住 reattach 后 Grok/Claude 在应用内滚。
+/// （滚动条走 `set_scroll_offset`，不经过这里）。
+///
+/// **备用屏（Grok/Claude）**：始终发 SGR 滚轮给进程。本地 `MOUSE_MODE` 位 reattach
+/// 后常丢，但进程侧鼠标跟踪通常仍开着；方向键多数 chat TUI 用来改输入/历史，
+/// **不**滚 transcript。主屏无 mouse → 本地 history。
 pub(crate) fn scroll_wheel_plan(
     mode: TermMode,
     lines: i32,
@@ -966,15 +1389,13 @@ pub(crate) fn scroll_wheel_plan(
     let mouse_on = mode.intersects(TermMode::MOUSE_MODE);
     let alt_screen = mode.contains(TermMode::ALT_SCREEN);
 
-    if mouse_on {
-        if mode.contains(TermMode::SGR_MOUSE) {
+    if alt_screen || mouse_on {
+        // 备用屏即使本地丢了 SGR_MOUSE 位也用 SGR 编码（进程侧常见 1006）。
+        if alt_screen || mode.contains(TermMode::SGR_MOUSE) {
             ScrollWheelPlan::Send(encode_wheel_sgr(up, count, row, col))
         } else {
             ScrollWheelPlan::Send(encode_wheel_x10(up, count, row, col))
         }
-    } else if alt_screen {
-        // reattach 丢 mouse 位时的兜底：备用屏按 TUI 发 SGR，绝不滚本地 history。
-        ScrollWheelPlan::Send(encode_wheel_sgr(up, count, row, col))
     } else {
         // 主屏：本地 history。不要用 ALTERNATE_SCROLL 发方向键（默认位常开）。
         ScrollWheelPlan::LocalHistory(lines)
@@ -1121,18 +1542,19 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// reattach 快照整段灌进客户端 Term 之后：贴底 + 补鼠标模式位。
 ///
-/// 守护快照应已带 `1006/1002…`，但实机偶发客户端 Term 停在备用屏却没有
-/// `MOUSE_MODE`，`scroll_wheel` 会误滚本地 history（Grok/Claude「外面滚」）。
-/// 这里只改**本地**解析状态，让分流走应用滚轮；应用侧若已开鼠标会吃到事件。
+/// 快照灌完后的 reattach 收尾。
+///
+/// - 贴底：避免停在 history 中间。
+/// - `\x1b[0m`：清 SGR 状态机，降低「快照末半截真彩参数当正文」
+///   （顶行出现 `48;2;…m` 碎片）的概率；live jolt 重绘会再盖一层正确画面。
+/// - **不再本地伪造 MOUSE_MODE**：以前补 `1006h/1002h` 只改客户端 Term，
+///   进程侧若未开鼠标，滚轮按 SGR 发出去会被 Ignored →「恢复后滚不动」。
+///   无 mouse 的备用屏改走方向键兜底（见 `scroll_wheel_plan`）。
 fn finalize_reattach_term(term: &mut Term<EventProxy>, parser: &mut Processor) {
     term.scroll_display(Scroll::Bottom);
-    let mode = *term.mode();
-    let alt = mode.contains(TermMode::ALT_SCREEN);
-    let mouse = mode.intersects(TermMode::MOUSE_MODE);
-    if alt && !mouse {
-        // SGR + cell motion：与 Claude/Grok 常见组合一致
-        parser.advance(term, b"\x1b[?1006h\x1b[?1002h");
-    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        parser.advance(term, b"\x1b[0m");
+    }));
 }
 
 impl Terminal {
@@ -1249,12 +1671,18 @@ impl Terminal {
                         bytes_seen += n;
                         if let Ok(mut term) = term_reader.lock() {
                             parser.advance(&mut *term, &buf[..n]);
-                            // 快照刚灌完：强制贴底，并在「备用屏却无鼠标上报」时本地补上
-                            // 1006+1002，让 scroll_wheel 走应用滚轮而不是本地 history
-                            // （reattach 后 Grok/Claude 整屏被外壳滚的根因）。
+                            // 快照刚灌完：贴底 + 清 SGR；live jolt 字节会接在后面。
                             if !replay_finalized && bytes_seen >= replay_len {
                                 replay_finalized = true;
                                 finalize_reattach_term(&mut term, &mut parser);
+                            }
+                            // jolt 重绘常在 live 前几包；再贴一次底，避免停在半屏。
+                            if replay_finalized && bytes_seen < replay_len.saturating_add(64 * 1024)
+                            {
+                                let mode = *term.mode();
+                                if mode.contains(TermMode::ALT_SCREEN) {
+                                    term.scroll_display(Scroll::Bottom);
+                                }
                             }
                         }
                         // 喂完这批立刻请求一次重绘（Zed 式：内容生产者驱动重绘）。
@@ -1398,6 +1826,9 @@ impl Terminal {
     /// 按新行列 + 单元格像素 resize：同步 alacritty 网格，并发帧让守护 ioctl
     /// TIOCSWINSZ（含 ws_xpixel/ws_ypixel）。`cell_w_px` / `cell_h_px` 为 0 时只更新
     /// 行列（兼容老路径）。无变化则跳过。
+    ///
+    /// reattach 后请再调一次 [`force_resize`]：本函数 same_size 早退会挡掉同尺寸帧；
+    /// 守护 jolt 用 cell=0，需要 GUI 首帧量到真实 cell 像素后再强制同步一次。
     pub fn resize(&mut self, rows: usize, cols: usize, cell_w_px: u16, cell_h_px: u16) {
         if rows == 0 || cols == 0 {
             return;
@@ -1411,6 +1842,28 @@ impl Terminal {
         if same_grid && same_cell {
             return;
         }
+        self.apply_resize(rows, cols, cell_w_px, cell_h_px, same_grid);
+    }
+
+    /// 无条件向守护发 type-1 resize 帧（行列/cell 相同也发）。
+    /// 首帧布局、reattach 后补真实 cell 像素时用——避免 `resize` 早退导致 PTY
+    /// 一直停在守护默认/零像素尺寸，Claude/Grok TUI 排版错位。
+    pub fn force_resize(&mut self, rows: usize, cols: usize, cell_w_px: u16, cell_h_px: u16) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let same_grid = rows == self.size.rows && cols == self.size.cols;
+        self.apply_resize(rows, cols, cell_w_px, cell_h_px, same_grid);
+    }
+
+    fn apply_resize(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        cell_w_px: u16,
+        cell_h_px: u16,
+        same_grid: bool,
+    ) {
         self.size = TermSize { rows, cols };
         if let Ok(mut m) = self.metrics.lock() {
             m.rows = rows as u16;
@@ -1652,11 +2105,9 @@ impl Terminal {
 
     /// 滚轮：按终端当前模式分流，`lines` 正数向上、负数向下，`(row,col)` 为 0 基单元格。
     ///
-    /// - 应用开了鼠标上报（MOUSE_MODE）→ SGR/X10 滚轮事件发给应用（Claude/Grok TUI）。
-    /// - **备用屏但鼠标位丢失**（reattach 常见）→ 仍发 SGR 滚轮，避免滚本地 history
-    ///   「在 Grok 外面整屏滚」。
-    /// - **主屏** → 永远滚本地 history。注意 alacritty 默认就带 `ALTERNATE_SCROLL`，
-    ///   绝不能在主屏据此发方向键（会把 `^[[A`/`^[[B` 打进 shell / `make dev`）。
+    /// - **备用屏**（Claude/Grok）→ 始终 SGR 滚轮给进程（本地 mouse 位 reattach 会丢）。
+    /// - 主屏 + 应用开了鼠标 → SGR/X10。
+    /// - **主屏无鼠标** → 本地 history。注意默认 `ALTERNATE_SCROLL` 绝不能在主屏发方向键。
     pub fn scroll_wheel(&mut self, lines: i32, row: usize, col: usize) {
         let mode = match self.term.lock() {
             Ok(term) => *term.mode(),
@@ -2467,12 +2918,16 @@ mod scroll_wheel_plan_tests {
     }
 
     #[test]
-    fn alt_screen_without_mouse_still_sends_sgr_fallback() {
-        // reattach 丢 mouse 位：备用屏仍发 SGR，不滚本地 history（Grok 外面整屏滚）。
+    fn alt_screen_without_local_mouse_still_sends_sgr() {
+        // reattach 本地丢 mouse 位：仍发 SGR（进程侧跟踪通常还在）；不滚本地 history。
         let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
         match scroll_wheel_plan(mode, 1, 0, 0) {
             ScrollWheelPlan::Send(b) => assert_eq!(b, b"\x1b[<64;1;1M"),
-            other => panic!("备用屏无 mouse 应 SGR 兜底，got {other:?}"),
+            other => panic!("备用屏应发 SGR 滚轮，got {other:?}"),
+        }
+        match scroll_wheel_plan(mode, -1, 3, 5) {
+            ScrollWheelPlan::Send(b) => assert_eq!(b, b"\x1b[<65;6;4M"),
+            other => panic!("下滚 SGR，got {other:?}"),
         }
     }
 }

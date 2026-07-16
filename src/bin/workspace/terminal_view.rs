@@ -211,6 +211,9 @@ pub struct TerminalView {
     /// 快捷启动实际命令行（硬重启守护 / 冷启动 id 不存在时用来重跑 agent）。
     /// 与 launch_label 分离：label 给人看，cmd 给 shell 跑。
     launch_cmd: Option<String>,
+    /// 首帧布局后强制发一次 PTY resize（含真实 cell 像素）。reattach 后守护 jolt
+    /// 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺像素」的 TUI 排版。
+    pty_kick_pending: bool,
 }
 
 /// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
@@ -668,6 +671,7 @@ impl TerminalView {
             launch_kind,
             launch_label,
             launch_cmd,
+            pty_kick_pending: true,
         }
     }
 
@@ -766,6 +770,8 @@ impl TerminalView {
         self.app_mouse = false;
         self.drag_scroll = 0;
         self.cursor = None;
+        // 重连后必须再 force 一次带 cell 像素的 resize（见 pty_kick_pending）。
+        self.pty_kick_pending = true;
         cx.notify();
     }
 
@@ -1183,7 +1189,15 @@ impl Render for TerminalView {
                 let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
                 let cell_w_px = cell_w.round().clamp(1.0, 64.0) as u16;
                 let cell_h_px = line_px().round().clamp(1.0, 128.0) as u16;
-                self.terminal.resize(grid_rows, cols, cell_w_px, cell_h_px);
+                if self.pty_kick_pending {
+                    // 首帧 / reattach：无条件发 resize（含真实 cell 像素）。
+                    // 守护 jolt 用 cell=0；普通 resize 同尺寸会早退——两处都补不到像素。
+                    self.terminal
+                        .force_resize(grid_rows, cols, cell_w_px, cell_h_px);
+                    self.pty_kick_pending = false;
+                } else {
+                    self.terminal.resize(grid_rows, cols, cell_w_px, cell_h_px);
+                }
             }
         }
 
