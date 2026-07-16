@@ -470,6 +470,38 @@ fn probe_daemon() -> DaemonProbe {
     }
 }
 
+/// 守护自报的运行信息，设置页展示用。
+///
+/// 字段全是 `Option`：`pid`/`started_at`/`session_count` 是后加的，老守护（还没换代的
+/// 那个进程）只回 `version`/`exe_mtime`，读不到就显示不出来，不能因此判失败。
+#[derive(Clone, Debug, Default)]
+pub struct DaemonInfo {
+    pub version: Option<String>,
+    pub pid: Option<u32>,
+    /// 守护进程启动时刻（unix 秒）。无缝升级 exec 后会重置，见 smeltd.rs::started_at。
+    pub started_at: Option<u64>,
+    pub session_count: Option<u64>,
+}
+
+/// 查正在跑的守护的运行信息；守护没起 / 不响应 → None。
+///
+/// **阻塞 IO，只能在后台跑**（见 main.rs::refresh_daemon_status）。故意不走
+/// `connect_daemon`：那个连不上会顺手拉起守护，而这里只是"看一眼现状"，
+/// 不该有副作用——没起就是没起。
+pub fn daemon_info() -> Option<DaemonInfo> {
+    let mut s = UnixStream::connect(sock_path()).ok()?;
+    writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
+    let mut resp = String::new();
+    BufReader::new(s).read_line(&mut resp).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&resp).ok()?;
+    Some(DaemonInfo {
+        version: v["version"].as_str().map(str::to_string),
+        pid: v["pid"].as_u64().map(|n| n as u32),
+        started_at: v["started_at"].as_u64(),
+        session_count: v["session_count"].as_u64(),
+    })
+}
+
 /// 磁盘上 smeltd 二进制（GUI 同目录）的当前 mtime（秒）。
 fn disk_smeltd_mtime() -> Option<u64> {
     let exe = std::env::current_exe().ok()?;

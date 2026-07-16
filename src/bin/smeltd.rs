@@ -146,7 +146,7 @@ use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -243,6 +243,16 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 本进程启动时刻（unix 秒），`version` op 回给 GUI 展示「守护跑了多久」。
+/// 必须在 main 最开头取一次，否则记的是「首次有人问」的时间。
+///
+/// 无缝升级（exec 交接）后是全新进程，这个值会重置，而会话照旧活着——设置页因此
+/// 会显示「守护刚起、会话仍在」，那是如实反映，不是 bug。
+fn started_at() -> u64 {
+    static STARTED_AT: OnceLock<u64> = OnceLock::new();
+    *STARTED_AT.get_or_init(now_unix)
 }
 
 /// 会话状态通道（见 docs/state-channel-plan.md）。三个信源按可信度覆盖：
@@ -904,6 +914,8 @@ mod menubar {
 
 
 fn main() {
+    // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
+    started_at();
     // 无缝升级交接：上一代进程 exec 本二进制前写好交接文件并把路径放在环境变量里。
     // 立即摘掉环境变量：它只对"本次 exec 交接"有意义，不能传染给之后 spawn 的 shell。
     let handoff = std::env::var("SMELTD_HANDOFF").ok();
@@ -1612,11 +1624,20 @@ fn handle_conn(
         }
         Some("upgrade") => handle_upgrade(conn, &sessions, listen_fd),
         Some("version") => {
+            // pid/started_at/session_count 是后加的：旧 GUI 只读 version/exe_mtime，
+            // 多出来的字段它直接忽略，协议向后兼容。
+            let session_count = sessions.lock().map(|s| s.len()).unwrap_or(0);
             let mut c = conn;
             let _ = writeln!(
                 c,
                 "{}",
-                serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "exe_mtime": exe_mtime })
+                serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "exe_mtime": exe_mtime,
+                    "pid": std::process::id(),
+                    "started_at": started_at(),
+                    "session_count": session_count,
+                })
             );
         }
         Some("shutdown") => {

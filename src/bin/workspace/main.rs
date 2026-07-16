@@ -1089,6 +1089,9 @@ struct Workspace {
     daemon_upgrade_msg: Option<String>,
     /// 无缝升级进行中（按钮置灰防连点）。
     daemon_upgrading: bool,
+    /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
+    /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
+    daemon_info: Option<terminal::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
     /// 启动时从存档恢复失败的会话（守护未就绪等）。仍写回 workspace.json，避免
@@ -1332,6 +1335,7 @@ impl Workspace {
             daemon_outdated: None,
             daemon_upgrade_msg: None,
             daemon_upgrading: false,
+            daemon_info: None,
             show_daemon_restart_confirm: false,
             restore_orphans,
             focus_handle: cx.focus_handle(),
@@ -2211,8 +2215,13 @@ impl Workspace {
     /// check_for_update 同款结构，别在 UI 线程里做阻塞 IO。
     fn check_daemon_outdated(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let outdated = cx.background_executor().spawn(async { terminal::daemon_outdated() }).await;
+            // 版本落后判定和运行信息一次问完：两者都要连守护，分两趟等于白跑一次握手。
+            let (outdated, info) = cx
+                .background_executor()
+                .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
+                .await;
             let _ = this.update(cx, |this, cx| {
+                this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 // 落后就自动无缝升级——「随版本更新且不中断」：exec 交接保留所有会话；
                 // 正在跑的守护太旧不支持时，结果提示会引导到设置页手动重启。
@@ -2250,10 +2259,14 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let outcome =
                 cx.background_executor().spawn(async { terminal::upgrade_daemon() }).await;
-            let outdated =
-                cx.background_executor().spawn(async { terminal::daemon_outdated() }).await;
+            // exec 换代后 PID / 启动时刻都变了，跟版本一起重新问一遍。
+            let (outdated, info) = cx
+                .background_executor()
+                .spawn(async { (terminal::daemon_outdated(), terminal::daemon_info()) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_upgrading = false;
+                this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 this.daemon_upgrade_msg = Some(match outcome {
                     terminal::UpgradeOutcome::Upgraded => {
@@ -2308,12 +2321,13 @@ impl Workspace {
         }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let outdated = cx
+            // 硬重启后是全新进程，PID / 启动时刻 / 会话数都得重问。
+            let (outdated, info) = cx
                 .background_executor()
                 .spawn(async {
                     terminal::restart_daemon();
                     terminal::ensure_daemon_running();
-                    terminal::daemon_outdated()
+                    (terminal::daemon_outdated(), terminal::daemon_info())
                 })
                 .await;
 
@@ -2337,6 +2351,7 @@ impl Workspace {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 let mut failed = 0usize;
                 for (entity, term) in built {

@@ -571,6 +571,52 @@ pub struct LaunchInputs {
 ///
 /// 但「转手调」不等于「跟着刷新」：`cx.notify()` 标脏的是 Workspace，设置窗口不在它
 /// 的观察者名单里，不会因此重绘。所以得显式 observe 一把，否则后台改的状态——更新
+/// 运行时长的人话格式：秒 → 「3 小时 12 分」。只保留两级单位，设置页那行不需要秒级精度。
+fn fmt_uptime(secs: u64) -> String {
+    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{secs} 秒"),
+        (0, 0, m) => format!("{m} 分钟"),
+        (0, h, m) => format!("{h} 小时 {m} 分"),
+        (d, h, _) => format!("{d} 天 {h} 小时"),
+    }
+}
+
+/// 守护运行信息拼成一行：`v0.5.4 · PID 64954 · 启动于 07-16 20:38（已运行 3 小时 12 分）· 5 个会话`。
+/// 老守护回不出的字段直接不显示——宁可少一段，也不摆「未知」占位。
+fn daemon_info_line(info: &terminal::DaemonInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &info.version {
+        parts.push(format!("v{v}"));
+    }
+    if let Some(pid) = info.pid {
+        parts.push(format!("PID {pid}"));
+    }
+    if let Some(started) = info.started_at {
+        // 本地时区显示；秒数换算成人话时长跟在后面。
+        let started_txt = chrono::DateTime::from_timestamp(started as i64, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "?".into());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // saturating：守护跟 GUI 之间时钟若有漂移，别算出个天文数字。
+        parts.push(format!(
+            "启动于 {started_txt}（已运行 {}）",
+            fmt_uptime(now.saturating_sub(started))
+        ));
+    }
+    if let Some(n) = info.session_count {
+        parts.push(format!("{n} 个会话"));
+    }
+    parts.join(" · ")
+}
+
 /// 下载进度、守护进程检测结果——在设置窗口里会一直停在打开那一刻的样子。
 pub struct SettingsWindow {
     workspace: Entity<Workspace>,
@@ -1487,6 +1533,14 @@ impl Workspace {
                         Some(false) => "已是最新。".to_string(),
                         None => "检测中…".to_string(),
                     };
+                    // 运行信息：守护没起就明说，别留空白让人以为没加载出来。
+                    let info = daemon_entity.read(cx).daemon_info.clone();
+                    let info_text = match (&info, outdated) {
+                        (Some(i), _) => Some(daemon_info_line(i)),
+                        // outdated 已探测完但拿不到 info → 守护确实没跑。
+                        (None, Some(_)) => Some("未在运行（新建终端时会自动拉起）".to_string()),
+                        (None, None) => None,
+                    };
 
                     v_flex()
                         .w_full()
@@ -1506,6 +1560,9 @@ impl Workspace {
                                 ),
                         )
                         .child(div().text_xs().text_color(muted).child(status_text))
+                        .children(
+                            info_text.map(|t| div().text_xs().text_color(muted).child(t)),
+                        )
                         .children(upgrade_msg.map(|m| div().text_xs().text_color(muted).child(m)))
                         .child(
                             div()
@@ -1830,5 +1887,59 @@ impl Workspace {
                 .expect("打开设置窗口失败");
             cx.set_global(SettingsWindowHandle(Some(handle)));
         });
+    }
+}
+
+#[cfg(test)]
+mod daemon_info_tests {
+    use super::{daemon_info_line, fmt_uptime};
+    use crate::terminal::DaemonInfo;
+
+    #[test]
+    fn fmt_uptime_picks_two_units() {
+        assert_eq!(fmt_uptime(45), "45 秒");
+        assert_eq!(fmt_uptime(600), "10 分钟");
+        assert_eq!(fmt_uptime(3600 * 3 + 60 * 12), "3 小时 12 分");
+        assert_eq!(fmt_uptime(86400 * 2 + 3600 * 5), "2 天 5 小时");
+    }
+
+    /// 老守护只回 version/exe_mtime：拿不到的字段整段省掉，不摆「未知」占位。
+    #[test]
+    fn old_daemon_without_new_fields_shows_only_version() {
+        let info = DaemonInfo {
+            version: Some("0.5.4".into()),
+            ..Default::default()
+        };
+        assert_eq!(daemon_info_line(&info), "v0.5.4");
+    }
+
+    /// 全字段齐活：各段用 · 连起来，PID 和会话数都在。
+    #[test]
+    fn full_info_joins_all_parts() {
+        let info = DaemonInfo {
+            version: Some("0.5.4".into()),
+            pid: Some(64954),
+            started_at: Some(1_000_000),
+            session_count: Some(5),
+        };
+        let line = daemon_info_line(&info);
+        assert!(line.starts_with("v0.5.4 · PID 64954 · 启动于 "), "got {line}");
+        assert!(line.contains("已运行 "), "got {line}");
+        assert!(line.ends_with("· 5 个会话"), "got {line}");
+    }
+
+    /// 守护时钟比 GUI 快时不能算出天文数字（saturating_sub 兜底）。
+    #[test]
+    fn future_started_at_does_not_underflow() {
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 9999;
+        let info = DaemonInfo {
+            started_at: Some(future),
+            ..Default::default()
+        };
+        assert!(daemon_info_line(&info).contains("已运行 0 秒"));
     }
 }
