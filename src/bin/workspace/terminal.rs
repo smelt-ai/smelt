@@ -895,6 +895,69 @@ fn encode_mouse(mode: TermMode, button: u8, pressed: bool, row: usize, col: usiz
     }
 }
 
+/// `scroll_wheel` 的分流结果：要么把字节喂给应用，要么滚本地 history。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScrollWheelPlan {
+    Send(Vec<u8>),
+    LocalHistory(i32),
+}
+
+/// 编码滚轮 SGR 事件（button 64/65，坐标 1 基）。
+fn encode_wheel_sgr(up: bool, count: usize, row: usize, col: usize) -> Vec<u8> {
+    let cb: u8 = if up { 64 } else { 65 };
+    let cx = col.saturating_add(1);
+    let cy = row.saturating_add(1);
+    let one = format!("\x1b[<{cb};{cx};{cy}M");
+    one.repeat(count).into_bytes()
+}
+
+/// 编码滚轮 X10 事件。
+fn encode_wheel_x10(up: bool, count: usize, row: usize, col: usize) -> Vec<u8> {
+    let cb: u8 = if up { 64 } else { 65 };
+    let cx = col.saturating_add(1);
+    let cy = row.saturating_add(1);
+    let bx = 32u8.saturating_add(cx.min(223) as u8);
+    let by = 32u8.saturating_add(cy.min(223) as u8);
+    let mut buf = Vec::with_capacity(6 * count);
+    for _ in 0..count {
+        buf.extend_from_slice(&[0x1b, b'[', b'M', 32 + cb, bx, by]);
+    }
+    buf
+}
+
+/// 纯函数：按 TermMode 决定滚轮是转发应用还是滚本地 history。
+///
+/// **回归点**：alacritty 默认 `TermMode` 含 `ALTERNATE_SCROLL`。主屏上绝不能把它
+/// 当成「发方向键」——否则 shell / `make dev` 会打印 `^[[A`，滚动条却仍正常
+/// （滚动条走 `set_scroll_offset`，不经过这里）。备用屏 + 丢 mouse 位时发 SGR，
+/// 保住 reattach 后 Grok/Claude 在应用内滚。
+pub(crate) fn scroll_wheel_plan(
+    mode: TermMode,
+    lines: i32,
+    row: usize,
+    col: usize,
+) -> ScrollWheelPlan {
+    let count = (lines.unsigned_abs() as usize).clamp(1, 8);
+    let up = lines > 0;
+    // intersects：很多 TUI 只开 MOUSE_MOTION 一位，contains(MOUSE_MODE) 会漏。
+    let mouse_on = mode.intersects(TermMode::MOUSE_MODE);
+    let alt_screen = mode.contains(TermMode::ALT_SCREEN);
+
+    if mouse_on {
+        if mode.contains(TermMode::SGR_MOUSE) {
+            ScrollWheelPlan::Send(encode_wheel_sgr(up, count, row, col))
+        } else {
+            ScrollWheelPlan::Send(encode_wheel_x10(up, count, row, col))
+        }
+    } else if alt_screen {
+        // reattach 丢 mouse 位时的兜底：备用屏按 TUI 发 SGR，绝不滚本地 history。
+        ScrollWheelPlan::Send(encode_wheel_sgr(up, count, row, col))
+    } else {
+        // 主屏：本地 history。不要用 ALTERNATE_SCROLL 发方向键（默认位常开）。
+        ScrollWheelPlan::LocalHistory(lines)
+    }
+}
+
 /// 把用户输入当成字面量塞进 RegexSearch：转义正则元字符，避免 `foo.bar` 误匹配。
 pub(crate) fn escape_regex_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -1581,62 +1644,19 @@ impl Terminal {
     /// - 应用开了鼠标上报（MOUSE_MODE）→ SGR/X10 滚轮事件发给应用（Claude/Grok TUI）。
     /// - **备用屏但鼠标位丢失**（reattach 常见）→ 仍发 SGR 滚轮，避免滚本地 history
     ///   「在 Grok 外面整屏滚」。
-    /// - 否则若开了 ALTERNATE_SCROLL → 方向键。
-    /// - 普通主屏 → 滚本地历史缓冲。
+    /// - **主屏** → 永远滚本地 history。注意 alacritty 默认就带 `ALTERNATE_SCROLL`，
+    ///   绝不能在主屏据此发方向键（会把 `^[[A`/`^[[B` 打进 shell / `make dev`）。
     pub fn scroll_wheel(&mut self, lines: i32, row: usize, col: usize) {
         let mode = match self.term.lock() {
             Ok(term) => *term.mode(),
             Err(_) => return,
         };
-        let count = (lines.unsigned_abs() as usize).clamp(1, 8);
-        let up = lines > 0;
-
-        // intersects 而非 contains：MOUSE_MODE 是 REPORT_CLICK|MOTION|DRAG 的组合，很多 TUI
-        // 只开其中一位（MOUSE_MOTION），contains 会漏判。
-        let mouse_on = mode.intersects(TermMode::MOUSE_MODE);
-        let alt_screen = mode.contains(TermMode::ALT_SCREEN);
-        if mouse_on {
-            // 上=64 下=65；坐标 1 基。
-            let cb: u8 = if up { 64 } else { 65 };
-            let cx = col.saturating_add(1);
-            let cy = row.saturating_add(1);
-            let sgr = mode.contains(TermMode::SGR_MOUSE);
-            let mut buf = Vec::new();
-            for _ in 0..count {
-                if sgr {
-                    buf.extend_from_slice(format!("\x1b[<{cb};{cx};{cy}M").as_bytes());
-                } else {
-                    let bx = 32u8.saturating_add(cx.min(223) as u8);
-                    let by = 32u8.saturating_add(cy.min(223) as u8);
-                    buf.extend_from_slice(&[0x1b, b'[', b'M', 32 + cb, bx, by]);
-                }
+        match scroll_wheel_plan(mode, lines, row, col) {
+            ScrollWheelPlan::Send(bytes) => self.send_input(&bytes),
+            ScrollWheelPlan::LocalHistory(delta) => {
+                let Ok(mut term) = self.term.lock() else { return };
+                term.scroll_display(Scroll::Delta(delta));
             }
-            self.send_input(&buf);
-        } else if alt_screen {
-            // reattach 丢 mouse 位时的兜底：备用屏按 TUI 发 SGR 滚轮，绝不滚本地 history。
-            let cb: u8 = if up { 64 } else { 65 };
-            let cx = col.saturating_add(1);
-            let cy = row.saturating_add(1);
-            let mut buf = Vec::new();
-            for _ in 0..count {
-                buf.extend_from_slice(format!("\x1b[<{cb};{cx};{cy}M").as_bytes());
-            }
-            self.send_input(&buf);
-        } else if mode.contains(TermMode::ALTERNATE_SCROLL) {
-            let seq: &[u8] = match (up, mode.contains(TermMode::APP_CURSOR)) {
-                (true, true) => b"\x1bOA",
-                (true, false) => b"\x1b[A",
-                (false, true) => b"\x1bOB",
-                (false, false) => b"\x1b[B",
-            };
-            let mut buf = Vec::with_capacity(seq.len() * count);
-            for _ in 0..count {
-                buf.extend_from_slice(seq);
-            }
-            self.send_input(&buf);
-        } else {
-            let Ok(mut term) = self.term.lock() else { return };
-            term.scroll_display(Scroll::Delta(lines));
         }
     }
 
@@ -2394,6 +2414,56 @@ mod mouse_encode_tests {
         assert_eq!(encode_mouse(sgr, 0, true, 2, 4), b"\x1b[<0;5;3M");
         assert_eq!(encode_mouse(sgr, 0, false, 2, 4), b"\x1b[<0;5;3m");
         assert_eq!(encode_mouse(sgr, 32, true, 2, 4), b"\x1b[<32;5;3M");
+    }
+}
+
+#[cfg(test)]
+mod scroll_wheel_plan_tests {
+    use super::{scroll_wheel_plan, ScrollWheelPlan};
+    use alacritty_terminal::term::TermMode;
+
+    #[test]
+    fn primary_screen_default_modes_scroll_local_history() {
+        // 回归：alacritty 默认含 ALTERNATE_SCROLL；主屏滚轮绝不能发 ^[[A 进 shell。
+        let mode = TermMode::default();
+        assert!(
+            mode.contains(TermMode::ALTERNATE_SCROLL),
+            "前提：默认应含 ALTERNATE_SCROLL，否则测不到回归点"
+        );
+        assert!(!mode.contains(TermMode::ALT_SCREEN));
+        assert_eq!(
+            scroll_wheel_plan(mode, 3, 1, 2),
+            ScrollWheelPlan::LocalHistory(3)
+        );
+        assert_eq!(
+            scroll_wheel_plan(mode, -2, 1, 2),
+            ScrollWheelPlan::LocalHistory(-2)
+        );
+    }
+
+    #[test]
+    fn mouse_mode_sgr_forwards_wheel_to_app() {
+        let mode = TermMode::SGR_MOUSE | TermMode::MOUSE_MOTION | TermMode::ALT_SCREEN;
+        match scroll_wheel_plan(mode, 1, 4, 8) {
+            ScrollWheelPlan::Send(b) => {
+                assert_eq!(b, b"\x1b[<64;9;5M");
+            }
+            other => panic!("期望 Send SGR 滚轮，got {other:?}"),
+        }
+        match scroll_wheel_plan(mode, -1, 4, 8) {
+            ScrollWheelPlan::Send(b) => assert_eq!(b, b"\x1b[<65;9;5M"),
+            other => panic!("期望 Send 下滚，got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_screen_without_mouse_still_sends_sgr_fallback() {
+        // reattach 丢 mouse 位：备用屏仍发 SGR，不滚本地 history（Grok 外面整屏滚）。
+        let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
+        match scroll_wheel_plan(mode, 1, 0, 0) {
+            ScrollWheelPlan::Send(b) => assert_eq!(b, b"\x1b[<64;1;1M"),
+            other => panic!("备用屏无 mouse 应 SGR 兜底，got {other:?}"),
+        }
     }
 }
 

@@ -50,7 +50,7 @@
 | DEC 1004 焦点上报 | `report_focus` → 开了 `FOCUS_IN_OUT` 时写 `\x1b[I` / `\x1b[O` | `Terminal::report_focus` + render 里焦点边沿 |
 | 选区 | alacritty `Selection`（Simple/Word/Line）；拖边自动滚；copy-on-select；Cmd+C | `selection_*`，mouse handlers |
 | Kitty keyboard（Enter 消歧） | `Config.kitty_keyboard = true`；Shift+Enter → CSI u | `term_config`，`keystroke_to_bytes` |
-| App cursor / alt scroll / 滚轮 | DECCKM 方向键；MOUSE_MODE 滚轮 SGR/X10；ALT+ALTERNATE_SCROLL → 方向键 | `scroll_wheel`，`app_cursor_mode` |
+| App cursor / alt scroll / 滚轮 | DECCKM 方向键；MOUSE_MODE / 备用屏丢 mouse → SGR 滚轮；**主屏永远本地 history**（勿用默认 ALTERNATE_SCROLL 发方向键） | `scroll_wheel` / `scroll_wheel_plan`，`app_cursor_mode` |
 | 鼠标单击转发 | 无非空选区时 mouse_up 发 press+release；Shift 旁路 | `mouse_button` |
 | PtyWrite / ColorRequest | EventProxy 写回守护帧 | `EventListener` |
 | damage 节流 | `take_damage` 滤掉「仅静止光标格」 | `take_damage` + 定时刷新 |
