@@ -1787,9 +1787,25 @@ impl Workspace {
         eprintln!("[tasks] run launch={launch_cmd}");
 
         let sid = new_sid();
+        // 同 add_session_with_launch：FFI 回调栈上 panic = abort 整个 app，
+        // spawn 失败就不起任务终端，留日志。
+        let terminal = match crate::terminal::Terminal::spawn(
+            24,
+            80,
+            cwd.as_deref(),
+            &sid,
+            Some(launch_cmd.as_str()),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[tasks] 任务终端启动失败（{cwd:?}）：{e:#}");
+                return;
+            }
+        };
         let view = cx.new(|cx| {
-            TerminalView::new(
+            TerminalView::from_terminal(
                 cx,
+                terminal,
                 cwd,
                 sid.clone(),
                 Some(launch_cmd.as_str()),

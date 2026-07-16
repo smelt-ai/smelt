@@ -1462,7 +1462,18 @@ impl Workspace {
         label: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let view = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), launch, label));
+        // spawn 可失败（守护挂了）。这里在用户事件的 FFI 回调栈上，panic 不能
+        // unwind 会直接 abort 整个 app（拖放开项目曾这么崩过）——失败就不开，
+        // 留日志。守护端有自动拉起，用户重试一次通常就好。
+        let sid = new_sid();
+        let terminal = match terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, launch) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[workspace] 新建会话失败（{cwd:?}）：{e:#}");
+                return;
+            }
+        };
+        let view = cx.new(|cx| TerminalView::from_terminal(cx, terminal, cwd, sid, launch, label));
         self.sessions.push(Session::single(view));
         self.active_session = self.sessions.len() - 1;
         self.save_state(cx);
@@ -1474,7 +1485,16 @@ impl Workspace {
         let Some(sess) = self.cur() else { return };
         let cwd = sess.active.read(cx).cwd().or_else(current_dir);
         let old = sess.active.entity_id();
-        let view = cx.new(|cx| TerminalView::new(cx, cwd, new_sid(), None, None));
+        // 同 add_session_with_launch：FFI 回调栈上不许 panic，失败就不分屏。
+        let sid = new_sid();
+        let terminal = match terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[workspace] 分屏失败（{cwd:?}）：{e:#}");
+                return;
+            }
+        };
+        let view = cx.new(|cx| TerminalView::from_terminal(cx, terminal, cwd, sid, None, None));
         let state = cx.new(|_| ResizableState::default());
         let sess = &mut self.sessions[self.active_session];
         split_leaf(&mut sess.layout, old, axis, state, view.clone());

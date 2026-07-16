@@ -495,37 +495,11 @@ fn classify_launch(launch: Option<&str>) -> LaunchKind {
 }
 
 impl TerminalView {
-    pub fn new(
-        cx: &mut Context<Self>,
-        cwd: Option<String>,
-        session_id: String,
-        launch: Option<&str>,
-        launch_label: Option<&str>,
-    ) -> Self {
-        Self::try_new(cx, cwd, session_id, launch, launch_label)
-            .expect("启动内嵌终端失败")
-    }
-
-    /// 可失败版本：无头 job 提升为可见终端时 reattach 可能已 EOF。
-    pub fn try_new(
-        cx: &mut Context<Self>,
-        cwd: Option<String>,
-        session_id: String,
-        launch: Option<&str>,
-        launch_label: Option<&str>,
-    ) -> Option<Self> {
-        let terminal = Terminal::spawn(24, 80, cwd.as_deref(), &session_id, launch).ok()?;
-        Some(Self::from_terminal(
-            cx,
-            terminal,
-            cwd,
-            session_id,
-            launch,
-            launch_label,
-        ))
-    }
-
-    /// 用已 spawn 的 `Terminal` 包一层视图（无头 job 提升时先 spawn 再决定是否建 Entity）。
+    /// 用已 spawn 的 `Terminal` 包一层视图。**这是唯一的构造入口**——先
+    /// `Terminal::spawn`（可失败）再决定是否建 Entity；不提供包着 expect 的
+    /// 便捷构造：所有调用方都在 GPUI 的 ObjC 回调栈上（启动
+    /// did_finish_launching / 用户事件），panic 不能跨 FFI unwind，一炸就是
+    /// 整个 app abort——历史上「重启就崩」「拖文件夹就崩」都是它。
     pub fn from_terminal(
         cx: &mut Context<Self>,
         terminal: Terminal,
