@@ -62,6 +62,18 @@ smelt 把终端——agent 真正干活的地方——变成主战场。
 - Git diff 视图，字符级行内高亮
 - 代码热力图：从 `git log` 提炼改动热点（改得越勤、越近，分数越高）
 
+**远程访问**（默认关闭）
+- 开个开关拿一条链接，手机浏览器就能看本机 agent 会话的实时终端画面（真 xterm 渲染，TUI 正常显示）
+- 可选开放写入：手机上打字、批准 / 拒绝权限；Claude Code 的编号选项会被识别成大按钮，点一下就选
+- 出门也能连：装了 [`cloudflared`](https://developers.cloudflare.com/cloudflare-tunnel/) 后自动建 Cloudflare quick tunnel 生成公网链接（临时链接，重启会变）
+
+  > ⚠️ **链接即权限**：鉴权只有 URL 里的随机 token，无密码、无过期，一条链接管本机全部会话。
+  > 开着「允许远程写入」把链接发出去，等于交出一个远程 shell。默认三个开关全关、只绑回环地址。
+  > 细节见[文档](https://github.com/smelt-ai/smelt/blob/main/website/content/docs.md#远程访问)。
+
+  做到「一个人用手机遥控自己的 Mac」为止；IM 卡片、同事协作 / 认领 / 移交都还没动工，
+  见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
+
 **其它**
 - 终端会话持久化：GUI 退出或崩溃不影响 shell 存活，重开自动 reattach
 - 桌面宠物：透明置顶浮窗，可选接 LLM 大脑（OpenAI 兼容协议）
@@ -103,15 +115,21 @@ cargo test
 
 ## 架构
 
-仓库有两个二进制：
+仓库有四个二进制，日常只需要跑第一个：
 
 | 二进制 | 作用 |
 |---|---|
 | `workspace` | GUI 主程序（`src/bin/workspace/`） |
-| `smeltd` | 终端持久化守护进程，类 tmux（`src/bin/smeltd.rs`） |
+| `smeltd` | 终端持久化守护进程，类 tmux（`src/bin/smeltd.rs`）；远程网关也跑在它里面 |
+| `gateway` | 远程网关的独立可执行版（`src/bin/gateway.rs`），与 smeltd 共用 `src/remote_gateway.rs`，主要用于开发调试 |
+| `smelt-notify` | Claude Code hooks 调用的状态上报小工具（`src/bin/smelt-notify.rs`） |
 
 `smeltd` 由 GUI 按需自动拉起并托管（独立进程组，GUI 退出不波及），**不需要手动运行**。
 它以字节流 + 重放 + 尺寸协商的方式为每个终端会话保活，重开 GUI 时按会话 id reattach。
+守护常驻 `~/.smelt/bin/smeltd`——不住在 App 包里，换包 / 在线更新才不会连带杀掉会话。
+
+手机端 H5（`remote-web/`，Preact + Tailwind + xterm）在编译期由 `rust-embed` 打进
+`smeltd` / `gateway`，所以只拷二进制也能跑；改前端后需重新 `npm run build` 再 `cargo build`。
 
 详细架构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，
 待做点子见 [`docs/roadmap.md`](docs/roadmap.md)。
@@ -120,7 +138,9 @@ cargo test
 
 Rust 2021 · [GPUI](https://github.com/zed-industries/zed) + [gpui-component](https://github.com/longbridge/gpui-component)
 · portable-pty（PTY）· alacritty_terminal（ANSI 状态机）· tokio · smol · similar（diff）
-· notify（文件监听）· reqwest · anyhow
+· notify（文件监听）· reqwest · anyhow · axum（远程网关 HTTP/WS）· rust-embed（把手机端 H5 编进二进制）
+
+手机端 H5：Preact + Tailwind + xterm.js（`remote-web/`，Vite 构建）。
 
 配置放在 `~/.smelt/`。
 
