@@ -18,26 +18,24 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const REFERENCE_PAGE: &str = include_str!("remote_gateway_page.html");
 const LIST_PAGE: &str = include_str!("remote_gateway_list_page.html");
 const CONSOLE_PAGE: &str = include_str!("remote_gateway_console_page.html");
 
-/// Preact 远程 H5 构建产物目录（内含 `index.html` + `assets/`）。
-///
-/// 查找顺序（第一个存在 `index.html` 的目录生效）：
-/// 1. 环境变量 `SMELT_REMOTE_WEB`（调试/自定义）
-/// 2. App 包：`Smelt.app/Contents/Resources/remote-web`（打包脚本拷入）
-/// 3. 与 smeltd 同目录下的 `remote-web/`
-/// 4. 开发：仓库根 `remote-web/dist`（`CARGO_MANIFEST_DIR`）
-///
-/// **不要**只依赖 `CARGO_MANIFEST_DIR`：编译机路径在用户 DMG 里不存在，
-/// 会误回退到旧内嵌 HTML，手机端样式看起来「全乱了」。
-fn remote_web_dist() -> PathBuf {
+/// 编译期打进二进制的 SPA（`build.rs` 保证 `remote-web/dist` 存在）。
+/// Docker 只交付 smeltd、或 App 里漏拷 Resources 时，仍能出 Preact 面板。
+#[derive(rust_embed::RustEmbed)]
+#[folder = "remote-web/dist/"]
+struct EmbeddedSpa;
+
+/// 磁盘上的 SPA 目录（可选覆盖嵌入资源，便于开发热更）。
+/// 顺序：`SMELT_REMOTE_WEB` → App `Resources/remote-web` → 同目录 `remote-web` → 仓库 dist。
+fn remote_web_dist_fs() -> Option<PathBuf> {
     use std::sync::OnceLock;
-    static CACHED: OnceLock<PathBuf> = OnceLock::new();
+    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
     CACHED
         .get_or_init(|| {
             let mut candidates: Vec<PathBuf> = Vec::new();
@@ -49,7 +47,6 @@ fn remote_web_dist() -> PathBuf {
             }
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(macos_dir) = exe.parent() {
-                    // …/Smelt.app/Contents/MacOS/smeltd → …/Contents/Resources/remote-web
                     if let Some(contents) = macos_dir.parent() {
                         candidates.push(contents.join("Resources").join("remote-web"));
                     }
@@ -63,23 +60,37 @@ fn remote_web_dist() -> PathBuf {
             );
             for c in candidates {
                 if c.join("index.html").is_file() {
-                    return c;
+                    return Some(c);
                 }
             }
-            // 占位：spa_ready() 为 false 时走旧 HTML
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("remote-web")
-                .join("dist")
+            None
         })
         .clone()
 }
 
-fn spa_index_path() -> PathBuf {
-    remote_web_dist().join("index.html")
+/// 读 SPA 文件：磁盘优先（开发），否则用嵌入资源（Docker/DMG 可靠路径）。
+fn spa_read(rel: &str) -> Option<Vec<u8>> {
+    let rel = rel.trim_start_matches('/');
+    if let Some(dir) = remote_web_dist_fs() {
+        let p = dir.join(rel);
+        if p.is_file() {
+            if let Ok(b) = std::fs::read(p) {
+                return Some(b);
+            }
+        }
+    }
+    EmbeddedSpa::get(rel).map(|f| f.data.into_owned())
 }
 
 fn spa_ready() -> bool {
-    spa_index_path().is_file()
+    match spa_read("index.html") {
+        Some(b) => {
+            let s = String::from_utf8_lossy(&b);
+            // build.rs 占位页不含 Vite assets 引用
+            s.contains("/assets/") || s.contains("assets/")
+        }
+        None => false,
+    }
 }
 
 pub fn sock_path() -> std::path::PathBuf {
@@ -157,29 +168,29 @@ pub fn build_router(token: String, write_enabled: bool) -> Router {
     r.with_state(state)
 }
 
-/// 读 dist/index.html，注入 write 权限 meta + 当前 token 提示（token 仍走 query）。
+/// 读 SPA index.html（磁盘或嵌入），注入 write 权限 meta。
 fn spa_index_html(write_enabled: bool) -> Response {
-    let path = spa_index_path();
-    let Ok(mut raw) = std::fs::read_to_string(&path) else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "remote-web 未构建：cd remote-web && npm run build")
+    let Some(bytes) = spa_read("index.html") else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "remote-web 未构建：cd remote-web && npm ci && npm run build",
+        )
             .into_response();
     };
+    let mut raw = String::from_utf8_lossy(&bytes).into_owned();
     let meta = format!(
         r#"<meta name="smelt-write" content="{}" />"#,
         if write_enabled { "true" } else { "false" }
     );
     if raw.contains("</head>") {
-        raw = raw.replacen("</head>", &format!("{meta}
-</head>"), 1);
+        raw = raw.replacen("</head>", &format!("{meta}\n</head>"), 1);
     } else {
-        raw = format!("{meta}
-{raw}");
+        raw = format!("{meta}\n{raw}");
     }
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            // 开发迭代频繁：禁止缓存 index，避免手机仍加载旧 JS 哈希
             (header::CACHE_CONTROL, "no-store, max-age=0"),
         ],
         raw,
@@ -208,21 +219,19 @@ async fn spa_index_handler_with_id(
     spa_index_html(state.write_enabled)
 }
 
-/// 托管 Vite 产物：/assets/...
+/// 托管 Vite 产物：/assets/...（磁盘或嵌入二进制）
 async fn spa_asset_handler(Path(path): Path<String>) -> Response {
-    // 防目录穿越
     if path.contains("..") || path.starts_with('/') {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
     }
-    let full = remote_web_dist().join("assets").join(&path);
-    serve_file(&full)
-}
-
-fn serve_file(full: &FsPath) -> Response {
-    let Ok(bytes) = std::fs::read(full) else {
+    let rel = format!("assets/{path}");
+    let Some(bytes) = spa_read(&rel) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let ct = match full.extension().and_then(|e| e.to_str()) {
+    let ct = match PathBuf::from(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
         Some("js") => "application/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("svg") => "image/svg+xml",
@@ -235,7 +244,6 @@ fn serve_file(full: &FsPath) -> Response {
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, ct),
-            // 带 content-hash 的文件名已可长期缓存；仍给短 max-age，方便迭代
             (header::CACHE_CONTROL, "public, max-age=120"),
         ],
         bytes,

@@ -54,6 +54,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # remote-web（Preact SPA）编译进 smeltd；无 Node 时 build.rs 只会嵌占位页，手机样式必坏
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: remote-web/package-lock.json
+
+      - name: Build remote-web SPA
+        run: |
+          cd remote-web
+          npm ci
+          npm run build
+          test -f dist/index.html
+          grep -q assets/ dist/index.html || { echo "✗ dist/index.html 不像 Vite 产物"; exit 1; }
+          ls -lh dist/assets
+
       # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -107,6 +124,13 @@ jobs:
         run: |
           test -f dist/Smelt.dmg || { echo "✗ 没生成 dist/Smelt.dmg"; exit 1; }
           ls -lh dist/Smelt.dmg
+          # App 内应有 SPA；smeltd 亦嵌入了同一份，双保险
+          test -f dist/Smelt.app/Contents/Resources/remote-web/index.html \
+            || { echo "✗ App Resources 缺少 remote-web"; exit 1; }
+          # 嵌入的不是占位页：二进制里应有 vite 资源路径痕迹
+          strings dist/Smelt.app/Contents/MacOS/smeltd | grep -q 'assets/index-' \
+            || { echo "✗ smeltd 未嵌入 remote-web SPA（可能 cargo 时 dist 为空）"; exit 1; }
+          echo "✅ remote-web 已打入 Resources 且嵌入 smeltd"
 
       - name: Clean up codesign keychain
         if: always()

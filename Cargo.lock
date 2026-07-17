@@ -6471,6 +6471,7 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "reqwest",
+ "rust-embed",
  "serde",
  "serde_json",
  "similar",

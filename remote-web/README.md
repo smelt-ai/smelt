@@ -25,8 +25,19 @@ cd remote-web && npm run build
 cargo run --bin gateway -- --port 18765 --write
 ```
 
-打包 DMG 时 `scripts/package-mac.sh` 会把 `dist/` 拷进
-`Smelt.app/Contents/Resources/remote-web/`；smeltd 运行时用 `current_exe`
-解析该路径（不是编译机上的 `CARGO_MANIFEST_DIR`）。
+## 打包 / Docker
 
-未构建 / 未打进包时回退内嵌旧 HTML，**手机端样式会乱**。
+1. **编译期嵌入**：`build.rs` + `rust-embed` 把 `remote-web/dist` 打进
+   `smeltd` / `gateway`。Docker 只拷二进制、不带 `Resources` 也能出 SPA。
+2. **磁盘覆盖**（可选）：`SMELT_REMOTE_WEB` 或
+   `Smelt.app/Contents/Resources/remote-web/` 优先于嵌入资源。
+3. **package-mac.sh** 仍会把 dist 拷进 Resources（双保险）。
+
+Docker / CI **务必**在 `cargo build` 前构建前端（否则只嵌占位页）：
+
+```bash
+cd remote-web && npm ci && npm run build
+cargo build --release --bin smeltd
+```
+
+`build.rs` 在 dist 缺失时会尝试自动 `npm run build`（镜像需有 Node）。
