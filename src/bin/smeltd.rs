@@ -109,9 +109,11 @@
 //! Cloudflare 的隧道中转，权衡理由见 roadmap 文档。
 //!
 //! `cloudflared` 是外部二进制，不 vendor 进仓库；没装时 `tunnel_start` 会明确报错
-//! （提示 `brew install cloudflared`），不是静默失败。子进程的 stdout/stderr 全程
-//! 有专门线程持续读干净（不只是为了扒事件，也是为了不让管道写满反过来卡住
-//! cloudflared）。同样不参与无缝升级交接，同样默认关闭。
+//! （提示 `brew install cloudflared`），不是静默失败。查找**不只靠 PATH**：从 Dock
+//! 启动的 GUI 继承的 PATH 通常没有 Homebrew（`/opt/homebrew/bin`），开发时终端里
+//! 有、打成 DMG 后却报「没找到」就是这个原因。见 `resolve_cloudflared`。
+//! 子进程的 stdout/stderr 全程有专门线程持续读干净（不只是为了扒事件，也是为了
+//! 不让管道写满反过来卡住 cloudflared）。同样不参与无缝升级交接，同样默认关闭。
 //!
 //! **强制 `--protocol http2`**（实测踩过的坑）：quick tunnel 默认先试 QUIC，网络挡
 //! UDP/QUIC 时会反复重试好几轮才退化到 http2；而且 cloudflared 打印"隧道已创建"
@@ -713,6 +715,81 @@ mod ensure_remote_gateway_write_tests {
     }
 }
 
+/// 定位本机 `cloudflared` 可执行文件。
+///
+/// 不能只写 `Command::new("cloudflared")`：从 Dock / Finder 打开的 `.app` 拿到的
+/// PATH 往往是 `/usr/bin:/bin:/usr/sbin:/sbin`，**没有** Homebrew 的
+/// `/opt/homebrew/bin` 或 `/usr/local/bin`。终端里 `cargo run` 正常、装 DMG 后
+/// 却提示「没找到 cloudflared」就是这个差异。
+fn resolve_cloudflared() -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+
+    if let Ok(p) = std::env::var("SMELT_CLOUDFLARED") {
+        let p = PathBuf::from(p.trim());
+        if p.is_file() {
+            return Ok(p);
+        }
+        return Err(format!(
+            "SMELT_CLOUDFLARED={p:?} 不是可执行文件"
+        ));
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // Homebrew / 常见前缀（Apple Silicon 与 Intel）
+    candidates.push(PathBuf::from("/opt/homebrew/bin/cloudflared"));
+    candidates.push(PathBuf::from("/usr/local/bin/cloudflared"));
+    candidates.push(PathBuf::from("/usr/bin/cloudflared"));
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local/bin/cloudflared"));
+        candidates.push(home.join("bin/cloudflared"));
+        // 部分用户用 brew --prefix 装在自定义路径；仍可通过下面 PATH / login shell 兜底
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            candidates.push(PathBuf::from(dir).join("cloudflared"));
+        }
+    }
+
+    for c in &candidates {
+        if c.is_file() {
+            return Ok(c.clone());
+        }
+    }
+
+    // 最后手段：登录 shell 的 PATH（GUI 进程 PATH 太瘦时，zsh -lc 往往还能 which 到）
+    #[cfg(target_os = "macos")]
+    {
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            let Ok(out) = std::process::Command::new(shell)
+                .args(["-lc", "command -v cloudflared"])
+                .output()
+            else {
+                continue;
+            };
+            if !out.status.success() {
+                continue;
+            }
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if p.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(p);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+
+    Err(
+        "没找到 cloudflared（Dock 启动的 App 读不到 brew 的 PATH 是正常的）。\
+         请确认已安装：brew install cloudflared；或设置环境变量 SMELT_CLOUDFLARED=绝对路径"
+            .into(),
+    )
+}
+
 /// 幂等：已经开着直接回现有 URL。会先确保本机远程网关已经按 `write` 开着（隧道
 /// 要转发给它），没开或写权限对不上会顺带用默认参数（回环 + 随机端口）开/重开一个。
 ///
@@ -747,7 +824,8 @@ fn start_tunnel(
         let (_, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
 
         use std::process::{Command, Stdio};
-        let mut child = Command::new("cloudflared")
+        let cloudflared = resolve_cloudflared()?;
+        let mut child = Command::new(&cloudflared)
             .arg("tunnel")
             .arg("--protocol")
             .arg("http2")
@@ -758,9 +836,12 @@ fn start_tunnel(
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    "没找到 cloudflared，先装一下：brew install cloudflared".to_string()
+                    format!(
+                        "无法执行 {}（文件在但启动失败？）：{e}",
+                        cloudflared.display()
+                    )
                 } else {
-                    format!("启动 cloudflared 失败：{e}")
+                    format!("启动 cloudflared（{}）失败：{e}", cloudflared.display())
                 }
             })?;
 
@@ -1337,6 +1418,32 @@ mod tunnel_tests {
     fn connected_marker_matches_real_cloudflared_log_line() {
         let line = "2026-07-15T08:26:46Z INF Registered tunnel connection connIndex=0 connection=0cc8452d-281b-43d2-892a-a60480f845d9 event=0 ip=198.18.20.145 location=lax07 protocol=http2";
         assert!(line.contains(TUNNEL_CONNECTED_MARKER));
+    }
+
+    /// GUI 瘦 PATH 下也要能扫到 brew 安装路径（本机装了才会过；CI 无 cloudflared 则 skip）。
+    #[test]
+    fn resolve_cloudflared_finds_homebrew_path_when_installed() {
+        let brew = std::path::Path::new("/opt/homebrew/bin/cloudflared");
+        let brew_intel = std::path::Path::new("/usr/local/bin/cloudflared");
+        if !brew.is_file() && !brew_intel.is_file() {
+            return;
+        }
+        // 清掉 PATH，模拟 Dock 启动的 .app
+        let old = std::env::var_os("PATH");
+        // Safety: 单测进程内临时改 PATH；串行跑即可
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+        let found = resolve_cloudflared();
+        if let Some(p) = old {
+            unsafe { std::env::set_var("PATH", p) };
+        } else {
+            unsafe { std::env::remove_var("PATH") };
+        }
+        let p = found.expect("PATH 很瘦时仍应扫到 Homebrew 路径");
+        assert!(p.is_file(), "{p:?}");
+        assert!(
+            p.ends_with("cloudflared"),
+            "应是 cloudflared 本体，得到 {p:?}"
+        );
     }
 }
 
