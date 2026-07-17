@@ -2019,7 +2019,17 @@ fn handle_conn(
             // 猜出来的值（见 SessionState 定义处注释）。会话不存在（hook 跑得比
             // spawn 还快，或者会话已经被 kill）就静默丢弃，不算错误。
             let id = v["id"].as_str().unwrap_or_default();
-            if let Some(sess) = sessions.lock().unwrap().get(id).cloned() {
+            // 先把会话取出来、当场放掉 sessions 锁，再往下走：下面的 broadcast_state
+            // 要拿 subscribers，而 handle_subscribe 是「持 subscribers 求 sessions」——
+            // 反向持有就是 ABBA 死锁。sessions 一旦锁死，open/list/kill/version/upgrade
+            // 全部卡住，PTY 还活着但守护已废，用户只能 pkill，正在跑的会话全灭。
+            //
+            // 绝不能写回 `if let Some(sess) = sessions.lock().unwrap()...`：if-let 的
+            // scrutinee 临时量（那把 guard）活到整个 body 结束，Rust 2024 的 if-let
+            // rescope 只改 else 分支、救不了这里。旁边 action/input/resize 用 let-else
+            // 正是为此（guard 在语句末即释放）。
+            let sess = sessions.lock().unwrap().get(id).cloned();
+            if let Some(sess) = sess {
                 if let Ok(phase) = serde_json::from_value::<Phase>(v["phase"].clone()) {
                     let snapshot = {
                         let mut st = sess.state.lock().unwrap();
@@ -3681,5 +3691,91 @@ mod watch_tests {
         let second: serde_json::Value = serde_json::from_str(&line2).unwrap();
         assert_eq!(second["session"]["phase"], "awaiting_approval");
         assert_eq!(second["session"]["pending_question"], "要不要继续");
+    }
+
+    /// `state` op 与 `subscribe` 并发时不得 ABBA 死锁——两边的锁序必须一致。
+    ///
+    /// 这两条路径在真实环境里天天并发：`state` 是 Claude hooks 每次状态变化都在打的，
+    /// `subscribe` 是 GUI 状态通道常驻的。一旦成环，`sessions` 会被永久锁死，
+    /// `open`/`list`/`kill`/`version`/`upgrade` 全部卡住——PTY 还活着，但守护废了，
+    /// 用户只能 pkill，**正在跑的 agent 会话全灭**。CLIENT_WRITE_TIMEOUT 救不了：
+    /// 卡在锁获取上，不是卡在 write。
+    ///
+    /// 易错点（本 bug 的成因）：`if let Some(x) = m.lock().unwrap().get(..).cloned() { .. }`
+    /// 里那把 guard **活到整个 body 结束**（两个 edition 都如此，Rust 2024 的
+    /// if-let rescope 只改 else 分支）。旁边的 action/input/resize 用 let-else，
+    /// guard 在语句末即释放，所以只有 state 这一条路径会成环。
+    #[test]
+    fn state_op_and_subscribe_do_not_deadlock() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let sess = make_dummy_session(24, 80);
+        sess.state.lock().unwrap().id = "dl".to_string();
+        sessions.lock().unwrap().insert("dl".to_string(), sess);
+        let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+
+        const ROUNDS: usize = 300;
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<&'static str>();
+
+        // A：反复走 state op（真 handle_conn 分发）
+        {
+            let sessions = Arc::clone(&sessions);
+            let subscribers = Arc::clone(&subscribers);
+            let tx = done_tx.clone();
+            thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let (server, client) = UnixStream::pair().unwrap();
+                    let mut client = client;
+                    writeln!(
+                        client,
+                        "{}",
+                        serde_json::json!({ "op": "state", "id": "dl", "phase": "thinking" })
+                    )
+                    .unwrap();
+                    handle_conn(
+                        server,
+                        Arc::clone(&sessions),
+                        0,
+                        -1,
+                        Arc::new(Mutex::new(None)),
+                        Arc::new(Mutex::new(None)),
+                        Arc::clone(&subscribers),
+                    );
+                }
+                let _ = tx.send("state");
+            });
+        }
+
+        // B：反复走 subscribe（持 subscribers 求 sessions，与 A 反向）。
+        // handle_subscribe 注册完会阻塞在 read 上等客户端断开（长连接，同 handle_watch），
+        // 所以必须另起线程跑它、由本线程 drop 掉 client 放它走——直接调用会把本线程
+        // 当场焊死在 read 上（这里踩过一次，卡住的是测试自己，不是产品）。
+        {
+            let sessions = Arc::clone(&sessions);
+            let subscribers = Arc::clone(&subscribers);
+            let tx = done_tx.clone();
+            thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let (server, client) = UnixStream::pair().unwrap();
+                    let s = Arc::clone(&sessions);
+                    let sub = Arc::clone(&subscribers);
+                    let h = thread::spawn(move || handle_subscribe(server, &s, &sub));
+                    // 立刻断开：read 拿到 EOF 就收尾退出。要抓的锁序（持 subscribers
+                    // → 求 sessions）在注册阶段、早于 read，此时已经跑过了。
+                    drop(client);
+                    let _ = h.join();
+                }
+                let _ = tx.send("subscribe");
+            });
+        }
+        drop(done_tx);
+
+        for _ in 0..2 {
+            if done_rx.recv_timeout(std::time::Duration::from_secs(20)).is_err() {
+                panic!(
+                    "state op 与 subscribe 并发死锁：20 秒内未跑完 {ROUNDS} 轮。\
+                     state 持 sessions 求 subscribers，subscribe 持 subscribers 求 sessions"
+                );
+            }
+        }
     }
 }
