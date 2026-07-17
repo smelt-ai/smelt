@@ -3862,6 +3862,18 @@ impl Workspace {
                             .child(d)
                     }))
                     .children(is_approval.then(|| {
+                        // 按网格里真实扫到的菜单渲染：有几个选项就几个按钮，每个打自己
+                        // 的 key（走 Session::permission_prompt，与总览页同一条路）。写死
+                        // 1/3 会漏掉「本次会话全部允许」这类选项，更要命的是提示并非总是
+                        // 三选（也有 1.Yes / 2.No 的），那时「拒绝」打出的 3 会落空或误选。
+                        let opts = self
+                            .sessions
+                            .get(session_ix)
+                            .and_then(|s| s.permission_prompt(cx))
+                            .map(|p| p.options)
+                            .unwrap_or_default();
+                        let has_opts = !opts.is_empty();
+
                         div()
                             .flex()
                             .flex_col()
@@ -3872,56 +3884,83 @@ impl Workspace {
                                     .text_color(muted)
                                     .child("快捷（写入活动 pane）"),
                             )
-                            .child(
+                            .children(opts.into_iter().enumerate().map(|(oi, opt)| {
+                                let key = opt.key.clone();
+                                let label = opt.button_label();
+                                let (btn_bg, btn_fg) = match opt.kind {
+                                    terminal_view::PermissionOptionKind::Allow => {
+                                        (green_tint, c_green)
+                                    }
+                                    terminal_view::PermissionOptionKind::Deny => (red_tint, c_red),
+                                    terminal_view::PermissionOptionKind::Other => (soft, fg),
+                                };
                                 div()
-                                    .id(("struct-approve", session_ix))
+                                    .id(SharedString::from(format!(
+                                        "struct-perm-{session_ix}-{oi}"
+                                    )))
                                     .px_2()
                                     .py(px(6.))
                                     .rounded_md()
-                                    .bg(green_tint)
+                                    .bg(btn_bg)
                                     .text_xs()
-                                    .text_color(c_green)
+                                    .text_color(btn_fg)
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.85))
-                                    .child("批准（1 ↵）")
+                                    .child(format!("{label}（{key} ↵）"))
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _, window, cx| {
                                             this.structure_inject_keys(
-                                                session_ix,
-                                                "1",
-                                                true,
-                                                window,
-                                                cx,
+                                                session_ix, &key, true, window, cx,
                                             );
                                         }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id(("struct-deny", session_ix))
-                                    .px_2()
-                                    .py(px(6.))
-                                    .rounded_md()
-                                    .bg(red_tint)
-                                    .text_xs()
-                                    .text_color(c_red)
-                                    .cursor_pointer()
-                                    .hover(|s| s.opacity(0.85))
-                                    .child("拒绝（3 ↵）")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.structure_inject_keys(
-                                                session_ix,
-                                                "3",
-                                                true,
-                                                window,
-                                                cx,
-                                            );
-                                        }),
-                                    ),
-                            )
+                                    )
+                            }))
+                            // 网格没扫到菜单时的兜底：Claude Code 常见布局 1=允许 / 3=拒绝
+                            .when(!has_opts, |col| {
+                                col.child(
+                                    div()
+                                        .id(("struct-approve", session_ix))
+                                        .px_2()
+                                        .py(px(6.))
+                                        .rounded_md()
+                                        .bg(green_tint)
+                                        .text_xs()
+                                        .text_color(c_green)
+                                        .cursor_pointer()
+                                        .hover(|s| s.opacity(0.85))
+                                        .child("批准（1 ↵）")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.structure_inject_keys(
+                                                    session_ix, "1", true, window, cx,
+                                                );
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id(("struct-deny", session_ix))
+                                        .px_2()
+                                        .py(px(6.))
+                                        .rounded_md()
+                                        .bg(red_tint)
+                                        .text_xs()
+                                        .text_color(c_red)
+                                        .cursor_pointer()
+                                        .hover(|s| s.opacity(0.85))
+                                        .child("拒绝（3 ↵）")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.structure_inject_keys(
+                                                    session_ix, "3", true, window, cx,
+                                                );
+                                            }),
+                                        ),
+                                )
+                            })
                     }))
                     .when(state.is_none(), |d| {
                         d.child(
