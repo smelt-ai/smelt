@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "preact/hooks";
 import { Terminal } from "@xterm/xterm";
-import { wsUrl } from "../api";
+import { FitAddon } from "@xterm/addon-fit";
+import { postInput, postResize, wsUrl } from "../api";
 import { serializeVisibleScreen } from "../lib/serializeScreen";
 
 type Props = {
   sessionId: string;
+  /** 保留接口兼容；移动端不把键盘打进 xterm（只用自建 Composer） */
   onUserData?: (data: string) => void;
   writeEnabled?: boolean;
   class?: string;
@@ -43,43 +45,43 @@ const THEME = {
   brightWhite: "#fafafa",
 } as const;
 
+const FONT = 13;
 const FONT_FAMILY =
   'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace';
 
 /**
- * 移动端终端面 —— **镜像模式**（内容与 PC 一致，交互本地独立）
+ * 移动端终端面 —— 操作优先
  *
  * | 维度 | 策略 |
  * |------|------|
- * | 内容 | 同一 watch 字节流 + 同一 PTY 行列（stream header） |
- * | 尺寸 | **不** postResize；只改本机 fontSize / CSS scale 适配手机视口 |
- * | 滚动 | 纯本地 viewport / 带色历史层；不向 PTY 发方向键 |
- * | 输入 | 仍走 POST /input（可选写入），与 PC 共享会话状态 |
+ * | 尺寸 | 手机 fit → postResize |
+ * | 输入 | **仅**自建 Composer（xterm 永久 disableStdin，不聚焦 Claude TUI 输入框） |
+ * | 滚动 | 同步：发 **SGR 鼠标滚轮**（与桌面 smelt 一致），**不发 ↑↓** |
+ * |      | Claude 会把方向键当成输入历史；故黄字 “Scroll wheel is sending arrow keys” |
  */
 export function XtermSurface({
   sessionId,
-  onUserData,
   writeEnabled,
   class: cls,
   onBufferText,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const histHostRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const onDataRef = useRef(onUserData);
-  onDataRef.current = onUserData;
   const onBufRef = useRef(onBufferText);
   onBufRef.current = onBufferText;
 
   useEffect(() => {
     const host = hostRef.current;
-    const histHost = histHostRef.current;
     const wrap = wrapRef.current;
-    if (!host || !histHost || !wrap) return;
+    if (!host || !wrap) return;
 
-    const termOpts = {
-      convertEol: false as const,
-      fontSize: 12,
+    // 永远不接收键盘：文字只走底部 Composer，避免「聚焦 Claude 输入框」后
+    // 滑动发的键被当成改 prompt / 历史。
+    const term = new Terminal({
+      convertEol: false,
+      cursorBlink: false,
+      disableStdin: true,
+      fontSize: FONT,
       lineHeight: 1.15,
       letterSpacing: 0,
       fontFamily: FONT_FAMILY,
@@ -90,22 +92,32 @@ export function XtermSurface({
       macOptionIsMeta: true,
       scrollOnUserInput: false,
       rightClickSelectsWord: false,
-    };
-
-    const term = new Terminal({
-      ...termOpts,
-      cursorBlink: !!writeEnabled,
-      disableStdin: !writeEnabled,
-    });
-    const histTerm = new Terminal({
-      ...termOpts,
-      cursorBlink: false,
-      disableStdin: true,
-      scrollback: 12000,
     });
 
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
     term.open(host);
-    histTerm.open(histHost);
+
+    // 彻底禁止 xterm 隐藏 textarea 抢焦点
+    const lockTermFocus = () => {
+      const ta = host.querySelector("textarea.xterm-helper-textarea") as HTMLTextAreaElement | null;
+      if (!ta) return;
+      ta.setAttribute("readonly", "true");
+      ta.setAttribute("tabindex", "-1");
+      ta.setAttribute("aria-hidden", "true");
+      ta.blur();
+      const refocus = () => {
+        ta.blur();
+      };
+      ta.addEventListener("focus", refocus);
+      return () => ta.removeEventListener("focus", refocus);
+    };
+    let unlockFocus = lockTermFocus();
+    // open 后 DOM 可能稍后才有 textarea
+    requestAnimationFrame(() => {
+      unlockFocus?.();
+      unlockFocus = lockTermFocus();
+    });
 
     const core = term as unknown as { _core?: CoreDims };
     const getCellSize = () => {
@@ -113,129 +125,81 @@ export function XtermSurface({
       if (cell && cell.width > 0 && cell.height > 0) {
         return { w: cell.width, h: cell.height };
       }
-      const fs = Number(term.options.fontSize) || 12;
-      return { w: fs * 0.62, h: fs * 1.2 };
+      return { w: FONT * 0.6, h: FONT * 1.2 };
     };
 
-    // PTY 几何：以 stream header / PC 为准，手机绝不改 PTY
-    let ptyCols = 80;
-    let ptyRows = 24;
-    let geometryReady = false;
+    let lastCols = 0;
+    let lastRows = 0;
+    let resizeTimer: number | null = null;
+    let resizeTimer2: number | null = null;
 
-    const applyScale = (el: HTMLElement, t: Terminal) => {
-      const xtermEl = el.querySelector(".xterm") as HTMLElement | null;
-      if (!xtermEl) return;
-      const { w: cellW, h: cellH } = (() => {
-        if (t === term) return getCellSize();
-        const c = (histTerm as unknown as { _core?: CoreDims })._core?._renderService
-          ?.dimensions?.css?.cell;
-        if (c && c.width > 0 && c.height > 0) return { w: c.width, h: c.height };
-        return getCellSize();
-      })();
-      const contentW = Math.max(t.cols * cellW, 1);
-      const contentH = Math.max(t.rows * cellH, 1);
-      const availW = Math.max(el.clientWidth, 1);
-      const availH = Math.max(el.clientHeight, 1);
-      // 完整装进手机视口（可缩小；略放大上限 1.25 避免大屏空旷）
-      const s = Math.min(availW / contentW, availH / contentH, 1.25);
-      const scaledW = contentW * s;
-      const scaledH = contentH * s;
-      const ox = (availW - scaledW) / 2;
-      const oy = (availH - scaledH) / 2;
-      xtermEl.style.width = `${contentW}px`;
-      xtermEl.style.height = `${contentH}px`;
-      xtermEl.style.transformOrigin = "top left";
-      xtermEl.style.transform = `translate(${Math.max(0, ox)}px, ${Math.max(0, oy)}px) scale(${s})`;
+    const pushPtySize = () => {
+      const cols = term.cols;
+      const rows = term.rows;
+      if (cols === lastCols && rows === lastRows) return;
+      lastCols = cols;
+      lastRows = rows;
+      const { w: cellW, h: cellH } = getCellSize();
+      if (resizeTimer != null) window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = null;
+        void postResize(
+          sessionId,
+          cols,
+          rows,
+          Math.max(1, Math.round(cellW)),
+          Math.max(1, Math.round(cellH)),
+        );
+      }, 120);
     };
 
-    /**
-     * 按 PTY 行列布置本机 xterm，再用字号 + scale 适配宿主。
-     * 不调用 /resize，PC 几何不受影响。
-     */
-    const layoutMirror = () => {
-      if (host.clientWidth < 20 || host.clientHeight < 20) return;
-      const availW = Math.max(host.clientWidth - 2, 20);
-      const availH = Math.max(host.clientHeight - 2, 20);
-      // 先按近似 cell 比例估字号，使 cols×rows 大致铺满
-      let fs = Math.min(availW / ptyCols / 0.6, availH / ptyRows / 1.2);
-      fs = Math.max(5, Math.min(20, Math.floor(fs * 10) / 10));
-
-      term.options.fontSize = fs;
-      histTerm.options.fontSize = fs;
+    const layoutPhone = () => {
+      if (host.clientWidth < 40 || host.clientHeight < 40) return;
+      term.options.fontSize = FONT;
       try {
-        term.resize(ptyCols, ptyRows);
-        histTerm.resize(ptyCols, ptyRows);
+        fitAddon.fit();
       } catch {
         /* ignore */
       }
-
-      // 实测 cell 后微调字号，避免最后一列被裁
-      requestAnimationFrame(() => {
-        const { w: cellW, h: cellH } = getCellSize();
-        const needW = ptyCols * cellW;
-        const needH = ptyRows * cellH;
-        if (needW > availW + 0.5 || needH > availH + 0.5) {
-          const factor = Math.min(availW / needW, availH / needH);
-          const fs2 = Math.max(5, Math.floor(fs * factor * 10) / 10);
-          if (Math.abs(fs2 - fs) > 0.05) {
-            term.options.fontSize = fs2;
-            histTerm.options.fontSize = fs2;
-            try {
-              term.resize(ptyCols, ptyRows);
-              histTerm.resize(ptyCols, ptyRows);
-            } catch {
-              /* ignore */
-            }
-          }
+      const { w: cellW, h: cellH } = getCellSize();
+      const availW = Math.max(host.clientWidth - 8, 60);
+      const availH = Math.max(host.clientHeight - 4, 40);
+      const cols = Math.max(20, Math.min(120, Math.floor(availW / Math.max(cellW, 1)) - 1));
+      const rows = Math.max(10, Math.min(80, Math.floor(availH / Math.max(cellH, 1))));
+      if (cols !== term.cols || rows !== term.rows) {
+        try {
+          term.resize(cols, rows);
+        } catch {
+          /* ignore */
         }
-        applyScale(host, term);
-        if (histHost.style.display !== "none") {
-          applyScale(histHost, histTerm);
-        }
-      });
-    };
-
-    const setPtyGeometry = (cols: number, rows: number) => {
-      const c = Math.max(2, Math.min(300, Math.floor(cols)));
-      const r = Math.max(2, Math.min(200, Math.floor(rows)));
-      if (geometryReady && c === ptyCols && r === ptyRows) {
-        layoutMirror();
-        return;
       }
-      ptyCols = c;
-      ptyRows = r;
-      geometryReady = true;
-      layoutMirror();
+      const screen = host.querySelector(".xterm-screen") as HTMLElement | null;
+      if (screen) {
+        let guard = 0;
+        while (screen.offsetWidth > host.clientWidth - 1 && term.cols > 24 && guard < 8) {
+          try {
+            term.resize(term.cols - 1, term.rows);
+          } catch {
+            break;
+          }
+          guard++;
+        }
+      }
+      pushPtySize();
     };
 
-    // 默认在收到 header 前先按 80×24 占位
-    setPtyGeometry(80, 24);
-
-    const ro = new ResizeObserver(() => layoutMirror());
+    layoutPhone();
+    requestAnimationFrame(layoutPhone);
+    const ro = new ResizeObserver(() => layoutPhone());
     ro.observe(host);
     ro.observe(wrap);
 
-    let dataDisp: { dispose: () => void } | undefined;
-    if (writeEnabled) {
-      dataDisp = term.onData((d) => onDataRef.current?.(d));
-    }
-
-    // ── 本地独立滚动 + 带色历史 ─────────────────────────────
-    let followLive = true;
-    let lastCapText = "";
-    let lastCapAnsi = "";
-    let histHasContent = false;
+    // ── 同步滚动：SGR 滚轮（对齐桌面 terminal.rs encode_wheel_sgr）──
+    // 绝不发 ↑↓：Claude 在输入框聚焦时会当成 prompt 历史，并提示
+    // 「Scroll wheel is sending arrow keys · use PgUp/PgDn to scroll」。
     let touchLastY = 0;
     let touching = false;
     let accPx = 0;
-
-    const liveBtn = document.createElement("button");
-    liveBtn.type = "button";
-    liveBtn.className = "xterm-live-btn";
-    liveBtn.textContent = "↓ 回到实时";
-    liveBtn.style.display = "none";
-    liveBtn.addEventListener("click", () => goLive());
-    wrap.appendChild(liveBtn);
 
     const isAltScreen = () => {
       try {
@@ -245,138 +209,65 @@ export function XtermSurface({
       }
     };
 
-    const canViewportScroll = (el: HTMLElement) => {
-      const vp = el.querySelector(".xterm-viewport") as HTMLElement | null;
+    const canViewportScroll = () => {
+      const vp = host.querySelector(".xterm-viewport") as HTMLElement | null;
       return !!vp && vp.scrollHeight > vp.clientHeight + 2;
     };
 
-    const appendFrameToHist = (ansi: string) => {
-      if (!ansi.trim()) return;
-      try {
-        histTerm.write(ansi.endsWith("\n") ? ansi + "\r\n" : ansi + "\r\n\r\n");
-        histHasContent = true;
-      } catch {
-        /* ignore */
-      }
+    /**
+     * SGR 鼠标滚轮：`\x1b[<64;col;rowM` 上滚 / `65` 下滚。
+     * 与 workspace/terminal.rs encode_wheel_sgr 一致。
+     */
+    const encodeWheelSgr = (wheelUp: boolean, count: number): string => {
+      const cb = wheelUp ? 64 : 65;
+      // 点在视口中部，避免点在底部 prompt 条上
+      const col = Math.max(1, Math.floor(term.cols / 2));
+      const row = Math.max(1, Math.floor(term.rows * 0.35));
+      const one = `\x1b[<${cb};${col};${row}M`;
+      return one.repeat(Math.min(Math.max(count, 1), 6));
     };
 
-    const accumulateHistory = () => {
-      if (!followLive) return;
-      const { ansi, text } = serializeVisibleScreen(term);
-      if (text === lastCapText) return;
-      if (lastCapAnsi) appendFrameToHist(lastCapAnsi);
-      lastCapAnsi = ansi;
-      lastCapText = text;
+    /** 写入滚动序列（与 Composer 相同 POST /input） */
+    const postScrollBytes = (payload: string) => {
+      if (!writeEnabled || !payload) return;
+      void postInput(sessionId, payload);
     };
 
-    const enterBrowse = () => {
-      if (!followLive) return;
-      accumulateHistory();
-      if (lastCapAnsi) appendFrameToHist(lastCapAnsi);
-      followLive = false;
-      histHost.style.display = "block";
-      host.style.visibility = "hidden";
-      liveBtn.style.display = "block";
-      layoutMirror();
-      try {
-        histTerm.scrollToBottom();
-        histTerm.scrollLines(-Math.max(2, Math.floor(histTerm.rows * 0.15)));
-      } catch {
-        /* ignore */
+    const sendAppScroll = (lines: number) => {
+      if (!lines || !writeEnabled) return;
+      // lines>0：指上滑 / 滚轮下 → 内容上移 → wheel down (65)
+      // lines<0：指下滑 → 看更早 → wheel up (64)
+      const wheelUp = lines < 0;
+      const n = Math.min(Math.abs(lines), 6);
+      // 主策略 SGR 滚轮；大步时再夹 PgUp/PgDn（Claude 官方提示）
+      let payload = encodeWheelSgr(wheelUp, n);
+      if (n >= 3) {
+        payload += (wheelUp ? "\x1b[5~" : "\x1b[6~").repeat(Math.min(2, Math.floor(n / 3)));
       }
-    };
-
-    const goLive = () => {
-      followLive = true;
-      histHost.style.display = "none";
-      host.style.visibility = "visible";
-      liveBtn.style.display = "none";
-      accPx = 0;
-      layoutMirror();
-      try {
-        term.scrollToBottom();
-      } catch {
-        /* ignore */
-      }
-    };
-
-    const scrollTerm = (el: HTMLElement, t: Terminal, dy: number): boolean => {
-      if (canViewportScroll(el)) {
-        const vp = el.querySelector(".xterm-viewport") as HTMLElement;
-        const prev = vp.scrollTop;
-        vp.scrollTop = prev + dy;
-        if (vp.scrollTop !== prev) return true;
-      }
-      const { h: cellH } = getCellSize();
-      const step = Math.max(cellH * 0.45, 8);
-      accPx += dy;
-      if (Math.abs(accPx) < step) return Math.abs(dy) >= 0.5;
-      const lines = Math.trunc(accPx / step);
-      accPx -= lines * step;
-      if (lines !== 0) {
-        t.scrollLines(lines);
-        return true;
-      }
-      return false;
-    };
-
-    const histAtBottom = () => {
-      try {
-        const buf = histTerm.buffer.active;
-        return buf.viewportY >= buf.baseY + histTerm.rows - 2;
-      } catch {
-        return true;
-      }
+      postScrollBytes(payload);
     };
 
     const applyScrollDelta = (dy: number, e?: TouchEvent | WheelEvent) => {
       if (Math.abs(dy) < 0.5) return;
+      e?.preventDefault();
+      e?.stopPropagation();
 
-      if (!followLive) {
-        scrollTerm(histHost, histTerm, dy);
-        e?.preventDefault();
-        if (dy > 0 && histAtBottom()) goLive();
-        return;
-      }
-
-      if (canViewportScroll(host)) {
+      // 主缓冲真 scrollback：本地即可
+      if (!isAltScreen() && canViewportScroll()) {
         const vp = host.querySelector(".xterm-viewport") as HTMLElement;
         const prev = vp.scrollTop;
         vp.scrollTop = prev + dy;
-        if (vp.scrollTop !== prev) {
-          e?.preventDefault();
-          return;
-        }
-        if (dy < 0 && vp.scrollTop <= 0 && (histHasContent || lastCapAnsi)) {
-          enterBrowse();
-          e?.preventDefault();
-          return;
-        }
+        if (vp.scrollTop !== prev) return;
       }
 
+      if (!writeEnabled) return;
       accPx += dy;
       const { h: cellH } = getCellSize();
-      const step = Math.max(cellH * 0.45, 8);
-      if (Math.abs(accPx) < step) {
-        e?.preventDefault();
-        return;
-      }
+      const step = Math.max(cellH * 0.55, 12);
+      if (Math.abs(accPx) < step) return;
       const lines = Math.trunc(accPx / step);
       accPx -= lines * step;
-
-      if (lines < 0) {
-        accumulateHistory();
-        if (histHasContent || lastCapAnsi) {
-          enterBrowse();
-        } else if (!isAltScreen()) {
-          term.scrollLines(lines);
-        }
-        e?.preventDefault();
-        return;
-      }
-
-      if (!isAltScreen()) term.scrollLines(lines);
-      e?.preventDefault();
+      sendAppScroll(lines);
     };
 
     const onTouchStart = (ev: TouchEvent) => {
@@ -384,6 +275,8 @@ export function XtermSurface({
       touching = true;
       touchLastY = ev.touches[0].clientY;
       accPx = 0;
+      // 点在终端上也不让 xterm textarea 聚焦
+      unlockFocus = lockTermFocus() ?? unlockFocus;
     };
     const onTouchMove = (ev: TouchEvent) => {
       if (!touching || ev.touches.length !== 1) return;
@@ -397,12 +290,21 @@ export function XtermSurface({
       accPx = 0;
     };
     const onWheel = (ev: WheelEvent) => applyScrollDelta(ev.deltaY, ev);
+    const onMouseDown = (ev: MouseEvent) => {
+      // 阻止默认聚焦行为
+      ev.preventDefault();
+      unlockFocus = lockTermFocus() ?? unlockFocus;
+    };
 
-    wrap.addEventListener("touchstart", onTouchStart, { passive: true });
-    wrap.addEventListener("touchmove", onTouchMove, { passive: false });
-    wrap.addEventListener("touchend", onTouchEnd, { passive: true });
-    wrap.addEventListener("touchcancel", onTouchEnd, { passive: true });
-    wrap.addEventListener("wheel", onWheel, { passive: false });
+    const cap = { passive: false, capture: true } as const;
+    wrap.addEventListener("touchstart", onTouchStart, { passive: true, capture: true });
+    wrap.addEventListener("touchmove", onTouchMove, cap);
+    wrap.addEventListener("touchend", onTouchEnd, { passive: true, capture: true });
+    wrap.addEventListener("touchcancel", onTouchEnd, { passive: true, capture: true });
+    wrap.addEventListener("wheel", onWheel, cap);
+    wrap.addEventListener("mousedown", onMouseDown, cap);
+    host.addEventListener("wheel", onWheel, cap);
+    host.addEventListener("touchmove", onTouchMove, cap);
 
     const emitBufferText = () => {
       if (!onBufRef.current) return;
@@ -427,6 +329,14 @@ export function XtermSurface({
     let retry = 1000;
     let ws: WebSocket | null = null;
 
+    const measureSoon = () => {
+      requestAnimationFrame(() => {
+        layoutPhone();
+        if (resizeTimer2 != null) window.clearTimeout(resizeTimer2);
+        resizeTimer2 = window.setTimeout(() => layoutPhone(), 100);
+      });
+    };
+
     const connect = () => {
       if (closed) return;
       ws = new WebSocket(wsUrl(`/s/${encodeURIComponent(sessionId)}/stream`));
@@ -434,49 +344,28 @@ export function XtermSurface({
       ws.onopen = () => {
         retry = 1000;
         term.reset();
-        histTerm.reset();
-        lastCapText = "";
-        lastCapAnsi = "";
-        histHasContent = false;
-        followLive = true;
-        histHost.style.display = "none";
-        host.style.visibility = "visible";
-        liveBtn.style.display = "none";
+        lastCols = 0;
+        lastRows = 0;
+        measureSoon();
+        unlockFocus = lockTermFocus() ?? unlockFocus;
       };
       ws.onmessage = (ev) => {
-        // 文本帧 = PTY 尺寸 header（PC / smeltd 为准）
-        if (typeof ev.data === "string") {
-          try {
-            const j = JSON.parse(ev.data) as { cols?: number; rows?: number };
-            if (j.cols && j.rows) {
-              setPtyGeometry(j.cols, j.rows);
-            }
-          } catch {
-            /* ignore */
-          }
-          return;
-        }
+        if (typeof ev.data === "string") return;
         const bytes = new Uint8Array(ev.data as ArrayBuffer);
-        const shouldStickBottom =
-          followLive &&
-          (() => {
-            try {
-              const buf = term.buffer.active;
-              return buf.viewportY >= buf.baseY + term.rows - 3;
-            } catch {
-              return true;
-            }
-          })();
-
+        const shouldStickBottom = (() => {
+          try {
+            const buf = term.buffer.active;
+            return buf.viewportY >= buf.baseY + term.rows - 3;
+          } catch {
+            return true;
+          }
+        })();
         term.write(bytes, () => {
-          if (followLive) {
-            accumulateHistory();
-            if (shouldStickBottom && !isAltScreen()) {
-              try {
-                term.scrollToBottom();
-              } catch {
-                /* ignore */
-              }
+          if (shouldStickBottom && !isAltScreen()) {
+            try {
+              term.scrollToBottom();
+            } catch {
+              /* ignore */
             }
           }
           scheduleBufEmit();
@@ -494,17 +383,20 @@ export function XtermSurface({
 
     return () => {
       closed = true;
+      if (resizeTimer != null) window.clearTimeout(resizeTimer);
+      if (resizeTimer2 != null) window.clearTimeout(resizeTimer2);
       if (bufTimer != null) window.clearTimeout(bufTimer);
-      wrap.removeEventListener("touchstart", onTouchStart);
-      wrap.removeEventListener("touchmove", onTouchMove);
-      wrap.removeEventListener("touchend", onTouchEnd);
-      wrap.removeEventListener("touchcancel", onTouchEnd);
-      wrap.removeEventListener("wheel", onWheel);
-      liveBtn.remove();
-      dataDisp?.dispose();
+      unlockFocus?.();
+      wrap.removeEventListener("touchstart", onTouchStart, true);
+      wrap.removeEventListener("touchmove", onTouchMove, true);
+      wrap.removeEventListener("touchend", onTouchEnd, true);
+      wrap.removeEventListener("touchcancel", onTouchEnd, true);
+      wrap.removeEventListener("wheel", onWheel, true);
+      wrap.removeEventListener("mousedown", onMouseDown, true);
+      host.removeEventListener("wheel", onWheel, true);
+      host.removeEventListener("touchmove", onTouchMove, true);
       ro.disconnect();
       ws?.close();
-      histTerm.dispose();
       term.dispose();
     };
   }, [sessionId, writeEnabled]);
@@ -512,11 +404,6 @@ export function XtermSurface({
   return (
     <div ref={wrapRef} class={`relative h-full w-full min-h-0 overflow-hidden ${cls ?? ""}`}>
       <div ref={hostRef} class="xterm-host h-full w-full" />
-      <div
-        ref={histHostRef}
-        class="xterm-host xterm-hist-host h-full w-full"
-        style={{ display: "none" }}
-      />
     </div>
   );
 }

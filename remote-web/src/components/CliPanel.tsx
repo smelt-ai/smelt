@@ -157,7 +157,7 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
           <h1 class="truncate text-sm font-semibold leading-tight">{name}</h1>
           <p class="truncate text-[10px] text-muted">
             {subtitle ? `${subtitle} · ` : ""}
-            <span class="text-accent/90">镜像独立</span>
+            <span class="text-accent/90">手机布局 · 滚轮同步</span>
           </p>
         </div>
         <StatusBadge phase={state.phase} />

@@ -31,47 +31,40 @@ body,
   width: 100%;
   height: 100%;
   overflow: hidden;
-  /* 触摸由 JS 处理；禁止浏览器把竖滑当成页面手势抢走 */
   touch-action: none;
   position: relative;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  /* 不让 xterm 内部 helper textarea 参与 tab / 虚拟键盘 */
+  -webkit-user-select: none;
+  user-select: none;
 }
-/* 镜像模式：.xterm 实际尺寸 = PTY 行列 × cell，再由 JS transform scale 装进宿主 */
+.xterm-host textarea.xterm-helper-textarea {
+  /* 双保险：永不聚焦、不弹键盘 */
+  pointer-events: none !important;
+  opacity: 0 !important;
+  position: absolute !important;
+}
+/* 手机布局：xterm 铺满宿主，cols/rows 由 JS fit + postResize 决定 */
 .xterm-host .xterm {
+  width: 100% !important;
+  height: 100% !important;
   padding: 0;
   overflow: hidden !important;
-  /* width/height/transform 由 XtermSurface layoutMirror 设置 */
+  transform: none !important;
 }
 .xterm-host .xterm-viewport {
+  width: 100% !important;
+  height: 100% !important;
   overflow-y: auto !important;
   overflow-x: hidden !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
 }
+.xterm-host .xterm-screen {
+  max-width: 100% !important;
+}
 
-/* 带色历史：第二个 xterm，叠在实时层上 */
-.xterm-hist-host {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  background: #08080a;
-}
-.xterm-live-btn {
-  position: absolute;
-  z-index: 3;
-  left: 50%;
-  bottom: 10px;
-  transform: translateX(-50%);
-  border: 1px solid #3a5570;
-  border-radius: 999px;
-  background: #151a24ee;
-  color: #7ec8f0;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 14px;
-  box-shadow: 0 2px 12px #0008;
-  backdrop-filter: blur(6px);
-}
-.xterm-live-btn:active {
-  transform: translateX(-50%) scale(0.97);
-}
+

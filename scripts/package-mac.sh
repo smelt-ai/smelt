@@ -176,16 +176,39 @@ echo "▶ 打 dmg（定制安装窗口）…"
 # 打包工具链装进独立 venv：不污染系统 python，也绕开 PEP 668 externally-managed
 # 限制（CI runner 的 python 多半是 Homebrew 装的，直接 pip install 会被拒）。
 # 已经装好就复用（dist/ 在 .gitignore 里，不入库）。
+#
+# PyPI 在国内/部分网络会 ReadTimeout（卡在 mac-alias 等依赖）。支持：
+#   PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple make dist-build
+# 未设置时：先官方，失败再自动换清华镜像。
 VENV="$DIST/.dmgvenv"
 if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
   echo "  … 准备打包工具链（dmgbuild + Pillow）"
   rm -rf "$VENV"
   python3 -m venv "$VENV"
-  "$VENV/bin/pip" install --quiet --upgrade pip
-  # dmgbuild 钉死版本：这是发布链路，上游发新版不该让某天的 tag 突然打不出包（它纯
-  # python，钉版本不会有 wheel 问题）。Pillow 只给下界——CI runner 的 python 版本会随
-  # 镜像变，钉死可能撞上没有对应 wheel、退化成本地编译。
-  "$VENV/bin/pip" install --quiet "dmgbuild==1.6.7" "Pillow>=10"
+  # 拉长超时，避免默认 15s 被掐断
+  export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
+  pip_base=( "$VENV/bin/pip" install --upgrade )
+  # 用户指定镜像则只走一条；否则官方 → 清华
+  if [[ -n "${PIP_INDEX_URL:-}" ]]; then
+    echo "  … pip 使用 PIP_INDEX_URL=$PIP_INDEX_URL"
+    "${pip_base[@]}" pip
+    "${pip_base[@]}" "dmgbuild==1.6.7" "Pillow>=10"
+  else
+    if ! "${pip_base[@]}" --quiet pip \
+      || ! "${pip_base[@]}" "dmgbuild==1.6.7" "Pillow>=10"; then
+      echo "  ⚠ 官方 PyPI 失败，改用清华镜像重试 …"
+      MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
+      "${pip_base[@]}" -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn pip
+      "${pip_base[@]}" -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn \
+        "dmgbuild==1.6.7" "Pillow>=10"
+    fi
+  fi
+  [[ -x "$VENV/bin/dmgbuild" ]] || {
+    echo "✗ 安装 dmgbuild 失败。可手动：" >&2
+    echo "  PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple make dist-build" >&2
+    exit 1
+  }
+  echo "  ✓ dmgbuild 已就绪"
 fi
 
 # 背景图：@1x + @2x 合成 retina 多分辨率 tiff，retina 屏上才不糊。

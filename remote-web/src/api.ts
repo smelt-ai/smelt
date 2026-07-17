@@ -92,9 +92,8 @@ export async function postInput(
 }
 
 /**
- * 改共享 PTY 尺寸（会触发 SIGWINCH，PC/手机画面一起重排）。
- * 移动端镜像模式**不要**调用：手机只做本地缩放，保持与 PC 内容一致、几何解耦。
- * 保留给将来「主动接管尺寸」之类能力。
+ * 改共享 PTY 尺寸（SIGWINCH；手机打开 CLI 时按视口调用，操作体验优先）。
+ * 通常用户只在一端操作：以当前操作端几何为准。
  */
 export async function postResize(
   id: string,
