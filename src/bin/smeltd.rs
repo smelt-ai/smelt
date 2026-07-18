@@ -615,9 +615,46 @@ fn extract_tunnel_url(line: &str) -> Option<String> {
 enum TunnelEvent {
     Url(String),
     Connected,
+    /// cloudflared 明确失败（如 `failed to request quick Tunnel: ...`），应立刻失败
+    /// 而不是傻等到 30s 超时。
+    Failed(String),
 }
 
 const TUNNEL_CONNECTED_MARKER: &str = "Registered tunnel connection";
+
+/// 从 cloudflared 日志里摘「致命错误」摘要，方便 GUI 展示（换网络后常见
+/// `api.trycloudflare.com` 被墙/劫持/断连）。
+fn extract_tunnel_failure(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    // 官方 quick tunnel 申请失败
+    if lower.contains("failed to request quick tunnel")
+        || lower.contains("failed to create tunnel")
+        || lower.contains("unable to reach the origin service")
+        || lower.contains("context deadline exceeded")
+        || lower.contains("connection refused")
+        || lower.contains("i/o timeout")
+        || lower.contains("no such host")
+        || lower.contains("certificate")
+        || (lower.contains("err ") && lower.contains("tunnel"))
+    {
+        // 去掉时间戳前缀，只留可读部分
+        let msg = line
+            .split_once("ERR ")
+            .map(|(_, rest)| rest)
+            .or_else(|| line.split_once("INF ").map(|(_, rest)| rest))
+            .unwrap_or(line)
+            .trim();
+        if msg.is_empty() {
+            return None;
+        }
+        return Some(msg.to_string());
+    }
+    // 非 ERR 级别但明确失败的整行
+    if line.contains("failed to request quick Tunnel") {
+        return Some(line.trim().to_string());
+    }
+    None
+}
 
 /// 持续把 cloudflared 的一路输出（stdout 或 stderr）读干净，**贯穿整个子进程生命
 /// 周期**，不是只读到握手成功为止：不只是为了扒事件（不读干净会把管道缓冲区写满，
@@ -645,6 +682,9 @@ fn spawn_tunnel_output_scanner(
             }
             if line.contains(TUNNEL_CONNECTED_MARKER) {
                 let _ = tx.send(TunnelEvent::Connected);
+            }
+            if let Some(err) = extract_tunnel_failure(&line) {
+                let _ = tx.send(TunnelEvent::Failed(err));
             }
         }
     });
@@ -864,34 +904,47 @@ fn start_tunnel(
             spawn_tunnel_output_scanner(err, tx, Arc::clone(tunnel_state));
         }
 
-        // 30s 内必须同时等到 URL 和"已连接"确认，缺一都当失败。
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // 45s 内必须同时等到 URL 和"已连接"确认；若 cloudflared 已打出明确错误则立刻失败。
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
         let mut url: Option<String> = None;
         let mut connected = false;
+        let mut last_fail: Option<String> = None;
         let url = loop {
             if connected {
                 if let Some(u) = url {
                     break u;
                 }
             }
+            // 进程已退出且还没成功 → 用已抓到的失败信息
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                let _ = child.wait();
+                return Err(format_tunnel_timeout_err(last_fail.as_deref(), true));
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(
-                    "等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本".to_string(),
-                );
+                return Err(format_tunnel_timeout_err(last_fail.as_deref(), false));
             }
             match rx.recv_timeout(remaining) {
                 Ok(TunnelEvent::Url(u)) => url = Some(u),
                 Ok(TunnelEvent::Connected) => connected = true,
+                Ok(TunnelEvent::Failed(msg)) => {
+                    last_fail = Some(msg.clone());
+                    // 申请 quick tunnel 失败通常进程会很快退出；先记下来，下一轮 try_wait
+                    // 或再次 Failed 再收尾。若已是明确 "failed to request" 则立刻失败。
+                    let lower = msg.to_ascii_lowercase();
+                    if lower.contains("failed to request")
+                        || lower.contains("failed to create")
+                        || lower.contains("no such host")
+                    {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format_tunnel_timeout_err(Some(&msg), true));
+                    }
+                }
                 Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(
-                        "等 cloudflared 建好隧道超时（30s），检查网络或 cloudflared 版本"
-                            .to_string(),
-                    );
+                    // recv 超时：可能是 deadline 到了，回到 loop 顶检查
                 }
             }
         };
@@ -927,6 +980,18 @@ fn stop_tunnel(state: &TunnelState) {
         Some(TunnelSlot::Starting) | None => {
             // Starting：start_tunnel 失败路径会自己清；这里 take 掉占位可打断并发等待方的假设
         }
+    }
+}
+
+/// 把超时/进程退出收成用户可读错误。`last_fail` 来自 cloudflared 日志（若有）。
+fn format_tunnel_timeout_err(last_fail: Option<&str>, process_exited: bool) -> String {
+    let hint = "当前网络可能访问不了 Cloudflare Quick Tunnel（api.trycloudflare.com）。\
+                可换网络 / 开代理后再试，或仅用本机/局域网链接。";
+    match (last_fail, process_exited) {
+        (Some(msg), true) => format!("cloudflared 建隧道失败：{msg}。{hint}"),
+        (Some(msg), false) => format!("cloudflared 建隧道超时（45s）：{msg}。{hint}"),
+        (None, true) => format!("cloudflared 已退出，未拿到公网链接。{hint}"),
+        (None, false) => format!("等 cloudflared 建好隧道超时（45s）。{hint}"),
     }
 }
 
@@ -1675,6 +1740,13 @@ mod tunnel_tests {
         assert_eq!(extract_tunnel_url("2026-07-15T08:22:22Z INF Requesting new quick Tunnel on trycloudflare.com..."), None);
         assert_eq!(extract_tunnel_url("2026-07-15T08:25:01Z ERR Failed to dial a quic connection"), None);
         assert_eq!(extract_tunnel_url(""), None);
+    }
+
+    #[test]
+    fn extract_tunnel_failure_from_quick_tunnel_eof() {
+        let line = r#"failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": EOF"#;
+        let msg = extract_tunnel_failure(line).expect("应识别 quick tunnel 申请失败");
+        assert!(msg.to_ascii_lowercase().contains("failed to request"));
     }
 
     /// 真实抓过的"已连接"确认行（`--protocol http2` 实测）：URL 早就打印过了，

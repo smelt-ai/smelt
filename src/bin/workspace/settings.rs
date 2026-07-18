@@ -2106,8 +2106,10 @@ impl Workspace {
                     }
 
                     if let Some(err) = remote.error.as_ref().or(tunnel.error.as_ref()) {
-                        let need_cloudflared = err.contains("cloudflared")
-                            || err.contains("brew install");
+                        // 仅「没装」时给 brew；网络超时也带 cloudflared 字样，勿误导
+                        let need_cloudflared = err.contains("没找到 cloudflared")
+                            || err.contains("brew install cloudflared")
+                            || err.contains("SMELT_CLOUDFLARED");
                         let mut box_ = v_flex()
                             .gap_2()
                             .child(div().text_xs().text_color(danger).child(format!("出了点问题：{err}")))
