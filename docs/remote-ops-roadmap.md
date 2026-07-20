@@ -151,8 +151,12 @@
 Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这里独立做，不用等前面的
 知情/操控功能齐全。
 
-**为什么改用 Cloudflare Tunnel、不再自己搭信令服务器 + WebRTC**（原方案见
-[collaboration.md](collaboration.md)「点对点连接」一节，作为考虑过的备选留档）：
+> **2026-07 决策更新：** 跨网主路径改回 **自建信令 + WebRTC DataChannel + 自营 TURN**
+> （P2P 优先，TURN 仅 NAT 失败时中继业务数据）。Quick Tunnel 降为高级/临时。
+> 定稿见 [webrtc-edge.md](webrtc-edge.md)。以下「改用 CF」为历史记录，实现以 webrtc-edge 为准。
+
+**（历史）为什么一度改用 Cloudflare Tunnel、不再自己搭信令 + WebRTC**（原方案见
+[collaboration.md](collaboration.md)「点对点连接」一节）：
 
 1. 自己实现 WebRTC 信令，需要一个双方都能连出去的公网信令服务器——这意味着**必须
    有人运营一个公网服务**，不是纯客户端方案，跟"个人项目不做账号体系/运维"这条
