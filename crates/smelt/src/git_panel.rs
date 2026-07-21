@@ -16,6 +16,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::Tag;
 use gpui_component::*;
@@ -144,6 +145,102 @@ impl RepoInfo {
     pub fn is_worktree(&self) -> bool {
         self.git_dir != self.common_dir
     }
+}
+
+/// 变更文件列表的一行（树形）。目录行只用来折叠，文件行才带状态码。
+#[derive(Debug)]
+pub struct GitTreeRow {
+    /// 缩进层级。
+    pub depth: usize,
+    /// 显示名：文件是文件名，目录可能是压缩后的多段（如 `src/bin/workspace`）。
+    pub name: String,
+    /// 相对仓库根的完整路径。目录行拿它当折叠 key，文件行拿它开 diff。
+    pub path: String,
+    /// None = 目录行；Some = 文件行的 porcelain 两位状态码。
+    pub status: Option<String>,
+}
+
+/// 构建变更文件的目录树。
+///
+/// 单链目录会被压缩成一行（`a` 里只有 `a/b`、`a/b` 里只有 `a/b/c` → 显示成
+/// `a/b/c`）——git 的改动常常埋在很深的目录里，不压缩就是一串只有一个孩子的
+/// 缩进，白占宽度。JetBrains 的 compact middle packages 就是这个行为。
+pub fn build_git_tree(
+    files: &[(String, String)],
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<GitTreeRow> {
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Node {
+        dirs: BTreeMap<String, Node>,
+        /// (文件名, 状态码)
+        files: Vec<(String, String)>,
+    }
+
+    let mut root = Node::default();
+    for (st, path) in files {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        let Some(fname) = parts.pop() else { continue };
+        let mut cur = &mut root;
+        for p in parts {
+            cur = cur.dirs.entry(p.to_string()).or_default();
+        }
+        cur.files.push((fname.to_string(), st.clone()));
+    }
+
+    /// 目录在前、文件在后地铺平；prefix 是当前节点的完整路径。
+    fn walk(
+        node: &Node,
+        prefix: &str,
+        depth: usize,
+        collapsed: &std::collections::HashSet<String>,
+        out: &mut Vec<GitTreeRow>,
+    ) {
+        for (name, child) in &node.dirs {
+            // 压缩单链：只有一个子目录且没有直属文件时，把名字接起来继续往下钻。
+            let mut label = name.clone();
+            let mut path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let mut node = child;
+            while node.files.is_empty() && node.dirs.len() == 1 {
+                let (n, c) = node.dirs.iter().next().unwrap();
+                label = format!("{label}/{n}");
+                path = format!("{path}/{n}");
+                node = c;
+            }
+            let is_collapsed = collapsed.contains(&path);
+            out.push(GitTreeRow {
+                depth,
+                name: label,
+                path: path.clone(),
+                status: None,
+            });
+            if !is_collapsed {
+                walk(node, &path, depth + 1, collapsed, out);
+            }
+        }
+        for (fname, st) in &node.files {
+            let path = if prefix.is_empty() {
+                fname.clone()
+            } else {
+                format!("{prefix}/{fname}")
+            };
+            out.push(GitTreeRow {
+                depth,
+                name: fname.clone(),
+                path,
+                status: Some(st.clone()),
+            });
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&root, "", 0, collapsed, &mut out);
+    out
 }
 
 /// 并排视图的一行：Both = 左(旧侧)/右(新侧)各一行（None 为空侧占位）；
@@ -1101,6 +1198,9 @@ pub fn git_view(
     files_scroll: &ScrollHandle,
     diff_scroll: &UniformListScrollHandle,
     active_hunk: Option<usize>,
+    git_left_resize: &Entity<ResizableState>,
+    git_left_w: f32,
+    tree_collapsed: &HashSet<String>,
     cx: &mut Context<Workspace>,
 ) -> Div {
     let (muted, fg, border, accent) = {
@@ -1134,7 +1234,43 @@ pub fn git_view(
             .flex()
             .flex_col()
             .p_1()
-            .children(files.into_iter().enumerate().map(|(i, (st, path))| {
+            .children(build_git_tree(&files, tree_collapsed).into_iter().enumerate().map(|(i, row)| {
+                // 每层缩进 14px，与文件树页同一套视觉节奏。
+                let indent = px(4.0 + row.depth as f32 * 14.0);
+                let path = row.path;
+                // 目录行：只负责折叠，没有状态码也没有勾选框。
+                let Some(st) = row.status else {
+                    let collapsed = tree_collapsed.contains(&path);
+                    let p_toggle = path.clone();
+                    return div()
+                        .id(("git-dir", i))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl(indent)
+                        .pr_2()
+                        .py(px(1.0))
+                        .text_sm()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(accent))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.git_tree_collapsed.remove(&p_toggle) {
+                                this.git_tree_collapsed.insert(p_toggle.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            Icon::new(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size_4()
+                            .text_color(muted),
+                        )
+                        .child(div().min_w_0().text_color(muted).child(row.name));
+                };
                 let st_trim = st.trim();
                 // 状态标记用 Tag 彩色胶囊：新增=绿 删除=红 修改=黄 未跟踪=灰 其余=蓝。
                 let label = if st_trim.is_empty() {
@@ -1158,6 +1294,7 @@ pub fn git_view(
                 let untracked = st.contains('?');
                 let is_sel = selected.as_deref() == Some(path.as_str());
                 let (r, p) = (root.clone(), path.clone());
+                let name = row.name;
                 // 暂存勾选框：索引状态（porcelain 第一位）不是空格/`?` 就算已暂存
                 // （`??` 是 untracked，两位都不算暂存；`MM` 这种"暂存过又改"第一位
                 // 仍是暂存态，勾着）。纯本地索引操作，直接执行不用发终端确认。
@@ -1184,7 +1321,8 @@ pub fn git_view(
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_2()
+                    .pl(indent)
+                    .pr_2()
                     .py(px(1.0))
                     .text_sm()
                     .rounded_sm()
@@ -1195,7 +1333,23 @@ pub fn git_view(
                     }))
                     .child(stage_checkbox)
                     .child(status_tag)
-                    .child(div().min_w_0().text_color(fg).child(path));
+                    // 只显示文件名——路径已经由树的层级表达了。整条路径挂 tooltip，
+                    // 免得同名文件（一堆 mod.rs）分不清。tooltip 需要元素带 id。
+                    .child(
+                        div()
+                            .id(("git-name", i))
+                            .min_w_0()
+                            .truncate()
+                            .text_color(fg)
+                            .child(name)
+                            .tooltip({
+                                let full = path.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(full.clone())
+                                        .build(window, cx)
+                                }
+                            }),
+                    );
                 // 选中项高亮背景（无 .when，用普通条件分支）。
                 if is_sel {
                     row.bg(accent)
@@ -1273,7 +1427,7 @@ pub fn git_view(
     };
 
     let left = div()
-        .w(px(300.))
+        .size_full()
         .min_h_0()
         .flex()
         .flex_col()
@@ -1283,21 +1437,32 @@ pub fn git_view(
         .child(file_list)
         .child(commit_message_bar(commit_msg_input, commit_msg_generating, cx));
 
+    // 左栏宽度可拖拽（同文件树那套，拖完落盘）。以前写死 300px，路径一长就只能
+    // 看见结尾几个字符。
     div()
         .flex_1()
         .min_h_0()
         .flex()
-        .child(left)
-        .child(git_diff_pane(
-            &root,
-            git_diff,
-            split,
-            diff_selected,
-            diff_comment_input,
-            diff_scroll,
-            active_hunk,
-            cx,
-        ))
+        .child(
+            h_resizable("git-left-split")
+                .with_state(git_left_resize)
+                .child(
+                    resizable_panel()
+                        .size(px(git_left_w))
+                        .size_range(px(200.)..px(560.))
+                        .child(left),
+                )
+                .child(resizable_panel().child(git_diff_pane(
+                    &root,
+                    git_diff,
+                    split,
+                    diff_selected,
+                    diff_comment_input,
+                    diff_scroll,
+                    active_hunk,
+                    cx,
+                ))),
+        )
 }
 
 // ===================== Workspace 方法 =====================
@@ -2258,7 +2423,53 @@ mod tests {
     // 不用 `use super::*;`：本文件顶部有 gpui/gpui_component 的 glob 导入，带进测试
     // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩（hotspot.rs 的
     // 测试模块踩过，那边留了同样的注释）。只导入真正用到的名字。
-    use super::{hunk_patch, parse_diff, run_git, run_git_stdin};
+    use super::{build_git_tree, hunk_patch, parse_diff, run_git, run_git_stdin};
+
+    fn files(paths: &[&str]) -> Vec<(String, String)> {
+        paths.iter().map(|p| (" M".to_string(), p.to_string())).collect()
+    }
+
+    /// 只有一个孩子的目录链要压成一行，否则深路径全是空缩进。
+    #[test]
+    fn tree_compacts_single_child_dir_chains() {
+        let rows = build_git_tree(&files(&["crates/smelt/src/main.rs"]), &Default::default());
+        assert_eq!(rows.len(), 2, "应是一行目录 + 一行文件，实际 {rows:?}");
+        assert_eq!(rows[0].name, "crates/smelt/src");
+        assert_eq!(rows[0].path, "crates/smelt/src");
+        assert!(rows[0].status.is_none(), "目录行不该带状态码");
+        assert_eq!(rows[1].name, "main.rs");
+        assert_eq!(rows[1].path, "crates/smelt/src/main.rs");
+        assert_eq!(rows[1].depth, 1);
+    }
+
+    /// 分叉处必须停止压缩，各分支自己成行。
+    #[test]
+    fn tree_stops_compacting_at_a_fork() {
+        let rows = build_git_tree(&files(&["a/b/x.rs", "a/c/y.rs"]), &Default::default());
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "x.rs", "c", "y.rs"], "实际 {names:?}");
+        assert_eq!(rows[0].depth, 0);
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[2].depth, 2);
+    }
+
+    /// 目录排在文件前面，同层内各自有序。
+    #[test]
+    fn tree_lists_dirs_before_files() {
+        let rows = build_git_tree(&files(&["zz.txt", "aa/b.rs"]), &Default::default());
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["aa", "b.rs", "zz.txt"], "目录应排在文件前，实际 {names:?}");
+    }
+
+    /// 折叠的目录不展开其子树，但目录行自己还在。
+    #[test]
+    fn tree_hides_children_of_collapsed_dir() {
+        let mut collapsed = std::collections::HashSet::new();
+        collapsed.insert("a".to_string());
+        let rows = build_git_tree(&files(&["a/b/x.rs", "a/c/y.rs", "top.rs"]), &collapsed);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "top.rs"], "折叠后不该露出子树，实际 {names:?}");
+    }
 
     /// 在临时目录里造一个仓库：写 `content`、提交，再覆写成 `modified`（不提交）。
     /// 返回仓库根路径。用 pid + 标签避免并行测试互相踩。

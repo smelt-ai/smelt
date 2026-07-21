@@ -698,6 +698,9 @@ struct WsState {
     /// 文件树列拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     file_tree_w: Option<f32>,
+    /// Git 页左栏（变更文件列表）拖出的宽度（px）；None = 用默认值。
+    #[serde(default)]
+    git_left_w: Option<f32>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
     /// 旧格式：单棵分屏树。
     #[serde(default)]
@@ -989,6 +992,9 @@ struct Workspace {
     diff_split: bool,
     /// F7/Shift+F7 当前跳到第几个改动块（None = 还没跳过）。换文件重开 diff 时清空。
     active_hunk: Option<usize>,
+    /// Git 页变更文件树里被折叠的目录（存相对仓库根的路径）。默认全展开——改动
+    /// 文件通常没几个，一进来就全看见比让人挨个点开更顺手。
+    git_tree_collapsed: HashSet<String>,
     /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
     diff_selected: HashSet<usize>,
     /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
@@ -1015,6 +1021,9 @@ struct Workspace {
     /// 文件树列宽拖拽状态（对面板：文件树 + 右侧文件内容）；拖动完通过 save_state
     /// 落盘到 file_tree_w，重启后从存档恢复。
     file_tree_resize: Entity<ResizableState>,
+    /// Git 页左栏 resize 状态；宽度落盘到 git_left_w，同文件树一套。
+    git_left_resize: Entity<ResizableState>,
+    git_left_w: f32,
     /// 文件树顶部的过滤输入框；首次渲染文件树时懒创建（需要 window）。
     file_filter: Option<Entity<gpui_component::input::InputState>>,
     /// 过滤框的变更订阅（键入即重渲染）；随视图存活。
@@ -1060,6 +1069,7 @@ struct Workspace {
     file_tree_w: f32,
     /// 文件树列 resize 事件订阅（拖动完写回存档）；随视图存活。
     _file_tree_resize_sub: Subscription,
+    _git_left_resize_sub: Subscription,
     /// git 信息缓存（cwd → (分支, 改动数)），总览页后台刷新、渲染读缓存。
     git_cache: HashMap<String, (String, usize)>,
     /// 宠物大脑（LLM）配置的输入框；首次打开设置面板时懒创建（需要 window）。
@@ -1224,6 +1234,7 @@ impl Workspace {
         let saved = load_ws_state();
         let sidebar_w = saved.as_ref().and_then(|s| s.sidebar_w).unwrap_or(230.);
         let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
+        let git_left_w = saved.as_ref().and_then(|s| s.git_left_w).unwrap_or(300.);
 
         let (pending_sessions, active_session) = saved
             .as_ref()
@@ -1242,6 +1253,12 @@ impl Workspace {
         let file_tree_resize = cx.new(|_| ResizableState::default());
         let _file_tree_resize_sub =
             cx.subscribe(&file_tree_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
+                this.save_state(cx);
+            });
+        // Git 页左栏 resize：同上一套，拖完落盘。
+        let git_left_resize = cx.new(|_| ResizableState::default());
+        let _git_left_resize_sub =
+            cx.subscribe(&git_left_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
                 this.save_state(cx);
             });
 
@@ -1264,6 +1281,7 @@ impl Workspace {
             diff_gen: 0,
             diff_split: false,
             active_hunk: None,
+            git_tree_collapsed: HashSet::new(),
             diff_selected: HashSet::new(),
             diff_comment_input: None,
             commit_msg_input: None,
@@ -1298,6 +1316,9 @@ impl Workspace {
             _resize_sub,
             file_tree_w,
             _file_tree_resize_sub,
+            git_left_resize,
+            git_left_w,
+            _git_left_resize_sub,
             git_cache: HashMap::new(),
             git_status: HashMap::new(),
             git_status_inflight: HashSet::new(),
@@ -1834,6 +1855,7 @@ impl Workspace {
             active_session: self.active_session,
             sidebar_w,
             file_tree_w,
+            git_left_w: self.git_left_resize.read(cx).sizes().first().copied().map(f32::from),
             ..Default::default()
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -5530,6 +5552,9 @@ impl Render for Workspace {
                                 &self.git_files_scroll,
                                 &self.diff_scroll,
                                 self.active_hunk,
+                                &self.git_left_resize,
+                                self.git_left_w,
+                                &self.git_tree_collapsed,
                                 cx,
                             )
                         }
