@@ -15,7 +15,7 @@ use gpui::InteractiveElement;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::Tag;
@@ -1269,7 +1269,10 @@ pub fn git_view(
                             .size_4()
                             .text_color(muted),
                         )
-                        .child(div().min_w_0().text_color(muted).child(row.name));
+                        .child(div().min_w_0().text_color(muted).child(row.name))
+                        // 目录行和文件行（挂了 context_menu，类型不同）要统一成
+                        // AnyElement 才能进同一个 children 迭代器。
+                        .into_any_element();
                 };
                 let st_trim = st.trim();
                 // 状态标记用 Tag 彩色胶囊：新增=绿 删除=红 修改=黄 未跟踪=灰 其余=蓝。
@@ -1350,12 +1353,36 @@ pub fn git_view(
                                 }
                             }),
                     );
-                // 选中项高亮背景（无 .when，用普通条件分支）。
-                if is_sel {
-                    row.bg(accent)
-                } else {
-                    row
-                }
+                // 右键菜单：丢弃改动 / 复制路径 / 在 Finder 中显示。此前 git 页完全
+                // 没有右键入口，「丢弃这个文件的改动」这种最常用的操作根本没地方点。
+                let ws_menu = cx.entity();
+                let full_path = Path::new(&root).join(&path).to_string_lossy().to_string();
+                let (root_menu, path_menu) = (root.clone(), path.clone());
+                // 选中高亮要在挂菜单之前上色：context_menu 会把元素包一层，之后
+                // 就不能再改样式了。
+                let row = if is_sel { row.bg(accent) } else { row };
+                row.context_menu(move |menu, _window, _cx| {
+                    let (ws_d, r_d, p_d) = (ws_menu.clone(), root_menu.clone(), path_menu.clone());
+                    let (ws_c, p_c) = (ws_menu.clone(), full_path.clone());
+                    let (ws_f, p_f) = (ws_menu.clone(), full_path.clone());
+                    menu.item(
+                        PopupMenuItem::new(if untracked { "删除文件" } else { "丢弃改动" }).on_click(
+                            move |_ev, _window, cx| {
+                                ws_d.update(cx, |ws, cx| {
+                                    ws.start_discard_file(r_d.clone(), p_d.clone(), untracked, cx)
+                                });
+                            },
+                        ),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::new("复制文件路径").on_click(move |_ev, _window, cx| {
+                        ws_c.update(cx, |ws, cx| ws.copy_file_path_to_clipboard(p_c.clone(), cx));
+                    }))
+                    .item(PopupMenuItem::new("在 Finder 中显示").on_click(move |_ev, _window, cx| {
+                        ws_f.update(cx, |ws, cx| ws.reveal_path_in_finder(p_f.clone(), cx));
+                    }))
+                })
+                .into_any_element()
             }))
             .into_any_element()
     };
@@ -1719,6 +1746,112 @@ impl Workspace {
                     ),
             );
         Self::modal_shell(360., true, content, cx)
+    }
+
+    /// 文件右键「丢弃改动」：先弹确认。untracked 标记决定是删盘还是 restore。
+    pub fn start_discard_file(
+        &mut self,
+        root: String,
+        path: String,
+        untracked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_file_target = Some((root, path, untracked));
+        cx.notify();
+    }
+
+    /// 取消丢弃文件。
+    pub fn cancel_discard_file(&mut self, cx: &mut Context<Self>) {
+        self.discard_file_target = None;
+        cx.notify();
+    }
+
+    /// 确认丢弃整个文件的改动。
+    ///
+    /// 已跟踪走 `git restore --staged --worktree`（暂存区和工作区一起还原，省得
+    /// 用户为「已 add 过」的文件再点一次）；未跟踪的 git 管不着，直接删盘。
+    pub fn confirm_discard_file(&mut self, cx: &mut Context<Self>) {
+        let Some((root, path, untracked)) = self.discard_file_target.take() else { return };
+        cx.spawn(async move |this, cx| {
+            let (r, p) = (root.clone(), path.clone());
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if untracked {
+                        let full = Path::new(&r).join(&p);
+                        return std::fs::remove_file(&full)
+                            .map_err(|e| format!("删除 {p} 失败：{e}"));
+                    }
+                    let out = run_git(&r, &["restore", "--staged", "--worktree", "--", &p])
+                        .map_err(|e| e.to_string())?;
+                    if out.status.success() {
+                        Ok(())
+                    } else {
+                        Err(git_err(&out, "git restore 失败"))
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.invalidate_git_status(&root);
+                        // 丢弃的正是当前打开的那个文件时，diff 已经没意义了，关掉。
+                        if this.git_diff.as_ref().is_some_and(|d| d.path == path) {
+                            this.git_diff = None;
+                            this.active_hunk = None;
+                        }
+                    }
+                    Err(err) => this.background_error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 「丢弃文件改动」确认弹窗。未跟踪文件是直接删盘，措辞要比 restore 更重。
+    pub fn render_discard_file_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let (fg, muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let Some((_, path, untracked)) = self.discard_file_target.as_ref() else { return div() };
+        let untracked = *untracked;
+        let (title, body) = if untracked {
+            ("确定删除这个新文件吗？", format!("{path} 从未被 git 跟踪过，删了就是彻底删除。"))
+        } else {
+            ("确定丢弃这个文件的改动吗？", format!("{path} 会被还原成 HEAD 的样子，已暂存的部分一并还原。"))
+        };
+
+        let content = v_flex()
+            .child(div().font_bold().text_color(fg).text_lg().child(title))
+            .child(div().text_sm().text_color(muted).child(body))
+            .child(div().text_sm().text_color(accent_text).child("不进 reflog，找不回来。"))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-discard-file",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_discard_file(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-discard-file",
+                        if untracked { "删除文件" } else { "丢弃改动" },
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_discard_file(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(380., true, content, cx)
     }
 
     /// F7 / Shift+F7：跳到下一个 / 上一个改动块并滚到视野里。

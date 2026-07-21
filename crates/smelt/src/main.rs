@@ -1199,6 +1199,9 @@ struct Workspace {
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
     /// reflog，找不回来，所以必须过一道确认。
     discard_hunk_target: Option<(String, usize)>,
+    /// 正在确认丢弃整个文件的改动：(仓库根, 相对路径, 是否未跟踪)。未跟踪文件是
+    /// 直接删盘，比 restore 更狠，文案要分开写。
+    discard_file_target: Option<(String, String, bool)>,
     /// 各类后台操作（建/删 worktree、生成 commit message 等）失败时的提示，render
     /// 顶部取走并弹成通知；后台任务里没有 Window，弹不了通知，所以先暂存到这。
     background_error: Option<String>,
@@ -1374,6 +1377,7 @@ impl Workspace {
             _new_worktree_sub: None,
             delete_worktree_target: None,
             discard_hunk_target: None,
+            discard_file_target: None,
             background_error: None,
             daemon_outdated: None,
             daemon_upgrade_msg: None,
@@ -5607,6 +5611,7 @@ impl Render for Workspace {
             // 删除 Worktree 确认拦截弹层
             .children(self.delete_worktree_target.is_some().then(|| self.render_delete_worktree_confirm(cx)))
             .children(self.discard_hunk_target.is_some().then(|| self.render_discard_hunk_confirm(cx)))
+            .children(self.discard_file_target.is_some().then(|| self.render_discard_file_confirm(cx)))
             // 删除文件二次确认拦截弹层
             .children(self.delete_file_target.is_some().then(|| self.render_delete_file_confirm(cx)))
             // 重启守护确认弹层改挂在设置窗（SettingsWindow::render），不在主窗口画。
