@@ -565,12 +565,7 @@ impl TerminalView {
     /// 终端末尾最多 n 行非空文本（总览页迷你预览用）。走 [`Terminal::text_lines`] 的纯文本
     /// 路径，不为了几行字把整个网格连同颜色/属性 clone 一遍。
     pub fn last_lines(&self, n: usize) -> Vec<String> {
-        let mut lines = self.terminal.text_lines();
-        while lines.last().is_some_and(|l| l.is_empty()) {
-            lines.pop();
-        }
-        let start = lines.len().saturating_sub(n);
-        lines[start..].to_vec()
+        self.terminal.last_lines(n)
     }
 
     /// 通知消息文本（供通知面板显示）。

@@ -44,6 +44,10 @@ pub struct PermissionPrompt {
     pub options: Vec<PermissionOption>,
 }
 
+// 下面两个是渲染按钮用的，只有 GUI 会调；smeltd 只调 parse_permission_prompt。
+// 本模块以 #[path] 同时编进两个二进制，smeltd 那侧必然报 dead_code——不是真没人用，
+// 是那个 bin 用不到。等有了 lib crate 就能按需导出，届时可去掉这个 allow。
+#[allow(dead_code)]
 impl PermissionOption {
     /// 总览按钮短标签。
     pub fn button_label(&self) -> String {

@@ -1994,17 +1994,15 @@ impl Terminal {
         }
     }
 
-    /// 可视区的纯文本行（总览页迷你预览用）。**不走 snapshot**：那会把整个网格连同颜色、
-    /// 属性、链接一起 clone 一遍，而这里只要字符——总览页每帧对每个终端都调一次，白白
-    /// clone 几千个 Cell 太亏。零宽字符（变体选择器 / 音标）要带上，否则预览里 emoji 掉成
-    /// 黑白、带声调的字掉音标。
-    pub fn text_lines(&self) -> Vec<String> {
-        // 逐格拼行的实现在 src/term_text.rs（与 smeltd 共用）——宽字符占位、零宽字符、
-        // 行尾裁剪这几处细节只该写对一次。
+    /// 末尾 n 行（先丢掉尾部空行）。**不走 snapshot**：那会把整个网格连同颜色、属性、
+    /// 链接一起 clone 一遍，而这里只要字符。逐格拼行与裁剪的实现在 src/term_text.rs，
+    /// 与 smeltd 共用：GUI 扫权限菜单和 smeltd 的 `menu` op 必须看到完全一样的
+    /// 文本，否则两边判断会不一致。
+    pub fn last_lines(&self, n: usize) -> Vec<String> {
         let Ok(term) = self.term.lock() else {
             return Vec::new();
         };
-        crate::term_text::text_lines(&term)
+        crate::term_text::last_lines(&term, n)
     }
 
     /// 焦点变化上报（DEC 1004，`CSI ?1004h` 打开）：应用开了这个模式时，终端在获得 / 失去
