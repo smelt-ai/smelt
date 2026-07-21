@@ -14,8 +14,10 @@
 //! - `GET  /health` → `{ ok, rooms }`
 //! - `POST /v1/rooms` → `{ room, secret, expires_at, ttl_secs, signal_ws }`
 //! - `GET  /ws` → WebSocket 信令
+//! - `GET  /` `/s/*` `/assets/*` → remote-web SPA（跨网手机页）
 
 mod protocol;
+mod spa;
 mod state;
 mod ws;
 
@@ -63,11 +65,21 @@ async fn main() {
     );
 
     let state = AppState::new(ice_servers, Duration::from_secs(ttl_secs));
+    let spa_ok = spa::spa_ready();
+    info!(spa_embedded = spa_ok, "smelt-signal routes");
 
-    let app = Router::new()
+    // API / WS 优先；其余同域托管 SPA（nginx 仍可整站反代到本进程）
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/v1/rooms", post(create_room))
-        .route("/ws", get(ws::ws_upgrade))
+        .route("/ws", get(ws::ws_upgrade));
+    if spa_ok {
+        app = app
+            .route("/", get(spa::spa_index))
+            .route("/s/{*rest}", get(spa::spa_index))
+            .route("/assets/{*path}", get(spa::spa_asset));
+    }
+    let app = app
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

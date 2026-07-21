@@ -16,6 +16,7 @@ on:
       - feat/webrtc-edge
     paths:
       - "crates/smelt-signal/**"
+      - "remote-web/**"
       - "Cargo.lock"
       - "Cargo.toml"
       - ".github/workflows/signal.yml"
@@ -34,6 +35,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: remote-web/package-lock.json
+
+      - name: Build remote-web SPA
+        run: |
+          cd remote-web
+          npm ci
+          npm run build
+          test -f dist/index.html
+          grep -q assets/ dist/index.html
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -42,6 +58,13 @@ jobs:
 
       - name: Build smelt-signal (release)
         run: cargo build -p smelt-signal --release
+
+      - name: Verify SPA embedded
+        run: |
+          # 占位页不含 vite assets 路径痕迹
+          strings target/release/smelt-signal | grep -q 'assets/index-' \
+            || { echo "✗ binary 未嵌入 remote-web SPA"; exit 1; }
+          echo "✅ SPA embedded"
 
       - name: Package binary
         run: |

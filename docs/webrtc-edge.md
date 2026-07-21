@@ -138,6 +138,7 @@ remote-web/src/transport/
 ### 信令服务（`crates/smelt-signal`，已实现）
 
 ```bash
+# 先 npm run build remote-web（或 build.rs 自动尝试）
 cargo run -p smelt-signal
 # 默认 bind 127.0.0.1:7878
 ```
@@ -147,6 +148,7 @@ cargo run -p smelt-signal
 | `GET /health` | `{ ok, rooms }` |
 | `POST /v1/rooms` | body 可选 `{ "ttl_secs" }` → `{ room, secret, expires_at, ttl_secs, signal_ws }` |
 | `GET /ws` | 信令 WebSocket（上表协议） |
+| `GET /` `/s/*` `/assets/*` | **remote-web SPA**（与信令同域，跨网手机只开 signal 域名） |
 
 环境变量：
 
@@ -174,12 +176,14 @@ cargo run -p smeltd --bin gateway -- --port 18765 --write
 # 2) 桥：建房 + host 信令 + WebRTC + 转发 gateway
 SMELT_GATEWAY_TOKEN=<token> \
 SMELT_SIGNAL_HTTP=https://signal.zhyqhxb.fun \
-SMELT_SHARE_BASE=http://127.0.0.1:18765/ \
   cargo run -p smelt-bridge
 ```
 
-终端会打印跨网 URL：`?room=&k=&signal=wss://…/ws&token=`。  
-手机打开该 URL（需能加载 SPA：gateway 已嵌入 remote-web，或用局域网/隧道访问 gateway）。
+终端会打印跨网 URL，默认页根是 **信令 HTTPS**（SPA 已嵌进 `smelt-signal`）：
+
+`https://signal.zhyqhxb.fun/?room=&k=&signal=wss://…/ws&token=`
+
+手机 **只开这一条** 即可；不需要 CF 隧道拉本机网页。业务数据仍是 WebRTC → Mac bridge。
 
 | 环境变量 | 默认 |
 |----------|------|
@@ -187,7 +191,7 @@ SMELT_SHARE_BASE=http://127.0.0.1:18765/ \
 | `SMELT_SIGNAL_WS` | 由 HTTP 推导 `/ws` |
 | `SMELT_GATEWAY` | `http://127.0.0.1:18765` |
 | `SMELT_GATEWAY_TOKEN` | **必填** |
-| `SMELT_SHARE_BASE` | 拼分享链接的页根 |
+| `SMELT_SHARE_BASE` | 默认 = `SMELT_SIGNAL_HTTP/` |
 
 ### DataChannel 标签
 

@@ -23,3 +23,8 @@ rand = "0.8"
 dashmap = "6"
 futures-util = "0.3"
 base64 = "0.22"
+# 公网信令同域托管 remote-web SPA（跨网手机只打开 signal 域名）
+rust-embed = { version = "8.7", features = ["debug-embed"] }
+
+[build-dependencies]
+# build.rs 无额外依赖

@@ -58,7 +58,11 @@ impl Config {
         let write = env::var("SMELT_WRITE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
-        let share_base = env::var("SMELT_SHARE_BASE").ok().filter(|s| !s.is_empty());
+        // 默认 = 信令 HTTPS 根（SPA 已嵌进 smelt-signal，同域打开即可）
+        let share_base = env::var("SMELT_SHARE_BASE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(format!("{}/", signal_http.trim_end_matches('/'))));
         Ok(Self {
             signal_http,
             signal_ws,
@@ -112,13 +116,11 @@ async fn main() -> Result<()> {
 }
 
 fn build_share_url(cfg: &Config, room: &str, secret: &str) -> String {
-    // 默认：无 SPA 公网托管时，仍打印 query 供手工拼 / 内嵌页
+    // 默认：https://signal…/ （SPA 与信令同域）；手机只开这一条链接
     let base = cfg
         .share_base
         .clone()
-        .unwrap_or_else(|| "https://signal.zhyqhxb.fun/".into());
-    // 若 share_base 是信号域名，手机只能先测信令；真 SPA 请设 SMELT_SHARE_BASE
-    // 指向托管了 remote-web 的地址，或局域网 gateway 经隧道暴露的 URL。
+        .unwrap_or_else(|| format!("{}/", cfg.signal_http.trim_end_matches('/')));
     let mut u = url::Url::parse(&base).unwrap_or_else(|_| {
         url::Url::parse("https://example.invalid/").expect("static")
     });

@@ -156,6 +156,25 @@ sudo SKIP_TLS=1 bash /tmp/install.sh
 
 ---
 
+## 升级（含 SPA）
+
+CI 会把 **remote-web** 编进 `smelt-signal`。升级：
+
+```bash
+export GH_MIRROR="${GH_MIRROR-https://ghfast.top/}"
+BIN_URL="https://github.com/smelt-ai/smelt/releases/download/signal-nightly/smelt-signal-x86_64-unknown-linux-gnu"
+curl -fL --connect-timeout 15 --max-time 180 -o /tmp/smelt-signal "${GH_MIRROR}${BIN_URL}" \
+  || curl -fL --connect-timeout 15 --max-time 180 -o /tmp/smelt-signal "https://ghproxy.net/${BIN_URL}"
+sudo install -m 755 /tmp/smelt-signal /usr/local/bin/smelt-signal
+sudo systemctl restart smelt-signal
+curl -sS https://signal.你的域名/ | head
+# 应是 SPA html，不是 404
+```
+
+nginx 继续整站反代 `signal` → `127.0.0.1:7878` 即可（`/ws` `/v1` `/health` 与 SPA 同一进程）。
+
+---
+
 ## 排错
 
 | 现象 | 处理 |
@@ -163,3 +182,4 @@ sudo SKIP_TLS=1 bash /tmp/install.sh
 | curl 镜像超时 | 换 `GH_MIRROR=https://ghproxy.net/` |
 | 下载了但不是二进制（很小/HTML） | 镜像返回错误页；换镜像或看 `file /tmp/smelt-signal` |
 | health 失败 | `journalctl -u smelt-signal -n 40 --no-pager` |
+| 打开 `/` 不是 SPA | 二进制过旧未嵌 SPA；拉最新 `signal-nightly` |

@@ -7057,6 +7057,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "rand 0.8.6",
+ "rust-embed",
  "serde",
  "serde_json",
  "tokio",
