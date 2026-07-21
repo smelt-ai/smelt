@@ -95,23 +95,35 @@ async fn main() -> Result<()> {
         "smelt-bridge starting"
     );
 
-    // 1) 建房
-    let room = signal::create_room(&cfg.signal_http)
-        .await
-        .context("POST /v1/rooms")?;
-    info!(room = %room.room, "room created");
+    // 1) 建房：可被 GUI 预建（SMELT_ROOM + SMELT_SECRET），否则自建
+    let (room_id, secret) = match (
+        env::var("SMELT_ROOM").ok().filter(|s| !s.is_empty()),
+        env::var("SMELT_SECRET").ok().filter(|s| !s.is_empty()),
+    ) {
+        (Some(r), Some(s)) => {
+            info!(room = %r, "using pre-created room");
+            (r, s)
+        }
+        _ => {
+            let room = signal::create_room(&cfg.signal_http)
+                .await
+                .context("POST /v1/rooms")?;
+            info!(room = %room.room, "room created");
+            (room.room, room.secret)
+        }
+    };
 
-    let share = build_share_url(&cfg, &room.room, &room.secret);
+    let share = build_share_url(&cfg, &room_id, &secret);
     println!();
     println!("========== 跨网链接（手机打开） ==========");
     println!("{share}");
-    println!("room={}  secret={}", room.room, room.secret);
+    println!("room={room_id}  secret={secret}");
     println!("signal={}", cfg.signal_ws);
     println!("==========================================");
     println!();
 
     // 2) 信令 + RTC（阻塞直到结束）
-    signal::run_host(cfg, room.room, room.secret).await?;
+    signal::run_host(cfg, room_id, secret).await?;
     Ok(())
 }
 

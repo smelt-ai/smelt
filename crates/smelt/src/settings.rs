@@ -460,6 +460,12 @@ pub struct RemoteConfig {
     /// 这个字段比 `enabled` 晚加，旧的 collab.json 里没有这个键，缺省按关闭处理。
     #[serde(default)]
     pub tunnel_enabled: bool,
+    /// 跨网主路径：WebRTC + 自营信令（docs/webrtc-edge.md）。
+    #[serde(default)]
+    pub webrtc_enabled: bool,
+    /// 公网信令 HTTP 根（SPA 同域），如 https://signal.example.com
+    #[serde(default = "default_signal_http")]
+    pub signal_http: String,
     /// 这条链接是否允许 approve/deny/reply（Phase 6，见 smeltd.rs「远程操控」）。
     /// `#[serde(default)]`：比前两个字段更晚加，旧配置缺省按只读处理——不能让
     /// 老用户的配置在升级后突然变成可写。链接分享出去本身就是授权，这里没有
@@ -468,9 +474,19 @@ pub struct RemoteConfig {
     pub write_enabled: bool,
 }
 
+fn default_signal_http() -> String {
+    "https://signal.zhyqhxb.fun".into()
+}
+
 impl Default for RemoteConfig {
     fn default() -> Self {
-        Self { enabled: false, tunnel_enabled: false, write_enabled: false }
+        Self {
+            enabled: false,
+            tunnel_enabled: false,
+            webrtc_enabled: false,
+            signal_http: default_signal_http(),
+            write_enabled: false,
+        }
     }
 }
 
@@ -571,12 +587,13 @@ fn spawn_tunnel_start(write: bool, cx: &mut App) {
     .detach();
 }
 
-/// 总开关：开启远程。关掉时自动拆掉隧道，用户不必先关外网再关远程。
+/// 总开关：开启远程。关掉时自动拆掉隧道 / WebRTC 桥，用户不必先关外网再关远程。
 pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
     if enabled {
         let c = cx.global::<RemoteConfig>().clone();
         let write = c.write_enabled;
         let want_tunnel = c.tunnel_enabled;
+        let want_webrtc = c.webrtc_enabled;
         set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = true;
@@ -586,19 +603,281 @@ pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
         if want_tunnel {
             spawn_tunnel_start(write, cx);
         }
+        if want_webrtc {
+            spawn_webrtc_start(cx);
+        }
     } else {
+        stop_webrtc_bridge(cx);
         terminal::tunnel_stop();
         terminal::remote_stop();
         cx.set_global(TunnelRuntimeState::default());
         cx.set_global(RemoteRuntimeState::default());
+        cx.set_global(WebrtcRuntimeState::default());
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = false;
         // 总开关关掉 = 停止分享。外网开关一并熄灭，避免「远程关了但手机访问还亮着」
         // 的误解；写入偏好保留，下次再开远程仍按原权限。
         c.tunnel_enabled = false;
+        c.webrtc_enabled = false;
         save_remote_config(&c);
         cx.set_global(c);
     }
+}
+
+// ===================== WebRTC 跨网（smelt-bridge + 公网信令） =====================
+
+/// WebRTC 跨网运行时（不落盘）：bridge 子进程 + 分享 URL + 二维码 PNG。
+#[derive(Clone, Default)]
+pub struct WebrtcRuntimeState {
+    pub connecting: bool,
+    pub share_url: Option<String>,
+    pub error: Option<String>,
+    /// bridge 进程 pid，关掉开关时 SIGTERM
+    pub bridge_pid: Option<u32>,
+    /// 分享链接的 QR（PNG 字节），URL 变了才重算
+    pub qr_png: Option<Vec<u8>>,
+}
+
+impl Global for WebrtcRuntimeState {}
+
+fn resolve_smelt_bridge() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("smelt-bridge");
+            if p.is_file() {
+                return Some(p);
+            }
+            // 开发：…/target/debug/smelt 旁
+            let p2 = dir.join("smelt-bridge");
+            if p2.is_file() {
+                return Some(p2);
+            }
+        }
+    }
+    let dev = std::path::PathBuf::from("target/debug/smelt-bridge");
+    if dev.is_file() {
+        return Some(dev);
+    }
+    let dev_rel = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/smelt-bridge");
+    if dev_rel.is_file() {
+        return Some(dev_rel);
+    }
+    None
+}
+
+fn qr_png_for_url(url: &str) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    use qrcode::QrCode;
+    let code = QrCode::new(url.as_bytes()).ok()?;
+    let img = code
+        .render::<image::Luma<u8>>()
+        .dark_color(image::Luma([0u8]))
+        .light_color(image::Luma([255u8]))
+        .min_dimensions(160, 160)
+        .quiet_zone(true)
+        .build();
+    let mut buf = Vec::new();
+    let enc = image::codecs::png::PngEncoder::new(&mut buf);
+    enc.write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::L8,
+    )
+    .ok()?;
+    Some(buf)
+}
+
+fn stop_webrtc_bridge(cx: &mut App) {
+    if let Some(pid) = cx
+        .try_global::<WebrtcRuntimeState>()
+        .and_then(|s| s.bridge_pid)
+    {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    cx.set_global(WebrtcRuntimeState::default());
+}
+
+/// 开关「跨网 WebRTC」：确保本机网关 + 拉 smelt-bridge，生成 signal 同域分享链接。
+pub fn apply_webrtc_toggle(enabled: bool, cx: &mut App) {
+    let mut c = cx.global::<RemoteConfig>().clone();
+    c.webrtc_enabled = enabled;
+    if enabled {
+        c.enabled = true;
+    }
+    save_remote_config(&c);
+    cx.set_global(c.clone());
+
+    if !enabled {
+        stop_webrtc_bridge(cx);
+        return;
+    }
+
+    let write = c.write_enabled;
+    if !cx
+        .global::<RemoteRuntimeState>()
+        .token
+        .as_ref()
+        .is_some_and(|t| !t.is_empty())
+    {
+        set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
+    }
+    spawn_webrtc_start(cx);
+}
+
+fn spawn_webrtc_start(cx: &mut App) {
+    stop_webrtc_bridge(cx);
+    let cfg = cx.global::<RemoteConfig>().clone();
+    let token = cx
+        .global::<RemoteRuntimeState>()
+        .token
+        .clone()
+        .filter(|t| !t.is_empty());
+    let Some(token) = token else {
+        cx.set_global(WebrtcRuntimeState {
+            connecting: false,
+            share_url: None,
+            error: Some("本机远程网关还没有密钥，请先打开「开启远程」".into()),
+            bridge_pid: None,
+            qr_png: None,
+        });
+        return;
+    };
+
+    let signal_http = cfg.signal_http.trim_end_matches('/').to_string();
+    let write = cfg.write_enabled;
+    let bridge_bin = resolve_smelt_bridge();
+    let gateway_base = cx
+        .global::<RemoteRuntimeState>()
+        .addr
+        .as_ref()
+        .map(|a| {
+            if a.starts_with("http") {
+                a.clone()
+            } else {
+                format!("http://{a}")
+            }
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:18765".into());
+
+    cx.set_global(WebrtcRuntimeState {
+        connecting: true,
+        share_url: None,
+        error: None,
+        bridge_pid: None,
+        qr_png: None,
+    });
+
+    cx.spawn(async move |cx| {
+        let result = cx
+            .background_executor()
+            .spawn(async move {
+                let Some(bridge) = bridge_bin else {
+                    return Err(
+                        "找不到 smelt-bridge。开发：cargo build -p smelt-bridge；发版请随 app 打包。"
+                            .into(),
+                    );
+                };
+                // 1) 在公网信令上建房
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(20))
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let room_url = format!("{signal_http}/v1/rooms");
+                let resp = client
+                    .post(&room_url)
+                    .header("content-type", "application/json")
+                    .body("{}")
+                    .send()
+                    .await
+                    .map_err(|e| format!("连信令失败（{signal_http}）：{e}"))?;
+                if !resp.status().is_success() {
+                    return Err(format!(
+                        "建房失败 HTTP {}：{}",
+                        resp.status(),
+                        resp.text().await.unwrap_or_default()
+                    ));
+                }
+                #[derive(serde::Deserialize)]
+                struct Room {
+                    room: String,
+                    secret: String,
+                }
+                let room: Room = resp.json().await.map_err(|e| e.to_string())?;
+                let signal_ws = {
+                    let u = signal_http
+                        .replacen("https://", "wss://", 1)
+                        .replacen("http://", "ws://", 1);
+                    format!("{u}/ws")
+                };
+                let share = format!(
+                    "{signal_http}/?room={}&k={}&signal={}&token={}",
+                    urlencoding_minimal(&room.room),
+                    urlencoding_minimal(&room.secret),
+                    urlencoding_minimal(&signal_ws),
+                    urlencoding_minimal(&token),
+                );
+
+                // 2) 拉起 bridge（预置房间）
+                let mut cmd = std::process::Command::new(&bridge);
+                cmd.env("SMELT_SIGNAL_HTTP", &signal_http)
+                    .env("SMELT_SIGNAL_WS", &signal_ws)
+                    .env("SMELT_GATEWAY", &gateway_base)
+                    .env("SMELT_GATEWAY_TOKEN", &token)
+                    .env("SMELT_ROOM", &room.room)
+                    .env("SMELT_SECRET", &room.secret)
+                    .env("SMELT_WRITE", if write { "true" } else { "false" })
+                    .env("RUST_LOG", "info")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                let child = cmd.spawn().map_err(|e| format!("启动 smelt-bridge 失败：{e}"))?;
+                let pid = child.id();
+                // 泄漏 Child：用 pid 管理生命周期
+                std::mem::forget(child);
+                let qr = qr_png_for_url(&share);
+                Ok((share, pid, qr))
+            })
+            .await;
+
+        let _ = cx.update(|cx| {
+            match result {
+                Ok((share, pid, qr)) => {
+                    cx.set_global(WebrtcRuntimeState {
+                        connecting: false,
+                        share_url: Some(share),
+                        error: None,
+                        bridge_pid: Some(pid),
+                        qr_png: qr,
+                    });
+                }
+                Err(e) => {
+                    cx.set_global(WebrtcRuntimeState {
+                        connecting: false,
+                        share_url: None,
+                        error: Some(e),
+                        bridge_pid: None,
+                        qr_png: None,
+                    });
+                }
+            }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+fn urlencoding_minimal(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u32),
+        })
+        .collect()
 }
 
 /// Cloudflare Tunnel 运行时状态（不落盘）：`connecting` 是"cloudflared 起来了但
@@ -715,7 +994,12 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
         return;
     }
 
-    if c.tunnel_enabled {
+    if c.webrtc_enabled {
+        stop_webrtc_bridge(cx);
+        terminal::remote_stop();
+        set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
+        spawn_webrtc_start(cx);
+    } else if c.tunnel_enabled {
         terminal::tunnel_stop();
         terminal::remote_stop();
         cx.set_global(RemoteRuntimeState {
@@ -732,14 +1016,23 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
     }
 }
 
-/// 分享卡片上的「重试」：按当前配置把网关 / 隧道重新拉齐，不要求用户记步骤。
+/// 分享卡片上的「重试」：按当前配置把网关 / 隧道 / WebRTC 重新拉齐。
 pub fn retry_remote_setup(cx: &mut App) {
     let c = cx.global::<RemoteConfig>().clone();
-    if !c.enabled && !c.tunnel_enabled {
+    if !c.enabled && !c.tunnel_enabled && !c.webrtc_enabled {
         return;
     }
     let write = c.write_enabled;
-    if c.tunnel_enabled {
+    if c.webrtc_enabled {
+        let mut cfg = c;
+        cfg.enabled = true;
+        cfg.webrtc_enabled = true;
+        save_remote_config(&cfg);
+        cx.set_global(cfg);
+        stop_webrtc_bridge(cx);
+        set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
+        spawn_webrtc_start(cx);
+    } else if c.tunnel_enabled {
         let mut cfg = c;
         cfg.enabled = true;
         cfg.tunnel_enabled = true;
@@ -1999,8 +2292,7 @@ impl Workspace {
                 })),
         );
 
-        // —— 远程：总开关 + 选项自动联动 + 一张分享卡片 ——
-        // 用户不需要知道「先开远程再开隧道」；依赖和重试都在逻辑里消化。
+        // —— 远程：本机 → 跨网 WebRTC → 临时 CF → 写入 → 分享卡片（复制 + 扫码）——
         let remote_page = SettingPage::new("远程").group(
             SettingGroup::new().items(vec![
                 SettingItem::new(
@@ -2011,21 +2303,30 @@ impl Workspace {
                     ),
                 )
                 .description(
-                    "打开后生成分享链接，浏览器即可查看本机 agent 会话。关掉会停止分享\
-                     （若开着手机访问也会一起停）。",
+                    "打开后生成本机分享能力（局域网 / 跨网都依赖）。关掉会停止所有分享。",
                 ),
                 SettingItem::new(
-                    "手机 / 外网也能打开",
+                    "跨网（WebRTC）",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<RemoteConfig>().webrtc_enabled,
+                        |v: bool, cx: &mut App| apply_webrtc_toggle(v, cx),
+                    ),
+                )
+                .description(
+                    "推荐：手机蜂窝也能连。经公网信令握手，数据优先点对点到本机；\
+                     打开后生成可复制 / 扫码的跨网链接（需已部署 smelt-signal）。",
+                ),
+                SettingItem::new(
+                    "临时 Cloudflare（高级）",
                     SettingField::switch(
                         |cx: &App| cx.global::<RemoteConfig>().tunnel_enabled,
                         |v: bool, cx: &mut App| apply_tunnel_toggle(v, cx),
                     ),
                 )
                 .description(
-                    "用 Cloudflare 生成公网链接，离开 Wi‑Fi 也能连。需要本机已安装 \
-                     cloudflared。打开时会自动开启上方「远程」。安装命令见下方（可一键复制）。",
+                    "Quick Tunnel 临时公网链接，不稳定时优先用上方「跨网 WebRTC」。\
+                     需要本机 cloudflared；打开时会自动开启「远程」。",
                 ),
-                // GPUI 描述文案通常不可选中，单独给 brew 命令 + 复制按钮（成功有 toast + 文案闪变）
                 SettingItem::render(move |_, _, cx: &mut App| {
                     let muted = cx.theme().muted_foreground;
                     let fg = cx.theme().foreground;
@@ -2038,7 +2339,7 @@ impl Workspace {
                             div()
                                 .text_xs()
                                 .text_color(muted)
-                                .child("未安装时请在终端执行："),
+                                .child("Cloudflare 未安装时："),
                         )
                         .child(
                             div()
@@ -2074,45 +2375,68 @@ impl Workspace {
                 )
                 .description(
                     "链接持有者可在手机上输入、批准/拒绝权限。分享即授权。\
-                     切换后会自动换一条新链接（旧链接失效），无需手动重开。",
+                     切换后会自动换一条新链接（旧链接失效）。",
                 ),
-                // 统一分享卡片：优先公网链接，否则本机链接；异常时给重试，不写「请先…再…」
+                // 分享卡片：WebRTC 优先 → CF → 本机；复制 + 二维码
                 SettingItem::render(move |_, _, cx: &mut App| {
                     let cfg = cx.global::<RemoteConfig>().clone();
                     let remote = cx.global::<RemoteRuntimeState>().clone();
                     let tunnel = cx.global::<TunnelRuntimeState>().clone();
+                    let webrtc = cx
+                        .try_global::<WebrtcRuntimeState>()
+                        .cloned()
+                        .unwrap_or_default();
                     let danger = cx.theme().danger;
+                    let muted = cx.theme().muted_foreground;
+                    let fg = cx.theme().foreground;
 
-                    if !cfg.enabled && !cfg.tunnel_enabled {
+                    if !cfg.enabled && !cfg.tunnel_enabled && !cfg.webrtc_enabled {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("打开「开启远程」后，这里会出现可复制的分享链接。");
+                            .child("打开「开启远程」或「跨网（WebRTC）」后，这里出现分享链接与二维码。");
                     }
 
-                    // 准备中：隧道 connecting，或远程已开但还没有 token
+                    // WebRTC 准备中
+                    if cfg.webrtc_enabled && webrtc.connecting {
+                        return div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("正在准备跨网链接…（建房 + 启动 bridge）");
+                    }
+
                     let preparing = tunnel.connecting
                         || (cfg.enabled
+                            && !cfg.webrtc_enabled
                             && remote.error.is_none()
                             && !remote.token.as_ref().is_some_and(|t| !t.is_empty()));
 
                     if preparing {
                         let msg = if tunnel.connecting {
-                            "正在准备分享链接…（外网通道最多约 30 秒）"
+                            "正在准备 Cloudflare 链接…（最多约 30 秒）"
                         } else {
                             "正在准备分享链接…"
                         };
                         return div().text_xs().text_color(muted).child(msg);
                     }
 
-                    if let Some(err) = remote.error.as_ref().or(tunnel.error.as_ref()) {
-                        // 仅「没装」时给 brew；网络超时也带 cloudflared 字样，勿误导
+                    if let Some(err) = webrtc
+                        .error
+                        .as_ref()
+                        .or(remote.error.as_ref())
+                        .or(tunnel.error.as_ref())
+                    {
                         let need_cloudflared = err.contains("没找到 cloudflared")
                             || err.contains("brew install cloudflared")
                             || err.contains("SMELT_CLOUDFLARED");
                         let mut box_ = v_flex()
                             .gap_2()
-                            .child(div().text_xs().text_color(danger).child(format!("出了点问题：{err}")))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(danger)
+                                    .child(format!("出了点问题：{err}")),
+                            )
                             .child(
                                 btn("retry-remote", "重试".into()).on_mouse_down(
                                     MouseButton::Left,
@@ -2158,8 +2482,28 @@ impl Workspace {
                         return box_;
                     }
 
+                    // 主链接优先级：WebRTC → CF → 本机
+                    let webrtc_url = webrtc
+                        .share_url
+                        .clone()
+                        .filter(|_| cfg.webrtc_enabled);
                     let token = remote.token.clone().filter(|t| !t.is_empty());
-                    let Some(token) = token else {
+                    let public = tunnel
+                        .url
+                        .as_ref()
+                        .filter(|_| cfg.tunnel_enabled)
+                        .and_then(|u| token.as_ref().map(|t| format!("{u}/?token={t}")));
+                    let local = remote
+                        .addr
+                        .as_ref()
+                        .and_then(|a| token.as_ref().map(|t| format!("http://{a}/?token={t}")));
+
+                    let primary = webrtc_url
+                        .clone()
+                        .or_else(|| public.clone())
+                        .or_else(|| local.clone());
+
+                    let Some(primary) = primary else {
                         return v_flex()
                             .gap_2()
                             .child(
@@ -2176,80 +2520,146 @@ impl Workspace {
                             );
                     };
 
-                    // 主链接：有公网用公网（手机场景），否则本机
-                    let public = tunnel
-                        .url
-                        .as_ref()
-                        .filter(|_| cfg.tunnel_enabled)
-                        .map(|u| format!("{u}/?token={token}"));
-                    let local = remote
-                        .addr
-                        .as_ref()
-                        .map(|a| format!("http://{a}/?token={token}"));
-                    let primary = public.clone().or_else(|| local.clone());
-                    let Some(primary) = primary else {
-                        return div().text_xs().text_color(muted).child("正在准备分享链接…");
-                    };
-
-                    let write_on = if public.is_some() {
-                        tunnel.write
+                    let (scope, mode) = if webrtc_url.is_some() {
+                        (
+                            "跨网 WebRTC（手机扫码 / 蜂窝可用）",
+                            if remote.write {
+                                "可写入"
+                            } else {
+                                "只读"
+                            },
+                        )
+                    } else if public.is_some() {
+                        (
+                            "临时 Cloudflare 公网",
+                            if tunnel.write { "可写入" } else { "只读" },
+                        )
                     } else {
-                        remote.write
-                    };
-                    let mode = if write_on {
-                        "可写入（终端 + 批准/拒绝）"
-                    } else {
-                        "只读观战"
-                    };
-                    let scope = if public.is_some() {
-                        "手机 / 外网可用"
-                    } else {
-                        "仅本机或同一局域网（可用 Tailscale）"
+                        (
+                            "仅本机 / 局域网",
+                            if remote.write { "可写入" } else { "只读" },
+                        )
                     };
 
                     let primary_copy = primary.clone();
-                    let mut card = v_flex()
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .max_w(px(320.))
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis_middle()
-                                        .text_xs()
-                                        .text_color(fg)
-                                        .child(primary),
-                                )
-                                .child(
-                                    btn(
-                                        "copy-share-link",
-                                        copy_btn_label("copy-share-link", "复制链接", cx),
-                                    )
-                                    .flex_shrink_0()
-                                    .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
-                                        copy_with_feedback(
-                                            primary_copy.clone(),
-                                            "copy-share-link",
-                                            "已复制分享链接",
-                                            window,
-                                            cx,
-                                        );
-                                    }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(format!("{scope} · {mode}")),
-                        );
+                    let qr_png = if webrtc_url.is_some() {
+                        webrtc.qr_png.clone()
+                    } else {
+                        qr_png_for_url(&primary)
+                    };
 
-                    // 同时有公网时，附带本机链接作次要信息（不抢主按钮）
-                    if let (Some(_), Some(local_link)) = (public, local) {
+                    let mut card = v_flex().gap_2();
+
+                    // 二维码 + 链接区
+                    let mut row = h_flex().items_start().gap_3();
+                    if let Some(png) = qr_png {
+                        row = row.child(
+                            div()
+                                .p_2()
+                                .rounded(px(8.))
+                                .bg(gpui::white())
+                                .child(
+                                    img(std::sync::Arc::new(Image::from_bytes(
+                                        ImageFormat::Png,
+                                        png,
+                                    )))
+                                    .w(px(132.))
+                                    .h(px(132.)),
+                                ),
+                        );
+                    }
+                    row = row.child(
+                        v_flex()
+                            .gap_1p5()
+                            .min_w(px(0.))
+                            .flex_1()
+                            .child(
+                                div()
+                                    .max_w(px(280.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis_middle()
+                                    .text_xs()
+                                    .text_color(fg)
+                                    .child(primary.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        btn(
+                                            "copy-share-link",
+                                            copy_btn_label("copy-share-link", "复制链接", cx),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_, window, cx: &mut App| {
+                                                copy_with_feedback(
+                                                    primary_copy.clone(),
+                                                    "copy-share-link",
+                                                    "已复制分享链接",
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("{scope} · {mode}")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("手机扫码打开；或复制链接到浏览器。"),
+                            ),
+                    );
+                    card = card.child(row);
+
+                    // 次要：WebRTC 开启时仍可看本机链接
+                    if webrtc_url.is_some() {
+                        if let Some(local_link) = local.clone() {
+                            let local_copy = local_link.clone();
+                            card = card.child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .max_w(px(260.))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis_middle()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format!("本机：{local_link}")),
+                                    )
+                                    .child(
+                                        btn(
+                                            "copy-local-link",
+                                            copy_btn_label("copy-local-link", "复制本机", cx),
+                                        )
+                                        .flex_shrink_0()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_, window, cx: &mut App| {
+                                                copy_with_feedback(
+                                                    local_copy.clone(),
+                                                    "copy-local-link",
+                                                    "已复制本机链接",
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    ),
+                            );
+                        }
+                    } else if let (Some(_), Some(local_link)) = (public, local) {
                         let local_copy = local_link.clone();
                         card = card.child(
                             h_flex()
@@ -2271,15 +2681,18 @@ impl Workspace {
                                         copy_btn_label("copy-local-link", "复制本机", cx),
                                     )
                                     .flex_shrink_0()
-                                    .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
-                                        copy_with_feedback(
-                                            local_copy.clone(),
-                                            "copy-local-link",
-                                            "已复制本机链接",
-                                            window,
-                                            cx,
-                                        );
-                                    }),
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |_, window, cx: &mut App| {
+                                            copy_with_feedback(
+                                                local_copy.clone(),
+                                                "copy-local-link",
+                                                "已复制本机链接",
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ),
                                 ),
                         );
                     }

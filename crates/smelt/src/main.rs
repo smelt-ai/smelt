@@ -5954,6 +5954,7 @@ fn main() {
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
         cx.set_global(settings::TunnelRuntimeState::default());
+        cx.set_global(settings::WebrtcRuntimeState::default());
         if want_remote || want_tunnel {
             if want_tunnel {
                 cx.set_global(settings::TunnelRuntimeState {
