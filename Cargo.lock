@@ -6451,12 +6451,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
-name = "smelt"
+name = "smelt-core"
 version = "0.5.7"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "axum",
+ "dirs 5.0.1",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "smelt-workspace"
+version = "0.5.7"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
  "chrono",
  "core-foundation 0.10.0",
  "core-graphics 0.24.0",
@@ -6471,11 +6484,29 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "reqwest",
- "rust-embed",
  "serde",
  "serde_json",
  "similar",
+ "smelt-core",
  "smol",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "smeltd"
+version = "0.5.7"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "axum",
+ "dirs 5.0.1",
+ "libc",
+ "objc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "smelt-core",
  "tokio",
  "uuid",
 ]

@@ -243,7 +243,7 @@ fn classify_attention(msg: &str) -> AttentionKind {
     }
 }
 
-// 权限菜单解析已抽到 src/permission_menu.rs（唯一真源，GUI 与 smeltd 共用）。
+// 权限菜单解析已抽到 smelt_core::permission_menu（唯一真源，GUI 与 smeltd 共用）。
 // 这里只 use 自己要用的；消费者（main.rs 等）直接从 permission_menu 取类型，不经这里
 // 转发——转发一层就等于多一个「看起来像定义处」的地方。
 use crate::permission_menu::{parse_permission_prompt, PermissionPrompt};

@@ -1,6 +1,6 @@
-//! 远程操作网关的核心逻辑（路由 + handler + HTML 模板），供两个地方 `#[path]` 引入：
-//! - `src/bin/gateway.rs`：独立进程，命令行启动，自己管一个 `--bind`/`--port`
-//! - `src/bin/smeltd.rs`：内嵌进守护，靠 `remote_start`/`remote_stop` op 按需开关
+//! 远程操作网关的核心逻辑（路由 + handler + HTML 模板），供两个地方使用：
+//! - `crates/smeltd/src/bin/gateway.rs`：独立进程，命令行启动，自己管一个 `--bind`/`--port`
+//! - `crates/smeltd/src/main.rs`：内嵌进守护，靠 `remote_start`/`remote_stop` op 按需开关
 //!
 //! 两边共用同一份 handler，避免同一套鉴权/转义/协议逻辑复制两次（CLAUDE.md 明令
 //! 别复制）。这个模块本身**不碰 smeltd 主协议**：所有跟 smeltd 的交互都是走
@@ -28,7 +28,7 @@ const CONSOLE_PAGE: &str = include_str!("remote_gateway_console_page.html");
 /// 编译期打进二进制的 SPA（`build.rs` 保证 `remote-web/dist` 存在）。
 /// Docker 只交付 smeltd、或 App 里漏拷 Resources 时，仍能出 Preact 面板。
 #[derive(rust_embed::RustEmbed)]
-#[folder = "remote-web/dist/"]
+#[folder = "../../remote-web/dist/"]
 struct EmbeddedSpa;
 
 /// 磁盘上的 SPA 目录（可选覆盖嵌入资源，便于开发热更）。

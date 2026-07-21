@@ -1,4 +1,4 @@
-//! 权限菜单解析 —— **唯一真源**，GUI 与 smeltd 共用（`#[path]` 引入，同 title_spinner.rs）。
+//! 权限菜单解析 —— **唯一真源**，GUI 与 smeltd 共用。
 //!
 //! 从终端可视区扫出 Claude Code 等 TUI 的编号选择菜单（`❯ 1. Yes` / `[1] Allow` …），
 //! 供三处消费：
@@ -44,10 +44,6 @@ pub struct PermissionPrompt {
     pub options: Vec<PermissionOption>,
 }
 
-// 下面两个是渲染按钮用的，只有 GUI 会调；smeltd 只调 parse_permission_prompt。
-// 本模块以 #[path] 同时编进两个二进制，smeltd 那侧必然报 dead_code——不是真没人用，
-// 是那个 bin 用不到。等有了 lib crate 就能按需导出，届时可去掉这个 allow。
-#[allow(dead_code)]
 impl PermissionOption {
     /// 总览按钮短标签。
     pub fn button_label(&self) -> String {

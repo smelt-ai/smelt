@@ -141,17 +141,12 @@
 //! （GUI 的"允许写入"），网关侧 `write_enabled` 把关，smeltd 的 action 门闩只管
 //! 时机、不管权限。
 
-#[path = "../remote_gateway.rs"]
-mod remote_gateway;
-// 只需要 spinner 判定；OSC 扫描整包留给 workspace（见 src/osc.rs / title_spinner.rs）。
-#[path = "../title_spinner.rs"]
-mod title_spinner;
-// 权限菜单解析与网格取文本：与 GUI 共用同一份。手机端不再自己解析——它拉 `menu` op
-// 拿这里的结果。两份实现（Rust/TS）曾实测漂移过，别再走回头路。
-#[path = "../permission_menu.rs"]
-mod permission_menu;
-#[path = "../term_text.rs"]
-mod term_text;
+use smelt_core::remote_gateway;
+// 只需要 spinner 判定；OSC 扫描整包留给 workspace（smelt-core 的 osc 模块）。
+use smelt_core::title_spinner;
+// 权限菜单解析与网格取文本：与 GUI 共用 smelt-core 里的同一份。手机端不再自己解析——
+// 它拉 `menu` op 拿这里的结果。两份实现（Rust/TS）曾实测漂移过，别再走回头路。
+use smelt_core::{permission_menu, term_text};
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1025,7 +1020,7 @@ mod menubar {
     use std::sync::OnceLock;
 
     /// 应用图标母图，编进二进制当菜单栏图标（跟 workspace 用的是同一张）。
-    const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon-1024.png");
+    const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-1024.png");
 
     #[repr(C)]
     #[derive(Clone, Copy)]

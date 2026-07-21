@@ -1,5 +1,5 @@
-//! 终端标题 Braille spinner 判定——GUI 与 smeltd 共用，单独成文件避免 smeltd
-//! 为用一个函数去整份编译 `osc.rs`（OscScan 等只服务 workspace）。
+//! 终端标题 Braille spinner 判定——GUI 与 smeltd 共用。单独成模块是因为 smeltd
+//! 只要这一个函数，不必与 `osc.rs`（OscScan 等只服务 workspace）绑在一起。
 
 /// 标题是否以 Braille spinner（U+2801–U+28FF，盲文块非空白帧）开头——终端协议约定，
 /// 任何遵守此约定的 agent（Claude Code 等）都能被识别，不是某家私有格式。

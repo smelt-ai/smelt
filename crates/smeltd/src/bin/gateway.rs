@@ -1,6 +1,6 @@
 //! smelt 远程操作网关——独立进程版（见 docs/remote-ops-roadmap.md）。
 //!
-//! 实际的路由/handler/HTML 都在 `src/remote_gateway.rs`（这个文件和 smeltd 内嵌的
+//! 实际的路由/handler/HTML 都在 `smelt_core::remote_gateway`（这个文件和 smeltd 内嵌的
 //! `remote_start` op 共用同一份，见那边的模块注释）。这个文件只负责命令行启动：
 //! 解析 `--bind`/`--port`、生成 token、绑端口、打印分享链接。
 //!
@@ -11,8 +11,7 @@
 //! 这条链接能 `input`（原始键盘）+ approve/deny/reply（见 smeltd「远程操控」），
 //! 链接本身就是授权，不再额外要求当面确认。
 
-#[path = "../remote_gateway.rs"]
-mod remote_gateway;
+use smelt_core::remote_gateway;
 
 use std::net::{IpAddr, Ipv4Addr};
 

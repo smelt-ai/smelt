@@ -1,0 +1,53 @@
+[package]
+name = "smelt-workspace"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+# GUI 主程序。产物名固定为 workspace（Makefile / package-mac.sh 都按这个名字取）。
+[[bin]]
+name = "workspace"
+path = "src/main.rs"
+
+[dependencies]
+# GUI/守护共用的无 UI 逻辑（终端文本、OSC 扫描、权限菜单解析、远程网关）。
+smelt-core = { path = "../smelt-core" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+# GPUI + gpui-component（组件库，Apache-2.0）。三者锁到 gpui-component 用的同一个
+# zed commit，避免版本漂移；gpui_platform 开 runtime_shaders 免装完整 Xcode。
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# tree-sitter-languages：文件树打开文件用组件自带的 Editor（CodeEditor 模式），
+# 语法高亮 + 行号 + 搜索都是组件自己做的，不再需要 syntect。
+gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
+# 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+# 内嵌终端：portable-pty 起 shell 子进程并拿到 PTY，alacritty_terminal 做
+# 终端状态机（ANSI 解析 + 网格模型），GPUI 负责把网格渲染出来。
+portable-pty = "0.9"
+libc = "0.2"
+alacritty_terminal = { version = "0.26", default-features = false }
+smol = "2"  # 定时器：驱动终端网格的定时快照重绘
+# diff 行内高亮：对配对的删/增行做字符级 diff，标出具体变化的片段。
+similar = "2"
+# Git 状态改用文件监听而非轮询：macOS 走 FSEvents，仓库一有变化就标脏触发刷新。
+notify = "6"
+
+# macOS：桌面宠物浮窗需要绕过 GPUI（它在 mac 上只会建 Titled 窗口，必带圆角边框+
+# 阴影），直接操作底层 NSWindow 改成 Borderless/无阴影/透明。版本对齐 gpui 依赖树。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+raw-window-handle = "0.6"
+# 划词翻译：CGEventTap 被动监听全局鼠标拖拽 + 模拟 Cmd+C 读剪贴板。
+# 版本对齐 cocoa/gpui_platform 依赖树里已解析的那一份，避免重复编译两份。
+core-graphics = "0.24"
+core-foundation = "0.10"

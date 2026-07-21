@@ -3,6 +3,10 @@
 //! Docker / CI 若只跑 `cargo build` 而不先 `npm run build`，以前会回退到旧 HTML，
 //! 手机端样式全乱。这里在缺产物时自动尝试 npm；仍失败则写入占位页，避免编译挂掉，
 //! 但日志会打 warning。
+//!
+//! **必须住在 smelt-core**：rust-embed 的 `#[folder]` 在编译本 crate 时展开，build
+//! script 得赶在那之前跑；`rerun-if-changed` 也得挂在本 crate 上，SPA 重新构建后
+//! smelt-core 才会重编、把新产物嵌进去。放根 crate 两条都不成立（依赖先于根编译）。
 
 use std::env;
 use std::fs;
@@ -11,7 +15,9 @@ use std::process::Command;
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let remote_web = manifest.join("remote-web");
+    // 本 crate 在 crates/smelt-core，remote-web 在仓库根。
+    let repo_root = manifest.parent().unwrap().parent().unwrap().to_path_buf();
+    let remote_web = repo_root.join("remote-web");
     let dist = remote_web.join("dist");
     let index = dist.join("index.html");
 
@@ -49,8 +55,10 @@ fn main() {
         }
     }
 
-    println!("cargo:rerun-if-changed=remote-web/dist/index.html");
-    println!("cargo:rerun-if-changed=remote-web/package.json");
+    // rerun-if-changed 的相对路径按 CARGO_MANIFEST_DIR（crates/smelt-core）解析，
+    // 必须用拼好的绝对路径指向仓库根下的 remote-web。
+    println!("cargo:rerun-if-changed={}", index.display());
+    println!("cargo:rerun-if-changed={}", remote_web.join("package.json").display());
     if let Ok(entries) = fs::read_dir(dist.join("assets")) {
         for e in entries.flatten() {
             println!("cargo:rerun-if-changed={}", e.path().display());

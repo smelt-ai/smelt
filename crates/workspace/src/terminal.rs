@@ -1,7 +1,7 @@
 //! 内嵌终端前端：连接 smeltd 守护进程拿字节流 + alacritty_terminal 做终端状态机。
 //!
 //! PTY 与 shell 活在 smeltd 里（GUI 退出不杀会话，重开按 id 重连并重放恢复画面，
-//! 类 tmux；协议见 src/bin/smeltd.rs 头注释）。数据流：后台线程读守护 socket →
+//! 类 tmux；协议见 crates/smeltd/src/main.rs 头注释）。数据流：后台线程读守护 socket →
 //! vte 解析器 advance → 更新共享的 Term 网格；UI 线程定时对网格做快照并重绘。
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1995,7 +1995,7 @@ impl Terminal {
     }
 
     /// 末尾 n 行（先丢掉尾部空行）。**不走 snapshot**：那会把整个网格连同颜色、属性、
-    /// 链接一起 clone 一遍，而这里只要字符。逐格拼行与裁剪的实现在 src/term_text.rs，
+    /// 链接一起 clone 一遍，而这里只要字符。逐格拼行与裁剪的实现在 smelt_core::term_text，
     /// 与 smeltd 共用：GUI 扫权限菜单和 smeltd 的 `menu` op 必须看到完全一样的
     /// 文本，否则两边判断会不一致。
     pub fn last_lines(&self, n: usize) -> Vec<String> {

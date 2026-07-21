@@ -1,9 +1,8 @@
-//! OSC 通知扫描——主要给 GUI（`workspace/terminal.rs`）用，跨 bin 时用 `#[path]`
-//! 引入（跟 `remote_gateway.rs` 同一个套路）。
+//! OSC 通知扫描——主要给 GUI（`workspace/terminal.rs`）用。
 //!
 //! - `OscScan`：OSC 9 / 99 / 777 通知（alacritty 不解析，逐字节自己扫，跟 cmux 同协议）
-//! - `title_starts_with_spinner`：从 `title_spinner.rs` 再导出，spinner 单独成文件
-//!   是因为 smeltd 只需要那一个函数，不必整份编本模块
+//! - `title_starts_with_spinner`：从 `title_spinner.rs` 再导出，smeltd 只用那一个
+//!   函数，直接走 `smelt_core::title_spinner` 即可，不必经过本模块
 
 /// OSC 9 / 99 / 777 通知扫描：提取 `ESC ] … (BEL|ST)`，跨 `feed` 调用保持状态
 /// （字节可能跨 PTY read 边界断开）。
@@ -166,9 +165,7 @@ fn decode_base64_utf8(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-#[path = "title_spinner.rs"]
-mod title_spinner;
-pub use title_spinner::title_starts_with_spinner;
+pub use crate::title_spinner::title_starts_with_spinner;
 
 #[cfg(test)]
 mod tests {

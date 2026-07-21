@@ -1,0 +1,28 @@
+[package]
+name = "smeltd"
+version.workspace = true
+edition.workspace = true
+
+# 守护侧三个无 GUI 二进制：smeltd（终端持久化守护，src/main.rs）、gateway（远程
+# 网关独立进程）、smelt-notify（Claude Code hook → smeltd state op 的翻译小工具）。
+# 独立成 crate 的意义：依赖树彻底脱离 GPUI，改守护不用等 GUI 依赖编译。
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-core = { path = "../smelt-core" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+portable-pty = "0.9"
+# smeltd 无缝升级：PTY master 裸 fd 的 dup/CLOEXEC/ioctl(TIOCSWINSZ)/kill/waitpid。
+libc = "0.2"
+alacritty_terminal = { version = "0.26", default-features = false }
+axum = { version = "0.8.9", features = ["ws"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
