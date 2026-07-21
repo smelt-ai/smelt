@@ -2,19 +2,23 @@
 # 腾讯云 / 国内 VPS 部署 smelt-signal（每步打时间戳，curl 带超时，卡在哪一目了然）
 #
 # 用法：
-#   # 推荐：本机先下好二进制再 scp 上来（避开 VPS 拉 GitHub 慢）
-#   sudo DOMAIN=signal.example.com BIN=/tmp/smelt-signal bash install.sh
-#
-#   # 或让脚本自己下（可能慢/超时）
+#   # 国内 VPS 默认走 GitHub 镜像拉二进制（可直接网页终端跑）
+#   sudo SKIP_TLS=1 bash install.sh
 #   sudo DOMAIN=signal.example.com bash install.sh
 #
+#   # 已有二进制
+#   sudo DOMAIN=signal.example.com BIN=/tmp/smelt-signal bash install.sh
+#
 # 环境变量：
-#   DOMAIN   必填，例如 signal.example.com
-#   BIN      可选，已有的 smelt-signal 可执行文件路径
-#   REPO     默认 smelt-ai/smelt
-#   BRANCH   默认 feat/webrtc-edge（拉 unit/env 模板）
-#   TLS      nginx|caddy|none  默认 nginx（apt 装，国内快）；caddy 走国外源易卡
-#   SKIP_TLS 若只想先跑通进程，设 1 跳过反代
+#   DOMAIN     上 HTTPS 时必填，例如 signal.example.com
+#   BIN        可选，已有二进制路径（设置后不下载）
+#   REPO       默认 smelt-ai/smelt
+#   BRANCH     默认 feat/webrtc-edge
+#   TLS        nginx|caddy|none  默认 nginx
+#   SKIP_TLS   1 = 只装进程
+#   GH_MIRROR  镜像前缀，默认 https://ghfast.top/
+#              空字符串 "" = 直连 GitHub（海外机）
+#              也可换：https://ghproxy.net/  https://mirror.ghproxy.com/
 
 set -euo pipefail
 
@@ -24,22 +28,75 @@ REPO="${REPO:-smelt-ai/smelt}"
 BRANCH="${BRANCH:-feat/webrtc-edge}"
 TLS="${TLS:-nginx}"
 SKIP_TLS="${SKIP_TLS:-0}"
-RELEASE_BASE="https://github.com/${REPO}/releases/download/signal-nightly"
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}/deploy/signal"
+# 国内默认镜像；海外可 GH_MIRROR= sudo ...
+GH_MIRROR="${GH_MIRROR-https://ghfast.top/}"
+
+ORIGIN_RELEASE="https://github.com/${REPO}/releases/download/signal-nightly"
+ORIGIN_RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}/deploy/signal"
 
 log()  { printf '\n[%s] >>> %s\n' "$(date '+%H:%M:%S')" "$*"; }
 ok()   { printf '[%s]     OK %s\n' "$(date '+%H:%M:%S')" "$*"; }
 die()  { printf '[%s] !!! %s\n' "$(date '+%H:%M:%S')" "$*" >&2; exit 1; }
 
-# curl：连接 15s，总 120s，显示进度，失败立刻报步骤名
-fetch() {
-  local url="$1" out="$2" step="$3"
-  log "下载 ($step): $url"
-  if ! curl -fL --connect-timeout 15 --max-time 120 --retry 2 --retry-delay 2 \
-      -o "$out" "$url"; then
-    die "下载失败 ($step)。国内机访问 GitHub 常超时：请在 Mac 上下好后 scp，再用 BIN=/path $0"
+# 给 GitHub/raw URL 套镜像；已是镜像或非 github 则原样
+mirror_url() {
+  local url="$1"
+  if [[ -z "${GH_MIRROR}" ]]; then
+    printf '%s' "$url"
+    return
   fi
-  ok "已保存 $out ($(wc -c <"$out") bytes)"
+  case "$url" in
+    https://github.com/*|https://raw.githubusercontent.com/*|http://github.com/*)
+      # 避免重复套
+      if [[ "$url" == "${GH_MIRROR}"* ]]; then
+        printf '%s' "$url"
+      else
+        printf '%s%s' "${GH_MIRROR}" "$url"
+      fi
+      ;;
+    *)
+      printf '%s' "$url"
+      ;;
+  esac
+}
+
+# 多地址尝试：镜像 → 备用镜像 → 直连
+fetch() {
+  local path_or_url="$1" out="$2" step="$3"
+  local candidates=()
+  local u
+
+  if [[ "$path_or_url" == https://* ]] || [[ "$path_or_url" == http://* ]]; then
+    candidates+=("$(mirror_url "$path_or_url")")
+    # 备用镜像（主镜像挂了时）
+    if [[ -n "${GH_MIRROR}" ]]; then
+      candidates+=("https://ghproxy.net/${path_or_url}")
+      candidates+=("https://mirror.ghproxy.com/${path_or_url}")
+      candidates+=("$path_or_url") # 最后直连碰运气
+    fi
+  else
+    candidates+=("$path_or_url")
+  fi
+
+  # 去重
+  local tried=()
+  for u in "${candidates[@]}"; do
+    local seen=0 t
+    for t in "${tried[@]+"${tried[@]}"}"; do
+      [[ "$t" == "$u" ]] && seen=1 && break
+    done
+    [[ "$seen" -eq 1 ]] && continue
+    tried+=("$u")
+
+    log "下载 ($step): $u"
+    if curl -fL --connect-timeout 15 --max-time 180 --retry 1 \
+        -o "$out" "$u"; then
+      ok "已保存 $out ($(wc -c <"$out") bytes)"
+      return 0
+    fi
+    log "该源失败，试下一个…"
+  done
+  die "下载失败 ($step)。可换: GH_MIRROR=https://ghproxy.net/ 或在 Mac 下好后 BIN=/path"
 }
 
 need_root() {
@@ -56,7 +113,7 @@ step_bin() {
   else
     local tmp
     tmp="$(mktemp)"
-    fetch "${RELEASE_BASE}/smelt-signal-x86_64-unknown-linux-gnu" "$tmp" "signal binary"
+    fetch "${ORIGIN_RELEASE}/smelt-signal-x86_64-unknown-linux-gnu" "$tmp" "signal binary"
     install -m 755 "$tmp" "$dest"
     rm -f "$tmp"
   fi
@@ -74,8 +131,8 @@ step_config() {
     cp "$(dirname "$0")/smelt-signal.service" /etc/systemd/system/smelt-signal.service
     ok "从本地 deploy/signal 复制配置"
   else
-    fetch "${RAW_BASE}/smelt-signal.env.example" /etc/smelt/smelt-signal.env "env"
-    fetch "${RAW_BASE}/smelt-signal.service" /etc/systemd/system/smelt-signal.service "unit"
+    fetch "${ORIGIN_RAW}/smelt-signal.env.example" /etc/smelt/smelt-signal.env "env"
+    fetch "${ORIGIN_RAW}/smelt-signal.service" /etc/systemd/system/smelt-signal.service "unit"
   fi
   systemctl daemon-reload
   systemctl enable smelt-signal

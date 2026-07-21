@@ -1,98 +1,36 @@
-# 不用 SSH：腾讯云网页终端 / VNC 部署
+# 腾讯云网页终端部署（推荐 GitHub 镜像）
 
-适合：控制台「登录」网页终端、VNC、堡垒机网页，**本机没有配置 ssh/scp**。
+适合：控制台网页终端 / VNC，**不必 SSH、不必 Mac 上传**。
 
-思路：**GitHub 下载只在 Mac 上做**；二进制用控制台「上传文件」丢进机器；网页终端里只跑本地命令（不访问 GitHub）。
-
----
-
-## 总流程
-
-```text
-Mac 下载 smelt-signal 二进制
-    ↓
-腾讯云控制台 → 上传到 VPS（如 /tmp/）
-    ↓
-网页终端：写配置 + 启动（下面复制粘贴）
-```
+国内直连 `github.com` 常卡住；用 **镜像前缀** 即可在 VPS 上下二进制。
 
 ---
 
-## 1. 在 Mac 上下载二进制
+## 最快：网页终端一整段（镜像拉二进制）
 
-浏览器打开（或终端）：
-
-```bash
-# Mac 终端
-cd ~/Downloads
-curl -fL --connect-timeout 15 --max-time 180 \
-  -o smelt-signal-linux \
-  "https://github.com/smelt-ai/smelt/releases/download/signal-nightly/smelt-signal-x86_64-unknown-linux-gnu"
-ls -lh smelt-signal-linux
-```
-
-得到文件：`~/Downloads/smelt-signal-linux`（大约几 MB）。
-
----
-
-## 2. 上传到腾讯云
-
-按你实际登录方式选一种：
-
-### A. 腾讯云「标准登录 / 登录助手」网页终端
-
-部分产品顶部有 **上传文件** / 文件夹图标 → 选 `smelt-signal-linux` → 传到当前用户家目录或 `/tmp`。
-
-### B. VNC 图形桌面
-
-用浏览器 VNC 进桌面后，用桌面自带的上传（若有），或先传到你自己的网盘再在机器上下。
-
-### C. 对象存储 COS（最稳，国内快）
-
-1. Mac 上传 `smelt-signal-linux` 到你的 COS 桶（设**临时**公有读或签名 URL）
-2. 网页终端：
-
-```bash
-# 换成你的 COS 链接（国内下载通常很快）
-curl -fL --connect-timeout 10 --max-time 60 \
-  -o /tmp/smelt-signal \
-  "https://你的桶.cos.ap-xxx.myqcloud.com/smelt-signal-linux"
-chmod +x /tmp/smelt-signal
-```
-
-### D. 实在没有上传
-
-把文件发到微信/自己邮箱，在 VNC 桌面浏览器里下载到 VPS——只要**不依赖 VPS 访问 GitHub**即可。
-
-上传后确认：
-
-```bash
-ls -lh /tmp/smelt-signal ~/smelt-signal-linux 2>/dev/null
-# 记清楚真实路径，下面用 BIN= 指过去
-```
-
-若文件在家目录：
-
-```bash
-cp ~/smelt-signal-linux /tmp/smelt-signal
-chmod +x /tmp/smelt-signal
-```
-
----
-
-## 3. 网页终端：只装进程（先验证，不需要域名）
-
-下面整段复制执行（**不访问 GitHub**）：
+下面整段复制执行。默认镜像 `https://ghfast.top/`；失败会自动试 `ghproxy.net` 等。
 
 ```bash
 set -e
-BIN=/tmp/smelt-signal   # 若路径不同请改这里
+# 可选：换镜像  export GH_MIRROR=https://ghproxy.net/
+# 可选：直连    export GH_MIRROR=
+export GH_MIRROR="${GH_MIRROR-https://ghfast.top/}"
 
-echo "[$(date +%H:%M:%S)] 1 安装二进制"
-sudo install -m 755 "$BIN" /usr/local/bin/smelt-signal
-file /usr/local/bin/smelt-signal
+BIN_URL="https://github.com/smelt-ai/smelt/releases/download/signal-nightly/smelt-signal-x86_64-unknown-linux-gnu"
+MIRROR_URL="${GH_MIRROR}${BIN_URL}"
 
-echo "[$(date +%H:%M:%S)] 2 写环境变量"
+echo "[$(date +%H:%M:%S)] 1 下载二进制（镜像）"
+echo "    $MIRROR_URL"
+curl -fL --connect-timeout 15 --max-time 180 -o /tmp/smelt-signal "$MIRROR_URL" \
+  || curl -fL --connect-timeout 15 --max-time 180 -o /tmp/smelt-signal "https://ghproxy.net/${BIN_URL}" \
+  || curl -fL --connect-timeout 15 --max-time 180 -o /tmp/smelt-signal "https://mirror.ghproxy.com/${BIN_URL}"
+chmod +x /tmp/smelt-signal
+ls -lh /tmp/smelt-signal
+
+echo "[$(date +%H:%M:%S)] 2 安装"
+sudo install -m 755 /tmp/smelt-signal /usr/local/bin/smelt-signal
+
+echo "[$(date +%H:%M:%S)] 3 配置 + systemd"
 sudo mkdir -p /etc/smelt
 sudo tee /etc/smelt/smelt-signal.env >/dev/null <<'EOF'
 SMELT_SIGNAL_BIND=127.0.0.1:7878
@@ -100,7 +38,6 @@ SMELT_ROOM_TTL_SECS=3600
 RUST_LOG=info
 EOF
 
-echo "[$(date +%H:%M:%S)] 3 写 systemd"
 sudo tee /etc/systemd/system/smelt-signal.service >/dev/null <<'EOF'
 [Unit]
 Description=smelt WebRTC signaling (no PTY)
@@ -122,46 +59,54 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
-echo "[$(date +%H:%M:%S)] 4 启动"
 sudo systemctl daemon-reload
 sudo systemctl enable --now smelt-signal
 sleep 1
-systemctl is-active smelt-signal
+echo "[$(date +%H:%M:%S)] 4 health"
 curl -sS --connect-timeout 3 --max-time 5 http://127.0.0.1:7878/health
 echo
 echo "[$(date +%H:%M:%S)] 完成。应看到 {\"ok\":true,\"rooms\":0}"
 ```
 
-若某一行长时间无输出：看最后打印的 `[时:分:秒] N …` 是第几步。
-
-失败时：
+若第 1 步三个镜像都失败，再试：
 
 ```bash
-sudo journalctl -u smelt-signal -n 40 --no-pager
+export GH_MIRROR=https://ghproxy.net/
+# 或
+export GH_MIRROR=https://mirror.ghproxy.com/
+# 重跑上面下载那几行
 ```
+
+常用镜像前缀（拼在 **完整 GitHub URL 前面**）：
+
+| 前缀 | 示例 |
+|------|------|
+| `https://ghfast.top/` | `https://ghfast.top/https://github.com/smelt-ai/smelt/releases/download/...` |
+| `https://ghproxy.net/` | 同上 |
+| `https://mirror.ghproxy.com/` | 同上 |
+
+镜像站会变动，一个不行换另一个即可。
 
 ---
 
-## 4. 有域名再上 HTTPS（nginx + certbot，走 apt，不拉国外 Caddy）
+## 有域名：HTTPS（nginx + certbot，apt，不经 GitHub）
 
-安全组放行 **80、443**；域名 A 记录指到该机。
+安全组 **80、443**；域名 A 记录到位。
 
 ```bash
 set -e
-DOMAIN=signal.你的域名.com   # 改成真实域名
+DOMAIN=signal.你的域名.com   # 改
 
-echo "[$(date +%H:%M:%S)] apt 安装 nginx certbot（可能 1～3 分钟，会有输出）"
+echo "[$(date +%H:%M:%S)] apt nginx certbot"
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -y
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 
-echo "[$(date +%H:%M:%S)] 写 nginx 反代"
 sudo tee /etc/nginx/sites-available/smelt-signal >/dev/null <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN};
-
     location / {
         proxy_pass http://127.0.0.1:7878;
         proxy_http_version 1.1;
@@ -178,39 +123,43 @@ server {
 EOF
 sudo ln -sfn /etc/nginx/sites-available/smelt-signal /etc/nginx/sites-enabled/smelt-signal
 sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl enable --now nginx
-sudo systemctl reload nginx
+sudo nginx -t && sudo systemctl enable --now nginx && sudo systemctl reload nginx
 
-echo "[$(date +%H:%M:%S)] certbot 申请证书"
+echo "[$(date +%H:%M:%S)] certbot"
 sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
   --register-unsafely-without-email --redirect
 
-echo "[$(date +%H:%M:%S)] 公网探活"
 curl -sS --connect-timeout 10 --max-time 20 "https://${DOMAIN}/health"
 echo
+echo "WSS: wss://${DOMAIN}/ws"
 ```
 
-信令地址：`wss://你的域名/ws`
+---
+
+## 备选：用 install.sh（也默认镜像）
+
+若机器上已有仓库或能镜像拉 raw：
+
+```bash
+# 镜像拉 install.sh
+curl -fL --connect-timeout 15 --max-time 60 \
+  -o /tmp/install.sh \
+  "https://ghfast.top/https://raw.githubusercontent.com/smelt-ai/smelt/feat/webrtc-edge/deploy/signal/install.sh"
+sudo SKIP_TLS=1 bash /tmp/install.sh
+```
 
 ---
 
-## 常见卡点
+## 备选：Mac 上传 / COS
 
-| 卡住的感觉 | 实际原因 | 怎么办 |
-|------------|----------|--------|
-| `curl github.com` 一直转 | 国内机访问 GitHub 差 | **不要在 VPS 下二进制**，用 Mac 下 + 上传 |
-| `apt-get update` 慢 | 源慢 | 换腾讯云镜像源后重试；应有滚动输出 |
-| 无任何提示 | 命令没 `echo` 进度 | 用上面带 `[时:分:秒]` 的脚本 |
-| certbot 失败 | DNS/安全组 | 先 `curl 127.0.0.1:7878/health` 证明进程 OK |
+镜像全挂时：Mac 下好 → 控制台上传 / COS，见旧说明；或 `BIN=/tmp/smelt-signal` 再装。
 
 ---
 
-## 和 SSH 脚本的关系
+## 排错
 
-| 方式 | 适用 |
+| 现象 | 处理 |
 |------|------|
-| 本文（网页终端） | 无 SSH、控制台登录 |
-| `push-from-mac.sh` + `install.sh` | 本机已配置 `ssh user@ip` |
-
-两种最终效果一样：本机 `7878` + 可选 `https://域名`。
+| curl 镜像超时 | 换 `GH_MIRROR=https://ghproxy.net/` |
+| 下载了但不是二进制（很小/HTML） | 镜像返回错误页；换镜像或看 `file /tmp/smelt-signal` |
+| health 失败 | `journalctl -u smelt-signal -n 40 --no-pager` |

@@ -6,12 +6,19 @@ wss://<你的域名>/ws
 
 **VPS 不用装 Rust。** 进程只听 `127.0.0.1:7878`，外网只开 **80/443**。
 
-国内机访问 GitHub / Caddy 源经常**无进度卡住**。
+国内直连 GitHub 常卡：**默认用镜像**（`ghfast.top` / `ghproxy.net` 等）。
 
 | 你怎么上机器 | 看哪份文档 |
 |--------------|------------|
-| **网页终端 / VNC**（没配 SSH） | **[`WEB-CONSOLE.md`](./WEB-CONSOLE.md)** ← 先看这个 |
-| 本机已 `ssh user@ip` | 下文「Mac 推包 + scp」 |
+| **网页终端 / VNC** | **[`WEB-CONSOLE.md`](./WEB-CONSOLE.md)** ← 镜像一键粘贴 |
+| 本机已 `ssh user@ip` | 下文或 `install.sh`（同样默认镜像） |
+
+```bash
+# 镜像下载示例（网页终端可直接跑）
+curl -fL --connect-timeout 15 --max-time 180 \
+  -o /tmp/smelt-signal \
+  "https://ghfast.top/https://github.com/smelt-ai/smelt/releases/download/signal-nightly/smelt-signal-x86_64-unknown-linux-gnu"
+```
 
 ---
 
