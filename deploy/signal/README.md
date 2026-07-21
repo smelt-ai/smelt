@@ -1,13 +1,13 @@
 # 公网信令部署（腾讯云 Ubuntu）
 
-把 `smelt-signal` 跑在 VPS 上，手机和 Mac 都连：
-
 ```text
 wss://<你的域名>/ws
 ```
 
-**推荐：CI 打好的 Linux 二进制 + systemd + Caddy**（VPS **不用装 Rust**）。  
-进程只听 `127.0.0.1:7878`，外网只开 **80/443**。
+**VPS 不用装 Rust。** 进程只听 `127.0.0.1:7878`，外网只开 **80/443**。
+
+国内机访问 GitHub / Caddy 源经常**无进度卡住**——请用下面「Mac 下载 + scp」路径；  
+`install.sh` **每步带时间戳**，超时直接失败并报步骤名。
 
 ---
 
@@ -16,122 +16,74 @@ wss://<你的域名>/ws
 | 项 | 说明 |
 |----|------|
 | 腾讯云 CVM | Ubuntu 22.04/24.04 **x86_64**，有公网 IP |
-| **域名** | A 记录指到该公网 IP（Let's Encrypt 必需；纯 IP 不好做正规 WSS） |
-| 安全组 | 入站放行 **TCP 80、443**（不必放行 7878） |
-
-DNS 示例：`signal.example.com` → `1.2.3.4`。
+| 域名（上 HTTPS 时） | A 记录 → 公网 IP |
+| 安全组 | TCP **80、443**（不要开 7878） |
 
 ---
 
-## 推荐：下载 GitHub Actions 产物
+## 推荐：Mac 推包 + 上机安装（快、能看见进度）
 
-CI 工作流：`.github/workflows/signal.yml`  
-每次 push 信令相关改动（或手动 Run workflow）会：
-
-1. 在 `ubuntu-latest` 编译 `smelt-signal`
-2. 发布到滚动 pre-release 标签 **`signal-nightly`**
-
-### 固定下载 URL
-
-把 `OWNER/REPO` 换成实际仓库（例如 `smelt-ai/smelt`）：
+### 1）在 Mac 仓库根目录
 
 ```bash
-REPO=smelt-ai/smelt
-BASE="https://github.com/${REPO}/releases/download/signal-nightly"
-curl -fsSL -o smelt-signal -L \
-  "${BASE}/smelt-signal-x86_64-unknown-linux-gnu"
-curl -fsSL -o smelt-signal.sha256 -L \
-  "${BASE}/smelt-signal-x86_64-unknown-linux-gnu.sha256"
-# 可选校验
-sha256sum -c smelt-signal.sha256
-chmod +x smelt-signal
-sudo install -m 755 smelt-signal /usr/local/bin/smelt-signal
+chmod +x deploy/signal/push-from-mac.sh deploy/signal/install.sh
+./deploy/signal/push-from-mac.sh ubuntu@你的公网IP
 ```
 
-> 仓库若是 **private**：公开 URL 会 404，改用  
-> `gh release download signal-nightly -R OWNER/REPO -p 'smelt-signal*'`  
->（需 `gh auth login` 或 `GH_TOKEN`）。
+会在本机拉 `signal-nightly` 二进制并 scp 到 VPS 的 `/tmp/smelt-signal-deploy/`。
 
-### VPS 首次部署（无 Rust）
+### 2）SSH 上机——先只验证进程（不需域名）
 
 ```bash
-sudo apt update
-sudo apt install -y curl ca-certificates
-
-# 1) 二进制（见上）
-REPO=smelt-ai/smelt
-BASE="https://github.com/${REPO}/releases/download/signal-nightly"
-curl -fsSL -o /tmp/smelt-signal -L \
-  "${BASE}/smelt-signal-x86_64-unknown-linux-gnu"
-sudo install -m 755 /tmp/smelt-signal /usr/local/bin/smelt-signal
-
-# 2) 配置文件：可只 clone 本目录，或从仓库 curl 原材料
-#    若已 git clone：
-#    cd ~/smelt && git checkout feat/webrtc-edge
-sudo mkdir -p /etc/smelt
-sudo curl -fsSL -o /etc/smelt/smelt-signal.env \
-  "https://raw.githubusercontent.com/${REPO}/feat/webrtc-edge/deploy/signal/smelt-signal.env.example"
-sudo curl -fsSL -o /etc/systemd/system/smelt-signal.service \
-  "https://raw.githubusercontent.com/${REPO}/feat/webrtc-edge/deploy/signal/smelt-signal.service"
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now smelt-signal
+ssh ubuntu@你的公网IP
+cd /tmp/smelt-signal-deploy
+sudo SKIP_TLS=1 BIN=/tmp/smelt-signal-deploy/smelt-signal bash install.sh
 curl -sS http://127.0.0.1:7878/health
-# 期望：{"ok":true,"rooms":0}
-
-# 3) Caddy
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update && sudo apt install -y caddy
-
-sudo curl -fsSL -o /etc/caddy/Caddyfile \
-  "https://raw.githubusercontent.com/${REPO}/feat/webrtc-edge/deploy/signal/Caddyfile"
-sudo sed -i 's/signal.example.com/你的真实域名/g' /etc/caddy/Caddyfile
-sudo systemctl reload caddy
-
-curl -sS https://你的真实域名/health
+# 期望 {"ok":true,"rooms":0}
 ```
 
-### 升级二进制
+日志形如：`[14:02:11] >>> 步骤 1/6：…`。卡在哪一行就是哪一步。
+
+### 3）有域名后再上 HTTPS（默认 nginx + certbot，走 apt）
 
 ```bash
-REPO=smelt-ai/smelt
-BASE="https://github.com/${REPO}/releases/download/signal-nightly"
-curl -fsSL -o /tmp/smelt-signal -L \
-  "${BASE}/smelt-signal-x86_64-unknown-linux-gnu"
-sudo install -m 755 /tmp/smelt-signal /usr/local/bin/smelt-signal
-sudo systemctl restart smelt-signal
+sudo DOMAIN=signal.你的域名.com \
+  BIN=/tmp/smelt-signal-deploy/smelt-signal \
+  TLS=nginx \
+  bash install.sh
 ```
 
-建房试一下：
+探活：
 
 ```bash
-curl -sS -X POST https://你的真实域名/v1/rooms \
+curl -sS https://signal.你的域名.com/health
+curl -sS -X POST https://signal.你的域名.com/v1/rooms \
   -H 'content-type: application/json' -d '{}'
 ```
 
-浏览器 / bridge 信令地址：
+信令地址：`wss://signal.你的域名.com/ws`
 
-```text
-wss://你的真实域名/ws
-```
+### `install.sh` 环境变量
+
+| 变量 | 含义 |
+|------|------|
+| `DOMAIN` | 域名；`SKIP_TLS=1` 时可空 |
+| `BIN` | 已有二进制路径（强烈建议，避免 VPS 拉 GitHub） |
+| `TLS` | `nginx`（默认，国内快）/ `caddy`（国外源易卡）/ `none` |
+| `SKIP_TLS` | `1` = 只装进程 + 本机 health |
 
 ---
 
-## 备选：在 VPS 上自己编译
+## 升级二进制
 
-国内机房访问 `sh.rustup.rs` / crates.io 常很慢，需 [rsproxy](https://rsproxy.cn/) 等镜像。  
-一般 **不推荐**，优先用上面的 CI 二进制。
+在 Mac 再跑一遍 `push-from-mac.sh`，上机：
 
 ```bash
-# 装好 rustup + cargo 镜像后
-git clone -b feat/webrtc-edge <repo> ~/smelt && cd ~/smelt
-cargo build -p smelt-signal --release
-sudo install -m 755 target/release/smelt-signal /usr/local/bin/smelt-signal
+sudo install -m 755 /tmp/smelt-signal-deploy/smelt-signal /usr/local/bin/smelt-signal
+sudo systemctl restart smelt-signal
 ```
+
+房间在内存里，重启会清空。
 
 ---
 
@@ -139,49 +91,23 @@ sudo install -m 755 target/release/smelt-signal /usr/local/bin/smelt-signal
 
 | 文件 | 作用 |
 |------|------|
-| `smelt-signal.service` | systemd 单元 |
-| `smelt-signal.env.example` | 环境变量模板 → `/etc/smelt/smelt-signal.env` |
-| `Caddyfile` | TLS + 反代到 127.0.0.1:7878 |
-| `Dockerfile` | 可选：容器构建 |
-| `../.github/workflows/signal.yml` | CI 打 Linux 二进制 → `signal-nightly` |
-
----
-
-## 环境变量
-
-见 `smelt-signal.env.example`：
-
-- `SMELT_SIGNAL_BIND`：生产保持 `127.0.0.1:7878`
-- `SMELT_ROOM_TTL_SECS`：房间存活（默认 3600）
-- `SMELT_ICE_SERVERS`：JSON；**现阶段可只用公共 STUN**，coturn 以后再加
+| `push-from-mac.sh` | Mac：下二进制 + scp |
+| `install.sh` | VPS：分步安装（超时+日志） |
+| `smelt-signal.service` | systemd |
+| `smelt-signal.env.example` | → `/etc/smelt/smelt-signal.env` |
+| `Caddyfile` | 可选 Caddy |
+| `Dockerfile` | 可选容器构建 |
+| `.github/workflows/signal.yml` | CI → `signal-nightly` |
 
 ---
 
 ## 腾讯云安全组
 
-控制台 → 云服务器 → 安全组 → 入站规则：
-
-| 协议 | 端口 | 来源 | 用途 |
-|------|------|------|------|
-| TCP | 80 | 0.0.0.0/0 | ACME HTTP-01 + 跳转 HTTPS |
-| TCP | 443 | 0.0.0.0/0 | HTTPS / WSS |
-| TCP | 22 | 你的 IP | SSH（按你习惯收紧） |
-
-**不要**把 7878 对公网打开。
-
----
-
-## 升级
-
-```bash
-cd ~/smelt
-git pull
-cargo build -p smelt-signal --release
-sudo install -m 755 target/release/smelt-signal /usr/local/bin/smelt-signal
-sudo systemctl restart smelt-signal
-```
-
-注意：当前房间在**内存**里，重启会清空进行中的房间。
+| 协议 | 端口 | 用途 |
+|------|------|------|
+| TCP 80 | ACME + HTTP |
+| TCP 443 | HTTPS / WSS |
+| TCP 22 | SSH（建议收紧来源） |
 
 ---
 
@@ -189,23 +115,20 @@ sudo systemctl restart smelt-signal
 
 | 现象 | 检查 |
 |------|------|
-| `curl https://域名/health` 失败 | 安全组 80/443、DNS A 记录、`journalctl -u caddy -e` |
-| Caddy 证书失败 | 域名是否已解析到本机；80 是否通 |
-| health 本机 OK、外网不通 | 是否只绑了 7878 却没配 Caddy；安全组 |
-| WSS 连不上 | 必须用 `wss://`（不是 `ws://`）；证书是否有效 |
+| 命令一直无输出 | 多半卡在无超时的 `curl`/`apt`；改用本脚本（有超时） |
+| 下载 GitHub 失败 | 用 `push-from-mac.sh`，`BIN=` 指向上传的文件 |
+| 本机 health OK、HTTPS 挂 | 安全组 80/443、DNS、`journalctl -u nginx -e` |
+| certbot 失败 | 域名是否已指向本机；80 是否通 |
 
 ```bash
-sudo systemctl status smelt-signal caddy
-journalctl -u smelt-signal -e --no-pager | tail -50
-journalctl -u caddy -e --no-pager | tail -50
+systemctl status smelt-signal nginx
+journalctl -u smelt-signal -n 50 --no-pager
 ```
 
 ---
 
-## 和 smelt 客户端怎么接（之后）
+## 和客户端怎么接（之后）
 
-1. Mac `smelt-bridge`：`POST https://域名/v1/rooms` → 拿 `room`/`secret`，再 `wss://域名/ws` 以 **host** 身份 `hello`
-2. 分享链接：`...?room=...&k=...&signal=wss://域名/ws`
+1. Mac bridge：`POST https://域名/v1/rooms` → `wss://域名/ws` 以 host `hello`
+2. 分享链接带 `room` / `k` / `signal`
 3. 手机 SPA：`connectRtc({ signalUrl: "wss://域名/ws", ... })`
-
-coturn 未上线前，同网/宽松 NAT 仍可能 P2P 成功；跨运营商失败时再上 TURN。
