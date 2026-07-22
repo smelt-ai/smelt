@@ -238,15 +238,9 @@ fn default_true() -> bool {
     true
 }
 
-/// 结构面板 + 审批通知等偏好（`~/.smelt/agent_ui.json`）。
+/// 审批通知 / ACP 命令等 agent UI 偏好（`~/.smelt/agent_ui.json`）。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentUiConfig {
-    /// 终端页是否显示「结构」侧栏（总开关）。
-    #[serde(default = "default_true")]
-    pub show_structure_panel: bool,
-    /// 结构侧栏是否展开（false = 只留窄条，可点展开）。
-    #[serde(default = "default_true")]
-    pub structure_panel_expanded: bool,
     /// 状态通道进入「等你批准 / 等你输入」时用 Notification 组件弹出。
     #[serde(default = "default_true")]
     pub notify_awaiting: bool,
@@ -259,14 +253,24 @@ pub struct AgentUiConfig {
 pub fn default_acp_cmd() -> String {
     // bunx 由 smelt 解析到受管 bun（~/.smelt/runtime，首次自动下载，见 acp.rs）；
     // 适配器锁版本——方言适配与回归测试都对着这个版本做，升级是主动行为。
-    "bunx @agentclientprotocol/claude-agent-acp@0.60.0".to_string()
+    //
+    // --bun：强制 bunx 用 bun 自己的运行时执行，不 fallback 到系统 Node——实测
+    // 发现这个适配器声明了 `engines.node >= 22`，bunx 默认会尊重这个声明主动
+    // 切到系统 Node 去跑（哪怕我们准备了受管 bun），「受管运行时不依赖系统装了
+    // 什么」这条设计承诺不加这个 flag 就不成立。见 bunx --help 的官方说明。
+    //
+    // 锁 0.59.0 不锁最新（0.60.0）：0.60.0 依赖的 zod 4.x 那份 `zod/v4` 子目录
+    // 缺 index 文件（exports 声明了 `./v4` 但目录里只有 classic/core/locales/
+    // mini 几个子模块，没有入口文件），Node 和 Bun 的解析器都拒绝——是上游
+    // （@agentclientprotocol/sdk 的 zod 依赖）的 bug，不是我们能绕开的。0.59.0
+    // 依赖的 sdk@1.2.1 自带完整的 zod 4.4.3（`zod/v4/package.json` 齐全），
+    // 实测 initialize 握手正常返回、`agentCapabilities.loadSession: true` 也在。
+    "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0".to_string()
 }
 
 impl Default for AgentUiConfig {
     fn default() -> Self {
         Self {
-            show_structure_panel: true,
-            structure_panel_expanded: true,
             notify_awaiting: true,
             acp_cmd: default_acp_cmd(),
         }
@@ -1267,21 +1271,19 @@ impl Workspace {
             .clone();
         let appearance_page = SettingPage::new("外观").default_open(true).group(
             SettingGroup::new().items(vec![
+                // 本版仅深色：设计稿只有深色方案，开关撤掉换成说明行——
+                // 比留一个拨了没反应的开关诚实（main() 初始化处无条件 Dark）。
                 SettingItem::new(
                     "主题模式",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<Appearance>().theme_mode.is_dark(),
-                        |v: bool, cx: &mut App| {
-                            let mode = if v { ThemeMode::Dark } else { ThemeMode::Light };
-                            apply_appearance(|a| a.theme_mode = mode, cx);
-                            Theme::change(mode, None, cx);
-                            terminal::set_dark_mode(mode.is_dark());
-                            cx.refresh_windows();
-                        },
-                    )
-                    .default_value(true),
+                    SettingField::render(|_, _, cx: &mut App| {
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("本版本仅提供深色主题")
+                            .into_any_element()
+                    }),
                 )
-                .description("开启为深色主题，关闭为浅色主题"),
+                .description("浅色方案待设计稿补齐后恢复"),
                 SettingItem::new(
                     "字体大小",
                     SettingField::render(move |_, _, cx: &mut App| {
@@ -1850,6 +1852,24 @@ impl Workspace {
                         (None, Some(_)) => Some("未在运行（新建终端时会自动拉起）".to_string()),
                         (None, None) => None,
                     };
+                    // 「N 个会话」不只是个数字——守护持有的会话不全是侧栏认领的
+                    // （测试跑出来的孤儿、忘了关的临时会话也计在内），点开能看
+                    // 到明细并单独清理，不用被迫走「重启守护进程」那种连坐所有
+                    // 会话的核选项。守护没起来就没什么可看的，不露这个入口。
+                    let manage_sessions_entity = daemon_entity.clone();
+                    let manage_sessions_link = info.is_some().then(|| {
+                        div()
+                            .text_xs()
+                            .cursor_pointer()
+                            .text_color(muted)
+                            .hover(|s| s.text_color(fg))
+                            .child("查看/清理会话 ›")
+                            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                manage_sessions_entity.update(cx, |ws, cx| {
+                                    ws.open_session_manager(cx);
+                                });
+                            })
+                    });
 
                     v_flex()
                         .w_full()
@@ -1872,6 +1892,7 @@ impl Workspace {
                         .children(
                             info_text.map(|t| div().text_xs().text_color(muted).child(t)),
                         )
+                        .children(manage_sessions_link)
                         .children(upgrade_msg.map(|m| div().text_xs().text_color(muted).child(m)))
                         .child(
                             div()
@@ -1882,29 +1903,9 @@ impl Workspace {
                 })),
         );
 
-        // —— Claude 集成：结构面板 + hooks 安装/还原 ——
+        // —— Claude 集成：审批通知 + hooks 安装/还原 ——
         let agent_page = SettingPage::new("Claude 集成").group(
             SettingGroup::new()
-                .item(
-                    SettingItem::new(
-                        "终端显示状态面板",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentUiConfig>()
-                                    .map(|c| c.show_structure_panel)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_agent_ui(|c| c.show_structure_panel = v, cx);
-                            },
-                        ),
-                    )
-                    .description(
-                        "终端页右侧显示 agent 状态（思考 / 工具 / 审批）。关闭后完全隐藏；\
-                         打开后仍可点 › 收成窄条。",
-                    )
-                    .keywords(["状态", "面板", "agent", "claude"]),
-                )
                 .item(
                     SettingItem::new(
                         "审批时弹出通知",

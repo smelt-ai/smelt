@@ -901,7 +901,11 @@ impl Workspace {
         use gpui_component::input::{InputState, Position};
 
         self.reveal_in_file_tree(&path, cx);
-        self.view = crate::MainView::Files;
+        // 点文件 = 舞台只出文件内容，树留在右侧停靠面板里（不在左边再复制一份）。
+        // 已经在「文件树 + 内容」双栏全宽里点的，保持双栏别塌成详情。
+        if self.stage_override != Some(crate::MainView::Files) {
+            self.stage_override = Some(crate::MainView::FileDetail);
+        }
 
         self.file_gen = self.file_gen.wrapping_add(1);
         let r#gen = self.file_gen;

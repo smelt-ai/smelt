@@ -1,0 +1,764 @@
+//! 会话列表：窗口最左的单列（280px），**按项目上下分组**——项目是分组标题行，
+//! 它的会话缩进排在下面，一屏看全所有项目的所有会话（不必先切项目）。
+//!
+//! 设计稿原本是「64px 项目 rail + 270px 会话列」的左右两列，实测割裂：项目在
+//! rail 上只剩一个字母，且必须先点中某个项目才看得到它的会话。改回单列分组。
+//!
+//! 分组标题行：caret（折叠）+ 项目色点 + 项目名 + 会话数 + 聚合状态点 + `+`
+//! 下拉（按通道分组：终端 / 对话）；worktree 分组右键补「删除 Worktree」。
+//! 会话行：类型标识（agent 紫圆 / 终端绿方）+ 名称 + 状态点 + 副标题 + 关闭，
+//! 支持右键（新建任务 / 重命名）、拖拽排序、分屏子行。
+//!
+//! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
+
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::*;
+
+use crate::git_panel::main_repo_root_from_common_dir;
+use crate::settings::{active_launch_entries, icon_for_launch_command};
+use crate::{
+    pane_status, pane_title, ui_theme, AgentStatus, MainView, RenameTarget, SessionDrag,
+    SessionKind, Workspace,
+};
+
+/// 会话行副标题里的状态文案（与菜单栏下拉同一套口径）。
+fn status_text(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::WaitingApproval => "等你批准",
+        AgentStatus::NeedsAttention => "需要处理",
+        AgentStatus::Running => "运行中",
+        AgentStatus::Done => "已完成",
+        AgentStatus::Idle => "空闲",
+    }
+}
+
+impl Workspace {
+    /// 当前活动项目的分组名：优先用用户点选的 `active_project`，该组已消失
+    /// （会话全关了）则回退到活动会话所在组，再回退第一组。
+    pub(crate) fn active_project_name(&self, cx: &App) -> Option<String> {
+        let groups = self.project_groups(cx);
+        if let Some(name) = &self.active_project {
+            if groups.iter().any(|(n, _, _)| n == name) {
+                return Some(name.clone());
+            }
+        }
+        groups
+            .iter()
+            .find(|(_, _, ixs)| ixs.contains(&self.active_session))
+            .or(groups.first())
+            .map(|(n, _, _)| n.clone())
+    }
+
+    /// 280px 会话列表（全部项目，按项目分组）。
+    pub(crate) fn render_session_list(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let active = self.active_session;
+        let can_close = self.sessions.len() > 1;
+        let this = cx.entity();
+        let groups = self.project_groups(cx);
+        let active_name = self.active_project_name(cx);
+        let active_cwd = groups
+            .iter()
+            .find(|(n, _, _)| Some(n.as_str()) == active_name.as_deref())
+            .and_then(|(_, cwd, _)| (!cwd.is_empty()).then(|| cwd.clone()));
+
+        let titles: Vec<(usize, String)> =
+            self.sessions.iter().enumerate().map(|(ix, s)| (ix, s.title(cx))).collect();
+        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
+        let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.anchor_id()).collect();
+
+        // ---- 头部：SESSIONS · 总数 + 新建入口 + 历史 ----
+        let e_acp = this.clone();
+        let e_term = this.clone();
+        let e_hist = this.clone();
+        let cwd_acp = active_cwd.clone();
+        let cwd_term = active_cwd.clone();
+        let header = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .pt_3()
+            .pb_2()
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .child(format!("SESSIONS · {}", self.sessions.len())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .id("sess-new-agent")
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::PURPLE))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.8))
+                            .child("+Agent")
+                            .on_click(move |_ev, window, cx| {
+                                let cwd = cwd_acp.clone();
+                                e_acp.update(cx, |ws, cx| ws.add_acp_session(cwd, window, cx));
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("sess-new-term")
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::GREEN))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.8))
+                            .child("+Term")
+                            .on_click(move |_ev, _window, cx| {
+                                let cwd = cwd_term.clone();
+                                e_term.update(cx, |ws, cx| ws.add_session(cwd, cx));
+                            }),
+                    )
+                    .child(
+                        // 历史会话页入口（原顶部 TabBar 的「历史会话」标签迁到这里）。
+                        div()
+                            .id("sess-history")
+                            .text_xs()
+                            .text_color(rgb(ui_theme::TEXT_FAINT))
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(rgb(ui_theme::TEXT_MID)))
+                            .child("历史")
+                            .on_click(move |_ev, window, cx| {
+                                e_hist.update(cx, |ws, cx| {
+                                    ws.stage_override = Some(MainView::History);
+                                    cx.notify();
+                                });
+                                let h = e_hist.read(cx).focus_handle.clone();
+                                window.focus(&h, cx);
+                            }),
+                    ),
+            );
+
+        let mut rows = div()
+            .id("session-rows")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .px_2()
+            .pb_2();
+
+        for (pix, (name, cwd, ixs)) in groups.iter().enumerate() {
+            // ---- 项目分组标题行 ----
+            let collapsed = self.collapsed_projects.contains(name);
+            let is_active_group = Some(name.as_str()) == active_name.as_deref();
+            // 组内最高优先级状态（声明序即优先级）当聚合状态点；折叠时尤其有用。
+            let agg = ixs
+                .iter()
+                .filter_map(|&i| statuses.get(i).copied())
+                .min_by_key(|s| s.rank())
+                .unwrap_or(AgentStatus::Idle);
+
+            let repo_info_here = self.repo_info.get(cwd.as_str()).and_then(|(_, i)| i.clone());
+            let is_worktree_group = repo_info_here.as_ref().is_some_and(|i| i.is_worktree());
+            let worktree_main_root = repo_info_here
+                .as_ref()
+                .and_then(|i| main_repo_root_from_common_dir(&i.common_dir))
+                .unwrap_or_else(|| cwd.clone());
+            let worktree_branch =
+                repo_info_here.as_ref().map(|i| i.branch.clone()).unwrap_or_default();
+            // 分支名：worktree / 普通仓库都显示，跟项目名并排（淡色）。
+            let branch_label = repo_info_here.as_ref().map(|i| i.branch.clone());
+
+            let e_toggle = this.clone();
+            let toggle_name = name.clone();
+            let e_menu = this.clone();
+            let menu_cwd = cwd.clone();
+            let group_name: SharedString = name.clone().into();
+
+            rows = rows.child(
+                div()
+                    .id(("proj-group", pix))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .mt_1p5()
+                    .px_1p5()
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    // 淡背景带：层级信号里最强也最不伤可读性的一个。光靠字号/
+                    // 字重区分，两级要么糊在一起、要么把项目名压到看不清。
+                    .bg(ui_theme::tint(0xffffff, 0x0d))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(ui_theme::tint(0xffffff, 0x16)))
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .flex_shrink_0()
+                            .text_size(px(9.))
+                            .text_color(rgb(ui_theme::TEXT_FAINT))
+                            .child(if collapsed { "▸" } else { "▾" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            // 基线对齐：项目名 12.5px、分支名 10px，居中对齐会让
+                            // 小字看起来往上飘，对齐基线才是一条线上的。
+                            .items_baseline()
+                            .gap_1p5()
+                            .overflow_hidden()
+                            .child(
+                                // 项目名跟会话名同字号（像文件树里文件夹和文件那样）：
+                                // 层级已由 caret + 背景带 + 缩进引导线立住，不必再
+                                // 靠压小字号区分——压小只会让项目名难读。
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(12.5))
+                                    .font_semibold()
+                                    .text_color(if is_active_group {
+                                        rgb(ui_theme::TEXT_BRIGHT)
+                                    } else {
+                                        rgb(ui_theme::TEXT_MID)
+                                    })
+                                    .child(group_name.clone()),
+                            )
+                            .children(branch_label.map(|b| {
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .font_family("monospace")
+                                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                                    .child(b)
+                            })),
+                    )
+                    // 折叠时把组内状态收成一个点，展开时数量足够
+                    .when(collapsed && agg != AgentStatus::Idle, |d| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(ui_theme::session_dot_color(agg)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(ui_theme::TEXT_FAINT))
+                            .child(ixs.len().to_string()),
+                    )
+                    .child(
+                        // 「+」下拉：在本项目里新建（终端通道 / 对话通道）
+                        Button::new(("proj-new", pix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .dropdown_menu({
+                                let e_menu = e_menu.clone();
+                                let menu_cwd = menu_cwd.clone();
+                                move |menu, _window, cx| {
+                                    let cwd_opt = (!menu_cwd.is_empty()).then(|| menu_cwd.clone());
+                                    let entries = active_launch_entries(cx);
+                                    let e_term = e_menu.clone();
+                                    let cwd_new = cwd_opt.clone();
+                                    // 按「通道」分组：同一个 agent 既能跑在终端里
+                                    // （它自带的 TUI），也能接进 smelt 原生界面对话。
+                                    // 分组标题把差别说清，菜单项就不用背长名字了。
+                                    let mut menu = menu
+                                        .item(PopupMenuItem::label("终端 · agent 自带 TUI"))
+                                        .item(
+                                        PopupMenuItem::new("新建终端")
+                                            .icon(IconName::SquareTerminal)
+                                            .on_click(move |_ev, _window, cx| {
+                                                let cwd = cwd_new.clone();
+                                                e_term.update(cx, |ws, cx| ws.add_session(cwd, cx));
+                                            }),
+                                        );
+                                    for entry in entries {
+                                        let label = entry.label;
+                                        let command = entry.command;
+                                        let cwd_launch = cwd_opt.clone();
+                                        let e_launch = e_menu.clone();
+                                        let icon = icon_for_launch_command(&command);
+                                        menu = menu.item(
+                                            PopupMenuItem::new(label.clone()).icon(icon).on_click(
+                                                move |_ev, _window, cx| {
+                                                    let cwd = cwd_launch.clone();
+                                                    let cmd = command.clone();
+                                                    let name = label.clone();
+                                                    e_launch.update(cx, |ws, cx| {
+                                                        ws.add_session_with_launch(
+                                                            cwd,
+                                                            Some(cmd.as_str()),
+                                                            Some(name.as_str()),
+                                                            cx,
+                                                        );
+                                                    });
+                                                },
+                                            ),
+                                        );
+                                    }
+                                    let e_acp = e_menu.clone();
+                                    let cwd_acp = cwd_opt.clone();
+                                    menu = menu
+                                        .separator()
+                                        .item(PopupMenuItem::label("对话 · smelt 原生界面"))
+                                        .item(
+                                            PopupMenuItem::new("Claude Code").icon(IconName::Bot).on_click(
+                                                move |_ev, window, cx| {
+                                                    let cwd = cwd_acp.clone();
+                                                    e_acp.update(cx, |ws, cx| {
+                                                        ws.add_acp_session(cwd, window, cx)
+                                                    });
+                                                },
+                                            ),
+                                        );
+                                    menu
+                                }
+                            }),
+                    )
+                    .on_click(move |_ev, _window, cx| {
+                        let name = toggle_name.clone();
+                        e_toggle.update(cx, |ws, cx| {
+                            if !ws.collapsed_projects.remove(&name) {
+                                ws.collapsed_projects.insert(name);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .context_menu({
+                        // 复制路径人人有份；「删除 Worktree」只给 worktree 分组
+                        //（`when` 的两个分支类型必须一致，所以是菜单项按条件加，
+                        // 不是整个 context_menu 按条件挂）。
+                        let e_del = e_menu.clone();
+                        let path = cwd.clone();
+                        let del_main_root = worktree_main_root.clone();
+                        let del_branch = worktree_branch.clone();
+                        move |menu, _window, _cx| {
+                            let copy_path = path.clone();
+                            let del_path = path.clone();
+                            let e_del = e_del.clone();
+                            let del_main_root = del_main_root.clone();
+                            let del_branch = del_branch.clone();
+                            menu.item(PopupMenuItem::new("复制项目路径").on_click(
+                                move |_ev, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_path.clone(),
+                                    ));
+                                },
+                            ))
+                            .when(is_worktree_group, move |menu| {
+                                menu.separator().item(
+                                    PopupMenuItem::new("删除 Worktree")
+                                        .icon(IconName::Delete)
+                                        .on_click(move |_ev, _window, cx| {
+                                            let del_path = del_path.clone();
+                                            let del_main_root = del_main_root.clone();
+                                            let del_branch = del_branch.clone();
+                                            e_del.update(cx, |ws, cx| {
+                                                ws.start_delete_worktree(
+                                                    del_path,
+                                                    del_main_root,
+                                                    del_branch,
+                                                    cx,
+                                                )
+                                            });
+                                        }),
+                                )
+                            })
+                        }
+                    }),
+            );
+
+            if collapsed {
+                continue;
+            }
+
+            // ---- 组内会话行 ----
+            // 装进一个带左侧引导线的容器：缩进 + 竖线让「这些会话属于上面那个
+            // 项目」一眼成立，不靠读缩进像素差。
+            let mut group_body = div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .ml(px(9.))
+                .pl(px(9.))
+                .border_l_1()
+                .border_color(rgb(ui_theme::BORDER_DIM));
+            for &ix in ixs {
+                let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
+                let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
+                let is_active = ix == active;
+                let entity_id = entity_ids[ix];
+                let is_acp = matches!(self.sessions[ix].kind, SessionKind::Acp(_));
+                // 单行行高：副标题只保留「有增量信息」的部分——分屏数。
+                // agent 名（claude-agent-acp）已由紫色类型点表达，状态由状态点表达。
+                let subtitle = match &self.sessions[ix].kind {
+                    SessionKind::Acp(_) => None,
+                    SessionKind::Term { .. } => {
+                        let n = self.sessions[ix].pane_count();
+                        (n > 1).then(|| format!("⑂{n}"))
+                    }
+                };
+                // 「要人管」的状态才配文字（等你批准 / 需要处理）。
+                let attention_label = matches!(
+                    status,
+                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
+                )
+                .then(|| status_text(status));
+                let hint_before = self.sess_drop_hint == Some((entity_id, true));
+                let hint_after = self.sess_drop_hint == Some((entity_id, false));
+                let e_act = this.clone();
+                let e_close = this.clone();
+                let e_rename = this.clone();
+                let e_drop = this.clone();
+                let drag_title: SharedString = title.clone().into();
+
+                // 类型标识：agent 紫圆点 / 终端绿方块。
+                // 会话标记一律圆点（项目是方块），颜色区分类型：紫 = agent
+                // 消息流、绿 = 终端。形状管层级、颜色管类型，各司其职。
+                let type_dot: AnyElement = div()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(rgb(if is_acp { ui_theme::PURPLE } else { ui_theme::GREEN }))
+                    .into_any_element();
+
+                let dragging = cx.has_active_drag();
+                let make_hint = |before: bool, e_hint: Entity<Workspace>| {
+                    move |ev: &DragMoveEvent<SessionDrag>, _w: &mut Window, cx: &mut App| {
+                        let inside = ev.bounds.contains(&ev.event.position);
+                        e_hint.update(cx, |ws, cx| {
+                            let this_hint = Some((entity_id, before));
+                            if inside && ws.sess_drop_hint != this_hint {
+                                ws.sess_drop_hint = this_hint;
+                                cx.notify();
+                            } else if !inside && ws.sess_drop_hint == this_hint {
+                                ws.sess_drop_hint = None;
+                                cx.notify();
+                            }
+                        });
+                    }
+                };
+                let indicator = |anim_id: (&'static str, usize), at_top: bool| {
+                    div()
+                        .absolute()
+                        .left(px(4.))
+                        .right(px(4.))
+                        .h(px(5.))
+                        .rounded(px(2.5))
+                        .bg(rgb(ui_theme::BLUE))
+                        .map(|d| if at_top { d.top(px(-3.)) } else { d.bottom(px(-3.)) })
+                        .with_animation(
+                            anim_id,
+                            Animation::new(std::time::Duration::from_millis(160))
+                                .with_easing(ease_out_quint()),
+                            |this, delta| this.opacity(0.4 + 0.6 * delta).w(relative(delta)),
+                        )
+                };
+
+                let row = div()
+                    .id(("sess-row", ix))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(px(2.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .map(|d| {
+                        if is_active {
+                            d.bg(rgb(ui_theme::BG_SELECTED))
+                                .border_1()
+                                .border_color(rgb(ui_theme::BORDER_SELECTED))
+                        } else {
+                            d.border_1()
+                                .border_color(gpui::transparent_black())
+                                .hover(|d| d.bg(rgb(ui_theme::BG_HOVER)))
+                        }
+                    })
+                    .child(div().flex_shrink_0().child(type_dot))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.5))
+                            .text_color(rgb(ui_theme::TEXT))
+                            .truncate()
+                            .child(title.clone()),
+                    )
+                    // 分屏数：单行行高下用小角标带出来，别为它多占一行
+                    .children(subtitle.map(|s| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .font_family("monospace")
+                            .text_color(rgb(ui_theme::TEXT_FAINT))
+                            .child(s)
+                    }))
+                    // 状态文字只在「要人管」时才出（空闲/运行中靠状态点表达就够，
+                    // 每行都写一遍「空闲」等于用一整行高度说一句废话）
+                    .children(attention_label.map(|label| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(ui_theme::session_dot_color(status))
+                            .child(label)
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(ui_theme::session_dot_color(status)),
+                    )
+                    .child(
+                        // 右端：拖拽手柄（大热区、无图标）+ 关闭按钮。
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id(("sess-drag", ix))
+                                    .w(px(14.))
+                                    .h(px(18.))
+                                    .cursor_grab()
+                                    .on_drag(SessionDrag { id: entity_id, title: drag_title }, {
+                                        let e_clear = e_drop.clone();
+                                        move |drag, _, _, cx| {
+                                            e_clear.update(cx, |ws, _| ws.sess_drop_hint = None);
+                                            cx.new(|_| drag.clone())
+                                        }
+                                    }),
+                            )
+                            .children(can_close.then(|| {
+                                Button::new(("close-session", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::CircleX)
+                                    .on_click(move |_ev, _w, cx| {
+                                        cx.stop_propagation();
+                                        e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
+                                    })
+                            })),
+                    )
+                    .on_click(move |_ev, window, cx| {
+                        e_act.update(cx, |ws, cx| ws.activate(ix, window, cx));
+                    })
+                    .context_menu(move |menu, _window, _cx| {
+                        let e_rename = e_rename.clone();
+                        let e_task = e_rename.clone();
+                        let sess_ix = ix;
+                        menu.item(PopupMenuItem::new("新建任务").on_click(
+                            move |_ev, window, cx| {
+                                e_task.update(cx, |ws, cx| {
+                                    if let Some(pane) = ws
+                                        .sessions
+                                        .get(sess_ix)
+                                        .and_then(|s| s.active_term().cloned())
+                                    {
+                                        ws.open_new_task_for_terminal(&pane, window, cx);
+                                    }
+                                });
+                            },
+                        ))
+                        .item(PopupMenuItem::new("重命名").on_click(move |_ev, window, cx| {
+                            e_rename.update(cx, |ws, cx| {
+                                ws.start_rename(RenameTarget::Session(ix), window, cx)
+                            });
+                        }))
+                    })
+                    .when(dragging, |row| {
+                        // 拖拽进行中才渲染整行 drop 接收层：上半段插到目标前、下半段插到后。
+                        let e_before = e_drop.clone();
+                        let e_after = e_drop.clone();
+                        row.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .child(
+                                    div()
+                                        .id(("sess-drop-before", ix))
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .right_0()
+                                        .h_1_2()
+                                        .on_drag_move(make_hint(true, e_before.clone()))
+                                        .on_drop(move |drag: &SessionDrag, _window, cx| {
+                                            let dragged = drag.id;
+                                            e_before.update(cx, |ws, cx| {
+                                                ws.sess_drop_hint = None;
+                                                ws.move_session_near(dragged, entity_id, true, cx)
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id(("sess-drop-after", ix))
+                                        .absolute()
+                                        .bottom_0()
+                                        .left_0()
+                                        .right_0()
+                                        .h_1_2()
+                                        .on_drag_move(make_hint(false, e_after.clone()))
+                                        .on_drop(move |drag: &SessionDrag, _window, cx| {
+                                            let dragged = drag.id;
+                                            e_after.update(cx, |ws, cx| {
+                                                ws.sess_drop_hint = None;
+                                                ws.move_session_near(dragged, entity_id, false, cx)
+                                            });
+                                        }),
+                                ),
+                        )
+                        .when(hint_before, |row| row.child(indicator(("sess-ind-b", ix), true)))
+                        .when(hint_after, |row| row.child(indicator(("sess-ind-a", ix), false)))
+                    });
+                group_body = group_body.child(row);
+
+                // 分屏子行：>1 个 pane 时一 pane 一行（再缩进一级），点击切到该 pane。
+                if self.sessions[ix].pane_count() > 1 {
+                    let leaves = self.sessions[ix].term_leaves();
+                    let active_pane_id = self.sessions[ix].anchor_id();
+                    for (lix, view) in leaves.into_iter().enumerate() {
+                        let p_title = pane_title(&view, cx);
+                        let p_status = pane_status(&view, cx);
+                        let is_current_view = ix == active && view.entity_id() == active_pane_id;
+                        let e_pane_act = this.clone();
+                        let e_pane_menu = this.clone();
+                        let pane = view.clone();
+                        let menu_pane = view.clone();
+                        group_body = group_body.child(
+                            div()
+                                .id(("sess-pane-row", ix * 100 + lix))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .ml(px(30.))
+                                .px_2()
+                                .py(px(2.))
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .map(|d| {
+                                    if is_current_view {
+                                        d.bg(rgb(ui_theme::BG_SELECTED))
+                                    } else {
+                                        d.hover(|d| d.bg(rgb(ui_theme::BG_HOVER)))
+                                    }
+                                })
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .size(px(5.))
+                                        .rounded_full()
+                                        .bg(ui_theme::session_dot_color(p_status)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(ui_theme::TEXT_MID))
+                                        .truncate()
+                                        .child(p_title),
+                                )
+                                .on_click(move |_ev, window, cx| {
+                                    let pane = pane.clone();
+                                    e_pane_act.update(cx, |ws, cx| {
+                                        ws.activate_session_pane(ix, pane, window, cx)
+                                    });
+                                })
+                                .context_menu(move |menu, _window, _cx| {
+                                    let e_task = e_pane_menu.clone();
+                                    let e_rename = e_pane_menu.clone();
+                                    let task_pane = menu_pane.clone();
+                                    let rename_pane = menu_pane.clone();
+                                    menu.item(PopupMenuItem::new("新建任务").on_click(
+                                        move |_ev, window, cx| {
+                                            let pane = task_pane.clone();
+                                            e_task.update(cx, |ws, cx| {
+                                                ws.open_new_task_for_terminal(&pane, window, cx);
+                                            });
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("重命名").on_click(
+                                        move |_ev, window, cx| {
+                                            let target = RenameTarget::Pane(rename_pane.clone());
+                                            e_rename.update(cx, |ws, cx| {
+                                                ws.start_rename(target, window, cx)
+                                            });
+                                        },
+                                    ))
+                                }),
+                        );
+                    }
+                }
+            }
+            rows = rows.child(group_body);
+        }
+
+        // ---- 底部：打开项目 / 临时终端（原项目 rail 底部的「+」）----
+        let e_open = this.clone();
+        let e_scratch = this.clone();
+        let footer = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_1p5()
+            .border_t_1()
+            .border_color(rgb(ui_theme::BORDER_DIM))
+            .child(
+                div()
+                    .id("open-project")
+                    .text_xs()
+                    .text_color(rgb(ui_theme::TEXT_MUTED))
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(rgb(ui_theme::TEXT_BRIGHT)))
+                    .child("+ 打开项目")
+                    .on_click(move |_ev, _window, cx| {
+                        e_open.update(cx, |ws, cx| ws.open_project(cx));
+                    }),
+            )
+            .child(
+                div()
+                    .id("scratch-terminal")
+                    .text_xs()
+                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(rgb(ui_theme::TEXT_MID)))
+                    .child("临时终端")
+                    .on_click(move |_ev, window, cx| {
+                        e_scratch.update(cx, |ws, cx| ws.activate_or_new_scratch(window, cx));
+                    }),
+            );
+
+        div()
+            .w(px(280.))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(ui_theme::BG_ELEV))
+            .border_r_1()
+            .border_color(rgb(ui_theme::BORDER_DIM))
+            .child(header)
+            .child(rows)
+            .child(footer)
+    }
+}

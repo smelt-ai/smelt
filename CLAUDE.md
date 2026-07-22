@@ -31,7 +31,8 @@ Mac 上的 AI coding 驾驶舱：一个专为「同时指挥多个 CLI coding ag
 - `crates/smeltd/` —— 守护侧三个无 GUI 二进制（smeltd / gateway / smelt-notify），
   依赖树不含 GPUI，改守护不用等 GUI 依赖编译
 - `docs/workspace.md` —— GUI 已实现功能与架构
-- `docs/roadmap.md` —— 待做点子存档
+- `docs/product-roadmap.md` —— 产品主航道（ACP / App / Git·Review / 任务 / 手机远程 / 体验）
+- `docs/roadmap.md` —— 杂项待做点子存档
 
 ## 原则
 - 每步 cargo check 通过再继续

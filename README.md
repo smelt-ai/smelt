@@ -134,7 +134,10 @@ cargo test
 `smeltd` / `gateway`，所以只拷二进制也能跑；改前端后需重新 `npm run build` 再 `cargo build`。
 
 详细架构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，
-待做点子见 [`docs/roadmap.md`](docs/roadmap.md)。
+产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)
+（含 ACP / App / Review / 任务 / **手机远程** / 体验），
+杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)，
+远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
 
 ## 技术栈
 

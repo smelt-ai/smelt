@@ -18,10 +18,10 @@ use agent_client_protocol::schema::v1::{
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction,
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities,
     ElicitationMode, ElicitationPropertySchema, ElicitationSchema, InitializeRequest,
-    LoadSessionRequest, MultiSelectItems, NewSessionResponse, PermissionOption,
+    LoadSessionRequest, MultiSelectItems, NewSessionResponse, PermissionOption, Plan,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, StopReason,
-    ToolCall, ToolCallUpdate,
+    ToolCall, ToolCallId, ToolCallUpdate,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatch;
@@ -66,10 +66,16 @@ pub enum AcpEvent {
     AgentChunk { thought: bool, text: String },
     ToolCall(ToolCall),
     ToolCallUpdate(ToolCallUpdate),
+    /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
+    /// UI 渲染成消息流上方的可折叠 PLAN 条。
+    Plan(Plan),
     /// agent 请求权限：UI 渲染按钮，凭 responder 直接回 RPC。
     Permission {
         /// 请求摘要（tool call 标题，没有就用工具 id）。
         question: String,
+        /// 关联的工具调用 id：UI 靠它把审批按钮内嵌进对应工具卡片，
+        /// 消息流里找不到该卡片时退回独立卡片渲染。
+        tool_call_id: ToolCallId,
         pub_options: Vec<PermissionOption>,
         responder: PermissionResponder,
     },
@@ -78,6 +84,9 @@ pub enum AcpEvent {
     /// 我们没有替它们手动 push 过）。正常 live 对话是否也会收到这个事件目前
     /// 没有把握确认，UI 侧用「等回声」状态机兼容两种可能，见 acp_view.rs。
     UserChunk(String),
+    /// 会话当前可用的命令集大小（`/compact` 这类斜杠命令，不是「工具」）。
+    /// 只存数量，UI 侧输入框工具栏展示成「N 条命令」的胶囊。
+    AvailableCommands(usize),
     /// agent 的选择题 / 表单（AskUserQuestion 类）：UI 渲染字段，凭 responder 回填。
     Elicitation {
         message: String,
@@ -323,6 +332,7 @@ async fn run_connection(
                     let question = permission_question(&request);
                     let _ = perm_tx.try_send(AcpEvent::Permission {
                         question,
+                        tool_call_id: request.tool_call.tool_call_id.clone(),
                         pub_options: request.options,
                         responder: PermissionResponder(Some(responder)),
                     });
@@ -479,7 +489,12 @@ async fn translate_update(
                         SessionUpdate::UserMessageChunk(chunk) => {
                             Some(AcpEvent::UserChunk(content_text(&chunk.content)))
                         }
-                        // Plan / 模式 / 用量等 MVP 不渲染（见方案「已知不做」）。
+                        SessionUpdate::AvailableCommandsUpdate(u) => {
+                            Some(AcpEvent::AvailableCommands(u.available_commands.len()))
+                        }
+                        // 计划（步骤清单）：透传给 UI 渲染 PLAN 条。
+                        SessionUpdate::Plan(p) => Some(AcpEvent::Plan(p)),
+                        // 模式 / 用量等仍不渲染（见方案「已知不做」）。
                         _ => None,
                     };
                     if let Some(ev) = event {
@@ -775,6 +790,27 @@ mod runtime_tests {
         let noop = |_: &str| {};
         let out = resolve_runtime_command("bunx pkg@1 --flag", &noop).unwrap();
         assert_eq!(out, format!("{} x pkg@1 --flag", bun.to_string_lossy()));
+    }
+
+    /// 默认命令带 `--bun`（强制不 fallback 到系统 Node，见 default_acp_cmd 的
+    /// 注释）：这个 flag 只是 `rest` 里的又一个词，改写时要原样透传、落在
+    /// `x` 后面、包名前面——`bun x --bun pkg@version`，不能被误吞或挪位置。
+    #[test]
+    fn bunx_dash_dash_bun_flag_passes_through_in_order() {
+        let Some(bun) = managed_bun_path() else { return };
+        if !bun.is_file() {
+            return;
+        }
+        let noop = |_: &str| {};
+        let out = resolve_runtime_command(
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+            &noop,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            format!("{} x --bun @agentclientprotocol/claude-agent-acp@0.59.0", bun.to_string_lossy())
+        );
     }
 
     /// 真实下载验证 + 预热（22MB，网络依赖）：`cargo test -- --ignored manual_ensure_bun`

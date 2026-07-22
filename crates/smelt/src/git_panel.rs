@@ -5,7 +5,7 @@
 //! 纯粹是「剪切代码位置」，不改变量访问方式，风险跟改动量不成正比地小。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -25,15 +25,6 @@ use notify::{RecursiveMode, Watcher};
 use crate::{agent, placeholder_view, terminal_view, Workspace};
 
 // ===================== 类型 =====================
-
-/// 「新建 Worktree」弹窗要新建在哪个仓库：repo_root 可以是主仓库、也可以是任意一个
-/// 已存在的 worktree（`git worktree add` 从哪个检出发起都行，git 会自动解析到公共
-/// 仓库），repo_label 纯展示用。
-#[derive(Clone)]
-pub struct NewWorktreeTarget {
-    pub repo_root: String,
-    pub repo_label: String,
-}
 
 /// 「删除 Worktree」弹窗要删的目标：path 是待删的 worktree 检出目录；main_root 是
 /// 同仓库下另一个稳定存在的目录（主仓库根），`git worktree remove` 必须从别处发起，
@@ -438,38 +429,6 @@ fn collect_commit_diff(root: &str) -> Option<String> {
     }
 }
 
-/// 后台执行 `git worktree add`：分支已存在就直接检出，不存在就 `-b` 新建（从当前
-/// HEAD 出来）。先把目标目录的上级目录建好——老版本 git 的 `worktree add` 不会自动
-/// 建多层目录。绝不能在调用方所在的主线程/render 里跑，git 在大仓可能要几百 ms。
-fn create_worktree(repo_root: &str, branch: &str, path: &str) -> Result<(), String> {
-    if let Some(parent) = Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // 先按「检出已有分支」尝试：本地已有这个分支、或者只有唯一一个 remote 有同名
-    // 分支（git worktree add 内建的 DWIM，跟 `git checkout <branch>` 同一套逻辑，
-    // 会自动建好跟踪分支）都会在这一步直接成功。不预先自己去查 refs/heads——那样
-    // 会漏掉"只在 remote 上存在、本地还没跟踪分支"这种情况，误判成"不存在"然后
-    // 新建出一个从当前 HEAD 分叉的同名分支。真的哪儿都找不到这个名字，这步才会
-    // 失败，退到下面 -b 新建。
-    let checkout =
-        run_git(repo_root, &["worktree", "add", path, branch]).map_err(|e| e.to_string())?;
-    if checkout.status.success() {
-        return Ok(());
-    }
-    let first_err = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
-    let created = run_git(repo_root, &["worktree", "add", "-b", branch, path])
-        .map_err(|e| e.to_string())?;
-    if created.status.success() {
-        Ok(())
-    } else if !first_err.is_empty() {
-        // 两步都失败：优先把第一步（检出已有分支）的错误报出去——像"这个分支已经
-        // 在别的 worktree 检出了"这种根因，第一步的报错比第二步"分支已存在"更有用。
-        Err(first_err)
-    } else {
-        Err(git_err(&created, "git worktree add 失败"))
-    }
-}
-
 /// 后台执行 `git worktree remove`：必须从 main_root（同仓库下另一个稳定目录）发起，
 /// 不能从待删的 path 自己发起。force 由调用方根据「有没有未提交改动」+ 用户确认决定。
 fn remove_worktree(main_root: &str, path: &str, force: bool) -> Result<(), String> {
@@ -577,31 +536,6 @@ pub fn repo_label_from_common_dir(common_dir: &str) -> Option<String> {
 /// worktree 自己发起，得从同仓库下别的稳定目录（主仓库根）跑。
 pub fn main_repo_root_from_common_dir(common_dir: &str) -> Option<String> {
     Path::new(common_dir).parent()?.to_str().map(String::from)
-}
-
-/// worktree 落脚目录：`~/.smelt/worktrees/<仓库名>/<分支名>`——集中放在 smelt 自己的
-/// 地盘（跟 workspace.json/config.toml 同一惯例），而不是仓库旁边的 sibling 目录，
-/// 这样"删除 Worktree"能放心整个目录一起删，不用去猜这个目录是不是 smelt 建的。
-fn worktrees_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".smelt").join("worktrees"))
-}
-
-/// 把仓库名 / 分支名转成安全的文件名片段：只留字母数字和 `-_./`，其余（含空格）
-/// 折成 `-`，连续的 `-` 合并、掐头去尾。分支名允许保留 `/`（`feature/foo` 这种很
-/// 常见，落到路径里就是嵌套目录，`git worktree add` 会自己建好中间目录）。
-fn slugify_path_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_was_dash = false;
-    for c in s.trim().chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' {
-            out.push(c);
-            last_was_dash = false;
-        } else if !last_was_dash {
-            out.push('-');
-            last_was_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
 }
 
 // ===================== diff 解析 =====================
@@ -1194,7 +1128,7 @@ fn git_diff_pane(
                 .on_click(move |_ev, window, cx| {
                     let path = full_path.clone();
                     ws_open.update(cx, |wsx, cx| {
-                        wsx.view = crate::MainView::Files;
+                        wsx.stage_override = Some(crate::MainView::Files);
                         wsx.view_file(path, window, cx);
                     });
                 });
@@ -1773,81 +1707,6 @@ pub fn git_view(
 // ===================== Workspace 方法 =====================
 
 impl Workspace {
-    /// 项目行「+ → 新建 Worktree…」：弹文本框填分支名。repo_root 可以是主仓库、
-    /// 也可以是任意一个已存在的 worktree（git 自己会解析到公共仓库），repo_label
-    /// 纯展示（弹窗标题里说清是在哪个仓库下新建）。
-    pub fn start_new_worktree(
-        &mut self,
-        repo_root: String,
-        repo_label: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use gpui_component::input::{InputEvent, InputState};
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("分支名，例如 feature/foo"));
-        input.update(cx, |s, cx| s.focus(window, cx));
-        self._new_worktree_sub = Some(cx.subscribe_in(
-            &input,
-            window,
-            |this, _input, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
-                    this.confirm_new_worktree(window, cx);
-                }
-            },
-        ));
-        self.new_worktree_target = Some(NewWorktreeTarget { repo_root, repo_label });
-        self.new_worktree_input = Some(input);
-        cx.notify();
-    }
-
-    /// 提交新建 worktree：分支名为空就什么都不做；否则后台跑 `git worktree add`
-    /// （见 create_worktree：分支已存在就直接检出，不存在就从当前 HEAD 新建），成功
-    /// 后在新目录里开一个会话并切过去；失败写 background_error，交给 render 顶部弹
-    /// 通知（后台任务里没有 Window，弹不了）。
-    pub fn confirm_new_worktree(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.new_worktree_target.take() else { return };
-        let Some(input) = self.new_worktree_input.take() else { return };
-        self._new_worktree_sub = None;
-        cx.notify();
-        let branch = input.read(cx).value().trim().to_string();
-        if branch.is_empty() {
-            return;
-        }
-        let Some(worktrees_root) = worktrees_root() else { return };
-        let repo_slug = slugify_path_segment(&target.repo_label);
-        let branch_slug = slugify_path_segment(&branch);
-        if repo_slug.is_empty() || branch_slug.is_empty() {
-            self.background_error = Some("分支名不能是空的或全是特殊字符".to_string());
-            return;
-        }
-        let path = worktrees_root.join(repo_slug).join(branch_slug).to_string_lossy().to_string();
-        let repo_root = target.repo_root;
-        cx.spawn(async move |this, cx| {
-            let path_for_git = path.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { create_worktree(&repo_root, &branch, &path_for_git) })
-                .await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.add_session(Some(path), cx),
-                Err(err) => {
-                    this.background_error = Some(err);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// 取消新建 worktree：不落地任何改动。
-    pub fn cancel_new_worktree(&mut self, cx: &mut Context<Self>) {
-        self.new_worktree_target = None;
-        self.new_worktree_input = None;
-        self._new_worktree_sub = None;
-        cx.notify();
-    }
-
     /// 项目行右键「删除 Worktree」（仅 worktree 分组显示，见 render 里 is_worktree_group）：
     /// 先弹窗（dirty=None，显示"检查中…"），后台探测有没有未提交改动，探测完再把
     /// dirty 写回去驱动弹窗文案/是否要红色警告。main_root 是同仓库下的主仓库根目录，
@@ -1914,51 +1773,6 @@ impl Workspace {
     pub fn cancel_delete_worktree(&mut self, cx: &mut Context<Self>) {
         self.delete_worktree_target = None;
         cx.notify();
-    }
-
-    /// 「新建 Worktree」弹窗：填分支名，回车 / 点「新建」提交（confirm_new_worktree），
-    /// 点「取消」什么都不发生。视觉同 render_rename_session 一套（居中卡片 + 半透明
-    /// 遮罩）。
-    pub fn render_new_worktree_dialog(&self, cx: &mut Context<Self>) -> Div {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(false);
-        let Some(input) = self.new_worktree_input.as_ref() else { return div() };
-        let Some(target) = self.new_worktree_target.as_ref() else { return div() };
-
-        let content = v_flex()
-            .child(div().font_bold().text_color(fg).text_lg().child("新建 Worktree"))
-            .child(div().text_sm().text_color(muted).child(format!(
-                "在「{}」下新建一个 worktree。分支已存在就直接检出，不存在就从当前 HEAD 新建分支。",
-                target.repo_label
-            )))
-            .child(Input::new(input))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_button(
-                        "cancel-new-worktree",
-                        "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
-                        |this, _, _, cx| this.cancel_new_worktree(cx),
-                        cx,
-                    ))
-                    .child(Self::modal_button(
-                        "confirm-new-worktree",
-                        "新建",
-                        tint,
-                        hover,
-                        accent_text,
-                        |this, _, window, cx| this.confirm_new_worktree(window, cx),
-                        cx,
-                    )),
-            );
-        Self::modal_shell(360., true, content, cx)
     }
 
     /// 「删除 Worktree」确认弹窗：dirty 探测完之前（None）按钮禁用显示"检查中…"；
@@ -2810,6 +2624,12 @@ impl Workspace {
         });
         self.diff_selected.clear(); // 换文件/重开 diff：旧的行选区不再对应新内容
         self.active_hunk = None; // 块下标同理，换了文件就不指向原来那块了
+        // 点变更 = 舞台只出 diff 详情，变更列表留在右侧停靠面板里（不在左边再
+        // 复制一份）。已经在「变更 + diff」双栏全宽里点的，保持双栏别塌成详情。
+        if self.stage_override != Some(crate::MainView::Git) {
+            self.stage_override = Some(crate::MainView::DiffDetail);
+        }
+        self.git_tab = crate::GitTab::Changes;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -3045,6 +2865,417 @@ impl Workspace {
             });
         })
         .detach();
+    }
+}
+
+impl Workspace {
+    /// 舞台的「只出 diff」视图：从停靠的 GIT 面板点一条变更走这里——变更列表
+    /// 留在右侧面板里，舞台只放 diff 详情，不再把列表在左边复制一份。
+    /// 复用全屏 Git 页那份 `git_diff_pane`（选行评论 / 按块操作 / 并排切换全在）。
+    pub(crate) fn git_diff_only_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> AnyElement {
+        let root = self.cur().and_then(|s| s.cwd(cx)).unwrap_or_default();
+        // 评论输入框懒创建（需要 window），跟全屏 Git 页同一套模式。
+        if self.git_diff.is_some() && self.diff_comment_input.is_none() {
+            use gpui_component::input::InputState;
+            let state = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("给选中的行写评论，发送前可以再改改…")
+            });
+            self.diff_comment_input = Some(state);
+        }
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .child(git_diff_pane(
+                &root,
+                &self.git_diff,
+                self.diff_split,
+                &self.diff_selected,
+                self.diff_comment_input.as_ref(),
+                &self.diff_scroll,
+                self.active_hunk,
+                self.diff_scope,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// inspector 的窄版 GIT 面板（344px）：SOURCE CONTROL 头（↑ahead ↓behind）+
+    /// STAGED / CHANGES 分组文件列表 + commit 输入条；打开某个文件的 diff 后切
+    /// DIFF 预览子视图（只读行 + 文件级暂存按钮）。放本文件是因为要读
+    /// GitStatusData / GitDiff / DiffLine 的模块内私有字段。
+    pub(crate) fn git_narrow_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> AnyElement {
+        use crate::inspector::InspectorTab;
+        use crate::ui_theme;
+
+        let Some(root) = self.cur().and_then(|s| s.cwd(cx)) else {
+            let header = self.inspector_header("SOURCE CONTROL", InspectorTab::Git, cx);
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .child(header)
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(ui_theme::TEXT_FAINT))
+                        .child("无项目目录"),
+                )
+                .into_any_element();
+        };
+
+        // ---- 列表 ----
+        let status = self.git_status.get(&root).map(|(_, d)| d.clone());
+        let (ahead, behind) = status.as_ref().map(|d| (d.ahead, d.behind)).unwrap_or((0, 0));
+        let header = self
+            .inspector_header("SOURCE CONTROL", InspectorTab::Git, cx)
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("monospace")
+                    // 有待推/待拉才亮绿，0/0 弱化——常绿会把「没事」渲染成「有事」。
+                    .text_color(if ahead + behind > 0 {
+                        rgb(ui_theme::GREEN)
+                    } else {
+                        rgb(ui_theme::TEXT_FAINT)
+                    })
+                    .child(format!("↑{ahead} ↓{behind}")),
+            );
+
+        // commit message 输入框懒创建（跟全屏 Git 页同一个实体，两处共享草稿）。
+        if self.commit_msg_input.is_none() {
+            use gpui_component::input::InputState;
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .multi_line(true)
+                    .auto_grow(2, 8)
+                    .placeholder("Commit message（可多行；点「AI 生成」起草）")
+            });
+            self.commit_msg_input = Some(state);
+        }
+
+        // porcelain XY 两位码拆分组：X（index 侧）非空非 ? → STAGED；
+        // Y（工作区侧）非空或 ?? → CHANGES。部分暂存的文件两组都出现。
+        let mut staged: Vec<(String, String)> = Vec::new();
+        let mut changed: Vec<(String, String)> = Vec::new();
+        if let Some(d) = &status {
+            for (code, path) in &d.files {
+                let mut cs = code.chars();
+                let x = cs.next().unwrap_or(' ');
+                let y = cs.next().unwrap_or(' ');
+                if code == "??" {
+                    changed.push((code.clone(), path.clone()));
+                    continue;
+                }
+                if x != ' ' {
+                    staged.push((code.clone(), path.clone()));
+                }
+                if y != ' ' {
+                    changed.push((code.clone(), path.clone()));
+                }
+            }
+        }
+
+        let ws = cx.entity();
+        // 一组改动：复用全屏页的 build_git_tree（JetBrains 式目录树 + 单链压缩），
+        // 折叠状态也共用同一份 git_tree_collapsed，两处视图折叠同步。
+        // 目录行 = caret + 目录名（淡）；文件行 = 前缀符号（staged「+」绿 /
+        // 已跟踪改动「~」橙 / 未跟踪「?」绿）+ 文件名 + 右侧状态字母。
+        let collapsed = self.git_tree_collapsed.clone();
+        let group = |title: String,
+                     files: Vec<(String, String)>,
+                     key: &'static str,
+                     is_staged_group: bool,
+                     root: String,
+                     ws: Entity<Workspace>,
+                     collapsed: &std::collections::HashSet<String>| {
+            let mut col = v_flex().child(
+                div()
+                    .px_3()
+                    .pt_2p5()
+                    .pb_1()
+                    .text_size(px(10.))
+                    .font_semibold()
+                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .child(title),
+            );
+            for (rix, row) in build_git_tree(&files, collapsed).into_iter().enumerate() {
+                let indent = px(10. + row.depth as f32 * 12.);
+                match row.status {
+                    // 目录行：点击折叠/展开。
+                    None => {
+                        let is_collapsed = collapsed.contains(&row.path);
+                        let toggle_path = row.path.clone();
+                        let ws = ws.clone();
+                        col = col.child(
+                            div()
+                                .id((key, rix))
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .pl(indent)
+                                .pr_3()
+                                .py(px(3.))
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(rgb(ui_theme::TEXT_MUTED))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(ui_theme::BG_HOVER)))
+                                .child(
+                                    div()
+                                        .w(px(10.))
+                                        .flex_shrink_0()
+                                        .text_size(px(9.))
+                                        .child(if is_collapsed { "▸" } else { "▾" }),
+                                )
+                                .child(div().flex_1().min_w_0().truncate().child(row.name))
+                                .on_click(move |_ev, _window, cx| {
+                                    let p = toggle_path.clone();
+                                    ws.update(cx, |ws, cx| {
+                                        if !ws.git_tree_collapsed.remove(&p) {
+                                            ws.git_tree_collapsed.insert(p);
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    // 文件行：勾选框暂存/取消暂存，点行开 diff。
+                    Some(code) => {
+                        let untracked = code == "??";
+                        let letter = code.trim().chars().next().unwrap_or('M').to_string();
+                        let letter_color = if untracked || letter == "A" {
+                            rgb(ui_theme::GREEN)
+                        } else if letter == "D" {
+                            rgb(ui_theme::RED)
+                        } else {
+                            rgb(ui_theme::ACCENT)
+                        };
+                        // 勾选 = 已暂存：索引位（porcelain 第一位）不是空格/`?`
+                        // 就算暂存（判定与全屏页一致）。STAGED 分组里的行天然是勾上的。
+                        let staged = is_staged_group
+                            || code.as_bytes().first().is_some_and(|&b| b != b' ' && b != b'?');
+                        let ws_stage = ws.clone();
+                        let (r_stage, p_stage) = (root.clone(), row.path.clone());
+                        let stage_checkbox = Checkbox::new((key, rix))
+                            .checked(staged)
+                            .on_click(move |checked, _window, cx| {
+                                // 别冒泡成「打开这份 diff」——勾选是纯索引操作。
+                                cx.stop_propagation();
+                                let checked = *checked;
+                                let root = r_stage.clone();
+                                let path = p_stage.clone();
+                                ws_stage.update(cx, |wsx, cx| {
+                                    if checked {
+                                        wsx.stage_file(root, path, cx);
+                                    } else {
+                                        wsx.unstage_file(root, path, cx);
+                                    }
+                                });
+                            });
+                        let ws = ws.clone();
+                        let root = root.clone();
+                        let open_path = row.path.clone();
+                        col = col.child(
+                            div()
+                                .id((key, rix))
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .pl(indent)
+                                .pr_3()
+                                .py(px(3.))
+                                .text_xs()
+                                .font_family("monospace")
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(ui_theme::BG_HOVER)))
+                                .child(stage_checkbox)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(rgb(ui_theme::TEXT))
+                                        .child(row.name),
+                                )
+                                .child(div().flex_shrink_0().text_color(letter_color).child(letter))
+                                .on_click(move |_ev, _window, cx| {
+                                    let root = root.clone();
+                                    let path = open_path.clone();
+                                    ws.update(cx, |ws, cx| ws.open_diff(root, path, untracked, cx));
+                                }),
+                        );
+                    }
+                }
+            }
+            col
+        };
+
+        let mut list = div()
+            .id("narrow-git-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if staged.is_empty() && changed.is_empty() {
+            list = list.child(
+                div()
+                    .pt_8()
+                    .flex()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgb(ui_theme::TEXT_FAINT))
+                    .child("工作区干净"),
+            );
+        } else {
+            if !staged.is_empty() {
+                list = list.child(group(
+                    format!("STAGED · {}", staged.len()),
+                    staged,
+                    "narrow-staged",
+                    true,
+                    root.clone(),
+                    ws.clone(),
+                    &collapsed,
+                ));
+            }
+            if !changed.is_empty() {
+                list = list.child(group(
+                    format!("CHANGES · {}", changed.len()),
+                    changed,
+                    "narrow-changed",
+                    false,
+                    root.clone(),
+                    ws.clone(),
+                    &collapsed,
+                ));
+            }
+        }
+
+        // commit 区（对齐设计稿）：输入框 + 满宽橙色主按钮「提交并推送」；
+        // 「AI 生成 / 仅提交 / 仅推送」收成弱化的文字按钮行，不跟主按钮抢重量。
+        let has_text = self
+            .commit_msg_input
+            .as_ref()
+            .is_some_and(|s| !s.read(cx).value().trim().is_empty());
+        let generating = self.commit_msg_generating;
+        let pushing = self.pushing;
+        let e_gen = ws.clone();
+        let e_commit_push = ws.clone();
+        let e_commit = ws.clone();
+        let e_push = ws.clone();
+        let text_btn = |id: &'static str, label: String, enabled: bool| {
+            div()
+                .id(id)
+                .text_xs()
+                .text_color(if enabled {
+                    rgb(ui_theme::TEXT_MUTED)
+                } else {
+                    rgb(ui_theme::TEXT_FAINT)
+                })
+                .when(enabled, |d| {
+                    d.cursor_pointer().hover(|d| d.text_color(rgb(ui_theme::TEXT_BRIGHT)))
+                })
+                .child(label)
+        };
+        let commit_bar = div()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(ui_theme::BORDER_DIM))
+            .p_2p5()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(
+                self.commit_msg_input
+                    .as_ref()
+                    .map(|input| gpui_component::input::Input::new(input)),
+            )
+            .child(
+                div()
+                    .id("narrow-commit-push")
+                    .w_full()
+                    .py_1p5()
+                    .rounded(px(7.))
+                    .text_sm()
+                    .font_semibold()
+                    .text_center()
+                    .map(|d| {
+                        if has_text && !pushing {
+                            d.bg(rgb(ui_theme::ACCENT))
+                                .text_color(rgb(ui_theme::ON_ACCENT))
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.9))
+                        } else {
+                            d.bg(rgb(ui_theme::BG_CARD)).text_color(rgb(ui_theme::TEXT_FAINT))
+                        }
+                    })
+                    .child(if pushing { "推送中…" } else { "提交并推送" })
+                    .on_click(move |_ev, window, cx| {
+                        e_commit_push.update(cx, |ws, cx| {
+                            if !ws.pushing {
+                                ws.commit(true, window, cx);
+                            }
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        text_btn(
+                            "narrow-ai-gen",
+                            if generating { "✨ 生成中…".to_string() } else { "✨ AI 生成".to_string() },
+                            !generating,
+                        )
+                        .on_click(move |_ev, window, cx| {
+                            e_gen.update(cx, |ws, cx| ws.generate_commit_message(window, cx));
+                        }),
+                    )
+                    .child(div().flex_1())
+                    .child(text_btn("narrow-commit-only", "仅提交".to_string(), has_text).on_click(
+                        move |_ev, window, cx| {
+                            e_commit.update(cx, |ws, cx| ws.commit(false, window, cx));
+                        },
+                    ))
+                    .child(
+                        text_btn(
+                            "narrow-push-only",
+                            format!("仅推送 ↑{ahead}"),
+                            ahead > 0 && !pushing,
+                        )
+                        .on_click(move |_ev, _window, cx| {
+                            e_push.update(cx, |ws, cx| {
+                                if !ws.pushing {
+                                    ws.push_only(cx);
+                                }
+                            });
+                        }),
+                    ),
+            );
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(header)
+            .child(list)
+            .child(commit_bar)
+            .into_any_element()
     }
 }
 

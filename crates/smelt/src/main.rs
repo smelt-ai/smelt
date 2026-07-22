@@ -15,6 +15,7 @@ mod git_log;
 mod git_log_view;
 mod git_panel;
 mod hotspot;
+mod inspector;
 mod json_store;
 mod markdown_mermaid;
 mod mem_usage;
@@ -26,11 +27,17 @@ use smelt_core::permission_menu;
 use smelt_core::term_text;
 mod pet;
 mod session_history;
+mod session_list;
 mod settings;
+mod skills;
+mod stage;
+mod status_bar;
 mod status_item;
 mod tasks;
+mod toast;
 mod terminal;
 mod terminal_view;
+mod ui_theme;
 mod updater;
 mod usage_stats;
 
@@ -45,22 +52,16 @@ use std::time::{Duration, Instant};
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
-};
+use gpui_component::badge::Badge;
 use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_component::badge::Badge;
 use gpui_component::notification::Notification;
 use gpui_component::slider::SliderState;
 use gpui_component::table::TableState;
 use gpui_component::resizable::{
     h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
 };
-use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 use notify::RecommendedWatcher;
 use terminal_view::TerminalView;
@@ -69,15 +70,11 @@ use file_tree::{
     file_content_pane, file_tree, search_results_view, DeleteFileTarget, OpenFile, SearchState,
 };
 use git_panel::{
-    git_view, main_repo_root_from_common_dir, repo_label_from_common_dir, run_git, BranchList,
-    DeleteWorktreeTarget, GitDiff, GitStatusData, NewWorktreeTarget, RepoInfo,
+    git_view, run_git, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo,
 };
 use hotspot::hotspot_view;
 use session_history::{history_view, HistoryListState, HistoryPane, SessionHistoryDelegate};
-use settings::{
-    active_launch_entries, icon_for_launch_command, load_appearance, load_launch_config, Appearance,
-    LlmInputs,
-};
+use settings::{load_appearance, load_launch_config, Appearance, LlmInputs};
 use usage_stats::format_count;
 
 
@@ -202,16 +199,23 @@ impl ListDelegate for CmdDelegate {
     }
 }
 
-/// 主区视图：会话总览 / 任务总览 / 终端 / 文件树 / Git / 热力图 / 历史。
-/// 任务总览与会话总览并列独立页，互不混内容；入口在侧栏「任务」。
+/// 舞台覆盖页（stage_override 的取值）：会话总览 / 任务总览 / 文件树 / Git /
+/// 热力图 / 历史。曾是主区 TabBar 的互斥视图（含 Terminal 变体）；改版后终端
+/// 舞台 = `stage_override == None`，这里只剩「盖在舞台上的全屏页」。
 #[derive(Clone, Copy, PartialEq)]
 enum MainView {
     Overview,
     /// 任务总览（卡片网格，对齐会话总览交互，内容只含任务）。
     Tasks,
-    Terminal,
+    /// 「文件树 + 内容」双栏全宽（inspector FILES 面板 ⤢ 提升上来；此时面板收起）。
     Files,
+    /// 只有文件内容：树留在右侧停靠面板里，舞台不再摆第二份。
+    /// 从停靠的 FILES 面板点文件走这条，不是整页跳转。
+    FileDetail,
+    /// 「变更列表 + diff」双栏全宽（inspector GIT 面板 ⤢ 提升上来；此时面板收起）。
     Git,
+    /// 只有 diff：变更列表留在右侧停靠面板里，舞台只出详情。
+    DiffDetail,
     Hotspot,
     History,
 }
@@ -241,6 +245,20 @@ enum AgentStatus {
     Done,
     /// 其余 → 空闲，灰色。
     Idle,
+}
+
+impl AgentStatus {
+    /// 优先级序（越小越紧急），与声明序一致：排序、聚合（项目 rail 的组内
+    /// 最高优先级状态点）共用。
+    fn rank(self) -> u8 {
+        match self {
+            AgentStatus::WaitingApproval => 0,
+            AgentStatus::NeedsAttention => 1,
+            AgentStatus::Running => 2,
+            AgentStatus::Done => 3,
+            AgentStatus::Idle => 4,
+        }
+    }
 }
 
 /// 总览页筛选：基于 AgentStatus / 状态通道，不猜 TUI。
@@ -319,7 +337,9 @@ impl Render for SessionDrag {
 }
 
 /// 拖拽项目分组排序时跟随鼠标的小预览 chip。
+/// 旧侧栏的项目行拖拽已撤；待接到项目 rail 后复活（收尾阶段定去留）。
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ProjectDrag {
     name: SharedString,
 }
@@ -430,6 +450,9 @@ impl Session {
     }
 
     /// 侧栏行图标：终端会话按启动方式（LaunchKind）对应，与「+」菜单图标一一对应。
+    /// 新会话列表改用类型点（agent 紫圆 / 终端绿方），此图标暂时闲置——
+    /// 收尾阶段决定是否用回行首或删除。
+    #[allow(dead_code)]
     fn row_icon(&self, cx: &App) -> IconName {
         match &self.kind {
             SessionKind::Term { active, .. } => match active.read(cx).launch_kind() {
@@ -454,8 +477,8 @@ impl Session {
                     .cwd()
                     .map(|c| c.rsplit('/').next().unwrap_or(&c).to_string());
                 match dir {
-                    Some(d) if !d.is_empty() => format!("Claude 消息流 · {d}"),
-                    _ => "Claude 消息流".to_string(),
+                    Some(d) if !d.is_empty() => format!("Claude 对话 · {d}"),
+                    _ => "Claude 对话".to_string(),
                 }
             }
         })
@@ -597,18 +620,6 @@ impl Session {
             return AgentStatus::Done;
         }
         AgentStatus::Idle
-    }
-}
-
-/// 状态点颜色：等审批(红) > 需要处理(橙) > 运行中(蓝) > 已完成未读(绿)。
-/// 会话行状态点、侧栏展开出的分屏 pane 状态点共用同一套配色。
-fn status_color(status: AgentStatus) -> gpui::Rgba {
-    match status {
-        AgentStatus::WaitingApproval => rgb(0xef4444),
-        AgentStatus::NeedsAttention => rgb(0xf59e0b),
-        AgentStatus::Running => rgb(0x4a9eff),
-        AgentStatus::Done => rgb(0x22c55e),
-        AgentStatus::Idle => unreachable!(),
     }
 }
 
@@ -1106,8 +1117,17 @@ struct Workspace {
     sessions: Vec<Session>,
     /// 当前活动会话索引（主区显示它、侧栏高亮它）。
     active_session: usize,
-    /// 主区当前视图：终端 / 文件树 / Git。
-    view: MainView,
+    /// 舞台覆盖页：Some = 旧全屏页（总览/任务/文件树/Git/热力图/历史）盖住会话
+    /// 舞台；None = 正常显示当前会话。Esc / 各入口收回时清 None。
+    stage_override: Option<MainView>,
+    /// inspector 当前 tab（右侧图标条切换；见 inspector.rs）。
+    inspector_tab: inspector::InspectorTab,
+    /// inspector 面板是否展开（Cmd+B / 图标条再点收合）。
+    inspector_open: bool,
+    /// 阻塞 toast 的 ✕ / 稍后 记录（键 = 会话 anchor_id）；会话状态解除时自动
+    /// 清除，同一会话再次阻塞会重新弹。见 toast.rs。
+    toast_dismissed: HashSet<EntityId>,
+    toast_snoozed: HashMap<EntityId, Instant>,
     /// 总览页筛选（全部 / 待我处理 / 运行中）。
     overview_filter: OverviewFilter,
     /// 文件树里已展开的文件夹绝对路径。
@@ -1166,8 +1186,16 @@ struct Workspace {
     commit_msg_input: Option<Entity<gpui_component::input::InputState>>,
     /// 「生成」按钮请求 LLM 生成 commit message 进行中（防连点、按钮显示"生成中…"）。
     commit_msg_generating: bool,
-    /// 左侧会话侧栏是否展开（Cmd+B 切换）。
-    sidebar_open: bool,
+    /// 活动项目（project_groups 的分组名）：会话列表里高亮哪一组、顶栏显示谁、
+    /// 「+Agent/+Term」新建到哪个 cwd。None 或该组已消失时回退到活动会话所在组
+    /// （见 active_project_name）。
+    active_project: Option<String>,
+    /// 会话列表里被折叠起来的项目分组名。
+    collapsed_projects: HashSet<String>,
+    /// SKILLS 面板缓存：(取得时刻, 列表) + 扫的是哪个项目 + 是否正在后台扫。
+    skills_cache: skills::SkillsCache,
+    skills_cache_cwd: Option<String>,
+    skills_inflight: bool,
     /// 通知面板是否打开（标题栏铃铛切换）。
     notifications_open: bool,
     /// 命令面板（Cmd+K）；None 表示未打开。搜索/导航/确认由 ListState 负责。
@@ -1221,12 +1249,6 @@ struct Workspace {
     search_results: Option<SearchState>,
     /// 搜索任务自增序号：后台遍历完成时用它丢弃过期结果（期间又改了查询）。
     search_gen: u64,
-    /// 根布局左右分栏（会话侧栏 ↔ 主区）的可拖拽状态；常驻以保住拖出的宽度。
-    root_resize: Entity<ResizableState>,
-    /// 侧栏初始宽度（px）：启动时从存档恢复，作为 resizable_panel 的初始 size。
-    sidebar_w: f32,
-    /// 侧栏 resize 事件订阅（拖动完写回存档）；随视图存活。
-    _resize_sub: Subscription,
     /// 文件树列初始宽度（px）：启动时从存档恢复，作为 resizable_panel 的初始 size。
     file_tree_w: f32,
     /// 文件树列 resize 事件订阅（拖动完写回存档）；随视图存活。
@@ -1339,6 +1361,8 @@ struct Workspace {
     /// 维护，驱动插入指示条的出现动画；起拖时清空，避免上次拖拽的残留闪一帧。
     sess_drop_hint: Option<(EntityId, bool)>,
     /// 项目分组拖拽悬停中的目标项目名，作用同上。
+    /// （项目拖拽待接到 rail，暂时闲置；见 ProjectDrag 注释。）
+    #[allow(dead_code)]
     proj_drop_hint: Option<SharedString>,
     /// 正在重命名的对象 + 弹窗里的文本框（None = 没在重命名）。见
     /// `start_rename`/`confirm_rename`。
@@ -1353,9 +1377,6 @@ struct Workspace {
     /// 正在后台探测仓库身份、避免重复起进程的 cwd 集合。
     repo_info_inflight: HashSet<String>,
     /// 正在新建的 worktree 目标 + 弹窗里的分支名文本框（None = 没在新建）。
-    new_worktree_target: Option<NewWorktreeTarget>,
-    new_worktree_input: Option<Entity<gpui_component::input::InputState>>,
-    _new_worktree_sub: Option<Subscription>,
     /// 正在确认删除的 worktree（None = 没在删）。
     delete_worktree_target: Option<DeleteWorktreeTarget>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
@@ -1379,6 +1400,13 @@ struct Workspace {
     daemon_info: Option<terminal::DaemonInfo>,
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
+    /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
+    /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的孤儿、忘了关的临时会话都会
+    /// 计进「N 个会话」里但从没在任何侧栏露过面，只有这里能看见并单独清理，
+    /// 不用被迫走「重启守护进程」这种会误伤正常会话的核选项。
+    session_manager_open: bool,
+    /// 弹窗数据：最近一次 list 查询结果，None = 正在查/还没查过。
+    session_manager_list: Option<Vec<terminal::DaemonSessionState>>,
     /// 启动时从存档恢复失败的会话（守护未就绪等）。仍写回 workspace.json，避免
     /// 「恢复失败 → 写空盘 → 会话永久蒸发」。侧栏本帧看不到它们，下次冷启动会重试。
     restore_orphans: Vec<SessionState>,
@@ -1397,7 +1425,6 @@ impl Workspace {
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let saved = load_ws_state();
-        let sidebar_w = saved.as_ref().and_then(|s| s.sidebar_w).unwrap_or(230.);
         let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
         let git_left_w = saved.as_ref().and_then(|s| s.git_left_w).unwrap_or(300.);
 
@@ -1409,12 +1436,7 @@ impl Workspace {
         let restore_orphans = pending_sessions.clone();
         let sessions: Vec<Session> = Vec::new();
 
-        // 订阅侧栏 resize：拖动完 emit Resized，写回存档以持久化宽度。
-        let root_resize = cx.new(|_| ResizableState::default());
-        let _resize_sub = cx.subscribe(&root_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
-            this.save_state(cx);
-        });
-        // 文件树列 resize：同侧栏一套写法，拖动完写回存档持久化宽度。
+        // 文件树列 resize：拖动完 emit Resized，写回存档持久化宽度。
         let file_tree_resize = cx.new(|_| ResizableState::default());
         let _file_tree_resize_sub =
             cx.subscribe(&file_tree_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
@@ -1432,7 +1454,11 @@ impl Workspace {
         let mut ws = Self {
             sessions,
             active_session,
-            view: MainView::Terminal,
+            stage_override: None,
+            inspector_tab: inspector::InspectorTab::Files,
+            inspector_open: true,
+            toast_dismissed: HashSet::new(),
+            toast_snoozed: HashMap::new(),
             overview_filter: OverviewFilter::All,
             expanded: HashSet::new(),
             dir_cache: HashMap::new(),
@@ -1459,7 +1485,11 @@ impl Workspace {
             diff_comment_input: None,
             commit_msg_input: None,
             commit_msg_generating: false,
-            sidebar_open: true,
+            active_project: None,
+            collapsed_projects: HashSet::new(),
+            skills_cache: None,
+            skills_cache_cwd: None,
+            skills_inflight: false,
             notifications_open: false,
             palette: None,
             _palette_sub: None,
@@ -1484,9 +1514,6 @@ impl Workspace {
             task_schedule_started: false,
             search_results: None,
             search_gen: 0,
-            root_resize,
-            sidebar_w,
-            _resize_sub,
             file_tree_w,
             _file_tree_resize_sub,
             git_left_resize,
@@ -1542,9 +1569,6 @@ impl Workspace {
             _rename_sub: None,
             repo_info: HashMap::new(),
             repo_info_inflight: HashSet::new(),
-            new_worktree_target: None,
-            new_worktree_input: None,
-            _new_worktree_sub: None,
             delete_worktree_target: None,
             discard_hunk_target: None,
             discard_file_target: None,
@@ -1554,6 +1578,8 @@ impl Workspace {
             daemon_upgrading: false,
             daemon_info: None,
             show_daemon_restart_confirm: false,
+            session_manager_open: false,
+            session_manager_list: None,
             restore_orphans,
             focus_handle: cx.focus_handle(),
         };
@@ -1589,13 +1615,19 @@ impl Workspace {
             pending.into_iter().partition(|ss| ss.acp.is_some());
         for ss in acp_saved {
             let Some(saved) = ss.acp else { continue };
+            // 有旧 session id 的会在切到它时自动续接（见 maybe_auto_resume），
+            // 文案别再让人去点按钮；没有 id 的只能手动开新会话。
+            let reason = if saved.resume_session_id.is_some() {
+                "上次的对话已随 GUI 退出（历史消息已保留，切到本会话会自动续接）"
+            } else {
+                "上次的对话已随 GUI 退出结束（历史消息已保留，点击重新开始继续）"
+            };
             let view = cx.new(|cx| {
                 acp_view::AcpView::placeholder(
                     cx,
                     saved.cmd,
                     saved.cwd,
-                    "上次的 ACP 会话已随 GUI 退出结束（历史消息已保留，点击重新开始继续）"
-                        .to_string(),
+                    reason.to_string(),
                     saved.entries,
                     saved.resume_session_id,
                 )
@@ -1828,6 +1860,8 @@ impl Workspace {
     }
 
     /// 拖拽排序：把 from 项目的所有会话（保持相对顺序）整体挪到 to 项目最前面。
+    /// （项目拖拽待接到 rail，暂时闲置；见 ProjectDrag 注释。）
+    #[allow(dead_code)]
     fn move_project_near(&mut self, from_name: SharedString, to_name: SharedString, cx: &mut Context<Self>) {
         if from_name == to_name {
             return;
@@ -1904,7 +1938,7 @@ impl Workspace {
             _acp_persist_sub,
         });
         self.active_session = self.sessions.len() - 1;
-        self.view = MainView::Terminal;
+        self.stage_override = None;
         self.save_state(cx);
         cx.notify();
     }
@@ -1929,7 +1963,7 @@ impl Workspace {
         let sid_bg = sid.clone();
         let launch_bg = launch_owned.clone();
         // 立刻给反馈，避免「点了像没点」。
-        self.view = MainView::Terminal;
+        self.stage_override = None;
         eprintln!(
             "[workspace] 新建会话 cwd={cwd:?} launch={launch:?} sid={sid}"
         );
@@ -1987,7 +2021,7 @@ impl Workspace {
                 });
                 this.sessions.push(Session::single(view));
                 this.active_session = this.sessions.len() - 1;
-                this.view = MainView::Terminal;
+                this.stage_override = None;
                 this.save_state(cx);
                 eprintln!(
                     "[workspace] 新建会话成功，当前共 {} 个",
@@ -2112,12 +2146,12 @@ impl Workspace {
             }
         }
 
-        let sidebar_w = self.root_resize.read(cx).sizes().first().copied().map(f32::from);
         let file_tree_w = self.file_tree_resize.read(cx).sizes().first().copied().map(f32::from);
         let state = WsState {
             sessions,
             active_session: self.active_session,
-            sidebar_w,
+            // 旧档的 sidebar_w 字段保留声明只为 serde 兼容；新布局固定宽，不再写。
+            sidebar_w: None,
             file_tree_w,
             git_left_w: self.git_left_resize.read(cx).sizes().first().copied().map(f32::from),
             ..Default::default()
@@ -2151,7 +2185,7 @@ impl Workspace {
         match existing {
             Some(ix) => {
                 self.activate(ix, window, cx);
-                self.view = MainView::Terminal;
+                self.stage_override = None;
                 self.focus_active(window, cx);
                 cx.notify();
             }
@@ -2194,7 +2228,7 @@ impl Workspace {
             paths
         );
         // 立刻切到终端页并提示，避免用户以为拖了没反应（spawn 在后台要几百毫秒～数秒）。
-        self.view = MainView::Terminal;
+        self.stage_override = None;
         cx.notify();
 
         let paths: Vec<std::path::PathBuf> = paths.to_vec();
@@ -2262,7 +2296,7 @@ impl Workspace {
                     }
                 }
                 if ok_n > 0 {
-                    this.view = MainView::Terminal;
+                    this.stage_override = None;
                     this.save_state(cx);
                 }
                 if !err_msgs.is_empty() {
@@ -2372,6 +2406,34 @@ impl Workspace {
     }
 
     /// 聚焦当前会话的活动终端（ACP 会话的聚焦走视图自身，这里跳过）。
+    /// 设置/收回舞台覆盖页并处理焦点：全屏页自己没有可聚焦元素，焦点认领到根
+    /// 让全局快捷键仍收得到；收回时把焦点还给活动会话（终端 pane / ACP 输入框）。
+    pub(crate) fn set_stage_override(
+        &mut self,
+        v: Option<MainView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stage_override = v;
+        match v {
+            Some(_) => window.focus(&self.focus_handle, cx),
+            None => self.focus_active_stage(window, cx),
+        }
+        cx.notify();
+    }
+
+    /// 焦点还给活动会话：Term → 活动 pane；ACP → 消息流输入框。
+    fn focus_active_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Session { kind: SessionKind::Acp(view), .. }) =
+            self.sessions.get(self.active_session)
+        {
+            let view = view.clone();
+            view.update(cx, |v, cx| v.focus_input(window, cx));
+        } else {
+            self.focus_active(window, cx);
+        }
+    }
+
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
         if let Some(active) = self.cur().and_then(|s| s.active_term()) {
             let h = active.read(cx).focus_handle();
@@ -2443,14 +2505,25 @@ impl Workspace {
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix < self.sessions.len() {
             self.active_session = ix;
-            // 从会话总览 / 任务总览点会话 → 进入终端视图（否则主区仍停在总览页）。
-            if matches!(self.view, MainView::Overview | MainView::Tasks) {
-                self.view = MainView::Terminal;
+            // 项目 rail 的选中态跟着活动会话走：切到别的项目的会话时 rail 与
+            // 会话列表同步换过去。
+            if let Some((name, _, _)) = self
+                .project_groups(cx)
+                .into_iter()
+                .find(|(_, _, ixs)| ixs.contains(&ix))
+            {
+                self.active_project = Some(name);
             }
+            // 点会话 = 回到会话舞台：收掉任何全屏覆盖页（总览/Git/文件树/…）。
+            // 新布局没有常驻 TabBar，这里不收的话覆盖页会一直盖着舞台，
+            // 「点了会话却还满屏 Git」看起来就像回不到终端。
+            self.stage_override = None;
             // 切过去只是查看，不清「需要注意」——等用户实际输入回应了才清。
             // ACP 会话例外：绿点「有结果可看」查看即清（消息流全文可见，看到=处理）。
             if let SessionKind::Acp(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
+                    // 冷恢复占位第一次被切到 → 自动续接（免手点「重新开始」）。
+                    v.maybe_auto_resume(window, cx);
                     v.mark_read();
                     v.focus_input(window, cx);
                 });
@@ -2723,6 +2796,206 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// GUI 侧栏当前认领的全部 session id（Term 会话；ACP 会话是 GUI 直接 spawn
+    /// 的子进程，根本不经过 smeltd，不出现在 list 结果里，不用管）。跟 list
+    /// 查回来的全量做差集，剩下的就是「守护持有但没有任何侧栏在追踪」的孤儿
+    /// ——测试跑出来的、忘了关的临时会话，都会落在这一类。
+    fn tracked_session_ids(&self, cx: &App) -> std::collections::HashSet<String> {
+        self.sessions
+            .iter()
+            .flat_map(|s| s.term_leaves())
+            .map(|t| t.read(cx).session_id().to_string())
+            .collect()
+    }
+
+    /// 打开「会话管理」弹窗并触发一次查询（每次打开都重新拉最新数据，不复用
+    /// 上次缓存——孤儿是不是还在、有没有新泄漏，都得是当下的事实）。
+    fn open_session_manager(&mut self, cx: &mut Context<Self>) {
+        self.session_manager_open = true;
+        self.session_manager_list = None;
+        cx.notify();
+        self.refresh_session_manager(cx);
+    }
+
+    fn refresh_session_manager(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let list = cx.background_executor().spawn(async { terminal::list_daemon_sessions() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.session_manager_list = Some(list);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 关掉守护进程里的一个会话（真杀底层 shell），关完刷新列表。
+    fn kill_session_in_manager(&mut self, id: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn({
+                    let id = id.clone();
+                    async move { terminal::kill_remote(&id) }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| this.refresh_session_manager(cx));
+        })
+        .detach();
+    }
+
+    /// 批量清理「没有任何侧栏在追踪」的孤儿——不碰任何 GUI 认领的正常会话，
+    /// 不需要走「重启守护进程」那种连坐所有会话的核选项。
+    fn kill_all_orphans_in_manager(&mut self, cx: &mut Context<Self>) {
+        let tracked = self.tracked_session_ids(cx);
+        let Some(list) = self.session_manager_list.clone() else { return };
+        let orphan_ids: Vec<String> =
+            list.into_iter().map(|s| s.id).filter(|id| !tracked.contains(id)).collect();
+        if orphan_ids.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    for id in &orphan_ids {
+                        terminal::kill_remote(id);
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| this.refresh_session_manager(cx));
+        })
+        .detach();
+    }
+
+    /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是孤儿（没有任何
+    /// 侧栏在追踪），逐个/批量清理。跟 render_quit_confirm 同款视觉。
+    fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
+        let (fg, muted, border) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground, t.border)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let tracked = self.tracked_session_ids(cx);
+
+        let body: AnyElement = match &self.session_manager_list {
+            None => div().text_sm().text_color(muted).child("查询中…").into_any_element(),
+            Some(list) if list.is_empty() => {
+                div().text_sm().text_color(muted).child("守护进程当前没有任何会话。").into_any_element()
+            }
+            Some(list) => {
+                let orphan_count = list.iter().filter(|s| !tracked.contains(&s.id)).count();
+                let mut rows =
+                    v_flex().id("session-manager-list").gap_1().max_h(px(360.)).overflow_y_scroll();
+                for s in list {
+                    let is_orphan = !tracked.contains(&s.id);
+                    let label = s
+                        .cwd
+                        .clone()
+                        .or_else(|| s.title.clone())
+                        .unwrap_or_else(|| s.id.clone());
+                    let id_for_kill = s.id.clone();
+                    rows = rows.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .justify_between()
+                            .py_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .min_w_0()
+                                    .child(div().size_2().rounded_full().bg(if is_orphan {
+                                        rgb(0xef4444)
+                                    } else {
+                                        rgb(0x22c55e)
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(fg)
+                                            .truncate()
+                                            .child(label),
+                                    )
+                                    .children(is_orphan.then(|| {
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xef4444))
+                                            .child("孤儿（无侧栏追踪）")
+                                    })),
+                            )
+                            .child(Self::modal_button(
+                                "kill-session-in-manager",
+                                "关闭",
+                                neutral_bg,
+                                neutral_hover,
+                                fg,
+                                move |this, _, _, cx| {
+                                    this.kill_session_in_manager(id_for_kill.clone(), cx);
+                                },
+                                cx,
+                            )),
+                    );
+                }
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("共 {} 个，{orphan_count} 个孤儿", list.len())),
+                    )
+                    .child(rows)
+                    .into_any_element()
+            }
+        };
+
+        let has_orphans = self
+            .session_manager_list
+            .as_ref()
+            .map(|l| l.iter().any(|s| !tracked.contains(&s.id)))
+            .unwrap_or(false);
+
+        let content = v_flex()
+            .child(div().font_bold().text_color(fg).text_lg().child("会话管理"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("守护进程持有的全部会话；孤儿是没有被任何窗口侧栏追踪的（测试跑出来的、忘了关的临时会话），清理它们不影响正常使用中的会话。"),
+            )
+            .child(div().border_t_1().border_color(border).pt_3().child(body))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "close-session-manager",
+                        "关闭",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| {
+                            this.session_manager_open = false;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .when(has_orphans, |el| {
+                        el.child(Self::modal_button(
+                            "kill-all-orphans",
+                            "清理全部孤儿",
+                            tint,
+                            hover,
+                            accent_text,
+                            |this, _, _, cx| {
+                                this.kill_all_orphans_in_manager(cx);
+                            },
+                            cx,
+                        ))
+                    }),
+            );
+        Self::modal_shell(420., true, content, cx)
     }
 
     /// upgrade 完成后延迟 reattach：给守护 handoff 泵线程 / jolt 一点时间。
@@ -3942,365 +4215,6 @@ impl Workspace {
         }
     }
 
-    /// B 路线：终端右侧「结构」条——读守护状态通道（hook 事实），不解析 TUI 像素。
-    /// 可折叠（窄条）；总开关在设置 → Claude 集成。
-    fn render_agent_structure_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (fg, muted, border) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground, t.border)
-        };
-        let soft: Hsla = rgba(0xffffff0a).into();
-        let c_red: Hsla = rgb(0xef4444).into();
-        let c_blue: Hsla = rgb(0x4a9eff).into();
-        let c_amber: Hsla = rgb(0xf59e0b).into();
-        let c_green: Hsla = rgb(0x22c55e).into();
-        let red_tint: Hsla = rgba(0xef444422).into();
-        let blue_tint: Hsla = rgba(0x4a9eff22).into();
-        let amber_tint: Hsla = rgba(0xf59e0b22).into();
-        let green_tint: Hsla = rgba(0x22c55e22).into();
-
-        let expanded = cx
-            .try_global::<settings::AgentUiConfig>()
-            .map(|c| c.structure_panel_expanded)
-            .unwrap_or(true);
-
-        // 折叠：窄条，点一下展开
-        if !expanded {
-            return div()
-                .id("agent-structure-collapsed")
-                .w(px(28.))
-                .flex_shrink_0()
-                .h_full()
-                .border_l_1()
-                .border_color(border)
-                .bg(rgb(0x12141a))
-                .flex()
-                .flex_col()
-                .items_center()
-                .pt_2()
-                .gap_1()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x1a1c24)))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("‹"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(fg)
-                        .child("状"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(fg)
-                        .child("态"),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_this, _, _, cx| {
-                        settings::apply_agent_ui(|c| c.structure_panel_expanded = true, cx);
-                        cx.notify();
-                    }),
-                )
-                .into_any_element();
-        }
-
-        let sess = self.sessions.get(self.active_session);
-        let leaves = sess.map(|s| s.term_leaves()).unwrap_or_default();
-        // 活动 pane 优先，否则扫分屏找有状态的
-        let active = sess.and_then(|s| s.active_term().cloned());
-        let state = active
-            .as_ref()
-            .and_then(|t| daemon_state_for(t, cx))
-            .or_else(|| leaves.iter().find_map(|t| daemon_state_for(t, cx)));
-
-        let (phase_color, phase_bg) = match state.as_ref().map(|s| s.phase) {
-            Some(terminal::DaemonPhase::AwaitingApproval) => (c_red, red_tint),
-            Some(terminal::DaemonPhase::WaitingForUser) => (c_amber, amber_tint),
-            Some(terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool) => {
-                (c_blue, blue_tint)
-            }
-            Some(terminal::DaemonPhase::Dead) => (muted, soft),
-            _ => (c_green, green_tint),
-        };
-
-        let phase_label = state
-            .as_ref()
-            .map(|s| s.phase_label())
-            .unwrap_or("无守护数据");
-        let detail = state.as_ref().and_then(|s| s.detail_line());
-        let age = state.as_ref().and_then(|s| s.phase_age_secs());
-        let title = state
-            .as_ref()
-            .and_then(|s| s.title.clone())
-            .or_else(|| active.as_ref().map(|t| pane_title(t, cx)));
-        let launch = state.as_ref().and_then(|s| s.launch.clone());
-        let is_approval = matches!(
-            state.as_ref().map(|s| s.phase),
-            Some(terminal::DaemonPhase::AwaitingApproval)
-        );
-        let session_ix = self.active_session;
-
-        let pill = |text: &str, color: Hsla, bg: Hsla| {
-            div()
-                .px(px(8.))
-                .py(px(3.))
-                .rounded_full()
-                .bg(bg)
-                .text_xs()
-                .text_color(color)
-                .child(text.to_string())
-        };
-
-        div()
-            .id("agent-structure-panel")
-            .w(px(220.))
-            .flex_shrink_0()
-            .h_full()
-            .min_h_0()
-            .border_l_1()
-            .border_color(border)
-            .bg(rgb(0x12141a))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(border)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(fg)
-                            .child("状态"),
-                    )
-                    .child(
-                        div()
-                            .id("structure-collapse")
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(muted)
-                            .hover(|s| s.bg(border).text_color(fg))
-                            .child("›")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|_this, _, _, cx| {
-                                    settings::apply_agent_ui(
-                                        |c| c.structure_panel_expanded = false,
-                                        cx,
-                                    );
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_hidden()
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(pill(phase_label, phase_color, phase_bg))
-                    .children(age.map(|a| {
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(if a < 60 {
-                                format!("已 {a} 秒")
-                            } else {
-                                format!("已 {} 分钟", a / 60)
-                            })
-                    }))
-                    .children(title.map(|t| {
-                        div()
-                            .text_xs()
-                            .text_color(fg)
-                            .font_semibold()
-                            .child(t)
-                    }))
-                    .children(launch.map(|l| {
-                        div().text_xs().text_color(muted).child(format!("启动 · {l}"))
-                    }))
-                    .children(
-                        state
-                            .as_ref()
-                            .and_then(|s| s.cwd.clone())
-                            .map(|c| {
-                                let short = c
-                                    .trim_end_matches('/')
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or(&c)
-                                    .to_string();
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(format!("📁 {short}"))
-                            }),
-                    )
-                    .children(detail.map(|d| {
-                        div()
-                            .p_2()
-                            .rounded_md()
-                            .bg(soft)
-                            .text_xs()
-                            .text_color(fg)
-                            .child(d)
-                    }))
-                    .children(is_approval.then(|| {
-                        // 按网格里真实扫到的菜单渲染：有几个选项就几个按钮，每个打自己
-                        // 的 key（走 Session::permission_prompt，与总览页同一条路）。写死
-                        // 1/3 会漏掉「本次会话全部允许」这类选项，更要命的是提示并非总是
-                        // 三选（也有 1.Yes / 2.No 的），那时「拒绝」打出的 3 会落空或误选。
-                        let opts = self
-                            .sessions
-                            .get(session_ix)
-                            .and_then(|s| s.permission_prompt(cx))
-                            .map(|p| p.options)
-                            .unwrap_or_default();
-                        let has_opts = !opts.is_empty();
-
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child("快捷（写入活动 pane）"),
-                            )
-                            .children(opts.into_iter().enumerate().map(|(oi, opt)| {
-                                let key = opt.key.clone();
-                                let label = opt.button_label();
-                                let (btn_bg, btn_fg) = match opt.kind {
-                                    permission_menu::PermissionOptionKind::Allow => {
-                                        (green_tint, c_green)
-                                    }
-                                    permission_menu::PermissionOptionKind::Deny => (red_tint, c_red),
-                                    permission_menu::PermissionOptionKind::Other => (soft, fg),
-                                };
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "struct-perm-{session_ix}-{oi}"
-                                    )))
-                                    .px_2()
-                                    .py(px(6.))
-                                    .rounded_md()
-                                    .bg(btn_bg)
-                                    .text_xs()
-                                    .text_color(btn_fg)
-                                    .cursor_pointer()
-                                    .hover(|s| s.opacity(0.85))
-                                    .child(format!("{label}（{key} ↵）"))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.structure_inject_keys(
-                                                session_ix, &key, true, window, cx,
-                                            );
-                                        }),
-                                    )
-                            }))
-                            // 网格没扫到菜单时的兜底：Claude Code 常见布局 1=允许 / 3=拒绝
-                            .when(!has_opts, |col| {
-                                col.child(
-                                    div()
-                                        .id(("struct-approve", session_ix))
-                                        .px_2()
-                                        .py(px(6.))
-                                        .rounded_md()
-                                        .bg(green_tint)
-                                        .text_xs()
-                                        .text_color(c_green)
-                                        .cursor_pointer()
-                                        .hover(|s| s.opacity(0.85))
-                                        .child("批准（1 ↵）")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.structure_inject_keys(
-                                                    session_ix, "1", true, window, cx,
-                                                );
-                                            }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id(("struct-deny", session_ix))
-                                        .px_2()
-                                        .py(px(6.))
-                                        .rounded_md()
-                                        .bg(red_tint)
-                                        .text_xs()
-                                        .text_color(c_red)
-                                        .cursor_pointer()
-                                        .hover(|s| s.opacity(0.85))
-                                        .child("拒绝（3 ↵）")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.structure_inject_keys(
-                                                    session_ix, "3", true, window, cx,
-                                                );
-                                            }),
-                                        ),
-                                )
-                            })
-                    }))
-                    .when(state.is_none(), |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(
-                                    "暂无状态上报。用 smelt 新开 Claude 会话，并在设置 → Claude 集成里装好 hooks 后，这里会显示思考/工具/审批。",
-                                ),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// 结构面板快捷键注入活动 pane（数字菜单审批等）。
-    fn structure_inject_keys(
-        &mut self,
-        ix: usize,
-        key: &str,
-        with_enter: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if ix >= self.sessions.len() || key.is_empty() {
-            return;
-        }
-        let Some(pane) = self.sessions[ix].active_term().cloned() else {
-            return; // ACP 会话的审批是视图内结构化按钮，没有「注数字键」一说
-        };
-        let key = key.to_string();
-        pane.update(cx, |tv, cx| {
-            tv.type_text(&key, cx);
-            if with_enter {
-                tv.send_enter(cx);
-            }
-        });
-        cx.notify();
-    }
-
     /// 递归渲染分屏布局树：Leaf 渲染一个终端（活动 pane 描边 + 点击聚焦），
     /// Split 用 h/v_resizable 把子节点排成可拖拽的并排 / 堆叠。
     fn render_pane(&self, pane: &Pane, path: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -4354,1377 +4268,33 @@ impl Workspace {
     }
 }
 
-impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.active_session;
-        let can_close = self.sessions.len() > 1;
 
-        // Dock 角标 + 菜单栏图标角标/下拉菜单：同一份状态数据源（AgentStatus），
-        // 变了才调 Cocoa API 更新（避免每次 render 都发一遍）。
-        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
-        let attention_count =
-            statuses.iter().filter(|s| matches!(s, AgentStatus::WaitingApproval | AgentStatus::NeedsAttention)).count();
-        if self.dock_badge_count != Some(attention_count) {
-            self.dock_badge_count = Some(attention_count);
-            dock::set_badge(attention_count);
-            status_item::set_badge(attention_count);
-        }
-
-        // 菜单栏下拉菜单：按状态优先级排的会话列表（等审批 > 需要处理 > 运行中 >
-        // 刚完成 > 空闲），跟总览页卡片同一套排序/配色口径。
-        let mut menu_order: Vec<usize> = (0..self.sessions.len()).collect();
-        menu_order.sort_by_key(|&ix| match statuses[ix] {
-            AgentStatus::WaitingApproval => 0,
-            AgentStatus::NeedsAttention => 1,
-            AgentStatus::Running => 2,
-            AgentStatus::Done => 3,
-            AgentStatus::Idle => 4,
-        });
-        let menu_snapshot: Vec<status_item::SessionEntry> = menu_order
-            .into_iter()
-            .map(|ix| {
-                let (color, status_text) = match statuses[ix] {
-                    AgentStatus::WaitingApproval => ((0xef, 0x44, 0x44), "等你批准"),
-                    AgentStatus::NeedsAttention => ((0xf5, 0x9e, 0x0b), "需要处理"),
-                    AgentStatus::Running => ((0x4a, 0x9e, 0xff), "运行中"),
-                    AgentStatus::Done => ((0x22, 0xc5, 0x5e), "已完成"),
-                    AgentStatus::Idle => ((0x8b, 0x93, 0xa7), "空闲"),
-                };
-                status_item::SessionEntry { session_ix: ix, title: self.sessions[ix].title(cx), status_text, color }
-            })
-            .collect();
-        if self.status_menu_snapshot.as_ref() != Some(&menu_snapshot) {
-            status_item::update_menu(&menu_snapshot);
-            self.status_menu_snapshot = Some(menu_snapshot);
-        }
-
-        // 定时任务扫描：启动后约 2s 首扫，之后 30s 一轮；到期 → run_task。
-        if !self.task_schedule_started {
-            self.task_schedule_started = true;
-            cx.spawn_in(window, async move |this, cx| {
-                smol::Timer::after(std::time::Duration::from_secs(2)).await;
-                loop {
-                    let alive = this
-                        .update_in(cx, |this, window, cx| {
-                            this.tick_scheduled_tasks(window, cx);
-                        })
-                        .is_ok();
-                    if !alive {
-                        break;
-                    }
-                    smol::Timer::after(std::time::Duration::from_secs(30)).await;
-                }
-            })
-            .detach();
-        }
-
-        // 组件 toast：app 前台但没在看的 pane 有新通知时弹一条（右上角浮层，5s
-        // 自动消失）。完全切到别的 app 时不弹 toast，走 terminal_view.rs 里的系统
-        // 通知；正在看的那个 pane 直接吃掉待发消息，不弹——你自己看得见。
-        // 每帧都要来取（不管是否前台），否则待发消息会一直攒着，等哪天恰好前台又
-        // 不是当前 pane 时全冒出来。
-        // 同时捞「任务完成 → 自动续跑」挂旗（先收集再处理，避免 run 时改 sessions）。
-        let window_active = window.is_window_active();
-        let mut task_continues: Vec<(String, String)> = Vec::new();
-        for (ix, sess) in self.sessions.iter().enumerate() {
-            let leaves = sess.term_leaves();
-            let active_pane_id = sess.anchor_id();
-            for leaf in &leaves {
-                let (toast, cont_cwd) = leaf.update(cx, |t, _cx| {
-                    (t.take_pending_toast(), t.take_pending_task_continue())
-                });
-                if let Some(cwd) = cont_cwd {
-                    let sid = leaf.read(cx).session_id().to_string();
-                    task_continues.push((sid, cwd));
-                }
-                let Some(msg) = toast else { continue };
-                let is_current_view = ix == active && leaf.entity_id() == active_pane_id;
-                if window_active && !is_current_view {
-                    window.push_notification(Notification::info(msg), cx);
-                }
-            }
-        }
-        for (sid, cwd) in task_continues {
-            self.on_session_task_idle(&sid, &cwd, window, cx);
-        }
-
-        // 侧栏项目分组：后台刷新每个会话 cwd 的仓库身份（是不是 worktree + 分支名），
-        // 让 worktree 的会话能跟主仓库聚在一起显示、标签带上分支名。侧栏一直显示
-        // 全部项目，不像 git status/hotspot 那样只关心当前打开的那个，所以对
-        // self.sessions 里出现过的所有 cwd 都要探测，而不是只探测 self.cur()。
-        let repo_cwds: HashSet<String> = self.sessions.iter().filter_map(|s| s.cwd(cx)).collect();
-        for cwd in repo_cwds {
-            self.ensure_repo_info(cwd, cx);
-        }
-
-        // 各类后台操作（建/删 worktree、生成 commit message）失败时，错误信息暂存在
-        // 这个字段（后台任务里没有 Window，弹不了通知），render 一开始就取走弹成通知。
-        if let Some(msg) = self.background_error.take() {
-            window.push_notification(Notification::error(msg), cx);
-        }
-        // 状态通道：等批准 / 等输入 → gpui-component Notification
-        if let Some(pending) = cx.try_global::<PendingAgentNotifs>() {
-            let batch = std::mem::take(&mut *pending.0.lock().unwrap());
-            for (title, message, is_approval) in batch {
-                let n = if is_approval {
-                    Notification::warning(message).title(title)
-                } else {
-                    Notification::info(message).title(title)
-                };
-                window.push_notification(n, cx);
-            }
-        }
-
-        // Git 页：后台刷新改动列表 + 分支列表（git status/for-each-ref 慢，绝不在
-        // render 里同步跑）。
-        if self.view == MainView::Git {
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                self.ensure_git_watch(root.clone(), cx);
-                self.ensure_git_status(root.clone(), cx);
-                self.ensure_branches(root, cx);
-            }
-        }
-
-        // 热力图页：后台刷新改动热力（git log 扫历史更慢，同样绝不同步跑）。
-        if self.view == MainView::Hotspot {
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                self.ensure_hotspot(root, cx);
-            }
-        }
-
-        // 历史会话页：后台刷新当前项目的会话列表 / 记忆列表（看当前是哪个子页）。
-        if self.view == MainView::History {
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                match self.history_pane {
-                    HistoryPane::Sessions => self.ensure_session_list(root, cx),
-                    HistoryPane::Memories => self.ensure_memory_list(root, cx),
-                }
-            }
-        }
-
-        // 文件树页：后台刷新根目录 + 所有已展开目录的直接子项列表（fs::read_dir 绝不
-        // 在 render 里同步跑）。展开新目录时它会先落空，下一帧缓存到位后自动出现。
-        if self.view == MainView::Files {
-            // 搜索输入框懒创建（需要 window）：键入即 notify，触发文件名 + 内容搜索。
-            if self.file_filter.is_none() {
-                use gpui_component::input::{InputEvent, InputState};
-                let state =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
-                self._file_filter_sub =
-                    Some(cx.subscribe(&state, |_, _, ev: &InputEvent, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            cx.notify();
-                        }
-                    }));
-                self.file_filter = Some(state);
-            }
-            let query = self
-                .file_filter
-                .as_ref()
-                .map(|s| s.read(cx).value().trim().to_string())
-                .unwrap_or_default();
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                // 改动文件 M/A/D 标要用 git status；不强制用户先去过 Git 页才有数据，
-                // Files 页自己也确保一份缓存新鲜（ensure_git_status 内部已有 TTL）。
-                self.ensure_git_status(root.clone(), cx);
-                if query.is_empty() {
-                    // 无查询：正常树形浏览，清空上一次搜索结果。
-                    self.search_results = None;
-                    self.ensure_dir_listing(root.clone(), cx);
-                    for dir in self.expanded.clone() {
-                        self.ensure_dir_listing(dir, cx);
-                    }
-                } else {
-                    // 有查询：切换为搜索结果视图，后台遍历项目（query 未变则不重扫）。
-                    self.ensure_search(root, query, cx);
-                }
-            }
-        }
-
-        // 同步窗口背景外观：不透明度 / 模糊改了（可能来自 slider/取色器的无 window 回调）
-        // → 这里用 window 切换透明/模糊。仅在变化时调，避免每帧重复。
-        let want_bg = cx.global::<Appearance>().window_bg();
-        if self.applied_window_bg != Some(want_bg) {
-            window.set_background_appearance(want_bg);
-            self.applied_window_bg = Some(want_bg);
-        }
-
-        // 调试 HUD：开启时用 request_animation_frame 驱动连续渲染，测真实帧率
-        // （连续重绘会重跑整窗布局/绘制，diff 面板卡不卡直接反映到帧耗时上）。
-        if self.debug_hud {
-            let now = Instant::now();
-            if let Some(prev) = self.last_frame {
-                let dt = now.duration_since(prev).as_secs_f32();
-                if dt > 0.0 {
-                    let inst = 1.0 / dt;
-                    self.fps_ema =
-                        if self.fps_ema <= 0.0 { inst } else { self.fps_ema * 0.9 + inst * 0.1 };
-                }
-            }
-            self.last_frame = Some(now);
-            let mem_due = self
-                .debug_mem_sampled_at
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
-            if mem_due {
-                self.debug_mem_rss = mem_usage::current_rss_bytes();
-                self.debug_mem_sampled_at = Some(now);
-            }
-            window.request_animation_frame();
-        } else {
-            self.last_frame = None;
-            self.debug_mem_rss = None;
-            self.debug_mem_sampled_at = None;
-        }
-
-        // 主题色 token（跟随 gpui-component 主题，替代硬编码）
-        let (c_bg, c_border, c_popover, c_muted, c_fg) = {
+impl Workspace {
+    /// 舞台覆盖页（旧全屏页）：总览 / 任务 / 文件树 / Git / 热力图 / 历史。
+    /// 原主区 TabBar 分派的 match 各臂原样搬入，由 stage_override 驱动。
+    fn render_stage_override(
+        &mut self,
+        v: MainView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (c_border, c_muted, c_fg) = {
             let t = cx.theme();
-            (t.background, t.border, t.popover, t.muted_foreground, t.foreground)
+            (t.border, t.muted_foreground, t.foreground)
         };
-
-        // 会话标题（取活动终端的 cwd 末段）
-        let titles: Vec<(usize, String)> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(ix, s)| (ix, s.title(cx)))
-            .collect();
-        // 各会话状态（预算好，避免在侧栏 map 闭包里借用 cx）。与总览页共用同一套五态配色。
-        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
-        // 各会话的稳定身份（拖拽排序用：下标会因增删/排序失效，entity_id 不会）。
-        let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.anchor_id()).collect();
-        // 待处理通知总数（标题栏铃铛用）。
-        let notif_count = self.collect_notifications(cx).len();
-        // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
-        let active_title = titles
-            .iter()
-            .find(|(ix, _)| *ix == active)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
-
-        // 左侧会话侧栏：按会话的 cwd 分组成项目（保持出现顺序），
-        // 记住每组的完整 cwd 供「在该项目新建终端」用。分组算法见 project_groups。
-        let projects = self.project_groups(cx);
-
-        // 项目 → 会话 两级菜单（gpui-component Sidebar）。
-        // Sidebar 组件的回调是 Fn(&_, &mut Window, &mut App)，拿不到 Context<Self>，
-        // 故捕获 entity 句柄在闭包里 update 自身。
-        let this = cx.entity();
-        let menu_items: Vec<SidebarMenuItem> = projects
-            .iter()
-            .enumerate()
-            .map(|(pix, (name, cwd, ixs))| {
-                let sess_items: Vec<SidebarMenuItem> = ixs
-                    .iter()
-                    .map(|&ix| {
-                        let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
-                        let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
-                        // 只在「非活动」会话上亮点：正在看的那个不提醒（但通知仍留着）。
-                        // 空闲不点，其余四态用与总览页一致的颜色，一眼区分等审批/需处理/运行中/已完成。
-                        let status_dot = (status != AgentStatus::Idle && ix != active)
-                            .then(|| status_color(status));
-                        let e_act = this.clone();
-                        let entity_id = entity_ids[ix];
-                        let drag_title: SharedString = title.clone().into();
-                        let e_drop = this.clone();
-                        let e_close = this.clone();
-                        let e_rename = this.clone();
-                        // 拖拽悬停指示：本行上/下边缘是否是当前插入位置（快照进 suffix
-                        // 闭包；hint 变化会 notify 重渲染，快照不会过期）。
-                        let hint_before = self.sess_drop_hint == Some((entity_id, true));
-                        let hint_after = self.sess_drop_hint == Some((entity_id, false));
-                        // 行图标跟建它时用的启动方式对齐（新建终端/Claude Code/Codex/
-                        // Copilot/ACP），跟「+」下拉菜单里的图标一一对应，见 LaunchKind。
-                        let row_icon = self.sessions[ix].row_icon(cx);
-                        // 会话内有分屏（>1 个 pane）时，展开出子行：一 pane 一行，各自标题 +
-                        // 状态点，点击直接切到该会话并聚焦该 pane。只有 1 个 pane 的会话
-                        // pane_items 为空，SidebarMenuItem 判定无 children 就不长出展开箭头，
-                        // 行为跟改动前完全一样。
-                        let pane_items: Vec<SidebarMenuItem> = if self.sessions[ix].pane_count() > 1 {
-                            let leaves = self.sessions[ix].term_leaves();
-                            let active_pane_id = self.sessions[ix].anchor_id();
-                            leaves
-                                .into_iter()
-                                .map(|view| {
-                                    let p_title = pane_title(&view, cx);
-                                    let p_status = pane_status(&view, cx);
-                                    let is_current_view =
-                                        ix == active && view.entity_id() == active_pane_id;
-                                    let p_dot = (p_status != AgentStatus::Idle && !is_current_view)
-                                        .then(|| status_color(p_status));
-                                    let e_pane_act = this.clone();
-                                    let e_pane_rename = this.clone();
-                                    let pane = view.clone();
-                                    let rename_pane = view.clone();
-                                    SidebarMenuItem::new(p_title)
-                                        .icon(IconName::SquareTerminal)
-                                        .active(is_current_view)
-                                        .on_click(move |_ev, window, cx| {
-                                            let pane = pane.clone();
-                                            e_pane_act.update(cx, |ws, cx| {
-                                                ws.activate_session_pane(ix, pane, window, cx)
-                                            });
-                                        })
-                                        // 分屏子行也能改名，写到 pane 自己的 custom_title，
-                                        // 不影响所属会话（父行）的名字。
-                                        .context_menu(move |menu, _window, _cx| {
-                                            let e_pane_rename = e_pane_rename.clone();
-                                            let rename_pane = rename_pane.clone();
-                                            let e_task = e_pane_rename.clone();
-                                            let task_pane = rename_pane.clone();
-                                            menu.item(PopupMenuItem::new("新建任务").on_click(
-                                                move |_ev, window, cx| {
-                                                    let pane = task_pane.clone();
-                                                    e_task.update(cx, |ws, cx| {
-                                                        ws.open_new_task_for_terminal(
-                                                            &pane, window, cx,
-                                                        );
-                                                    });
-                                                },
-                                            ))
-                                            .item(PopupMenuItem::new("重命名").on_click(
-                                                move |_ev, window, cx| {
-                                                    let target =
-                                                        RenameTarget::Pane(rename_pane.clone());
-                                                    e_pane_rename.update(cx, |ws, cx| {
-                                                        ws.start_rename(target, window, cx)
-                                                    });
-                                                },
-                                            ))
-                                        })
-                                        .suffix(move |_w, _cx| {
-                                            div().children(
-                                                p_dot.map(|c| div().size_2().rounded_full().bg(c)),
-                                            )
-                                        })
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-                        let item = SidebarMenuItem::new(title)
-                            .icon(row_icon)
-                            .active(ix == active)
-                            // 分屏子行第一次出现（1 pane → >1 pane）时默认展开：SidebarMenuItem
-                            // 内部用 window 按 id 记的持久 open 状态，default_open 只在该 id
-                            // 首次创建（也就是 is_submenu 第一次为 true）时生效，之后用户手动
-                            // 收起会一直记住，不会被这里重置。
-                            .default_open(true)
-                            .children(pane_items)
-                            .on_click(move |_ev, window, cx| {
-                                e_act.update(cx, |ws, cx| ws.activate(ix, window, cx));
-                            })
-                            .context_menu(move |menu, _window, _cx| {
-                                let e_rename = e_rename.clone();
-                                let e_task = e_rename.clone();
-                                let sess_ix = ix;
-                                menu.item(PopupMenuItem::new("新建任务").on_click(
-                                    move |_ev, window, cx| {
-                                        e_task.update(cx, |ws, cx| {
-                                            if let Some(pane) = ws
-                                                .sessions
-                                                .get(sess_ix)
-                                                .and_then(|s| s.active_term().cloned())
-                                            {
-                                                ws.open_new_task_for_terminal(&pane, window, cx);
-                                            }
-                                        });
-                                    },
-                                ))
-                                .item(PopupMenuItem::new("重命名").on_click(
-                                    move |_ev, window, cx| {
-                                        e_rename.update(cx, |ws, cx| {
-                                            ws.start_rename(RenameTarget::Session(ix), window, cx)
-                                        });
-                                    },
-                                ))
-                            })
-                            // suffix：拖拽手柄（项目内排序）+ 状态点 + 关闭按钮。
-                            .suffix(move |_w, cx| {
-                                let e_close = e_close.clone();
-                                let e_drop_before = e_drop.clone();
-                                let e_drop_after = e_drop.clone();
-                                let e_clear = e_drop.clone();
-                                let drag_title = drag_title.clone();
-                                // 拖拽进行中才渲染整行 drop 接收层：suffix 位于行右端，
-                                // 用负 left 往左铺满整行（超出部分被行容器裁掉），上半段
-                                // 插到目标前、下半段插到目标后。平时不渲染，不挡点击。
-                                let dragging = cx.has_active_drag();
-                                // 插入位置指示条：淡入 + 从左展开的动画"插槽"。由
-                                // on_drag_move 维护的 hint 状态驱动，不用 drag_over 样式
-                                //（样式刷新是瞬时的，做不了出现动画）。
-                                let make_hint = move |before: bool, e_hint: Entity<Workspace>| {
-                                    move |ev: &DragMoveEvent<SessionDrag>, _w: &mut Window, cx: &mut App| {
-                                        let inside = ev.bounds.contains(&ev.event.position);
-                                        e_hint.update(cx, |ws, cx| {
-                                            let this_hint = Some((entity_id, before));
-                                            if inside && ws.sess_drop_hint != this_hint {
-                                                ws.sess_drop_hint = this_hint;
-                                                cx.notify();
-                                            } else if !inside && ws.sess_drop_hint == this_hint {
-                                                ws.sess_drop_hint = None;
-                                                cx.notify();
-                                            }
-                                        });
-                                    }
-                                };
-                                let indicator = |anim_id: (&'static str, usize), at_top: bool| {
-                                    div()
-                                        .absolute()
-                                        .left(px(4.))
-                                        .h(px(5.))
-                                        .rounded(px(2.5))
-                                        .bg(rgb(0x4a9eff))
-                                        .map(|d| if at_top { d.top(px(2.)) } else { d.bottom(px(2.)) })
-                                        .with_animation(
-                                            anim_id,
-                                            Animation::new(std::time::Duration::from_millis(160))
-                                                .with_easing(ease_out_quint()),
-                                            |this, delta| {
-                                                this.opacity(0.4 + 0.6 * delta).w(relative(delta))
-                                            },
-                                        )
-                                };
-                                h_flex()
-                                    .relative()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        // 拖拽手柄：不露图标，留一块看不见但比原 12px 图标明显更大的
-                                        // 抓取区（原图标太小不好点住）；按住这里拖拽排序，行内其余
-                                        // 点击（切换会话/关闭）走各自正常逻辑，互不影响。
-                                        div()
-                                            .id(("sess-drag", ix))
-                                            .w(px(28.))
-                                            .h(px(20.))
-                                            .cursor_grab()
-                                            .on_drag(
-                                                SessionDrag { id: entity_id, title: drag_title },
-                                                move |drag, _, _, cx| {
-                                                    // 起拖先清掉上次拖拽残留的指示位置
-                                                    e_clear.update(cx, |ws, _| ws.sess_drop_hint = None);
-                                                    cx.new(|_| drag.clone())
-                                                },
-                                            ),
-                                    )
-                                    .children(
-                                        status_dot
-                                            .map(|c| div().size_2().rounded_full().bg(c)),
-                                    )
-                                    .children(can_close.then(|| {
-                                        Button::new(("close-session", ix))
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(IconName::CircleX)
-                                            .on_click(move |_ev, _w, cx| {
-                                                // 别把点击冒泡成「切换到该会话」
-                                                cx.stop_propagation();
-                                                e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
-                                            })
-                                    }))
-                                    .when(dragging, |this| {
-                                        this.child(
-                                            div()
-                                                .absolute()
-                                                .top(px(-6.))
-                                                .bottom(px(-6.))
-                                                .left(px(-1000.))
-                                                .right(px(-8.))
-                                                .child(
-                                                    div()
-                                                        .id(("sess-drop-before", ix))
-                                                        .absolute()
-                                                        .top_0()
-                                                        .left_0()
-                                                        .right_0()
-                                                        .h_1_2()
-                                                        .on_drag_move(make_hint(true, e_drop_before.clone()))
-                                                        .on_drop(move |drag: &SessionDrag, _window, cx| {
-                                                            let dragged = drag.id;
-                                                            e_drop_before.update(cx, |ws, cx| {
-                                                                ws.sess_drop_hint = None;
-                                                                ws.move_session_near(dragged, entity_id, true, cx)
-                                                            });
-                                                        }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id(("sess-drop-after", ix))
-                                                        .absolute()
-                                                        .bottom_0()
-                                                        .left_0()
-                                                        .right_0()
-                                                        .h_1_2()
-                                                        .on_drag_move(make_hint(false, e_drop_after.clone()))
-                                                        .on_drop(move |drag: &SessionDrag, _window, cx| {
-                                                            let dragged = drag.id;
-                                                            e_drop_after.update(cx, |ws, cx| {
-                                                                ws.sess_drop_hint = None;
-                                                                ws.move_session_near(dragged, entity_id, false, cx)
-                                                            });
-                                                        }),
-                                                )
-                                                .when(hint_before, |this| {
-                                                    this.child(indicator(("sess-ind-b", ix), true))
-                                                })
-                                                .when(hint_after, |this| {
-                                                    this.child(indicator(("sess-ind-a", ix), false))
-                                                }),
-                                        )
-                                    })
-                            });
-                        item
-                    })
-                    .collect();
-                // 项目行右侧「+」：点击弹出下拉菜单（新建终端 / Claude Code / Codex）。
-                // 用 gpui-component 的 DropdownMenu 真浮层，不再用 hover 状态机模拟——
-                // hover 版鼠标移向菜单项途中就会被延时收起，菜单项根本点不到。
-                let e_new = this.clone();
-                let e_proj_drop = this.clone();
-                let project_name: SharedString = name.clone().into();
-                let new_cwd = cwd.clone();
-                let is_scratch_group = scratch_dir().as_deref() == Some(cwd.as_str());
-                // worktree 相关：本组是不是 worktree 检出（决定右键菜单要不要露出「删除
-                // Worktree」）、给「新建 Worktree」弹窗用的仓库名（就算本组自己就是
-                // worktree，也要用仓库本名而不是「仓库名 · 分支名」这个复合展示名）、
-                // 以及删除时 `git worktree remove` 要从哪个稳定目录发起。
-                let repo_info_here = self.repo_info.get(cwd.as_str()).and_then(|(_, i)| i.clone());
-                let is_worktree_group = repo_info_here.as_ref().is_some_and(|i| i.is_worktree());
-                let repo_label = repo_info_here
-                    .as_ref()
-                    .and_then(|i| repo_label_from_common_dir(&i.common_dir))
-                    .unwrap_or_else(|| project_name_for_cwd(&cwd));
-                let worktree_main_root = repo_info_here
-                    .as_ref()
-                    .and_then(|i| main_repo_root_from_common_dir(&i.common_dir));
-                let worktree_branch =
-                    repo_info_here.as_ref().map(|i| i.branch.clone()).unwrap_or_default();
-                // 拖拽悬停指示：本项目行是否是当前插入位置。
-                let proj_hinted = self.proj_drop_hint.as_deref() == Some(name.as_str());
-                SidebarMenuItem::new(name.clone())
-                    .icon(if is_scratch_group { IconName::SquareTerminal } else { IconName::Folder })
-                    .default_open(true)
-                    .click_to_toggle(true)
-                    .suffix(move |_w, cx| {
-                        let e_new = e_new.clone();
-                        let e_proj_drop = e_proj_drop.clone();
-                        let project_name = project_name.clone();
-                        let cwd = new_cwd.clone();
-                        let repo_label = repo_label.clone();
-                        let dragging = cx.has_active_drag();
-                        h_flex()
-                            .relative()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                // 拖拽手柄：项目分组之间排序。不露图标，留一块看不见但比原 12px
-                                // 图标明显更大的抓取区，跟「+」下拉按钮各自独立不冲突。
-                                div()
-                                    .id(("project-drag", pix))
-                                    .w(px(28.))
-                                    .h(px(20.))
-                                    .cursor_grab()
-                                    .on_drag(ProjectDrag { name: project_name.clone() }, {
-                                        let e_clear = e_proj_drop.clone();
-                                        move |drag, _, _, cx| {
-                                            // 起拖先清掉上次拖拽残留的指示位置
-                                            e_clear.update(cx, |ws, _| ws.proj_drop_hint = None);
-                                            cx.new(|_| drag.clone())
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new(("new-in-project", pix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Plus)
-                                    .dropdown_menu(move |menu, _window, cx| {
-                                        let raw_cwd = cwd.clone();
-                                        let repo_label = repo_label.clone();
-                                        let e_worktree = e_new.clone();
-                                        let cwd = (!cwd.is_empty()).then(|| cwd.clone());
-                                        let cwd_new = cwd.clone();
-                                        let e_term = e_new.clone();
-                                        let entries = active_launch_entries(cx);
-                                        let mut menu = menu.item(
-                                            PopupMenuItem::new("新建终端")
-                                                .icon(IconName::SquareTerminal)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let cwd = cwd_new.clone();
-                                                    e_term.update(cx, |ws, cx| ws.add_session(cwd, cx));
-                                                }),
-                                        );
-                                        for entry in entries {
-                                            let label = entry.label;
-                                            let command = entry.command;
-                                            let cwd_launch = cwd.clone();
-                                            let e_launch = e_new.clone();
-                                            let icon = icon_for_launch_command(&command);
-                                            menu = menu.item(
-                                                PopupMenuItem::new(label.clone())
-                                                    .icon(icon)
-                                                    .on_click(move |_ev, _window, cx| {
-                                                        let cwd = cwd_launch.clone();
-                                                        let cmd = command.clone();
-                                                        let name = label.clone();
-                                                        e_launch.update(cx, |ws, cx| {
-                                                            ws.add_session_with_launch(
-                                                                cwd,
-                                                                Some(cmd.as_str()),
-                                                                Some(name.as_str()),
-                                                                cx,
-                                                            );
-                                                        });
-                                                    }),
-                                            );
-                                        }
-                                        // ACP 第二通道：结构化消息流 + 原生审批按钮
-                                        // （区别于上面走 PTY 的快捷启动）。
-                                        let e_acp = e_new.clone();
-                                        let cwd_acp = cwd.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new("Claude 消息流")
-                                                .icon(IconName::Bot)
-                                                .on_click(move |_ev, window, cx| {
-                                                    let cwd = cwd_acp.clone();
-                                                    e_acp.update(cx, |ws, cx| {
-                                                        ws.add_acp_session(cwd, window, cx);
-                                                    });
-                                                }),
-                                        );
-                                        // 临时终端（$HOME）不是真项目，建不了 worktree；空 cwd
-                                        // 同理（会话还没上报出目录）。
-                                        menu
-                                        .when(!is_scratch_group && !raw_cwd.is_empty(), |menu| {
-                                            menu.separator().item(
-                                                PopupMenuItem::new("新建 Worktree…")
-                                                    .icon(IconName::Folder)
-                                                    .on_click(move |_ev, window, cx| {
-                                                        let repo_root = raw_cwd.clone();
-                                                        let repo_label = repo_label.clone();
-                                                        e_worktree.update(cx, |ws, cx| {
-                                                            ws.start_new_worktree(
-                                                                repo_root,
-                                                                repo_label,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        });
-                                                    }),
-                                            )
-                                        })
-                                    }),
-                            )
-                            .when(dragging, |this| {
-                                // 拖拽进行中的整行 drop 接收层，同会话行的做法。
-                                let e_hint = e_proj_drop.clone();
-                                let hint_name = project_name.clone();
-                                this.child(
-                                    div()
-                                        .id(("project-drop", pix))
-                                        .absolute()
-                                        .top(px(-6.))
-                                        .bottom(px(-6.))
-                                        .left(px(-1000.))
-                                        .right(px(-8.))
-                                        .on_drag_move(move |ev: &DragMoveEvent<ProjectDrag>, _w, cx| {
-                                            let inside = ev.bounds.contains(&ev.event.position);
-                                            let hint_name = hint_name.clone();
-                                            e_hint.update(cx, |ws, cx| {
-                                                if inside && ws.proj_drop_hint.as_ref() != Some(&hint_name) {
-                                                    ws.proj_drop_hint = Some(hint_name);
-                                                    cx.notify();
-                                                } else if !inside && ws.proj_drop_hint.as_ref() == Some(&hint_name) {
-                                                    ws.proj_drop_hint = None;
-                                                    cx.notify();
-                                                }
-                                            });
-                                        })
-                                        .on_drop(move |drag: &ProjectDrag, _window, cx| {
-                                            let from = drag.name.clone();
-                                            let to = project_name.clone();
-                                            e_proj_drop.update(cx, |ws, cx| {
-                                                ws.proj_drop_hint = None;
-                                                ws.move_project_near(from, to, cx)
-                                            });
-                                        })
-                                        .when(proj_hinted, |this| {
-                                            this.child(
-                                                div()
-                                                    .absolute()
-                                                    .top(px(2.))
-                                                    .left(px(4.))
-                                                    .h(px(5.))
-                                                    .rounded(px(2.5))
-                                                    .bg(rgb(0x4a9eff))
-                                                    .with_animation(
-                                                        ("proj-ind", pix),
-                                                        Animation::new(std::time::Duration::from_millis(160))
-                                                            .with_easing(ease_out_quint()),
-                                                        |this, delta| {
-                                                            this.opacity(0.4 + 0.6 * delta).w(relative(delta))
-                                                        },
-                                                    ),
-                                            )
-                                        }),
-                                )
-                            })
-                    })
-                    // 只有 worktree 分组才露出「删除 Worktree」——主仓库/临时终端那组
-                    // 没有对应的 git 操作。
-                    .when(is_worktree_group, |item| {
-                        let e_del = this.clone();
-                        let del_path = cwd.clone();
-                        let del_main_root = worktree_main_root.clone().unwrap_or_else(|| cwd.clone());
-                        let del_branch = worktree_branch.clone();
-                        item.context_menu(move |menu, _window, _cx| {
-                            let e_del = e_del.clone();
-                            let del_path = del_path.clone();
-                            let del_main_root = del_main_root.clone();
-                            let del_branch = del_branch.clone();
-                            menu.item(PopupMenuItem::new("删除 Worktree").icon(IconName::Delete).on_click(
-                                move |_ev, _window, cx| {
-                                    let del_path = del_path.clone();
-                                    let del_main_root = del_main_root.clone();
-                                    let del_branch = del_branch.clone();
-                                    e_del.update(cx, |ws, cx| {
-                                        ws.start_delete_worktree(del_path, del_main_root, del_branch, cx)
-                                    });
-                                },
-                            ))
-                        })
-                    })
-                    .children(sess_items)
-            })
-            .collect();
-
-        let overview_active = self.view == MainView::Overview;
-        let e_overview = this.clone();
-        // 总览行右侧的状态摘要：四态各自的会话数，零的不显示。侧栏折起来看不到会话行的
-        // 状态点，agent 一多也懒得逐行扫——「有几个在等我」应该在第一眼落点上直接答完。
-        // 顺序即紧急度（等审批 → 需处理 → 运行中 → 已完成），与 AgentStatus 声明序一致。
-        let status_counts: [(AgentStatus, usize); 4] = [
-            AgentStatus::WaitingApproval,
-            AgentStatus::NeedsAttention,
-            AgentStatus::Running,
-            AgentStatus::Done,
-        ]
-        .map(|st| (st, statuses.iter().filter(|s| **s == st).count()));
-
-        let sidebar_el = Sidebar::new("workspace-sidebar")
-            .collapsible(SidebarCollapsible::Offcanvas)
-            // 宽度交给外层 resizable_panel 控制（可拖），这里填满 panel。
-            // 品牌已移到顶部标题栏，侧栏直接从「会话」开始，避免重复。
-            .w(relative(1.))
-            // 总览：不挂在任何项目下的全局入口，跟当前在哪个项目无关，随时点得到。
-            // 新建终端挪到底部跟「打开项目」放一起了（见 footer），都是「开个新地方干活」
-            // 这一类操作，归在一块更好找。
-            //
-            // 放 header 而不是 `SidebarGroup::new("")`：SidebarGroup 无条件渲染分组标题行
-            // 且写死 h_8，空标题也照占 32px，「总览」上方会白白空出一大块。header 没有这个
-            // 标题行，左右内边距（px_3）跟下面的分组内容一致，视觉照样对齐。
-            .header(
-                // 外面包一层 w_full：header 容器是 h_flex，不撑宽的话「总览」行只有文字那么宽，
-                // hover 高亮和点击热区都缩成一小条，跟下面的会话行对不齐。
-                div().w_full().child(
-                SidebarMenu::new()
-                    .children([SidebarMenuItem::new("总览")
-                        .icon(IconName::LayoutDashboard)
-                        .active(overview_active)
-                        .on_click(move |_ev, window, cx| {
-                            e_overview.update(cx, |ws, cx| {
-                                ws.view = MainView::Overview;
-                                ws.refresh_git(cx); // 进总览 → 后台刷新 git
-                                cx.notify();
-                            });
-                            // 总览页没有可聚焦元素，focus 显式认领到根节点，
-                            // 不然 Cmd+Shift+F 等全局快捷键在这页会收不到事件。
-                            let h = e_overview.read(cx).focus_handle.clone();
-                            window.focus(&h, cx);
-                        })
-                        .suffix(move |_w, cx: &mut App| {
-                            let muted = cx.theme().muted_foreground;
-                            h_flex().gap_2().items_center().children(
-                                status_counts.into_iter().filter(|(_, n)| *n > 0).map(
-                                    |(st, n)| {
-                                        h_flex()
-                                            .gap_1()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .size_2()
-                                                    .rounded_full()
-                                                    .bg(status_color(st)),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(n.to_string()),
-                                            )
-                                    },
-                                ),
-                            )
-                        })])
-                    .render("sidebar-overview", window, cx),
-                ),
-            )
-            .child({
-                // 侧栏「任务」：任务总览入口 + 执行中快捷项（新建在总览页顶栏 / 终端右键）
-                let e_task = this.clone();
-                let tasks_active = self.view == MainView::Tasks;
-                let mut task_items: Vec<SidebarMenuItem> = Vec::new();
-                {
-                    let e = e_task.clone();
-                    let e2 = e_task.clone();
-                    task_items.push(
-                        SidebarMenuItem::new("任务总览")
-                            .icon(IconName::Bot)
-                            .active(tasks_active)
-                            .on_click(move |_ev, window, cx| {
-                                e.update(cx, |ws, cx| {
-                                    ws.view = MainView::Tasks;
-                                    cx.notify();
-                                });
-                                let h = e2.read(cx).focus_handle.clone();
-                                window.focus(&h, cx);
-                            }),
-                    );
-                }
-                let mut listed = tasks::TaskStore::load().tasks;
-                listed.retain(|t| t.column.is_active());
-                listed.sort_by_key(|t| t.column.sidebar_rank());
-                for t in listed.into_iter().take(12) {
-                    let tid = t.id.clone();
-                    let e = e_task.clone();
-                    let e2 = e_task.clone();
-                    let title = t.title.clone();
-                    let st_color = rgb(t.column.color());
-                    let selected = self.task_selected.as_deref() == Some(tid.as_str())
-                        && self.view == MainView::Terminal;
-                    task_items.push(
-                        SidebarMenuItem::new(title)
-                            .icon(IconName::Bot)
-                            .active(selected)
-                            .on_click(move |_ev, window, cx| {
-                                let tid = tid.clone();
-                                e.update(cx, |ws, cx| {
-                                    ws.focus_or_run_task(&tid, window, cx);
-                                });
-                                let h = e2.read(cx).focus_handle.clone();
-                                window.focus(&h, cx);
-                            })
-                            .suffix(move |_w, _cx: &mut App| {
-                                div()
-                                    .size_2()
-                                    .rounded_full()
-                                    .bg(st_color)
-                                    .into_any_element()
-                            }),
-                    );
-                }
-                SidebarGroup::new("任务").child(SidebarMenu::new().children(task_items))
-            })
-            .child(SidebarGroup::new("会话").child(SidebarMenu::new().children(menu_items)))
-            // 不用 SidebarFooter：它会给整块 footer 挂 hover 背景（sidebar_accent），
-            // 盖住按钮自己的 hover。直接放普通容器，让每个按钮各自 hover 可见。
-            .footer(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .gap_1()
-                    .px_2()
-                    .pt_2()
-                    .pb_1()
-                    .border_t_1()
-                    .border_color(rgba(0xffffff0d))
-                    // 「打开项目」+「新建终端」并排：都是"开个新地方干活"，归一块好找。
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_1()
-                            .child(open_project_button(cx))
-                            .child(scratch_terminal_button(cx)),
-                    )
-                    // 版本号居中：编译期取 Cargo.toml 的 version；点一下跳 GitHub 仓库。
-                    // 有新版本时缀红点（跟设置齿轮同一信号），点击改跳 Releases 看更新内容。
-                    .child({
-                        let has_update = self.update_available();
-                        let version: AnyElement = if has_update {
-                            Badge::new()
-                                .dot()
-                                .child(concat!("v", env!("CARGO_PKG_VERSION")))
-                                .into_any_element()
-                        } else {
-                            concat!("v", env!("CARGO_PKG_VERSION")).into_any_element()
-                        };
-                        div()
-                            .id("version-github-link")
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|s| s.text_color(cx.theme().foreground))
-                            .child(version)
-                            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-                                cx.open_url(if has_update {
-                                    "https://github.com/smelt-ai/smelt/releases"
-                                } else {
-                                    "https://github.com/smelt-ai/smelt"
-                                });
-                            })
-                    }),
-            );
-
-        // 主内容：有会话就渲染当前会话的分屏布局树 + 可选右侧结构面板。
-        // 需 .flex()，否则单 pane 的叶子 flex_1 不生效、塌缩到内容高度（边框不到底）。
-        let content = if self.sessions.get(self.active_session).is_some() {
-            let show_struct = cx
-                .try_global::<settings::AgentUiConfig>()
-                .map(|c| c.show_structure_panel)
-                .unwrap_or(true);
-            let mut row = div()
+        let _ = (c_border, c_muted, c_fg);
+        match v {
+            MainView::Overview => self.render_overview(window, cx).into_any_element(),
+            // 只出详情：对应的列表/树在右侧停靠面板里常驻，舞台不再摆第二份
+            MainView::FileDetail => div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .flex()
-                        .child(match &self.sessions[self.active_session].kind {
-                            SessionKind::Term { .. } => self.render_pane(
-                                self.sessions[self.active_session]
-                                    .term_layout()
-                                    .expect("Term 会话必有 layout"),
-                                "pane",
-                                cx,
-                            ),
-                            // ACP 会话：整块主区就是消息流视图（无分屏树）。
-                            SessionKind::Acp(view) => view.clone().into_any_element(),
-                        }),
-                );
-            if show_struct {
-                row = row.child(self.render_agent_structure_panel(cx));
-            }
-            row
-        } else {
-            // 空状态：引导用户新建会话 / 打开项目。
-            let btn = |id: &'static str, label: &'static str| {
-                div()
-                    .id(id)
-                    .px_3()
-                    .py(px(6.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(c_border)
-                    .text_color(c_fg)
-                    .text_sm()
-                    .hover(|s| s.bg(c_border))
-                    .child(label.to_string())
-            };
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_4()
-                .child(Icon::new(IconName::SquareTerminal).size(px(40.)).text_color(c_muted))
-                .child(div().text_color(c_muted).child("还没有会话"))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(btn("empty-new", "+ 新建会话").on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _w, cx| this.new_tab(cx)),
-                        ))
-                        .child(btn("empty-open", "打开项目…").on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _w, cx| this.open_project(cx)),
-                        )),
-                )
-        };
-
-        // 命令面板弹层：搜索框 + 候选列表全部由 ListState 渲染。
-        let palette_overlay = self.palette.as_ref().map(|state| {
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .justify_center()
-                .pt(px(80.))
-                // 点背景空白处关闭面板
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
-                )
-                .child(
-                    div()
-                        // 点面板内部不冒泡到背景，避免误关
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .w(px(480.))
-                        .h(px(360.))
-                        .flex()
-                        .flex_col()
-                        .bg(c_popover)
-                        .border_1()
-                        .border_color(c_border)
-                        .rounded_lg()
-                        .shadow_lg()
-                        .child(List::new(state).search_placeholder("输入命令…")),
-                )
-        });
-
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(c_bg)
-            .font_family(terminal_view::font_family())
-            // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
-            // window 的 focus 兜底钉在这层，保证下面的全局 on_key_down 收得到事件。
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &Quit, _window, cx| {
-                this.show_quit_confirm = true;
-                cx.notify();
-            }))
-            // Cmd+, / 应用菜单「设置…」：跟齿轮图标共用同一个独立设置窗口。
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                if this.llm_inputs.is_none() {
-                    this.init_llm_inputs(window, cx);
-                }
-                // 不动 nonce：窗口已开着就保持用户当前所在页，只是把它提到前台；
-                // 但下次新开窗口得回到外观页，不能停在「检查更新…」跳过去的那页。
-                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
-                this.open_settings_window(cx);
-            }))
-            // Cmd+Shift+N：全局新建任务（侧栏任务列表 + 弹窗）。
-            .on_action(cx.listener(|this, _: &NewTask, window, cx| {
-                this.open_new_task_modal(window, cx);
-            }))
-            // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
-            .on_action(cx.listener(|this, _: &CheckForUpdate, window, cx| {
-                if this.llm_inputs.is_none() {
-                    this.init_llm_inputs(window, cx);
-                }
-                if !matches!(
-                    this.update_status,
-                    updater::UpdateStatus::Checking
-                        | updater::UpdateStatus::Downloading { .. }
-                        | updater::UpdateStatus::Installing { .. }
-                ) {
-                    this.check_for_update(false, cx);
-                }
-                this.settings_page_ix = SETTINGS_PAGE_UPDATE;
-                this.settings_page_nonce += 1;
-                this.open_settings_window(cx);
-            }))
-            // 应用菜单「反馈问题…」：跳 GitHub issue 模板选择页。
-            .on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
-                cx.open_url("https://github.com/smelt-ai/smelt/issues/new/choose");
-            }))
-            // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
-            .on_action(cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
-                this.send_open_file_selection(cx);
-            }))
-            // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+[ ] 切当前会话内的 pane /
-            // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                let ks = &ev.keystroke;
-                // 文件树键盘导航：搜索框 / 编辑器聚焦时不抢键。
-                if this.view == MainView::Files && !ks.modifiers.platform && !ks.modifiers.control {
-                    use gpui::Focusable;
-                    let search_focused = this.file_filter.as_ref().is_some_and(|s| {
-                        s.read(cx).focus_handle(cx).is_focused(window)
-                    });
-                    let editor_focused = this.open_file.as_ref().is_some_and(|of| {
-                        of.editor.read(cx).focus_handle(cx).is_focused(window)
-                    });
-                    if !search_focused && !editor_focused {
-                        match ks.key.as_str() {
-                            "up" => {
-                                this.file_tree_move_selection(-1, cx);
-                                return;
-                            }
-                            "down" => {
-                                this.file_tree_move_selection(1, cx);
-                                return;
-                            }
-                            "left" => {
-                                this.file_tree_key_left(cx);
-                                return;
-                            }
-                            "right" => {
-                                this.file_tree_key_right(window, cx);
-                                return;
-                            }
-                            "enter" => {
-                                this.file_tree_key_enter(window, cx);
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // Git 页 F7 / Shift+F7：在改动块之间跳（对齐 JetBrains 的 next/previous
-                // difference）。不带 Cmd，所以要赶在下面的 platform 判断之前处理。
-                if this.view == MainView::Git
-                    && this.git_tab == GitTab::Changes
-                    && ks.key == "f7"
-                    && !ks.modifiers.platform
-                {
-                    this.jump_hunk(!ks.modifiers.shift, cx);
-                    return;
-                }
-                if !ks.modifiers.platform {
-                    return;
-                }
-                match ks.key.as_str() {
-                    "k" => {
-                        if this.palette.is_some() {
-                            this.close_palette(window, cx);
-                        } else {
-                            this.open_palette(window, cx);
-                        }
-                    }
-                    "b" => {
-                        this.sidebar_open = !this.sidebar_open;
-                        cx.notify();
-                    }
-                    // 切当前会话内的活动 pane（分屏），不是切会话——切会话见下面的 Cmd+1~9。
-                    "[" => this.cycle_pane(-1, window, cx),
-                    "]" => this.cycle_pane(1, window, cx),
-                    // Cmd+1~9：直接跳到侧栏第 N 个会话（对齐 iTerm2），超出现有会话数就
-                    // 什么都不做。
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                        let n = ks.key.as_bytes()[0] - b'1';
-                        let ix = n as usize;
-                        if ix < this.sessions.len() {
-                            this.activate(ix, window, cx);
-                        }
-                    }
-                    // Cmd+D 竖切（右侧并排）/ Cmd+Shift+D 横切（下方堆叠）
-                    "d" => {
-                        let axis = if ks.modifiers.shift {
-                            Axis::Vertical
-                        } else {
-                            Axis::Horizontal
-                        };
-                        this.split_active(axis, cx);
-                    }
-                    // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）
-                    "w" => this.close_active(window, cx),
-                    // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
-                    // 视图时背着用户悄悄写盘）。
-                    "s" if this.view == MainView::Files => this.save_open_file(cx),
-                    // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
-                    "f" if ks.modifiers.shift => {
-                        this.debug_hud = !this.debug_hud;
-                        this.fps_ema = 0.0;
-                        this.last_frame = None;
-                        this.debug_mem_rss = None;
-                        this.debug_mem_sampled_at = None;
-                        cx.notify();
-                    }
-                    // Cmd+Q 退出交给应用菜单的 Quit action（全局绑定，见 main）
-                    _ => {}
-                }
-            }))
-            // 顶部集成标题栏：透明 + 红绿灯占位 + 可拖拽，替代割裂的系统灰条。
-            .child(
-                TitleBar::new().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    img(Arc::new(Image::from_bytes(
-                                        ImageFormat::Png,
-                                        include_bytes!("../../../assets/icon-1024.png").to_vec(),
-                                    )))
-                                    .w(px(16.))
-                                    .h(px(16.))
-                                    .rounded(px(4.)),
-                                )
-                                .child(div().text_sm().font_bold().child("smelt"))
-                                .child(div().text_sm().text_color(c_muted).child(active_title)),
-                        )
-                        // 右侧：铃铛（通知面板）+ 齿轮（外观设置）。stop_propagation 避免触发拖拽。
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_1()
-                                // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
-                                .pr_2()
-                                .child(
-                                    div()
-                                        .id("usage-entry")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child(Icon::new(IconName::ChartPie))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                this.open_usage_window(cx);
-                                            }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id("notif-bell")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        // 有待处理通知 → 铃铛变蓝
-                                        .text_color(if notif_count > 0 {
-                                            rgb(0x4a9eff).into()
-                                        } else {
-                                            c_muted
-                                        })
-                                        .hover(|s| s.bg(c_border))
-                                        .child(Icon::new(IconName::Bell))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                this.notifications_open = !this.notifications_open;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                )
-                                .child({
-                                    // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
-                                    // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
-                                    // 之前让整个图标变蓝，看着像常驻高亮状态，容易被当成卡住了。
-                                    let needs_attention =
-                                        self.update_available() || self.daemon_outdated == Some(true);
-                                    let gear: AnyElement = if needs_attention {
-                                        Badge::new().dot().child(Icon::new(IconName::Settings)).into_any_element()
-                                    } else {
-                                        Icon::new(IconName::Settings).into_any_element()
-                                    };
-                                    div()
-                                        .id("settings-gear")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child(gear)
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.check_daemon_outdated(cx);
-                                                if this.llm_inputs.is_none() {
-                                                    this.init_llm_inputs(window, cx);
-                                                }
-                                                // 同 OpenSettings：新开的窗口回到外观页。
-                                                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
-                                                this.open_settings_window(cx);
-                                            }),
-                                        )
-                                }),
-                        ),
-                ),
-            )
-            // 主体：左侧会话侧栏 + 右侧主区，占满标题栏以下的剩余高度。
-            .child(
-                div().flex_1().min_h_0().flex().child(
-                h_resizable("root-split")
-                    .with_state(&self.root_resize)
-                    // 会话侧栏：可拖拽宽度（160–420），Cmd+B 整体显隐
-                    .child(
-                        resizable_panel()
-                            .size(px(self.sidebar_w))
-                            .size_range(px(160.)..px(420.))
-                            .visible(self.sidebar_open)
-                            .child(sidebar_el),
-                    )
-                    // 主区：顶部视图切换 + 内容
-                    .child(resizable_panel().child(
-                        div()
-                            .flex_1()
-                            // min_w_0：主区在根 flex 行里默认 min-width:auto，会被最长终端行
-                            // 撑到不肯收缩，导致宽度被内容反向放大。归零后才能正常按剩余空间收缩。
-                            .min_w_0()
-                    .flex()
-                    .flex_col()
-                    // 会话视图 tab（终端/文件树/Git）——总览是全局视图，走侧栏入口，不在这排里；
-                    // 用量页已拆成独立窗口，不再是 self.view 的一种取值。
-                    .children((!matches!(self.view, MainView::Overview | MainView::Tasks))
-                        .then(|| {
-                        TabBar::new("main-view-tabs")
-                            .underline()
-                            // 左缩进 12px，与终端/文件内容左边基线对齐（不贴边）；
-                            // underline 变体的底边线是绝对满宽 div，不受此内边距影响。
-                            .pl(px(12.))
-                            .selected_index(match self.view {
-                                MainView::Terminal => 0,
-                                MainView::Files => 1,
-                                MainView::Git => 2,
-                                MainView::Hotspot => 3,
-                                _ => 4,
-                            })
-                            .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                                this.view = match *ix {
-                                    0 => MainView::Terminal,
-                                    1 => MainView::Files,
-                                    2 => MainView::Git,
-                                    3 => MainView::Hotspot,
-                                    _ => MainView::History,
-                                };
-                                // 切到非终端页面时把 focus 认领到根节点：这几页自己
-                                // 没有可聚焦元素，不然全局快捷键在这些页面会失灵。
-                                // 切回终端页要显式把 focus 还给当前活动 pane——TerminalView
-                                // 的首帧自动聚焦（did_focus）只在它第一次渲染时触发一次，
-                                // 从文件树/Git 页切回来时它早就渲染过了，不会再抢，不然
-                                // 焦点会一直留在根节点上，得手动点一下终端才能输入。
-                                if this.view != MainView::Terminal {
-                                    window.focus(&this.focus_handle, cx);
-                                } else {
-                                    this.focus_active(window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(Tab::new().label("终端"))
-                            .child(Tab::new().label("文件树"))
-                            .child(Tab::new().label("Git"))
-                            .child(Tab::new().label("热力图"))
-                            .child(Tab::new().label("历史会话"))
-                    }))
-                    .child(match self.view {
-                        MainView::Overview => self.render_overview(window, cx),
-                        MainView::Tasks => self.render_tasks_page(window, cx),
-                        MainView::Terminal => content,
+                .child(file_content_pane(&self.open_file, cx))
+                .into_any_element(),
+            MainView::DiffDetail => self.git_diff_only_pane(window, cx),
+            MainView::Tasks => self.render_tasks_page(window, cx).into_any_element(),
                         MainView::Files => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
                             // 有查询串 → 显示搜索结果；否则显示文件树。
@@ -5804,6 +4374,7 @@ impl Render for Workspace {
                                         )
                                         .child(resizable_panel().child(content)),
                                 )
+                                .into_any_element()
                         }
                         MainView::Git => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
@@ -5841,6 +4412,24 @@ impl Render for Workspace {
                                                 .child(label)
                                         },
                                     ))
+                                    // 热力图入口：原顶部 TabBar 撤掉后挂靠在 Git 页
+                                    // （同为「看仓库」维度的全屏视图）。
+                                    .child(
+                                        div()
+                                            .id("git-tab-hotspot")
+                                            .px_2()
+                                            .py(px(1.0))
+                                            .text_sm()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(muted)
+                                            .hover(|d| d.opacity(0.8))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.stage_override = Some(MainView::Hotspot);
+                                                cx.notify();
+                                            }))
+                                            .child("热力图"),
+                                    )
                             };
 
                             let body = match self.git_tab {
@@ -5984,14 +4573,14 @@ impl Render for Workspace {
                                 }
                             };
 
-                            v_flex().flex_1().min_h_0().child(sub_tabs).child(body)
+                            v_flex().flex_1().min_h_0().child(sub_tabs).child(body).into_any_element()
                         }
                         MainView::Hotspot => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
                             let data = cwd
                                 .as_ref()
                                 .and_then(|r| self.hotspot_data.get(r).map(|(_, d)| d.clone()));
-                            hotspot_view(cwd, data, cx)
+                            hotspot_view(cwd, data, cx).into_any_element()
                         }
                         MainView::History => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
@@ -6017,21 +4606,811 @@ impl Render for Workspace {
                                 self.memory_selected,
                                 cx,
                             )
+                            .into_any_element()
                         }
-                    }),
-                    )),
+        }
+    }
+}
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active_session;
+
+        // Dock 角标 + 菜单栏图标角标/下拉菜单：同一份状态数据源（AgentStatus），
+        // 变了才调 Cocoa API 更新（避免每次 render 都发一遍）。
+        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
+        let attention_count =
+            statuses.iter().filter(|s| matches!(s, AgentStatus::WaitingApproval | AgentStatus::NeedsAttention)).count();
+        if self.dock_badge_count != Some(attention_count) {
+            self.dock_badge_count = Some(attention_count);
+            dock::set_badge(attention_count);
+            status_item::set_badge(attention_count);
+        }
+
+        // 菜单栏下拉菜单：按状态优先级排的会话列表（等审批 > 需要处理 > 运行中 >
+        // 刚完成 > 空闲），跟总览页卡片同一套排序/配色口径。
+        let mut menu_order: Vec<usize> = (0..self.sessions.len()).collect();
+        menu_order.sort_by_key(|&ix| statuses[ix].rank());
+        let menu_snapshot: Vec<status_item::SessionEntry> = menu_order
+            .into_iter()
+            .map(|ix| {
+                let color = ui_theme::agent_status_rgb8(statuses[ix]);
+                let status_text = match statuses[ix] {
+                    AgentStatus::WaitingApproval => "等你批准",
+                    AgentStatus::NeedsAttention => "需要处理",
+                    AgentStatus::Running => "运行中",
+                    AgentStatus::Done => "已完成",
+                    AgentStatus::Idle => "空闲",
+                };
+                status_item::SessionEntry { session_ix: ix, title: self.sessions[ix].title(cx), status_text, color }
+            })
+            .collect();
+        if self.status_menu_snapshot.as_ref() != Some(&menu_snapshot) {
+            status_item::update_menu(&menu_snapshot);
+            self.status_menu_snapshot = Some(menu_snapshot);
+        }
+
+        // 定时任务扫描：启动后约 2s 首扫，之后 30s 一轮；到期 → run_task。
+        if !self.task_schedule_started {
+            self.task_schedule_started = true;
+            cx.spawn_in(window, async move |this, cx| {
+                smol::Timer::after(std::time::Duration::from_secs(2)).await;
+                loop {
+                    let alive = this
+                        .update_in(cx, |this, window, cx| {
+                            this.tick_scheduled_tasks(window, cx);
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                    smol::Timer::after(std::time::Duration::from_secs(30)).await;
+                }
+            })
+            .detach();
+        }
+
+        // 组件 toast：app 前台但没在看的 pane 有新通知时弹一条（右上角浮层，5s
+        // 自动消失）。完全切到别的 app 时不弹 toast，走 terminal_view.rs 里的系统
+        // 通知；正在看的那个 pane 直接吃掉待发消息，不弹——你自己看得见。
+        // 每帧都要来取（不管是否前台），否则待发消息会一直攒着，等哪天恰好前台又
+        // 不是当前 pane 时全冒出来。
+        // 同时捞「任务完成 → 自动续跑」挂旗（先收集再处理，避免 run 时改 sessions）。
+        let window_active = window.is_window_active();
+        let mut task_continues: Vec<(String, String)> = Vec::new();
+        for (ix, sess) in self.sessions.iter().enumerate() {
+            let leaves = sess.term_leaves();
+            let active_pane_id = sess.anchor_id();
+            for leaf in &leaves {
+                let (toast, cont_cwd) = leaf.update(cx, |t, _cx| {
+                    (t.take_pending_toast(), t.take_pending_task_continue())
+                });
+                if let Some(cwd) = cont_cwd {
+                    let sid = leaf.read(cx).session_id().to_string();
+                    task_continues.push((sid, cwd));
+                }
+                let Some(msg) = toast else { continue };
+                let is_current_view = ix == active && leaf.entity_id() == active_pane_id;
+                if window_active && !is_current_view {
+                    window.push_notification(Notification::info(msg), cx);
+                }
+            }
+        }
+        for (sid, cwd) in task_continues {
+            self.on_session_task_idle(&sid, &cwd, window, cx);
+        }
+
+        // 侧栏项目分组：后台刷新每个会话 cwd 的仓库身份（是不是 worktree + 分支名），
+        // 让 worktree 的会话能跟主仓库聚在一起显示、标签带上分支名。侧栏一直显示
+        // 全部项目，不像 git status/hotspot 那样只关心当前打开的那个，所以对
+        // self.sessions 里出现过的所有 cwd 都要探测，而不是只探测 self.cur()。
+        let repo_cwds: HashSet<String> = self.sessions.iter().filter_map(|s| s.cwd(cx)).collect();
+        for cwd in repo_cwds {
+            self.ensure_repo_info(cwd, cx);
+        }
+
+        // 各类后台操作（建/删 worktree、生成 commit message）失败时，错误信息暂存在
+        // 这个字段（后台任务里没有 Window，弹不了通知），render 一开始就取走弹成通知。
+        if let Some(msg) = self.background_error.take() {
+            window.push_notification(Notification::error(msg), cx);
+        }
+        // 状态通道：等批准 / 等输入 → gpui-component Notification
+        if let Some(pending) = cx.try_global::<PendingAgentNotifs>() {
+            let batch = std::mem::take(&mut *pending.0.lock().unwrap());
+            for (title, message, is_approval) in batch {
+                // 等批准类改由右上角阻塞 toast 展示（派生态，见 toast.rs），
+                // 这里不再重复弹组件通知，避免同屏双弹。
+                if is_approval {
+                    continue;
+                }
+                window.push_notification(Notification::info(message).title(title), cx);
+            }
+        }
+
+        // Git 页：后台刷新改动列表 + 分支列表（git status/for-each-ref 慢，绝不在
+        // render 里同步跑）。
+        if matches!(self.stage_override, Some(MainView::Git | MainView::DiffDetail))
+            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Git)
+        {
+            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                self.ensure_git_watch(root.clone(), cx);
+                self.ensure_git_status(root.clone(), cx);
+                self.ensure_branches(root, cx);
+            }
+        }
+
+        // 热力图页：后台刷新改动热力（git log 扫历史更慢，同样绝不同步跑）。
+        if self.stage_override == Some(MainView::Hotspot) {
+            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                self.ensure_hotspot(root, cx);
+            }
+        }
+
+        // 历史会话页：后台刷新当前项目的会话列表 / 记忆列表（看当前是哪个子页）。
+        if self.stage_override == Some(MainView::History) {
+            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                match self.history_pane {
+                    HistoryPane::Sessions => self.ensure_session_list(root, cx),
+                    HistoryPane::Memories => self.ensure_memory_list(root, cx),
+                }
+            }
+        }
+
+        // 文件树页：后台刷新根目录 + 所有已展开目录的直接子项列表（fs::read_dir 绝不
+        // 在 render 里同步跑）。展开新目录时它会先落空，下一帧缓存到位后自动出现。
+        if matches!(self.stage_override, Some(MainView::Files | MainView::FileDetail))
+            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
+        {
+            // 搜索输入框懒创建（需要 window）：键入即 notify，触发文件名 + 内容搜索。
+            if self.file_filter.is_none() {
+                use gpui_component::input::{InputEvent, InputState};
+                let state =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
+                self._file_filter_sub =
+                    Some(cx.subscribe(&state, |_, _, ev: &InputEvent, cx| {
+                        if matches!(ev, InputEvent::Change) {
+                            cx.notify();
+                        }
+                    }));
+                self.file_filter = Some(state);
+            }
+            let query = self
+                .file_filter
+                .as_ref()
+                .map(|s| s.read(cx).value().trim().to_string())
+                .unwrap_or_default();
+            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                // 改动文件 M/A/D 标要用 git status；不强制用户先去过 Git 页才有数据，
+                // Files 页自己也确保一份缓存新鲜（ensure_git_status 内部已有 TTL）。
+                self.ensure_git_status(root.clone(), cx);
+                if query.is_empty() {
+                    // 无查询：正常树形浏览，清空上一次搜索结果。
+                    self.search_results = None;
+                    self.ensure_dir_listing(root.clone(), cx);
+                    for dir in self.expanded.clone() {
+                        self.ensure_dir_listing(dir, cx);
+                    }
+                } else {
+                    // 有查询：切换为搜索结果视图，后台遍历项目（query 未变则不重扫）。
+                    self.ensure_search(root, query, cx);
+                }
+            }
+        }
+
+        // 同步窗口背景外观：不透明度 / 模糊改了（可能来自 slider/取色器的无 window 回调）
+        // → 这里用 window 切换透明/模糊。仅在变化时调，避免每帧重复。
+        let want_bg = cx.global::<Appearance>().window_bg();
+        if self.applied_window_bg != Some(want_bg) {
+            window.set_background_appearance(want_bg);
+            self.applied_window_bg = Some(want_bg);
+        }
+
+        // 调试 HUD：开启时用 request_animation_frame 驱动连续渲染，测真实帧率
+        // （连续重绘会重跑整窗布局/绘制，diff 面板卡不卡直接反映到帧耗时上）。
+        if self.debug_hud {
+            let now = Instant::now();
+            if let Some(prev) = self.last_frame {
+                let dt = now.duration_since(prev).as_secs_f32();
+                if dt > 0.0 {
+                    let inst = 1.0 / dt;
+                    self.fps_ema =
+                        if self.fps_ema <= 0.0 { inst } else { self.fps_ema * 0.9 + inst * 0.1 };
+                }
+            }
+            self.last_frame = Some(now);
+            let mem_due = self
+                .debug_mem_sampled_at
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
+            if mem_due {
+                self.debug_mem_rss = mem_usage::current_rss_bytes();
+                self.debug_mem_sampled_at = Some(now);
+            }
+            window.request_animation_frame();
+        } else {
+            self.last_frame = None;
+            self.debug_mem_rss = None;
+            self.debug_mem_sampled_at = None;
+        }
+
+        // 主题色 token（跟随 gpui-component 主题，替代硬编码）
+        let (c_bg, c_border, c_popover, c_muted, c_fg) = {
+            let t = cx.theme();
+            (t.background, t.border, t.popover, t.muted_foreground, t.foreground)
+        };
+
+        // 会话标题（取活动终端的 cwd 末段）
+        let titles: Vec<(usize, String)> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(ix, s)| (ix, s.title(cx)))
+            .collect();
+        // 待处理通知总数（标题栏铃铛用）。
+        let notif_count = self.collect_notifications(cx).len();
+        // 标题栏分支胶囊：当前项目的分支名（repo_info 缓存，拿不到不显示）。
+        let title_branch = self
+            .cur()
+            .and_then(|s| s.cwd(cx))
+            .and_then(|c| self.repo_info.get(c.as_str()).cloned())
+            .and_then(|(_, i)| i)
+            .map(|i| i.branch);
+        // 标题栏 agent 胶囊：当前 ACP agent 命令的展示名。
+        let acp_label = cx
+            .try_global::<settings::AgentUiConfig>()
+            .map(|c| acp_agent_label(&c.acp_cmd))
+            .unwrap_or_else(|| "agent".to_string());
+        // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
+        let active_title = titles
+            .iter()
+            .find(|(ix, _)| *ix == active)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_default();
+
+        // 会话列表：单列按项目上下分组（替代旧 gpui-component Sidebar 两级菜单；
+        // 设计稿的「rail + 列表」左右两列实测割裂，见 session_list.rs 文件头）。
+        let list_el = self.render_session_list(window, cx);
+        // inspector：56px 图标条常驻 + 344px 面板（Cmd+B / 图标条切换显隐）。
+        let inspector_rail_el = self.render_inspector_rail(cx);
+        // 提升到舞台的那个 tab 不再停靠一份（见 inspector_panel_promoted）。
+        let inspector_panel_el = (self.inspector_open && !self.inspector_panel_promoted())
+            .then(|| self.render_inspector_panel(window, cx));
+        // 底部状态栏 + 右上阻塞 toast。
+        let status_bar_el = self.render_status_bar(cx);
+        let toast_el = self.render_blocked_toasts(cx);
+
+        // ACP 冷恢复会话「上屏即续接」：挂在这里而不是只挂 activate()——冷启动
+        // 后停在哪个会话上，那个会话压根不会收到 activate 调用，只挂那边的话
+        // 「重开 GUI 后当前这个 ACP 会话仍要手点重新开始」。maybe_auto_resume
+        // 自带一次性闸门，每帧调无副作用。
+        if let Some(SessionKind::Acp(view)) =
+            self.sessions.get(self.active_session).map(|s| &s.kind)
+        {
+            let view = view.clone();
+            view.update(cx, |v, cx| v.maybe_auto_resume(window, cx));
+        }
+
+        // 主内容（会话舞台）：舞台头 + 当前会话（分屏树 / ACP 消息流）+ 终端底条。
+        // 需 .flex()，否则单 pane 的叶子 flex_1 不生效、塌缩到内容高度（边框不到底）。
+        // 旧右侧「结构面板」已被 inspector + 舞台头承接，不再渲染。
+        let content = if self.sessions.get(self.active_session).is_some() {
+            let stage_header = self.render_stage_header(cx);
+            let term_bar = self.render_terminal_status_bar(cx);
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(stage_header)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .child(match &self.sessions[self.active_session].kind {
+                            SessionKind::Term { .. } => self.render_pane(
+                                self.sessions[self.active_session]
+                                    .term_layout()
+                                    .expect("Term 会话必有 layout"),
+                                "pane",
+                                cx,
+                            ),
+                            // ACP 会话：整块主区就是消息流视图（无分屏树）。
+                            SessionKind::Acp(view) => view.clone().into_any_element(),
+                        }),
+                )
+                .children(term_bar)
+        } else {
+            // 空状态：引导用户新建会话 / 打开项目。
+            let btn = |id: &'static str, label: &'static str| {
+                div()
+                    .id(id)
+                    .px_3()
+                    .py(px(6.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(c_border)
+                    .text_color(c_fg)
+                    .text_sm()
+                    .hover(|s| s.bg(c_border))
+                    .child(label.to_string())
+            };
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .child(Icon::new(IconName::SquareTerminal).size(px(40.)).text_color(c_muted))
+                .child(div().text_color(c_muted).child("还没有会话"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(btn("empty-new", "+ 新建会话").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _w, cx| this.new_tab(cx)),
+                        ))
+                        .child(btn("empty-open", "打开项目…").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _w, cx| this.open_project(cx)),
+                        )),
+                )
+        };
+
+        // 命令面板弹层：搜索框 + 候选列表全部由 ListState 渲染。
+        let palette_overlay = self.palette.as_ref().map(|state| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .pt(px(80.))
+                // 点背景空白处关闭面板
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                )
+                .child(
+                    div()
+                        // 点面板内部不冒泡到背景，避免误关
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .w(px(480.))
+                        .h(px(360.))
+                        .flex()
+                        .flex_col()
+                        .bg(c_popover)
+                        .border_1()
+                        .border_color(c_border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .child(List::new(state).search_placeholder("输入命令…")),
+                )
+        });
+
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(c_bg)
+            .font_family(terminal_view::font_family())
+            // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
+            // window 的 focus 兜底钉在这层，保证下面的全局 on_key_down 收得到事件。
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &Quit, _window, cx| {
+                this.show_quit_confirm = true;
+                cx.notify();
+            }))
+            // Cmd+, / 应用菜单「设置…」：跟齿轮图标共用同一个独立设置窗口。
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                if this.llm_inputs.is_none() {
+                    this.init_llm_inputs(window, cx);
+                }
+                // 不动 nonce：窗口已开着就保持用户当前所在页，只是把它提到前台；
+                // 但下次新开窗口得回到外观页，不能停在「检查更新…」跳过去的那页。
+                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
+                this.open_settings_window(cx);
+            }))
+            // Cmd+Shift+N：全局新建任务（侧栏任务列表 + 弹窗）。
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| {
+                this.open_new_task_modal(window, cx);
+            }))
+            // 应用菜单「检查更新…」：顺手发起一次检查，再把设置窗口开到「更新」页看进度。
+            .on_action(cx.listener(|this, _: &CheckForUpdate, window, cx| {
+                if this.llm_inputs.is_none() {
+                    this.init_llm_inputs(window, cx);
+                }
+                if !matches!(
+                    this.update_status,
+                    updater::UpdateStatus::Checking
+                        | updater::UpdateStatus::Downloading { .. }
+                        | updater::UpdateStatus::Installing { .. }
+                ) {
+                    this.check_for_update(false, cx);
+                }
+                this.settings_page_ix = SETTINGS_PAGE_UPDATE;
+                this.settings_page_nonce += 1;
+                this.open_settings_window(cx);
+            }))
+            // 应用菜单「反馈问题…」：跳 GitHub issue 模板选择页。
+            .on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
+                cx.open_url("https://github.com/smelt-ai/smelt/issues/new/choose");
+            }))
+            // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
+            .on_action(cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
+                this.send_open_file_selection(cx);
+            }))
+            // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+[ ] 切当前会话内的 pane /
+            // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let ks = &ev.keystroke;
+                // 文件树键盘导航：搜索框 / 编辑器聚焦时不抢键。
+                if matches!(this.stage_override, Some(MainView::Files | MainView::FileDetail))
+                    && !ks.modifiers.platform && !ks.modifiers.control {
+                    use gpui::Focusable;
+                    let search_focused = this.file_filter.as_ref().is_some_and(|s| {
+                        s.read(cx).focus_handle(cx).is_focused(window)
+                    });
+                    let editor_focused = this.open_file.as_ref().is_some_and(|of| {
+                        of.editor.read(cx).focus_handle(cx).is_focused(window)
+                    });
+                    if !search_focused && !editor_focused {
+                        match ks.key.as_str() {
+                            "up" => {
+                                this.file_tree_move_selection(-1, cx);
+                                return;
+                            }
+                            "down" => {
+                                this.file_tree_move_selection(1, cx);
+                                return;
+                            }
+                            "left" => {
+                                this.file_tree_key_left(cx);
+                                return;
+                            }
+                            "right" => {
+                                this.file_tree_key_right(window, cx);
+                                return;
+                            }
+                            "enter" => {
+                                this.file_tree_key_enter(window, cx);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Git 页 F7 / Shift+F7：在改动块之间跳（对齐 JetBrains 的 next/previous
+                // difference）。不带 Cmd，所以要赶在下面的 platform 判断之前处理。
+                if matches!(this.stage_override, Some(MainView::Git | MainView::DiffDetail))
+                    && this.git_tab == GitTab::Changes
+                    && ks.key == "f7"
+                    && !ks.modifiers.platform
+                {
+                    this.jump_hunk(!ks.modifiers.shift, cx);
+                    return;
+                }
+                // Esc：收掉舞台上的全屏覆盖页，回到当前会话。弹层开着时不抢
+                // （弹层各自处理关闭）。
+                if ks.key == "escape"
+                    && this.stage_override.is_some()
+                    && this.palette.is_none()
+                    && this.rename_target.is_none()
+                    && !this.show_new_task_modal
+                    && !this.show_quit_confirm
+                    && this.delete_worktree_target.is_none()
+                {
+                    this.set_stage_override(None, window, cx);
+                    return;
+                }
+                if !ks.modifiers.platform {
+                    return;
+                }
+                match ks.key.as_str() {
+                    "k" => {
+                        if this.palette.is_some() {
+                            this.close_palette(window, cx);
+                        } else {
+                            this.open_palette(window, cx);
+                        }
+                    }
+                    // Cmd+B：inspector 面板显隐（旧语义是左侧栏；会话列表现在常驻）。
+                    "b" => {
+                        this.inspector_open = !this.inspector_open;
+                        cx.notify();
+                    }
+                    // 切当前会话内的活动 pane（分屏），不是切会话——切会话见下面的 Cmd+1~9。
+                    "[" => this.cycle_pane(-1, window, cx),
+                    "]" => this.cycle_pane(1, window, cx),
+                    // Cmd+1~9：跳到会话列表里第 N 个会话——按列表显示顺序（各项目
+                    // 分组依次铺平）数，所见即所得；超出会话数就什么都不做。
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                        let n = (ks.key.as_bytes()[0] - b'1') as usize;
+                        let visible: Vec<usize> = this
+                            .project_groups(cx)
+                            .into_iter()
+                            .flat_map(|(_, _, ixs)| ixs)
+                            .collect();
+                        if let Some(&ix) = visible.get(n) {
+                            this.activate(ix, window, cx);
+                        }
+                    }
+                    // Cmd+D 竖切（右侧并排）/ Cmd+Shift+D 横切（下方堆叠）
+                    "d" => {
+                        let axis = if ks.modifiers.shift {
+                            Axis::Vertical
+                        } else {
+                            Axis::Horizontal
+                        };
+                        this.split_active(axis, cx);
+                    }
+                    // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）
+                    "w" => this.close_active(window, cx),
+                    // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
+                    // 视图时背着用户悄悄写盘）。
+                    "s" if matches!(this.stage_override, Some(MainView::Files | MainView::FileDetail)) => {
+                        this.save_open_file(cx)
+                    }
+                    // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
+                    "f" if ks.modifiers.shift => {
+                        this.debug_hud = !this.debug_hud;
+                        this.fps_ema = 0.0;
+                        this.last_frame = None;
+                        this.debug_mem_rss = None;
+                        this.debug_mem_sampled_at = None;
+                        cx.notify();
+                    }
+                    // Cmd+Q 退出交给应用菜单的 Quit action（全局绑定，见 main）
+                    _ => {}
+                }
+            }))
+            // 顶部集成标题栏：透明 + 红绿灯占位 + 可拖拽，替代割裂的系统灰条。
+            .child(
+                TitleBar::new().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    img(Arc::new(Image::from_bytes(
+                                        ImageFormat::Png,
+                                        include_bytes!("../../../assets/icon-1024.png").to_vec(),
+                                    )))
+                                    .w(px(16.))
+                                    .h(px(16.))
+                                    .rounded(px(4.)),
+                                )
+                                .child(div().text_sm().font_bold().child("smelt"))
+                                .child(div().text_sm().text_color(c_muted).child(active_title))
+                                .children(title_branch.map(|b| {
+                                    // 分支胶囊：绿点 + 当前项目分支（repo_info 缓存）。
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .px_2()
+                                        .py(px(2.))
+                                        .rounded(px(6.))
+                                        .bg(rgb(ui_theme::BG_HOVER))
+                                        .border_1()
+                                        .border_color(rgb(ui_theme::BORDER_MID))
+                                        .text_xs()
+                                        .font_family("monospace")
+                                        .text_color(rgb(ui_theme::TEXT_MUTED))
+                                        .child(
+                                            div()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .bg(rgb(ui_theme::GREEN)),
+                                        )
+                                        .child(b)
+                                })),
+                        )
+                        // 右侧：铃铛（通知面板）+ 齿轮（外观设置）。stop_propagation 避免触发拖拽。
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_1()
+                                // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
+                                .pr_2()
+                                .child(
+                                    div()
+                                        .id("usage-entry")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(c_muted)
+                                        .hover(|s| s.bg(c_border))
+                                        .child(Icon::new(IconName::ChartPie))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _w, cx| {
+                                                cx.stop_propagation();
+                                                this.open_usage_window(cx);
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("notif-bell")
+                                        .relative()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(c_muted)
+                                        .hover(|s| s.bg(c_border))
+                                        .child(Icon::new(IconName::Bell))
+                                        // 待处理通知数：黄色角标（对齐设计稿）。
+                                        .when(notif_count > 0, |d| {
+                                            d.child(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(-3.))
+                                                    .right(px(-3.))
+                                                    .min_w(px(14.))
+                                                    .h(px(14.))
+                                                    .px(px(3.))
+                                                    .rounded(px(7.))
+                                                    .bg(rgb(ui_theme::YELLOW))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(9.))
+                                                    .font_semibold()
+                                                    .text_color(rgb(ui_theme::ON_ACCENT))
+                                                    .child(notif_count.to_string()),
+                                            )
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _w, cx| {
+                                                cx.stop_propagation();
+                                                this.notifications_open = !this.notifications_open;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    // agent 胶囊：紫点 + 当前 ACP agent 展示名，点击开
+                                    // 设置窗「Claude 集成」页（换 agent 命令的入口）。
+                                    div()
+                                        .id("agent-pill")
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .px_2()
+                                        .py(px(3.))
+                                        .rounded(px(6.))
+                                        .bg(rgb(ui_theme::BG_HOVER))
+                                        .border_1()
+                                        .border_color(rgb(ui_theme::BORDER_MID))
+                                        .cursor_pointer()
+                                        .hover(|s| s.border_color(rgb(ui_theme::BORDER_FOCUS)))
+                                        .text_xs()
+                                        .font_family("monospace")
+                                        .text_color(rgb(ui_theme::TEXT_MID))
+                                        .child(
+                                            div()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .bg(rgb(ui_theme::PURPLE)),
+                                        )
+                                        .child(acp_label.clone())
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                if this.llm_inputs.is_none() {
+                                                    this.init_llm_inputs(window, cx);
+                                                }
+                                                this.settings_page_ix = 3; // Claude 集成页
+                                                this.settings_page_nonce += 1;
+                                                this.open_settings_window(cx);
+                                            }),
+                                        ),
+                                )
+                                .child({
+                                    // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
+                                    // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
+                                    // 之前让整个图标变蓝，看着像常驻高亮状态，容易被当成卡住了。
+                                    let needs_attention =
+                                        self.update_available() || self.daemon_outdated == Some(true);
+                                    let gear: AnyElement = if needs_attention {
+                                        Badge::new().dot().child(Icon::new(IconName::Settings)).into_any_element()
+                                    } else {
+                                        Icon::new(IconName::Settings).into_any_element()
+                                    };
+                                    div()
+                                        .id("settings-gear")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(c_muted)
+                                        .hover(|s| s.bg(c_border))
+                                        .child(gear)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.check_daemon_outdated(cx);
+                                                if this.llm_inputs.is_none() {
+                                                    this.init_llm_inputs(window, cx);
+                                                }
+                                                // 同 OpenSettings：新开的窗口回到外观页。
+                                                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
+                                                this.open_settings_window(cx);
+                                            }),
+                                        )
+                                }),
+                        ),
                 ),
             )
+            // 主体：左侧会话侧栏 + 右侧主区，占满标题栏以下的剩余高度。
+            .child(
+                div().flex_1().min_h_0().flex().child(
+                div()
+                    .size_full()
+                    .flex()
+                    // 会话列表（280px，按项目分组）
+                    .child(list_el)
+                    // 主区：顶部视图切换 + 内容
+                    .child(
+                        div()
+                            .flex_1()
+                            // min_w_0：主区在根 flex 行里默认 min-width:auto，会被最长终端行
+                            // 撑到不肯收缩，导致宽度被内容反向放大。归零后才能正常按剩余空间收缩。
+                            .min_w_0()
+                    .flex()
+                    .flex_col()
+                    // 舞台：覆盖页（旧全屏页）优先，否则显示当前会话。
+                    // 覆盖页顶部带显式返回条——Esc 之外总得有个能点的出口。
+                    .child(match self.stage_override {
+                        Some(v) => v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.render_stage_back_bar(v, cx))
+                            .child(self.render_stage_override(v, window, cx))
+                            .into_any_element(),
+                        None => content.into_any_element(),
+                    }),
+                    )
+                    .children(inspector_panel_el)
+                    .child(inspector_rail_el),
+                ),
+            )
+            // 底部状态栏
+            .child(status_bar_el)
+            // 右上阻塞 toast（浮层，命令面板之下）
+            .children(toast_el)
             // 命令面板（最上层）
             .children(palette_overlay)
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
+            // 会话管理弹窗（设置页「更新」tab 点开）
+            .children(self.session_manager_open.then(|| self.render_session_manager(cx)))
             // 会话重命名拦截弹层
             .children(self.rename_target.is_some().then(|| self.render_rename_session(cx)))
             // 新建任务弹窗
             .children(self.show_new_task_modal.then(|| self.render_new_task_modal(cx)))
-            // 新建 Worktree 拦截弹层
-            .children(self.new_worktree_target.is_some().then(|| self.render_new_worktree_dialog(cx)))
             // 删除 Worktree 确认拦截弹层
             .children(self.delete_worktree_target.is_some().then(|| self.render_delete_worktree_confirm(cx)))
             .children(self.discard_hunk_target.is_some().then(|| self.render_discard_hunk_confirm(cx)))
@@ -6114,64 +5493,13 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
 
 
 
-/// 侧栏底部胶囊按钮：图标 + 文字，果冻感（tint 底 + 细白边 + hover 提亮），
-/// 与总览页设计语言一致。accent = 品牌蓝主按钮，否则中性次按钮。
-/// （组件 Button 的 ghost 在暗色下 hover 几乎不可见，这里自绘保证反馈明显。）
-fn tool_button(
-    id: &'static str,
-    icon: IconName,
-    label: &'static str,
-    accent: bool,
-    cx: &mut Context<Workspace>,
-    handler: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
-) -> Stateful<Div> {
-    let (fg, bg, bg_hover): (Hsla, Hsla, Hsla) = if accent {
-        (rgb(0x8fc7ff).into(), rgba(0x4a9eff24).into(), rgba(0x4a9eff40).into())
-    } else {
-        (
-            cx.theme().sidebar_foreground,
-            rgba(0xffffff0a).into(),
-            rgba(0xffffff1f).into(),
-        )
-    };
-    div()
-        .id(id)
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .py(px(5.))
-        .rounded_lg()
-        .bg(bg)
-        .border_1()
-        .border_color(rgba(0xffffff12))
-        .text_sm()
-        .text_color(fg)
-        .hover(move |s| s.bg(bg_hover))
-        .child(Icon::new(icon).size(px(14.)))
-        .child(label)
-        .on_click(cx.listener(move |this, _ev, window, cx| handler(this, window, cx)))
-}
-
-/// 「打开项目」按钮：弹选择框选目录，在其中开新标签。
-fn open_project_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    tool_button("open-project", IconName::Folder, "打开项目", true, cx, |this, _w, cx| {
-        this.open_project(cx)
-    })
-}
-
-/// 「新建终端」按钮：不用先选项目，直接落在 $HOME 开/切一个终端（原先是顶部
-/// 独立入口，挪到跟「打开项目」并排，都是"开个新地方干活"，归一块好找）。
-fn scratch_terminal_button(cx: &mut Context<Workspace>) -> Stateful<Div> {
-    tool_button(
-        "scratch-terminal",
-        IconName::SquareTerminal,
-        "新建终端",
-        false,
-        cx,
-        |this, window, cx| this.activate_or_new_scratch(window, cx),
-    )
+/// ACP 启动命令 → 标题栏胶囊的展示名（`bunx @scope/claude-agent-acp@0.59.0` →
+/// `claude-agent-acp`，`copilot --acp` → `copilot`）。与 acp_view 输入栏胶囊
+/// 同一套抠名逻辑；没有模型名数据源，不硬编。
+fn acp_agent_label(cmd: &str) -> String {
+    let tok = cmd.split_whitespace().rev().find(|t| !t.starts_with('-')).unwrap_or("agent");
+    let name = tok.rsplit('/').next().unwrap_or(tok);
+    name.split('@').find(|s| !s.is_empty()).unwrap_or(name).to_string()
 }
 
 /// 当前工作目录字符串。
@@ -6325,12 +5653,13 @@ fn main() {
             MenuItem::action("退出 Smelt", Quit),
         ])]);
 
-        // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）+ 明暗主题
-        // （默认深色，与终端配色一致；用户可在设置页切换，选择会持久化）。
+        // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
+        // 主题本版强制深色——设计稿只有深色方案；旧配置里可能存着 Light，
+        // 这里无条件 Dark（theme_mode 字段保留只为 serde 兼容，外观页开关已撤）。
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
-        Theme::change(appearance.theme_mode, None, cx);
-        terminal::set_dark_mode(appearance.theme_mode.is_dark());
+        Theme::change(ThemeMode::Dark, None, cx);
+        terminal::set_dark_mode(true);
         terminal_view::set_font_px(appearance.font_px);
         terminal_view::set_font_family(&appearance.font_family);
         cx.set_global(appearance);
@@ -6597,8 +5926,8 @@ fn main() {
                             let _ = ws.update(cx, |ws, cx| {
                                 if ix < ws.sessions.len() {
                                     ws.active_session = ix;
-                                    if ws.view == MainView::Overview {
-                                        ws.view = MainView::Terminal;
+                                    if ws.stage_override == Some(MainView::Overview) {
+                                        ws.stage_override = None;
                                     }
                                     ws.save_state(cx);
                                     cx.notify();

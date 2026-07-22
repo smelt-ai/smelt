@@ -5,6 +5,9 @@
 客户端可以是桌面浏览器、手机 H5、飞书机器人卡片等。  
 「完整终端画面」「状态元数据」「可写输入」是远程操作的**能力分层**；**xterm.js 只是其中一种呈现**，不是远程操作本身。
 
+> **产品主航道里的「手机与远程」见 [product-roadmap.md §6](product-roadmap.md)**（目标体验与交付切片）。  
+> 本文展开协议分层、网关契约与 phase 细节。
+
 配套：[collaboration.md](collaboration.md)、[state-channel-plan.md](state-channel-plan.md)。  
 其它 backlog 见 [roadmap.md](roadmap.md)。
 

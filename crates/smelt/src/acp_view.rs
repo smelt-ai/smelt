@@ -11,10 +11,11 @@ use gpui::{
     Window,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{h_flex, v_flex, ActiveTheme, Icon, IconName, StyledExt};
+use gpui_component::{h_flex, v_flex, ActiveTheme, StyledExt};
 
 use agent_client_protocol::schema::v1::{
-    PermissionOption, PermissionOptionKind, SessionId, ToolCallId, ToolCallStatus, ToolKind,
+    PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, SessionId, ToolCallId,
+    ToolCallStatus, ToolKind,
 };
 
 use crate::acp::{
@@ -22,6 +23,7 @@ use crate::acp::{
     ElicitationResponder, PermissionResponder,
 };
 use crate::terminal::{DaemonPhase, DaemonSessionState};
+use crate::ui_theme;
 
 /// 消息流里的一条。落盘持久化（见 main.rs 的 AcpSaved），进程重启 / 会话
 /// 「重新开始」都要保住历史，不能让 agent 一断线聊天记录就没了。
@@ -35,10 +37,25 @@ pub(crate) enum AcpEntry {
         title: String,
         kind: ToolKind,
         status: ToolCallStatus,
-        output: String,
+        /// 保留结构（不压扁成一行文本）——diff 要能逐行渲染红/绿，压扁了就
+        /// 回不去了。只存纯数据，不依赖 agent_client_protocol 的类型，落盘格式
+        /// 不跟协议版本绑死。
+        output: Vec<ToolOutputPart>,
     },
     /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
     Divider(String),
+}
+
+/// 工具调用的一段输出：纯文本，或者一份文件 diff。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ToolOutputPart {
+    Text(String),
+    Diff {
+        path: String,
+        /// 新文件没有旧内容。
+        old_text: Option<String>,
+        new_text: String,
+    },
 }
 
 /// 会话相位（UI 侧状态机；翻译成 DaemonPhase 进全局）。
@@ -57,6 +74,8 @@ enum AcpPhase {
 /// 待审批卡片：responder 是 Option 因为 select 消费所有权（从 &mut self take）。
 struct PermissionCard {
     question: String,
+    /// 关联的工具调用：消息流里有对应卡片时按钮内嵌进卡片底部，没有则独立渲染。
+    tool_call_id: ToolCallId,
     options: Vec<PermissionOption>,
     responder: Option<PermissionResponder>,
 }
@@ -102,6 +121,18 @@ pub struct AcpView {
     /// 吞掉不重复；等到 agent 给出实质响应/turn 收尾就清掉，之后的 UserChunk
     /// （只可能来自 replay）正常追加显示。
     awaiting_user_echo: bool,
+    /// 会话当前可用的命令数（输入框工具栏胶囊展示）；None = agent 没发过这个
+    /// 更新（不是「0 个」，是「不知道」，不该显示成 0）。
+    available_commands: Option<usize>,
+    /// agent 最近一次上报的任务计划（每次全量覆盖）。回合态：不落盘，
+    /// TurnEnded 保留最后一份供回看，「重新开始」清空。
+    plan: Option<Plan>,
+    /// PLAN 条折叠态（默认展开，跟设计稿一致）。
+    plan_collapsed: bool,
+    /// 冷恢复占位待自动续接：GUI 重启后第一次切到这个会话时自动 restart
+    /// （协议级 session/load 续接），免去手点「重新开始」。只消费一次——
+    /// 自动续接失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
+    auto_resume_pending: bool,
     scroll: gpui::ScrollHandle,
     focus_handle: FocusHandle,
     _input_sub: Option<gpui::Subscription>,
@@ -140,7 +171,11 @@ impl AcpView {
         entries: Vec<AcpEntry>,
         resume_session_id: Option<SessionId>,
     ) -> Self {
+        // 有旧 session id 的冷恢复占位才值得自动续接（没有 id 只能开全新会话，
+        // 丢 agent 侧上下文，留给用户手动决定）。先算，下面 struct 初始化会 move。
+        let auto_resume_pending = resume_session_id.is_some();
         Self {
+            auto_resume_pending,
             sid: format!("acp-{}", uuid::Uuid::new_v4()),
             cwd,
             entries,
@@ -154,6 +189,9 @@ impl AcpView {
             cmd,
             acp_session_id: resume_session_id,
             awaiting_user_echo: false,
+            available_commands: None,
+            plan: None,
+            plan_collapsed: false,
             scroll: gpui::ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             _input_sub: None,
@@ -166,8 +204,18 @@ impl AcpView {
     /// adapter 不支持该能力、或旧会话已失效，自动退回全新会话：本地历史保留在
     /// 分割线上方（`Ready{resumed:false}` 触发），不会丢。
     fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 用当前全局配置刷新命令，不死守创建时固化的旧值——「重新开始」的直觉
+        // 语义是「用现在认为对的命令再来一次」，不是「原样复刻可能早就被发现
+        // 有 bug、用户已经在设置页改掉的旧配置」。真实教训：默认命令曾经指向
+        // 一个有 zod 依赖 bug 的适配器版本，改了默认值后，已存在的旧会话点
+        // 「重新开始」却因为这里死守 self.cmd 而继续用旧版本，看起来像「修复
+        // 没生效」。
+        if let Some(cfg) = cx.try_global::<crate::settings::AgentUiConfig>() {
+            self.cmd = cfg.acp_cmd.clone();
+        }
         self.permission = None;
         self.elicitation = None;
+        self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
         self.completed_unread = false;
         self.phase = AcpPhase::Starting;
         self.init_input(window, cx);
@@ -179,6 +227,34 @@ impl AcpView {
         });
         self.attach_handle(handle, cx);
         cx.notify();
+    }
+
+    /// 舞台头状态胶囊用的相位文案 + 颜色。
+    ///
+    /// ACP 有自己的相位机，不能经 DaemonStates 那套五态绕一圈拿——`Starting`
+    /// 和 `Ended` 在映射里都会塌成「空闲」，于是「正在启动」的横幅底下顶着一个
+    /// 「空闲」胶囊，自相矛盾。
+    pub(crate) fn phase_label(&self) -> (&'static str, u32) {
+        match &self.phase {
+            AcpPhase::Starting => ("启动中", ui_theme::BLUE),
+            AcpPhase::Idle => ("空闲", ui_theme::TEXT_FAINT),
+            AcpPhase::Running => ("运行中", ui_theme::BLUE),
+            AcpPhase::AwaitingApproval => ("等你批准", ui_theme::YELLOW),
+            AcpPhase::AwaitingChoice => ("等你选择", ui_theme::YELLOW),
+            AcpPhase::Ended(_) => ("已结束", ui_theme::TEXT_FAINT),
+        }
+    }
+
+    /// 切到本会话时的自动续接：冷恢复占位（Ended + 有旧 session id）第一次被
+    /// 激活就 restart，像终端一样「点开就是活的」。只触发一次，见字段注释。
+    pub(crate) fn maybe_auto_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.auto_resume_pending {
+            return;
+        }
+        self.auto_resume_pending = false;
+        if matches!(self.phase, AcpPhase::Ended(_)) && self.handle.is_none() {
+            self.restart(window, cx);
+        }
     }
 
     fn init_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -304,6 +380,30 @@ impl AcpView {
         }
     }
 
+    /// 把一段文本塞进输入框并聚焦（SKILLS 面板点一条 skill 用）。
+    /// 不自动发送——skill 后面常还要补一句话，发不发由人定。
+    pub(crate) fn insert_prompt_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.input.clone() else { return };
+        input.update(cx, |s, cx| {
+            let cur = s.value().to_string();
+            let merged = if cur.trim().is_empty() {
+                format!("{text} ")
+            } else if cur.ends_with(' ') {
+                format!("{cur}{text} ")
+            } else {
+                format!("{cur} {text} ")
+            };
+            s.set_value(merged, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     /// 总览快捷回复直达（对齐终端会话的 send_key_to_session 语义）。
     pub fn send_prompt(&mut self, text: String, cx: &mut Context<Self>) {
         if text.trim().is_empty() {
@@ -343,14 +443,19 @@ impl AcpView {
 
     /// 事件应用：entries 合并 + phase 机 + 全局状态同步。
     fn apply_event(&mut self, ev: AcpEvent, cx: &mut Context<Self>) {
-        // 持久化要排除的高频事件（match 会消费 ev，得在此之前先记下来）。
-        let is_agent_chunk = matches!(ev, AcpEvent::AgentChunk { .. });
-        // 除 UserChunk/Status 外的任何事件都代表「已经过了等自己那条 prompt
-        // 回声的窗口」——agent 给出实质响应或者 turn 收尾，这轮回声不会再来了。
-        if !matches!(ev, AcpEvent::UserChunk(_) | AcpEvent::Status(_)) {
+        // 持久化要排除的事件（match 会消费 ev，得在此之前先记下来）：
+        // AgentChunk 是逐块流式增量，触发太密；Plan 本来就不落盘，触发没意义。
+        let skip_persist = matches!(ev, AcpEvent::AgentChunk { .. } | AcpEvent::Plan(_));
+        // 除 UserChunk/Status/AvailableCommands 外的任何事件都代表「已经过了
+        // 等自己那条 prompt 回声的窗口」——后两者是跟对话轮次推进无关的元数据
+        // 更新，agent 给出实质响应或者 turn 收尾才算真的翻篇。
+        if !matches!(ev, AcpEvent::UserChunk(_) | AcpEvent::Status(_) | AcpEvent::AvailableCommands(_)) {
             self.awaiting_user_echo = false;
         }
         match ev {
+            AcpEvent::AvailableCommands(n) => {
+                self.available_commands = Some(n);
+            }
             AcpEvent::Status(msg) => {
                 self.status_line = Some(msg);
             }
@@ -401,7 +506,7 @@ impl AcpView {
                     title: tc.title,
                     kind: tc.kind,
                     status: tc.status,
-                    output: tool_content_text(&tc.content),
+                    output: tool_content_parts(&tc.content),
                 });
                 self.phase = AcpPhase::Running;
             }
@@ -421,13 +526,19 @@ impl AcpView {
                         *status = s;
                     }
                     if let Some(c) = u.fields.content {
-                        *output = tool_content_text(&c);
+                        *output = tool_content_parts(&c);
                     }
                 }
             }
-            AcpEvent::Permission { question, pub_options, responder } => {
+            AcpEvent::Plan(p) => {
+                // 每次全量覆盖：协议约定 Plan 更新携带完整清单，不做增量合并。
+                self.plan = Some(p);
+                self.phase = AcpPhase::Running;
+            }
+            AcpEvent::Permission { question, tool_call_id, pub_options, responder } => {
                 self.permission = Some(PermissionCard {
                     question: question.clone(),
+                    tool_call_id,
                     options: pub_options,
                     responder: Some(responder),
                 });
@@ -482,7 +593,7 @@ impl AcpView {
         // 变成写盘风暴；完整文本在 TurnEnded 时已经在 self.entries 里了，那时存
         // 一次就够。真被强制退出打断在流式中间，最多丢当前这一轮还没打完的字，
         // 之前所有已完成的对话都在上一次 TurnEnded 落盘时保住了。
-        if !is_agent_chunk {
+        if !skip_persist {
             cx.emit(AcpViewEvent::Changed);
         }
         cx.notify();
@@ -610,6 +721,189 @@ impl AcpView {
         cx.notify();
     }
 
+    /// 输入栏 agent 胶囊的展示名：从启动命令里抠个可读的包名/程序名
+    /// （`bunx @scope/claude-agent-acp@0.59.0` → `claude-agent-acp`，
+    /// `copilot --acp` → `copilot`）。没有模型名数据源，不硬编。
+    fn agent_label(&self) -> String {
+        let tok = self
+            .cmd
+            .split_whitespace()
+            .rev()
+            .find(|t| !t.starts_with('-'))
+            .unwrap_or("agent");
+        let name = tok.rsplit('/').next().unwrap_or(tok);
+        name.split('@').find(|s| !s.is_empty()).unwrap_or(name).to_string()
+    }
+
+    /// PLAN 条：agent 上报的任务计划 → 消息流上方的可折叠进度条。
+    /// 折叠 = 一行摘要 + 进度条；展开 = 三态步骤清单（对齐设计稿）。
+    /// 只借 `&Context`（listener 不需要可变借用），render 里跟 theme 引用共存。
+    fn render_plan_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let plan = self.plan.as_ref()?;
+        let total = plan.entries.len();
+        if total == 0 {
+            return None;
+        }
+        let done = plan
+            .entries
+            .iter()
+            .filter(|e| matches!(e.status, PlanEntryStatus::Completed))
+            .count();
+        let in_progress = plan
+            .entries
+            .iter()
+            .filter(|e| matches!(e.status, PlanEntryStatus::InProgress))
+            .count();
+        // 「第几步 of 总数」：正在跑的算当前步；全完成就是 n of n。
+        let current = (done + in_progress).min(total);
+        let (summary, summary_color) = if done == total {
+            (format!("{total} of {total} · 完成"), gpui::rgb(ui_theme::GREEN))
+        } else if in_progress > 0 {
+            (format!("{current} of {total} · 进行中"), gpui::rgb(ui_theme::ACCENT))
+        } else {
+            (format!("{done} of {total}"), gpui::rgb(ui_theme::TEXT_MUTED))
+        };
+        let progress = (done as f32 + in_progress as f32 * 0.5) / total as f32;
+
+        let mut bar = gpui_component::v_flex()
+            .border_b_1()
+            .border_color(gpui::rgb(ui_theme::BORDER_DIM))
+            .bg(gpui::rgb(ui_theme::BG_STATUS))
+            .child(
+                h_flex()
+                    .id("acp-plan-toggle")
+                    .px_4()
+                    .py_2()
+                    .gap_2p5()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.plan_collapsed = !this.plan_collapsed;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .text_xs()
+                            .text_color(gpui::rgb(ui_theme::TEXT_MUTED))
+                            .child(if self.plan_collapsed { "▸" } else { "▾" }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(gpui::rgb(ui_theme::TEXT_MUTED))
+                            .child("PLAN"),
+                    )
+                    .child(div().text_xs().text_color(summary_color).child(summary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .max_w(px(180.))
+                            .h(px(5.))
+                            .rounded_full()
+                            .bg(gpui::rgb(ui_theme::BORDER_DIM))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .w(gpui::relative(progress.clamp(0., 1.)))
+                                    .h_full()
+                                    .bg(gpui::rgb(ui_theme::ACCENT)),
+                            ),
+                    ),
+            );
+        if !self.plan_collapsed {
+            let mut steps = gpui_component::v_flex().px_4().pb_3().gap_0p5();
+            for entry in &plan.entries {
+                let row = h_flex().gap_2p5().items_center().py_0p5();
+                let row = match entry.status {
+                    PlanEntryStatus::Completed => row
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(15.))
+                                .rounded_sm()
+                                .bg(gpui::rgb(ui_theme::GREEN))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::ON_ACCENT))
+                                .child("✓"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(gpui::rgb(ui_theme::TEXT_FAINT))
+                                .line_through()
+                                .child(entry.content.clone()),
+                        ),
+                    PlanEntryStatus::InProgress => row
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(15.))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(gpui::rgb(ui_theme::ACCENT))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(div().size(px(7.)).rounded_xs().bg(gpui::rgb(ui_theme::ACCENT))),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_medium()
+                                        .text_color(gpui::rgb(ui_theme::TEXT_BRIGHT))
+                                        .child(entry.content.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(gpui::rgb(ui_theme::ACCENT))
+                                        .child("· 进行中"),
+                                ),
+                        ),
+                    // Pending 与协议未来的新状态都按「待做」渲染。
+                    _ => row
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(15.))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(gpui::rgb(ui_theme::BORDER_FOCUS)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(gpui::rgb(ui_theme::TEXT_MID))
+                                .child(entry.content.clone()),
+                        ),
+                };
+                steps = steps.child(row);
+            }
+            bar = bar.child(steps);
+        }
+        Some(bar.into_any_element())
+    }
+
+    /// ⌘⏎ 快捷批准：选第一个 allow 类选项（跟绿色主按钮同一目标）。
+    fn pick_permission_primary(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = &self.permission else { return };
+        let Some(pix) = card.options.iter().position(|o| {
+            matches!(o.kind, PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways)
+        }) else {
+            return;
+        };
+        self.pick_permission(pix, cx);
+    }
+
     /// 审批按钮：消费 responder 回 RPC，卡片收起，相位回 Running（agent 会继续）。
     fn pick_permission(&mut self, option_ix: usize, cx: &mut Context<Self>) {
         let Some(card) = &mut self.permission else { return };
@@ -643,11 +937,15 @@ impl Render for AcpView {
                     .p_2()
                     .text_sm()
                     .text_color(muted)
-                    .child(
-                        self.status_line
-                            .clone()
-                            .unwrap_or_else(|| "正在启动 agent…（首次需下载适配器，可能要一会儿）".to_string()),
-                    )
+                    .child(self.status_line.clone().unwrap_or_else(|| {
+                        // 续接旧会话和全新启动是两件事，文案别混：带着旧
+                        // session id 时说的是「接上次那段」，不是从零开一个。
+                        if self.acp_session_id.is_some() {
+                            "正在续接上次的会话…".to_string()
+                        } else {
+                            "正在启动 agent…（首次需下载适配器，可能要一会儿）".to_string()
+                        }
+                    }))
                     .into_any_element(),
             ),
             AcpPhase::Ended(msg) => Some(
@@ -670,8 +968,8 @@ impl Render for AcpView {
                             .id("acp-restart")
                             .w(px(120.))
                             .px_3()
-                            .py_1()
-                            .rounded_md()
+                            .py_1p5()
+                            .rounded_lg()
                             .border_1()
                             .border_color(t.border)
                             .text_sm()
@@ -688,6 +986,71 @@ impl Render for AcpView {
             _ => None,
         };
 
+        // 权限审批按钮条：构建一次，优先内嵌进消息流里对应的工具卡片底部
+        // （凭 tool_call_id 关联，对齐设计稿「diff 卡片自带 Approve/Reject」）；
+        // 消息流里找不到对应卡片时退回独立卡片渲染——责任链只有一个出口，
+        // responder 不会既没人展示又没人消费。
+        let perm_target: Option<ToolCallId> =
+            self.permission.as_ref().map(|c| c.tool_call_id.clone());
+        let perm_embedded = perm_target.as_ref().is_some_and(|tid| {
+            self.entries
+                .iter()
+                .any(|e| matches!(e, AcpEntry::ToolCall { id, .. } if id == tid))
+        });
+        let mut perm_buttons: Option<gpui::AnyElement> = self.permission.as_ref().map(|card| {
+            let primary_ix = card.options.iter().position(|o| {
+                matches!(o.kind, PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways)
+            });
+            let mut buttons = h_flex().gap_2().items_center().flex_wrap();
+            if let Some(pix) = primary_ix {
+                let name = card.options[pix].name.clone();
+                buttons = buttons.child(
+                    div()
+                        .id(("acp-perm-primary", pix))
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(gpui::rgb(ui_theme::GREEN))
+                        .text_color(gpui::rgb(ui_theme::ON_ACCENT))
+                        .text_sm()
+                        .font_semibold()
+                        .cursor_pointer()
+                        .hover(|d| d.opacity(0.9))
+                        .child(format!("{name} ⌘⏎"))
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.pick_permission(pix, cx);
+                        })),
+                );
+            }
+            for (ix, opt) in card.options.iter().enumerate() {
+                if Some(ix) == primary_ix {
+                    continue;
+                }
+                let danger = matches!(
+                    opt.kind,
+                    PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
+                );
+                buttons = buttons.child(
+                    div()
+                        .id(("acp-perm-opt", ix))
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(t.border)
+                        .text_sm()
+                        .cursor_pointer()
+                        .when(danger, |d| d.text_color(gpui::rgb(ui_theme::RED)))
+                        .hover(|d| d.opacity(0.85))
+                        .child(opt.name.clone())
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.pick_permission(ix, cx);
+                        })),
+                );
+            }
+            buttons.into_any_element()
+        });
+
         // 消息流。
         let mut list = v_flex()
             .id("acp-entries")
@@ -695,64 +1058,157 @@ impl Render for AcpView {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .p_3()
-            .gap_2();
+            .p_4()
+            .gap_4();
         for (i, entry) in self.entries.iter().enumerate() {
             let el: gpui::AnyElement = match entry {
-                AcpEntry::User(text) => h_flex()
-                    .justify_end()
+                AcpEntry::User(text) => div()
+                    .w_full()
+                    .px_4()
+                    .py_3()
+                    .rounded_lg()
+                    .bg(t.muted)
+                    .text_sm()
+                    .child(crate::markdown_mermaid::markdown_view(("acp-user-md", i), text.clone()))
+                    .into_any_element(),
+                AcpEntry::Assistant { text, thought } => h_flex()
+                    .items_start()
+                    .gap_3()
+                    .child(assistant_avatar())
                     .child(
                         div()
-                            .max_w_4_5()
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(t.muted)
+                            .flex_1()
+                            .min_w_0()
+                            .pt(px(2.)) // 跟头像文字视觉基线对齐
                             .text_sm()
-                            .child(crate::markdown_mermaid::markdown_view(("acp-user-md", i), text.clone())),
+                            .when(*thought, |d| d.text_color(muted).italic())
+                            .child(crate::markdown_mermaid::markdown_view(("acp-md", i), text.clone())),
                     )
                     .into_any_element(),
-                AcpEntry::Assistant { text, thought } => div()
-                    .max_w_full()
-                    .text_sm()
-                    .when(*thought, |d| d.text_color(muted).italic())
-                    .child(crate::markdown_mermaid::markdown_view(("acp-md", i), text.clone()))
-                    .into_any_element(),
-                AcpEntry::ToolCall { title, kind, status, output, .. } => {
-                    let (dot, label) = match status {
+                AcpEntry::ToolCall { id, title, kind, status, output } => {
+                    let accent = tool_accent_color(kind);
+                    let (status_dot, status_label): (gpui::Hsla, &str) = match status {
                         ToolCallStatus::Pending => (t.muted_foreground, "待执行"),
-                        ToolCallStatus::InProgress => (gpui::rgb(0x4a9eff).into(), "执行中"),
-                        ToolCallStatus::Completed => (gpui::rgb(0x22c55e).into(), "完成"),
-                        ToolCallStatus::Failed => (gpui::rgb(0xef4444).into(), "失败"),
+                        ToolCallStatus::InProgress => (gpui::rgb(ui_theme::BLUE).into(), "执行中"),
+                        ToolCallStatus::Completed => (gpui::rgb(ui_theme::GREEN).into(), "完成"),
+                        ToolCallStatus::Failed => (gpui::rgb(ui_theme::RED).into(), "失败"),
                         _ => (t.muted_foreground, "…"), // schema #[non_exhaustive]
                     };
-                    v_flex()
-                        .p_2()
-                        .gap_1()
-                        .rounded_md()
+
+                    // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
+                    // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
+                    let diff_totals: Vec<(usize, usize)> = output
+                        .iter()
+                        .filter_map(|p| match p {
+                            ToolOutputPart::Diff { old_text, new_text, .. } => {
+                                Some(diff_line_stats(old_text.as_deref().unwrap_or(""), new_text))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let has_diff = !diff_totals.is_empty();
+                    let (total_added, total_removed) =
+                        diff_totals.iter().fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
+
+                    let header_right: gpui::AnyElement = if has_diff {
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .font_family("monospace")
+                            .child(
+                                div()
+                                    .text_color(gpui::rgb(ui_theme::GREEN))
+                                    .child(format!("+{total_added}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(gpui::rgb(ui_theme::RED))
+                                    .child(format!("-{total_removed}")),
+                            )
+                            .into_any_element()
+                    } else {
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().size_2().rounded_full().bg(status_dot))
+                            .child(div().text_xs().text_color(muted).child(status_label))
+                            .into_any_element()
+                    };
+
+                    let mut card = v_flex()
+                        .rounded_lg()
                         .border_1()
                         .border_color(t.border)
                         .child(
                             h_flex()
+                                .px_4()
+                                .py_2p5()
                                 .gap_2()
                                 .items_center()
-                                .child(Icon::new(tool_icon(kind)).size(px(13.)).text_color(muted))
-                                .child(div().text_sm().flex_1().truncate().child(title.clone()))
-                                .child(div().size_2().rounded_full().bg(dot))
-                                .child(div().text_xs().text_color(muted).child(label)),
-                        )
-                        .when(!output.trim().is_empty(), |d| {
-                            d.child(
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .text_color(accent)
+                                        .child(tool_kind_label(kind)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .font_family("monospace")
+                                        .text_color(muted)
+                                        .truncate()
+                                        .child(title.clone()),
+                                )
+                                .child(header_right),
+                        );
+                    for (part_ix, part) in output.iter().enumerate() {
+                        card = match part {
+                            ToolOutputPart::Diff { path, old_text, new_text } => card.child(
+                                v_flex()
+                                    .px_4()
+                                    .pb_3()
+                                    .gap_1()
+                                    .child(div().text_xs().text_color(muted).child(path.clone()))
+                                    .child(render_diff_lines(
+                                        old_text.as_deref().unwrap_or(""),
+                                        new_text,
+                                        (i, part_ix),
+                                        t.border,
+                                        t.muted_foreground,
+                                    )),
+                            ),
+                            ToolOutputPart::Text(text) if !text.trim().is_empty() => card.child(
                                 div()
+                                    .px_4()
+                                    .pb_3()
                                     .text_xs()
                                     .text_color(muted)
                                     .font_family("monospace")
                                     .max_h(px(160.))
                                     .overflow_hidden()
-                                    .child(output.clone()),
-                            )
-                        })
-                        .into_any_element()
+                                    .child(text.clone()),
+                            ),
+                            ToolOutputPart::Text(_) => card,
+                        };
+                    }
+                    // 这条工具调用正在等审批 → 按钮条内嵌进卡片底部。
+                    if perm_target.as_ref() == Some(id) {
+                        if let Some(btns) = perm_buttons.take() {
+                            card = card.child(
+                                v_flex()
+                                    .px_4()
+                                    .py_2p5()
+                                    .gap_2()
+                                    .border_t_1()
+                                    .border_color(t.border)
+                                    .child(btns),
+                            );
+                        }
+                    }
+                    card.into_any_element()
                 }
                 AcpEntry::Divider(label) => h_flex()
                     .items_center()
@@ -766,67 +1222,47 @@ impl Render for AcpView {
             list = list.child(el);
         }
 
-        // 权限审批卡片：原生按钮，点了直接回 RPC——这是 ACP 通道的核心卖点。
-        let permission = self.permission.as_ref().map(|card| {
-            let mut buttons = h_flex().gap_2().flex_wrap();
-            for (ix, opt) in card.options.iter().enumerate() {
-                let primary = matches!(
-                    opt.kind,
-                    PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
-                );
-                let danger = matches!(
-                    opt.kind,
-                    PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
-                );
-                buttons = buttons.child(
-                    div()
-                        .id(("acp-perm-opt", ix))
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
+        // 独立权限卡片：仅当消息流里没有可内嵌的工具卡片时兜底渲染
+        // （按钮条构建见循环前的 perm_buttons；内嵌成功时这里拿到的是 None）。
+        let permission = (!perm_embedded)
+            .then(|| {
+                let card = self.permission.as_ref()?;
+                let buttons = perm_buttons.take()?;
+                Some(
+                    v_flex()
+                        .mx_4()
+                        .mb_3()
+                        .p_4()
+                        .gap_3()
+                        .rounded_lg()
                         .border_1()
                         .border_color(t.border)
-                        .text_sm()
-                        .cursor_pointer()
-                        .when(primary, |d| d.bg(gpui::rgb(0x22c55e)).text_color(gpui::white()))
-                        .when(danger, |d| d.text_color(gpui::rgb(0xef4444)))
-                        .hover(|d| d.opacity(0.85))
-                        .child(opt.name.clone())
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.pick_permission(ix, cx);
-                        })),
-                );
-            }
-            v_flex()
-                .mx_3()
-                .mb_2()
-                .p_3()
-                .gap_2()
-                .rounded_md()
-                .border_1()
-                .border_color(gpui::rgb(0xef4444))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().text_sm().font_semibold().child("等你批准"))
-                        .child(div().text_sm().text_color(muted).child(card.question.clone())),
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_sm().font_semibold().child("等你批准"))
+                                .child(
+                                    div().text_sm().text_color(muted).child(card.question.clone()),
+                                ),
+                        )
+                        .child(buttons),
                 )
-                .child(buttons)
-        });
+            })
+            .flatten();
 
         // 选择题卡片：message + 逐字段按钮组；单字段单选点击即提交，
         // 其余选齐后亮「提交」；「跳过」丢卡（responder Drop 回 Cancel）。
         let elicitation = self.elicitation.as_ref().map(|card| {
             let ready = self.elicit_ready();
             let mut body = v_flex()
-                .mx_3()
-                .mb_2()
-                .p_3()
-                .gap_2()
-                .rounded_md()
+                .mx_4()
+                .mb_3()
+                .p_4()
+                .gap_3()
+                .rounded_lg()
                 .border_1()
-                .border_color(gpui::rgb(0xf59e0b))
+                .border_color(gpui::rgb(ui_theme::YELLOW))
                 .child(
                     h_flex()
                         .gap_2()
@@ -853,7 +1289,7 @@ impl Render for AcpView {
                             .id(("acp-elicit-opt", fix * 1000 + oix))
                             .px_3()
                             .py_1()
-                            .rounded_md()
+                            .rounded_lg()
                             .border_1()
                             .border_color(if selected { gpui::rgb(0xf59e0b).into() } else { t.border })
                             .when(selected, |d| d.bg(t.muted))
@@ -890,7 +1326,7 @@ impl Render for AcpView {
                                 .id("acp-elicit-submit")
                                 .px_3()
                                 .py_1()
-                                .rounded_md()
+                                .rounded_lg()
                                 .text_sm()
                                 .when(ready, |d| {
                                     d.bg(gpui::rgb(0x22c55e))
@@ -913,7 +1349,7 @@ impl Render for AcpView {
                                 .id("acp-elicit-skip")
                                 .px_3()
                                 .py_1()
-                                .rounded_md()
+                                .rounded_lg()
                                 .text_sm()
                                 .text_color(muted)
                                 .cursor_pointer()
@@ -928,38 +1364,98 @@ impl Render for AcpView {
             body
         });
 
+        let agent_name = self.agent_label();
         let input_row = self.input.as_ref().map(|input| {
-            h_flex()
-            .p_2()
-            .gap_2()
-            .items_end()
-            .border_t_1()
-            .border_color(t.border)
-            .child(div().flex_1().child(Input::new(input)))
-            .when(matches!(self.phase, AcpPhase::Running), |row| {
-                row.child(
-                    div()
-                        .id("acp-stop")
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(t.border)
-                        .text_xs()
-                        .text_color(muted)
-                        .cursor_pointer()
-                        .hover(|d| d.opacity(0.8))
-                        .child("停止")
-                        .on_click(cx.listener(|this, _ev, _window, _cx| this.cancel_turn())),
+            v_flex()
+                .border_t_1()
+                .border_color(t.border)
+                .child(
+                    // 底部工具栏：上下文/命令数量/agent 名这类元信息用小胶囊展示，
+                    // 跟输入框本体分层，不抢文字输入的视觉重量。
+                    h_flex()
+                        .px_3()
+                        .pt_2()
+                        .gap_2()
+                        .items_center()
+                        .child(toolbar_pill("@ 上下文"))
+                        .when_some(self.available_commands, |row, n| {
+                            row.child(toolbar_pill(format!("{n} 条命令")))
+                        })
+                        .child(
+                            // agent 胶囊：紫色标识当前会话背后是哪个 agent 命令。
+                            div()
+                                .px_2p5()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(gpui::rgba(0x80808020))
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::PURPLE))
+                                .child(agent_name.clone()),
+                        ),
                 )
-            })
+                .child(
+                    h_flex()
+                        .p_3()
+                        .gap_2()
+                        .items_end()
+                        .child(div().flex_1().child(Input::new(input)))
+                        .when(matches!(self.phase, AcpPhase::Running), |row| {
+                            row.child(
+                                div()
+                                    .id("acp-stop")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.8))
+                                    .child("停止")
+                                    .on_click(cx.listener(|this, _ev, _window, _cx| this.cancel_turn())),
+                            )
+                        })
+                        .child(
+                            // 主发送按钮（橙实心，对齐设计稿 Send ⏎）。
+                            div()
+                                .id("acp-send")
+                                .px_4()
+                                .py_1p5()
+                                .rounded_lg()
+                                .bg(gpui::rgb(ui_theme::ACCENT))
+                                .text_color(gpui::rgb(ui_theme::ON_ACCENT))
+                                .text_sm()
+                                .font_semibold()
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.9))
+                                .child("发送 ⏎")
+                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                    this.submit_input(window, cx);
+                                })),
+                        ),
+                )
         });
+
+        let plan_bar = self.render_plan_bar(cx);
 
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
+            // ⌘⏎ 快捷批准：有待审批卡片时等价于点绿色主按钮。挂在根上冒泡接收，
+            // 输入框聚焦时也能生效（Input 只消费不带修饰键的 Enter）。
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                if ev.keystroke.modifiers.platform
+                    && ev.keystroke.key == "enter"
+                    && this.permission.is_some()
+                {
+                    this.pick_permission_primary(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .bg(t.background)
             .children(banner)
+            .children(plan_bar)
             .child(list)
             .children(permission)
             .children(elicitation)
@@ -967,26 +1463,145 @@ impl Render for AcpView {
     }
 }
 
-/// ToolKind → 图标（与终端侧 LaunchKind 图标风格对齐）。
-fn tool_icon(kind: &ToolKind) -> IconName {
+/// assistant 消息的发送方头像：主橙方块 + 首字母（设计稿色板 ACCENT），
+/// 给消息流一个视觉锚点。
+fn assistant_avatar() -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .w(px(24.))
+        .h(px(24.))
+        .rounded_md()
+        .bg(gpui::rgb(ui_theme::ACCENT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(gpui::rgb(ui_theme::ON_ACCENT))
+        .text_xs()
+        .font_semibold()
+        .child("C")
+}
+
+/// 输入框工具栏的小胶囊：上下文/命令数量这类元信息用它展示，浅底圆角，视觉上比
+/// 正文文字更轻。
+fn toolbar_pill(label: impl Into<gpui::SharedString>) -> impl IntoElement {
+    div()
+        .px_2p5()
+        .py_0p5()
+        .rounded_full()
+        .bg(gpui::rgba(0x80808020))
+        .text_xs()
+        .text_color(gpui::rgb(0x9ca3af))
+        .child(label.into())
+}
+
+/// ToolKind → 强调色：读类蓝、改类橙、执行类绿，一眼区分工具在干什么类型的事。
+fn tool_accent_color(kind: &ToolKind) -> gpui::Rgba {
     match kind {
-        ToolKind::Read | ToolKind::Search | ToolKind::Fetch => IconName::Search,
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => IconName::File,
-        ToolKind::Execute => IconName::SquareTerminal,
-        _ => IconName::Bot,
+        ToolKind::Read | ToolKind::Search | ToolKind::Fetch => gpui::rgb(ui_theme::BLUE),
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => gpui::rgb(ui_theme::ACCENT),
+        ToolKind::Execute => gpui::rgb(ui_theme::GREEN),
+        _ => gpui::rgb(ui_theme::TEXT_MUTED),
     }
 }
 
-/// tool call content 文本化（复用 acp.rs 的 ContentBlock 规则）。
-fn tool_content_text(content: &[agent_client_protocol::schema::v1::ToolCallContent]) -> String {
+/// ToolKind → 简短英文标签（跟工具本身在协议里的调用名对齐，比长句子扫得快）。
+fn tool_kind_label(kind: &ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "Read",
+        ToolKind::Edit => "Edit",
+        ToolKind::Delete => "Delete",
+        ToolKind::Move => "Move",
+        ToolKind::Search => "Search",
+        ToolKind::Execute => "Bash",
+        ToolKind::Fetch => "Fetch",
+        ToolKind::Think => "Think",
+        ToolKind::SwitchMode => "Mode",
+        _ => "Tool",
+    }
+}
+
+/// 逐行算 diff 的增删行数：diff 统计（"+N -M"）和渲染共用同一份计算，不能各算
+/// 各的——数字对不上比不显示还糟。
+fn diff_line_stats(old: &str, new: &str) -> (usize, usize) {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            similar::ChangeTag::Insert => added += 1,
+            similar::ChangeTag::Delete => removed += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    (added, removed)
+}
+
+/// 渲染一份 diff：逐行红（删）/绿（增）/灰（不变），等宽字体，滚动限高——大改动
+/// 不能把整个消息流撑爆，超出部分滚动查看。`key` 保证同一条消息里多个 diff
+/// 块各自有唯一 element id。
+fn render_diff_lines(
+    old: &str,
+    new: &str,
+    key: (usize, usize),
+    border_color: gpui::Hsla,
+    muted_color: gpui::Hsla,
+) -> gpui::AnyElement {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut rows = v_flex()
+        .id(("acp-diff", key.0 * 10_000 + key.1))
+        .max_h(px(320.))
+        .overflow_y_scroll()
+        .rounded_md()
+        .border_1()
+        .border_color(border_color)
+        .font_family("monospace")
+        .text_xs();
+    for change in diff.iter_all_changes() {
+        let line = change.value().trim_end_matches('\n').to_string();
+        let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match change.tag() {
+            similar::ChangeTag::Delete => (
+                Some(crate::ui_theme::tint(crate::ui_theme::RED, 0x22).into()),
+                "-",
+                gpui::rgb(crate::ui_theme::RED).into(),
+            ),
+            similar::ChangeTag::Insert => (
+                Some(crate::ui_theme::tint(crate::ui_theme::GREEN, 0x22).into()),
+                "+",
+                gpui::rgb(crate::ui_theme::DIFF_ADD_TEXT).into(),
+            ),
+            similar::ChangeTag::Equal => (None, " ", muted_color),
+        };
+        let mut row = h_flex().px_2().gap_2();
+        if let Some(bg) = bg {
+            row = row.bg(bg);
+        }
+        rows = rows.child(
+            row.child(div().w(px(12.)).flex_shrink_0().text_color(fg).child(prefix.to_string()))
+                .child(div().flex_1().min_w_0().text_color(fg).child(line)),
+        );
+    }
+    rows.into_any_element()
+}
+
+/// tool call content → 结构化的输出片段（文本走 acp.rs 的 ContentBlock 规则文本化；
+/// diff 保留 old/new 原文，留给渲染层逐行算差异，不在这里压扁）。
+fn tool_content_parts(
+    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+) -> Vec<ToolOutputPart> {
     use agent_client_protocol::schema::v1::ToolCallContent;
     content
         .iter()
         .filter_map(|c| match c {
-            ToolCallContent::Content(inner) => Some(crate::acp::content_text(&inner.content)),
-            ToolCallContent::Diff(d) => Some(format!("diff: {}", d.path.display())),
-            _ => None,
+            ToolCallContent::Content(inner) => {
+                let text = crate::acp::content_text(&inner.content);
+                (!text.trim().is_empty()).then(|| ToolOutputPart::Text(text))
+            }
+            ToolCallContent::Diff(d) => Some(ToolOutputPart::Diff {
+                path: d.path.display().to_string(),
+                old_text: d.old_text.clone(),
+                new_text: d.new_text.clone(),
+            }),
+            _ => None, // Terminal 等 MVP 不渲染
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }

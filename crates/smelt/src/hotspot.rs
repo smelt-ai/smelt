@@ -267,7 +267,7 @@ pub fn hotspot_view(
                 .hover(|d| d.border_color(rgb(0x4a9eff)))
                 .on_click(move |_ev, window, cx| {
                     this.update(cx, |ws, cx| {
-                        ws.view = MainView::Files;
+                        ws.stage_override = Some(MainView::Files);
                         ws.view_file(abs_path.clone(), window, cx);
                     });
                     // 见总览入口同款注释：文件树页没有可聚焦元素，focus 显式

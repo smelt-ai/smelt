@@ -1103,6 +1103,28 @@ pub fn kill_remote(id: &str) {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
+/// 守护进程当前持有的**全部**会话——不止 GUI 侧栏认领的那些，测试跑出来的
+/// 孤儿、忘了关的临时会话同样计在内。设置页「会话管理」弹窗用；跟 daemon_info()
+/// 同一套阻塞调用模式，调用方自己扔后台线程。
+pub fn list_daemon_sessions() -> Vec<DaemonSessionState> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else { return Vec::new() };
+    if writeln!(s, "{}", serde_json::json!({ "op": "list" })).is_err() {
+        return Vec::new();
+    }
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Vec::new();
+    }
+    // list 的响应是 {"sessions":[id..], "states":[state..]}；每个 state 自己
+    // 就带 id 字段（smeltd::SessionState），只取 states 就够，不用额外拼装。
+    #[derive(serde::Deserialize)]
+    struct ListResp {
+        #[serde(default)]
+        states: Vec<DaemonSessionState>,
+    }
+    serde_json::from_str::<ListResp>(&resp).map(|r| r.states).unwrap_or_default()
+}
+
 /// 内嵌远程网关（见 smeltd.rs「内嵌远程网关」一节）的运行状态，供设置页「远程」
 /// 标签页展示用。
 #[derive(Clone, Debug, Default)]
@@ -1254,7 +1276,10 @@ pub struct DaemonSessionState {
     pub pending_question: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// 守护下发的协议字段（旧结构面板曾展示 launch 命令）；GUI 侧暂无读者，
+    /// 保留以维持与 smeltd 状态通道的结构对齐。
     #[serde(default)]
+    #[allow(dead_code)]
     pub launch: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -2453,6 +2478,47 @@ impl Terminal {
 mod damage_gate_tests {
     use super::*;
 
+    /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
+    /// 失败）都会执行，不像原来手写在函数末尾的 `kill_remote(&id)`——那种写法
+    /// 一旦前面某个 assert 炸了就会被 unwind 跳过，永远执行不到。
+    ///
+    /// 真实教训：这几个测试连的是真实 smeltd 守护进程（不是 mock），而它们本身
+    /// 是有记录的 flaky（全量并行跑时偶发超时失败，见 flaky-damage-gate-tests 记
+    /// 忆）——每 flaky 失败一次就跳过一次手写清理，泄漏一个孤儿会话；开发机上
+    /// 长期攒了一堆 `smelt-kitty-test-*`/`smelt-damage-test-*`，跟真实项目会话
+    /// 混在守护进程的会话计数里，「侧栏会话数」和「守护进程会话数」对不上正是
+    /// 这个原因。
+    struct TestSessionGuard(String);
+    impl Drop for TestSessionGuard {
+        fn drop(&mut self) {
+            kill_remote(&self.0);
+        }
+    }
+
+    /// 验证上面这个修复模式本身是对的：手写清理语句会被 panic 跳过，Drop 不会
+    /// ——这正是要堵的洞，不是走个形式验证 Rust 语言特性。
+    #[test]
+    fn guard_cleans_up_even_when_body_panics() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleaned2 = cleaned.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = Guard(cleaned2);
+            panic!("模拟测试中途 assert 失败");
+        }));
+        assert!(result.is_err(), "闭包应该 panic 了");
+        assert!(cleaned.load(Ordering::SeqCst), "即使 panic，Drop 也该执行清理，不能被跳过");
+    }
+
     /// P0 性能修复的验证：真空闲时 take_damage() 应稳定为 false（跳过重画），
     /// 写入字节后应变 true（真实变化不会被吞掉）。用全新一次性 session id +
     /// 空临时目录，不碰任何真实/持久化会话。
@@ -2464,6 +2530,7 @@ mod damage_gate_tests {
         let dir = std::env::temp_dir().join(format!("smelt-damage-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("damage-test-{}", uuid_like());
+        let _guard = TestSessionGuard(id.clone());
 
         let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
 
@@ -2504,9 +2571,7 @@ mod damage_gate_tests {
         term.send_input(b"hi\n");
         thread::sleep(Duration::from_millis(300));
         assert!(term.take_damage(), "写入字节后 take_damage() 应返回 true");
-
-        // 清理：让守护杀掉这个一次性测试会话。
-        kill_remote(&id);
+        // 清理交给 _guard 的 Drop（含 panic 路径），不再手写。
     }
 
     /// 走完整生产路径（Terminal::spawn 的真 PTY + 真 shell + alacritty 解析）验证
@@ -2517,6 +2582,7 @@ mod damage_gate_tests {
         let dir = std::env::temp_dir().join(format!("smelt-kitty-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("kitty-test-{}", uuid_like());
+        let _guard = TestSessionGuard(id.clone());
 
         let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
         thread::sleep(Duration::from_millis(800)); // 等 shell 起来
@@ -2531,8 +2597,7 @@ mod damage_gate_tests {
             term.kitty_keyboard_mode(),
             "真实 PTY 上收到 CSI > 1 u 后应置位——没置位说明 spawn 的 Config 没开 kitty_keyboard"
         );
-
-        kill_remote(&id);
+        // 清理交给 _guard 的 Drop（含 panic 路径），不再手写。
     }
 
     /// 全屏 TUI（Cursor CLI / Claude Code）用 `CSI ?25l` 藏真实光标、在输入框自画
@@ -2544,6 +2609,7 @@ mod damage_gate_tests {
         let dir = std::env::temp_dir().join(format!("smelt-cursor-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("cursor-test-{}", uuid_like());
+        let _guard = TestSessionGuard(id.clone());
 
         let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
         thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀，避免并发 advance 干扰
@@ -2576,8 +2642,7 @@ mod damage_gate_tests {
         inject(b"\x1b[3 q"); // 3/4 = 下划线
         let (.., kind) = term.snapshot().cursor.expect("下划线光标仍是可见光标");
         assert_eq!(kind, CursorKind::Underline, "CSI 3 SP q 应切成下划线");
-
-        kill_remote(&id);
+        // 清理交给 _guard 的 Drop（含 panic 路径），不再手写。
     }
 
     /// 用户报告：框选后滚动，选区高亮消失。选区跟随滚动是本次重构的核心目标——
@@ -2588,6 +2653,7 @@ mod damage_gate_tests {
         let dir = std::env::temp_dir().join(format!("smelt-selscroll-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("selscroll-test-{}", uuid_like());
+        let _guard = TestSessionGuard(id.clone());
 
         let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
         thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀
@@ -2616,8 +2682,7 @@ mod damage_gate_tests {
         let sel_row_after = frame.rows.iter().position(|r| r.iter().any(|c| c.selected));
         assert_eq!(sel_row_after, Some(8), "滚动 3 行后选区高亮应跟随内容移到第 8 行");
         assert_eq!(term.selection_text().as_deref(), Some(text_before.as_str()), "滚动不该改变选区文本");
-
-        kill_remote(&id);
+        // 清理交给 _guard 的 Drop（含 panic 路径），不再手写。
     }
 
     /// 不依赖 uuid crate（terminal.rs 本身不需要它），用 pid+时间戳拼一个够唯一的 id。

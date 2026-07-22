@@ -47,9 +47,9 @@ impl TaskColumn {
 
     pub fn color(self) -> u32 {
         match self {
-            Self::Running | Self::Waiting => 0x4a9eff,
-            Self::Backlog | Self::Ready => 0x8b93a7,
-            Self::Done => 0x22c55e,
+            Self::Running | Self::Waiting => crate::ui_theme::BLUE,
+            Self::Backlog | Self::Ready => crate::ui_theme::TEXT_MUTED,
+            Self::Done => crate::ui_theme::GREEN,
         }
     }
 
@@ -1628,7 +1628,7 @@ impl Workspace {
 
         self.active_session = ix;
         self.sessions[ix].set_active_term(leaf.clone());
-        self.view = crate::MainView::Terminal;
+        self.stage_override = None;
 
         if inject && !prompt.is_empty() {
             leaf.update(cx, |tv, cx| {
@@ -1651,7 +1651,7 @@ impl Workspace {
             for leaf in self.sessions[i].term_leaves() {
                 if leaf.read(cx).session_id() == sid {
                     self.active_session = i;
-                    self.view = crate::MainView::Terminal;
+                    self.stage_override = None;
                     self.sessions[i].set_active_term(leaf);
                     self.focus_active(window, cx);
                     cx.notify();
@@ -1808,7 +1808,7 @@ impl Workspace {
         });
         self.sessions.push(crate::Session::single(view));
         self.active_session = self.sessions.len() - 1;
-        self.view = crate::MainView::Terminal;
+        self.stage_override = None;
 
         // 存 base（不含 prompt 拼接），再跑时重新拼首包。
         TaskStore::update(id, |t| {
