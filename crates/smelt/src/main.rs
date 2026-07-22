@@ -1260,6 +1260,8 @@ struct Workspace {
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
     llm_subs: Vec<Subscription>,
+    /// 远程：信令服务地址输入框（用户自部署 smelt-signal，无内置默认）。
+    signal_http_input: Option<Entity<gpui_component::input::InputState>>,
     /// 启动项列表编辑器（设置页「启动」分组懒创建）。
     launch_inputs: Option<settings::LaunchInputs>,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器。
@@ -1541,6 +1543,7 @@ impl Workspace {
             memory_selected: None,
             llm_inputs: None,
             llm_subs: Vec::new(),
+            signal_http_input: None,
             launch_inputs: None,
             opacity_slider: None,
             font_size_slider: None,
@@ -2644,10 +2647,7 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?
-                        .block_on(updater::fetch_latest())
+                    smelt_core::block_on::block_on_tokio(updater::fetch_latest()).and_then(|r| r)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -2679,12 +2679,10 @@ impl Workspace {
             let (tx, rx) = smol::channel::unbounded::<updater::DownloadProgress>();
             let v = version.clone();
             let task = cx.background_executor().spawn(async move {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?
-                    .block_on(updater::download_and_stage(&url, &v, |p| {
-                        let _ = tx.try_send(p);
-                    }))
+                smelt_core::block_on::block_on_tokio(updater::download_and_stage(&url, &v, |p| {
+                    let _ = tx.try_send(p);
+                }))
+                .and_then(|r| r)
             });
 
             while let Ok(progress) = rx.recv().await {
@@ -5752,11 +5750,23 @@ fn main() {
         // 隧道依赖本机网关；配置里 tunnel_enabled=true 时 enabled 理应也是 true
         // （apply_tunnel_toggle 存盘时就是这么同步的），但独立判断一次更保险。
         let want_tunnel = remote_config.tunnel_enabled;
+        let want_webrtc = remote_config.webrtc_enabled;
         let want_write = remote_config.write_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
         cx.set_global(settings::TunnelRuntimeState::default());
-        if want_remote || want_tunnel {
+        cx.set_global(settings::WebrtcRuntimeState::default());
+        cx.set_global(settings::SignalProbeState::default());
+        // Cmd+Q 直接退出 App（没有先手动关跨网开关）时，WebRTC bridge 子进程原本
+        // 没人管——会被系统收养成孤儿，一直占着信令服务器上的房间和本机网关连接
+        // 直到房间 TTL 到期。退出前顺手杀掉它。
+        cx.on_app_quit(|cx| {
+            settings::stop_webrtc_bridge_on_quit(cx);
+            async {}
+        })
+        .detach();
+        // 恢复跨网：隧道仍走下面 spawn；WebRTC 在网关 hydrate 后再拉 bridge
+        if want_remote || want_tunnel || want_webrtc {
             if want_tunnel {
                 cx.set_global(settings::TunnelRuntimeState {
                     connecting: true,
@@ -5766,13 +5776,14 @@ fn main() {
                 });
             }
             cx.spawn(async move |cx| {
-                let (remote_rt, tunnel_rt) = cx
+                let (remote_rt, tunnel_rt, want_webrtc) = cx
                     .background_executor()
                     .spawn(async move {
                         terminal::ensure_daemon_running();
 
                         // 1) 本机网关：已在跑就复用 token，否则按配置 start
-                        let remote_rt = if want_remote || want_tunnel {
+                        // WebRTC 也需要本机网关 token
+                        let remote_rt = if want_remote || want_tunnel || want_webrtc {
                             let existing = terminal::remote_status();
                             if existing.running
                                 && existing.token.as_ref().is_some_and(|t| !t.is_empty())
@@ -5847,7 +5858,7 @@ fn main() {
                         };
 
                         // 隧道 start 可能顺带（重）开了网关：再读一次 token，避免 UI 仍空
-                        let remote_rt = if want_remote || want_tunnel {
+                        let remote_rt = if want_remote || want_tunnel || want_webrtc {
                             let again = terminal::remote_status();
                             if again.running && again.token.as_ref().is_some_and(|t| !t.is_empty())
                             {
@@ -5880,12 +5891,16 @@ fn main() {
                             tunnel_rt
                         };
 
-                        (remote_rt, tunnel_rt)
+                        (remote_rt, tunnel_rt, want_webrtc)
                     })
                     .await;
                 let _ = cx.update(|cx| {
                     cx.set_global(remote_rt);
                     cx.set_global(tunnel_rt);
+                    // 网关 token 就绪后再恢复 WebRTC bridge（否则建房有 token 却无本机网关）
+                    if want_webrtc {
+                        settings::spawn_webrtc_start_public(cx);
+                    }
                 });
             })
             .detach();

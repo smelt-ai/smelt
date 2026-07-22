@@ -100,3 +100,117 @@ hello | sessions | sessions_ok | open | pty | input | action | resize | state | 
 
 - 公网 VPS + 域名 TLS（signal + coturn）  
 - 无 VPS 则无法交付 W1 跨网主路径（局域网 HTTP 仍可用）  
+
+---
+
+## 浏览器实现选型（已定）
+
+| 层 | 选型 |
+|----|------|
+| 手机 WebRTC | **原生** `RTCPeerConnection` + `RTCDataChannel`（不引入 PeerJS / simple-peer） |
+| 信令 | 原生 `WebSocket`（`remote-web/src/transport/signaling.ts`） |
+| Mac Bridge | 后续 `webrtc-rs`（W0 spike） |
+
+### 前端脚手架（`feat/webrtc-edge`）
+
+```
+remote-web/src/transport/
+  types.ts       # 连接状态、ICE、信令消息
+  frames.ts      # DC 业务帧编解码 + base64
+  signaling.ts   # WSS 信令客户端
+  rtc-peer.ts    # 原生 PC + DC；parseRtcQuery
+  index.ts
+```
+
+局域网路径仍用现有 `api.ts` fetch/WS；跨网就绪后 UI 按 `?room=&k=&signal=` 走 `connectRtc`。
+
+### 信令线协议（与 `signaling.ts` 对齐）
+
+```json
+{ "op": "hello", "role": "client"|"host", "room": "...", "secret": "..." }
+{ "op": "hello_ok", "ice_servers": [{ "urls": "...", "username?", "credential?" }] }
+{ "op": "peer_joined", "role": "client"|"host" }
+{ "op": "signal", "from": "client"|"host", "payload": { "kind": "offer"|"answer"|"ice", ... } }
+{ "op": "err", "msg": "..." }
+{ "op": "ping" } / { "op": "pong" }
+```
+
+### 信令服务（`crates/smelt-signal`，已实现）
+
+```bash
+# 先 npm run build remote-web（或 build.rs 自动尝试）
+cargo run -p smelt-signal
+# 默认 bind 127.0.0.1:7878
+```
+
+| 端点 | 作用 |
+|------|------|
+| `GET /health` | `{ ok, rooms }` |
+| `POST /v1/rooms` | body 可选 `{ "ttl_secs" }` → `{ room, secret, expires_at, ttl_secs, signal_ws }` |
+| `GET /ws` | 信令 WebSocket（上表协议） |
+| `GET /` `/s/*` `/assets/*` | **remote-web SPA**（与信令同域，跨网手机只开 signal 域名） |
+
+环境变量：
+
+| 变量 | 默认 | 含义 |
+|------|------|------|
+| `SMELT_SIGNAL_BIND` | `127.0.0.1:7878` | 监听地址 |
+| `SMELT_ROOM_TTL_SECS` | `3600` | 房间默认存活 |
+| `SMELT_ICE_SERVERS` | 四公共 STUN（见下） | JSON 数组，下发给 `hello_ok` |
+
+**默认公共 STUN（未设环境变量时）：**
+
+1. `stun:stun.qq.com:3478`（腾讯，国内优先）  
+2. `stun:stun.miwifi.com:3478`（小米备份）  
+3. `stun:stun.cloudflare.com:3478`（CF 免费无限 STUN）  
+4. `stun:stun.l.google.com:19302`（Google 兜底）
+
+仅 STUN 约 7～8 成能直连；**手机蜂窝 / 对称 NAT 需要 TURN**。  
+生产：同机 coturn + 写入 `SMELT_ICE_SERVERS`，见 [`deploy/signal/coturn.md`](../deploy/signal/coturn.md)。  
+房间内存存、短时效，进程重启清空。
+
+**公网部署（腾讯云 Ubuntu 等）：** 见 [`deploy/signal/README.md`](../deploy/signal/README.md)  
+（推荐 CI 产物 + systemd + Caddy → `https://域名/health`、`wss://域名/ws`）。
+
+CI：`.github/workflows/signal.yml` → 滚动 release 标签 `signal-nightly`  
+下载：`.../releases/download/signal-nightly/smelt-signal-x86_64-unknown-linux-gnu`
+
+### Mac bridge（`crates/smelt-bridge`）
+
+```bash
+# 1) 本机可写网关
+cargo run -p smeltd --bin gateway -- --port 18765 --write
+# 记下打印的 token=...
+
+# 2) 桥：建房 + host 信令 + WebRTC + 转发 gateway
+#    SMELT_SIGNAL_HTTP 填你自己部署的信令，无内置默认域名
+SMELT_GATEWAY_TOKEN=<token> \
+SMELT_SIGNAL_HTTP=https://signal.example.com \
+  cargo run -p smelt-bridge
+```
+
+终端会打印跨网 URL，页根是 **信令 HTTPS**（SPA 已嵌进 `smelt-signal`）：
+
+`https://signal.example.com/?room=&k=&signal=wss://…/ws&token=`
+
+手机 **只开这一条** 即可；不需要 CF 隧道拉本机网页。业务数据仍是 WebRTC → Mac bridge。
+
+GUI 设置 → 远程 → **信令服务地址** 同样须手动填写（写入 `~/.smelt/collab.json` 的 `signal_http`）。
+
+| 环境变量 | 默认 |
+|----------|------|
+| `SMELT_SIGNAL_HTTP` | **必填**，无默认 |
+| `SMELT_SIGNAL_WS` | 由 HTTP 推导 `/ws` |
+| `SMELT_GATEWAY` | `http://127.0.0.1:18765` |
+| `SMELT_GATEWAY_TOKEN` | **必填** |
+| `SMELT_SHARE_BASE` | 默认 = `SMELT_SIGNAL_HTTP/` |
+
+### 换网 / 断线（手机）
+
+SPA 会自动重连：检测 PC/ICE/DC/信令断开与 `online` 事件 → 退避重建信令+WebRTC → `hello` 后 **重新 open 已打开的终端**。  
+Mac bridge 侧每次新 offer 新建 PC（见 reconnect fix）。顶栏显示「网络变化，正在重连…」。
+
+### DataChannel 标签
+
+- label: `smelt`
+- ordered: true  
