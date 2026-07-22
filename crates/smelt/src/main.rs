@@ -5,13 +5,18 @@
 //!
 //! 运行： cargo run --bin smelt
 
+mod acp;
+mod acp_view;
 mod agent;
 mod claude_memory;
 mod dock;
 mod file_tree;
+mod git_log;
+mod git_log_view;
 mod git_panel;
 mod hotspot;
 mod json_store;
+mod markdown_mermaid;
 mod mem_usage;
 use smelt_core::osc;
 // 权限菜单解析：唯一真源，与 smeltd 共用 smelt-core 里的同一份（smeltd 解析后随
@@ -79,7 +84,7 @@ use usage_stats::format_count;
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
 gpui::actions!(
     smelt,
-    [Quit, OpenSettings, CheckForUpdate, SendSelectionToTerminal, NewTask]
+    [Quit, OpenSettings, CheckForUpdate, ReportIssue, SendSelectionToTerminal, NewTask]
 );
 
 /// 命令面板里的一个可执行动作。
@@ -211,6 +216,16 @@ enum MainView {
     History,
 }
 
+/// Git 页内部的子页。对标 JetBrains 的 Git 工具窗口——「提交」和「日志」是同一个
+/// 窗口里的两个视图，不占两个顶层标签。
+#[derive(Clone, Copy, PartialEq)]
+enum GitTab {
+    /// 工作区改动：文件树 + diff + 暂存 / 提交。
+    Changes,
+    /// 提交历史 + 分支图。
+    Log,
+}
+
 /// 会话里 agent 的状态（用于总览页状态徽章）。借鉴 codex 的 ThreadStatus 细分：
 /// 「需要处理」不再一锅烩，等审批和一般等待是不同等级的行动召唤。
 /// 排列顺序即优先级（值越小越靠前 / 越紧急）。
@@ -333,44 +348,138 @@ impl Render for ProjectDrag {
     }
 }
 
-/// 一个会话 = 一棵独立分屏树 + 会话内当前活动 pane（终端）。
-/// 侧栏每条对应一个会话；主区显示当前会话的分屏树。
+/// 一个会话的内容形态。Term 是第一通道（PTY 分屏树），Acp 是第二通道（结构化
+/// 消息流，见 docs/project-report.md 第 5 节）——后者不参与分屏，一会话一视图。
+enum SessionKind {
+    /// 终端会话 = 一棵独立分屏树 + 会话内当前活动 pane（终端）。
+    Term {
+        layout: Pane,
+        active: Entity<TerminalView>,
+    },
+    /// ACP 消息流会话：单视图，不参与分屏。
+    Acp(Entity<acp_view::AcpView>),
+}
+
+/// 侧栏每条对应一个会话；主区显示当前会话的内容（分屏树或 ACP 消息流）。
 struct Session {
-    layout: Pane,
-    active: Entity<TerminalView>,
+    kind: SessionKind,
     /// 用户手动改过的会话名（侧栏右键「重命名」）；None = 用下面 title() 的自动推导。
     custom_title: Option<String>,
+    /// ACP 会话内容变化（AcpViewEvent::Changed）→ save_state 的订阅；Term 会话
+    /// 没有（终端内容不经这条通道持久化，走 daemon session id 就够）。
+    _acp_persist_sub: Option<gpui::Subscription>,
 }
 
 impl Session {
     /// 单终端会话。
     fn single(view: Entity<TerminalView>) -> Self {
-        Self { layout: Pane::Leaf(view.clone()), active: view, custom_title: None }
+        Self {
+            kind: SessionKind::Term { layout: Pane::Leaf(view.clone()), active: view },
+            custom_title: None,
+            _acp_persist_sub: None,
+        }
+    }
+
+    /// 会话身份锚点：侧栏选中态、拖拽、activate 等都拿它做「是同一个会话吗」比较。
+    /// Term = 活动终端的 entity id。
+    fn anchor_id(&self) -> EntityId {
+        match &self.kind {
+            SessionKind::Term { active, .. } => active.entity_id(),
+            SessionKind::Acp(view) => view.entity_id(),
+        }
+    }
+
+    /// 终端会话的活动 pane；ACP 会话返回 None（调用方借此天然跳过终端专属操作）。
+    fn active_term(&self) -> Option<&Entity<TerminalView>> {
+        match &self.kind {
+            SessionKind::Term { active, .. } => Some(active),
+            SessionKind::Acp(_) => None,
+        }
+    }
+
+    /// 切换终端会话的活动 pane；非终端会话是 no-op。
+    fn set_active_term(&mut self, view: Entity<TerminalView>) {
+        match &mut self.kind {
+            SessionKind::Term { active, .. } => *active = view,
+            SessionKind::Acp(_) => {}
+        }
+    }
+
+    /// 终端会话的分屏树；ACP 会话没有。
+    fn term_layout(&self) -> Option<&Pane> {
+        match &self.kind {
+            SessionKind::Term { layout, .. } => Some(layout),
+            SessionKind::Acp(_) => None,
+        }
+    }
+
+    fn term_layout_mut(&mut self) -> Option<&mut Pane> {
+        match &mut self.kind {
+            SessionKind::Term { layout, .. } => Some(layout),
+            SessionKind::Acp(_) => None,
+        }
+    }
+
+    /// 收集会话内全部终端叶子（ACP 会话得到空列表）。
+    fn term_leaves(&self) -> Vec<Entity<TerminalView>> {
+        let mut v = Vec::new();
+        if let Some(layout) = self.term_layout() {
+            collect_leaves(layout, &mut v);
+        }
+        v
+    }
+
+    /// 侧栏行图标：终端会话按启动方式（LaunchKind）对应，与「+」菜单图标一一对应。
+    fn row_icon(&self, cx: &App) -> IconName {
+        match &self.kind {
+            SessionKind::Term { active, .. } => match active.read(cx).launch_kind() {
+                terminal_view::LaunchKind::Claude => IconName::Asterisk,
+                terminal_view::LaunchKind::Codex => IconName::Bot,
+                terminal_view::LaunchKind::Copilot => IconName::Github,
+                terminal_view::LaunchKind::Terminal => IconName::SquareTerminal,
+            },
+            SessionKind::Acp(_) => IconName::Bot,
+        }
     }
 
     /// 会话标题：用户重命名过就用那个；否则仅当终端标题是 Claude Code 风格（✳ 或
     /// Braille spinner 开头）时取它的任务名，再否则回退 cwd 末段——避免把普通 shell 的
     /// user@host:path 标题当任务名。
     fn title(&self, cx: &App) -> String {
-        self.custom_title.clone().unwrap_or_else(|| pane_auto_title(&self.active, cx))
+        self.custom_title.clone().unwrap_or_else(|| match &self.kind {
+            SessionKind::Term { active, .. } => pane_auto_title(active, cx),
+            SessionKind::Acp(view) => {
+                let dir = view
+                    .read(cx)
+                    .cwd()
+                    .map(|c| c.rsplit('/').next().unwrap_or(&c).to_string());
+                match dir {
+                    Some(d) if !d.is_empty() => format!("Claude 消息流 · {d}"),
+                    _ => "Claude 消息流".to_string(),
+                }
+            }
+        })
     }
 
     /// 会话工作目录：活动终端的 cwd（侧栏分组用）。
     fn cwd(&self, cx: &App) -> Option<String> {
-        self.active.read(cx).cwd()
+        match &self.kind {
+            SessionKind::Term { active, .. } => active.read(cx).cwd(),
+            SessionKind::Acp(view) => view.read(cx).cwd(),
+        }
     }
 
     /// 会话内 pane 数（判断 Cmd+W 是关 pane 还是关整会话）。
     fn pane_count(&self) -> usize {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
-        v.len()
+        match &self.kind {
+            SessionKind::Term { .. } => self.term_leaves().len(),
+            SessionKind::Acp(_) => 1,
+        }
     }
 
     /// 会话内任一 pane 的待处理通知消息（供总览卡片显示「等你确认 xxx」）。
     fn notification_msg(&self, cx: &App) -> Option<String> {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
+        let v = self.term_leaves();
         // 优先：网格解析出的权限摘要 → OSC 审批文案 → 任意通知
         if let Some(p) = self.permission_prompt(cx) {
             if let Some(s) = p.summary {
@@ -387,8 +496,7 @@ impl Session {
 
     /// 会话内扫到的权限菜单（优先含审批/菜单的 pane）。
     fn permission_prompt(&self, cx: &App) -> Option<permission_menu::PermissionPrompt> {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
+        let v = self.term_leaves();
         if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
             if let Some(p) = t.read(cx).permission_prompt() {
                 return Some(p);
@@ -399,8 +507,7 @@ impl Session {
 
     /// 需要用户处理的 pane：优先等审批 / 权限菜单，其次任意「需要注意」。
     fn attention_pane(&self, cx: &App) -> Option<Entity<TerminalView>> {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
+        let v = self.term_leaves();
         if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
             return Some(t.clone());
         }
@@ -411,20 +518,43 @@ impl Session {
 
     /// 活动 pane 末尾 n 行文本（总览卡片迷你预览）。
     fn preview(&self, cx: &App, n: usize) -> Vec<String> {
-        self.active.read(cx).last_lines(n)
+        match &self.kind {
+            SessionKind::Term { active, .. } => active.read(cx).last_lines(n),
+            SessionKind::Acp(view) => view.read(cx).last_lines(n),
+        }
     }
 
     /// 会话内最近一次通知时刻（总览「N 分钟前」）。
     fn notified_at(&self, cx: &App) -> Option<Instant> {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
-        v.iter().filter_map(|t| t.read(cx).notified_at()).max()
+        self.term_leaves()
+            .iter()
+            .filter_map(|t| t.read(cx).notified_at())
+            .max()
     }
 
     /// 会话状态：等审批 > 需要处理 > 运行中 > 刚完成未读 > 空闲（遍历全部 pane 取最高）。
     fn status(&self, cx: &App) -> AgentStatus {
-        let mut v = Vec::new();
-        collect_leaves(&self.layout, &mut v);
+        let active = match &self.kind {
+            SessionKind::Term { active, .. } => active,
+            // ACP 会话：相位是协议事实，直接问视图，不经推断链。
+            SessionKind::Acp(view) => {
+                let v = view.read(cx);
+                if v.is_awaiting_approval() {
+                    return AgentStatus::WaitingApproval;
+                }
+                if v.is_awaiting_choice() {
+                    return AgentStatus::NeedsAttention;
+                }
+                if v.is_running() {
+                    return AgentStatus::Running;
+                }
+                if v.completed_unread() {
+                    return AgentStatus::Done;
+                }
+                return AgentStatus::Idle;
+            }
+        };
+        let v = self.term_leaves();
         // 等审批（红）压过一般注意（橙）：
         // 1) daemon 状态通道事实  2) OSC 文案  3) 网格权限菜单
         let mut attention = None;
@@ -450,14 +580,14 @@ impl Session {
         }
         // 活动终端：daemon 说在跑（Thinking/ExecutingTool）比标题 spinner 猜测更可信；
         // 没有 daemon 数据（老版本守护/还没收到第一条上报）才退化到猜。
-        if let Some(state) = daemon_state_for(&self.active, cx) {
+        if let Some(state) = daemon_state_for(active, cx) {
             if matches!(
                 state.phase,
                 terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool
             ) {
                 return AgentStatus::Running;
             }
-        } else if let Some(raw) = self.active.read(cx).agent_title() {
+        } else if let Some(raw) = active.read(cx).agent_title() {
             if crate::osc::title_starts_with_spinner(raw.trim_start()) {
                 return AgentStatus::Running;
             }
@@ -698,6 +828,9 @@ struct WsState {
     /// 文件树列拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     file_tree_w: Option<f32>,
+    /// Git 页左栏（变更文件列表）拖出的宽度（px）；None = 用默认值。
+    #[serde(default)]
+    git_left_w: Option<f32>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
     /// 旧格式：单棵分屏树。
     #[serde(default)]
@@ -717,6 +850,24 @@ struct SessionState {
     active: usize,
     #[serde(default)]
     custom_title: Option<String>,
+    /// Some = ACP 消息流会话（layout 只是占位叶子，旧版 smelt 读到会降级开普通
+    /// 终端，不炸档）。恢复时建占位视图（会话进程不持久化，见方案「已知不做」）。
+    #[serde(default)]
+    acp: Option<AcpSaved>,
+}
+
+/// ACP 会话的存档元数据：cwd/cmd 给「重新开始」按钮原样重启用；entries 是完整
+/// 消息历史——GUI 重开后占位视图直接显示它，不是「已结束」四个字干瞪眼；
+/// resume_session_id 是 agent 侧的会话 id，「重新开始」靠它尝试 session/load
+/// 真续接（agent 记得之前聊了什么），而不只是摆样子的新对话。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct AcpSaved {
+    cwd: Option<String>,
+    cmd: String,
+    #[serde(default)]
+    entries: Vec<acp_view::AcpEntry>,
+    #[serde(default)]
+    resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
 }
 
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点。
@@ -904,6 +1055,7 @@ fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
                 layout: ps.clone(),
                 active: s.active,
                 custom_title: None,
+                acp: None,
             }],
             0,
         );
@@ -921,6 +1073,7 @@ fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
             },
             active: 0,
             custom_title: None,
+            acp: None,
         })
         .collect();
     (sessions, s.active)
@@ -987,6 +1140,23 @@ struct Workspace {
     diff_gen: u64,
     /// diff 是否用并排（split）视图；false 为统一（unified）视图。
     diff_split: bool,
+    /// F7/Shift+F7 当前跳到第几个改动块（None = 还没跳过）。换文件重开 diff 时清空。
+    active_hunk: Option<usize>,
+    /// Git 页变更文件树里被折叠的目录（存相对仓库根的路径）。默认全展开——改动
+    /// 文件通常没几个，一进来就全看见比让人挨个点开更顺手。
+    git_tree_collapsed: HashSet<String>,
+    /// diff 看哪一层改动（全部 / 已暂存 / 未暂存）。默认全部，保持既有观感。
+    diff_scope: git_panel::DiffScope,
+    /// 「日志」页（git 提交历史 + 分支图）的全部状态。
+    git_log: git_log::GitLogState,
+    /// Git 页当前在看哪个子页（改动 / 日志）。
+    git_tab: GitTab,
+    /// 正在推送（按钮显示「推送中…」并禁用，避免连点推两次）。
+    pushing: bool,
+    /// 正在确认删除的分支：(仓库根, 分支名, 是否远端分支)。
+    delete_branch_target: Option<(String, String, bool)>,
+    /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
+    git_log_resize: Entity<ResizableState>,
     /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
     diff_selected: HashSet<usize>,
     /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
@@ -1013,6 +1183,9 @@ struct Workspace {
     /// 文件树列宽拖拽状态（对面板：文件树 + 右侧文件内容）；拖动完通过 save_state
     /// 落盘到 file_tree_w，重启后从存档恢复。
     file_tree_resize: Entity<ResizableState>,
+    /// Git 页左栏 resize 状态；宽度落盘到 git_left_w，同文件树一套。
+    git_left_resize: Entity<ResizableState>,
+    git_left_w: f32,
     /// 文件树顶部的过滤输入框；首次渲染文件树时懒创建（需要 window）。
     file_filter: Option<Entity<gpui_component::input::InputState>>,
     /// 过滤框的变更订阅（键入即重渲染）；随视图存活。
@@ -1058,6 +1231,7 @@ struct Workspace {
     file_tree_w: f32,
     /// 文件树列 resize 事件订阅（拖动完写回存档）；随视图存活。
     _file_tree_resize_sub: Subscription,
+    _git_left_resize_sub: Subscription,
     /// git 信息缓存（cwd → (分支, 改动数)），总览页后台刷新、渲染读缓存。
     git_cache: HashMap<String, (String, usize)>,
     /// 宠物大脑（LLM）配置的输入框；首次打开设置面板时懒创建（需要 window）。
@@ -1186,6 +1360,12 @@ struct Workspace {
     _new_worktree_sub: Option<Subscription>,
     /// 正在确认删除的 worktree（None = 没在删）。
     delete_worktree_target: Option<DeleteWorktreeTarget>,
+    /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
+    /// reflog，找不回来，所以必须过一道确认。
+    discard_hunk_target: Option<(String, usize)>,
+    /// 正在确认丢弃整个文件的改动：(仓库根, 相对路径, 是否未跟踪)。未跟踪文件是
+    /// 直接删盘，比 restore 更狠，文案要分开写。
+    discard_file_target: Option<(String, String, bool)>,
     /// 各类后台操作（建/删 worktree、生成 commit message 等）失败时的提示，render
     /// 顶部取走并弹成通知；后台任务里没有 Window，弹不了通知，所以先暂存到这。
     background_error: Option<String>,
@@ -1221,6 +1401,7 @@ impl Workspace {
         let saved = load_ws_state();
         let sidebar_w = saved.as_ref().and_then(|s| s.sidebar_w).unwrap_or(230.);
         let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
+        let git_left_w = saved.as_ref().and_then(|s| s.git_left_w).unwrap_or(300.);
 
         let (pending_sessions, active_session) = saved
             .as_ref()
@@ -1239,6 +1420,14 @@ impl Workspace {
         let file_tree_resize = cx.new(|_| ResizableState::default());
         let _file_tree_resize_sub =
             cx.subscribe(&file_tree_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
+                this.save_state(cx);
+            });
+        // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
+        let git_log_resize = cx.new(|_| ResizableState::default());
+        // Git 页左栏 resize：同上一套，拖完落盘。
+        let git_left_resize = cx.new(|_| ResizableState::default());
+        let _git_left_resize_sub =
+            cx.subscribe(&git_left_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
                 this.save_state(cx);
             });
 
@@ -1260,6 +1449,14 @@ impl Workspace {
             git_diff: None,
             diff_gen: 0,
             diff_split: false,
+            active_hunk: None,
+            git_tree_collapsed: HashSet::new(),
+            diff_scope: git_panel::DiffScope::All,
+            git_log: git_log::GitLogState::default(),
+            git_tab: GitTab::Changes,
+            pushing: false,
+            delete_branch_target: None,
+            git_log_resize,
             diff_selected: HashSet::new(),
             diff_comment_input: None,
             commit_msg_input: None,
@@ -1294,6 +1491,9 @@ impl Workspace {
             _resize_sub,
             file_tree_w,
             _file_tree_resize_sub,
+            git_left_resize,
+            git_left_w,
+            _git_left_resize_sub,
             git_cache: HashMap::new(),
             git_status: HashMap::new(),
             git_status_inflight: HashSet::new(),
@@ -1349,6 +1549,8 @@ impl Workspace {
             new_worktree_input: None,
             _new_worktree_sub: None,
             delete_worktree_target: None,
+            discard_hunk_target: None,
+            discard_file_target: None,
             background_error: None,
             daemon_outdated: None,
             daemon_upgrade_msg: None,
@@ -1384,6 +1586,35 @@ impl Workspace {
         active_session: usize,
         cx: &mut Context<Self>,
     ) {
+        // ACP 会话不走守护 reattach：进程没有持久化，UI 线程直接建「已结束」占位
+        // （一键同 cmd/cwd 重开）。摘出后剩下的照旧走后台恢复。
+        let (acp_saved, pending): (Vec<SessionState>, Vec<SessionState>) =
+            pending.into_iter().partition(|ss| ss.acp.is_some());
+        for ss in acp_saved {
+            let Some(saved) = ss.acp else { continue };
+            let view = cx.new(|cx| {
+                acp_view::AcpView::placeholder(
+                    cx,
+                    saved.cmd,
+                    saved.cwd,
+                    "上次的 ACP 会话已随 GUI 退出结束（历史消息已保留，点击重新开始继续）"
+                        .to_string(),
+                    saved.entries,
+                    saved.resume_session_id,
+                )
+            });
+            let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
+            self.sessions.push(Session {
+                kind: SessionKind::Acp(view),
+                custom_title: ss.custom_title,
+                _acp_persist_sub,
+            });
+        }
+        if pending.is_empty() {
+            self.check_daemon_outdated(cx);
+            cx.notify();
+            return;
+        }
         // 逐个交货，别攒成一整包：会话之间互不依赖，攒一包等于让窗口空等最慢的那次
         // attach——表现为「冷启动后一个会话都不显示，过一会才全部冒出来」。改成恢复好
         // 一个就发一个，第一个会话立刻上屏，其余陆续补齐。unbounded 保证后台线程不会
@@ -1442,9 +1673,9 @@ impl Workspace {
                         return Some(ss);
                     };
                     this.sessions.push(Session {
-                        layout,
-                        active,
+                        kind: SessionKind::Term { layout, active },
                         custom_title: ss.custom_title,
+                        _acp_persist_sub: None,
                     });
                     // 让这一个立刻上屏，不等其余的
                     cx.notify();
@@ -1569,7 +1800,7 @@ impl Workspace {
         let group_of = |id: EntityId| {
             groups
                 .iter()
-                .position(|(_, _, ixs)| ixs.iter().any(|&ix| self.sessions[ix].active.entity_id() == id))
+                .position(|(_, _, ixs)| ixs.iter().any(|&ix| self.sessions[ix].anchor_id() == id))
         };
         let (Some(dragged_group), Some(target_group)) = (group_of(dragged), group_of(target)) else {
             return;
@@ -1577,21 +1808,21 @@ impl Workspace {
         if dragged_group != target_group {
             return;
         }
-        let Some(from_ix) = self.sessions.iter().position(|s| s.active.entity_id() == dragged) else {
+        let Some(from_ix) = self.sessions.iter().position(|s| s.anchor_id() == dragged) else {
             return;
         };
-        let Some(target_ix) = self.sessions.iter().position(|s| s.active.entity_id() == target) else {
+        let Some(target_ix) = self.sessions.iter().position(|s| s.anchor_id() == target) else {
             return;
         };
 
-        let active_id = self.cur().map(|s| s.active.entity_id());
+        let active_id = self.cur().map(|s| s.anchor_id());
         let session = self.sessions.remove(from_ix);
         let adjusted_target_ix = if from_ix < target_ix { target_ix - 1 } else { target_ix };
         let insert_at = adjusted_target_ix + if before { 0 } else { 1 };
         self.sessions.insert(insert_at, session);
 
         if let Some(id) = active_id {
-            if let Some(ix) = self.sessions.iter().position(|s| s.active.entity_id() == id) {
+            if let Some(ix) = self.sessions.iter().position(|s| s.anchor_id() == id) {
                 self.active_session = ix;
             }
         }
@@ -1615,7 +1846,7 @@ impl Workspace {
         let mut from_ixs = from_ixs.clone();
         from_ixs.sort_unstable();
 
-        let active_id = self.cur().map(|s| s.active.entity_id());
+        let active_id = self.cur().map(|s| s.anchor_id());
         // 降序 remove 保证前面下标不受后面删除影响；收集完再倒回原相对顺序。
         let mut moved: Vec<Session> = from_ixs.iter().rev().map(|&ix| self.sessions.remove(ix)).collect();
         moved.reverse();
@@ -1636,7 +1867,7 @@ impl Workspace {
         }
 
         if let Some(id) = active_id {
-            if let Some(ix) = self.sessions.iter().position(|s| s.active.entity_id() == id) {
+            if let Some(ix) = self.sessions.iter().position(|s| s.anchor_id() == id) {
                 self.active_session = ix;
             }
         }
@@ -1647,6 +1878,38 @@ impl Workspace {
     /// 「+」/新建：开一个独立新会话（单终端），并切过去。
     fn add_session(&mut self, cwd: Option<String>, cx: &mut Context<Self>) {
         self.add_session_with_launch(cwd, None, None, cx);
+    }
+
+    /// ACP 会话内容变化（AcpViewEvent::Changed）→ 立即 save_state。与侧栏/文件树
+    /// resize 订阅同一惯用法（main.rs::new 里的 _resize_sub）。
+    fn subscribe_acp_persist(
+        &mut self,
+        view: &Entity<acp_view::AcpView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(view, |this: &mut Self, _view, _ev: &acp_view::AcpViewEvent, cx| {
+            this.save_state(cx);
+        })
+    }
+
+    /// 「+」菜单「Claude 消息流」：新建 ACP 会话（第二种会话类型，结构化消息流）。
+    /// spawn_acp 只起线程立即返回，不需要 add_session_with_launch 那套后台三段舞。
+    fn add_acp_session(&mut self, cwd: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let cmd = cx
+            .try_global::<settings::AgentUiConfig>()
+            .map(|c| c.acp_cmd.clone())
+            .unwrap_or_else(settings::default_acp_cmd);
+        let view = cx.new(|cx| acp_view::AcpView::start(window, cx, cmd, cwd));
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
+        self.sessions.push(Session {
+            kind: SessionKind::Acp(view),
+            custom_title: None,
+            _acp_persist_sub,
+        });
+        self.active_session = self.sessions.len() - 1;
+        self.view = MainView::Terminal;
+        self.save_state(cx);
+        cx.notify();
     }
 
     /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
@@ -1740,10 +2003,12 @@ impl Workspace {
     }
 
     /// 在当前会话的活动 pane 上分屏：Horizontal=右侧并排，Vertical=下方堆叠。
+    /// ACP 会话没有分屏树，直接忽略。
     fn split_active(&mut self, axis: Axis, cx: &mut Context<Self>) {
         let Some(sess) = self.cur() else { return };
-        let cwd = sess.active.read(cx).cwd().or_else(current_dir);
-        let old = sess.active.entity_id();
+        let Some(active) = sess.active_term() else { return };
+        let cwd = active.read(cx).cwd().or_else(current_dir);
+        let old = sess.anchor_id();
         let session_ix = self.active_session;
         let sid = new_sid();
         let cwd_bg = cwd.clone();
@@ -1773,11 +2038,15 @@ impl Workspace {
                 let state = cx.new(|_| ResizableState::default());
                 let sess = &mut this.sessions[session_ix];
                 // old 叶子若已被拆掉/关掉，split_leaf 找不到就不动。
-                if !split_leaf(&mut sess.layout, old, axis, state, view.clone()) {
+                let Some(layout) = sess.term_layout_mut() else {
+                    eprintln!("[workspace] 分屏目标会话不是终端会话，丢弃");
+                    return;
+                };
+                if !split_leaf(layout, old, axis, state, view.clone()) {
                     eprintln!("[workspace] 分屏目标 pane 已不存在，丢弃");
                     return;
                 }
-                sess.active = view;
+                sess.set_active_term(view);
                 this.save_state(cx);
                 cx.notify();
             });
@@ -1792,15 +2061,38 @@ impl Workspace {
         let mut sessions: Vec<SessionState> = self
             .sessions
             .iter()
-            .map(|s| {
-                let layout = pane_to_state(&s.layout, cx);
-                let mut ids = Vec::new();
-                collect_leaf_ids(&s.layout, &mut ids);
-                let active = ids
-                    .iter()
-                    .position(|x| *x == s.active.entity_id())
-                    .unwrap_or(0);
-                SessionState { layout, active, custom_title: s.custom_title.clone() }
+            .map(|s| match &s.kind {
+                SessionKind::Term { layout: l, .. } => {
+                    let layout = pane_to_state(l, cx);
+                    let mut ids = Vec::new();
+                    collect_leaf_ids(l, &mut ids);
+                    let active = ids
+                        .iter()
+                        .position(|x| *x == s.anchor_id())
+                        .unwrap_or(0);
+                    SessionState { layout, active, custom_title: s.custom_title.clone(), acp: None }
+                }
+                SessionKind::Acp(view) => {
+                    let v = view.read(cx);
+                    SessionState {
+                        // 占位叶子：旧版 smelt 读到降级开普通终端，不炸档。
+                        layout: PaneState::Leaf {
+                            cwd: v.cwd(),
+                            id: None,
+                            custom_title: None,
+                            launch_label: None,
+                            launch_cmd: None,
+                        },
+                        active: 0,
+                        custom_title: s.custom_title.clone(),
+                        acp: Some(AcpSaved {
+                            cwd: v.cwd(),
+                            cmd: v.launch_cmd().to_string(),
+                            entries: v.entries_for_save(),
+                            resume_session_id: v.resume_session_id_for_save(),
+                        }),
+                    }
+                }
             })
             .collect();
         // 启动时恢复失败的会话继续挂在存档里，下次冷启动重试。
@@ -1830,6 +2122,7 @@ impl Workspace {
             active_session: self.active_session,
             sidebar_w,
             file_tree_w,
+            git_left_w: self.git_left_resize.read(cx).sizes().first().copied().map(f32::from),
             ..Default::default()
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -1998,10 +2291,11 @@ impl Workspace {
         if self.sessions.len() <= 1 || ix >= self.sessions.len() {
             return;
         }
-        let mut leaves = Vec::new();
-        collect_leaves(&self.sessions[ix].layout, &mut leaves);
-        for t in &leaves {
+        for t in &self.sessions[ix].term_leaves() {
             terminal::kill_remote(t.read(cx).session_id());
+        }
+        if let SessionKind::Acp(view) = &self.sessions[ix].kind {
+            view.update(cx, |v, cx| v.shutdown(cx));
         }
         self.sessions.remove(ix);
         if self.active_session >= self.sessions.len() {
@@ -2042,15 +2336,17 @@ impl Workspace {
     fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sess) = self.cur() else { return };
         if sess.pane_count() > 1 {
-            let target = sess.active.entity_id();
-            // 用户主动关 pane → 守护真正杀掉该 shell。
-            terminal::kill_remote(&sess.active.read(cx).session_id().to_string());
+            let target = sess.anchor_id();
+            // 用户主动关 pane → 守护真正杀掉该 shell。多 pane 必是终端会话。
+            if let Some(active) = sess.active_term() {
+                terminal::kill_remote(&active.read(cx).session_id().to_string());
+            }
             let sess = &mut self.sessions[self.active_session];
-            remove_leaf(&mut sess.layout, target);
-            let mut leaves = Vec::new();
-            collect_leaves(&sess.layout, &mut leaves);
-            if let Some(first) = leaves.first().cloned() {
-                sess.active = first;
+            if let Some(layout) = sess.term_layout_mut() {
+                remove_leaf(layout, target);
+            }
+            if let Some(first) = sess.term_leaves().first().cloned() {
+                sess.set_active_term(first);
             }
             self.focus_active(window, cx);
             self.save_state(cx);
@@ -2069,7 +2365,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(sess) = self.sessions.get_mut(self.active_session) {
-            sess.active = e.clone();
+            sess.set_active_term(e.clone());
         }
         // 只聚焦、不清「需要注意」——查看≠处理，等用户实际输入回应了才清（见 TerminalView）。
         let h = e.read(cx).focus_handle();
@@ -2078,10 +2374,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 聚焦当前会话的活动终端。
+    /// 聚焦当前会话的活动终端（ACP 会话的聚焦走视图自身，这里跳过）。
     fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        if let Some(sess) = self.cur() {
-            let h = sess.active.read(cx).focus_handle();
+        if let Some(active) = self.cur().and_then(|s| s.active_term()) {
+            let h = active.read(cx).focus_handle();
             window.focus(&h, cx);
         }
     }
@@ -2128,11 +2424,14 @@ impl Workspace {
         if ix >= self.sessions.len() || key.is_empty() {
             return;
         }
-        let pane = self.sessions[ix]
+        let Some(pane) = self.sessions[ix]
             .attention_pane(cx)
-            .unwrap_or_else(|| self.sessions[ix].active.clone());
+            .or_else(|| self.sessions[ix].active_term().cloned())
+        else {
+            return; // ACP 会话的审批走视图内按钮，不注 key
+        };
         if let Some(sess) = self.sessions.get_mut(ix) {
-            sess.active = pane.clone();
+            sess.set_active_term(pane.clone());
         }
         self.active_session = ix;
         let key = key.to_string();
@@ -2152,7 +2451,15 @@ impl Workspace {
                 self.view = MainView::Terminal;
             }
             // 切过去只是查看，不清「需要注意」——等用户实际输入回应了才清。
-            self.focus_active(window, cx);
+            // ACP 会话例外：绿点「有结果可看」查看即清（消息流全文可见，看到=处理）。
+            if let SessionKind::Acp(view) = &self.sessions[ix].kind {
+                view.update(cx, |v, cx| {
+                    v.mark_read();
+                    v.focus_input(window, cx);
+                });
+            } else {
+                self.focus_active(window, cx);
+            }
             self.save_state(cx);
             cx.notify();
         }
@@ -2177,12 +2484,11 @@ impl Workspace {
     /// 只有一个 pane（没分屏）时什么都不做。
     fn cycle_pane(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sess) = self.cur() else { return };
-        let mut leaves = Vec::new();
-        collect_leaves(&sess.layout, &mut leaves);
+        let leaves = sess.term_leaves();
         if leaves.len() < 2 {
             return;
         }
-        let cur_id = sess.active.entity_id();
+        let cur_id = sess.anchor_id();
         let Some(ix) = leaves.iter().position(|l| l.entity_id() == cur_id) else {
             return;
         };
@@ -2360,8 +2666,7 @@ impl Workspace {
     /// 无缝升级（Upgraded/Failed，见下）和硬重启都要用同一套。
     fn reconnect_all_terminals(&self, cx: &mut Context<Self>) {
         for sess in &self.sessions {
-            let mut leaves = Vec::new();
-            collect_leaves(&sess.layout, &mut leaves);
+            let leaves = sess.term_leaves();
             for leaf in leaves {
                 leaf.update(cx, |view, cx| view.reconnect(cx));
             }
@@ -2446,8 +2751,7 @@ impl Workspace {
         let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String, Option<String>)> =
             Vec::new();
         for sess in &self.sessions {
-            let mut leaves = Vec::new();
-            collect_leaves(&sess.layout, &mut leaves);
+            let leaves = sess.term_leaves();
             for leaf in leaves {
                 let view = leaf.read(cx);
                 let cwd = view.cwd();
@@ -2523,9 +2827,8 @@ impl Workspace {
     fn collect_notifications(&self, cx: &App) -> Vec<(usize, Entity<TerminalView>, String)> {
         let mut out = Vec::new();
         for (si, s) in self.sessions.iter().enumerate() {
-            let viewing = (si == self.active_session).then(|| s.active.entity_id());
-            let mut leaves = Vec::new();
-            collect_leaves(&s.layout, &mut leaves);
+            let viewing = (si == self.active_session).then(|| s.anchor_id());
+            let leaves = s.term_leaves();
             for t in leaves {
                 if Some(t.entity_id()) == viewing {
                     continue;
@@ -2865,14 +3168,10 @@ impl Workspace {
                     .and_then(|c| self.session_list.get(c))
                     .and_then(|(_, list)| list.first());
                 // 状态通道（hook 事实）优先；jsonl 作补充。
-                let daemon_detail = {
-                    let mut leaves = Vec::new();
-                    collect_leaves(&self.sessions[ix].layout, &mut leaves);
-                    leaves
-                        .iter()
-                        .find_map(|t| daemon_state_for(t, cx))
-                        .or_else(|| daemon_state_for(&self.sessions[ix].active, cx))
-                };
+                let daemon_detail = self.sessions[ix]
+                    .term_leaves()
+                    .iter()
+                    .find_map(|t| daemon_state_for(t, cx));
                 let phase_label = daemon_detail
                     .as_ref()
                     .map(|d| d.phase_label().to_string());
@@ -3709,12 +4008,9 @@ impl Workspace {
         }
 
         let sess = self.sessions.get(self.active_session);
-        let mut leaves = Vec::new();
-        if let Some(s) = sess {
-            collect_leaves(&s.layout, &mut leaves);
-        }
+        let leaves = sess.map(|s| s.term_leaves()).unwrap_or_default();
         // 活动 pane 优先，否则扫分屏找有状态的
-        let active = sess.map(|s| s.active.clone());
+        let active = sess.and_then(|s| s.active_term().cloned());
         let state = active
             .as_ref()
             .and_then(|t| daemon_state_for(t, cx))
@@ -3990,7 +4286,9 @@ impl Workspace {
         if ix >= self.sessions.len() || key.is_empty() {
             return;
         }
-        let pane = self.sessions[ix].active.clone();
+        let Some(pane) = self.sessions[ix].active_term().cloned() else {
+            return; // ACP 会话的审批是视图内结构化按钮，没有「注数字键」一说
+        };
         let key = key.to_string();
         pane.update(cx, |tv, cx| {
             tv.type_text(&key, cx);
@@ -4008,7 +4306,7 @@ impl Workspace {
             Pane::Leaf(t) => {
                 let active = self
                     .cur()
-                    .is_some_and(|s| s.active.entity_id() == t.entity_id());
+                    .is_some_and(|s| s.anchor_id() == t.entity_id());
                 // 不给任何 pane 描边（iTerm2 也不描，之前的蓝框提醒也拿掉了）：分屏时靠
                 // 「压暗非活动 pane」区分谁是活动的就够了；单 pane 时压根没有别的 pane
                 // 可比，不需要任何叠加层。
@@ -4127,9 +4425,8 @@ impl Render for Workspace {
         let window_active = window.is_window_active();
         let mut task_continues: Vec<(String, String)> = Vec::new();
         for (ix, sess) in self.sessions.iter().enumerate() {
-            let mut leaves = Vec::new();
-            collect_leaves(&sess.layout, &mut leaves);
-            let active_pane_id = sess.active.entity_id();
+            let leaves = sess.term_leaves();
+            let active_pane_id = sess.anchor_id();
             for leaf in &leaves {
                 let (toast, cont_cwd) = leaf.update(cx, |t, _cx| {
                     (t.take_pending_toast(), t.take_pending_task_continue())
@@ -4293,7 +4590,7 @@ impl Render for Workspace {
         // 各会话状态（预算好，避免在侧栏 map 闭包里借用 cx）。与总览页共用同一套五态配色。
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
         // 各会话的稳定身份（拖拽排序用：下标会因增删/排序失效，entity_id 不会）。
-        let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.active.entity_id()).collect();
+        let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.anchor_id()).collect();
         // 待处理通知总数（标题栏铃铛用）。
         let notif_count = self.collect_notifications(cx).len();
         // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
@@ -4335,21 +4632,15 @@ impl Render for Workspace {
                         let hint_before = self.sess_drop_hint == Some((entity_id, true));
                         let hint_after = self.sess_drop_hint == Some((entity_id, false));
                         // 行图标跟建它时用的启动方式对齐（新建终端/Claude Code/Codex/
-                        // Copilot），跟「+」下拉菜单里的图标一一对应，见 LaunchKind。
-                        let row_icon = match self.sessions[ix].active.read(cx).launch_kind() {
-                            terminal_view::LaunchKind::Claude => IconName::Asterisk,
-                            terminal_view::LaunchKind::Codex => IconName::Bot,
-                            terminal_view::LaunchKind::Copilot => IconName::Github,
-                            terminal_view::LaunchKind::Terminal => IconName::SquareTerminal,
-                        };
+                        // Copilot/ACP），跟「+」下拉菜单里的图标一一对应，见 LaunchKind。
+                        let row_icon = self.sessions[ix].row_icon(cx);
                         // 会话内有分屏（>1 个 pane）时，展开出子行：一 pane 一行，各自标题 +
                         // 状态点，点击直接切到该会话并聚焦该 pane。只有 1 个 pane 的会话
                         // pane_items 为空，SidebarMenuItem 判定无 children 就不长出展开箭头，
                         // 行为跟改动前完全一样。
                         let pane_items: Vec<SidebarMenuItem> = if self.sessions[ix].pane_count() > 1 {
-                            let mut leaves = Vec::new();
-                            collect_leaves(&self.sessions[ix].layout, &mut leaves);
-                            let active_pane_id = self.sessions[ix].active.entity_id();
+                            let leaves = self.sessions[ix].term_leaves();
+                            let active_pane_id = self.sessions[ix].anchor_id();
                             leaves
                                 .into_iter()
                                 .map(|view| {
@@ -4428,8 +4719,11 @@ impl Render for Workspace {
                                 menu.item(PopupMenuItem::new("新建任务").on_click(
                                     move |_ev, window, cx| {
                                         e_task.update(cx, |ws, cx| {
-                                            if let Some(sess) = ws.sessions.get(sess_ix) {
-                                                let pane = sess.active.clone();
+                                            if let Some(pane) = ws
+                                                .sessions
+                                                .get(sess_ix)
+                                                .and_then(|s| s.active_term().cloned())
+                                            {
                                                 ws.open_new_task_for_terminal(&pane, window, cx);
                                             }
                                         });
@@ -4682,6 +4976,20 @@ impl Render for Workspace {
                                                     }),
                                             );
                                         }
+                                        // ACP 第二通道：结构化消息流 + 原生审批按钮
+                                        // （区别于上面走 PTY 的快捷启动）。
+                                        let e_acp = e_new.clone();
+                                        let cwd_acp = cwd.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new("Claude 消息流")
+                                                .icon(IconName::Bot)
+                                                .on_click(move |_ev, window, cx| {
+                                                    let cwd = cwd_acp.clone();
+                                                    e_acp.update(cx, |ws, cx| {
+                                                        ws.add_acp_session(cwd, window, cx);
+                                                    });
+                                                }),
+                                        );
                                         // 临时终端（$HOME）不是真项目，建不了 worktree；空 cwd
                                         // 同理（会话还没上报出目录）。
                                         menu
@@ -4987,13 +5295,17 @@ impl Render for Workspace {
                         .min_w_0()
                         .min_h_0()
                         .flex()
-                        .child(
-                            self.render_pane(
-                                &self.sessions[self.active_session].layout,
+                        .child(match &self.sessions[self.active_session].kind {
+                            SessionKind::Term { .. } => self.render_pane(
+                                self.sessions[self.active_session]
+                                    .term_layout()
+                                    .expect("Term 会话必有 layout"),
                                 "pane",
                                 cx,
                             ),
-                        ),
+                            // ACP 会话：整块主区就是消息流视图（无分屏树）。
+                            SessionKind::Acp(view) => view.clone().into_any_element(),
+                        }),
                 );
             if show_struct {
                 row = row.child(self.render_agent_structure_panel(cx));
@@ -5114,6 +5426,10 @@ impl Render for Workspace {
                 this.settings_page_nonce += 1;
                 this.open_settings_window(cx);
             }))
+            // 应用菜单「反馈问题…」：跳 GitHub issue 模板选择页。
+            .on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
+                cx.open_url("https://github.com/smelt-ai/smelt/issues/new/choose");
+            }))
             // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
             .on_action(cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
                 this.send_open_file_selection(cx);
@@ -5156,6 +5472,16 @@ impl Render for Workspace {
                             _ => {}
                         }
                     }
+                }
+                // Git 页 F7 / Shift+F7：在改动块之间跳（对齐 JetBrains 的 next/previous
+                // difference）。不带 Cmd，所以要赶在下面的 platform 判断之前处理。
+                if this.view == MainView::Git
+                    && this.git_tab == GitTab::Changes
+                    && ks.key == "f7"
+                    && !ks.modifiers.platform
+                {
+                    this.jump_hunk(!ks.modifiers.shift, cx);
+                    return;
                 }
                 if !ks.modifiers.platform {
                     return;
@@ -5479,43 +5805,184 @@ impl Render for Workspace {
                         }
                         MainView::Git => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let status =
-                                cwd.as_ref().and_then(|r| self.git_status.get(r).map(|(_, d)| d));
-                            let branches =
-                                cwd.as_ref().and_then(|r| self.branches.get(r).map(|(_, d)| d));
-                            // 评论输入框懒创建（需要 window），跟文件树搜索框同一套模式。
-                            if self.git_diff.is_some() && self.diff_comment_input.is_none() {
-                                use gpui_component::input::InputState;
-                                let state = cx.new(|cx| {
-                                    InputState::new(window, cx)
-                                        .placeholder("给选中的行写评论，发送前可以再改改…")
-                                });
-                                self.diff_comment_input = Some(state);
-                            }
-                            // commit message 输入框懒创建，跟上面评论框同一套模式；只要
-                            // 进了 Git 页就常驻（不像评论框依赖已经打开某个 diff）。
-                            if self.commit_msg_input.is_none() {
-                                use gpui_component::input::InputState;
-                                let state = cx.new(|cx| {
-                                    InputState::new(window, cx)
-                                        .placeholder("Commit message（点「生成」用 AI 起草，也可以自己写）")
-                                });
-                                self.commit_msg_input = Some(state);
-                            }
-                            git_view(
-                                cwd.clone(),
-                                status,
-                                branches,
-                                &self.git_diff,
-                                self.diff_split,
-                                &self.diff_selected,
-                                self.diff_comment_input.as_ref(),
-                                self.commit_msg_input.as_ref(),
-                                self.commit_msg_generating,
-                                &self.git_files_scroll,
-                                &self.diff_scroll,
-                                cx,
-                            )
+                            let c_border = cx.theme().border;
+                            // 「改动 / 日志」子标签。两者同属 Git 工具窗口，不占两个
+                            // 顶层标签（JetBrains 也是这个结构）。
+                            let sub_tabs = {
+                                let (fg, muted, accent) = {
+                                    let t = cx.theme();
+                                    (t.foreground, t.muted_foreground, t.accent)
+                                };
+                                h_flex()
+                                    .gap_1()
+                                    .px_3()
+                                    .py_1()
+                                    .border_b_1()
+                                    .border_color(c_border)
+                                    .children([(GitTab::Changes, "改动"), (GitTab::Log, "日志")].map(
+                                        |(tab, label)| {
+                                            let on = self.git_tab == tab;
+                                            div()
+                                                .id(label)
+                                                .px_2()
+                                                .py(px(1.0))
+                                                .text_sm()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .text_color(if on { fg } else { muted })
+                                                .when(on, |d| d.bg(accent))
+                                                .hover(|d| d.opacity(0.8))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.git_tab = tab;
+                                                    cx.notify();
+                                                }))
+                                                .child(label)
+                                        },
+                                    ))
+                            };
+
+                            let body = match self.git_tab {
+                                GitTab::Changes => {
+                                    let status = cwd
+                                        .as_ref()
+                                        .and_then(|r| self.git_status.get(r).map(|(_, d)| d));
+                                    let branches = cwd
+                                        .as_ref()
+                                        .and_then(|r| self.branches.get(r).map(|(_, d)| d));
+                                    // 评论输入框懒创建（需要 window），跟文件树搜索框同一套模式。
+                                    if self.git_diff.is_some() && self.diff_comment_input.is_none() {
+                                        use gpui_component::input::InputState;
+                                        let state = cx.new(|cx| {
+                                            InputState::new(window, cx)
+                                                .placeholder("给选中的行写评论，发送前可以再改改…")
+                                        });
+                                        self.diff_comment_input = Some(state);
+                                    }
+                                    // commit message 输入框懒创建，跟上面评论框同一套模式；只要
+                                    // 进了 Git 页就常驻（不像评论框依赖已经打开某个 diff）。
+                                    if self.commit_msg_input.is_none() {
+                                        use gpui_component::input::InputState;
+                                        let state = cx.new(|cx| {
+                                            // 多行 + 自增高：commit message 的规范写法是
+                                            // 「标题空行正文」，单行框根本写不了 body，
+                                            // AI 生成的多段说明也会被挤成一行。
+                                            InputState::new(window, cx)
+                                                .multi_line(true)
+                                                .auto_grow(2, 8)
+                                                .placeholder("Commit message（可多行；点「AI 生成」起草）")
+                                        });
+                                        self.commit_msg_input = Some(state);
+                                    }
+                                    git_view(
+                                        cwd.clone(),
+                                        status,
+                                        branches,
+                                        &self.git_diff,
+                                        self.diff_split,
+                                        &self.diff_selected,
+                                        self.diff_comment_input.as_ref(),
+                                        self.commit_msg_input.as_ref(),
+                                        self.commit_msg_generating,
+                                        self.pushing,
+                                        &self.git_files_scroll,
+                                        &self.diff_scroll,
+                                        self.active_hunk,
+                                        &self.git_left_resize,
+                                        self.git_left_w,
+                                        &self.git_tree_collapsed,
+                                        self.diff_scope,
+                                        cx,
+                                    )
+                                }
+                                GitTab::Log => {
+                                    if let Some(root) = cwd.clone() {
+                                        // 进页面就保证数据在（内部按 root 去重，不会每帧拉）；
+                                        // 分支列表复用 Git 页那份缓存，左侧树才有内容。
+                                        self.ensure_git_log(root.clone(), cx);
+                                        self.ensure_branches(root, cx);
+                                    }
+                                    // 状态在这里取好再传下去：渲染函数内部绝不能 read 自己的
+                                    // entity（render 期间它正被可变借用，重入会直接 abort）。
+                                    let branches = cwd
+                                        .as_ref()
+                                        .and_then(|r| self.branches.get(r))
+                                        .map(|(_, b)| b);
+                                    // 当前检出的分支：日志默认看它，分支树里也要标出来。
+                                    // 复用 Git 页已有的 status 缓存，不另跑一次 git。
+                                    let head_branch = cwd
+                                        .as_ref()
+                                        .and_then(|r| self.git_status.get(r))
+                                        .map(|(_, d)| d.branch_name().to_string())
+                                        .filter(|b| !b.is_empty());
+                                    // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死
+                                    // 宽度的话中间的提交列表会被挤得没法看。
+                                    div().flex_1().min_h_0().flex().child(
+                                        h_resizable("git-log-split")
+                                            .with_state(&self.git_log_resize)
+                                            // 左：分支树
+                                            .child(
+                                                resizable_panel()
+                                                    .size(px(200.))
+                                                    .size_range(px(140.)..px(360.))
+                                                    .child(
+                                                        div()
+                                                            .size_full()
+                                                            .min_h_0()
+                                                            .border_r_1()
+                                                            .border_color(c_border)
+                                                            .child(git_log_view::branch_tree(
+                                                                cwd.clone(),
+                                                                branches,
+                                                                &self.git_log.scope,
+                                                                head_branch.clone(),
+                                                                cx,
+                                                            )),
+                                                    ),
+                                            )
+                                            // 中：分支图 + 提交列表
+                                            // wrapper 必须 .flex()：div 默认 Block，
+                                            // 里面 flex_1 根节点会高度塌 0（同 Git
+                                            // 改动页 diff 面板的坑）。
+                                            .child(resizable_panel().child(
+                                                div()
+                                                    .size_full()
+                                                    .flex()
+                                                    .min_w_0()
+                                                    .min_h_0()
+                                                    .border_r_1()
+                                                    .border_color(c_border)
+                                                    .child(git_log_view::git_log_view(
+                                                        cwd.clone(),
+                                                        &self.git_log,
+                                                        head_branch,
+                                                        cx,
+                                                    )),
+                                            ))
+                                            // 右：提交详情
+                                            .child(
+                                                resizable_panel()
+                                                    .size(px(380.))
+                                                    .size_range(px(240.)..px(640.))
+                                                    .child(
+                                                        div()
+                                                            .size_full()
+                                                            .flex()
+                                                            .min_w_0()
+                                                            .min_h_0()
+                                                            .child(
+                                                                git_log_view::commit_detail_pane(
+                                                                    cwd,
+                                                                    &self.git_log,
+                                                                    cx,
+                                                                ),
+                                                            ),
+                                                    ),
+                                            ),
+                                    )
+                                }
+                            };
+
+                            v_flex().flex_1().min_h_0().child(sub_tabs).child(body)
                         }
                         MainView::Hotspot => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
@@ -5565,6 +6032,9 @@ impl Render for Workspace {
             .children(self.new_worktree_target.is_some().then(|| self.render_new_worktree_dialog(cx)))
             // 删除 Worktree 确认拦截弹层
             .children(self.delete_worktree_target.is_some().then(|| self.render_delete_worktree_confirm(cx)))
+            .children(self.discard_hunk_target.is_some().then(|| self.render_discard_hunk_confirm(cx)))
+            .children(self.discard_file_target.is_some().then(|| self.render_discard_file_confirm(cx)))
+            .children(self.delete_branch_target.is_some().then(|| self.render_delete_branch_confirm(cx)))
             // 删除文件二次确认拦截弹层
             .children(self.delete_file_target.is_some().then(|| self.render_delete_file_confirm(cx)))
             // 重启守护确认弹层改挂在设置窗（SettingsWindow::render），不在主窗口画。
@@ -5848,6 +6318,7 @@ fn main() {
             MenuItem::action("检查更新…", CheckForUpdate),
             MenuItem::Separator,
             MenuItem::action("设置…", OpenSettings),
+            MenuItem::action("反馈问题…", ReportIssue),
             MenuItem::Separator,
             MenuItem::action("退出 Smelt", Quit),
         ])]);
@@ -5900,7 +6371,9 @@ fn main() {
                         let mut map = states.lock().unwrap();
                         match event {
                             terminal::DaemonStateEvent::Snapshot(list) => {
-                                map.clear();
+                                // 只清守护侧条目：`acp-` 前缀是 GUI 内 ACP 会话自己
+                                // 维护的状态，smeltd 重连发快照时不能把它们抹掉。
+                                map.retain(|k, _| k.starts_with("acp-"));
                                 for s in list {
                                     map.insert(s.id.clone(), s);
                                 }
