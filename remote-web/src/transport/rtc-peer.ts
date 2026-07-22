@@ -151,8 +151,12 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
           fail(`ice restart timeout · ${reason}`);
         }
       }, 8000);
-    } catch {
-      fail(`ice restart failed · ${reason}`);
+    } catch (e) {
+      // 之前这里吞掉了具体异常，只剩个笼统的 "ice restart failed"，排查全靠猜。
+      const detail =
+        e instanceof DOMException ? `${e.name}: ${e.message}` : String(e);
+      console.warn("ice restart failed", reason, e);
+      fail(`ice restart failed(${detail}) · ${reason}`);
     } finally {
       iceRestarting = false;
     }
