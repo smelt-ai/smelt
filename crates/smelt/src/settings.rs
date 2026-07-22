@@ -941,6 +941,13 @@ pub fn spawn_webrtc_start_public(cx: &mut App) {
     spawn_webrtc_start(cx);
 }
 
+/// 供 main 的 on_app_quit 钩子调用：App 直接 Cmd+Q 退出（没有先手动关开关）时，
+/// bridge 子进程不会自己退出——之前只有「关开关」这条路径会杀它，直接退出 App
+/// 完全没人管，子进程被系统收养成孤儿，一直占着信令服务器上的房间直到 TTL 到期。
+pub fn stop_webrtc_bridge_on_quit(cx: &mut App) {
+    stop_webrtc_bridge(cx);
+}
+
 fn spawn_webrtc_start(cx: &mut App) {
     // 重入防护：上一轮还在 connecting（后台 remote_start/建房/spawn bridge 没
     // 完成）时再来一次，不能再起一条独立的异步链——两条链各自读 existing_token

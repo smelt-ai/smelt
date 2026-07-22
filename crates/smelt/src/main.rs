@@ -6428,6 +6428,14 @@ fn main() {
         cx.set_global(settings::TunnelRuntimeState::default());
         cx.set_global(settings::WebrtcRuntimeState::default());
         cx.set_global(settings::SignalProbeState::default());
+        // Cmd+Q 直接退出 App（没有先手动关跨网开关）时，WebRTC bridge 子进程原本
+        // 没人管——会被系统收养成孤儿，一直占着信令服务器上的房间和本机网关连接
+        // 直到房间 TTL 到期。退出前顺手杀掉它。
+        cx.on_app_quit(|cx| {
+            settings::stop_webrtc_bridge_on_quit(cx);
+            async {}
+        })
+        .detach();
         // 恢复跨网：隧道仍走下面 spawn；WebRTC 在网关 hydrate 后再拉 bridge
         if want_remote || want_tunnel || want_webrtc {
             if want_tunnel {
