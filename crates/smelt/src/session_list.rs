@@ -154,7 +154,6 @@ impl Workspace {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .px_2()
             .pb_2();
 
         for (pix, (name, cwd, ixs)) in groups.iter().enumerate() {
@@ -192,14 +191,15 @@ impl Workspace {
                     .items_center()
                     .gap_1p5()
                     .mt_1p5()
-                    .px_1p5()
-                    .py(px(3.))
-                    .rounded(px(6.))
-                    // 淡背景带：层级信号里最强也最不伤可读性的一个。光靠字号/
-                    // 字重区分，两级要么糊在一起、要么把项目名压到看不清。
-                    .bg(ui_theme::tint(0xffffff, 0x0d))
+                    .px_3()
+                    .py(px(4.))
+                    // 通栏满宽色带 + 下沿细线：读作「区段分隔」而不是「又一行内容」。
+                    // 内嵌小圆角块跟会话行太像，这才是层级最强的信号（且不动字号）。
+                    .bg(ui_theme::tint(0xffffff, 0x12))
+                    .border_b_1()
+                    .border_color(rgb(ui_theme::BORDER_DIM))
                     .cursor_pointer()
-                    .hover(|d| d.bg(ui_theme::tint(0xffffff, 0x16)))
+                    .hover(|d| d.bg(ui_theme::tint(0xffffff, 0x1c)))
                     .child(
                         div()
                             .w(px(10.))
@@ -220,17 +220,13 @@ impl Workspace {
                             .overflow_hidden()
                             .child(
                                 // 项目名跟会话名同字号（像文件树里文件夹和文件那样）：
-                                // 层级已由 caret + 背景带 + 缩进引导线立住，不必再
-                                // 靠压小字号区分——压小只会让项目名难读。
+                                // 层级靠色带 + 字重 + 缩进引导线立住，不靠压小字号
+                                // ——压小只会让项目名难读。
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(12.5))
                                     .font_semibold()
-                                    .text_color(if is_active_group {
-                                        rgb(ui_theme::TEXT_BRIGHT)
-                                    } else {
-                                        rgb(ui_theme::TEXT_MID)
-                                    })
+                                    .text_color(rgb(ui_theme::TEXT_BRIGHT))
                                     .child(group_name.clone()),
                             )
                             .children(branch_label.map(|b| {
@@ -394,8 +390,8 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(1.))
-                .ml(px(9.))
-                .pl(px(9.))
+                .ml(px(17.))
+                .pl(px(10.))
                 .border_l_1()
                 .border_color(rgb(ui_theme::BORDER_DIM));
             for &ix in ixs {
@@ -475,7 +471,8 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_2()
+                    .pl_2()
+                    .pr_3()
                     .py(px(2.))
                     .rounded(px(6.))
                     .cursor_pointer()
@@ -496,7 +493,7 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(12.5))
-                            .text_color(rgb(ui_theme::TEXT))
+                            .text_color(rgb(ui_theme::TEXT_MID))
                             .truncate()
                             .child(title.clone()),
                     )
