@@ -75,6 +75,9 @@ if [[ -f /etc/default/coturn ]]; then
 fi
 
 log ">>> 3/5 启动 coturn"
+# 刚装完包，systemd 的 unit 缓存可能还没刷新，list-unit-files 会看不到刚创建
+# 的 coturn.service（哪怕 postinst 已经打了 symlink）——先 daemon-reload 再查。
+systemctl daemon-reload
 systemctl enable coturn 2>/dev/null || systemctl enable turnserver 2>/dev/null || true
 if systemctl list-unit-files | grep -q '^coturn\.service'; then
   systemctl restart coturn

@@ -807,6 +807,16 @@ fn resolve_smelt_bridge() -> Option<std::path::PathBuf> {
     None
 }
 
+/// `~/.smelt/smelt-bridge.log`，每次 spawn 前截断重开。拿不到 home 目录时返回
+/// `None`，调用方回退到 `/dev/null`（不让日志问题阻塞跨网功能本身）。
+fn bridge_log_file() -> Option<std::fs::File> {
+    let path = dirs::home_dir()?.join(".smelt").join("smelt-bridge.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::File::create(&path).ok()
+}
+
 /// 生成 RGB PNG（避免 L8 灰度图在 GPUI/Metal 解码时 abort）。
 fn qr_png_for_url(url: &str) -> Option<Vec<u8>> {
     use qrcode::QrCode;
@@ -1104,7 +1114,8 @@ fn webrtc_start_blocking(
         urlencoding_minimal(&token),
     );
 
-    // 2) 拉起 bridge
+    // 2) 拉起 bridge。stdout/stderr 落盘到 ~/.smelt/smelt-bridge.log（每次启动截断）——
+    // 此前直接扔 /dev/null，ICE/DataChannel 连不上时完全没法从日志排查，只能看现象。
     let mut cmd = std::process::Command::new(&bridge);
     cmd.env("SMELT_SIGNAL_HTTP", &signal_http)
         .env("SMELT_SIGNAL_WS", &signal_ws)
@@ -1114,9 +1125,18 @@ fn webrtc_start_blocking(
         .env("SMELT_SECRET", &room.secret)
         .env("SMELT_WRITE", if write { "true" } else { "false" })
         .env("RUST_LOG", "info")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+    match bridge_log_file() {
+        Some(log) => {
+            let err_log = log
+                .try_clone()
+                .map_err(|e| format!("无法复用 bridge 日志文件描述符：{e}"))?;
+            cmd.stdout(log).stderr(err_log);
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        }
+    }
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动 smelt-bridge 失败：{e}"))?;
