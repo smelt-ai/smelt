@@ -145,20 +145,27 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
         from: "client",
         payload: { kind: "offer", sdp: offer.sdp || "", restart: true },
       });
+      // 故意不在这里把 iceRestarting 重置回 false——offer 刚发出去，answer
+      // 还没回来，pc 处于 have-local-offer。如果网络还在抖，别的事件（比如
+      // channel 又 close 一次）会紧接着再来一轮 restartOrFail；旧版在这里就
+      // 解锁了，一旦这轮 answer 落地、signalingState 瞬间回到 stable，第二个
+      // 请求会紧跟着再发一个 offer，跟第一轮还没收尾的 SDP 状态打架，就是
+      // Chrome 报 "order of m-lines ... doesn't match" 的根因。等 8 秒超时或
+      // 明确成功/失败再放行下一轮。
       window.setTimeout(() => {
+        iceRestarting = false;
         if (intentionalClose) return;
         if (pc?.connectionState !== "connected") {
           fail(`ice restart timeout · ${reason}`);
         }
       }, 8000);
     } catch (e) {
+      iceRestarting = false;
       // 之前这里吞掉了具体异常，只剩个笼统的 "ice restart failed"，排查全靠猜。
       const detail =
         e instanceof DOMException ? `${e.name}: ${e.message}` : String(e);
       console.warn("ice restart failed", reason, e);
       fail(`ice restart failed(${detail}) · ${reason}`);
-    } finally {
-      iceRestarting = false;
     }
   }
 
@@ -193,8 +200,11 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
     pc.onconnectionstatechange = () => {
       if (intentionalClose) return;
       const s = pc?.connectionState;
-      if (s === "connected") setPhase("connected");
-      else if (s === "failed") restartOrFail("peer connection failed");
+      if (s === "connected") {
+        setPhase("connected");
+        // 提前解锁：真连上了就不用等满 8 秒 watchdog，后面再抖一次可以马上重协商
+        iceRestarting = false;
+      } else if (s === "failed") restartOrFail("peer connection failed");
       else if (s === "disconnected") {
         // 换网常见：先 disconnected，稍后可能 failed 或自己恢复；给宽限
         setPhase("ice", "disconnected");
