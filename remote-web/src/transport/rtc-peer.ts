@@ -125,6 +125,17 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
   }
 
   let iceRestarting = false;
+  /**
+   * 真正的互斥锁，覆盖从"决定要 createOffer"到"setLocalDescription 落地"这一
+   * 小段窗口。signalingState 在这段窗口里还是 "stable"（createOffer 本身不
+   * 改状态，只有 setLocalDescription 才改），只查 signalingState 挡不住两个
+   * 调用方在这段窗口里同时冲进来各发一次 offer——webrtc-internals 实测抓到
+   * 过这个场景：两次 createOffer 都成功、两次 setLocalDescription 前后脚
+   * 提交，第二次因为跟第一次刚提交的状态对不上直接被 Chrome 拒掉（"order of
+   * m-lines ... doesn't match"）。createAndSendOffer（首次协商）和
+   * attemptIceRestart（重连）共用这一把锁，谁都不能插队。
+   */
+  let makingOffer = false;
 
   /**
    * 网络短暂抖动（弱 WiFi、蜂窝切基站）时优先原地 ICE restart，而不是整个
@@ -132,14 +143,20 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
    * candidate 收集，代价小、恢复快。8 秒内没连上才退回完整重连（resetPc）。
    */
   async function attemptIceRestart(reason: string) {
-    if (intentionalClose || !pc || iceRestarting) return;
+    if (intentionalClose || !pc || iceRestarting || makingOffer) return;
     if (pc.signalingState !== "stable") return; // 协商中，等这轮结束再看
     iceRestarting = true;
     setPhase("ice", `restart · ${reason}`);
     try {
       pc.restartIce();
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      makingOffer = true;
+      let offer: RTCSessionDescriptionInit;
+      try {
+        offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+      } finally {
+        makingOffer = false;
+      }
       signal.send({
         op: "signal",
         from: "client",
@@ -176,7 +193,7 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
    */
   function restartOrFail(reason: string) {
     if (intentionalClose) return;
-    if (iceRestarting) return;
+    if (iceRestarting || makingOffer) return;
     if (pc && pc.signalingState === "stable") {
       void attemptIceRestart(reason);
     } else {
@@ -266,9 +283,15 @@ export async function connectRtc(opts: RtcConnectOptions): Promise<RtcSession> {
   }
 
   async function createAndSendOffer() {
-    if (!pc) return;
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    if (!pc || makingOffer) return;
+    makingOffer = true;
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } finally {
+      makingOffer = false;
+    }
     signal.send({
       op: "signal",
       from: "client",
