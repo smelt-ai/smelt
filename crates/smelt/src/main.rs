@@ -1393,6 +1393,12 @@ struct Workspace {
     /// 正在确认丢弃整个文件的改动：(仓库根, 相对路径, 是否未跟踪)。未跟踪文件是
     /// 直接删盘，比 restore 更狠，文案要分开写。
     discard_file_target: Option<(String, String, bool)>,
+    /// 「丢弃全部改动」确认弹窗的目标仓库根（Some = 弹窗开着）。见 git_panel.rs。
+    discard_all_target: Option<String>,
+    /// git 远端同步 / stash 操作进行中：Some(操作名) = 正在跑，None = 空闲。
+    /// 既做并发闸门（防连点抢 index.lock），也给 SOURCE CONTROL 头显示「拉取中…」
+    /// 这类进行中反馈——否则点了按钮几秒内毫无动静。见 git_panel.rs run_git_op。
+    git_op: Option<&'static str>,
     /// 各类后台操作（建/删 worktree、生成 commit message 等）失败时的提示，render
     /// 顶部取走并弹成通知；后台任务里没有 Window，弹不了通知，所以先暂存到这。
     background_error: Option<String>,
@@ -1581,6 +1587,8 @@ impl Workspace {
             delete_worktree_target: None,
             discard_hunk_target: None,
             discard_file_target: None,
+            discard_all_target: None,
+            git_op: None,
             background_error: None,
             daemon_outdated: None,
             daemon_upgrade_msg: None,
@@ -3885,12 +3893,15 @@ impl Workspace {
                 Hsla::from(rgb(ui_theme::red())),
             )
         } else {
+            // 主操作（确定退出 / 提交 等）用**实心品牌色 blurple + 白字**，不再是
+            // 「薄底 + 彩字」那种轮廓感——之前还错用了青蓝 blue()，既不突出也不是
+            // 色板的强调色。danger 保持红薄底（危险操作克制警示）。
             (
                 neutral_bg,
                 neutral_hover,
-                ui_theme::tint(ui_theme::blue(), 0x24).into(),
-                ui_theme::tint(ui_theme::blue(), 0x40).into(),
-                Hsla::from(rgb(ui_theme::blue())),
+                Hsla::from(rgb(ui_theme::accent())),
+                ui_theme::tint(ui_theme::accent(), 0xdd).into(),
+                Hsla::from(rgb(ui_theme::on_accent())),
             )
         }
     }
@@ -5424,6 +5435,7 @@ impl Render for Workspace {
             .children(self.delete_worktree_target.is_some().then(|| self.render_delete_worktree_confirm(cx)))
             .children(self.discard_hunk_target.is_some().then(|| self.render_discard_hunk_confirm(cx)))
             .children(self.discard_file_target.is_some().then(|| self.render_discard_file_confirm(cx)))
+            .children(self.discard_all_target.is_some().then(|| self.render_discard_all_confirm(cx)))
             .children(self.delete_branch_target.is_some().then(|| self.render_delete_branch_confirm(cx)))
             // 删除文件二次确认拦截弹层
             .children(self.delete_file_target.is_some().then(|| self.render_delete_file_confirm(cx)))

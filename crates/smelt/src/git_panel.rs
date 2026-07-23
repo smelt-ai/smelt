@@ -132,6 +132,8 @@ pub struct GitStatusData {
     /// 改动文件：(porcelain 两位状态码, 路径)。file_tree.rs 借它给改动文件标 M/A/D，
     /// 所以是 pub（main.rs 转手把这份列表传过去）。
     pub files: Vec<(String, String)>,
+    /// stash 条数（`git stash list` 行数）：决定「恢复暂存」可用性 + 显示条数。
+    stash_count: u32,
 }
 
 /// 一次 `git for-each-ref` 探测的分支列表，给 Git 页头部的分支切换下拉用。
@@ -498,6 +500,136 @@ fn push_current(root: &str, branch: &str) -> Result<(), String> {
         return Err(git_err(&fallback, "git push 失败"));
     }
     Err(git_err(&attempt, "git push 失败"))
+}
+
+/// 跑一条**网络** git 命令（fetch/pull）：无 TTY 时必须禁交互提示，否则没有凭据
+/// 缓存时 git 会等用户名/密码卡死；禁掉后直接失败退出，报错进 stderr 正常上报。
+/// 同 push_current 的处理。
+fn run_git_net(root: &str, args: &[&str]) -> Result<(), String> {
+    let mut a = vec!["-C", root];
+    a.extend_from_slice(args);
+    let out = std::process::Command::new("git")
+        .args(&a)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(git_err(&out, "git 命令失败"))
+    }
+}
+
+/// `git fetch --all --prune`：更新所有远端追踪并清掉已删的远端分支引用。无副作用，
+/// 只刷新「远端有什么」，之后 ahead/behind 才准。
+fn fetch_remote(root: &str) -> Result<(), String> {
+    run_git_net(root, &["fetch", "--all", "--prune"])
+}
+
+/// `git pull --rebase`：拉取并把本地未推送提交 rebase 到远端之上（线性历史、无 merge
+/// commit）。脏工作区或 rebase 冲突时 git 自己拒绝并写 stderr，原样上报——**不自动
+/// stash**，那样 pop 冲突更难收拾。
+fn pull_rebase(root: &str) -> Result<(), String> {
+    run_git_net(root, &["pull", "--rebase"])
+}
+
+/// `git stash push -u`：把工作区改动（含未跟踪文件）压进 stash，工作区变干净。
+/// 切分支 / pull 前救场用。
+fn stash_push(root: &str) -> Result<(), String> {
+    let out = run_git(root, &["stash", "push", "-u"]).map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(git_err(&out, "git stash 失败"))
+    }
+}
+
+/// `git stash pop`：弹出最近一条 stash 应用回工作区。pop 冲突时 git 报错、stash 保留，
+/// 原样上报让用户手动收。
+fn stash_pop(root: &str) -> Result<(), String> {
+    let out = run_git(root, &["stash", "pop"]).map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(git_err(&out, "git stash pop 失败"))
+    }
+}
+
+/// 把「远端同步 + 本地救场」操作组加进一个下拉菜单。舞台 Git 视图的分支头下拉、
+/// inspector 窄面板头的同步下拉两处共用——别只在一处加，用户看的是 inspector 那个。
+/// 获取 / 拉取↓N / 暂存 / 恢复暂存(N) / 丢弃全部，按当前状态决定哪些出现。
+fn git_ops_menu_items(
+    mut menu: gpui_component::menu::PopupMenu,
+    ws: Entity<Workspace>,
+    root: String,
+    behind: u32,
+    stash_n: u32,
+    has_changes: bool,
+) -> gpui_component::menu::PopupMenu {
+    {
+        let ws = ws.clone();
+        menu = menu.item(PopupMenuItem::new("获取").on_click(move |_ev, _window, cx| {
+            ws.update(cx, |w, cx| w.git_fetch(cx));
+        }));
+    }
+    {
+        let ws = ws.clone();
+        let label = if behind > 0 { format!("拉取 ↓{behind}") } else { "拉取".to_string() };
+        menu = menu.item(PopupMenuItem::new(label).on_click(move |_ev, _window, cx| {
+            ws.update(cx, |w, cx| w.git_pull(cx));
+        }));
+    }
+    if has_changes {
+        let ws = ws.clone();
+        menu = menu.separator().item(PopupMenuItem::new("暂存改动").on_click(
+            move |_ev, _window, cx| {
+                ws.update(cx, |w, cx| w.git_stash_push(cx));
+            },
+        ));
+    }
+    if stash_n > 0 {
+        let ws = ws.clone();
+        menu = menu.item(PopupMenuItem::new(format!("恢复暂存 ({stash_n})")).on_click(
+            move |_ev, _window, cx| {
+                ws.update(cx, |w, cx| w.git_stash_pop(cx));
+            },
+        ));
+    }
+    if has_changes {
+        let ws = ws.clone();
+        menu = menu.separator().item(PopupMenuItem::new("丢弃全部改动").on_click(
+            move |_ev, _window, cx| {
+                ws.update(cx, |w, cx| w.start_discard_all(root.clone(), cx));
+            },
+        ));
+    }
+    menu
+}
+
+/// stash 条数（`git stash list` 的行数）：决定「恢复暂存」是否可用 + 显示条数。
+fn stash_count(root: &str) -> u32 {
+    run_git(root, &["stash", "list"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).count() as u32)
+        .unwrap_or(0)
+}
+
+/// 丢弃工作区**全部**改动：已跟踪的还原成 HEAD（暂存 + 工作区一起），未跟踪的删掉。
+/// 危险且不进 reflog，调用方必须先弹确认。
+fn discard_all(root: &str) -> Result<(), String> {
+    let restore = run_git(root, &["restore", "--staged", "--worktree", "."])
+        .map_err(|e| e.to_string())?;
+    if !restore.status.success() {
+        return Err(git_err(&restore, "git restore 失败"));
+    }
+    // 未跟踪文件 restore 管不着，git clean 收尾（-fd：强制 + 含目录）。
+    let clean = run_git(root, &["clean", "-fd"]).map_err(|e| e.to_string())?;
+    if !clean.status.success() {
+        return Err(git_err(&clean, "git clean 失败"));
+    }
+    Ok(())
 }
 
 /// 解析 `git status --porcelain=v1 -b` 的 `## ` 行：branch 名 + 上游分支名（有的话）+
@@ -1610,6 +1742,10 @@ pub fn git_view(
         let remote: Vec<String> = branches.map(|b| b.remote.clone()).unwrap_or_default();
         let ws = cx.entity();
         let root_for_menu = root.clone();
+        // 远端同步 / 本地救场操作组要的数据（见 dropdown 开头）。
+        let behind = data.behind;
+        let stash_n = data.stash_count;
+        let has_changes = !data.files.is_empty();
         div()
             .px_3()
             .py_2()
@@ -1621,7 +1757,17 @@ pub fn git_view(
                     .small()
                     .label(format!("⎇ {branch}{ahead_behind}"))
                     .dropdown_menu(move |menu, _window, _cx| {
-                        let mut menu = menu;
+                        // ---- 远端同步 + 本地救场（分支列表之前）----
+                        let mut menu = git_ops_menu_items(
+                            menu,
+                            ws.clone(),
+                            root_for_menu.clone(),
+                            behind,
+                            stash_n,
+                            has_changes,
+                        )
+                        .separator();
+                        // ---- 分支切换 ----
                         if local.is_empty() && remote.is_empty() {
                             menu = menu.item(PopupMenuItem::new("（没有其他分支）"));
                         }
@@ -2214,6 +2360,7 @@ impl Workspace {
                     if let Ok(o) = out {
                         if o.status.success() {
                             d.ok = true;
+                            d.stash_count = stash_count(&r);
                             let text = String::from_utf8_lossy(&o.stdout);
                             for line in text.lines() {
                                 if let Some(b) = line.strip_prefix("## ") {
@@ -2845,6 +2992,138 @@ impl Workspace {
         .detach();
     }
 
+    /// 后台跑一条 git 操作，回来刷新状态 / 报错。fetch·pull·stash 共用这个骨架
+    /// （照 push_only）。`name` 是进行中显示的操作名（「拉取」等）；`op` 在后台
+    /// 线程里执行，返回 `Result<(),String>`；`reload_log` = 操作会改历史（pull）
+    /// 时顺带重拉 log。
+    fn run_git_op<F>(&mut self, name: &'static str, reload_log: bool, op: F, cx: &mut Context<Self>)
+    where
+        F: FnOnce(&str) -> Result<(), String> + Send + 'static,
+    {
+        // 一次只跑一个：避免连点 fetch/pull 起一堆并发 git 抢 index.lock。
+        if self.git_op.is_some() {
+            return;
+        }
+        let Some(root) = self.cur().and_then(|s| s.cwd(cx)) else { return };
+        self.git_op = Some(name);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let result = cx.background_executor().spawn(async move { op(&r) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.git_op = None;
+                match result {
+                    Ok(()) => {
+                        this.invalidate_git_status(&root);
+                        if reload_log {
+                            this.reload_git_log(root.clone(), cx);
+                        }
+                    }
+                    Err(err) => this.background_error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// `git fetch --all --prune`：更新远端追踪，刷新 ahead/behind。
+    pub fn git_fetch(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op("获取", false, fetch_remote, cx);
+    }
+
+    /// `git pull --rebase`：拉取并 rebase 本地提交（历史变了 → 重拉 log）。
+    pub fn git_pull(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op("拉取", true, pull_rebase, cx);
+    }
+
+    /// `git stash push -u`：暂存全部改动（含未跟踪）。
+    pub fn git_stash_push(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op("暂存", false, stash_push, cx);
+    }
+
+    /// `git stash pop`：弹出最近一条 stash。
+    pub fn git_stash_pop(&mut self, cx: &mut Context<Self>) {
+        self.run_git_op("恢复暂存", false, stash_pop, cx);
+    }
+
+    /// 点「丢弃全部改动」：先弹确认，不直接动文件（照 start_discard_file）。
+    pub fn start_discard_all(&mut self, root: String, cx: &mut Context<Self>) {
+        self.discard_all_target = Some(root);
+        cx.notify();
+    }
+
+    /// 取消丢弃全部。
+    pub fn cancel_discard_all(&mut self, cx: &mut Context<Self>) {
+        self.discard_all_target = None;
+        cx.notify();
+    }
+
+    /// 确认丢弃工作区全部改动（restore + clean）。
+    pub fn confirm_discard_all(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.discard_all_target.take() else { return };
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let result = cx.background_executor().spawn(async move { discard_all(&r) }).await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.invalidate_git_status(&root);
+                        // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
+                        this.git_diff = None;
+                        this.active_hunk = None;
+                    }
+                    Err(err) => this.background_error = Some(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 「丢弃全部改动」确认弹窗（照 render_discard_file_confirm，措辞更重——连未
+    /// 跟踪文件一起删）。
+    pub fn render_discard_all_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let (fg, muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        if self.discard_all_target.is_none() {
+            return div();
+        }
+        let content = v_flex()
+            .child(div().font_bold().text_color(fg).text_lg().child("丢弃工作区全部改动？"))
+            .child(div().text_sm().text_color(muted).child(
+                "已跟踪文件还原成 HEAD，未暂存 / 未跟踪的新文件会被删除。",
+            ))
+            .child(div().text_sm().text_color(accent_text).child("不进 reflog，找不回来。"))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-discard-all",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_discard_all(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-discard-all",
+                        "全部丢弃",
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_discard_all(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(400., true, content, cx)
+    }
+
     fn commit(&mut self, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.cur().and_then(|s| s.cwd(cx)) else { return };
         let Some(message) = self.commit_msg_input.as_ref().map(|s| s.read(cx).value().trim().to_string())
@@ -2951,20 +3230,44 @@ impl Workspace {
         // ---- 列表 ----
         let status = self.git_status.get(&root).map(|(_, d)| d.clone());
         let (ahead, behind) = status.as_ref().map(|d| (d.ahead, d.behind)).unwrap_or((0, 0));
-        let header = self
-            .inspector_header("SOURCE CONTROL", InspectorTab::Git, cx)
-            .child(
-                div()
-                    .text_xs()
-                    .font_family("monospace")
-                    // 有待推/待拉才亮绿，0/0 弱化——常绿会把「没事」渲染成「有事」。
-                    .text_color(if ahead + behind > 0 {
-                        rgb(ui_theme::green())
-                    } else {
-                        rgb(ui_theme::text_faint())
-                    })
-                    .child(format!("↑{ahead} ↓{behind}")),
-            );
+        let stash_n = status.as_ref().map(|d| d.stash_count).unwrap_or(0);
+        let has_changes = status.as_ref().is_some_and(|d| !d.files.is_empty());
+        let ws_ops = cx.entity();
+        let root_ops = root.clone();
+        // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
+        // 「拉取中…」。
+        let busy = self.git_op;
+        // 同步入口 = 把本来就显眼的绿色 ↑N↓M 直接做成可点下拉（带 ▾ 提示），
+        // 替代之前那个不起眼的「⇅」。点开是获取/拉取/暂存/恢复/丢弃全部。
+        let sync_label = match busy {
+            Some(op) => format!("{op}中…"),
+            None => format!("↑{ahead} ↓{behind} ▾"),
+        };
+        let sync_color = if busy.is_some() {
+            rgb(ui_theme::yellow())
+        } else if ahead + behind > 0 {
+            rgb(ui_theme::green())
+        } else {
+            rgb(ui_theme::text_faint())
+        };
+        let header = self.inspector_header("SOURCE CONTROL", InspectorTab::Git, cx).child(
+            Button::new("git-sync-menu")
+                .ghost()
+                .xsmall()
+                .label(sync_label)
+                .font_family("monospace")
+                .text_color(sync_color)
+                .dropdown_menu(move |menu, _window, _cx| {
+                    git_ops_menu_items(
+                        menu,
+                        ws_ops.clone(),
+                        root_ops.clone(),
+                        behind,
+                        stash_n,
+                        has_changes,
+                    )
+                }),
+        );
 
         // commit message 输入框懒创建（跟全屏 Git 页同一个实体，两处共享草稿）。
         if self.commit_msg_input.is_none() {
