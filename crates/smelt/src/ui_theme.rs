@@ -298,6 +298,13 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     c.list_even = rgb(p.bg_elev).into();
     c.list_head = rgb(p.bg_bar).into();
     c.sidebar = rgb(p.bg_elev).into();
+
+    // colors 改完必须同步重算 tokens：组件内部有些位读的是 `tokens.*` 而不是
+    // `colors.*`（如 checkbox 勾选态的方块填充用 tokens.primary）。不同步的话
+    // 填充还是组件库默认的浅色，和被我们改成白的对勾（primary_foreground）撞成
+    // 「白底 + 白对勾」——勾选了却看不见勾，就是这个回归。
+    let theme = cx.global_mut::<Theme>();
+    theme.tokens = (&theme.colors).into();
 }
 
 /// 把一个 RGB 按比例调亮（factor > 1）或压暗（< 1），逐通道饱和截断。
