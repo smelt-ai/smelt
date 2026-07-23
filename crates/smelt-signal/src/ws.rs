@@ -132,10 +132,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             ClientMsg::RefreshIce => {
-                if joined.is_none() {
+                let Some((ref room, role)) = joined else {
                     send_json(&out_tx, ServerMsg::err("not joined"));
                     continue;
-                }
+                };
+                info!(room = %room, role = role.as_str(), "ice refreshed");
                 send_json(
                     &out_tx,
                     ServerMsg::IceServers {
