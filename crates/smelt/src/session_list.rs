@@ -107,7 +107,7 @@ impl Workspace {
                         Button::new("sess-new-agent")
                             .ghost()
                             .xsmall()
-                            .label("+Agent")
+                            .label("对话")
                             .text_xs()
                             .font_semibold()
                             .text_color(rgb(ui_theme::purple()))
@@ -137,7 +137,7 @@ impl Workspace {
                             .text_color(rgb(ui_theme::green()))
                             .cursor_pointer()
                             .hover(|d| d.opacity(0.8))
-                            .child("+Term")
+                            .child("终端")
                             .on_click(move |_ev, _window, cx| {
                                 let cwd = cwd_term.clone();
                                 e_term.update(cx, |ws, cx| ws.add_session(cwd, cx));
@@ -762,8 +762,8 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
                     .child("临时终端")
-                    .on_click(move |_ev, window, cx| {
-                        e_scratch.update(cx, |ws, cx| ws.activate_or_new_scratch(window, cx));
+                    .on_click(move |_ev, _window, cx| {
+                        e_scratch.update(cx, |ws, cx| ws.new_scratch_session(cx));
                     }),
             );
 

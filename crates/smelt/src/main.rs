@@ -2192,27 +2192,11 @@ impl Workspace {
     }
 
     /// 临时终端：不挂在任何项目下，固定落在 $HOME，侧栏单独分组「临时终端」。
-    /// 跟"打开项目/项目内新建"平级，但不需要先切到某个项目才能开。
+    /// 点一下就在 $HOME 新建一个终端——就这么简单，不做「已有就复用」那套
+    /// （复用反而制造困惑：分不清是新建还是切旧的）。异步 spawn，完成后
+    /// add_session_with_launch 会把舞台切到这个新终端。
     fn new_scratch_session(&mut self, cx: &mut Context<Self>) {
         self.add_session(scratch_dir(), cx);
-    }
-
-    /// 顶部「新建终端」入口：已有临时终端就切过去，没有才新开一个
-    /// （避免每次点这个常驻入口都新建一个空终端）。这个入口能从总览/设置页直接点，
-    /// `add_session` 异步完成后会把 `view` 切到 Terminal；已有会话则这里立刻切过去。
-    fn activate_or_new_scratch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let home = scratch_dir();
-        let existing = self.sessions.iter().position(|s| s.cwd(cx) == home);
-        match existing {
-            Some(ix) => {
-                self.activate(ix, window, cx);
-                self.stage_override = None;
-                self.focus_active(window, cx);
-                cx.notify();
-            }
-            // 新建是异步的（后台 spawn）；完成后 add_session_with_launch 会切到 Terminal。
-            None => self.new_scratch_session(cx),
-        }
     }
 
     /// 「打开项目」：弹原生选择框选一个目录，在其中开新会话。
