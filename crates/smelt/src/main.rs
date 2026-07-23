@@ -5616,7 +5616,7 @@ fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) ->
         // 单位，默认 rem_size=16px 偏小；这里统一调大，全局跟着等比例放大，不用
         // 逐个改 .text_xs()/.text_sm()。终端内容本身的字号另由 terminal_view.rs
         // 的 FONT_PX 控制，不受这个影响。
-        window.set_rem_size(px(18.));
+        window.set_rem_size(px(19.));
         let view = cx.new(|cx| Workspace::new(cx));
         workspace = Some(view.clone());
         // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。

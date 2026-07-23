@@ -1482,17 +1482,10 @@ impl Render for TerminalView {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(if terminal::is_dark() {
-                        rgb(0x0024_283b)
-                    } else {
-                        rgb(0x00ff_ffff)
-                    })
+                    // 底色跟随全局色板（写死的深蓝在换色板后会突兀）。
+                    .bg(rgb(crate::ui_theme::bg_card()))
                     .border_1()
-                    .border_color(if terminal::is_dark() {
-                        rgb(0x003d_4a6a)
-                    } else {
-                        rgb(0x00d0_d7de)
-                    })
+                    .border_color(rgb(crate::ui_theme::border_mid()))
                     .shadow_md()
                     .child(
                         div()
@@ -1568,11 +1561,7 @@ impl TerminalView {
         let track_h = (h - 2.0 * PAD_Y).max(1.0);
         let (thumb_h, thumb_y) =
             scrollbar_thumb(track_h, info.viewport_rows, info.max_offset, info.offset);
-        let thumb_color = if terminal::is_dark() {
-            rgb(0x005a_657a)
-        } else {
-            rgb(0x00af_b8c1)
-        };
+        let thumb_color = rgb(crate::ui_theme::border_focus());
         let max_off = info.max_offset;
         let viewport = info.viewport_rows;
 

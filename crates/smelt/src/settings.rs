@@ -109,6 +109,11 @@ pub fn apply_theme_mode(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     crate::ui_theme::set_light(!mode.is_dark());
     terminal::set_dark_mode(mode.is_dark());
+    // Theme::change 装的是组件库自带色板，跟 ui_theme 是两套值——同屏里
+    // `t.border` 和 `ui_theme::border_mid()` 挨着出现就会差一档。这里按语义位
+    // 把组件库主题覆写成 ui_theme 的值，色真源收敛成一个。
+    // 覆写必须在 Theme::change 之后：它会整套 apply_config 覆盖回默认。
+    crate::ui_theme::apply_to_component_theme(cx);
 }
 
 /// 外观设置文件路径：~/.smelt/appearance.json。
@@ -3489,7 +3494,7 @@ impl Workspace {
             };
             let handle = cx
                 .open_window(options, |window, cx| {
-                    window.set_rem_size(px(18.));
+                    window.set_rem_size(px(19.));
                     let view = cx.new(|cx| SettingsWindow {
                         _observe_workspace: cx.observe(&workspace, |_, _, cx| cx.notify()),
                         workspace: workspace.clone(),

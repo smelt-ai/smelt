@@ -157,6 +157,13 @@ impl Workspace {
                                     .child("查看")
                                     .on_click(move |_ev, window, cx| {
                                         e_review.update(cx, |ws, cx| {
+                                            // 点「查看」= 已知晓，跳转的同时把这条
+                                            // 关掉。少了这句：跳过去了但 status 还挂
+                                            // 在等待态，派生态 toast 下一帧又渲染回来
+                                            // ——表现为「点了不消失 / 反复弹」。
+                                            // status 真正解除时 retain 会把 id 从
+                                            // dismissed 清掉，之后再阻塞照常重弹。
+                                            ws.toast_dismissed.insert(id);
                                             ws.activate(ix, window, cx);
                                         });
                                     }),

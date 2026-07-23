@@ -242,7 +242,7 @@ impl Workspace {
                                 // ——压小只会让项目名难读。
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(px(12.5))
+                                    .text_size(px(14.))
                                     .font_semibold()
                                     .text_color(rgb(ui_theme::text_bright()))
                                     .child(group_name.clone()),
@@ -251,7 +251,7 @@ impl Workspace {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(10.))
+                                    .text_size(px(11.))
                                     .font_family("monospace")
                                     .text_color(rgb(ui_theme::text_faint()))
                                     .child(b)
@@ -270,7 +270,7 @@ impl Workspace {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .text_color(rgb(ui_theme::text_faint()))
                             .child(ixs.len().to_string()),
                     )
@@ -514,7 +514,7 @@ impl Workspace {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.5))
+                            .text_size(px(14.))
                             .text_color(rgb(ui_theme::text_mid()))
                             .truncate()
                             .child(title.clone()),
@@ -523,7 +523,7 @@ impl Workspace {
                     .children(subtitle.map(|s| {
                         div()
                             .flex_shrink_0()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .font_family("monospace")
                             .text_color(rgb(ui_theme::text_faint()))
                             .child(s)
@@ -533,7 +533,7 @@ impl Workspace {
                     .children(attention_label.map(|label| {
                         div()
                             .flex_shrink_0()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .text_color(ui_theme::session_dot_color(status))
                             .child(label)
                     }))
@@ -690,7 +690,7 @@ impl Workspace {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .text_size(px(10.))
+                                        .text_size(px(11.))
                                         .text_color(rgb(ui_theme::text_mid()))
                                         .truncate()
                                         .child(p_title),

@@ -447,7 +447,7 @@ impl Workspace {
             };
             let handle = cx
                 .open_window(options, |window, cx| {
-                    window.set_rem_size(px(18.));
+                    window.set_rem_size(px(19.));
                     let view = cx.new(|_cx| UsageWindow { workspace: workspace.clone() });
                     cx.new(|cx| Root::new(view, window, cx))
                 })

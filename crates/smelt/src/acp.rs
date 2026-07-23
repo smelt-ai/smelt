@@ -78,7 +78,13 @@ pub enum AcpEvent {
     Status(String),
     /// 握手完成，可以发 prompt 了。`kind` 说明这是怎么接上的——布尔的
     /// 「resumed 与否」表达不了三种情况，会让「续接成功」被渲染成「新会话」。
-    Ready { session_id: SessionId, kind: ReadyKind },
+    Ready {
+        session_id: SessionId,
+        kind: ReadyKind,
+        /// agent 是否收图（`promptCapabilities.image`）。Grok 是 false——UI 据此
+        /// 拦下粘贴，别让图片进了 prompt 被静默丢弃。
+        supports_image: bool,
+    },
     /// assistant 正文 / 思考块的流式增量（content 已文本化）。
     AgentChunk { thought: bool, text: String },
     ToolCall(ToolCall),
@@ -426,6 +432,8 @@ async fn run_connection(
                 )
                 .block_task()
                 .await?;
+            // 收图能力：三条恢复路径共用（bool 是 Copy，多次读没问题）。
+            let supports_image = init.agent_capabilities.prompt_capabilities.image;
 
             // 恢复链：resume → load → new。
             //
@@ -470,6 +478,7 @@ async fn run_connection(
                         cmd_rx,
                         event_tx,
                         ReadyKind::ResumedKeepHistory,
+                        supports_image,
                         model_cfg,
                     )
                     .await;
@@ -494,7 +503,7 @@ async fn run_connection(
                                 .config_options(loaded.config_options)
                                 .meta(loaded.meta);
                             let session = connection.attach_session(resp, Default::default())?;
-                            return drive_session(session, cmd_rx, event_tx, ReadyKind::ResumedWithReplay, model_cfg)
+                            return drive_session(session, cmd_rx, event_tx, ReadyKind::ResumedWithReplay, supports_image, model_cfg)
                                 .await;
                         }
                         Err(e) => {
@@ -525,7 +534,7 @@ async fn run_connection(
                     id
                 });
             let session = connection.attach_session(created, Default::default())?;
-            drive_session(session, cmd_rx, event_tx, ReadyKind::Fresh, model_cfg).await
+            drive_session(session, cmd_rx, event_tx, ReadyKind::Fresh, supports_image, model_cfg).await
         })
         .await
 }
@@ -537,11 +546,16 @@ async fn drive_session<'r>(
     cmd_rx: smol::channel::Receiver<AcpCommand>,
     event_tx: smol::channel::Sender<AcpEvent>,
     ready_kind: ReadyKind,
+    // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
+    supports_image: bool,
     // 模型配置项的 id（agent 报了才有）——切模型时按它下发 set_config_option。
     mut model_config_id: Option<SessionConfigId>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let _ = event_tx
-        .try_send(AcpEvent::Ready { session_id: session.session_id().clone(), kind: ready_kind });
+    let _ = event_tx.try_send(AcpEvent::Ready {
+        session_id: session.session_id().clone(),
+        kind: ready_kind,
+        supports_image,
+    });
     loop {
         // 两个等待源合一：先构造 read_update future，race 决议后它
         // 即被 drop（消息未出队不会丢），借用随之结束——绕开
@@ -695,8 +709,33 @@ fn build_agent(
     cmd: &str,
     stderr_tail: Arc<Mutex<Vec<String>>>,
 ) -> Result<AcpAgent, agent_client_protocol::Error> {
-    let path_env = format!("PATH={}", login_shell_path());
-    let args = std::iter::once(path_env.as_str()).chain(cmd.split_whitespace());
+    let path = login_shell_path();
+    let path_env = format!("PATH={path}");
+    // 命令名先按 login PATH 解析成绝对路径再交给 SDK。两个作用：
+    // 1) spawn 不再依赖别的什么 PATH——直接 exec 绝对路径；
+    // 2) **命令不存在时能提前给人话**：CLI 没装（grok / copilot 需单独安装并
+    //    登录），resolve 拿不到，与其让 SDK 甩一个 `os error 2` 天书，不如在这里
+    //    直接返回「未找到命令 X，请先安装并确保它在登录 shell 的 PATH 里」。
+    //    带 `/` 的（受管 bun 的绝对路径）跳过这步，本来就不查 PATH。
+    let mut tokens = cmd.split_whitespace();
+    let resolved: Vec<String> = match tokens.next() {
+        Some(prog) => {
+            let prog = if prog.contains('/') {
+                prog.to_string()
+            } else {
+                resolve_in_path(prog, path).ok_or_else(|| {
+                    agent_client_protocol::Error::internal_error().data(format!(
+                        "未找到命令 `{prog}`。这类对话 agent 是各自独立的 CLI，需要先自行\
+                         安装并登录，再确保它在登录 shell 的 PATH 里（在「设置 → Agent 集成」\
+                         能改启动命令 / 换成绝对路径）。"
+                    ))
+                })?
+            };
+            std::iter::once(prog).chain(tokens.map(String::from)).collect()
+        }
+        None => Vec::new(),
+    };
+    let args = std::iter::once(path_env.as_str()).chain(resolved.iter().map(String::as_str));
     let agent = AcpAgent::from_args(args)?.with_debug(move |line, direction| {
         if matches!(direction, LineDirection::Stderr) {
             let mut tail = stderr_tail.lock().unwrap();
@@ -906,6 +945,26 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
 /// login shell 的 PATH（跑一次缓存）。GUI 进程从 Finder 启动时 PATH 只有系统
 /// 目录，nvm/homebrew 里的 npx 找不到；跟终端会话不同（那边 shell 由 smeltd 起，
 /// 自带 login 环境），ACP 子进程是 GUI 直接 spawn 的，得自己补。
+/// 在 `:` 分隔的 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
+/// 已经带 `/` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
+/// None——调用方保留原名，让 spawn 照常失败并把真实错误报出来。
+fn resolve_in_path(program: &str, path: &str) -> Option<String> {
+    if program.contains('/') {
+        return Some(program.to_string());
+    }
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        let full = std::path::Path::new(dir).join(program);
+        // 是文件且可执行（软链会被 metadata 跟随到目标）。
+        if let Ok(meta) = std::fs::metadata(&full) {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return full.to_str().map(String::from);
+            }
+        }
+    }
+    None
+}
+
 fn login_shell_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
@@ -1050,6 +1109,31 @@ mod runtime_tests {
         let out = std::process::Command::new(&path).arg("--version").output().unwrap();
         assert!(out.status.success());
         eprintln!("bun @ {} → {}", path.display(), String::from_utf8_lossy(&out.stdout).trim());
+    }
+}
+
+#[cfg(test)]
+mod path_resolve_tests {
+    use super::resolve_in_path;
+
+    #[test]
+    fn absolute_or_slashed_returned_asis() {
+        // 带斜杠的（绝对路径 / 受管 bun 全路径）不查 PATH，原样返回。
+        assert_eq!(resolve_in_path("/usr/bin/env", "/nonexistent").as_deref(), Some("/usr/bin/env"));
+        assert_eq!(resolve_in_path("./x", "/bin").as_deref(), Some("./x"));
+    }
+
+    #[test]
+    fn finds_executable_across_path_dirs() {
+        // `sh` 一定在 /bin；把它藏在几个假目录后面，验证会逐段找下去。
+        let path = "/no/such/dir:/also/fake:/bin:/usr/bin";
+        assert_eq!(resolve_in_path("sh", path).as_deref(), Some("/bin/sh"));
+    }
+
+    #[test]
+    fn missing_command_returns_none() {
+        // 找不到就返回 None，让调用方保留原名、把真实 spawn 错误报出来。
+        assert!(resolve_in_path("definitely-not-a-real-cmd-xyz", "/bin:/usr/bin").is_none());
     }
 }
 

@@ -1,8 +1,12 @@
-//! 设计稿语义色板（深色 / 浅色两套）——全局 UI 颜色的唯一出处。
+//! 语义色板（深色 / 浅色两套）——全局 UI 颜色的唯一出处。
 //!
-//! 深色色值来自 claude.ai/design「桌面开发者客户端设计」的 Desktop Client 定稿；
-//! 浅色是按同一套语义层级（表面由深到浅、边由暗到亮、文字由强到弱）对偶推导的，
-//! 语义位一一对应，所以调用方不需要关心当前是哪套。
+//! 色值取自 **Discord**：深色 `#313338`（主区）/ `#2b2d31`（侧栏）/ `#1e1f22`
+//! （rail）那一套灰蓝，强调色是它的 blurple `#5865f2`；浅色对应 Discord light。
+//! 两套语义位一一对应，调用方不需要关心当前是哪套。
+//!
+//! 上一版色值来自 claude.ai/design「桌面开发者客户端设计」定稿（冷调近黑 +
+//! 橙强调）。换成 Discord 是整体换语言，不是调参：**表面层级的方向都反过来了**
+//! （见 DARK 的注释），两套混用会四不像。
 //!
 //! 布局各层（项目 rail / 会话列表 / 会话舞台 / inspector / 状态栏 / toast / diff）
 //! 统一从这里取色，别再在各处写裸 `rgb(0x...)`——写死的深色在浅色模式下会花。
@@ -109,38 +113,49 @@ pub struct Palette {
     pub diff_gutter: u32,
 }
 
-/// 深色（设计稿定稿值）。
+/// 深色（Discord 风格）。
+///
+/// **表面层级的方向跟大多数深色 UI 相反，别顺手「修正」**：Discord 是
+/// 「主区最亮、越往边缘越暗」（舞台 > 会话列表 > rail），靠边缘压暗把注意力
+/// 推向中间的内容区；常见做法（也是本项目上一版）是反过来让侧栏浮在舞台之上。
+/// 两种都自洽，但混用就会既不像 Discord 也不像原来那套。
 pub const DARK: Palette = Palette {
-    bg_rail: 0x0a0b0e,
-    bg_panel: 0x0f1116,
-    bg_elev: 0x12141a,
-    bg_bar: 0x14161b,
-    bg_card: 0x171a20,
-    bg_hover: 0x1a1d24,
-    bg_selected: 0x20232b,
-    bg_status: 0x0c0d11,
+    bg_rail: 0x191a1d,
+    bg_panel: 0x313338,
+    bg_elev: 0x232428,
+    bg_bar: 0x2b2d31,
+    bg_card: 0x3a3c42,
+    bg_hover: 0x35373c,
+    bg_selected: 0x45474f,
+    bg_status: 0x191a1d,
 
-    border_dim: 0x1c1f27,
-    border: 0x23262e,
-    border_mid: 0x262a33,
-    border_loud: 0x2a2e37,
-    border_focus: 0x3a3f4a,
-    border_selected: 0x33373f,
+    border_dim: 0x202226,
+    border: 0x2b2d31,
+    border_mid: 0x43454b,
+    border_loud: 0x54575e,
+    border_focus: 0x6d7079,
+    // 选中描边直接用 blurple：Discord 的选中态从来不是「灰上加灰」。
+    border_selected: 0x5865f2,
 
-    text_bright: 0xe6e8ec,
-    text: 0xd7dae0,
-    text_mid: 0xc2c6cf,
-    text_muted: 0x8b909c,
-    text_faint: 0x5a606c,
+    text_bright: 0xf2f3f5,
+    text: 0xdbdee1,
+    text_mid: 0xb5bac1,
+    text_muted: 0x949ba4,
+    text_faint: 0x80848e,
 
-    accent: 0xd98a4f,
-    green: 0x66bb8a,
-    yellow: 0xfebc2e,
-    blue: 0x6ea8fe,
-    purple: 0xb98be0,
-    red: 0xe0736e,
+    // accent 从原来的橙换成 Discord 的 blurple——它是这套设计的灵魂色，
+    // 主按钮 / 激活态 / 进行中全用它。随之 on_accent 必须翻成白：blurple
+    // 底上压深色文字读不出来。
+    accent: 0x5865f2,
+    green: 0x23a55a,
+    yellow: 0xf0b232,
+    // 链接蓝走 Discord 的青蓝，跟 blurple 拉开——两个都偏蓝紫会分不清。
+    blue: 0x00a8fc,
+    // agent 标识紫同理往粉里偏，避免和 blurple 撞。
+    purple: 0xc78ef7,
+    red: 0xf23f43,
     diff_add_text: 0x8fd6ac,
-    on_accent: 0x12141a,
+    on_accent: 0xffffff,
 
     diff_add_fg: 0xb5e08a,
     diff_add_bg: 0x16261a,
@@ -158,40 +173,45 @@ pub const DARK: Palette = Palette {
     diff_gutter: 0x2a2e3d,
 };
 
-/// 浅色（按深色的语义层级对偶推导）。
+/// 浅色（Discord light）。
 ///
-/// 两条不同于「把深色反过来」的地方，别顺手改平：
-/// - 卡片底是纯白、比舞台底更亮，靠「更亮」浮起；深色里卡片靠「更浅的灰」浮起。
-/// - 语义色整体压深一档（accent/green/blue…），否则在近白底上对比不足看不清。
+/// 两条别顺手改平：
+/// - 层级方向与深色一致：**舞台是纯白（最亮），侧栏和卡片反而更暗**。所以
+///   卡片不能再取纯白——那样就跟舞台糊成一片，浮不起来了（上一版靠纯白浮起，
+///   因为那时舞台不是纯白）。
+/// - 同深色一样，层级明度拉得比 Discord light 更开：它的侧栏/标题栏/卡片
+///   原样都是 `#f2f3f5` 同一个值，在这里会糊成一片。
+/// - blurple 深浅两套用同一个值：它是品牌色，跟着模式变色就不是那个牌子了；
+///   其余语义色（绿/黄/红/蓝/紫）照例压深一档，否则近白底上对比不足。
 pub const LIGHT: Palette = Palette {
-    bg_rail: 0xe7e9ed,
-    bg_panel: 0xfafbfc,
-    bg_elev: 0xf2f4f7,
-    bg_bar: 0xeef0f4,
-    bg_card: 0xffffff,
-    bg_hover: 0xe9ecf1,
-    bg_selected: 0xdde2ea,
-    bg_status: 0xe4e7ec,
+    bg_rail: 0xdcdfe4,
+    bg_panel: 0xffffff,
+    bg_elev: 0xeff1f4,
+    bg_bar: 0xf6f7f9,
+    bg_card: 0xf2f3f5,
+    bg_hover: 0xe6e9ee,
+    bg_selected: 0xdadee6,
+    bg_status: 0xdcdfe4,
 
-    border_dim: 0xe3e6ec,
-    border: 0xdadee5,
-    border_mid: 0xd1d6de,
-    border_loud: 0xc4cad4,
-    border_focus: 0x9aa2b0,
-    border_selected: 0xafb7c3,
+    border_dim: 0xe8eaee,
+    border: 0xdde0e5,
+    border_mid: 0xc9ced6,
+    border_loud: 0xb4bac4,
+    border_focus: 0x8e9297,
+    border_selected: 0x5865f2,
 
-    text_bright: 0x14161b,
-    text: 0x2b303a,
-    text_mid: 0x454b57,
-    text_muted: 0x6a7280,
-    text_faint: 0x99a1ae,
+    text_bright: 0x060607,
+    text: 0x2e3338,
+    text_mid: 0x4e5058,
+    text_muted: 0x5c5e66,
+    text_faint: 0x80848e,
 
-    accent: 0xb2662a,
-    green: 0x2c8459,
-    yellow: 0x9a6b0a,
-    blue: 0x2563c4,
-    purple: 0x7a4aa8,
-    red: 0xc0392f,
+    accent: 0x5865f2,
+    green: 0x248046,
+    yellow: 0xb8850b,
+    blue: 0x006ce7,
+    purple: 0x9b59d0,
+    red: 0xd83a3e,
     diff_add_text: 0x1c7a4a,
     on_accent: 0xffffff,
 
@@ -223,6 +243,71 @@ pub fn set_light(light: bool) {
 
 pub fn is_light() -> bool {
     LIGHT_MODE.load(Ordering::Relaxed)
+}
+
+/// 把当前色板按语义位灌进 gpui-component 的主题，让组件（Input / Button /
+/// Menu / 设置页 / 表格…）跟自绘部分同色。
+///
+/// 背景：全库有一百多处直接读 `cx.theme().border` 这类组件库色位，和自绘部分读
+/// 的 `ui_theme::*` 是两套独立色值，同屏挨着就差一档。与其改掉那一百多处调用，
+/// 不如在这里把组件库主题按语义对齐——色真源仍然只有本文件一个。
+///
+/// 只覆写「表面 / 边 / 文字 / 主按钮」这些会跟自绘部分并排出现的位；组件内部
+/// 的细分态（各种 button_success_hover 之类）交给组件库自己推导，别越俎代庖。
+pub fn apply_to_component_theme(cx: &mut gpui::App) {
+    use gpui_component::{ActiveTheme as _, Theme};
+
+    if !cx.has_global::<Theme>() {
+        return;
+    }
+    let p = palette();
+    let is_dark = cx.theme().mode.is_dark();
+    let c = &mut cx.global_mut::<Theme>().colors;
+
+    c.background = rgb(p.bg_panel).into();
+    c.foreground = rgb(p.text).into();
+    c.border = rgb(p.border_mid).into();
+    c.muted = rgb(p.bg_card).into();
+    c.muted_foreground = rgb(p.text_muted).into();
+    c.popover = rgb(p.bg_card).into();
+    c.popover_foreground = rgb(p.text).into();
+    c.input = rgb(p.border_loud).into();
+    c.ring = rgb(p.accent).into();
+    c.selection = rgba((p.accent << 8) | 0x55).into();
+    c.drop_target = rgba((p.accent << 8) | 0x33).into();
+
+    // 主按钮 = blurple，次按钮 = 卡片底。深浅两套的前景色跟着 on_accent 走。
+    c.primary = rgb(p.accent).into();
+    c.primary_hover = rgb(shade(p.accent, if is_dark { 1.12 } else { 0.92 })).into();
+    c.primary_active = rgb(shade(p.accent, if is_dark { 0.9 } else { 0.84 })).into();
+    c.primary_foreground = rgb(p.on_accent).into();
+    c.secondary = rgb(p.bg_card).into();
+    c.secondary_hover = rgb(p.bg_hover).into();
+    c.secondary_active = rgb(p.bg_selected).into();
+    c.secondary_foreground = rgb(p.text).into();
+    c.accent = rgb(p.bg_hover).into();
+    c.accent_foreground = rgb(p.text_bright).into();
+    c.danger = rgb(p.red).into();
+    c.danger_foreground = rgb(p.on_accent).into();
+
+    // 列表 / 侧栏：会话列表与文件树都在这一层，必须跟自绘的行底同色。
+    c.list = rgb(p.bg_elev).into();
+    c.list_hover = rgb(p.bg_hover).into();
+    c.list_active = rgb(p.bg_selected).into();
+    c.list_active_border = rgb(p.accent).into();
+    c.list_even = rgb(p.bg_elev).into();
+    c.list_head = rgb(p.bg_bar).into();
+    c.sidebar = rgb(p.bg_elev).into();
+}
+
+/// 把一个 RGB 按比例调亮（factor > 1）或压暗（< 1），逐通道饱和截断。
+/// 只给上面的 hover / active 态推导用——手写十几个近似色不值当。
+fn shade(color: u32, factor: f32) -> u32 {
+    let ch = |shift: u32| {
+        let v = ((color >> shift) & 0xff) as f32 * factor;
+        (v.clamp(0.0, 255.0) as u32) << shift
+    };
+    ch(16) | ch(8) | ch(0)
 }
 
 /// 当前色板。

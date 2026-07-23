@@ -319,15 +319,15 @@ fn git_status_badge(code: &str) -> Option<(char, gpui::Hsla)> {
     // 取 index + worktree 两位里「更严重」的那个：D > A/? > M > 其它
     let chars: String = code.chars().take(2).collect();
     if chars.contains('D') {
-        Some(('D', gpui::rgb(0x00f7_768e).into()))
+        Some(('D', gpui::rgb(crate::ui_theme::red()).into()))
     } else if chars.contains('A') {
-        Some(('A', gpui::rgb(0x009e_ce6a).into()))
+        Some(('A', gpui::rgb(crate::ui_theme::green()).into()))
     } else if chars.contains('?') {
-        Some(('U', gpui::rgb(0x007d_cfff).into())) // untracked
+        Some(('U', gpui::rgb(crate::ui_theme::blue()).into())) // untracked
     } else if chars.contains('M') || chars.contains('R') || chars.contains('C') {
-        Some(('M', gpui::rgb(0x00e0_af68).into()))
+        Some(('M', gpui::rgb(crate::ui_theme::yellow()).into()))
     } else if chars.chars().any(|c| c != ' ' && c != '?') {
-        Some(('M', gpui::rgb(0x00e0_af68).into()))
+        Some(('M', gpui::rgb(crate::ui_theme::yellow()).into()))
     } else {
         None
     }

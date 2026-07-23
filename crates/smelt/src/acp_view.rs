@@ -131,6 +131,12 @@ pub struct AcpView {
     /// 已粘进来、等着随下一条 prompt 发出去的图片（缩略图条显示，发完清空）。
     /// 只在内存里待到发送为止：图片体积大，不进 workspace.json。
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
+    /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
+    /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
+    supports_image: bool,
+    /// 「这个 agent 不收图」的一次性提示：粘图被拦时置上，输入框上方显示一行，
+    /// 用户下次一打字（Change）就清掉，不占定时器。
+    paste_hint: Option<String>,
     /// `@` / `/` 补全弹层的当前状态；None = 没在补全。
     completion: Option<CompletionPopup>,
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
@@ -228,6 +234,8 @@ impl AcpView {
             cmd,
             agent,
             pending_images: Vec::new(),
+            supports_image: true,
+            paste_hint: None,
             completion: None,
             file_cache: None,
             acp_session_id: resume_session_id,
@@ -431,6 +439,8 @@ impl AcpView {
 
     /// 按输入框当前内容重算补全候选。
     fn refresh_completion(&mut self, cx: &mut Context<Self>) {
+        // 一打字就把「不收图」提示撤了——它是针对上一次粘贴的，用户已经继续了。
+        self.paste_hint = None;
         let Some(input) = self.input.clone() else {
             self.completion = None;
             return;
@@ -615,17 +625,29 @@ impl AcpView {
     /// 调用方据此拦下事件，别再让输入框按文本粘一遍）。
     fn take_clipboard_image(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(item) = cx.read_from_clipboard() else { return false };
-        let mut got = false;
+        let has_image =
+            item.entries().iter().any(|e| matches!(e, gpui::ClipboardEntry::Image(_)));
+        if !has_image {
+            return false;
+        }
+        // 能力门：agent 不收图就别收进来（Grok = false）。返回 true 照样吞掉这次
+        // 粘贴——图片剪贴板里没有文本，放行给输入框也是白搭，只会漏个空。
+        if !self.supports_image {
+            self.paste_hint = Some(format!(
+                "{} 不支持图片，已忽略粘贴",
+                self.agent.short_label()
+            ));
+            cx.notify();
+            return true;
+        }
         for entry in item.into_entries() {
             if let gpui::ClipboardEntry::Image(image) = entry {
                 self.pending_images.push(std::sync::Arc::new(image));
-                got = true;
             }
         }
-        if got {
-            cx.notify();
-        }
-        got
+        self.paste_hint = None;
+        cx.notify();
+        true
     }
 
     /// 关闭会话：让连接收摊（drop 子进程），并从全局状态表摘掉自己。
@@ -695,8 +717,9 @@ impl AcpView {
                     }
                 }
             }
-            AcpEvent::Ready { session_id, kind } => {
+            AcpEvent::Ready { session_id, kind, supports_image } => {
                 self.acp_session_id = Some(session_id);
+                self.supports_image = supports_image;
                 match kind {
                     // `session/load` 续接：agent 马上把完整历史重放一遍，本地
                     // 快照先清空避免变成两份（重放内容比本地快照权威）。
@@ -2104,6 +2127,19 @@ impl Render for AcpView {
             .children(permission)
             .children(elicitation)
             .children(completion_bar)
+            .children(self.paste_hint.as_ref().map(|msg| {
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_1p5()
+                    .border_t_1()
+                    .border_color(t.border)
+                    .bg(ui_theme::tint(ui_theme::yellow(), 0x14))
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::yellow()))
+                    .child(msg.clone())
+            }))
             .children(input_row)
     }
 }
