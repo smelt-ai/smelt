@@ -51,6 +51,11 @@ pub struct SessionSummary {
     pub path: PathBuf,
     /// 首条用户消息文本（截断），取不到就回退用 session id（文件名去掉扩展名）。
     pub title: String,
+    /// agent 那头认得的 session id——续接时要发给协议的就是这个，不是 `path`。
+    /// 四家取法不一样：Claude 是文件名去扩展名，Codex 是 `session_meta.id`，
+    /// Grok/Copilot 是会话目录名，`path` 本身的形状（文件 vs 目录）四家也不一样，
+    /// 不能拿 `path` 现算，得在各自的 summarize 里就近取一份存下来。
+    pub resume_id: String,
     pub started_at: Option<DateTime<Utc>>,
     pub last_active_at: Option<DateTime<Utc>>,
     /// user + assistant 消息总数（不含被跳过的 tool_result / 内部记录）。
@@ -90,6 +95,27 @@ pub fn list_sessions(cwd: &str) -> Vec<SessionSummary> {
     out
 }
 
+/// 用户消息的真实文本。`message.content` 有两种形状：老一点的纯字符串，和
+/// 实测目前 Claude Code CLI（含 ACP 模式）在用的块数组
+/// `[{"type":"text","text":"..."}]`——工具结果回填给 user 角色时也是数组
+/// （`[{"type":"tool_result",...}]`），形状一样但不是真人发言，得按块的
+/// `type` 精确区分，不能像之前那样直接把"是不是数组"当判断依据（那样会把
+/// 块数组格式的真实发言也一并当成 tool_result 漏掉，历史页显示的用户消息
+/// 就会全部消失）。
+fn claude_user_text(content: &Value) -> Option<String> {
+    if let Some(s) = content.as_str() {
+        return (!s.trim().is_empty()).then(|| s.to_string());
+    }
+    let blocks = content.as_array()?;
+    let text = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 fn summarize_session(path: &Path) -> Option<SessionSummary> {
     let text = std::fs::read_to_string(path).ok()?;
     let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
@@ -123,10 +149,11 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
         }
 
         if kind == "user" {
-            // content 是纯字符串才算真实用户发言；数组形态是 tool_result 回填，不计数、不当标题。
-            if let Some(text) = row.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+            if let Some(text) =
+                row.get("message").and_then(|m| m.get("content")).and_then(claude_user_text)
+            {
                 message_count += 1;
-                if title.is_none() && !text.trim().is_empty() {
+                if title.is_none() {
                     title = Some(truncate(text.trim(), 80));
                 }
             }
@@ -165,8 +192,9 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
     }
 
     Some(SessionSummary {
-        title: title.unwrap_or(session_id),
+        title: title.unwrap_or_else(|| session_id.clone()),
         path: path.to_path_buf(),
+        resume_id: session_id,
         started_at,
         last_active_at,
         message_count,
@@ -204,11 +232,8 @@ pub fn load_session_detail(path: &Path) -> Option<SessionDetail> {
         let content = row.get("message").and_then(|m| m.get("content"));
 
         if kind == "user" {
-            let Some(text) = content.and_then(|c| c.as_str()) else { continue };
-            if text.trim().is_empty() {
-                continue;
-            }
-            turns.push(Turn { is_user: true, timestamp, text: text.to_string(), tools: Vec::new() });
+            let Some(text) = content.and_then(claude_user_text) else { continue };
+            turns.push(Turn { is_user: true, timestamp, text, tools: Vec::new() });
         } else {
             let blocks = content.and_then(|c| c.as_array());
             let Some(blocks) = blocks else { continue };
@@ -356,7 +381,8 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
 
     Some(SessionSummary {
         path: path.to_path_buf(),
-        title: title.unwrap_or(session_id),
+        title: title.unwrap_or_else(|| session_id.clone()),
+        resume_id: session_id,
         started_at,
         last_active_at,
         message_count,
@@ -468,10 +494,11 @@ fn summarize_grok_session(session_dir: &Path, want_cwd: &str) -> Option<SessionS
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(|s| truncate(s.trim(), 80))
-        .unwrap_or(session_id);
+        .unwrap_or_else(|| session_id.clone());
     Some(SessionSummary {
         path: session_dir.to_path_buf(),
         title,
+        resume_id: session_id,
         started_at: summary.get("created_at").and_then(|v| v.as_str()).and_then(parse_rfc3339),
         last_active_at: summary.get("updated_at").and_then(|v| v.as_str()).and_then(parse_rfc3339),
         message_count: summary
@@ -612,7 +639,7 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
         .or_else(|| fields.get("name"))
         .filter(|s| !s.trim().is_empty())
         .map(|s| truncate(s, 80))
-        .unwrap_or(session_id);
+        .unwrap_or_else(|| session_id.clone());
 
     // workspace.yaml 没存消息数/最近工具名，要拿这两项就得扫一遍 events.jsonl——
     // 跟 Claude/Codex 列表页同样的代价，不算特殊。
@@ -637,6 +664,7 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
     Some(SessionSummary {
         path: session_dir.to_path_buf(),
         title,
+        resume_id: session_id,
         started_at: fields.get("created_at").and_then(|v| parse_rfc3339(v)),
         last_active_at: fields.get("updated_at").and_then(|v| parse_rfc3339(v)),
         message_count,
@@ -703,7 +731,7 @@ pub fn load_copilot_session_detail(session_dir: &Path) -> Option<SessionDetail> 
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -713,7 +741,7 @@ use crate::claude_memory::MemoryEntry;
 use crate::usage_stats::format_count;
 use crate::{placeholder_view, Workspace};
 
-/// 历史会话表格「时间」列文案：有明显跨度（>1 分钟）就顺带标一下这个会话跑了多久，
+/// 历史会话「时间」文案：有明显跨度（>1 分钟）就顺带标一下这个会话跑了多久，
 /// 纯单条消息的会话就只显示时间点，不必画蛇添足展示"0 分钟"。
 fn session_when(s: &SessionSummary) -> String {
     match (s.started_at, s.last_active_at) {
@@ -727,90 +755,14 @@ fn session_when(s: &SessionSummary) -> String {
     }
 }
 
-/// 历史会话表格的数据委托：持有当前项目的会话列表 + 列定义，渲染/排序都在这实现。
-pub struct SessionHistoryDelegate {
-    pub sessions: Rc<Vec<SessionSummary>>,
-    columns: Vec<Column>,
-}
-
-impl SessionHistoryDelegate {
-    fn new(sessions: Rc<Vec<SessionSummary>>) -> Self {
-        Self {
-            sessions,
-            columns: vec![
-                Column::new("title", "标题").width(px(260.)),
-                Column::new("when", "时间").width(px(180.)).sortable(),
-                Column::new("messages", "消息数").width(px(90.)).sortable(),
-                Column::new("tokens", "Tokens").width(px(90.)).sortable(),
-            ],
-        }
-    }
-}
-
-impl TableDelegate for SessionHistoryDelegate {
-    fn columns_count(&self, _cx: &App) -> usize {
-        self.columns.len()
-    }
-
-    fn rows_count(&self, _cx: &App) -> usize {
-        self.sessions.len()
-    }
-
-    fn column(&self, col_ix: usize, _cx: &App) -> Column {
-        self.columns[col_ix].clone()
-    }
-
-    fn render_td(
-        &mut self,
-        row_ix: usize,
-        col_ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
-        let s = &self.sessions[row_ix];
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        match self.columns[col_ix].key.as_ref() {
-            "title" => div().text_color(fg).child(s.title.clone()).into_any_element(),
-            "when" => div().text_color(muted).child(session_when(s)).into_any_element(),
-            "messages" => {
-                div().text_color(muted).child(s.message_count.to_string()).into_any_element()
-            }
-            "tokens" => div().text_color(muted).child(format_count(s.total_tokens)).into_any_element(),
-            _ => Empty.into_any_element(),
-        }
-    }
-
-    fn perform_sort(
-        &mut self,
-        col_ix: usize,
-        sort: ColumnSort,
-        _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
-    ) {
-        let key = self.columns[col_ix].key.clone();
-        let rows = Rc::make_mut(&mut self.sessions);
-        match (key.as_ref(), sort) {
-            ("when", ColumnSort::Ascending) => rows.sort_by_key(|s| s.last_active_at),
-            ("when", ColumnSort::Descending) => rows.sort_by_key(|s| std::cmp::Reverse(s.last_active_at)),
-            ("messages", ColumnSort::Ascending) => rows.sort_by_key(|s| s.message_count),
-            ("messages", ColumnSort::Descending) => rows.sort_by_key(|s| std::cmp::Reverse(s.message_count)),
-            ("tokens", ColumnSort::Ascending) => rows.sort_by_key(|s| s.total_tokens),
-            ("tokens", ColumnSort::Descending) => rows.sort_by_key(|s| std::cmp::Reverse(s.total_tokens)),
-            // Default：不重排，维持 list_sessions 原始顺序（按时间新→旧）。
-            _ => {}
-        }
-    }
-}
-
-/// 历史会话列表的三种状态：还没扫描完 / 扫描完但没有历史会话 / 拿到数据（表格 Entity
-/// 已经就绪，见 Workspace::ensure_session_table）。
+/// 历史会话列表的三种状态：还没扫描完 / 扫描完但没有历史会话 / 拿到数据。
+/// 左侧只是个纯标题列表（不再用 DataTable——四个数据列挤在一栏很局促，且这里
+/// 只需要"选中一条 = 看右边详情"，用不上排序这类表格能力），排序/筛选这类需求
+/// 出现了再加不迟。
 pub enum HistoryListState {
     Loading,
     Empty,
-    Ready(Entity<TableState<SessionHistoryDelegate>>),
+    Ready(Rc<Vec<SessionSummary>>),
 }
 
 /// 历史会话页的两个子页，共用「左列表 + 右详情」的骨架：
@@ -825,11 +777,12 @@ pub enum HistoryPane {
 }
 
 /// 历史会话页：左侧列出当前项目下 Claude Code 保存的历史会话，右侧显示选中会话的
-/// 对话内容（只读浏览，不支持 resume）。数据来自 session_history 模块，跟「用量」
+/// 对话内容（只读浏览，支持右键「继续」恢复该对话）。数据来自 session_history 模块，跟「用量」
 /// 页读的是同一份 `~/.claude/projects/**/*.jsonl`，但这里还原对话本身而非统计聚合。
 pub fn history_view(
     pane: HistoryPane,
     agent: AcpAgentKind,
+    cwd: Option<String>,
     list: HistoryListState,
     detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
     memories: Option<Rc<Vec<MemoryEntry>>>,
@@ -874,17 +827,127 @@ pub fn history_view(
         .border_color(c_border)
         .children(AcpAgentKind::ALL.map(|a| agent_tab_button(a, agent, accent, fg, muted, cx)));
 
-    let list_body: AnyElement = match list {
-        HistoryListState::Loading => placeholder_view("加载中…", muted).into_any_element(),
-        HistoryListState::Empty => {
+    // 选中会话的路径：list 和 detail 各自渲染都要用它判断"这行是不是当前打开的"，
+    // 先从 detail 里取出来，避免下面重复解构。
+    let selected_path = detail.as_ref().map(|(p, _)| p.clone());
+    // 只有 Ready 时才有数据可查；detail 头部那行摘要信息（时间/消息数/tokens）
+    // 就是从这份列表里按路径找回对应的 SessionSummary，不用另存一份。
+    let sessions: Option<Rc<Vec<SessionSummary>>> = match &list {
+        HistoryListState::Ready(s) => Some(s.clone()),
+        _ => None,
+    };
+
+    let list_body: AnyElement = match (&list, &sessions) {
+        (HistoryListState::Loading, _) => placeholder_view("加载中…", muted).into_any_element(),
+        (HistoryListState::Empty, _) | (_, None) => {
             placeholder_view("这个项目还没有本地保存的历史会话", muted).into_any_element()
         }
-        HistoryListState::Ready(table) => {
-            div().flex_1().min_h_0().child(DataTable::new(&table).stripe(true)).into_any_element()
+        (HistoryListState::Ready(_), Some(list)) => {
+            // 只列标题：时间/消息数/tokens 这些细节挪到右边详情页顶部固定展示，
+            // 左边专心做"挑一条看"，不用再挤一整张表格。
+            let mut col =
+                v_flex().id("session-list").flex_1().min_h_0().overflow_y_scroll().p_2().gap_1();
+            // 右键「继续」的回调是个独立触发的普通闭包，不是 cx.listener——不能直接
+            // 拿闭包外那个 &mut Context<Workspace> 改状态，得先攥一份 Entity handle，
+            // 触发时再 .update() 回去，跟别处「异步回来再 update」是同一个道理。
+            let workspace = cx.entity();
+            for (ix, s) in list.iter().enumerate() {
+                let is_sel = selected_path.as_deref() == Some(s.path.as_path());
+                let path = s.path.clone();
+                let resume_path = s.path.clone();
+                let resume_id = s.resume_id.clone();
+                let row_cwd = cwd.clone();
+                let ws_for_resume = workspace.clone();
+                col = col.child(
+                    div()
+                        .id(("session-row", ix))
+                        .w_full()
+                        .px_2()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(fg)
+                        .truncate()
+                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
+                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
+                        .child(s.title.clone())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.open_session_detail(agent, path.clone(), cx);
+                            }),
+                        )
+                        .context_menu(move |mut menu, _window, _cx| {
+                            let ws = ws_for_resume.clone();
+                            let resume_id = resume_id.clone();
+                            let row_cwd = row_cwd.clone();
+                            let resume_path = resume_path.clone();
+                            menu = menu.item(PopupMenuItem::new("继续").on_click(
+                                move |_ev, window, cx| {
+                                    // 没选中项目时历史页本来就是空的，理论到不了这里，
+                                    // 防御性地什么都不做而不是 panic。
+                                    let Some(cwd) = row_cwd.clone() else { return };
+                                    let resume_id = resume_id.clone();
+                                    let resume_path = resume_path.clone();
+                                    ws.update(cx, |this, cx| {
+                                        this.resume_acp_session(
+                                            agent, cwd, resume_id, resume_path, window, cx,
+                                        );
+                                    });
+                                },
+                            ));
+                            menu
+                        }),
+                );
+            }
+            col.into_any_element()
         }
     };
 
-    let detail_body: AnyElement = match detail {
+    // 详情头部：选中会话的时间/消息数/tokens，固定在对话内容上方——之前这些
+    // 信息只在左边表格的列里能看到，挪掉表格之后得有地方接住。
+    let detail_header = selected_path.as_ref().and_then(|p| {
+        sessions.as_ref().and_then(|list| list.iter().find(|s| &s.path == p))
+    }).map(|s| {
+        h_flex()
+            .flex_none()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(c_border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(fg)
+                    .truncate()
+                    .child(s.title.clone()),
+            )
+            .child(div().flex_none().text_xs().text_color(muted).child(session_when(s)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(format!("{} 条消息", s.message_count)),
+            )
+            .when(s.total_tokens > 0, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format_count(s.total_tokens)),
+                )
+            })
+    });
+
+    let turns_body: AnyElement = match detail {
         None => placeholder_view("← 选择一个历史会话查看内容", muted).into_any_element(),
         Some((_, d)) if d.turns.is_empty() => {
             placeholder_view("这份会话没有可展示的对话内容", muted).into_any_element()
@@ -957,6 +1020,8 @@ pub fn history_view(
             }))
             .into_any_element(),
     };
+
+    let detail_body = v_flex().flex_1().min_h_0().children(detail_header).child(turns_body);
 
     v_flex().flex_1().min_h_0().child(switcher).child(agent_switcher).child(
         div()
@@ -1165,7 +1230,7 @@ fn list_sessions_for(agent: AcpAgentKind, cwd: &str) -> Vec<SessionSummary> {
     }
 }
 
-fn load_session_detail_for(agent: AcpAgentKind, path: &Path) -> Option<SessionDetail> {
+pub(crate) fn load_session_detail_for(agent: AcpAgentKind, path: &Path) -> Option<SessionDetail> {
     match agent {
         AcpAgentKind::Claude => load_session_detail(path),
         AcpAgentKind::Codex => load_codex_session_detail(path),
@@ -1235,38 +1300,6 @@ impl Workspace {
         .detach();
     }
 
-    /// 历史会话表格懒建 / 刷新：同项目（key 不变）只换 delegate 里的数据（保留排序/
-    /// 滚动/选中状态）；换项目（key 变）整个重建 Entity（重置这些状态，体感上是
-    /// "进了一个新页面"）。
-    pub fn ensure_session_table(
-        &mut self,
-        key: &str,
-        sessions: Rc<Vec<SessionSummary>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<TableState<SessionHistoryDelegate>> {
-        if self.session_table_key.as_deref() == Some(key) {
-            if let Some(table) = &self.session_table {
-                table.update(cx, |t, cx| {
-                    t.delegate_mut().sessions = sessions;
-                    t.refresh(cx);
-                });
-                return table.clone();
-            }
-        }
-        let table = cx.new(|cx| TableState::new(SessionHistoryDelegate::new(sessions), window, cx));
-        self.session_table_sub =
-            Some(cx.subscribe_in(&table, window, |this, table, ev: &TableEvent, _window, cx| {
-                if let TableEvent::SelectRow(ix) = ev {
-                    if let Some(s) = table.read(cx).delegate().sessions.get(*ix) {
-                        this.open_session_detail(this.history_agent, s.path.clone(), cx);
-                    }
-                }
-            }));
-        self.session_table_key = Some(key.to_string());
-        self.session_table = Some(table.clone());
-        table
-    }
 }
 
 #[cfg(test)]
@@ -1354,18 +1387,24 @@ mod tests {
                 r#"{"type":"user","timestamp":"2026-07-01T00:00:01Z","message":{"content":[{"type":"tool_result","content":"raw output"}]}}"#,
                 r#"{"type":"assistant","timestamp":"2026-07-01T00:00:02Z","message":{"content":[{"type":"text","text":"done"},{"type":"tool_use","name":"Bash"}]}}"#,
                 r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-07-01T00:00:03Z","message":{"content":[{"type":"text","text":"subagent chatter"}]}}"#,
+                // 实测目前 Claude Code CLI（含 ACP 模式）把用户发言也存成块数组，
+                // 不是纯字符串——之前的代码只认字符串，会把这种真实发言当成
+                // tool_result 漏掉，历史页里用户消息整个消失就是这么来的。
+                r#"{"type":"user","timestamp":"2026-07-01T00:00:04Z","message":{"content":[{"type":"text","text":"block-array 格式的真实发言"}]}}"#,
             ],
         );
 
         let detail = load_session_detail(&tmp).unwrap();
         std::fs::remove_file(&tmp).unwrap();
 
-        assert_eq!(detail.turns.len(), 2);
+        assert_eq!(detail.turns.len(), 3);
         assert!(detail.turns[0].is_user);
         assert_eq!(detail.turns[0].text, "do the thing");
         assert!(!detail.turns[1].is_user);
         assert_eq!(detail.turns[1].text, "done");
         assert_eq!(detail.turns[1].tools, vec!["Bash".to_string()]);
+        assert!(detail.turns[2].is_user);
+        assert_eq!(detail.turns[2].text, "block-array 格式的真实发言");
     }
 
     #[test]

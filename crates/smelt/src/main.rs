@@ -59,7 +59,6 @@ use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::notification::Notification;
 use gpui_component::slider::SliderState;
-use gpui_component::table::TableState;
 use gpui_component::resizable::{
     h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
 };
@@ -74,7 +73,7 @@ use git_panel::{
     git_view, run_git, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo,
 };
 use hotspot::hotspot_view;
-use session_history::{history_view, HistoryListState, HistoryPane, SessionHistoryDelegate};
+use session_history::{history_view, HistoryListState, HistoryPane};
 use settings::{load_appearance, load_launch_config, Appearance, LlmInputs};
 use usage_stats::format_count;
 
@@ -1327,14 +1326,13 @@ struct Workspace {
     session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
     /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
     session_detail_gen: u64,
-    /// 历史会话表格的 Entity（懒建，见 ensure_session_table）；None = 还没建过。
-    session_table: Option<Entity<TableState<SessionHistoryDelegate>>>,
-    /// session_table 当前装的是哪个 `"{agent_id}:{cwd}"`，项目或 agent tab 切换时
-    /// 判定要不要重建 Entity（重置排序/滚动位置——体感上是"进了一个新页面"，同一个
-    /// key 内刷新则保留这些状态）。
-    session_table_key: Option<String>,
-    /// TableEvent 订阅句柄，session_table 重建时一起换。
-    session_table_sub: Option<Subscription>,
+    /// 「继续」正在后台加载的目标（`"{agent_id}:{cwd}:{resume_id}"`），挡连点
+    /// 同一条历史记录重复发起、开出好几个重复标签页。
+    resume_inflight: HashSet<String>,
+    /// 「继续」操作的自增序号：只有发起时最新的那次操作，加载完成后才会真的抢
+    /// 激活态——连点两条不同历史记录时，防止加载慢的那条后完成反而把已经激活
+    /// 的那条顶掉（会话本身照样建，只是不抢焦点）。
+    resume_gen: u64,
     /// 历史会话页当前显示的是「会话」还是「记忆」（同一套左列表 + 右详情布局）。
     history_pane: HistoryPane,
     /// 历史会话页「会话」子页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
@@ -1454,6 +1452,39 @@ struct Workspace {
     /// 全部失灵"。切到非终端页面时把 focus 显式认领到这个句柄上，保证 Workspace 的
     /// on_key_down 始终在 dispatch 路径上。
     focus_handle: FocusHandle,
+}
+
+/// 历史会话页「继续」把已读出的 `Turn` 列表转成 `AcpEntry`，好塞进新建的占位
+/// 会话当本地快照（见 `Workspace::resume_acp_session`）。`Turn` 是给只读浏览
+/// 用的压扁视图（工具调用只留名字，没有 id/参数/输出），转回来必然有损——
+/// `id` 现造一个本会话内唯一的、`kind` 统一归 `Other`、`status` 记
+/// `Completed`（历史记录里的调用理应都跑完了）、`output` 留空。这不是"完整
+/// 还原"，只求「切换到这条历史会话时本地能看到个大概，而不是一片空白」；
+/// 真续接成功后（`ReadyKind::ResumedWithReplay`）这份快照会被 agent 重放的
+/// 内容整个替换掉，这里的近似值不会长期存在。
+fn turns_to_acp_entries(turns: &[session_history::Turn]) -> Vec<acp_view::AcpEntry> {
+    let mut out = Vec::new();
+    for (i, t) in turns.iter().enumerate() {
+        if t.is_user {
+            if !t.text.trim().is_empty() {
+                out.push(acp_view::AcpEntry::User(t.text.clone()));
+            }
+            continue;
+        }
+        if !t.text.trim().is_empty() {
+            out.push(acp_view::AcpEntry::Assistant { text: t.text.clone(), thought: false });
+        }
+        for (j, tool) in t.tools.iter().enumerate() {
+            out.push(acp_view::AcpEntry::ToolCall {
+                id: format!("history-{i}-{j}"),
+                title: tool.clone(),
+                kind: acp_view::ToolKind::Other,
+                status: acp_view::ToolCallStatus::Completed,
+                output: Vec::new(),
+            });
+        }
+    }
+    out
 }
 
 impl Workspace {
@@ -1577,9 +1608,8 @@ impl Workspace {
             session_list_inflight: HashSet::new(),
             session_detail: None,
             session_detail_gen: 0,
-            session_table: None,
-            session_table_key: None,
-            session_table_sub: None,
+            resume_inflight: HashSet::new(),
+            resume_gen: 0,
             history_pane: HistoryPane::Sessions,
             history_agent: settings::AcpAgentKind::Claude,
             memory_list: HashMap::new(),
@@ -2001,6 +2031,119 @@ impl Workspace {
         self.stage_override = None;
         self.save_state(cx);
         cx.notify();
+    }
+
+    /// 找当前已开的、匹配某个 agent+cwd+具体 session id 的 ACP 会话下标——「继续」
+    /// 点击时和后台加载完成时各查一次，两处逻辑必须完全一致，抽出来避免漂移。
+    fn find_open_acp_session(
+        &self,
+        agent: settings::AcpAgentKind,
+        cwd: &str,
+        target_id: &agent_client_protocol::schema::v1::SessionId,
+        cx: &App,
+    ) -> Option<usize> {
+        self.sessions.iter().position(|s| match &s.kind {
+            SessionKind::Acp(view) => {
+                let v = view.read(cx);
+                v.agent_kind() == agent
+                    && v.cwd().as_deref() == Some(cwd)
+                    && v.resume_session_id_for_save().as_ref() == Some(target_id)
+            }
+            _ => false,
+        })
+    }
+
+    /// 历史会话页「继续」：同一个 agent + 项目已经开着一个会话就直接跳过去
+    /// （不重复开），没有就新建一个「已结束」占位、带上 `resume_session_id`，
+    /// 靠 `activate()` 里已有的 `maybe_auto_resume` 触发真续接——跟"重开 GUI 后
+    /// 切到旧会话自动续接"走的是完全同一套机制，这里不重新发明一遍。
+    ///
+    /// 历史内容要后台读、转换才能塞进新会话当本地快照（见下），这段异步窗口期
+    /// 里得防两件事：连点同一条历史记录开出好几个重复标签页（`resume_inflight`
+    /// 挡重复发起）；连点两条不同的历史记录时，文件更大/加载更慢那条后完成，
+    /// 反而把已经激活的那条顶掉（`resume_gen` 保证只有"最新一次点击"才能真的
+    /// 抢激活态，但该建的会话还是照建，不会凭空消失）。
+    pub fn resume_acp_session(
+        &mut self,
+        agent: settings::AcpAgentKind,
+        cwd: String,
+        resume_id: String,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 已经开着的必须是**这一条**历史会话（比对 agent + cwd + 具体 session id），
+        // 不能只认 agent+cwd——同项目同 agent 可能同时开着好几条不同的历史会话，
+        // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
+        let target_id = agent_client_protocol::schema::v1::SessionId::new(resume_id.clone());
+        if let Some(ix) = self.find_open_acp_session(agent, &cwd, &target_id, cx) {
+            self.activate(ix, window, cx);
+            return;
+        }
+
+        let inflight_key = format!("{}:{cwd}:{resume_id}", agent.id());
+        if !self.resume_inflight.insert(inflight_key.clone()) {
+            return; // 这一条已经在后台加载了，连点不重复发起
+        }
+        self.resume_gen = self.resume_gen.wrapping_add(1);
+        let my_gen = self.resume_gen;
+
+        let cmd = settings::acp_cmd_for(agent, cx);
+        // 先把历史内容读出来转成本地快照——`session/resume`（不重放历史，见 acp.rs
+        // 里 apply_event 对 ReadyKind::ResumedKeepHistory 的注释）信任的就是这份本地
+        // 快照，给个空的会话开出来就是一片空白（真实教训：第一版就是这么写的，
+        // 点「继续」开出来的对话完全看不到历史）。放后台线程读，跟 open_session_detail
+        // 同款套路，避免大会话文件卡住 UI 线程。
+        cx.spawn_in(window, async move |this, cx| {
+            let p = path.clone();
+            let entries = cx
+                .background_executor()
+                .spawn(async move {
+                    session_history::load_session_detail_for(agent, &p)
+                        .map(|d| turns_to_acp_entries(&d.turns))
+                        .unwrap_or_default()
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.resume_inflight.remove(&inflight_key);
+                // 完成时再查一遍：万一这段等待期里这条会话已经从别处冒出来了
+                // （比如 inflight 生效前就已经在飞的另一次请求刚落地），别再建
+                // 重复的一份，跳过去就行。
+                if let Some(ix) = this.find_open_acp_session(agent, &cwd, &target_id, cx) {
+                    if this.resume_gen == my_gen {
+                        this.activate(ix, window, cx);
+                    }
+                    return;
+                }
+
+                let view = cx.new(|cx| {
+                    acp_view::AcpView::placeholder(
+                        cx,
+                        agent,
+                        cmd,
+                        Some(cwd),
+                        "正在续接历史会话…".to_string(),
+                        entries,
+                        Some(agent_client_protocol::schema::v1::SessionId::new(resume_id)),
+                    )
+                });
+                let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
+                this.sessions.push(Session {
+                    kind: SessionKind::Acp(view),
+                    custom_title: None,
+                    _acp_persist_sub,
+                });
+                let ix = this.sessions.len() - 1;
+                // 只有还是"最新一次点击"才抢激活态——连点两条不同历史记录时，
+                // 加载慢的那条完成得晚也不该把已经激活的那条顶掉，但会话本身
+                // 还是要建，不然用户点了却像什么都没发生，得自己翻标签页找。
+                if this.resume_gen == my_gen {
+                    this.activate(ix, window, cx);
+                }
+                this.save_state(cx);
+            });
+        })
+        .detach();
     }
 
     /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
@@ -4632,19 +4775,16 @@ impl Workspace {
                         }
                         MainView::History => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let table_key = cwd
+                            let list_key = cwd
                                 .as_ref()
                                 .map(|c| session_history::session_list_key(self.history_agent, c));
-                            let sessions = table_key
+                            let sessions = list_key
                                 .as_ref()
                                 .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
-                            let list_state = match (&table_key, sessions) {
-                                (_, None) => HistoryListState::Loading,
-                                (Some(_), Some(s)) if s.is_empty() => HistoryListState::Empty,
-                                (Some(key), Some(s)) => {
-                                    HistoryListState::Ready(self.ensure_session_table(key, s, window, cx))
-                                }
-                                (None, _) => HistoryListState::Empty,
+                            let list_state = match sessions {
+                                None => HistoryListState::Loading,
+                                Some(s) if s.is_empty() => HistoryListState::Empty,
+                                Some(s) => HistoryListState::Ready(s),
                             };
                             // 没选项目时给 Some(空表)，走「还没有记忆」而不是一直转圈。
                             let memories = match &cwd {
@@ -4654,6 +4794,7 @@ impl Workspace {
                             history_view(
                                 self.history_pane,
                                 self.history_agent,
+                                cwd,
                                 list_state,
                                 &self.session_detail,
                                 memories,
