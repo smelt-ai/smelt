@@ -709,25 +709,29 @@ fn build_agent(
     cmd: &str,
     stderr_tail: Arc<Mutex<Vec<String>>>,
 ) -> Result<AcpAgent, agent_client_protocol::Error> {
-    let path = login_shell_path();
-    let path_env = format!("PATH={path}");
-    // 命令名先按 login PATH 解析成绝对路径再交给 SDK。两个作用：
-    // 1) spawn 不再依赖别的什么 PATH——直接 exec 绝对路径；
-    // 2) **命令不存在时能提前给人话**：CLI 没装（grok / copilot 需单独安装并
-    //    登录），resolve 拿不到，与其让 SDK 甩一个 `os error 2` 天书，不如在这里
-    //    直接返回「未找到命令 X，请先安装并确保它在登录 shell 的 PATH 里」。
-    //    带 `/` 的（受管 bun 的绝对路径）跳过这步，本来就不查 PATH。
+    // 查找命令用 login PATH + 一批常见 CLI 安装目录兜底。为什么要兜底：
+    // login_shell_path 走的是 `zsh -lc`（非交互 login），只读 ~/.zprofile；很多
+    // CLI 的安装脚本把 PATH 加在 ~/.zshrc（交互式）里，非交互读不到 → 明明装了
+    // 却「未找到」。这里补搜标准安装位（尤其 grok 的 ~/.grok/bin），装了就一定
+    // 找得到；真没装的才落到下面的友好提示。子进程 PATH 也用这份扩展，免得
+    // agent 起来后找它自己的子工具又缺路径。
+    let search_path = extended_search_path();
+    let path_env = format!("PATH={search_path}");
+    // 命令名先解析成绝对路径再交给 SDK：spawn 直接 exec、不依赖任何 PATH；
+    // 找不到就提前返回人话，而不是让 SDK 甩 `os error 2` 天书。带 `/` 的
+    // （受管 bun 的绝对路径）跳过，本来就不查。
     let mut tokens = cmd.split_whitespace();
     let resolved: Vec<String> = match tokens.next() {
         Some(prog) => {
             let prog = if prog.contains('/') {
                 prog.to_string()
             } else {
-                resolve_in_path(prog, path).ok_or_else(|| {
+                resolve_in_path(prog, &search_path).ok_or_else(|| {
                     agent_client_protocol::Error::internal_error().data(format!(
                         "未找到命令 `{prog}`。这类对话 agent 是各自独立的 CLI，需要先自行\
-                         安装并登录，再确保它在登录 shell 的 PATH 里（在「设置 → Agent 集成」\
-                         能改启动命令 / 换成绝对路径）。"
+                         安装并登录。如果确定装了，多半是它的目录没进登录 shell 的 PATH——\
+                         可在「设置 → Agent 集成」把启动命令换成绝对路径（如 \
+                         `~/.grok/bin/{prog} …`）。"
                     ))
                 })?
             };
@@ -945,6 +949,28 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
 /// login shell 的 PATH（跑一次缓存）。GUI 进程从 Finder 启动时 PATH 只有系统
 /// 目录，nvm/homebrew 里的 npx 找不到；跟终端会话不同（那边 shell 由 smeltd 起，
 /// 自带 login 环境），ACP 子进程是 GUI 直接 spawn 的，得自己补。
+/// login PATH + 一批常见 CLI 安装目录，用来兜底查找命令（见 build_agent 的
+/// 注释）。顺序：login PATH 在前（用户显式配的优先），标准安装位在后兜底；
+/// 重复目录无所谓，resolve 取第一个命中即止。
+fn extended_search_path() -> String {
+    let mut path = login_shell_path().to_string();
+    let mut push = |p: String| {
+        path.push(':');
+        path.push_str(&p);
+    };
+    if let Some(home) = dirs::home_dir() {
+        // grok 装在 ~/.grok/bin（软链常在 ~/.local/bin）；其余是 pip/npm/cargo
+        // 之类常把 CLI 放的用户级目录。
+        for sub in [".grok/bin", ".local/bin", "bin", ".cargo/bin", ".volta/bin"] {
+            push(home.join(sub).to_string_lossy().into_owned());
+        }
+    }
+    for d in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        push(d.to_string());
+    }
+    path
+}
+
 /// 在 `:` 分隔的 PATH 里把命令名解析成绝对路径（找第一个可执行文件）。
 /// 已经带 `/` 的（绝对路径、受管 bun 的全路径）原样返回，不查。找不到返回
 /// None——调用方保留原名，让 spawn 照常失败并把真实错误报出来。
