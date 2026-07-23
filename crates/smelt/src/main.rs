@@ -1314,10 +1314,14 @@ struct Workspace {
     hotspot_data: HashMap<String, (Instant, Rc<Vec<hotspot::HotspotEntry>>)>,
     /// 正在后台计算热力的 root（防重复并发 spawn）。
     hotspot_inflight: HashSet<String>,
-    /// 历史会话列表缓存（cwd → (取得时刻, 数据)）：后台扫描该项目下的 transcript
-    /// 目录，render 只读。
+    /// 历史会话列表缓存（`"{agent_id}:{cwd}"` → (取得时刻, 数据)）：后台扫描该 agent
+    /// 在该项目下的本地存储，render 只读。key 带上 agent_id 是因为四家 agent 的历史
+    /// 各存各的，同一个 cwd 换个 tab 就是完全不同的一份数据。
+    /// 注意：总览卡片那边（`self.sessions` 渲染，展示"最近一次 Claude 活动"）也复用
+    /// 这份缓存，固定传 `AcpAgentKind::Claude`——历史会话页加多 agent tab 不该改变
+    /// 那个功能的行为，两处刻意共享同一套读写路径而不是各建一份。
     session_list: HashMap<String, (Instant, Rc<Vec<session_history::SessionSummary>>)>,
-    /// 正在后台扫描历史会话列表的 cwd（防重复并发 spawn）。
+    /// 正在后台扫描历史会话列表的 key（同上 `"{agent_id}:{cwd}"`，防重复并发 spawn）。
     session_list_inflight: HashSet<String>,
     /// 当前选中查看的历史会话（路径 + 解析出的对话内容）；None 表示未选。
     session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
@@ -1325,13 +1329,17 @@ struct Workspace {
     session_detail_gen: u64,
     /// 历史会话表格的 Entity（懒建，见 ensure_session_table）；None = 还没建过。
     session_table: Option<Entity<TableState<SessionHistoryDelegate>>>,
-    /// session_table 当前装的是哪个项目（cwd），项目切换时判定要不要重建 Entity
-    /// （重置排序/滚动位置——体感上是"进了一个新页面"，同项目内刷新则保留这些状态）。
+    /// session_table 当前装的是哪个 `"{agent_id}:{cwd}"`，项目或 agent tab 切换时
+    /// 判定要不要重建 Entity（重置排序/滚动位置——体感上是"进了一个新页面"，同一个
+    /// key 内刷新则保留这些状态）。
     session_table_key: Option<String>,
     /// TableEvent 订阅句柄，session_table 重建时一起换。
     session_table_sub: Option<Subscription>,
     /// 历史会话页当前显示的是「会话」还是「记忆」（同一套左列表 + 右详情布局）。
     history_pane: HistoryPane,
+    /// 历史会话页「会话」子页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
+    /// Grok 分 tab，各自存储格式不同，见 session_history.rs 头部注释）。
+    history_agent: settings::AcpAgentKind,
     /// 记忆列表缓存（cwd → (取得时刻, 数据)），跟 session_list 同一套 TTL 模板。
     memory_list: HashMap<String, (Instant, Rc<Vec<claude_memory::MemoryEntry>>)>,
     /// 正在后台扫描记忆的 cwd（防重复并发 spawn）。
@@ -1573,6 +1581,7 @@ impl Workspace {
             session_table_key: None,
             session_table_sub: None,
             history_pane: HistoryPane::Sessions,
+            history_agent: settings::AcpAgentKind::Claude,
             memory_list: HashMap::new(),
             memory_list_inflight: HashSet::new(),
             memory_selected: None,
@@ -3469,11 +3478,14 @@ impl Workspace {
             .map(|ix| {
                 let cwd_opt = self.sessions[ix].cwd(cx);
                 if let Some(c) = cwd_opt.clone() {
-                    self.ensure_session_list(c, cx);
+                    self.ensure_session_list(settings::AcpAgentKind::Claude, c, cx);
                 }
                 let live = cwd_opt
                     .as_deref()
-                    .and_then(|c| self.session_list.get(c))
+                    .and_then(|c| {
+                        self.session_list
+                            .get(&session_history::session_list_key(settings::AcpAgentKind::Claude, c))
+                    })
                     .and_then(|(_, list)| list.first());
                 // 状态通道（hook 事实）优先；jsonl 作补充。
                 let daemon_detail = self.sessions[ix]
@@ -4620,12 +4632,17 @@ impl Workspace {
                         }
                         MainView::History => {
                             let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let sessions = cwd.as_ref().and_then(|r| self.session_list.get(r).map(|(_, d)| d.clone()));
-                            let list_state = match (&cwd, sessions) {
+                            let table_key = cwd
+                                .as_ref()
+                                .map(|c| session_history::session_list_key(self.history_agent, c));
+                            let sessions = table_key
+                                .as_ref()
+                                .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
+                            let list_state = match (&table_key, sessions) {
                                 (_, None) => HistoryListState::Loading,
                                 (Some(_), Some(s)) if s.is_empty() => HistoryListState::Empty,
-                                (Some(cwd), Some(s)) => {
-                                    HistoryListState::Ready(self.ensure_session_table(cwd, s, window, cx))
+                                (Some(key), Some(s)) => {
+                                    HistoryListState::Ready(self.ensure_session_table(key, s, window, cx))
                                 }
                                 (None, _) => HistoryListState::Empty,
                             };
@@ -4636,6 +4653,7 @@ impl Workspace {
                             };
                             history_view(
                                 self.history_pane,
+                                self.history_agent,
                                 list_state,
                                 &self.session_detail,
                                 memories,
@@ -4786,7 +4804,7 @@ impl Render for Workspace {
         if self.stage_override == Some(MainView::History) {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
                 match self.history_pane {
-                    HistoryPane::Sessions => self.ensure_session_list(root, cx),
+                    HistoryPane::Sessions => self.ensure_session_list(self.history_agent, root, cx),
                     HistoryPane::Memories => self.ensure_memory_list(root, cx),
                 }
             }
@@ -5835,9 +5853,40 @@ fn main() {
         // Cmd+Q 直接退出 App（没有先手动关跨网开关）时，WebRTC bridge 子进程原本
         // 没人管——会被系统收养成孤儿，一直占着信令服务器上的房间和本机网关连接
         // 直到房间 TTL 到期。退出前顺手杀掉它。
-        cx.on_app_quit(|cx| {
+        //
+        // ACP 会话（Copilot/Claude/Codex/Grok 的 CLI 子进程）原本完全没管：
+        // Cmd+Q 直接终止整个 GUI 进程时，每条 ACP 连接线程会被系统一并带走，
+        // 没机会跑到自己的收尾逻辑（agent_client_protocol 内部靠 Drop 杀子进程），
+        // 子进程就变孤儿——真实症状：孤儿还占着旧登录会话，下次「重新开始」
+        // 新起一个进程去认证会撞上它，报出看着不相关的 Authentication required。
+        // 这里给每条活跃 ACP 连接发 Shutdown，再异步等线程真正收尾（超时兜底，
+        // 别让某个不听话的 agent 卡住整个 App 退出）。
+        let current_ws_for_quit = current_ws.clone();
+        cx.on_app_quit(move |cx| {
             settings::stop_webrtc_bridge_on_quit(cx);
-            async {}
+            let handles: Vec<acp::AcpHandle> = current_ws_for_quit
+                .borrow()
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .map(|ws| {
+                    ws.update(cx, |ws, cx| {
+                        ws.sessions
+                            .iter()
+                            .filter_map(|s| match &s.kind {
+                                SessionKind::Acp(view) => {
+                                    view.update(cx, |v, _cx| v.take_handle_for_quit())
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            async move {
+                for h in handles {
+                    acp::wait_for_shutdown(h, Duration::from_secs(3)).await;
+                }
+            }
         })
         .detach();
         // 恢复跨网：隧道仍走下面 spawn；WebRTC 在网关 hydrate 后再拉 bridge

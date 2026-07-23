@@ -46,6 +46,13 @@ pub struct AcpLaunch {
     /// （agent 记得之前聊了什么），adapter 不支持该能力或 load 失败则自动
     /// 退回 `session/new`（全新会话，见 AcpEvent::Ready 的 resumed 字段）。
     pub resume_session_id: Option<SessionId>,
+    /// 只有 Claude Code 才该为 true：它的 ACP 会话 id 就是自己的 transcript
+    /// 文件名，本地文件不存在时续接必然失败，值得靠这个提前跳过白等（见
+    /// `run_connection` 里的用法）。别家 agent（Copilot/Codex/Grok）各自管自己
+    /// 的 session 持久化，smelt 完全不了解它们的存储格式，没有资格替它们判断
+    /// "续不上"——一律直接把 resume/load 交给协议本身去试，成不成由 agent
+    /// 自己说了算，不要在 smelt 这层用只对一家 agent 成立的经验规则挡掉别家。
+    pub resume_needs_transcript_check: bool,
 }
 
 /// 随 prompt 一起发出去的一张图（剪贴板粘进来的截图等）。
@@ -309,6 +316,24 @@ pub struct AcpHandle {
     pub event_rx: smol::channel::Receiver<AcpEvent>,
 }
 
+/// App 退出前等一个已发过 Shutdown 的连接线程真正收尾。`event_rx` 所有
+/// sender 都掉光（channel 关闭）只会发生在 `spawn_acp` 起的那条线程完整跑完
+/// 之后——这时候线程内部持有的 agent 子进程句柄（含杀进程的 Drop）早就已经
+/// 执行过了，可以放心确认子进程不会变孤儿。等不到就按 `timeout` 放行，宁可
+/// 漏杀一个不听话的 agent，也不能让整个 App 退出卡死在它上面。
+pub async fn wait_for_shutdown(handle: AcpHandle, timeout: std::time::Duration) {
+    let AcpHandle { event_rx, .. } = handle;
+    smol::future::race(
+        async {
+            while event_rx.recv().await.is_ok() {}
+        },
+        async {
+            smol::Timer::after(timeout).await;
+        },
+    )
+    .await;
+}
+
 /// 起一条专用线程跑 ACP 连接，立即返回句柄。
 pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
@@ -441,13 +466,21 @@ async fn run_connection(
             //   完整消息流，让 agent 再吐一遍纯属浪费，还得处理去重。协议能力位里
             //   没声明它（claude-agent-acp 只报 loadSession），但实测可用，所以按
             //   「试了不亏」处理——失败就落到 load。
-            // - 前置检查 transcript 在不在：ACP 的会话 id 就是 Claude Code 的
-            //   transcript 文件名，文件不存在（会话建了没说过话 / 已被清理）时
-            //   续接必然「Resource not found」，实测白等约 2 秒。直接跳过。
+            // - 前置检查 transcript 在不在：只对 Claude Code 成立（它的 ACP 会话 id
+            //   就是自己的 transcript 文件名，文件不存在时续接必然「Resource not
+            //   found」，实测白等约 2 秒，值得靠这个跳过）。别家 agent 各自管自己
+            //   的 session 持久化，smelt 不了解也不该去猜——`resume_needs_transcript_check`
+            //   为 false 时无条件让协议自己试 resume/load，成不成交给 agent 判断，
+            //   不能拿 Claude 的私有存储格式当全体 agent 的通用规则（曾经因此导致
+            //   Copilot/Codex/Grok 的「重新开始」从来没真正走过 resume/load，
+            //   悄悄退化成了每次都开全新会话）。
             //
-            // 速度上 resume/load 都要十几秒——那是 Claude Code 自身启动的成本，
-            // 换哪条路都躲不掉（实测 new 10.4s / load 15.7s / resume 17.6s）。
+            // 速度上 resume/load 都要十几秒——那是 agent 自身启动的成本，换哪条路
+            // 都躲不掉（Claude 实测 new 10.4s / load 15.7s / resume 17.6s）。
             let resumable = launch.resume_session_id.as_ref().is_some_and(|sid| {
+                if !launch.resume_needs_transcript_check {
+                    return true;
+                }
                 launch.cwd.as_deref().is_some_and(|c| {
                     crate::session_history::transcript_path(c, &sid.to_string()).exists()
                 })
