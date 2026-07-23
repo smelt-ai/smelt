@@ -991,18 +991,77 @@ fn resolve_in_path(program: &str, path: &str) -> Option<String> {
     None
 }
 
+/// 交互式 login shell 里的 PATH（进程存活期只探一次）。
+///
+/// **为什么必须交互式（`-i`）**：非交互 login shell（`zsh -lc`）只读
+/// `.zshenv`/`.zprofile`/`.zlogin`，**不读 `.zshrc`**——而绝大多数人的 PATH 注入
+/// （各家 CLI、nvm、bun、volta …）都写在 `.zshrc`。少了它，Finder 启动的 GUI 取到
+/// 的 PATH 会漏掉一大批目录，导致明明装了、终端里能跑的 CLI（实测 grok 装在
+/// `~/.grok/bin`）被 `resolve_in_path` 判成「未找到命令」。加 `-i` 让它读 `.zshrc`，
+/// 跟用户终端里的 PATH 对齐。
+///
+/// **代价与去噪**：交互式 shell 启动会执行 shell-integration 脚本，往 stdout 打一段
+/// OSC 转义序列（形如 `\e]1337;…;shell=zsh`）。直接读会把这串噪音粘进 PATH 的第一
+/// 段、正好毁掉第一个目录（就是新装 CLI 常在的位置）。所以用一对唯一标记把 `$PATH`
+/// 夹住，再从输出里只抠中间那段，前后的噪音一律丢弃（见 `extract_marked_path`）。
 fn login_shell_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         std::process::Command::new("/bin/zsh")
-            .args(["-lc", "echo -n $PATH"])
+            .args([
+                "-ilc",
+                "printf %s __SMELT_PATH_BEGIN__; printf %s \"$PATH\"; printf %s __SMELT_PATH_END__",
+            ])
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .and_then(|o| extract_marked_path(&String::from_utf8_lossy(&o.stdout)))
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
     })
+}
+
+/// 从交互式 shell 的输出里抠出 `__SMELT_PATH_BEGIN__` 与 `__SMELT_PATH_END__` 之间
+/// 的 PATH，丢掉 shell-integration 打在前后的 OSC 噪音。找不到标记就返回 None
+/// （交给调用方回退到进程自身的 PATH）。
+fn extract_marked_path(raw: &str) -> Option<String> {
+    const BEGIN: &str = "__SMELT_PATH_BEGIN__";
+    const END: &str = "__SMELT_PATH_END__";
+    let start = raw.find(BEGIN)? + BEGIN.len();
+    let rest = &raw[start..];
+    let stop = rest.find(END)?;
+    Some(rest[..stop].trim().to_string())
+}
+
+#[cfg(test)]
+mod path_env_tests {
+    use super::extract_marked_path;
+
+    /// 交互式 zsh 会在 `$PATH` 前粘一段 shell-integration 的 OSC 噪音（实测形如
+    /// `\e]1337;…;shell=zsh`）。抠取逻辑必须只取标记之间的内容——第一段目录（新装
+    /// CLI 常在这里，如 grok 的 `~/.grok/bin`）绝不能被噪音吃掉。这正是把 `-lc` 改
+    /// 成 `-ilc` 后若不去噪就会踩的坑，锁死防回归。
+    #[test]
+    fn strips_shell_integration_noise_before_path() {
+        let raw = "\u{1b}]1337;RemoteHost=me@host\u{1b}\\\u{1b}]1337;ShellIntegrationVersion=14;shell=zsh\
+                   __SMELT_PATH_BEGIN__/Users/me/.grok/bin:/usr/bin:/bin__SMELT_PATH_END__";
+        let got = extract_marked_path(raw).expect("应能抠出 PATH");
+        assert_eq!(got, "/Users/me/.grok/bin:/usr/bin:/bin");
+        assert!(got.starts_with("/Users/me/.grok/bin"), "第一段目录不能被 OSC 噪音污染");
+    }
+
+    /// 没有标记（shell 直接失败、没跑到 printf）返回 None，让调用方回退到进程 PATH。
+    #[test]
+    fn returns_none_without_markers() {
+        assert!(extract_marked_path("/usr/bin:/bin").is_none());
+        assert!(extract_marked_path("").is_none());
+    }
+
+    /// 只有起始标记、没有结束标记（输出被截断）也不 panic，返回 None。
+    #[test]
+    fn returns_none_when_end_marker_missing() {
+        assert!(extract_marked_path("noise__SMELT_PATH_BEGIN__/usr/bin").is_none());
+    }
 }
 
 #[cfg(test)]

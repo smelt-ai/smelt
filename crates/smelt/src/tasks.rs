@@ -219,6 +219,16 @@ pub fn default_run_at_input() -> String {
         .to_string()
 }
 
+/// 编辑弹窗回填用：Unix 秒 → 输入框格式（本地 `YYYY-MM-DD HH:MM`，可被 [`parse_local_datetime`] 读回）。
+pub fn format_run_at_input(secs: u64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(secs as i64, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(default_run_at_input)
+}
+
 fn tasks_global_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".smelt").join("tasks.json"))
 }
@@ -549,6 +559,8 @@ impl Workspace {
 
     pub fn open_new_task_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_task_inputs(window, cx);
+        // 明确进入「新建」模式（可能从上一次编辑残留）
+        self.task_editing = None;
         // 终端右键预填（若有）
         if let Some(pre) = cx.try_global::<NewTaskPrefill>() {
             let pre = pre.clone();
@@ -595,9 +607,105 @@ impl Workspace {
     pub fn close_new_task_modal(&mut self, cx: &mut Context<Self>) {
         self.show_new_task_modal = false;
         self.task_bind_session = None;
+        self.task_editing = None;
         self.task_kind = TaskKind::Once;
         self.task_auto_run = true;
         cx.notify();
+    }
+
+    /// 打开「编辑任务」弹窗：复用新建弹窗，预填已有任务的全部字段。
+    /// 提交走 [`Self::save_task_from_inputs`]（upsert），不新建、不触发运行。
+    pub fn open_edit_task_modal(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_task_inputs(window, cx);
+        let Some(task) = TaskStore::get(id) else {
+            return;
+        };
+        self.task_editing = Some(id.to_string());
+        // 编辑不涉及「注入哪个终端」——清掉会话绑定，避免保存被当成开跑上下文。
+        self.task_bind_session = None;
+        self.task_bind_project = Some(task.project_cwd.clone());
+        self.task_bind_launch = task.launch.clone();
+        self.task_kind = task.kind;
+        self.task_auto_run = task.auto_run;
+
+        if let Some(input) = &self.task_body_input {
+            let body = task.body.clone();
+            input.update(cx, |s, cx| {
+                s.set_value(body, window, cx);
+                s.focus(window, cx);
+            });
+        }
+        if let Some(input) = &self.task_title_input {
+            let title = task.title.clone();
+            input.update(cx, |s, cx| s.set_value(title, window, cx));
+        }
+        if let Some(input) = &self.task_run_at_input {
+            let val = task
+                .run_at
+                .map(format_run_at_input)
+                .unwrap_or_else(default_run_at_input);
+            input.update(cx, |s, cx| s.set_value(val, window, cx));
+        }
+        self.show_new_task_modal = true;
+        cx.notify();
+    }
+
+    /// 编辑弹窗「保存」：把输入写回 [`TaskStore`]（不新建、不开跑）。
+    /// 校验同新建：首包必填；定时须合法时间。校验不过则保持弹窗。
+    pub fn save_task_from_inputs(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.task_editing.clone() else {
+            return;
+        };
+        let Some(cwd) = self.task_bind_cwd(cx) else {
+            return;
+        };
+        let body = self
+            .task_body_input
+            .as_ref()
+            .map(|s| s.read(cx).value().to_string())
+            .unwrap_or_default();
+        if body.trim().is_empty() {
+            return;
+        }
+        let title_in = self
+            .task_title_input
+            .as_ref()
+            .map(|s| s.read(cx).value().to_string())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let kind = self.task_kind;
+        // 定时任务恒为自动执行；普通任务跟弹窗开关。
+        let auto_run = kind == TaskKind::Scheduled || self.task_auto_run;
+        let run_at = if kind == TaskKind::Scheduled {
+            let raw = self
+                .task_run_at_input
+                .as_ref()
+                .map(|s| s.read(cx).value().to_string())
+                .unwrap_or_default();
+            let Some(at) = parse_local_datetime(&raw) else {
+                return;
+            };
+            Some(at)
+        } else {
+            None
+        };
+        let title = if title_in.is_empty() {
+            title_from_prompt(&body)
+        } else {
+            title_in
+        };
+        let launch = self.task_bind_launch_cmd(cx);
+        TaskStore::update(&id, |t| {
+            t.title = title;
+            t.body = body;
+            t.kind = kind;
+            t.run_at = run_at;
+            t.auto_run = auto_run;
+            t.project_cwd = cwd;
+            t.launch = launch;
+        });
+        self.close_new_task_modal(cx);
     }
 
     /// 从弹窗创建任务。`run` 时：有 `task_bind_session` → 注入该终端；否则新开终端。
@@ -797,6 +905,7 @@ impl Workspace {
             icon_for_launch_command(&cur_launch_cmd)
         };
 
+        let editing = self.task_editing.is_some();
         let on_existing = self.task_bind_session.is_some();
         let is_scheduled = self.task_kind == TaskKind::Scheduled;
         let auto_run = self.task_auto_run || is_scheduled;
@@ -809,7 +918,9 @@ impl Workspace {
         } else {
             "仅手动：点「运行」才开终端；不会被系统自动取走"
         };
-        let primary_label = if is_scheduled {
+        let primary_label = if editing {
+            "保存"
+        } else if is_scheduled {
             "创建定时"
         } else {
             "创建并运行"
@@ -999,7 +1110,9 @@ impl Workspace {
                     .font_bold()
                     .text_color(fg)
                     .text_lg()
-                    .child(if on_existing {
+                    .child(if editing {
+                        "编辑任务"
+                    } else if on_existing {
                         "新建任务 · 当前终端"
                     } else {
                         "新建任务"
@@ -1068,24 +1181,39 @@ impl Workspace {
                         |this, _, _, cx| this.close_new_task_modal(cx),
                         cx,
                     ))
-                    .child(Workspace::modal_button(
-                        "create-only-task",
-                        "仅创建",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
-                        |this, _, window, cx| this.create_task_from_inputs(false, window, cx),
-                        cx,
-                    ))
-                    .child(Workspace::modal_button(
-                        "confirm-new-task",
-                        primary_label,
-                        tint,
-                        hover,
-                        accent_text,
-                        |this, _, window, cx| this.create_task_from_inputs(true, window, cx),
-                        cx,
-                    )),
+                    // 编辑模式无「仅创建」——保存即写回。
+                    .when(!editing, |d| {
+                        d.child(Workspace::modal_button(
+                            "create-only-task",
+                            "仅创建",
+                            neutral_bg,
+                            neutral_hover,
+                            fg,
+                            |this, _, window, cx| this.create_task_from_inputs(false, window, cx),
+                            cx,
+                        ))
+                    })
+                    .child(if editing {
+                        Workspace::modal_button(
+                            "confirm-new-task",
+                            primary_label,
+                            tint,
+                            hover,
+                            accent_text,
+                            |this, _, window, cx| this.save_task_from_inputs(window, cx),
+                            cx,
+                        )
+                    } else {
+                        Workspace::modal_button(
+                            "confirm-new-task",
+                            primary_label,
+                            tint,
+                            hover,
+                            accent_text,
+                            |this, _, window, cx| this.create_task_from_inputs(true, window, cx),
+                            cx,
+                        )
+                    }),
             );
         Workspace::modal_shell(500., false, content, cx)
     }
@@ -1362,6 +1490,7 @@ impl Workspace {
         let id = task.id.clone();
         let id_run = id.clone();
         let id_col = id.clone();
+        let id_edit = id.clone();
         let id_del = id.clone();
         let title = task.title.clone();
         let proj = project_label(&task.project_cwd);
@@ -1574,6 +1703,15 @@ impl Workspace {
                                 this.primary_task_action(&id_run, window, cx);
                             }))
                     }))
+                    .child(
+                        Button::new(SharedString::from(format!("tc-edit-{id}")))
+                            .label("编辑")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_edit_task_modal(&id_edit, window, cx);
+                            })),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("tc-del-{id}")))
                             .label("删除")
@@ -1901,6 +2039,15 @@ mod task_model_tests {
         assert!(!t.is_due(99));
         t.column = TaskColumn::Running;
         assert!(!t.is_due(200));
+    }
+
+    #[test]
+    fn format_run_at_input_roundtrips_to_minute() {
+        // 编辑弹窗回填：format→parse 应还原到同一分钟（分精度，丢秒）。
+        let secs = 1_800_000_000u64; // 整分（可被 60 整除）
+        let s = super::format_run_at_input(secs);
+        let back = parse_local_datetime(&s).expect("parse back");
+        assert_eq!(back, secs - secs % 60);
     }
 
     #[test]

@@ -841,6 +841,12 @@ struct WsState {
     /// 文件树列拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     file_tree_w: Option<f32>,
+    /// 文件树里额外 pin 进来的项目根（除当前活动项目外）；空 = 只看当前项目。
+    #[serde(default)]
+    pinned_file_tree_roots: Vec<String>,
+    /// 文件树里被折叠起来的项目根（多根时）。
+    #[serde(default)]
+    collapsed_file_tree_roots: Vec<String>,
     /// Git 页左栏（变更文件列表）拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     git_left_w: Option<f32>,
@@ -1198,6 +1204,12 @@ struct Workspace {
     active_project: Option<String>,
     /// 会话列表里被折叠起来的项目分组名。
     collapsed_projects: HashSet<String>,
+    /// 文件树里被用户折叠起来的项目根目录（多根工作区才有；默认全展开，只有在这个
+    /// 集合里的才收起，见 file_tree / toggle_root_collapsed）。持久化。
+    collapsed_roots: HashSet<String>,
+    /// 文件树里额外 pin 进来的项目根（除当前活动项目外）。默认空 → 文件树就是当前
+    /// 项目单根；用户从「+ 项目」把别的项目挂进来才变多根。持久化，重启还在。
+    pinned_roots: Vec<String>,
     /// SKILLS 面板缓存：(取得时刻, 列表) + 扫的是哪个项目 + 是否正在后台扫。
     skills_cache: skills::SkillsCache,
     skills_cache_cwd: Option<String>,
@@ -1248,6 +1260,8 @@ struct Workspace {
     _task_title_sub: Option<Subscription>,
     /// 新建任务弹窗（Cmd+Shift+N / 侧栏「新建任务」）。
     show_new_task_modal: bool,
+    /// 弹窗处于「编辑」模式时的任务 id；None = 新建模式。
+    task_editing: Option<String>,
     /// 定时任务扫描循环是否已启动（避免 render 重复 spawn）。
     task_schedule_started: bool,
     /// 文件树搜索结果（文件名 + 文件内容）：后台遍历项目填充，render 只读。
@@ -1501,6 +1515,14 @@ impl Workspace {
             commit_msg_generating: false,
             active_project: None,
             collapsed_projects: HashSet::new(),
+            collapsed_roots: saved
+                .as_ref()
+                .map(|s| s.collapsed_file_tree_roots.iter().cloned().collect())
+                .unwrap_or_default(),
+            pinned_roots: saved
+                .as_ref()
+                .map(|s| s.pinned_file_tree_roots.clone())
+                .unwrap_or_default(),
             skills_cache: None,
             skills_cache_cwd: None,
             skills_inflight: false,
@@ -1525,6 +1547,7 @@ impl Workspace {
             task_column_filter: None,
             _task_title_sub: None,
             show_new_task_modal: false,
+            task_editing: None,
             task_schedule_started: false,
             search_results: None,
             search_gen: 0,
@@ -2183,6 +2206,8 @@ impl Workspace {
             sidebar_w: None,
             file_tree_w,
             git_left_w: self.git_left_resize.read(cx).sizes().first().copied().map(f32::from),
+            pinned_file_tree_roots: self.pinned_roots.clone(),
+            collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
             ..Default::default()
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -4308,7 +4333,6 @@ impl Workspace {
             MainView::DiffDetail => self.git_diff_only_pane(window, cx),
             MainView::Tasks => self.render_tasks_page(window, cx).into_any_element(),
                         MainView::Files => {
-                            let cwd = self.cur().and_then(|s| s.cwd(cx));
                             // 有查询串 → 显示搜索结果；否则显示文件树。
                             let has_query = self
                                 .file_filter
@@ -4329,20 +4353,20 @@ impl Workspace {
                             } else {
                                 let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
                                 let selected = self.file_tree_selected.as_deref();
-                                // 借当前 git status 缓存给改动文件标 M/A/D；没有缓存就是 None。
-                                let changed_files = cwd
-                                    .as_ref()
-                                    .and_then(|r| self.git_status.get(r))
-                                    .map(|(_, d)| d.files.as_slice());
+                                // 多根工作区：把所有项目根一起铺开（顺序同侧栏项目列表）；
+                                // 每个根各查各自的 git status 标 M/A/D，归属由 file_tree 内部
+                                // 按行所属的根处理，不再是全局一份。
+                                let roots = self.workspace_roots(cx);
                                 file_tree(
-                                    cwd,
+                                    &roots,
                                     &self.expanded,
+                                    &self.collapsed_roots,
                                     &self.dir_cache,
                                     &self.file_tree_scroll,
                                     open_path,
                                     selected,
                                     self.file_tree_w,
-                                    changed_files,
+                                    &self.git_status,
                                     cx,
                                 )
                             };
@@ -4791,21 +4815,26 @@ impl Render for Workspace {
                 .as_ref()
                 .map(|s| s.read(cx).value().trim().to_string())
                 .unwrap_or_default();
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                // 改动文件 M/A/D 标要用 git status；不强制用户先去过 Git 页才有数据，
-                // Files 页自己也确保一份缓存新鲜（ensure_git_status 内部已有 TTL）。
-                self.ensure_git_status(root.clone(), cx);
-                if query.is_empty() {
-                    // 无查询：正常树形浏览，清空上一次搜索结果。
-                    self.search_results = None;
+            // 多根工作区：文件树同时挂着所有项目根，后台刷新要覆盖每个根。改动文件
+            // M/A/D 标要用 git status；不强制用户先去过 Git 页才有数据，Files 页自己
+            // 也确保各根缓存新鲜（ensure_git_status 内部已有 TTL）。
+            let roots = self.workspace_roots(cx);
+            if query.is_empty() {
+                // 无查询：正常树形浏览，清空上一次搜索结果。
+                self.search_results = None;
+                for root in &roots {
+                    self.ensure_git_status(root.clone(), cx);
                     self.ensure_dir_listing(root.clone(), cx);
-                    for dir in self.expanded.clone() {
-                        self.ensure_dir_listing(dir, cx);
-                    }
-                } else {
-                    // 有查询：切换为搜索结果视图，后台遍历项目（query 未变则不重扫）。
-                    self.ensure_search(root, query, cx);
                 }
+                // 展开的子目录是绝对路径、跟属于哪个根无关，一次性全刷。
+                for dir in self.expanded.clone() {
+                    self.ensure_dir_listing(dir, cx);
+                }
+            } else if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+                // 有查询：搜索先只在当前会话根做（跨根搜索留作后续）；顺带刷一份该根的
+                // git status 给结果视图用。
+                self.ensure_git_status(root.clone(), cx);
+                self.ensure_search(root, query, cx);
             }
         }
 

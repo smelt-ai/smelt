@@ -11,6 +11,10 @@ use gpui_component::*;
 use crate::tasks::TaskStore;
 use crate::{ui_theme, MainView, Workspace, SETTINGS_PAGE_APPEARANCE};
 
+/// 侧栏任务卡片的 hover group 名：卡片 `.group()` + 操作条 `.group_hover()` 配对，
+/// 鼠标移到卡片才显形「编辑 / 删除」。名字全卡共享，靠 DOM 祖先关系就近生效。
+const TASK_CARD_GROUP: &str = "insp-task-card";
+
 /// inspector 面板的五个 tab。
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum InspectorTab {
@@ -286,10 +290,54 @@ impl Workspace {
             };
             let tid = t.id.clone();
             let e_act = this.clone();
+            // 平时透明、鼠标移到卡片才显形的操作条（编辑 / 删除）。stop_propagation
+            // 拦住 mouse_down，避免同时触发整卡的 focus_or_run。group 名见卡片 `.group()`。
+            let e_edit = this.clone();
+            let e_del = this.clone();
+            let tid_edit = t.id.clone();
+            let tid_del = t.id.clone();
+            let hover_bar = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .opacity(0.0)
+                .group_hover(TASK_CARD_GROUP, |s| s.opacity(1.0))
+                .child(
+                    div()
+                        .id(("inspector-task-edit", tix))
+                        .px_1()
+                        .text_xs()
+                        .cursor_pointer()
+                        .text_color(rgb(ui_theme::text_faint()))
+                        .hover(|s| s.text_color(rgb(ui_theme::accent())))
+                        .child("编辑")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_ev, window, cx| {
+                            let tid = tid_edit.clone();
+                            e_edit.update(cx, |ws, cx| ws.open_edit_task_modal(&tid, window, cx));
+                        }),
+                )
+                .child(
+                    div()
+                        .id(("inspector-task-del", tix))
+                        .px_1()
+                        .text_xs()
+                        .cursor_pointer()
+                        .text_color(rgb(ui_theme::text_faint()))
+                        .hover(|s| s.text_color(rgb(ui_theme::red())))
+                        .child("删除")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_ev, _window, cx| {
+                            let tid = tid_del.clone();
+                            e_del.update(cx, |ws, cx| ws.delete_task(&tid, cx));
+                        }),
+                );
             // 结构：外层横排 = 左侧 3px 状态色竖条 + 内容列（GPUI 边框色是单值，
             // 左边框异色做不到，用嵌套竖条实现设计稿的左色条）。
             let card = div()
                 .id(("inspector-task", tix))
+                .group(TASK_CARD_GROUP)
                 .rounded(px(9.))
                 .border_1()
                 .border_color(rgb(ui_theme::border_mid()))
@@ -309,14 +357,24 @@ impl Workspace {
                         .gap_2()
                         .child(
                             div()
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(rgb(ui_theme::text_bright()))
-                                .child(if t.title.is_empty() {
-                                    "（未命名任务）".to_string()
-                                } else {
-                                    t.title.clone()
-                                }),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .text_color(rgb(ui_theme::text_bright()))
+                                        .child(if t.title.is_empty() {
+                                            "（未命名任务）".to_string()
+                                        } else {
+                                            t.title.clone()
+                                        }),
+                                )
+                                .child(hover_bar),
                         )
                         .child(
                             div()
@@ -359,23 +417,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let header = self.inspector_header("EXPLORER", InspectorTab::Files, cx);
-        let cwd = self.cur().and_then(|s| s.cwd(cx));
         self.try_flush_file_tree_reveal(cx);
         let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
         let selected = self.file_tree_selected.as_deref();
-        let changed_files = cwd
-            .as_ref()
-            .and_then(|r| self.git_status.get(r))
-            .map(|(_, d)| d.files.as_slice());
+        // 多根工作区：inspector 的 EXPLORER 也把所有项目根一起挂出来（跟全屏 Files 页
+        // 同一套 workspace_roots / collapsed_roots，行为一致）。
+        let roots = self.workspace_roots(cx);
         let tree = crate::file_tree::file_tree(
-            cwd,
+            &roots,
             &self.expanded,
+            &self.collapsed_roots,
             &self.dir_cache,
             &self.file_tree_scroll,
             open_path,
             selected,
             344.,
-            changed_files,
+            &self.git_status,
             cx,
         );
         div()

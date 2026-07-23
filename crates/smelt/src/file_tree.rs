@@ -18,6 +18,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::*;
 
+use crate::git_panel::GitStatusData;
 use crate::{placeholder_view, SendSelectionToTerminal, Workspace};
 
 // ===================== 类型 =====================
@@ -333,188 +334,273 @@ fn git_status_badge(code: &str) -> Option<(char, gpui::Hsla)> {
     }
 }
 
+/// 文件树：单根时行为跟以前一致（根隐式展开、不显示根标题行）；工作区挂了 ≥2 个
+/// 项目目录时，每个根渲染成一个可折叠的顶层标题行、其下子项缩进一级——对齐 VSCode
+/// 的 multi-root workspace，右侧文件不用再切项目来回换。根集合由调用方（main.rs）按
+/// 项目分组聚合，每个根各查各自的 git status 标 M/A/D，互不串味。
 pub fn file_tree(
-    cwd: Option<String>,
+    roots: &[String],
     expanded: &HashSet<String>,
+    // 用户主动折叠起来的根目录（默认全展开，只有落在这个集合里的才收起）。
+    collapsed_roots: &HashSet<String>,
     dir_cache: &HashMap<String, (Instant, Rc<Vec<(String, bool)>>)>,
     scroll: &ScrollHandle,
     open_path: Option<&str>,
     // 键盘选中的条目路径（高亮边框，区别于「当前打开文件」的底色）。
     selected_path: Option<&str>,
     panel_w: f32,
-    // 当前 git status 的改动文件列表（(porcelain 状态码, 相对 root 的路径)）。
-    changed_files: Option<&[(String, String)]>,
+    // 各根的 git status（root 绝对路径 → 状态数据）；按行所属的根查各自的改动列表，
+    // 不是全局一份。
+    git_status: &HashMap<String, (Instant, GitStatusData)>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let (muted, fg, hover, active_bg, accent) = {
         let t = cx.theme();
         (t.muted_foreground, t.foreground, t.accent, t.border, t.primary)
     };
-    let Some(root) = cwd else {
+    if roots.is_empty() {
         return placeholder_view("无项目目录", muted).into_any_element();
-    };
-    if !dir_cache.contains_key(&root) {
-        // 首次进入该项目：ensure_dir_listing 已在 render 顶部触发，下一帧就有数据。
+    }
+    let multi = roots.len() > 1;
+    // 单根且尚未缓存：保持老行为，整块居中「加载中…」。
+    if !multi && !dir_cache.contains_key(&roots[0]) {
         return placeholder_view("加载中…", muted).into_any_element();
     }
 
-    // 每行预先算好展开状态。
-    let mut flat: Vec<(usize, String, bool, String, bool)> = Vec::new();
-    walk_dir_cached(&root, dir_cache, expanded, 0, &mut flat);
-
     let this = cx.entity();
-    let rows: Vec<AnyElement> = flat
-        .into_iter()
-        .enumerate()
-        .map(|(i, (depth, name, is_dir, path, is_expanded))| {
-            let indent = px(8.0 + depth as f32 * 14.0);
-            // 展开箭头：目录用 chevron（展开朝下 / 收起朝右），文件留等宽占位对齐。
-            let arrow = if is_dir {
-                div()
-                    .w(px(14.))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        Icon::new(if is_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size(px(12.))
-                        .text_color(muted),
-                    )
-                    .into_any_element()
-            } else {
-                div().w(px(14.)).into_any_element()
-            };
-            // 类型图标：目录（展开 / 收起用不同文件夹图标）与文件区分。
-            let type_icon = Icon::new(if is_dir {
-                if is_expanded {
-                    IconName::FolderOpen
-                } else {
-                    IconName::Folder
-                }
-            } else {
-                IconName::File
-            })
-            .size(px(14.))
-            .text_color(if is_dir { fg } else { muted });
-            let this = this.clone();
-            let p = path.clone();
-            let this_menu = this.clone();
-            let p_menu = p.clone();
-            // 当前在右侧内容面板打开的文件：文件树里对应行常驻高亮，不用靠记忆去找。
-            let is_open = !is_dir && open_path == Some(path.as_str());
-            // git 状态：M/A/D/U 字母色标（只标文件，不往目录冒泡）。
-            let git_badge = if !is_dir {
-                changed_files.and_then(|files| {
-                    Path::new(&path)
-                        .strip_prefix(&root)
-                        .ok()
-                        .and_then(|rel| rel.to_str())
-                        .and_then(|rel| {
-                            files
-                                .iter()
-                                .find(|(_, p)| p == rel)
-                                .and_then(|(code, _)| git_status_badge(code))
-                        })
-                })
-            } else {
-                None
-            };
-            let is_selected = selected_path == Some(path.as_str());
-            let name_tip: SharedString = name.clone().into();
-            let show_name_tip = name_likely_truncated(&name, depth, panel_w);
+
+    // 渲染一个文件/目录行。抽成闭包：多根时要在每个根的循环里各调一遍，且各传各的
+    // `row_root`（strip_prefix 基准）和 `changed`（该根的改动列表）。`i` 是全局唯一
+    // 行号，保证 ElementId 不撞。
+    let render_entry = |i: usize,
+                        depth: usize,
+                        name: String,
+                        is_dir: bool,
+                        path: String,
+                        is_expanded: bool,
+                        row_root: &str,
+                        changed: Option<&[(String, String)]>|
+     -> AnyElement {
+        let indent = px(8.0 + depth as f32 * 14.0);
+        // 展开箭头：目录用 chevron（展开朝下 / 收起朝右），文件留等宽占位对齐。
+        let arrow = if is_dir {
             div()
-                .id(("file", i))
+                .w(px(14.))
                 .flex()
-                .items_center()
-                .gap_1()
-                .pl(indent)
-                .pr_2()
-                .py(px(1.0))
-                .text_sm()
-                .text_color(if is_dir { fg } else { muted })
-                .when(is_open, |el| el.bg(active_bg))
-                .when(is_selected, |el| {
-                    el.border_l_2().border_color(accent).pl(indent - px(2.0))
-                })
-                .hover(move |s| s.bg(hover))
-                .on_click(move |_ev, window, cx| {
-                    this.update(cx, |ws, cx| {
-                        ws.file_tree_selected = Some(p.clone());
-                        if is_dir {
-                            ws.toggle_expand(p.clone(), cx);
-                        } else {
-                            ws.view_file(p.clone(), window, cx);
-                        }
-                    });
-                })
-                .context_menu(move |menu, _window, _cx| {
-                    let this_term = this_menu.clone();
-                    let p_term = p_menu.clone();
-                    let this_copy = this_menu.clone();
-                    let p_copy = p_menu.clone();
-                    let this_finder = this_menu.clone();
-                    let p_finder = p_menu.clone();
-                    let this_del = this_menu.clone();
-                    let p_del = p_menu.clone();
-                    menu
-                        .item(
-                            PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
-                                this_term.update(cx, |ws, cx| ws.send_path_to_terminal(p_term.clone(), cx));
-                            }),
-                        )
-                        .item(
-                            PopupMenuItem::new("复制文件路径").on_click(move |_ev, _window, cx| {
-                                this_copy.update(cx, |ws, cx| ws.copy_file_path_to_clipboard(p_copy.clone(), cx));
-                            }),
-                        )
-                        .item(
-                            PopupMenuItem::new("在 Finder 中显示").on_click(move |_ev, _window, cx| {
-                                this_finder.update(cx, |ws, cx| {
-                                    ws.reveal_path_in_finder(p_finder.clone(), cx);
-                                });
-                            }),
-                        )
-                        .item(
-                            PopupMenuItem::new("删除文件").on_click(
-                                move |_ev, _window, cx| {
-                                    this_del.update(cx, |ws, cx| {
-                                        ws.start_delete_file(p_del.clone(), is_dir, cx)
-                                    });
-                                },
-                            ),
-                        )
-                })
-                .child(arrow)
-                .child(type_icon)
-                // tooltip 只挂在文件名格子上，且仅当可能被截断时才显示——避免像
-                // Cargo.toml 这种短名也弹 tooltip，跟右键菜单叠在一起。
+                .justify_center()
                 .child(
-                    div()
-                        .id(("file-name", i))
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(name)
-                        .when(show_name_tip, |el| {
-                            el.tooltip(move |window, cx| {
-                                Tooltip::new(name_tip.clone()).build(window, cx)
-                            })
-                        }),
+                    Icon::new(if is_expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(12.))
+                    .text_color(muted),
                 )
-                .children(git_badge.map(|(ch, color)| {
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .font_bold()
-                        .text_color(color)
-                        .child(ch.to_string())
-                }))
                 .into_any_element()
+        } else {
+            div().w(px(14.)).into_any_element()
+        };
+        // 类型图标：目录（展开 / 收起用不同文件夹图标）与文件区分。
+        let type_icon = Icon::new(if is_dir {
+            if is_expanded {
+                IconName::FolderOpen
+            } else {
+                IconName::Folder
+            }
+        } else {
+            IconName::File
         })
-        .collect();
+        .size(px(14.))
+        .text_color(if is_dir { fg } else { muted });
+        let this = this.clone();
+        let p = path.clone();
+        let this_menu = this.clone();
+        let p_menu = p.clone();
+        // 当前在右侧内容面板打开的文件：文件树里对应行常驻高亮，不用靠记忆去找。
+        let is_open = !is_dir && open_path == Some(path.as_str());
+        // git 状态：M/A/D/U 字母色标（只标文件，不往目录冒泡）。
+        let git_badge = if !is_dir {
+            changed.and_then(|files| {
+                Path::new(&path)
+                    .strip_prefix(row_root)
+                    .ok()
+                    .and_then(|rel| rel.to_str())
+                    .and_then(|rel| {
+                        files
+                            .iter()
+                            .find(|(_, p)| p == rel)
+                            .and_then(|(code, _)| git_status_badge(code))
+                    })
+            })
+        } else {
+            None
+        };
+        let is_selected = selected_path == Some(path.as_str());
+        let name_tip: SharedString = name.clone().into();
+        let show_name_tip = name_likely_truncated(&name, depth, panel_w);
+        div()
+            .id(("file", i))
+            .flex()
+            .items_center()
+            .gap_1()
+            .pl(indent)
+            .pr_2()
+            .py(px(1.0))
+            .text_sm()
+            .text_color(if is_dir { fg } else { muted })
+            .when(is_open, |el| el.bg(active_bg))
+            .when(is_selected, |el| {
+                el.border_l_2().border_color(accent).pl(indent - px(2.0))
+            })
+            .hover(move |s| s.bg(hover))
+            .on_click(move |_ev, window, cx| {
+                this.update(cx, |ws, cx| {
+                    ws.file_tree_selected = Some(p.clone());
+                    if is_dir {
+                        ws.toggle_expand(p.clone(), cx);
+                    } else {
+                        ws.view_file(p.clone(), window, cx);
+                    }
+                });
+            })
+            .context_menu(move |menu, _window, _cx| {
+                let this_term = this_menu.clone();
+                let p_term = p_menu.clone();
+                let this_copy = this_menu.clone();
+                let p_copy = p_menu.clone();
+                let this_finder = this_menu.clone();
+                let p_finder = p_menu.clone();
+                let this_del = this_menu.clone();
+                let p_del = p_menu.clone();
+                menu
+                    .item(
+                        PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
+                            this_term.update(cx, |ws, cx| ws.send_path_to_terminal(p_term.clone(), cx));
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("复制文件路径").on_click(move |_ev, _window, cx| {
+                            this_copy.update(cx, |ws, cx| ws.copy_file_path_to_clipboard(p_copy.clone(), cx));
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("在 Finder 中显示").on_click(move |_ev, _window, cx| {
+                            this_finder.update(cx, |ws, cx| {
+                                ws.reveal_path_in_finder(p_finder.clone(), cx);
+                            });
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("删除文件").on_click(
+                            move |_ev, _window, cx| {
+                                this_del.update(cx, |ws, cx| {
+                                    ws.start_delete_file(p_del.clone(), is_dir, cx)
+                                });
+                            },
+                        ),
+                    )
+            })
+            .child(arrow)
+            .child(type_icon)
+            // tooltip 只挂在文件名格子上，且仅当可能被截断时才显示——避免像
+            // Cargo.toml 这种短名也弹 tooltip，跟右键菜单叠在一起。
+            .child(
+                div()
+                    .id(("file-name", i))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(name)
+                    .when(show_name_tip, |el| {
+                        el.tooltip(move |window, cx| {
+                            Tooltip::new(name_tip.clone()).build(window, cx)
+                        })
+                    }),
+            )
+            .children(git_badge.map(|(ch, color)| {
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .font_bold()
+                    .text_color(color)
+                    .child(ch.to_string())
+            }))
+            .into_any_element()
+    };
+
+    // 根标题行（仅多根时渲染）：可折叠，点击切换 collapsed_roots。样式比子项醒目
+    // 一档（加粗 + 常驻文件夹图标），一眼分出「这是一个项目根」。
+    let render_root_header = |i: usize, root: &str, root_open: bool| -> AnyElement {
+        let name = root.rsplit('/').find(|s| !s.is_empty()).unwrap_or(root).to_string();
+        let this = this.clone();
+        let rp = root.to_string();
+        div()
+            .id(("root", i))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py(px(2.0))
+            .text_sm()
+            .font_semibold()
+            .text_color(fg)
+            .hover(move |s| s.bg(hover))
+            .on_click(move |_ev, _window, cx| {
+                this.update(cx, |ws, cx| ws.toggle_root_collapsed(rp.clone(), cx));
+            })
+            .child(
+                div().w(px(14.)).flex().justify_center().child(
+                    Icon::new(if root_open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(12.))
+                    .text_color(muted),
+                ),
+            )
+            .child(Icon::new(IconName::FolderOpen).size(px(14.)).text_color(fg))
+            .child(div().flex_1().min_w_0().truncate().child(name))
+            .into_any_element()
+    };
+
+    let mut rows: Vec<AnyElement> = Vec::new();
+    let mut i = 0usize;
+    for root in roots {
+        let changed = git_status.get(root).map(|(_, d)| d.files.as_slice());
+        let root_open = !collapsed_roots.contains(root);
+        if multi {
+            rows.push(render_root_header(i, root, root_open));
+            i += 1;
+            if !root_open {
+                continue;
+            }
+        }
+        // 根目录尚未缓存：多根时在标题下给一行「加载中…」（单根已在上面早退兜底）。
+        if !dir_cache.contains_key(root) {
+            rows.push(
+                div()
+                    .id(("root-loading", i))
+                    .pl(px(if multi { 22.0 } else { 8.0 }))
+                    .py(px(1.0))
+                    .text_sm()
+                    .text_color(muted)
+                    .child("加载中…")
+                    .into_any_element(),
+            );
+            i += 1;
+            continue;
+        }
+        // 多根时子项缩进一级，给根标题让位；单根从 0 起（跟以前一致）。
+        let base_depth = if multi { 1 } else { 0 };
+        let mut flat: Vec<(usize, String, bool, String, bool)> = Vec::new();
+        walk_dir_cached(root, dir_cache, expanded, base_depth, &mut flat);
+        for (depth, name, is_dir, path, is_expanded) in flat {
+            rows.push(render_entry(i, depth, name, is_dir, path, is_expanded, root, changed));
+            i += 1;
+        }
+    }
 
     div()
         .id("file-tree")
@@ -678,6 +764,56 @@ impl Workspace {
             self.expanded.insert(path);
         }
         cx.notify();
+    }
+
+    /// 折叠/展开文件树里的一个项目根（多根工作区才有的顶层标题行）。根默认展开，只有
+    /// 落进 `collapsed_roots` 的才收起，所以这里是「在集合里就移除、不在就加入」。
+    /// 折叠偏好持久化（save_state），重启后还记得哪些根是收起的。
+    pub fn toggle_root_collapsed(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.collapsed_roots.remove(&path) {
+            self.collapsed_roots.insert(path);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// 把一个项目根 pin 进文件树 / 从文件树移除（toggle）。侧栏项目右键「加到文件树 /
+    /// 从文件树移除」走这里。当前活动项目根本来就在文件树里（workspace_roots 第一位），
+    /// pin 它的意义是「即使切到别的项目，它也一直留着」。改完立即持久化。
+    pub fn toggle_file_tree_root(&mut self, cwd: String, cx: &mut Context<Self>) {
+        if let Some(pos) = self.pinned_roots.iter().position(|p| p == &cwd) {
+            self.pinned_roots.remove(pos);
+        } else {
+            self.pinned_roots.push(cwd);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// 某个 cwd 当前是否已 pin 在文件树里（侧栏右键菜单据此显示「加到」还是「移除」）。
+    pub fn is_file_tree_root_pinned(&self, cwd: &str) -> bool {
+        self.pinned_roots.iter().any(|p| p == cwd)
+    }
+
+    /// 文件树要同时挂出来的根目录集合：按项目分组聚合（顺序跟侧栏项目列表一致），去空
+    /// 去重。单项目时就一个根、行为跟以前一样；多项目时文件树把这些根一起铺开，右侧
+    /// 文件不用再切项目来回换。
+    pub fn workspace_roots(&self, cx: &App) -> Vec<String> {
+        let mut roots: Vec<String> = Vec::new();
+        // 当前活动项目根永远在第一位——文件树默认就针对当前项目（单根，跟老版一致）。
+        if let Some(cur) = self.cur().and_then(|s| s.cwd(cx)) {
+            if !cur.is_empty() {
+                roots.push(cur);
+            }
+        }
+        // 用户从「+ 项目」主动 pin 进来的额外根（去重、跳过已是当前项目的那个）。
+        // 默认 pinned_roots 为空 → 就一个当前项目根，不显示根标题、不折腾。
+        for p in &self.pinned_roots {
+            if !p.is_empty() && !roots.contains(p) {
+                roots.push(p.clone());
+            }
+        }
+        roots
     }
 
     /// 在文件树中定位 path：展开所有祖先目录、选中、并排队滚动到该行。

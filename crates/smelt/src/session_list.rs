@@ -362,20 +362,33 @@ impl Workspace {
                         //（`when` 的两个分支类型必须一致，所以是菜单项按条件加，
                         // 不是整个 context_menu 按条件挂）。
                         let e_del = e_menu.clone();
+                        let e_pin = e_menu.clone();
                         let path = cwd.clone();
                         let del_main_root = worktree_main_root.clone();
                         let del_branch = worktree_branch.clone();
-                        move |menu, _window, _cx| {
+                        move |menu, _window, cx| {
                             let copy_path = path.clone();
                             let del_path = path.clone();
+                            let pin_path = path.clone();
                             let e_del = e_del.clone();
+                            let e_pin = e_pin.clone();
                             let del_main_root = del_main_root.clone();
                             let del_branch = del_branch.clone();
+                            // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
+                            // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
+                            let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
+                            let pin_label = if pinned { "从文件树移除" } else { "加到文件树" };
                             menu.item(PopupMenuItem::new("复制项目路径").on_click(
                                 move |_ev, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         copy_path.clone(),
                                     ));
+                                },
+                            ))
+                            .item(PopupMenuItem::new(pin_label).icon(IconName::Folder).on_click(
+                                move |_ev, _window, cx| {
+                                    let pin_path = pin_path.clone();
+                                    e_pin.update(cx, |ws, cx| ws.toggle_file_tree_root(pin_path, cx));
                                 },
                             ))
                             .when(is_worktree_group, move |menu| {
