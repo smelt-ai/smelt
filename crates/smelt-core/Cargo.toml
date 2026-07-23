@@ -17,6 +17,8 @@ anyhow = "1"
 dirs = "5"
 alacritty_terminal = { version = "0.26", default-features = false }
 axum = { version = "0.8.9", features = ["ws"] }
+# ACP 对话共享模型（acp_chat）里的逐行 diff 计算，GPUI 和 smelt 都用同一个算法。
+similar = "2"
 # 把 remote-web/dist 编进 smeltd/gateway：Docker 只拷二进制、无 Resources 时手机端仍有 SPA。
 # debug-embed：debug 构建也编进二进制（默认 debug 会回读磁盘，Docker 镜像里没有 dist 就挂）。
 rust-embed = { version = "8.7", features = ["debug-embed"] }

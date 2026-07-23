@@ -18,7 +18,6 @@ use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, StyledExt};
 
 use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, SessionId, ToolCallId,
-    ToolCallStatus, ToolKind,
 };
 
 use crate::acp::{
@@ -29,37 +28,43 @@ use crate::settings::AcpAgentKind;
 use crate::terminal::{DaemonPhase, DaemonSessionState};
 use crate::ui_theme;
 
-/// 消息流里的一条。落盘持久化（见 main.rs 的 AcpSaved），进程重启 / 会话
-/// 「重新开始」都要保住历史，不能让 agent 一断线聊天记录就没了。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) enum AcpEntry {
-    User(String),
-    /// assistant 正文或思考块（thought 弱化显示）；连续 chunk 就地追加。
-    Assistant { text: String, thought: bool },
-    ToolCall {
-        id: ToolCallId,
-        title: String,
-        kind: ToolKind,
-        status: ToolCallStatus,
-        /// 保留结构（不压扁成一行文本）——diff 要能逐行渲染红/绿，压扁了就
-        /// 回不去了。只存纯数据，不依赖 agent_client_protocol 的类型，落盘格式
-        /// 不跟协议版本绑死。
-        output: Vec<ToolOutputPart>,
-    },
-    /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
-    Divider(String),
+/// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
+/// markdown 围栏这批纯逻辑现在都活在 `smelt_core::acp_chat`——不依赖 GPUI 也不
+/// 依赖 agent_client_protocol，未来 web/mobile 端渲染同一份对话时不用重新实现
+/// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
+/// 裸 `AcpEntry::...` 用法不用逐处改路径。
+pub(crate) use smelt_core::acp_chat::{
+    diff_line_stats, diff_lines, is_interrupt_marker, strip_code_fence, AcpEntry, DiffLineTag,
+    ToolCallStatus, ToolKind, ToolOutputPart,
+};
+
+/// agent_client_protocol 的协议类型 → 共享模型类型。就近放这里：那边的 crate
+/// 依赖只此一份（acp.rs / acp_view.rs），smelt_core 不许引它。
+fn tool_kind_from_acp(k: agent_client_protocol::schema::v1::ToolKind) -> ToolKind {
+    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    match k {
+        Acp::Read => ToolKind::Read,
+        Acp::Edit => ToolKind::Edit,
+        Acp::Delete => ToolKind::Delete,
+        Acp::Move => ToolKind::Move,
+        Acp::Search => ToolKind::Search,
+        Acp::Execute => ToolKind::Execute,
+        Acp::Think => ToolKind::Think,
+        Acp::Fetch => ToolKind::Fetch,
+        Acp::SwitchMode => ToolKind::SwitchMode,
+        _ => ToolKind::Other, // #[non_exhaustive]：协议以后加的新分类先归到这
+    }
 }
 
-/// 工具调用的一段输出：纯文本，或者一份文件 diff。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) enum ToolOutputPart {
-    Text(String),
-    Diff {
-        path: String,
-        /// 新文件没有旧内容。
-        old_text: Option<String>,
-        new_text: String,
-    },
+fn tool_status_from_acp(s: agent_client_protocol::schema::v1::ToolCallStatus) -> ToolCallStatus {
+    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
+    match s {
+        Acp::Pending => ToolCallStatus::Pending,
+        Acp::InProgress => ToolCallStatus::InProgress,
+        Acp::Completed => ToolCallStatus::Completed,
+        Acp::Failed => ToolCallStatus::Failed,
+        _ => ToolCallStatus::Pending, // #[non_exhaustive]：协议以后加的新状态先当待定
+    }
 }
 
 /// 会话相位（UI 侧状态机；翻译成 DaemonPhase 进全局）。
@@ -198,6 +203,7 @@ impl AcpView {
             cwd: this.cwd.clone(),
             sid: this.sid.clone(),
             resume_session_id: None, // 第一次开，没有旧会话可续
+            resume_needs_transcript_check: matches!(agent, AcpAgentKind::Claude),
         });
         this.attach_handle(handle, cx);
         this
@@ -284,6 +290,7 @@ impl AcpView {
             cwd: self.cwd.clone(),
             sid: self.sid.clone(),
             resume_session_id: self.acp_session_id.clone(),
+            resume_needs_transcript_check: matches!(self.agent, AcpAgentKind::Claude),
         });
         self.attach_handle(handle, cx);
         cx.notify();
@@ -660,6 +667,21 @@ impl AcpView {
         }
     }
 
+    /// App 真退出前专用：发 Shutdown，但**不**在这里就地扔掉 handle——子进程
+    /// 是不是真被杀掉，取决于连接线程有没有机会跑到收尾（内部 ChildGuard 在
+    /// Drop 时才杀子进程，含整个进程组）。这里只发信号，`acp::wait_for_shutdown`
+    /// 由调用方（main.rs 的 on_app_quit）异步等这份 handle 的 event 通道关闭，
+    /// 确认线程真收尾了再放行退出——不然 Cmd+Q 直接杀掉整个 GUI 进程时，ACP
+    /// 连接线程会被系统一起带走，根本没机会 Drop，子进程就变孤儿（真实教训：
+    /// Copilot 这类 agent 的孤儿子进程还占着旧登录会话，下次「重新开始」新起
+    /// 一个进程会撞上它，报出 Authentication required 这种看着不相关的错）。
+    pub(crate) fn take_handle_for_quit(&mut self) -> Option<AcpHandle> {
+        if let Some(h) = self.handle.as_ref() {
+            let _ = h.cmd_tx.try_send(AcpCommand::Shutdown);
+        }
+        self.handle.take()
+    }
+
     fn submit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(input) = self.input.clone() else { return };
         let text = input.read(cx).value().trim().to_string();
@@ -752,28 +774,29 @@ impl AcpView {
             }
             AcpEvent::ToolCall(tc) => {
                 self.entries.push(AcpEntry::ToolCall {
-                    id: tc.tool_call_id,
+                    id: tc.tool_call_id.to_string(),
                     title: tc.title,
-                    kind: tc.kind,
-                    status: tc.status,
+                    kind: tool_kind_from_acp(tc.kind),
+                    status: tool_status_from_acp(tc.status),
                     output: tool_content_parts(&tc.content),
                 });
                 self.phase = AcpPhase::Running;
             }
             AcpEvent::ToolCallUpdate(u) => {
+                let update_id = u.tool_call_id.to_string();
                 if let Some(AcpEntry::ToolCall { title, kind, status, output, .. }) =
                     self.entries.iter_mut().rev().find(|e| {
-                        matches!(e, AcpEntry::ToolCall { id, .. } if *id == u.tool_call_id)
+                        matches!(e, AcpEntry::ToolCall { id, .. } if *id == update_id)
                     })
                 {
                     if let Some(t) = u.fields.title {
                         *title = t;
                     }
                     if let Some(k) = u.fields.kind {
-                        *kind = k;
+                        *kind = tool_kind_from_acp(k);
                     }
                     if let Some(s) = u.fields.status {
-                        *status = s;
+                        *status = tool_status_from_acp(s);
                     }
                     if let Some(c) = u.fields.content {
                         *output = tool_content_parts(&c);
@@ -1262,8 +1285,8 @@ impl Render for AcpView {
         // （凭 tool_call_id 关联，对齐设计稿「diff 卡片自带 Approve/Reject」）；
         // 消息流里找不到对应卡片时退回独立卡片渲染——责任链只有一个出口，
         // responder 不会既没人展示又没人消费。
-        let perm_target: Option<ToolCallId> =
-            self.permission.as_ref().map(|c| c.tool_call_id.clone());
+        let perm_target: Option<String> =
+            self.permission.as_ref().map(|c| c.tool_call_id.to_string());
         let perm_embedded = perm_target.as_ref().is_some_and(|tid| {
             self.entries
                 .iter()
@@ -1389,7 +1412,6 @@ impl Render for AcpView {
                         ToolCallStatus::InProgress => (gpui::rgb(ui_theme::blue()).into(), "执行中"),
                         ToolCallStatus::Completed => (gpui::rgb(ui_theme::green()).into(), "完成"),
                         ToolCallStatus::Failed => (gpui::rgb(ui_theme::red()).into(), "失败"),
-                        _ => (t.muted_foreground, "…"), // schema #[non_exhaustive]
                     };
 
                     // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
@@ -2186,24 +2208,6 @@ fn assistant_avatar() -> impl IntoElement {
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 
-/// agent 回显的「用户中断」标记——它走的是 UserMessageChunk 通道，但不是用户
-/// 打的字，UI 得把它渲染成状态提示而不是消息气泡。
-fn is_interrupt_marker(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("[Request interrupted by user") && t.ends_with(']')
-}
-
-/// 剥掉整段被 markdown 围栏包住的工具输出（```lang\n…\n```）。只在「整段就是
-/// 一个围栏块」时剥——正文里穿插的代码块交给 markdown 渲染器，别在这里瞎切。
-fn strip_code_fence(text: &str) -> &str {
-    let t = text.trim();
-    let Some(rest) = t.strip_prefix("```") else { return text };
-    // 跳过围栏后面的语言标注那一行
-    let Some(nl) = rest.find('\n') else { return text };
-    let Some(body) = rest[nl + 1..].strip_suffix("```") else { return text };
-    body.trim_end_matches('\n')
-}
-
 /// 工具标题里去掉与 kind 标签重复的前缀：adapter 常把标题写成
 /// `Read crates/foo.rs`，而卡片左边已经有一个 `Read` 标签了。
 fn strip_kind_prefix<'a>(title: &'a str, kind: &ToolKind) -> &'a str {
@@ -2241,25 +2245,10 @@ fn tool_kind_label(kind: &ToolKind) -> &'static str {
     }
 }
 
-/// 逐行算 diff 的增删行数：diff 统计（"+N -M"）和渲染共用同一份计算，不能各算
-/// 各的——数字对不上比不显示还糟。
-fn diff_line_stats(old: &str, new: &str) -> (usize, usize) {
-    let diff = similar::TextDiff::from_lines(old, new);
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            similar::ChangeTag::Insert => added += 1,
-            similar::ChangeTag::Delete => removed += 1,
-            similar::ChangeTag::Equal => {}
-        }
-    }
-    (added, removed)
-}
-
 /// 渲染一份 diff：逐行红（删）/绿（增）/灰（不变），等宽字体，滚动限高——大改动
 /// 不能把整个消息流撑爆，超出部分滚动查看。`key` 保证同一条消息里多个 diff
-/// 块各自有唯一 element id。
+/// 块各自有唯一 element id。行数据来自 `smelt_core::acp_chat::diff_lines`——
+/// 跟头部「+N -M」摘要（`diff_line_stats`）共用同一次计算结果，数字不会对不上。
 fn render_diff_lines(
     old: &str,
     new: &str,
@@ -2267,7 +2256,6 @@ fn render_diff_lines(
     border_color: gpui::Hsla,
     muted_color: gpui::Hsla,
 ) -> gpui::AnyElement {
-    let diff = similar::TextDiff::from_lines(old, new);
     let mut rows = v_flex()
         .id(("acp-diff", key.0 * 10_000 + key.1))
         .max_h(px(320.))
@@ -2277,20 +2265,19 @@ fn render_diff_lines(
         .border_color(border_color)
         .font_family("monospace")
         .text_xs();
-    for change in diff.iter_all_changes() {
-        let line = change.value().trim_end_matches('\n').to_string();
-        let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match change.tag() {
-            similar::ChangeTag::Delete => (
+    for line in diff_lines(old, new) {
+        let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
+            DiffLineTag::Removed => (
                 Some(crate::ui_theme::tint(crate::ui_theme::red(), 0x22).into()),
                 "-",
                 gpui::rgb(crate::ui_theme::red()).into(),
             ),
-            similar::ChangeTag::Insert => (
+            DiffLineTag::Added => (
                 Some(crate::ui_theme::tint(crate::ui_theme::green(), 0x22).into()),
                 "+",
                 gpui::rgb(crate::ui_theme::diff_add_text()).into(),
             ),
-            similar::ChangeTag::Equal => (None, " ", muted_color),
+            DiffLineTag::Context => (None, " ", muted_color),
         };
         let mut row = h_flex().px_2().gap_2();
         if let Some(bg) = bg {
@@ -2298,7 +2285,7 @@ fn render_diff_lines(
         }
         rows = rows.child(
             row.child(div().w(px(12.)).flex_shrink_0().text_color(fg).child(prefix.to_string()))
-                .child(div().flex_1().min_w_0().text_color(fg).child(line)),
+                .child(div().flex_1().min_w_0().text_color(fg).child(line.text)),
         );
     }
     rows.into_any_element()
@@ -2327,27 +2314,5 @@ fn tool_content_parts(
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{is_interrupt_marker, strip_code_fence};
-
-    #[test]
-    fn strips_whole_output_code_fence_only() {
-        // adapter 把工具输出整段包在围栏里 → 剥掉，别把 ``` 显示给人看
-        assert_eq!(strip_code_fence("```console\nhello\nworld\n```"), "hello\nworld");
-        // 无语言标注同理
-        assert_eq!(strip_code_fence("```\nplain\n```"), "plain");
-        // 正文里穿插的代码块不属于「整段就是一个围栏」，原样返回交给 markdown
-        let mixed = "前言\n```rs\nlet x = 1;\n```\n后记";
-        assert_eq!(strip_code_fence(mixed), mixed);
-        // 没有围栏的普通输出原样返回
-        assert_eq!(strip_code_fence("exit 0"), "exit 0");
-    }
-
-    #[test]
-    fn detects_interrupt_marker() {
-        assert!(is_interrupt_marker("[Request interrupted by user]"));
-        assert!(is_interrupt_marker("[Request interrupted by user for tool use]"));
-        assert!(!is_interrupt_marker("请把这段中断逻辑说清楚"));
-    }
-}
+// strip_code_fence / is_interrupt_marker 的单测随实现一起搬进了
+// smelt_core::acp_chat（见该模块的 #[cfg(test)]），这里不再重复。
