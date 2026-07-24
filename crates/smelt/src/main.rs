@@ -13,10 +13,10 @@
 // UI 基建，搬进 smelt-ui / smelt-core，见各自文件头注释）。这里用同名 `use`
 // 重新导出成原来的模块路径，全库既有的 `crate::ui_theme::x()` 之类写法不用
 // 逐处改——跟 session_history.rs 对 claude_paths 的重导出是同一个套路。
+pub(crate) use smelt_acp_view::acp_view;
 pub(crate) use smelt_core::json_store;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
-pub(crate) use smelt_acp_view::acp_view;
 mod agent;
 mod claude_memory;
 mod dock;
@@ -42,9 +42,9 @@ mod stage;
 mod status_bar;
 mod status_item;
 mod tasks;
-mod toast;
 mod terminal;
 mod terminal_view;
+mod toast;
 mod updater;
 mod usage_stats;
 
@@ -56,38 +56,44 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gpui::*;
-use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
+use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_component::badge::Badge;
 use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::notification::Notification;
-use gpui_component::slider::SliderState;
 use gpui_component::resizable::{
-    h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
+    ResizablePanelEvent, ResizableState, h_resizable, resizable_panel, v_resizable,
 };
+use gpui_component::slider::SliderState;
 use gpui_component::*;
 use notify::RecommendedWatcher;
 use terminal_view::TerminalView;
 
 use file_tree::{
-    file_content_pane, file_tree, search_results_view, DeleteFileTarget, OpenFile, SearchState,
+    DeleteFileTarget, OpenFile, SearchState, file_content_pane, file_tree, search_results_view,
 };
 use git_panel::{
-    git_view, run_git, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo,
+    BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo, git_view, run_git,
 };
 use hotspot::hotspot_view;
-use session_history::{history_view, HistoryListState, HistoryPane};
-use settings::{load_appearance, load_launch_config, Appearance, LlmInputs};
+use session_history::{HistoryListState, HistoryPane, history_view};
+use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
 use usage_stats::format_count;
-
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
 gpui::actions!(
     smelt,
-    [Quit, OpenSettings, CheckForUpdate, ReportIssue, SendSelectionToTerminal, NewTask]
+    [
+        Quit,
+        OpenSettings,
+        CheckForUpdate,
+        ReportIssue,
+        SendSelectionToTerminal,
+        NewTask
+    ]
 );
 
 /// 命令面板里的一个可执行动作。
@@ -137,7 +143,10 @@ impl RenderOnce for CmdItem {
         } else {
             cx.theme().foreground
         };
-        self.base.px_3().py_1().child(div().text_color(fg).child(self.label))
+        self.base
+            .px_3()
+            .py_1()
+            .child(div().text_color(fg).child(self.label))
     }
 }
 
@@ -261,7 +270,12 @@ pub(crate) use smelt_ui::daemon_states_global::{DaemonStates, PendingAgentNotifs
 /// 那个 session id 还没有数据都返回 None。
 fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::DaemonSessionState> {
     let id = view.read(cx).session_id().to_string();
-    cx.try_global::<DaemonStates>()?.0.lock().unwrap().get(&id).cloned()
+    cx.try_global::<DaemonStates>()?
+        .0
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
 }
 
 /// 主区终端分屏布局树：叶子是一个终端，内部 Split 把区域按某轴切成多块。
@@ -364,7 +378,10 @@ impl Session {
     /// 单终端会话。
     fn single(view: Entity<TerminalView>) -> Self {
         Self {
-            kind: SessionKind::Term { layout: Pane::Leaf(view.clone()), active: view },
+            kind: SessionKind::Term {
+                layout: Pane::Leaf(view.clone()),
+                active: view,
+            },
             custom_title: None,
             _acp_persist_sub: None,
         }
@@ -439,20 +456,22 @@ impl Session {
     /// Braille spinner 开头）时取它的任务名，再否则回退 cwd 末段——避免把普通 shell 的
     /// user@host:path 标题当任务名。
     fn title(&self, cx: &App) -> String {
-        self.custom_title.clone().unwrap_or_else(|| match &self.kind {
-            SessionKind::Term { active, .. } => pane_auto_title(active, cx),
-            SessionKind::Acp(view) => {
-                let dir = view
-                    .read(cx)
-                    .cwd()
-                    .map(|c| c.rsplit('/').next().unwrap_or(&c).to_string());
-                let agent = view.read(cx).agent_kind().short_label();
-                match dir {
-                    Some(d) if !d.is_empty() => format!("{agent} 对话 · {d}"),
-                    _ => format!("{agent} 对话"),
+        self.custom_title
+            .clone()
+            .unwrap_or_else(|| match &self.kind {
+                SessionKind::Term { active, .. } => pane_auto_title(active, cx),
+                SessionKind::Acp(view) => {
+                    let dir = view
+                        .read(cx)
+                        .cwd()
+                        .map(|c| c.rsplit('/').next().unwrap_or(&c).to_string());
+                    let agent = view.read(cx).agent_kind().short_label();
+                    match dir {
+                        Some(d) if !d.is_empty() => format!("{agent} 对话 · {d}"),
+                        _ => format!("{agent} 对话"),
+                    }
                 }
-            }
-        })
+            })
     }
 
     /// 会话工作目录：活动终端的 cwd（侧栏分组用）。
@@ -485,7 +504,8 @@ impl Session {
                 return Some(s.to_string());
             }
         }
-        v.iter().find_map(|t| t.read(cx).notification().map(|s| s.to_string()))
+        v.iter()
+            .find_map(|t| t.read(cx).notification().map(|s| s.to_string()))
     }
 
     /// 会话内扫到的权限菜单（优先含审批/菜单的 pane）。
@@ -844,16 +864,18 @@ struct SessionState {
     acp: Option<AcpSaved>,
 }
 
-/// ACP 会话的存档元数据：cwd/cmd 给「重新开始」按钮原样重启用；entries 是完整
+/// ACP 会话的存档元数据：cwd/launch 给「重新开始」按钮原样重启用；entries 是完整
 /// 消息历史——GUI 重开后占位视图直接显示它，不是「已结束」四个字干瞪眼；
 /// resume_session_id 是 agent 侧的会话 id，「重新开始」靠它尝试 session/load
 /// 真续接（agent 记得之前聊了什么），而不只是摆样子的新对话。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize)]
 struct AcpSaved {
     cwd: Option<String>,
-    cmd: String,
+    launch: smelt_core::agent_kind::AcpLaunchSpec,
+    #[serde(default)]
+    profile_id: Option<String>,
     /// agent 种类标识（`AcpAgentKind::id()`）。旧存档没有这个字段 → None，恢复时
-    /// 按 cmd 里的包名反推，反推不出就当 Claude（多 agent 之前只可能是它）。
+    /// 按 launch 里的命令反推，反推不出就当 Claude（多 agent 之前只可能是它）。
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
@@ -868,6 +890,62 @@ struct AcpSaved {
     /// 还在跑的会话，见 `acp_view::AcpView::placeholder` 的 `saved_sid` 参数。
     #[serde(default)]
     sid: Option<String>,
+    /// 兼容标记：普通无 profile 会话重启时按当前设置刷新；只带旧 `cmd` 的历史
+    /// 存档则保留原 launch，避免把旧 profile 覆盖掉。旧存档无此字段 → false。
+    #[serde(default)]
+    refresh_launch_from_settings: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct AcpSavedWire {
+    cwd: Option<String>,
+    #[serde(default)]
+    launch: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+    #[serde(default)]
+    cmd: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    entries: Vec<acp_view::AcpEntry>,
+    #[serde(default)]
+    resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    #[serde(default)]
+    sid: Option<String>,
+    #[serde(default)]
+    refresh_launch_from_settings: Option<bool>,
+}
+
+impl<'de> serde::Deserialize<'de> for AcpSaved {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <AcpSavedWire as serde::Deserialize>::deserialize(deserializer)?;
+        let refresh_launch_from_settings = wire
+            .refresh_launch_from_settings
+            .unwrap_or_else(|| wire.launch.is_some() && wire.profile_id.is_none());
+        let launch = wire.launch.unwrap_or_else(|| {
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(wire.cmd.unwrap_or_default())
+        });
+        Ok(Self {
+            cwd: wire.cwd,
+            launch,
+            profile_id: wire.profile_id,
+            agent: wire.agent,
+            entries: wire.entries,
+            resume_session_id: wire.resume_session_id,
+            sid: wire.sid,
+            refresh_launch_from_settings,
+        })
+    }
+}
+
+impl AcpSaved {
+    fn refresh_launch_from_settings(&self) -> bool {
+        self.refresh_launch_from_settings
+    }
 }
 
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点。
@@ -890,7 +968,10 @@ enum PaneState {
         #[serde(default)]
         launch_cmd: Option<String>,
     },
-    Split { axis: SplitAxis, children: Vec<PaneState> },
+    Split {
+        axis: SplitAxis,
+        children: Vec<PaneState>,
+    },
 }
 
 /// 新会话 id（uuid v4）：GUI 与 smeltd 之间的持久身份。
@@ -971,17 +1052,12 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
             launch_cmd,
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
-            let terminal = terminal::Terminal::spawn(
-                24,
-                80,
-                cwd.as_deref(),
-                &sid,
-                launch_cmd.as_deref(),
-            )
-            .map_err(|e| {
-                eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
-                e.to_string()
-            })?;
+            let terminal =
+                terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, launch_cmd.as_deref())
+                    .map_err(|e| {
+                        eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
+                        e.to_string()
+                    })?;
             out.push(SpawnedLeaf {
                 terminal,
                 sid,
@@ -1455,7 +1531,10 @@ fn turns_to_acp_entries(turns: &[session_history::Turn]) -> Vec<acp_view::AcpEnt
             continue;
         }
         if !t.text.trim().is_empty() {
-            out.push(acp_view::AcpEntry::Assistant { text: t.text.clone(), thought: false });
+            out.push(acp_view::AcpEntry::Assistant {
+                text: t.text.clone(),
+                thought: false,
+            });
         }
         for (j, tool) in t.tools.iter().enumerate() {
             out.push(acp_view::AcpEntry::ToolCall {
@@ -1488,18 +1567,22 @@ impl Workspace {
 
         // 文件树列 resize：拖动完 emit Resized，写回存档持久化宽度。
         let file_tree_resize = cx.new(|_| ResizableState::default());
-        let _file_tree_resize_sub =
-            cx.subscribe(&file_tree_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
+        let _file_tree_resize_sub = cx.subscribe(
+            &file_tree_resize,
+            |this, _state, _e: &ResizablePanelEvent, cx| {
                 this.save_state(cx);
-            });
+            },
+        );
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
         let git_log_resize = cx.new(|_| ResizableState::default());
         // Git 页左栏 resize：同上一套，拖完落盘。
         let git_left_resize = cx.new(|_| ResizableState::default());
-        let _git_left_resize_sub =
-            cx.subscribe(&git_left_resize, |this, _state, _e: &ResizablePanelEvent, cx| {
+        let _git_left_resize_sub = cx.subscribe(
+            &git_left_resize,
+            |this, _state, _e: &ResizablePanelEvent, cx| {
                 this.save_state(cx);
-            });
+            },
+        );
 
         let mut ws = Self {
             sessions,
@@ -1674,7 +1757,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // ACP 会话不走守护 reattach：进程没有持久化，UI 线程直接建「已结束」占位
-        // （一键同 cmd/cwd 重开）。摘出后剩下的照旧走后台恢复。
+        // （一键同 launch/cwd 重开）。摘出后剩下的照旧走后台恢复。
         let (acp_saved, pending): (Vec<SessionState>, Vec<SessionState>) =
             pending.into_iter().partition(|ss| ss.acp.is_some());
         for ss in acp_saved {
@@ -1690,12 +1773,15 @@ impl Workspace {
                 .agent
                 .as_deref()
                 .and_then(settings::AcpAgentKind::from_id)
-                .unwrap_or_else(|| acp_agent_from_cmd(&saved.cmd));
+                .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
+            let refresh_launch_from_settings = saved.refresh_launch_from_settings();
             let view = cx.new(|cx| {
                 acp_view::AcpView::placeholder(
                     cx,
                     agent,
-                    saved.cmd,
+                    saved.launch,
+                    refresh_launch_from_settings,
+                    saved.profile_id,
                     saved.cwd,
                     reason.to_string(),
                     saved.entries,
@@ -1765,7 +1851,8 @@ impl Workspace {
                     };
                     let mut leaf_iter = leaves.into_iter();
                     let mut tabs = Vec::new();
-                    let Some(layout) = rebuild_pane_ready(&ss.layout, &mut leaf_iter, &mut tabs, cx)
+                    let Some(layout) =
+                        rebuild_pane_ready(&ss.layout, &mut leaf_iter, &mut tabs, cx)
                     else {
                         return Some(ss);
                     };
@@ -1872,11 +1959,19 @@ impl Workspace {
         }
         let mut first_seen: HashMap<String, usize> = HashMap::new();
         for (i, (name, _, _)) in projects.iter().enumerate() {
-            let key = cluster_of.get(name).cloned().flatten().unwrap_or_else(|| name.clone());
+            let key = cluster_of
+                .get(name)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| name.clone());
             first_seen.entry(key).or_insert(i);
         }
         projects.sort_by_key(|(name, _, _)| {
-            let key = cluster_of.get(name).cloned().flatten().unwrap_or_else(|| name.clone());
+            let key = cluster_of
+                .get(name)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| name.clone());
             first_seen[&key]
         });
         projects
@@ -1902,7 +1997,8 @@ impl Workspace {
                 .iter()
                 .position(|(_, _, ixs)| ixs.iter().any(|&ix| self.sessions[ix].anchor_id() == id))
         };
-        let (Some(dragged_group), Some(target_group)) = (group_of(dragged), group_of(target)) else {
+        let (Some(dragged_group), Some(target_group)) = (group_of(dragged), group_of(target))
+        else {
             return;
         };
         if dragged_group != target_group {
@@ -1917,7 +2013,11 @@ impl Workspace {
 
         let active_id = self.cur().map(|s| s.anchor_id());
         let session = self.sessions.remove(from_ix);
-        let adjusted_target_ix = if from_ix < target_ix { target_ix - 1 } else { target_ix };
+        let adjusted_target_ix = if from_ix < target_ix {
+            target_ix - 1
+        } else {
+            target_ix
+        };
         let insert_at = adjusted_target_ix + if before { 0 } else { 1 };
         self.sessions.insert(insert_at, session);
 
@@ -1933,16 +2033,26 @@ impl Workspace {
     /// 拖拽排序：把 from 项目的所有会话（保持相对顺序）整体挪到 to 项目最前面。
     /// （项目拖拽待接到 rail，暂时闲置；见 ProjectDrag 注释。）
     #[allow(dead_code)]
-    fn move_project_near(&mut self, from_name: SharedString, to_name: SharedString, cx: &mut Context<Self>) {
+    fn move_project_near(
+        &mut self,
+        from_name: SharedString,
+        to_name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
         if from_name == to_name {
             return;
         }
         let groups = self.project_groups(cx);
-        let Some((_, _, from_ixs)) = groups.iter().find(|(n, _, _)| n.as_str() == from_name.as_ref())
+        let Some((_, _, from_ixs)) = groups
+            .iter()
+            .find(|(n, _, _)| n.as_str() == from_name.as_ref())
         else {
             return;
         };
-        if !groups.iter().any(|(n, _, _)| n.as_str() == to_name.as_ref()) {
+        if !groups
+            .iter()
+            .any(|(n, _, _)| n.as_str() == to_name.as_ref())
+        {
             return;
         }
         let mut from_ixs = from_ixs.clone();
@@ -1950,7 +2060,11 @@ impl Workspace {
 
         let active_id = self.cur().map(|s| s.anchor_id());
         // 降序 remove 保证前面下标不受后面删除影响；收集完再倒回原相对顺序。
-        let mut moved: Vec<Session> = from_ixs.iter().rev().map(|&ix| self.sessions.remove(ix)).collect();
+        let mut moved: Vec<Session> = from_ixs
+            .iter()
+            .rev()
+            .map(|&ix| self.sessions.remove(ix))
+            .collect();
         moved.reverse();
 
         let insert_at = self
@@ -1989,9 +2103,12 @@ impl Workspace {
         view: &Entity<acp_view::AcpView>,
         cx: &mut Context<Self>,
     ) -> gpui::Subscription {
-        cx.subscribe(view, |this: &mut Self, _view, _ev: &acp_view::AcpViewEvent, cx| {
-            this.save_state(cx);
-        })
+        cx.subscribe(
+            view,
+            |this: &mut Self, _view, _ev: &acp_view::AcpViewEvent, cx| {
+                this.save_state(cx);
+            },
+        )
     }
 
     /// 「+」菜单「对话 · smelt 原生界面」下那几项：新建 ACP 会话（第二种会话类型，
@@ -2001,13 +2118,17 @@ impl Workspace {
     fn add_acp_session(
         &mut self,
         agent: settings::AcpAgentKind,
-        cmd_override: Option<String>,
+        launch_override: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+        profile_id: Option<String>,
         cwd: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cmd = cmd_override.unwrap_or_else(|| settings::acp_cmd_for(agent, cx));
-        let view = cx.new(|cx| acp_view::AcpView::start(window, cx, agent, cmd, cwd));
+        let launch = launch_override.unwrap_or_else(|| {
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
+        });
+        let view =
+            cx.new(|cx| acp_view::AcpView::start(window, cx, agent, launch, profile_id, cwd));
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
         self.sessions.push(Session {
             kind: SessionKind::Acp(view),
@@ -2053,7 +2174,8 @@ impl Workspace {
     pub fn resume_acp_session(
         &mut self,
         agent: settings::AcpAgentKind,
-        cmd_override: Option<String>,
+        launch_override: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+        profile_id: Option<String>,
         cwd: String,
         resume_id: String,
         path: PathBuf,
@@ -2076,7 +2198,9 @@ impl Workspace {
         self.resume_gen = self.resume_gen.wrapping_add(1);
         let my_gen = self.resume_gen;
 
-        let cmd = cmd_override.unwrap_or_else(|| settings::acp_cmd_for(agent, cx));
+        let launch = launch_override.unwrap_or_else(|| {
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
+        });
         // 先把历史内容读出来转成本地快照——`session/resume`（不重放历史，见 acp.rs
         // 里 apply_event 对 ReadyKind::ResumedKeepHistory 的注释）信任的就是这份本地
         // 快照，给个空的会话开出来就是一片空白（真实教训：第一版就是这么写的，
@@ -2108,7 +2232,9 @@ impl Workspace {
                     acp_view::AcpView::placeholder(
                         cx,
                         agent,
-                        cmd,
+                        launch,
+                        profile_id.is_none(),
+                        profile_id,
                         Some(cwd),
                         "正在续接历史会话…".to_string(),
                         entries,
@@ -2159,9 +2285,7 @@ impl Workspace {
         let launch_bg = launch_owned.clone();
         // 立刻给反馈，避免「点了像没点」。
         self.stage_override = None;
-        eprintln!(
-            "[workspace] 新建会话 cwd={cwd:?} launch={launch:?} sid={sid}"
-        );
+        eprintln!("[workspace] 新建会话 cwd={cwd:?} launch={launch:?} sid={sid}");
         cx.notify();
 
         let (tx, rx) = smol::channel::bounded(1);
@@ -2184,8 +2308,7 @@ impl Workspace {
                 Ok(r) => r,
                 Err(_) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error =
-                            Some("新建会话内部通道断开，请重试".into());
+                        this.background_error = Some("新建会话内部通道断开，请重试".into());
                         cx.notify();
                     });
                     return;
@@ -2232,7 +2355,9 @@ impl Workspace {
     /// ACP 会话没有分屏树，直接忽略。
     fn split_active(&mut self, axis: Axis, cx: &mut Context<Self>) {
         let Some(sess) = self.cur() else { return };
-        let Some(active) = sess.active_term() else { return };
+        let Some(active) = sess.active_term() else {
+            return;
+        };
         let cwd = active.read(cx).cwd().or_else(current_dir);
         let old = sess.anchor_id();
         let session_ix = self.active_session;
@@ -2292,11 +2417,13 @@ impl Workspace {
                     let layout = pane_to_state(l, cx);
                     let mut ids = Vec::new();
                     collect_leaf_ids(l, &mut ids);
-                    let active = ids
-                        .iter()
-                        .position(|x| *x == s.anchor_id())
-                        .unwrap_or(0);
-                    SessionState { layout, active, custom_title: s.custom_title.clone(), acp: None }
+                    let active = ids.iter().position(|x| *x == s.anchor_id()).unwrap_or(0);
+                    SessionState {
+                        layout,
+                        active,
+                        custom_title: s.custom_title.clone(),
+                        acp: None,
+                    }
                 }
                 SessionKind::Acp(view) => {
                     let v = view.read(cx);
@@ -2313,11 +2440,13 @@ impl Workspace {
                         custom_title: s.custom_title.clone(),
                         acp: Some(AcpSaved {
                             cwd: v.cwd(),
-                            cmd: v.launch_cmd().to_string(),
+                            launch: v.launch_spec(),
+                            profile_id: v.profile_id().map(str::to_string),
                             agent: Some(v.agent_kind().id().to_string()),
                             entries: v.entries_for_save(),
                             resume_session_id: v.resume_session_id_for_save(),
                             sid: Some(v.session_id().to_string()),
+                            refresh_launch_from_settings: v.refresh_launch_from_settings(),
                         }),
                     }
                 }
@@ -2343,14 +2472,26 @@ impl Workspace {
             }
         }
 
-        let file_tree_w = self.file_tree_resize.read(cx).sizes().first().copied().map(f32::from);
+        let file_tree_w = self
+            .file_tree_resize
+            .read(cx)
+            .sizes()
+            .first()
+            .copied()
+            .map(f32::from);
         let state = WsState {
             sessions,
             active_session: self.active_session,
             // 旧档的 sidebar_w 字段保留声明只为 serde 兼容；新布局固定宽，不再写。
             sidebar_w: None,
             file_tree_w,
-            git_left_w: self.git_left_resize.read(cx).sizes().first().copied().map(f32::from),
+            git_left_w: self
+                .git_left_resize
+                .read(cx)
+                .sizes()
+                .first()
+                .copied()
+                .map(f32::from),
             pinned_file_tree_roots: self.pinned_roots.clone(),
             collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
             ..Default::default()
@@ -2490,8 +2631,7 @@ impl Workspace {
                         format!("拖入打开失败：{head}")
                     });
                 } else if ok_n == 0 {
-                    this.background_error =
-                        Some("拖入的路径无法作为项目目录打开".into());
+                    this.background_error = Some("拖入的路径无法作为项目目录打开".into());
                 }
                 cx.notify();
             });
@@ -2607,8 +2747,10 @@ impl Workspace {
 
     /// 焦点还给活动会话：Term → 活动 pane；ACP → 消息流输入框。
     fn focus_active_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Session { kind: SessionKind::Acp(view), .. }) =
-            self.sessions.get(self.active_session)
+        if let Some(Session {
+            kind: SessionKind::Acp(view),
+            ..
+        }) = self.sessions.get(self.active_session)
         {
             let view = view.clone();
             view.update(cx, |v, cx| v.focus_input(window, cx));
@@ -2638,12 +2780,7 @@ impl Workspace {
     }
 
     /// 总览：打开会话，并尽量聚焦到「需要处理」的那个 pane。
-    fn overview_open_session(
-        &mut self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn overview_open_session(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.sessions.len() {
             return;
         }
@@ -2762,18 +2899,24 @@ impl Workspace {
         use gpui_component::input::{InputEvent, InputState};
         let current = match &target {
             RenameTarget::Session(ix) => {
-                let Some(s) = self.sessions.get(*ix) else { return };
+                let Some(s) = self.sessions.get(*ix) else {
+                    return;
+                };
                 s.title(cx)
             }
             RenameTarget::Pane(view) => pane_title(view, cx),
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |s, cx| s.focus(window, cx));
-        self._rename_sub = Some(cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                this.confirm_rename(window, cx);
-            }
-        }));
+        self._rename_sub = Some(cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.confirm_rename(window, cx);
+                }
+            },
+        ));
         self.rename_target = Some(target);
         self.rename_input = Some(input);
         cx.notify();
@@ -2781,8 +2924,12 @@ impl Workspace {
 
     /// 提交重命名：空输入等于清掉自定义名，回退到自动推导的标题。
     fn confirm_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.rename_target.take() else { return };
-        let Some(input) = self.rename_input.take() else { return };
+        let Some(target) = self.rename_target.take() else {
+            return;
+        };
+        let Some(input) = self.rename_input.take() else {
+            return;
+        };
         self._rename_sub = None;
         let text = input.read(cx).value().trim().to_string();
         match target {
@@ -2832,14 +2979,19 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok((version, url)) if updater::is_newer(&version, env!("CARGO_PKG_VERSION")) => {
+                    Ok((version, url))
+                        if updater::is_newer(&version, env!("CARGO_PKG_VERSION")) =>
+                    {
                         this.start_update_download(version, url, cx);
                         return; // start_update_download 里已经 notify 过
                     }
                     Ok(_) => this.update_status = updater::UpdateStatus::UpToDate,
                     Err(e) => {
-                        this.update_status =
-                            if silent { updater::UpdateStatus::Idle } else { updater::UpdateStatus::Failed(e.to_string()) };
+                        this.update_status = if silent {
+                            updater::UpdateStatus::Idle
+                        } else {
+                            updater::UpdateStatus::Failed(e.to_string())
+                        };
                     }
                 }
                 cx.notify();
@@ -2852,8 +3004,11 @@ impl Workspace {
     /// 下载线程通过 channel 往回推字节进度，UI 线程照单刷新状态；发送端随下载任务结束而
     /// drop，`recv` 收到 Err 即代表下载收尾，此时再 `await` 任务拿最终结果。
     fn start_update_download(&mut self, version: String, url: String, cx: &mut Context<Self>) {
-        self.update_status =
-            updater::UpdateStatus::Downloading { version: version.clone(), received: 0, total: None };
+        self.update_status = updater::UpdateStatus::Downloading {
+            version: version.clone(),
+            received: 0,
+            total: None,
+        };
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (tx, rx) = smol::channel::unbounded::<updater::DownloadProgress>();
@@ -2870,7 +3025,11 @@ impl Workspace {
                 let _ = this.update(cx, |this, cx| {
                     this.update_status = match progress {
                         updater::DownloadProgress::Bytes { received, total } => {
-                            updater::UpdateStatus::Downloading { version, received, total }
+                            updater::UpdateStatus::Downloading {
+                                version,
+                                received,
+                                total,
+                            }
                         }
                         updater::DownloadProgress::Installing => {
                             updater::UpdateStatus::Installing { version }
@@ -2883,7 +3042,10 @@ impl Workspace {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.update_status = match result {
-                    Ok(staged_app) => updater::UpdateStatus::ReadyToInstall { version, staged_app },
+                    Ok(staged_app) => updater::UpdateStatus::ReadyToInstall {
+                        version,
+                        staged_app,
+                    },
                     Err(e) => updater::UpdateStatus::Failed(e.to_string()),
                 };
                 cx.notify();
@@ -3007,7 +3169,10 @@ impl Workspace {
 
     fn refresh_session_manager(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let list = cx.background_executor().spawn(async { terminal::list_daemon_sessions() }).await;
+            let list = cx
+                .background_executor()
+                .spawn(async { terminal::list_daemon_sessions() })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_manager_list = Some(list);
                 cx.notify();
@@ -3046,9 +3211,14 @@ impl Workspace {
     /// 不需要走「重启守护进程」那种连坐所有会话的核选项。
     fn kill_all_orphans_in_manager(&mut self, cx: &mut Context<Self>) {
         let tracked = self.tracked_session_ids(cx);
-        let Some(list) = self.session_manager_list.clone() else { return };
-        let orphan_ids: Vec<String> =
-            list.into_iter().map(|s| s.id).filter(|id| !tracked.contains(id)).collect();
+        let Some(list) = self.session_manager_list.clone() else {
+            return;
+        };
+        let orphan_ids: Vec<String> = list
+            .into_iter()
+            .map(|s| s.id)
+            .filter(|id| !tracked.contains(id))
+            .collect();
         if orphan_ids.is_empty() {
             return;
         }
@@ -3076,14 +3246,23 @@ impl Workspace {
         let tracked = self.tracked_session_ids(cx);
 
         let body: AnyElement = match &self.session_manager_list {
-            None => div().text_sm().text_color(muted).child("查询中…").into_any_element(),
-            Some(list) if list.is_empty() => {
-                div().text_sm().text_color(muted).child("守护进程当前没有任何会话。").into_any_element()
-            }
+            None => div()
+                .text_sm()
+                .text_color(muted)
+                .child("查询中…")
+                .into_any_element(),
+            Some(list) if list.is_empty() => div()
+                .text_sm()
+                .text_color(muted)
+                .child("守护进程当前没有任何会话。")
+                .into_any_element(),
             Some(list) => {
                 let orphan_count = list.iter().filter(|s| !tracked.contains(&s.id)).count();
-                let mut rows =
-                    v_flex().id("session-manager-list").gap_1().max_h(px(360.)).overflow_y_scroll();
+                let mut rows = v_flex()
+                    .id("session-manager-list")
+                    .gap_1()
+                    .max_h(px(360.))
+                    .overflow_y_scroll();
                 for s in list {
                     let is_orphan = !tracked.contains(&s.id);
                     let is_acp = s.id.starts_with("acp-");
@@ -3116,13 +3295,7 @@ impl Workspace {
                                             .text_color(muted)
                                             .child(if is_acp { "对话" } else { "终端" }),
                                     )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(fg)
-                                            .truncate()
-                                            .child(label),
-                                    )
+                                    .child(div().text_sm().text_color(fg).truncate().child(label))
                                     .children(is_orphan.then(|| {
                                         div()
                                             .text_xs()
@@ -3347,7 +3520,11 @@ impl Workspace {
         let list: Vec<_> = items
             .into_iter()
             .map(|(si, pane, msg)| {
-                let name = self.sessions.get(si).map(|s| s.title(cx)).unwrap_or_default();
+                let name = self
+                    .sessions
+                    .get(si)
+                    .map(|s| s.title(cx))
+                    .unwrap_or_default();
                 div()
                     .id(("notif", pane.entity_id()))
                     .p_2()
@@ -3443,25 +3620,12 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_between()
-            .child(
-                div()
-                    .text_xl()
-                    .font_bold()
-                    .text_color(fg)
-                    .child("总览"),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(if need_attn > 0 {
-                        format!(
-                            "会话监控 · {need_attn} 需关注 · hook 事实 + 终端权限菜单"
-                        )
-                    } else {
-                        format!("会话监控 · {} · 点卡片进入终端", self.sessions.len())
-                    }),
-            );
+            .child(div().text_xl().font_bold().text_color(fg).child("总览"))
+            .child(div().text_xs().text_color(muted).child(if need_attn > 0 {
+                format!("会话监控 · {need_attn} 需关注 · hook 事实 + 终端权限菜单")
+            } else {
+                format!("会话监控 · {} · 点卡片进入终端", self.sessions.len())
+            }));
 
         let body = self.render_overview_sessions(cx);
 
@@ -3504,45 +3668,61 @@ impl Workspace {
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
         let need = statuses
             .iter()
-            .filter(|s| matches!(s, AgentStatus::WaitingApproval | AgentStatus::NeedsAttention))
+            .filter(|s| {
+                matches!(
+                    s,
+                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
+                )
+            })
             .count();
-        let running = statuses.iter().filter(|s| matches!(s, AgentStatus::Running)).count();
-        let done = statuses.iter().filter(|s| matches!(s, AgentStatus::Done)).count();
+        let running = statuses
+            .iter()
+            .filter(|s| matches!(s, AgentStatus::Running))
+            .count();
+        let done = statuses
+            .iter()
+            .filter(|s| matches!(s, AgentStatus::Done))
+            .count();
         let filter = self.overview_filter;
         // 筛选：要一眼像「分段按钮」，未选中也有底/边/hover，别和装饰 pill 混。
-        let filter_chip = |id: &'static str, label: String, f: OverviewFilter, color: Hsla, tint: Hsla| {
-            let on = filter == f;
-            let idle_bg: Hsla = ui_theme::overlay(0x14).into();
-            let idle_border: Hsla = ui_theme::overlay(0x28).into();
-            div()
-                .id(id)
-                .px(px(12.))
-                .py(px(6.))
-                .rounded_md()
-                .cursor_pointer()
-                .bg(if on { tint } else { idle_bg })
-                .border_1()
-                .border_color(if on { color } else { idle_border })
-                .text_sm()
-                .font_weight(if on {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if on { color } else { fg })
-                .hover(|d| {
-                    d.bg(if on { tint } else { ui_theme::overlay(0x22).into() })
+        let filter_chip =
+            |id: &'static str, label: String, f: OverviewFilter, color: Hsla, tint: Hsla| {
+                let on = filter == f;
+                let idle_bg: Hsla = ui_theme::overlay(0x14).into();
+                let idle_border: Hsla = ui_theme::overlay(0x28).into();
+                div()
+                    .id(id)
+                    .px(px(12.))
+                    .py(px(6.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(if on { tint } else { idle_bg })
+                    .border_1()
+                    .border_color(if on { color } else { idle_border })
+                    .text_sm()
+                    .font_weight(if on {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .text_color(if on { color } else { fg })
+                    .hover(|d| {
+                        d.bg(if on {
+                            tint
+                        } else {
+                            ui_theme::overlay(0x22).into()
+                        })
                         .border_color(color)
-                })
-                .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.overview_filter = f;
-                        cx.notify();
-                    }),
-                )
-        };
+                    })
+                    .child(label)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.overview_filter = f;
+                            cx.notify();
+                        }),
+                    )
+            };
 
         let summary = div()
             .flex()
@@ -3624,17 +3804,15 @@ impl Workspace {
                 OverviewFilter::Running => "当前没有运行中的会话",
                 OverviewFilter::All => "没有会话",
             };
-            return div()
-                .child(summary)
-                .child(
-                    div()
-                        .py_12()
-                        .flex()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(empty_hint),
-                );
+            return div().child(summary).child(
+                div()
+                    .py_12()
+                    .flex()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(empty_hint),
+            );
         }
 
         let cards: Vec<_> = order
@@ -3659,9 +3837,7 @@ impl Workspace {
                     .term_leaves()
                     .iter()
                     .find_map(|t| daemon_state_for(t, cx));
-                let phase_label = daemon_detail
-                    .as_ref()
-                    .map(|d| d.phase_label().to_string());
+                let phase_label = daemon_detail.as_ref().map(|d| d.phase_label().to_string());
                 let phase_detail = daemon_detail.as_ref().and_then(|d| d.detail_line());
                 let phase_age = daemon_detail.as_ref().and_then(|d| d.phase_age_secs());
                 let mut meta_parts: Vec<String> = Vec::new();
@@ -3709,7 +3885,9 @@ impl Workspace {
                 let notif = s.notification_msg(cx);
                 let when = s.notified_at(cx).map(ago);
                 let preview = s.preview(cx, 3);
-                let git = cwd_opt.as_ref().and_then(|c| self.git_cache.get(c).cloned());
+                let git = cwd_opt
+                    .as_ref()
+                    .and_then(|c| self.git_cache.get(c).cloned());
                 // 等审批时描红边，方便在网格里扫到
                 let card_edge: Hsla = if is_approval {
                     c_red.into()
@@ -3757,7 +3935,11 @@ impl Workspace {
                     })
                     .shadow_sm()
                     .cursor_pointer()
-                    .hover(|d| d.border_color(dot).shadow_lg().bg(rgb(ui_theme::bg_hover())))
+                    .hover(|d| {
+                        d.border_color(dot)
+                            .shadow_lg()
+                            .bg(rgb(ui_theme::bg_hover()))
+                    })
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -3805,9 +3987,7 @@ impl Workspace {
                                     .bg(tint)
                                     .text_color(dot)
                                     .child(
-                                        phase_label
-                                            .clone()
-                                            .unwrap_or_else(|| label.to_string()),
+                                        phase_label.clone().unwrap_or_else(|| label.to_string()),
                                     ),
                             )
                             .child(div().text_color(muted).child(cwd))
@@ -3846,9 +4026,10 @@ impl Workspace {
                                 div().text_color(c_amber).child(format!("● {changed} 改动"))
                             }))
                     }))
-                    .children(meta_line.map(|line| {
-                        div().text_xs().text_color(muted).truncate().child(line)
-                    }))
+                    .children(
+                        meta_line
+                            .map(|line| div().text_xs().text_color(muted).truncate().child(line)),
+                    )
                     // OSC 通知且与 hook 问句不同时再显示
                     .children(
                         notif
@@ -3885,11 +4066,14 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .children(preview.into_iter().map(|line| {
-                                div().truncate().whitespace_nowrap().child(if line.is_empty() {
-                                    " ".to_string()
-                                } else {
-                                    line
-                                })
+                                div()
+                                    .truncate()
+                                    .whitespace_nowrap()
+                                    .child(if line.is_empty() {
+                                        " ".to_string()
+                                    } else {
+                                        line
+                                    })
                             }))
                     }))
                     // 需要用户时：实心/描边按钮，和侧栏「新建终端」一样有底有边
@@ -3906,9 +4090,7 @@ impl Workspace {
                                 .items_center()
                                 .gap_2()
                                 .pt_1()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .children(opts.into_iter().enumerate().map(|(oi, opt)| {
                                     let ix_sel = ix;
                                     let key = opt.key.clone();
@@ -3921,16 +4103,8 @@ impl Workspace {
                                         .rounded_md()
                                         .cursor_pointer()
                                         .border_1()
-                                        .border_color(if primary {
-                                            c_green
-                                        } else {
-                                            btn_border
-                                        })
-                                        .bg(if primary {
-                                            green_tint
-                                        } else {
-                                            btn_idle
-                                        })
+                                        .border_color(if primary { c_green } else { btn_border })
+                                        .bg(if primary { green_tint } else { btn_idle })
                                         .text_sm()
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(if primary { c_green } else { fg })
@@ -4061,7 +4235,11 @@ impl Workspace {
             let t = cx.theme();
             (t.border, t.popover)
         };
-        let backdrop = if heavy { rgba(0x000000aa) } else { rgba(0x00000026) };
+        let backdrop = if heavy {
+            rgba(0x000000aa)
+        } else {
+            rgba(0x00000026)
+        };
         div()
             .absolute()
             .inset_0()
@@ -4113,7 +4291,12 @@ impl Workspace {
     /// 弹窗按钮的基础样式（尺寸/圆角/字号/底色/文字色/label），不含点击行为——大部分
     /// 调用方直接用 [`Self::modal_button`]；`render_delete_worktree_confirm` 的
     /// 「检查中…」禁用态需要条件性挂 hover/on_click，才会单独调这个再自己 `.when(...)`。
-    fn modal_button_base(id: &'static str, label: &'static str, bg: Hsla, text_color: Hsla) -> Stateful<Div> {
+    fn modal_button_base(
+        id: &'static str,
+        label: &'static str,
+        bg: Hsla,
+        text_color: Hsla,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .px_3()
@@ -4149,10 +4332,17 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(false);
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
+            Self::modal_accent_colors(false);
 
         let content = v_flex()
-            .child(div().font_bold().text_color(fg).text_lg().child("确定退出 Smelt 吗？"))
+            .child(
+                div()
+                    .font_bold()
+                    .text_color(fg)
+                    .text_lg()
+                    .child("确定退出 Smelt 吗？"),
+            )
             .child(
                 div()
                     .text_sm()
@@ -4207,8 +4397,11 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(false);
-        let Some(input) = self.rename_input.as_ref() else { return div() };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
+            Self::modal_accent_colors(false);
+        let Some(input) = self.rename_input.as_ref() else {
+            return div();
+        };
         // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
         let heading = match self.rename_target {
             Some(RenameTarget::Pane(_)) => "重命名终端",
@@ -4217,7 +4410,12 @@ impl Workspace {
 
         let content = v_flex()
             .child(div().font_bold().text_color(fg).text_lg().child(heading))
-            .child(div().text_sm().text_color(muted).child("留空则恢复自动识别的标题。"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("留空则恢复自动识别的标题。"),
+            )
             .child(Input::new(input))
             .child(
                 h_flex()
@@ -4301,13 +4499,24 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(false);
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
+            Self::modal_accent_colors(false);
         let cur_name = self
             .open_file
             .as_ref()
-            .map(|of| of.path.rsplit('/').next().unwrap_or(of.path.as_str()).to_string())
+            .map(|of| {
+                of.path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(of.path.as_str())
+                    .to_string()
+            })
             .unwrap_or_default();
-        let target_name = target.rsplit('/').next().unwrap_or(target.as_str()).to_string();
+        let target_name = target
+            .rsplit('/')
+            .next()
+            .unwrap_or(target.as_str())
+            .to_string();
 
         let content = v_flex()
             .child(
@@ -4317,12 +4526,9 @@ impl Workspace {
                     .text_lg()
                     .child(format!("「{cur_name}」有未保存的改动")),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(format!("要切换到「{target_name}」了，这些改动还没保存，要怎么处理？")),
-            )
+            .child(div().text_sm().text_color(muted).child(format!(
+                "要切换到「{target_name}」了，这些改动还没保存，要怎么处理？"
+            )))
             .child(
                 h_flex()
                     .justify_end()
@@ -4383,7 +4589,12 @@ impl Workspace {
             window,
             |this, state, ev: &ListEvent, window, cx| match ev {
                 ListEvent::Confirm(ix) => {
-                    let cmd = state.read(cx).delegate().matched.get(ix.row).map(|(_, c)| c.clone());
+                    let cmd = state
+                        .read(cx)
+                        .delegate()
+                        .matched
+                        .get(ix.row)
+                        .map(|(_, c)| c.clone());
                     if let Some(cmd) = cmd {
                         this.exec_cmd(cmd, window, cx);
                     }
@@ -4436,9 +4647,7 @@ impl Workspace {
     fn render_pane(&self, pane: &Pane, path: &str, cx: &mut Context<Self>) -> AnyElement {
         match pane {
             Pane::Leaf(t) => {
-                let active = self
-                    .cur()
-                    .is_some_and(|s| s.anchor_id() == t.entity_id());
+                let active = self.cur().is_some_and(|s| s.anchor_id() == t.entity_id());
                 // 不给任何 pane 描边（iTerm2 也不描，之前的蓝框提醒也拿掉了）：分屏时靠
                 // 「压暗非活动 pane」区分谁是活动的就够了；单 pane 时压根没有别的 pane
                 // 可比，不需要任何叠加层。
@@ -4467,7 +4676,11 @@ impl Workspace {
                     .child(overlay)
                     .into_any_element()
             }
-            Pane::Split { axis, state, children } => {
+            Pane::Split {
+                axis,
+                state,
+                children,
+            } => {
                 let id = SharedString::from(path.to_string());
                 let mut group = if matches!(axis, Axis::Horizontal) {
                     h_resizable(id)
@@ -4483,7 +4696,6 @@ impl Workspace {
         }
     }
 }
-
 
 impl Workspace {
     /// 舞台覆盖页（旧全屏页）：总览 / 任务 / 文件树 / Git / 热力图 / 历史。
@@ -4511,327 +4723,325 @@ impl Workspace {
                 .into_any_element(),
             MainView::DiffDetail => self.git_diff_only_pane(window, cx),
             MainView::Tasks => self.render_tasks_page(window, cx).into_any_element(),
-                        MainView::Files => {
-                            // 有查询串 → 显示搜索结果；否则显示文件树。
-                            let has_query = self
-                                .file_filter
-                                .as_ref()
-                                .is_some_and(|s| !s.read(cx).value().trim().is_empty());
-                            // 打开文件后的 reveal：祖先目录缓存齐了就滚到树里对应行。
-                            if !has_query {
-                                self.try_flush_file_tree_reveal(cx);
-                            }
-                            let body = if has_query {
-                                match &self.search_results {
-                                    Some(state) => {
-                                        search_results_view(state, &self.file_tree_scroll, cx)
-                                    }
-                                    // ensure_search 已在 render 顶部同步置位，通常到不了这里。
-                                    None => div().flex_1().into_any_element(),
-                                }
-                            } else {
-                                let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
-                                let selected = self.file_tree_selected.as_deref();
-                                // 多根工作区：把所有项目根一起铺开（顺序同侧栏项目列表）；
-                                // 每个根各查各自的 git status 标 M/A/D，归属由 file_tree 内部
-                                // 按行所属的根处理，不再是全局一份。
-                                let roots = self.workspace_roots(cx);
-                                file_tree(
-                                    &roots,
-                                    &self.expanded,
-                                    &self.collapsed_roots,
-                                    &self.dir_cache,
-                                    &self.file_tree_scroll,
-                                    open_path,
-                                    selected,
-                                    self.file_tree_w,
-                                    &self.git_status,
-                                    cx,
-                                )
-                            };
-                            // 顶部搜索框（file_filter 已在 render 顶部懒创建）。
-                            let search_box = self.file_filter.as_ref().map(|state| {
-                                div()
-                                    .px_2()
-                                    .py(px(6.))
-                                    .border_b_1()
-                                    .border_color(c_border)
-                                    .child(Input::new(state).small())
-                            });
-                            let content = file_content_pane(&self.open_file, cx);
-                            div()
-                                .flex_1()
-                                // min_h_0：否则这个 flex item 会被文件内容撑到整份文件那么高、
-                                // 溢出窗口，导致内部 uniform_list 拿不到有界高度而无法滚动。
-                                .min_h_0()
-                                .flex()
-                                .child(
-                                    // 文件树列宽可拖拽（拖右边框），不再写死 260px——文件名
-                                    // 超长时至少还能拖宽了看，配合行上的 tooltip 一起解决
-                                    // 「长文件名看不全」的问题。
-                                    h_resizable("file-tree-split")
-                                        .with_state(&self.file_tree_resize)
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(self.file_tree_w))
-                                                .size_range(px(160.)..px(480.))
-                                                .child(
-                                                    div()
-                                                        .size_full()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .min_h_0()
-                                                        .border_r_1()
-                                                        .border_color(c_border)
-                                                        .children(search_box)
-                                                        .child(body),
-                                                ),
-                                        )
-                                        .child(resizable_panel().child(content)),
-                                )
-                                .into_any_element()
-                        }
-                        MainView::Git => {
-                            let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let c_border = cx.theme().border;
-                            // 「改动 / 日志」子标签。两者同属 Git 工具窗口，不占两个
-                            // 顶层标签（JetBrains 也是这个结构）。
-                            let sub_tabs = {
-                                let (fg, muted, accent) = {
-                                    let t = cx.theme();
-                                    (t.foreground, t.muted_foreground, t.accent)
-                                };
-                                h_flex()
-                                    .gap_1()
-                                    .px_3()
-                                    .py_1()
-                                    .border_b_1()
-                                    .border_color(c_border)
-                                    .children([(GitTab::Changes, "改动"), (GitTab::Log, "日志")].map(
-                                        |(tab, label)| {
-                                            let on = self.git_tab == tab;
-                                            div()
-                                                .id(label)
-                                                .px_2()
-                                                .py(px(1.0))
-                                                .text_sm()
-                                                .rounded_sm()
-                                                .cursor_pointer()
-                                                .text_color(if on { fg } else { muted })
-                                                .when(on, |d| d.bg(accent))
-                                                .hover(|d| d.opacity(0.8))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.git_tab = tab;
-                                                    cx.notify();
-                                                }))
-                                                .child(label)
-                                        },
-                                    ))
-                                    // 热力图入口：原顶部 TabBar 撤掉后挂靠在 Git 页
-                                    // （同为「看仓库」维度的全屏视图）。
+            MainView::Files => {
+                // 有查询串 → 显示搜索结果；否则显示文件树。
+                let has_query = self
+                    .file_filter
+                    .as_ref()
+                    .is_some_and(|s| !s.read(cx).value().trim().is_empty());
+                // 打开文件后的 reveal：祖先目录缓存齐了就滚到树里对应行。
+                if !has_query {
+                    self.try_flush_file_tree_reveal(cx);
+                }
+                let body = if has_query {
+                    match &self.search_results {
+                        Some(state) => search_results_view(state, &self.file_tree_scroll, cx),
+                        // ensure_search 已在 render 顶部同步置位，通常到不了这里。
+                        None => div().flex_1().into_any_element(),
+                    }
+                } else {
+                    let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
+                    let selected = self.file_tree_selected.as_deref();
+                    // 多根工作区：把所有项目根一起铺开（顺序同侧栏项目列表）；
+                    // 每个根各查各自的 git status 标 M/A/D，归属由 file_tree 内部
+                    // 按行所属的根处理，不再是全局一份。
+                    let roots = self.workspace_roots(cx);
+                    file_tree(
+                        &roots,
+                        &self.expanded,
+                        &self.collapsed_roots,
+                        &self.dir_cache,
+                        &self.file_tree_scroll,
+                        open_path,
+                        selected,
+                        self.file_tree_w,
+                        &self.git_status,
+                        cx,
+                    )
+                };
+                // 顶部搜索框（file_filter 已在 render 顶部懒创建）。
+                let search_box = self.file_filter.as_ref().map(|state| {
+                    div()
+                        .px_2()
+                        .py(px(6.))
+                        .border_b_1()
+                        .border_color(c_border)
+                        .child(Input::new(state).small())
+                });
+                let content = file_content_pane(&self.open_file, cx);
+                div()
+                    .flex_1()
+                    // min_h_0：否则这个 flex item 会被文件内容撑到整份文件那么高、
+                    // 溢出窗口，导致内部 uniform_list 拿不到有界高度而无法滚动。
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        // 文件树列宽可拖拽（拖右边框），不再写死 260px——文件名
+                        // 超长时至少还能拖宽了看，配合行上的 tooltip 一起解决
+                        // 「长文件名看不全」的问题。
+                        h_resizable("file-tree-split")
+                            .with_state(&self.file_tree_resize)
+                            .child(
+                                resizable_panel()
+                                    .size(px(self.file_tree_w))
+                                    .size_range(px(160.)..px(480.))
                                     .child(
                                         div()
-                                            .id("git-tab-hotspot")
-                                            .px_2()
-                                            .py(px(1.0))
-                                            .text_sm()
-                                            .rounded_sm()
-                                            .cursor_pointer()
-                                            .text_color(muted)
-                                            .hover(|d| d.opacity(0.8))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.stage_override = Some(MainView::Hotspot);
-                                                cx.notify();
-                                            }))
-                                            .child("热力图"),
-                                    )
-                            };
-
-                            let body = match self.git_tab {
-                                GitTab::Changes => {
-                                    let status = cwd
-                                        .as_ref()
-                                        .and_then(|r| self.git_status.get(r).map(|(_, d)| d));
-                                    let branches = cwd
-                                        .as_ref()
-                                        .and_then(|r| self.branches.get(r).map(|(_, d)| d));
-                                    // 评论输入框懒创建（需要 window），跟文件树搜索框同一套模式。
-                                    if self.git_diff.is_some() && self.diff_comment_input.is_none() {
-                                        use gpui_component::input::InputState;
-                                        let state = cx.new(|cx| {
-                                            InputState::new(window, cx)
-                                                .placeholder("给选中的行写评论，发送前可以再改改…")
-                                        });
-                                        self.diff_comment_input = Some(state);
-                                    }
-                                    // commit message 输入框懒创建，跟上面评论框同一套模式；只要
-                                    // 进了 Git 页就常驻（不像评论框依赖已经打开某个 diff）。
-                                    if self.commit_msg_input.is_none() {
-                                        use gpui_component::input::InputState;
-                                        let state = cx.new(|cx| {
-                                            // 多行 + 自增高：commit message 的规范写法是
-                                            // 「标题空行正文」，单行框根本写不了 body，
-                                            // AI 生成的多段说明也会被挤成一行。
-                                            InputState::new(window, cx)
-                                                .multi_line(true)
-                                                .auto_grow(2, 8)
-                                                .placeholder("Commit message（可多行；点「AI 生成」起草）")
-                                        });
-                                        self.commit_msg_input = Some(state);
-                                    }
-                                    git_view(
-                                        cwd.clone(),
-                                        status,
-                                        branches,
-                                        &self.git_diff,
-                                        self.diff_split,
-                                        &self.diff_selected,
-                                        self.diff_comment_input.as_ref(),
-                                        self.commit_msg_input.as_ref(),
-                                        self.commit_msg_generating,
-                                        self.pushing,
-                                        &self.git_files_scroll,
-                                        &self.diff_scroll,
-                                        self.active_hunk,
-                                        &self.git_left_resize,
-                                        self.git_left_w,
-                                        &self.git_tree_collapsed,
-                                        self.diff_scope,
-                                        cx,
-                                    )
-                                }
-                                GitTab::Log => {
-                                    if let Some(root) = cwd.clone() {
-                                        // 进页面就保证数据在（内部按 root 去重，不会每帧拉）；
-                                        // 分支列表复用 Git 页那份缓存，左侧树才有内容。
-                                        self.ensure_git_log(root.clone(), cx);
-                                        self.ensure_branches(root, cx);
-                                    }
-                                    // 状态在这里取好再传下去：渲染函数内部绝不能 read 自己的
-                                    // entity（render 期间它正被可变借用，重入会直接 abort）。
-                                    let branches = cwd
-                                        .as_ref()
-                                        .and_then(|r| self.branches.get(r))
-                                        .map(|(_, b)| b);
-                                    // 当前检出的分支：日志默认看它，分支树里也要标出来。
-                                    // 复用 Git 页已有的 status 缓存，不另跑一次 git。
-                                    let head_branch = cwd
-                                        .as_ref()
-                                        .and_then(|r| self.git_status.get(r))
-                                        .map(|(_, d)| d.branch_name().to_string())
-                                        .filter(|b| !b.is_empty());
-                                    // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死
-                                    // 宽度的话中间的提交列表会被挤得没法看。
-                                    div().flex_1().min_h_0().flex().child(
-                                        h_resizable("git-log-split")
-                                            .with_state(&self.git_log_resize)
-                                            // 左：分支树
-                                            .child(
-                                                resizable_panel()
-                                                    .size(px(200.))
-                                                    .size_range(px(140.)..px(360.))
-                                                    .child(
-                                                        div()
-                                                            .size_full()
-                                                            .min_h_0()
-                                                            .border_r_1()
-                                                            .border_color(c_border)
-                                                            .child(git_log_view::branch_tree(
-                                                                cwd.clone(),
-                                                                branches,
-                                                                &self.git_log.scope,
-                                                                head_branch.clone(),
-                                                                cx,
-                                                            )),
-                                                    ),
-                                            )
-                                            // 中：分支图 + 提交列表
-                                            // wrapper 必须 .flex()：div 默认 Block，
-                                            // 里面 flex_1 根节点会高度塌 0（同 Git
-                                            // 改动页 diff 面板的坑）。
-                                            .child(resizable_panel().child(
-                                                div()
-                                                    .size_full()
-                                                    .flex()
-                                                    .min_w_0()
-                                                    .min_h_0()
-                                                    .border_r_1()
-                                                    .border_color(c_border)
-                                                    .child(git_log_view::git_log_view(
-                                                        cwd.clone(),
-                                                        &self.git_log,
-                                                        head_branch,
-                                                        cx,
-                                                    )),
-                                            ))
-                                            // 右：提交详情
-                                            .child(
-                                                resizable_panel()
-                                                    .size(px(380.))
-                                                    .size_range(px(240.)..px(640.))
-                                                    .child(
-                                                        div()
-                                                            .size_full()
-                                                            .flex()
-                                                            .min_w_0()
-                                                            .min_h_0()
-                                                            .child(
-                                                                git_log_view::commit_detail_pane(
-                                                                    cwd,
-                                                                    &self.git_log,
-                                                                    cx,
-                                                                ),
-                                                            ),
-                                                    ),
-                                            ),
-                                    )
-                                }
-                            };
-
-                            v_flex().flex_1().min_h_0().child(sub_tabs).child(body).into_any_element()
-                        }
-                        MainView::Hotspot => {
-                            let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let data = cwd
-                                .as_ref()
-                                .and_then(|r| self.hotspot_data.get(r).map(|(_, d)| d.clone()));
-                            hotspot_view(cwd, data, cx).into_any_element()
-                        }
-                        MainView::History => {
-                            let cwd = self.cur().and_then(|s| s.cwd(cx));
-                            let list_key = cwd.as_ref().map(|c| {
-                                session_history::session_list_key(
-                                    self.history_agent,
-                                    self.history_profile.as_deref(),
-                                    c,
-                                )
-                            });
-                            let sessions = list_key
-                                .as_ref()
-                                .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
-                            let list_state = match sessions {
-                                None => HistoryListState::Loading,
-                                Some(s) if s.is_empty() => HistoryListState::Empty,
-                                Some(s) => HistoryListState::Ready(s),
-                            };
-                            // 没选项目时给 Some(空表)，走「还没有记忆」而不是一直转圈。
-                            let memories = match &cwd {
-                                Some(root) => self.memory_list.get(root).map(|(_, d)| d.clone()),
-                                None => Some(Rc::new(Vec::new())),
-                            };
-                            history_view(
-                                self.history_pane,
-                                self.history_agent,
-                                self.history_profile.clone(),
-                                cwd,
-                                list_state,
-                                &self.session_detail,
-                                memories,
-                                self.memory_selected,
-                                cx,
+                                            .size_full()
+                                            .flex()
+                                            .flex_col()
+                                            .min_h_0()
+                                            .border_r_1()
+                                            .border_color(c_border)
+                                            .children(search_box)
+                                            .child(body),
+                                    ),
                             )
-                            .into_any_element()
+                            .child(resizable_panel().child(content)),
+                    )
+                    .into_any_element()
+            }
+            MainView::Git => {
+                let cwd = self.cur().and_then(|s| s.cwd(cx));
+                let c_border = cx.theme().border;
+                // 「改动 / 日志」子标签。两者同属 Git 工具窗口，不占两个
+                // 顶层标签（JetBrains 也是这个结构）。
+                let sub_tabs = {
+                    let (fg, muted, accent) = {
+                        let t = cx.theme();
+                        (t.foreground, t.muted_foreground, t.accent)
+                    };
+                    h_flex()
+                        .gap_1()
+                        .px_3()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(c_border)
+                        .children([(GitTab::Changes, "改动"), (GitTab::Log, "日志")].map(
+                            |(tab, label)| {
+                                let on = self.git_tab == tab;
+                                div()
+                                    .id(label)
+                                    .px_2()
+                                    .py(px(1.0))
+                                    .text_sm()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .text_color(if on { fg } else { muted })
+                                    .when(on, |d| d.bg(accent))
+                                    .hover(|d| d.opacity(0.8))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.git_tab = tab;
+                                        cx.notify();
+                                    }))
+                                    .child(label)
+                            },
+                        ))
+                        // 热力图入口：原顶部 TabBar 撤掉后挂靠在 Git 页
+                        // （同为「看仓库」维度的全屏视图）。
+                        .child(
+                            div()
+                                .id("git-tab-hotspot")
+                                .px_2()
+                                .py(px(1.0))
+                                .text_sm()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .text_color(muted)
+                                .hover(|d| d.opacity(0.8))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.stage_override = Some(MainView::Hotspot);
+                                    cx.notify();
+                                }))
+                                .child("热力图"),
+                        )
+                };
+
+                let body = match self.git_tab {
+                    GitTab::Changes => {
+                        let status = cwd
+                            .as_ref()
+                            .and_then(|r| self.git_status.get(r).map(|(_, d)| d));
+                        let branches = cwd
+                            .as_ref()
+                            .and_then(|r| self.branches.get(r).map(|(_, d)| d));
+                        // 评论输入框懒创建（需要 window），跟文件树搜索框同一套模式。
+                        if self.git_diff.is_some() && self.diff_comment_input.is_none() {
+                            use gpui_component::input::InputState;
+                            let state = cx.new(|cx| {
+                                InputState::new(window, cx)
+                                    .placeholder("给选中的行写评论，发送前可以再改改…")
+                            });
+                            self.diff_comment_input = Some(state);
                         }
+                        // commit message 输入框懒创建，跟上面评论框同一套模式；只要
+                        // 进了 Git 页就常驻（不像评论框依赖已经打开某个 diff）。
+                        if self.commit_msg_input.is_none() {
+                            use gpui_component::input::InputState;
+                            let state = cx.new(|cx| {
+                                // 多行 + 自增高：commit message 的规范写法是
+                                // 「标题空行正文」，单行框根本写不了 body，
+                                // AI 生成的多段说明也会被挤成一行。
+                                InputState::new(window, cx)
+                                    .multi_line(true)
+                                    .auto_grow(2, 8)
+                                    .placeholder("Commit message（可多行；点「AI 生成」起草）")
+                            });
+                            self.commit_msg_input = Some(state);
+                        }
+                        git_view(
+                            cwd.clone(),
+                            status,
+                            branches,
+                            &self.git_diff,
+                            self.diff_split,
+                            &self.diff_selected,
+                            self.diff_comment_input.as_ref(),
+                            self.commit_msg_input.as_ref(),
+                            self.commit_msg_generating,
+                            self.pushing,
+                            &self.git_files_scroll,
+                            &self.diff_scroll,
+                            self.active_hunk,
+                            &self.git_left_resize,
+                            self.git_left_w,
+                            &self.git_tree_collapsed,
+                            self.diff_scope,
+                            cx,
+                        )
+                    }
+                    GitTab::Log => {
+                        if let Some(root) = cwd.clone() {
+                            // 进页面就保证数据在（内部按 root 去重，不会每帧拉）；
+                            // 分支列表复用 Git 页那份缓存，左侧树才有内容。
+                            self.ensure_git_log(root.clone(), cx);
+                            self.ensure_branches(root, cx);
+                        }
+                        // 状态在这里取好再传下去：渲染函数内部绝不能 read 自己的
+                        // entity（render 期间它正被可变借用，重入会直接 abort）。
+                        let branches = cwd
+                            .as_ref()
+                            .and_then(|r| self.branches.get(r))
+                            .map(|(_, b)| b);
+                        // 当前检出的分支：日志默认看它，分支树里也要标出来。
+                        // 复用 Git 页已有的 status 缓存，不另跑一次 git。
+                        let head_branch = cwd
+                            .as_ref()
+                            .and_then(|r| self.git_status.get(r))
+                            .map(|(_, d)| d.branch_name().to_string())
+                            .filter(|b| !b.is_empty());
+                        // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死
+                        // 宽度的话中间的提交列表会被挤得没法看。
+                        div().flex_1().min_h_0().flex().child(
+                            h_resizable("git-log-split")
+                                .with_state(&self.git_log_resize)
+                                // 左：分支树
+                                .child(
+                                    resizable_panel()
+                                        .size(px(200.))
+                                        .size_range(px(140.)..px(360.))
+                                        .child(
+                                            div()
+                                                .size_full()
+                                                .min_h_0()
+                                                .border_r_1()
+                                                .border_color(c_border)
+                                                .child(git_log_view::branch_tree(
+                                                    cwd.clone(),
+                                                    branches,
+                                                    &self.git_log.scope,
+                                                    head_branch.clone(),
+                                                    cx,
+                                                )),
+                                        ),
+                                )
+                                // 中：分支图 + 提交列表
+                                // wrapper 必须 .flex()：div 默认 Block，
+                                // 里面 flex_1 根节点会高度塌 0（同 Git
+                                // 改动页 diff 面板的坑）。
+                                .child(
+                                    resizable_panel().child(
+                                        div()
+                                            .size_full()
+                                            .flex()
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .border_r_1()
+                                            .border_color(c_border)
+                                            .child(git_log_view::git_log_view(
+                                                cwd.clone(),
+                                                &self.git_log,
+                                                head_branch,
+                                                cx,
+                                            )),
+                                    ),
+                                )
+                                // 右：提交详情
+                                .child(
+                                    resizable_panel()
+                                        .size(px(380.))
+                                        .size_range(px(240.)..px(640.))
+                                        .child(div().size_full().flex().min_w_0().min_h_0().child(
+                                            git_log_view::commit_detail_pane(
+                                                cwd,
+                                                &self.git_log,
+                                                cx,
+                                            ),
+                                        )),
+                                ),
+                        )
+                    }
+                };
+
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(sub_tabs)
+                    .child(body)
+                    .into_any_element()
+            }
+            MainView::Hotspot => {
+                let cwd = self.cur().and_then(|s| s.cwd(cx));
+                let data = cwd
+                    .as_ref()
+                    .and_then(|r| self.hotspot_data.get(r).map(|(_, d)| d.clone()));
+                hotspot_view(cwd, data, cx).into_any_element()
+            }
+            MainView::History => {
+                let cwd = self.cur().and_then(|s| s.cwd(cx));
+                let list_key = cwd.as_ref().map(|c| {
+                    session_history::session_list_key(
+                        self.history_agent,
+                        self.history_profile.as_deref(),
+                        c,
+                    )
+                });
+                let sessions = list_key
+                    .as_ref()
+                    .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
+                let list_state = match sessions {
+                    None => HistoryListState::Loading,
+                    Some(s) if s.is_empty() => HistoryListState::Empty,
+                    Some(s) => HistoryListState::Ready(s),
+                };
+                // 没选项目时给 Some(空表)，走「还没有记忆」而不是一直转圈。
+                let memories = match &cwd {
+                    Some(root) => self.memory_list.get(root).map(|(_, d)| d.clone()),
+                    None => Some(Rc::new(Vec::new())),
+                };
+                history_view(
+                    self.history_pane,
+                    self.history_agent,
+                    self.history_profile.clone(),
+                    cwd,
+                    list_state,
+                    &self.session_detail,
+                    memories,
+                    self.memory_selected,
+                    cx,
+                )
+                .into_any_element()
+            }
         }
     }
 }
@@ -4843,8 +5053,15 @@ impl Render for Workspace {
         // Dock 角标 + 菜单栏图标角标/下拉菜单：同一份状态数据源（AgentStatus），
         // 变了才调 Cocoa API 更新（避免每次 render 都发一遍）。
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
-        let attention_count =
-            statuses.iter().filter(|s| matches!(s, AgentStatus::WaitingApproval | AgentStatus::NeedsAttention)).count();
+        let attention_count = statuses
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s,
+                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
+                )
+            })
+            .count();
         if self.dock_badge_count != Some(attention_count) {
             self.dock_badge_count = Some(attention_count);
             dock::set_badge(attention_count);
@@ -4866,7 +5083,12 @@ impl Render for Workspace {
                     AgentStatus::Done => "已完成",
                     AgentStatus::Idle => "空闲",
                 };
-                status_item::SessionEntry { session_ix: ix, title: self.sessions[ix].title(cx), status_text, color }
+                status_item::SessionEntry {
+                    session_ix: ix,
+                    title: self.sessions[ix].title(cx),
+                    status_text,
+                    color,
+                }
             })
             .collect();
         if self.status_menu_snapshot.as_ref() != Some(&menu_snapshot) {
@@ -4953,8 +5175,10 @@ impl Render for Workspace {
 
         // Git 页：后台刷新改动列表 + 分支列表（git status/for-each-ref 慢，绝不在
         // render 里同步跑）。
-        if matches!(self.stage_override, Some(MainView::Git | MainView::DiffDetail))
-            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Git)
+        if matches!(
+            self.stage_override,
+            Some(MainView::Git | MainView::DiffDetail)
+        ) || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Git)
         {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
                 self.ensure_git_watch(root.clone(), cx);
@@ -4985,20 +5209,21 @@ impl Render for Workspace {
 
         // 文件树页：后台刷新根目录 + 所有已展开目录的直接子项列表（fs::read_dir 绝不
         // 在 render 里同步跑）。展开新目录时它会先落空，下一帧缓存到位后自动出现。
-        if matches!(self.stage_override, Some(MainView::Files | MainView::FileDetail))
-            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
+        if matches!(
+            self.stage_override,
+            Some(MainView::Files | MainView::FileDetail)
+        ) || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
         {
             // 搜索输入框懒创建（需要 window）：键入即 notify，触发文件名 + 内容搜索。
             if self.file_filter.is_none() {
                 use gpui_component::input::{InputEvent, InputState};
                 let state =
                     cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
-                self._file_filter_sub =
-                    Some(cx.subscribe(&state, |_, _, ev: &InputEvent, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            cx.notify();
-                        }
-                    }));
+                self._file_filter_sub = Some(cx.subscribe(&state, |_, _, ev: &InputEvent, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }));
                 self.file_filter = Some(state);
             }
             let query = self
@@ -5045,8 +5270,11 @@ impl Render for Workspace {
                 let dt = now.duration_since(prev).as_secs_f32();
                 if dt > 0.0 {
                     let inst = 1.0 / dt;
-                    self.fps_ema =
-                        if self.fps_ema <= 0.0 { inst } else { self.fps_ema * 0.9 + inst * 0.1 };
+                    self.fps_ema = if self.fps_ema <= 0.0 {
+                        inst
+                    } else {
+                        self.fps_ema * 0.9 + inst * 0.1
+                    };
                 }
             }
             self.last_frame = Some(now);
@@ -5067,7 +5295,13 @@ impl Render for Workspace {
         // 主题色 token（跟随 gpui-component 主题，替代硬编码）
         let (c_bg, c_border, c_popover, c_muted, c_fg) = {
             let t = cx.theme();
-            (t.background, t.border, t.popover, t.muted_foreground, t.foreground)
+            (
+                t.background,
+                t.border,
+                t.popover,
+                t.muted_foreground,
+                t.foreground,
+            )
         };
 
         // 会话标题（取活动终端的 cwd 末段）
@@ -5092,7 +5326,8 @@ impl Render for Workspace {
         let acp_label = match self.sessions.get(self.active_session).map(|s| &s.kind) {
             Some(SessionKind::Acp(view)) => {
                 let v = view.read(cx);
-                acp_pill_label(v.agent_kind(), v.launch_cmd())
+                let launch = v.launch_spec();
+                acp_pill_label(v.agent_kind(), &launch.command)
             }
             _ => {
                 let agent = settings::AcpAgentKind::Claude;
@@ -5143,12 +5378,8 @@ impl Render for Workspace {
                 .flex_col()
                 .children(stage_header)
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .flex()
-                        .child(match &self.sessions[self.active_session].kind {
+                    div().flex_1().min_w_0().min_h_0().flex().child(
+                        match &self.sessions[self.active_session].kind {
                             SessionKind::Term { .. } => self.render_pane(
                                 self.sessions[self.active_session]
                                     .term_layout()
@@ -5158,7 +5389,8 @@ impl Render for Workspace {
                             ),
                             // ACP 会话：整块主区就是消息流视图（无分屏树）。
                             SessionKind::Acp(view) => view.clone().into_any_element(),
-                        }),
+                        },
+                    ),
                 )
                 .children(term_bar)
         } else {
@@ -5184,7 +5416,11 @@ impl Render for Workspace {
                 .items_center()
                 .justify_center()
                 .gap_4()
-                .child(Icon::new(IconName::SquareTerminal).size(px(40.)).text_color(c_muted))
+                .child(
+                    Icon::new(IconName::SquareTerminal)
+                        .size(px(40.))
+                        .text_color(c_muted),
+                )
                 .child(div().text_color(c_muted).child("还没有会话"))
                 .child(
                     div()
@@ -5281,23 +5517,31 @@ impl Render for Workspace {
                 cx.open_url("https://github.com/smelt-ai/smelt/issues/new/choose");
             }))
             // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
-            .on_action(cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
-                this.send_open_file_selection(cx);
-            }))
+            .on_action(
+                cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
+                    this.send_open_file_selection(cx);
+                }),
+            )
             // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+[ ] 切当前会话内的 pane /
             // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
                 // 文件树键盘导航：搜索框 / 编辑器聚焦时不抢键。
-                if matches!(this.stage_override, Some(MainView::Files | MainView::FileDetail))
-                    && !ks.modifiers.platform && !ks.modifiers.control {
+                if matches!(
+                    this.stage_override,
+                    Some(MainView::Files | MainView::FileDetail)
+                ) && !ks.modifiers.platform
+                    && !ks.modifiers.control
+                {
                     use gpui::Focusable;
-                    let search_focused = this.file_filter.as_ref().is_some_and(|s| {
-                        s.read(cx).focus_handle(cx).is_focused(window)
-                    });
-                    let editor_focused = this.open_file.as_ref().is_some_and(|of| {
-                        of.editor.read(cx).focus_handle(cx).is_focused(window)
-                    });
+                    let search_focused = this
+                        .file_filter
+                        .as_ref()
+                        .is_some_and(|s| s.read(cx).focus_handle(cx).is_focused(window));
+                    let editor_focused = this
+                        .open_file
+                        .as_ref()
+                        .is_some_and(|of| of.editor.read(cx).focus_handle(cx).is_focused(window));
                     if !search_focused && !editor_focused {
                         match ks.key.as_str() {
                             "up" => {
@@ -5326,8 +5570,10 @@ impl Render for Workspace {
                 }
                 // Git 页 F7 / Shift+F7：在改动块之间跳（对齐 JetBrains 的 next/previous
                 // difference）。不带 Cmd，所以要赶在下面的 platform 判断之前处理。
-                if matches!(this.stage_override, Some(MainView::Git | MainView::DiffDetail))
-                    && this.git_tab == GitTab::Changes
+                if matches!(
+                    this.stage_override,
+                    Some(MainView::Git | MainView::DiffDetail)
+                ) && this.git_tab == GitTab::Changes
                     && ks.key == "f7"
                     && !ks.modifiers.platform
                 {
@@ -5392,7 +5638,11 @@ impl Render for Workspace {
                     "w" => this.close_active(window, cx),
                     // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
                     // 视图时背着用户悄悄写盘）。
-                    "s" if matches!(this.stage_override, Some(MainView::Files | MainView::FileDetail)) => {
+                    "s" if matches!(
+                        this.stage_override,
+                        Some(MainView::Files | MainView::FileDetail)
+                    ) =>
+                    {
                         this.save_open_file(cx)
                     }
                     // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
@@ -5569,10 +5819,13 @@ impl Render for Workspace {
                                     // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
                                     // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
                                     // 之前让整个图标变蓝，看着像常驻高亮状态，容易被当成卡住了。
-                                    let needs_attention =
-                                        self.update_available() || self.daemon_outdated == Some(true);
+                                    let needs_attention = self.update_available()
+                                        || self.daemon_outdated == Some(true);
                                     let gear: AnyElement = if needs_attention {
-                                        Badge::new().dot().child(Icon::new(IconName::Settings)).into_any_element()
+                                        Badge::new()
+                                            .dot()
+                                            .child(Icon::new(IconName::Settings))
+                                            .into_any_element()
                                     } else {
                                         Icon::new(IconName::Settings).into_any_element()
                                     };
@@ -5607,34 +5860,34 @@ impl Render for Workspace {
             // 主体：左侧会话侧栏 + 右侧主区，占满标题栏以下的剩余高度。
             .child(
                 div().flex_1().min_h_0().flex().child(
-                div()
-                    .size_full()
-                    .flex()
-                    // 会话列表（280px，按项目分组）
-                    .child(list_el)
-                    // 主区：顶部视图切换 + 内容
-                    .child(
-                        div()
-                            .flex_1()
-                            // min_w_0：主区在根 flex 行里默认 min-width:auto，会被最长终端行
-                            // 撑到不肯收缩，导致宽度被内容反向放大。归零后才能正常按剩余空间收缩。
-                            .min_w_0()
-                    .flex()
-                    .flex_col()
-                    // 舞台：覆盖页（旧全屏页）优先，否则显示当前会话。
-                    // 覆盖页顶部带显式返回条——Esc 之外总得有个能点的出口。
-                    .child(match self.stage_override {
-                        Some(v) => v_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .child(self.render_stage_back_bar(v, cx))
-                            .child(self.render_stage_override(v, window, cx))
-                            .into_any_element(),
-                        None => content.into_any_element(),
-                    }),
-                    )
-                    .children(inspector_panel_el)
-                    .child(inspector_rail_el),
+                    div()
+                        .size_full()
+                        .flex()
+                        // 会话列表（280px，按项目分组）
+                        .child(list_el)
+                        // 主区：顶部视图切换 + 内容
+                        .child(
+                            div()
+                                .flex_1()
+                                // min_w_0：主区在根 flex 行里默认 min-width:auto，会被最长终端行
+                                // 撑到不肯收缩，导致宽度被内容反向放大。归零后才能正常按剩余空间收缩。
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                // 舞台：覆盖页（旧全屏页）优先，否则显示当前会话。
+                                // 覆盖页顶部带显式返回条——Esc 之外总得有个能点的出口。
+                                .child(match self.stage_override {
+                                    Some(v) => v_flex()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .child(self.render_stage_back_bar(v, cx))
+                                        .child(self.render_stage_override(v, window, cx))
+                                        .into_any_element(),
+                                    None => content.into_any_element(),
+                                }),
+                        )
+                        .children(inspector_panel_el)
+                        .child(inspector_rail_el),
                 ),
             )
             // 底部状态栏
@@ -5646,19 +5899,53 @@ impl Render for Workspace {
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
             // 会话管理弹窗（设置页「更新」tab 点开）
-            .children(self.session_manager_open.then(|| self.render_session_manager(cx)))
+            .children(
+                self.session_manager_open
+                    .then(|| self.render_session_manager(cx)),
+            )
             // 会话重命名拦截弹层
-            .children(self.rename_target.is_some().then(|| self.render_rename_session(cx)))
+            .children(
+                self.rename_target
+                    .is_some()
+                    .then(|| self.render_rename_session(cx)),
+            )
             // 新建任务弹窗
-            .children(self.show_new_task_modal.then(|| self.render_new_task_modal(cx)))
+            .children(
+                self.show_new_task_modal
+                    .then(|| self.render_new_task_modal(cx)),
+            )
             // 删除 Worktree 确认拦截弹层
-            .children(self.delete_worktree_target.is_some().then(|| self.render_delete_worktree_confirm(cx)))
-            .children(self.discard_hunk_target.is_some().then(|| self.render_discard_hunk_confirm(cx)))
-            .children(self.discard_file_target.is_some().then(|| self.render_discard_file_confirm(cx)))
-            .children(self.discard_all_target.is_some().then(|| self.render_discard_all_confirm(cx)))
-            .children(self.delete_branch_target.is_some().then(|| self.render_delete_branch_confirm(cx)))
+            .children(
+                self.delete_worktree_target
+                    .is_some()
+                    .then(|| self.render_delete_worktree_confirm(cx)),
+            )
+            .children(
+                self.discard_hunk_target
+                    .is_some()
+                    .then(|| self.render_discard_hunk_confirm(cx)),
+            )
+            .children(
+                self.discard_file_target
+                    .is_some()
+                    .then(|| self.render_discard_file_confirm(cx)),
+            )
+            .children(
+                self.discard_all_target
+                    .is_some()
+                    .then(|| self.render_discard_all_confirm(cx)),
+            )
+            .children(
+                self.delete_branch_target
+                    .is_some()
+                    .then(|| self.render_delete_branch_confirm(cx)),
+            )
             // 删除文件二次确认拦截弹层
-            .children(self.delete_file_target.is_some().then(|| self.render_delete_file_confirm(cx)))
+            .children(
+                self.delete_file_target
+                    .is_some()
+                    .then(|| self.render_delete_file_confirm(cx)),
+            )
             // 重启守护确认弹层改挂在设置窗（SettingsWindow::render），不在主窗口画。
             // Finder 拖文件/文件夹：只在有拖拽时叠全窗 drop 层。
             // 常驻 hitbox 会盖住按钮（「新建终端」像没反应）；对齐「有 drag 才出现」。
@@ -5686,7 +5973,10 @@ impl Render for Workspace {
                     .map(|target| self.render_unsaved_file_confirm(target, cx)),
             )
             // 通知面板浮层
-            .children(self.notifications_open.then(|| self.render_notifications(cx)))
+            .children(
+                self.notifications_open
+                    .then(|| self.render_notifications(cx)),
+            )
             // 调试 HUD：右上角帧率 + 帧耗时 + RSS（Cmd+Shift+F 切换）
             .children(self.debug_hud.then(|| {
                 let fps = self.fps_ema;
@@ -5732,15 +6022,20 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
         .child(text.to_string())
 }
 
-
-
 /// ACP 启动命令 → 标题栏胶囊的展示名（`bunx @scope/claude-agent-acp@0.59.0` →
 /// `claude-agent-acp`，`copilot --acp` → `copilot`）。与 acp_view 输入栏胶囊
 /// 同一套抠名逻辑；没有模型名数据源，不硬编。
 fn acp_agent_label(cmd: &str) -> String {
-    let tok = cmd.split_whitespace().rev().find(|t| !t.starts_with('-')).unwrap_or("agent");
+    let tok = cmd
+        .split_whitespace()
+        .rev()
+        .find(|t| !t.starts_with('-'))
+        .unwrap_or("agent");
     let name = tok.rsplit('/').next().unwrap_or(tok);
-    name.split('@').find(|s| !s.is_empty()).unwrap_or(name).to_string()
+    name.split('@')
+        .find(|s| !s.is_empty())
+        .unwrap_or(name)
+        .to_string()
 }
 
 /// 标题栏 agent 胶囊的文字：命令还是出厂值就显示人话名（`Claude Code`），用户
@@ -5818,7 +6113,10 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
 /// 开一扇主工作台窗口（Workspace + Root 包装），返回其 weak 引用。
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档 + smeltd
 /// 重新拼出会话布局，跟正常重启应用效果一致。
-fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) -> WeakEntity<Workspace> {
+fn open_workspace_window(
+    cx: &mut App,
+    window_bg: WindowBackgroundAppearance,
+) -> WeakEntity<Workspace> {
     let window_options = WindowOptions {
         // 透明标题栏：红绿灯浮在内容上，拖拽 / 双击最大化由自定义 TitleBar 接管。
         titlebar: Some(TitleBar::title_bar_options()),
@@ -5866,7 +6164,10 @@ fn main() {
         // 回调（宠物浮窗一直挂着，是否会被系统计入可见窗口未经验证，这里做好兜底：
         // 主窗口还活着就什么都不做，只有真的没了才重新开一扇）。
         app.on_reopen(move |cx| {
-            let alive = current_ws.borrow().as_ref().is_some_and(|w| w.upgrade().is_some());
+            let alive = current_ws
+                .borrow()
+                .as_ref()
+                .is_some_and(|w| w.upgrade().is_some());
             if !alive {
                 let window_bg = cx
                     .try_global::<Appearance>()
@@ -5907,7 +6208,11 @@ fn main() {
             // 把 Tab/Shift-Tab 从 gpui-component Root 的全局焦点跳转手里要回来，
             // 终端聚焦时改发给 shell（见 terminal_view.rs 里 TerminalTab 的注释）。
             KeyBinding::new("tab", terminal_view::TerminalTab, Some("Terminal")),
-            KeyBinding::new("shift-tab", terminal_view::TerminalBackTab, Some("Terminal")),
+            KeyBinding::new(
+                "shift-tab",
+                terminal_view::TerminalBackTab,
+                Some("Terminal"),
+            ),
         ]);
         cx.set_menus(vec![Menu::new("Smelt").items([
             MenuItem::action("新建任务…", NewTask),
@@ -5947,9 +6252,11 @@ fn main() {
         cx.set_global(settings::load_agent_ui_config());
         let (daemon_state_tx, daemon_state_rx) =
             smol::channel::unbounded::<terminal::DaemonStateEvent>();
-        thread::spawn(move || loop {
-            terminal::subscribe_daemon_states_blocking(&daemon_state_tx);
-            thread::sleep(Duration::from_secs(2)); // 断线/连不上，等一下重试
+        thread::spawn(move || {
+            loop {
+                terminal::subscribe_daemon_states_blocking(&daemon_state_tx);
+                thread::sleep(Duration::from_secs(2)); // 断线/连不上，等一下重试
+            }
         });
         cx.spawn(async move |cx| {
             while let Ok(event) = daemon_state_rx.recv().await {
@@ -5959,9 +6266,7 @@ fn main() {
                         .try_global::<settings::AgentUiConfig>()
                         .map(|c| c.notify_awaiting)
                         .unwrap_or(true);
-                    let pending = cx
-                        .try_global::<PendingAgentNotifs>()
-                        .map(|p| p.0.clone());
+                    let pending = cx.try_global::<PendingAgentNotifs>().map(|p| p.0.clone());
                     {
                         let mut map = states.lock().unwrap();
                         match event {
@@ -5989,8 +6294,8 @@ fn main() {
                                             .unwrap_or_else(|| {
                                                 format!("会话 {}", &s.id[..8.min(s.id.len())])
                                             });
-                                        let is_appr = s.phase
-                                            == terminal::DaemonPhase::AwaitingApproval;
+                                        let is_appr =
+                                            s.phase == terminal::DaemonPhase::AwaitingApproval;
                                         q.lock().unwrap().push((title, msg, is_appr));
                                     }
                                 }
@@ -6090,15 +6395,12 @@ fn main() {
 
                         // 2) 隧道：同样先 status 再 start；最终以「有 token 才能展示 URL」为准
                         let tunnel_rt = if want_tunnel {
-                            let has_token =
-                                remote_rt.token.as_ref().is_some_and(|t| !t.is_empty());
+                            let has_token = remote_rt.token.as_ref().is_some_and(|t| !t.is_empty());
                             if !has_token {
                                 settings::TunnelRuntimeState {
                                     connecting: false,
                                     url: None,
-                                    error: Some(
-                                        "本机远程网关没起来，无法建立隧道".into(),
-                                    ),
+                                    error: Some("本机远程网关没起来，无法建立隧道".into()),
                                     write: false,
                                 }
                             } else {
@@ -6207,7 +6509,10 @@ fn main() {
         // 没了就跟 on_reopen 一样重开一扇（此时会话下标已经没意义，只重开窗口）。
         cx.spawn(async move |cx| {
             while let Ok(event) = status_rx.recv().await {
-                let alive = current_ws_status.borrow().as_ref().is_some_and(|w| w.upgrade().is_some());
+                let alive = current_ws_status
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|w| w.upgrade().is_some());
                 if alive {
                     if let status_item::StatusItemEvent::JumpToSession(ix) = event {
                         let ws = current_ws_status.borrow().clone();
@@ -6303,17 +6608,111 @@ mod pane_state_tests {
 
 #[cfg(test)]
 mod acp_agent_tests {
-    use super::{acp_agent_from_cmd, acp_pill_label, AcpSaved};
+    use super::{AcpSaved, acp_agent_from_cmd, acp_pill_label};
     use crate::settings::AcpAgentKind;
 
     /// 多 agent 之前的 ACP 存档没有 `agent` 字段：必须读得进来（None），
     /// 不能整条会话解析失败——那等于用户重开 GUI 少一个会话。
     #[test]
     fn old_acp_archive_without_agent_field_still_loads() {
-        let old = r#"{"cwd":"/tmp/x","cmd":"bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0"}"#;
+        let old =
+            r#"{"cwd":"/tmp/x","cmd":"bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0"}"#;
         let back: AcpSaved = serde_json::from_str(old).unwrap();
         assert!(back.agent.is_none(), "旧存档不该凭空冒出 agent 字段");
-        assert_eq!(acp_agent_from_cmd(&back.cmd), AcpAgentKind::Claude);
+        assert_eq!(
+            acp_agent_from_cmd(&back.launch.command),
+            AcpAgentKind::Claude
+        );
+    }
+
+    #[test]
+    fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
+        let saved = AcpSaved {
+            cwd: Some("/repo".into()),
+            launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude")
+                .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
+            profile_id: Some("quant".into()),
+            agent: Some("claude".into()),
+            entries: Vec::new(),
+            resume_session_id: None,
+            sid: Some("acp-1".into()),
+            refresh_launch_from_settings: false,
+        };
+
+        let value = serde_json::to_value(&saved).unwrap();
+        assert!(value.get("cmd").is_none(), "新存档不该再写旧 cmd 字段");
+        let restored: AcpSaved = serde_json::from_value(value).unwrap();
+
+        assert_eq!(restored.profile_id.as_deref(), Some("quant"));
+        assert_eq!(
+            restored
+                .launch
+                .env
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("~/Claude Workspaces/quant")
+        );
+    }
+
+    #[test]
+    fn legacy_acp_saved_cmd_deserializes_into_launch_spec() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "cmd": "claude --flag",
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        assert_eq!(restored.launch.command, "claude --flag");
+        assert!(restored.profile_id.is_none());
+    }
+
+    #[test]
+    fn legacy_cmd_archive_keeps_saved_launch_on_restart() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "cmd": "CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude",
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        assert!(
+            !restored.refresh_launch_from_settings(),
+            "旧 cmd 存档缺少 profile_id 时也不能被当成普通会话刷新成当前默认命令"
+        );
+    }
+
+    #[test]
+    fn structured_launch_without_profile_id_refreshes_from_settings() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "launch": { "command": "claude", "env": {} },
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        assert!(
+            restored.refresh_launch_from_settings(),
+            "新存档的普通会话仍应沿用按当前设置刷新的行为"
+        );
+    }
+
+    #[test]
+    fn legacy_cmd_archive_round_trip_preserves_restart_refresh_behavior() {
+        let legacy: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "cmd": "CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude",
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(&legacy).unwrap();
+        let restored: AcpSaved = serde_json::from_value(value).unwrap();
+
+        assert!(
+            !restored.refresh_launch_from_settings(),
+            "旧 cmd 存档升级成新格式后也必须继续保留原 launch，不得在下一次重启时退化成按默认设置刷新"
+        );
     }
 
     /// 旧存档反推：命令里带 copilot / codex 字样的归给对应 agent，其余当 Claude。
@@ -6341,6 +6740,9 @@ mod acp_agent_tests {
     fn pill_label_tells_truth_about_custom_cmd() {
         let claude = AcpAgentKind::Claude;
         assert_eq!(acp_pill_label(claude, &claude.default_cmd()), "Claude Code");
-        assert_eq!(acp_pill_label(claude, "bunx my-own-acp@1.2.3"), "my-own-acp");
+        assert_eq!(
+            acp_pill_label(claude, "bunx my-own-acp@1.2.3"),
+            "my-own-acp"
+        );
     }
 }

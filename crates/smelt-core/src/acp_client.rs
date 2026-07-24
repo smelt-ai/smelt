@@ -14,6 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use crate::acp_session::{AcpPhase, AcpSnapshot, AcpUserAction};
+use crate::agent_kind::AcpLaunchSpec;
 
 /// 一次 `acp_open` 的启动参数。`agent_id` 是 `AcpAgentKind::id()` 那串小写
 /// 标识（"claude"/"codex"/"copilot"/"grok"），smeltd 只靠它判断
@@ -21,12 +22,48 @@ use crate::acp_session::{AcpPhase, AcpSnapshot, AcpUserAction};
 pub struct AcpClientLaunch {
     pub id: String,
     pub cwd: Option<String>,
-    pub cmd: String,
+    pub launch: AcpLaunchSpec,
     pub agent_id: String,
     /// 首次以「继续历史会话」打开时带上；已经连过一次之后 smeltd 自己记得
     /// agent 侧真实的 session id，这个字段只在“smeltd 也不认识这个 id”时
     /// （比如它刚重启过）才会被用上。
     pub resume_id: Option<String>,
+}
+
+fn legacy_cmd_fallback(launch: &AcpLaunchSpec) -> Option<String> {
+    if launch.command.trim().is_empty() {
+        return None;
+    }
+    if launch.env.is_empty() {
+        return Some(launch.command.clone());
+    }
+    if launch.env.iter().any(|(name, value)| {
+        name.contains(char::is_whitespace) || value.contains(char::is_whitespace)
+    }) {
+        return None;
+    }
+    let prefix = launch
+        .env
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!("{prefix} {}", launch.command))
+}
+
+fn acp_open_request(launch: &AcpClientLaunch) -> serde_json::Value {
+    let mut req = serde_json::json!({
+        "op": "acp_open",
+        "id": &launch.id,
+        "cwd": &launch.cwd,
+        "launch": &launch.launch,
+        "agent": &launch.agent_id,
+        "resume_id": &launch.resume_id,
+    });
+    if let Some(cmd) = legacy_cmd_fallback(&launch.launch) {
+        req["cmd"] = serde_json::Value::String(cmd);
+    }
+    req
 }
 
 pub struct AcpClientHandle {
@@ -98,20 +135,14 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
             let conn = match UnixStream::connect(&sock_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = snapshot_tx
-                        .try_send(fallback_snapshot(&format!("连不上 smeltd：{e}")));
+                    let _ = snapshot_tx.try_send(fallback_snapshot(&format!("连不上 smeltd：{e}")));
                     return;
                 }
             };
-            let Ok(mut writer) = conn.try_clone() else { return };
-            let req = serde_json::json!({
-                "op": "acp_open",
-                "id": launch.id,
-                "cwd": launch.cwd,
-                "cmd": launch.cmd,
-                "agent": launch.agent_id,
-                "resume_id": launch.resume_id,
-            });
+            let Ok(mut writer) = conn.try_clone() else {
+                return;
+            };
+            let req = acp_open_request(&launch);
             if writeln!(writer, "{req}").is_err() {
                 let _ = snapshot_tx.try_send(fallback_snapshot("向 smeltd 发起会话失败"));
                 return;
@@ -129,7 +160,9 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
             std::thread::spawn(move || {
                 smol::block_on(async move {
                     while let Ok(action) = action_rx.recv().await {
-                        let Ok(line) = serde_json::to_string(&action) else { continue };
+                        let Ok(line) = serde_json::to_string(&action) else {
+                            continue;
+                        };
                         if writeln!(writer, "{line}").is_err() {
                             return;
                         }
@@ -149,7 +182,9 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
                     continue;
                 };
-                let Some(snap_v) = v.get("snapshot") else { continue };
+                let Some(snap_v) = v.get("snapshot") else {
+                    continue;
+                };
                 let Ok(snap) = serde_json::from_value::<AcpSnapshot>(snap_v.clone()) else {
                     continue;
                 };
@@ -161,7 +196,11 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
         })
         .expect("spawn acp client thread");
 
-    AcpClientHandle { action_tx, snapshot_rx, conn_cell }
+    AcpClientHandle {
+        action_tx,
+        snapshot_rx,
+        conn_cell,
+    }
 }
 
 /// 显式结束一个 smeltd 托管的 ACP 会话：杀子进程、摘表、踢掉所有连接
@@ -173,8 +212,50 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
 /// 阻塞：等守护回执再返回，跟 `terminal::kill_remote` 同一个理由——避免
 /// 关闭动作和后续可能的 App 退出之间有个窗口，kill 命令还没送达就被中断。
 pub fn kill_acp_session(id: &str) {
-    let Ok(mut s) = UnixStream::connect(crate::daemon_state::smeltd_sock_path()) else { return };
+    let Ok(mut s) = UnixStream::connect(crate::daemon_state::smeltd_sock_path()) else {
+        return;
+    };
     let _ = writeln!(s, "{}", serde_json::json!({ "op": "acp_kill", "id": id }));
     let mut resp = String::new();
     let _ = BufReader::new(s).read_line(&mut resp);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AcpClientLaunch, acp_open_request};
+    use crate::agent_kind::AcpLaunchSpec;
+
+    #[test]
+    fn acp_open_request_serializes_structured_launch() {
+        let req = acp_open_request(&AcpClientLaunch {
+            id: "acp-1".into(),
+            cwd: Some("/repo".into()),
+            launch: AcpLaunchSpec::from_command("claude --print")
+                .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
+            agent_id: "claude".into(),
+            resume_id: Some("resume-1".into()),
+        });
+
+        assert_eq!(req["op"], "acp_open");
+        assert_eq!(req["launch"]["command"], "claude --print");
+        assert_eq!(
+            req["launch"]["env"]["CLAUDE_CONFIG_DIR"],
+            "~/Claude Workspaces/quant"
+        );
+        assert!(req.get("cmd").is_none(), "新协议不该再发旧 cmd 字段");
+    }
+
+    #[test]
+    fn acp_open_request_keeps_plain_cmd_fallback_for_old_daemons() {
+        let req = acp_open_request(&AcpClientLaunch {
+            id: "acp-2".into(),
+            cwd: Some("/repo".into()),
+            launch: AcpLaunchSpec::from_command("claude --print"),
+            agent_id: "claude".into(),
+            resume_id: None,
+        });
+
+        assert_eq!(req["launch"]["command"], "claude --print");
+        assert_eq!(req["cmd"], "claude --print");
+    }
 }

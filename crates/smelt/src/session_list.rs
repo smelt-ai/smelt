@@ -68,8 +68,12 @@ impl Workspace {
             .find(|(n, _, _)| Some(n.as_str()) == active_name.as_deref())
             .and_then(|(_, cwd, _)| (!cwd.is_empty()).then(|| cwd.clone()));
 
-        let titles: Vec<(usize, String)> =
-            self.sessions.iter().enumerate().map(|(ix, s)| (ix, s.title(cx))).collect();
+        let titles: Vec<(usize, String)> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(ix, s)| (ix, s.title(cx)))
+            .collect();
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
         let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.anchor_id()).collect();
 
@@ -121,24 +125,38 @@ impl Workspace {
                                             .on_click(move |_ev, window, cx| {
                                                 let cwd = cwd_acp.clone();
                                                 e_acp.update(cx, |ws, cx| {
-                                                    ws.add_acp_session(agent, None, cwd, window, cx)
+                                                    ws.add_acp_session(
+                                                        agent, None, None, cwd, window, cx,
+                                                    )
                                                 });
                                             }),
                                     );
                                 }
-                                let profiles = cx.global::<crate::settings::AgentUiConfig>().profiles.clone();
+                                let profiles = cx
+                                    .global::<crate::settings::AgentUiConfig>()
+                                    .profiles
+                                    .clone();
                                 for p in profiles {
                                     let e_acp = e_acp.clone();
                                     let cwd_acp = cwd_acp.clone();
-                                    let cmd = p.command();
+                                    let launch = p.launch_spec();
+                                    let profile_id = Some(p.id.clone());
                                     menu = menu.item(
                                         PopupMenuItem::new(p.label.clone())
                                             .icon(IconName::Bot)
                                             .on_click(move |_ev, window, cx| {
                                                 let cwd = cwd_acp.clone();
-                                                let cmd = cmd.clone();
+                                                let launch = launch.clone();
+                                                let profile_id = profile_id.clone();
                                                 e_acp.update(cx, |ws, cx| {
-                                                    ws.add_acp_session(p.kind(), Some(cmd), cwd, window, cx)
+                                                    ws.add_acp_session(
+                                                        p.kind(),
+                                                        Some(launch),
+                                                        profile_id,
+                                                        cwd,
+                                                        window,
+                                                        cx,
+                                                    )
                                                 });
                                             }),
                                     );
@@ -200,14 +218,19 @@ impl Workspace {
                 .min_by_key(|s| s.rank())
                 .unwrap_or(AgentStatus::Idle);
 
-            let repo_info_here = self.repo_info.get(cwd.as_str()).and_then(|(_, i)| i.clone());
+            let repo_info_here = self
+                .repo_info
+                .get(cwd.as_str())
+                .and_then(|(_, i)| i.clone());
             let is_worktree_group = repo_info_here.as_ref().is_some_and(|i| i.is_worktree());
             let worktree_main_root = repo_info_here
                 .as_ref()
                 .and_then(|i| main_repo_root_from_common_dir(&i.common_dir))
                 .unwrap_or_else(|| cwd.clone());
-            let worktree_branch =
-                repo_info_here.as_ref().map(|i| i.branch.clone()).unwrap_or_default();
+            let worktree_branch = repo_info_here
+                .as_ref()
+                .map(|i| i.branch.clone())
+                .unwrap_or_default();
             // 分支名：worktree / 普通仓库都显示，跟项目名并排（淡色）。
             let branch_label = repo_info_here.as_ref().map(|i| i.branch.clone());
 
@@ -230,7 +253,10 @@ impl Workspace {
                     // 内嵌小圆角块跟会话行太像，这才是层级最强的信号（且不动字号）。
                     // 活动项目的色带亮一档：+Agent/+Term 就是新建到这个项目里，
                     // 得看得出是哪个。
-                    .bg(ui_theme::tint(0xffffff, if is_active_group { 0x1e } else { 0x12 }))
+                    .bg(ui_theme::tint(
+                        0xffffff,
+                        if is_active_group { 0x1e } else { 0x12 },
+                    ))
                     .border_b_1()
                     .border_color(rgb(ui_theme::border_dim()))
                     .cursor_pointer()
@@ -311,12 +337,14 @@ impl Workspace {
                                     let mut menu = menu
                                         .item(PopupMenuItem::label("终端 · agent 自带 TUI"))
                                         .item(
-                                        PopupMenuItem::new("新建终端")
-                                            .icon(IconName::SquareTerminal)
-                                            .on_click(move |_ev, _window, cx| {
-                                                let cwd = cwd_new.clone();
-                                                e_term.update(cx, |ws, cx| ws.add_session(cwd, cx));
-                                            }),
+                                            PopupMenuItem::new("新建终端")
+                                                .icon(IconName::SquareTerminal)
+                                                .on_click(move |_ev, _window, cx| {
+                                                    let cwd = cwd_new.clone();
+                                                    e_term.update(cx, |ws, cx| {
+                                                        ws.add_session(cwd, cx)
+                                                    });
+                                                }),
                                         );
                                     for entry in entries {
                                         let label = entry.label;
@@ -356,28 +384,36 @@ impl Workspace {
                                                 .on_click(move |_ev, window, cx| {
                                                     let cwd = cwd_acp.clone();
                                                     e_acp.update(cx, |ws, cx| {
-                                                        ws.add_acp_session(agent, None, cwd, window, cx)
+                                                        ws.add_acp_session(
+                                                            agent, None, None, cwd, window, cx,
+                                                        )
                                                     });
                                                 }),
                                         );
                                     }
                                     // 手动添加的 workspace profile（同一家 agent 的
                                     // 另一个数据目录）追加在后面，用自动拼好的命令。
-                                    let profiles = cx.global::<crate::settings::AgentUiConfig>().profiles.clone();
+                                    let profiles = cx
+                                        .global::<crate::settings::AgentUiConfig>()
+                                        .profiles
+                                        .clone();
                                     for p in profiles {
                                         let e_acp = e_menu.clone();
                                         let cwd_acp = cwd_opt.clone();
-                                        let cmd = p.command();
+                                        let launch = p.launch_spec();
+                                        let profile_id = Some(p.id.clone());
                                         menu = menu.item(
                                             PopupMenuItem::new(p.label.clone())
                                                 .icon(IconName::Bot)
                                                 .on_click(move |_ev, window, cx| {
                                                     let cwd = cwd_acp.clone();
-                                                    let cmd = cmd.clone();
+                                                    let launch = launch.clone();
+                                                    let profile_id = profile_id.clone();
                                                     e_acp.update(cx, |ws, cx| {
                                                         ws.add_acp_session(
                                                             p.kind(),
-                                                            Some(cmd),
+                                                            Some(launch),
+                                                            profile_id,
                                                             cwd,
                                                             window,
                                                             cx,
@@ -419,7 +455,11 @@ impl Workspace {
                             // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
                             // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
                             let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
-                            let pin_label = if pinned { "从文件树移除" } else { "加到文件树" };
+                            let pin_label = if pinned {
+                                "从文件树移除"
+                            } else {
+                                "加到文件树"
+                            };
                             menu.item(PopupMenuItem::new("复制项目路径").on_click(
                                 move |_ev, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
@@ -427,12 +467,16 @@ impl Workspace {
                                     ));
                                 },
                             ))
-                            .item(PopupMenuItem::new(pin_label).icon(IconName::Folder).on_click(
-                                move |_ev, _window, cx| {
-                                    let pin_path = pin_path.clone();
-                                    e_pin.update(cx, |ws, cx| ws.toggle_file_tree_root(pin_path, cx));
-                                },
-                            ))
+                            .item(
+                                PopupMenuItem::new(pin_label)
+                                    .icon(IconName::Folder)
+                                    .on_click(move |_ev, _window, cx| {
+                                        let pin_path = pin_path.clone();
+                                        e_pin.update(cx, |ws, cx| {
+                                            ws.toggle_file_tree_root(pin_path, cx)
+                                        });
+                                    }),
+                            )
                             .when(is_worktree_group, move |menu| {
                                 menu.separator().item(
                                     PopupMenuItem::new("删除 Worktree")
@@ -506,7 +550,11 @@ impl Workspace {
                 let type_dot: AnyElement = div()
                     .size(px(7.))
                     .rounded_full()
-                    .bg(rgb(if is_acp { ui_theme::purple() } else { ui_theme::green() }))
+                    .bg(rgb(if is_acp {
+                        ui_theme::purple()
+                    } else {
+                        ui_theme::green()
+                    }))
                     .into_any_element();
 
                 let dragging = cx.has_active_drag();
@@ -533,7 +581,13 @@ impl Workspace {
                         .h(px(5.))
                         .rounded(px(2.5))
                         .bg(rgb(ui_theme::blue()))
-                        .map(|d| if at_top { d.top(px(-3.)) } else { d.bottom(px(-3.)) })
+                        .map(|d| {
+                            if at_top {
+                                d.top(px(-3.))
+                            } else {
+                                d.bottom(px(-3.))
+                            }
+                        })
                         .with_animation(
                             anim_id,
                             Animation::new(std::time::Duration::from_millis(160))
@@ -611,13 +665,20 @@ impl Workspace {
                                     .w(px(14.))
                                     .h(px(18.))
                                     .cursor_grab()
-                                    .on_drag(SessionDrag { id: entity_id, title: drag_title }, {
-                                        let e_clear = e_drop.clone();
-                                        move |drag, _, _, cx| {
-                                            e_clear.update(cx, |ws, _| ws.sess_drop_hint = None);
-                                            cx.new(|_| drag.clone())
-                                        }
-                                    }),
+                                    .on_drag(
+                                        SessionDrag {
+                                            id: entity_id,
+                                            title: drag_title,
+                                        },
+                                        {
+                                            let e_clear = e_drop.clone();
+                                            move |drag, _, _, cx| {
+                                                e_clear
+                                                    .update(cx, |ws, _| ws.sess_drop_hint = None);
+                                                cx.new(|_| drag.clone())
+                                            }
+                                        },
+                                    ),
                             )
                             .children(can_close.then(|| {
                                 Button::new(("close-session", ix))
@@ -650,11 +711,13 @@ impl Workspace {
                                 });
                             },
                         ))
-                        .item(PopupMenuItem::new("重命名").on_click(move |_ev, window, cx| {
-                            e_rename.update(cx, |ws, cx| {
-                                ws.start_rename(RenameTarget::Session(ix), window, cx)
-                            });
-                        }))
+                        .item(
+                            PopupMenuItem::new("重命名").on_click(move |_ev, window, cx| {
+                                e_rename.update(cx, |ws, cx| {
+                                    ws.start_rename(RenameTarget::Session(ix), window, cx)
+                                });
+                            }),
+                        )
                     })
                     .when(dragging, |row| {
                         // 拖拽进行中才渲染整行 drop 接收层：上半段插到目标前、下半段插到后。
@@ -699,8 +762,12 @@ impl Workspace {
                                         }),
                                 ),
                         )
-                        .when(hint_before, |row| row.child(indicator(("sess-ind-b", ix), true)))
-                        .when(hint_after, |row| row.child(indicator(("sess-ind-a", ix), false)))
+                        .when(hint_before, |row| {
+                            row.child(indicator(("sess-ind-b", ix), true))
+                        })
+                        .when(hint_after, |row| {
+                            row.child(indicator(("sess-ind-a", ix), false))
+                        })
                     });
                 group_body = group_body.child(row);
 
@@ -769,14 +836,17 @@ impl Workspace {
                                             });
                                         },
                                     ))
-                                    .item(PopupMenuItem::new("重命名").on_click(
-                                        move |_ev, window, cx| {
-                                            let target = RenameTarget::Pane(rename_pane.clone());
-                                            e_rename.update(cx, |ws, cx| {
-                                                ws.start_rename(target, window, cx)
-                                            });
-                                        },
-                                    ))
+                                    .item(
+                                        PopupMenuItem::new("重命名").on_click(
+                                            move |_ev, window, cx| {
+                                                let target =
+                                                    RenameTarget::Pane(rename_pane.clone());
+                                                e_rename.update(cx, |ws, cx| {
+                                                    ws.start_rename(target, window, cx)
+                                                });
+                                            },
+                                        ),
+                                    )
                                 }),
                         );
                     }
