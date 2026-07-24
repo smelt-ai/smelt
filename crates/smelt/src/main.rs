@@ -2980,11 +2980,19 @@ impl Workspace {
     /// 的子进程，根本不经过 smeltd，不出现在 list 结果里，不用管）。跟 list
     /// 查回来的全量做差集，剩下的就是「守护持有但没有任何侧栏在追踪」的孤儿
     /// ——测试跑出来的、忘了关的临时会话，都会落在这一类。
+    /// 会话管理弹窗判断「孤儿」的依据：守护/smeltd 那边的会话 id 有没有被
+    /// 某个侧栏标签认领。终端会话看 `term_leaves`；ACP 会话现在也托管在
+    /// smeltd 里、用同一份 `list` 汇总（见 smeltd「ACP 会话托管」一节），
+    /// 不把它们的 id 也算进「已认领」，正常开着的 ACP 对话会被误标成孤儿。
     fn tracked_session_ids(&self, cx: &App) -> std::collections::HashSet<String> {
         self.sessions
             .iter()
             .flat_map(|s| s.term_leaves())
             .map(|t| t.read(cx).session_id().to_string())
+            .chain(self.sessions.iter().filter_map(|s| match &s.kind {
+                SessionKind::Acp(view) => Some(view.read(cx).session_id().to_string()),
+                _ => None,
+            }))
             .collect()
     }
 
@@ -3008,13 +3016,25 @@ impl Workspace {
         .detach();
     }
 
-    /// 关掉守护进程里的一个会话（真杀底层 shell），关完刷新列表。
+    /// 按 id 前缀分流到对应的 kill op——ACP 会话（`acp-` 前缀）只在
+    /// `AcpSessions` 表里，终端的 `kill` op 认不出这个 id，会静默什么都不做
+    /// 却照样回 `{"ok":true}`（真实教训：两条表分开存，用错 op 表面上「成功」
+    /// 实际上会话根本没被杀掉，圈了个大坑）。
+    fn kill_daemon_session(id: &str) {
+        if id.starts_with("acp-") {
+            smelt_core::acp_client::kill_acp_session(id);
+        } else {
+            terminal::kill_remote(id);
+        }
+    }
+
+    /// 关掉守护进程里的一个会话（真杀底层 shell / ACP 子进程），关完刷新列表。
     fn kill_session_in_manager(&mut self, id: String, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .spawn({
                     let id = id.clone();
-                    async move { terminal::kill_remote(&id) }
+                    async move { Self::kill_daemon_session(&id) }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| this.refresh_session_manager(cx));
@@ -3036,7 +3056,7 @@ impl Workspace {
             cx.background_executor()
                 .spawn(async move {
                     for id in &orphan_ids {
-                        terminal::kill_remote(id);
+                        Self::kill_daemon_session(id);
                     }
                 })
                 .await;
@@ -3066,6 +3086,7 @@ impl Workspace {
                     v_flex().id("session-manager-list").gap_1().max_h(px(360.)).overflow_y_scroll();
                 for s in list {
                     let is_orphan = !tracked.contains(&s.id);
+                    let is_acp = s.id.starts_with("acp-");
                     let label = s
                         .cwd
                         .clone()
@@ -3088,6 +3109,13 @@ impl Workspace {
                                     } else {
                                         rgb(ui_theme::green())
                                     }))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .flex_shrink_0()
+                                            .text_color(muted)
+                                            .child(if is_acp { "对话" } else { "终端" }),
+                                    )
                                     .child(
                                         div()
                                             .text_sm()
