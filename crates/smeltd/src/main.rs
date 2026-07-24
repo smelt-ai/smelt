@@ -1175,9 +1175,13 @@ fn main() {
     // subscribe 连接是网络层面的东西，跟 out.client/watchers 一样没必要假装还在。
     // 建在 resume_handoff 之前：交接恢复的会话也需要一份 Subscribers 去广播状态。
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
-    let (listener, sessions) = match handoff.and_then(|p| resume_handoff(&p, &subscribers)) {
+    let (listener, sessions, acp_sessions) = match handoff.and_then(|p| resume_handoff(&p, &subscribers)) {
         Some(x) => {
-            dlog(&format!("upgrade: 交接完成，恢复 {} 个会话", x.1.lock().map(|s| s.len()).unwrap_or(0)));
+            let acp_n = x.2.lock().map(|s| s.len()).unwrap_or(0);
+            dlog(&format!(
+                "upgrade: 交接完成，恢复 {} 个终端会话 + {acp_n} 个 ACP 会话",
+                x.1.lock().map(|s| s.len()).unwrap_or(0)
+            ));
             x
         }
         None => {
@@ -1213,7 +1217,7 @@ fn main() {
                 &path,
                 std::os::unix::fs::PermissionsExt::from_mode(0o600),
             );
-            (listener, Arc::new(Mutex::new(HashMap::new())))
+            (listener, Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new())))
         }
     };
 
@@ -1223,9 +1227,8 @@ fn main() {
     // 见 RemoteGateway / Tunnel 定义处注释。
     let remote_state: RemoteState = Arc::new(Mutex::new(None));
     let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
-    // ACP 会话托管表：同样不参与无缝升级交接（见「ACP 会话托管」一节文件头
-    // 注释），每次进程启动都是全新的空表。
-    let acp_sessions: AcpSessions = Arc::new(Mutex::new(HashMap::new()));
+    // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
+    // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
     register_lifecycle(Arc::clone(&remote_state), Arc::clone(&tunnel_state));
 
@@ -1288,7 +1291,10 @@ fn handoff_path() -> std::path::PathBuf {
 /// 从交接文件恢复：认领监听 socket 和各会话的 PTY master fd，重建会话表 + 泵线程。
 /// 任何全局性错误（文件读不到/解析失败/监听 fd 无效）返回 None 走全新启动——会话
 /// 保不住但守护必须活着；单个会话的 fd 坏了只跳过那一个。
-fn resume_handoff(path: &str, subscribers: &Subscribers) -> Option<(UnixListener, Sessions)> {
+fn resume_handoff(
+    path: &str,
+    subscribers: &Subscribers,
+) -> Option<(UnixListener, Sessions, AcpSessions)> {
     let data = std::fs::read_to_string(path).ok()?;
     let _ = std::fs::remove_file(path); // 读到手就删，避免残留被下次启动误认
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
@@ -1394,7 +1400,94 @@ fn resume_handoff(path: &str, subscribers: &Subscribers) -> Option<(UnixListener
         sessions.lock().unwrap().insert(id.to_string(), Arc::clone(&sess));
         start_pty_pump(sess, Box::new(reader), id.to_string(), Arc::clone(&sessions));
     }
-    Some((listener, sessions))
+
+    // ACP 会话：fd 裸传跟终端同一招，多一步"回放 pending_raw_line 再接上
+    // 实时字节"（见 acp_conn::resume_acp_from_fds），把交接过来的快照数据
+    // 重建成活体状态。
+    let acp_sessions: AcpSessions = Arc::new(Mutex::new(HashMap::new()));
+    for item in v["acp_sessions"].as_array().map(|a| a.as_slice()).unwrap_or_default() {
+        let Some(id) = item["id"].as_str() else { continue };
+        let stdin_fd = item["stdin_fd"].as_i64().unwrap_or(-1) as RawFd;
+        let stdout_fd = item["stdout_fd"].as_i64().unwrap_or(-1) as RawFd;
+        let pid = item["pid"].as_i64().unwrap_or(0) as i32;
+        if stdin_fd < 0
+            || stdout_fd < 0
+            || unsafe { libc::fcntl(stdin_fd, libc::F_GETFD) } < 0
+            || unsafe { libc::fcntl(stdout_fd, libc::F_GETFD) } < 0
+        {
+            continue; // fd 缺失/已失效，没有可恢复的东西
+        }
+        if pid <= 0 {
+            // pid 坏了没法在需要时 kill 这个孤儿 agent；关掉两个 fd（agent 读到
+            // stdin EOF 大概率自己退出，同终端那边同款兜底思路）。
+            unsafe {
+                libc::close(stdin_fd);
+                libc::close(stdout_fd);
+            }
+            continue;
+        }
+        let Some(snapshot_v) = item.get("snapshot") else { continue };
+        let Ok(snapshot) =
+            serde_json::from_value::<smelt_core::acp_session::AcpSnapshot>(snapshot_v.clone())
+        else {
+            continue;
+        };
+        let Some(acp_session_id) = snapshot.acp_session_id.clone() else {
+            // 没有 agent 侧 session id 就没法直接 attach_session——理论上不该
+            // 发生（能撑到升级这一刻的会话早就握手成功过一次）。防御性地跟
+            // pid 坏了同样处理：关 fd + 杀子进程，不留孤儿。
+            unsafe {
+                libc::close(stdin_fd);
+                libc::close(stdout_fd);
+                libc::kill(pid, libc::SIGKILL);
+            }
+            continue;
+        };
+        set_cloexec(stdin_fd, true);
+        set_cloexec(stdout_fd, true);
+
+        let cwd = item["cwd"].as_str().map(String::from);
+        let cmd = item["cmd"].as_str().unwrap_or_default().to_string();
+        let agent_needs_transcript_check =
+            item["agent_needs_transcript_check"].as_bool().unwrap_or(false);
+        let pending_raw_line = item["pending_raw_line"].as_str().map(String::from);
+        let supports_image = snapshot.supports_image;
+        let reduced = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
+
+        let state = Arc::new(Mutex::new(SessionState {
+            id: id.to_string(),
+            cwd: cwd.clone(),
+            launch: Some(cmd),
+            ..Default::default()
+        }));
+        let sess = Arc::new(AcpSession {
+            reduced: Mutex::new(reduced),
+            handle: Mutex::new(None),
+            cwd,
+            agent_needs_transcript_check,
+            state,
+            out: Mutex::new(AcpOut { client: None, watchers: Vec::new() }),
+        });
+
+        let handle = smelt_core::acp_conn::resume_acp_from_fds(
+            id.to_string(),
+            stdin_fd,
+            stdout_fd,
+            pid,
+            acp_session_id,
+            supports_image,
+            pending_raw_line,
+        );
+        let event_rx = handle.event_rx.clone();
+        *sess.handle.lock().unwrap() = Some(handle);
+        acp_sessions.lock().unwrap().insert(id.to_string(), Arc::clone(&sess));
+        // 落地就有一份现成快照，不用等下一次协议事件才让 subscribe 订阅者
+        // 看到这条会话——跟终端那边"resume 完成靠后续 PTY 输出自然触发广播"
+        // 不同，ACP 没有"泵线程闲着也吐字节"这回事。
+        update_acp_daemon_state(&sess, subscribers);
+        start_acp_event_drain(sess, event_rx, subscribers.clone());
+    }
+    Some((listener, sessions, acp_sessions))
 }
 
 /// 把字节喂进常驻 Term；panic 时吞掉，避免畸形序列拖死整个守护。
@@ -1577,7 +1670,7 @@ mod resume_handoff_tests {
         });
         std::fs::write(&p, handoff.to_string()).unwrap();
 
-        let (_listener, sessions) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        let (_listener, sessions, _acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
         let sess = sessions.lock().unwrap().get("s1").cloned().expect("会话 s1 应存在");
         let text = term_text_of(&sess);
 
@@ -1610,7 +1703,7 @@ mod resume_handoff_tests {
         });
         std::fs::write(&p, handoff.to_string()).unwrap();
 
-        let (_l, sessions) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        let (_l, sessions, _acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
         let sess = sessions.lock().unwrap().get("s1").cloned().unwrap();
         let text = term_text_of(&sess);
         assert!(
@@ -1637,7 +1730,7 @@ mod resume_handoff_tests {
         });
         std::fs::write(&p, handoff.to_string()).unwrap();
 
-        let (_l, sessions) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        let (_l, sessions, _acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
         let map = sessions.lock().unwrap();
         assert!(!map.contains_key("dead"), "fd 失效的会话应被跳过");
         assert!(map.contains_key("good"), "其余会话必须照常恢复，不能被坏的那个拖垮");
@@ -1660,7 +1753,7 @@ mod resume_handoff_tests {
         });
         std::fs::write(&p, handoff.to_string()).unwrap();
 
-        let (_l, sessions) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        let (_l, sessions, _acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
         let sess = sessions.lock().unwrap().get("s1").cloned().unwrap();
         let term = sess.term.lock().unwrap();
         assert!(
@@ -1685,9 +1778,162 @@ mod resume_handoff_tests {
         });
         std::fs::write(&p, handoff.to_string()).unwrap();
 
-        let (_l, sessions) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        let (_l, sessions, _acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
         let sess = sessions.lock().unwrap().get("s1").cloned().unwrap();
         assert!(sess.ctl.lock().unwrap().jolt, "恢复的会话必须挂 jolt");
+    }
+
+    /// 造一对能被 resume_handoff 接管的假 stdin/stdout fd（管道即可，不需要
+    /// 真的能跑 JSON-RPC——resume_acp_from_fds 只是起个线程去读它，本测试不
+    /// 关心那条线程后续读到什么，只关心 resume_handoff 这一步的解析/建表
+    /// 逻辑对不对）。返回 (stdin_fd, stdout_fd, 两端读写口保管者, pid)。
+    fn make_fake_acp_stdio() -> (RawFd, RawFd, (std::fs::File, std::fs::File), i32) {
+        let mut in_fds = [0i32; 2];
+        let mut out_fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(in_fds.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(out_fds.as_mut_ptr()) }, 0);
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        drop(child); // 留成 zombie，交给 resume_acp_from_fds 内部的 KillProcessGroupOnDrop 收尾
+        // 写端/读端各自保管一份，避免管道另一头因为「没人拿着」直接 EOF。
+        let stdin_fd = in_fds[1]; // 交给 resume_handoff 接管（当作"守护写向 agent"）
+        let stdout_fd = out_fds[0]; // 交给 resume_handoff 接管（当作"从 agent 读"）
+        let keep_alive = unsafe {
+            (std::fs::File::from_raw_fd(in_fds[0]), std::fs::File::from_raw_fd(out_fds[1]))
+        };
+        (stdin_fd, stdout_fd, keep_alive, pid)
+    }
+
+    fn sample_snapshot(acp_session_id: &str) -> smelt_core::acp_session::AcpSnapshot {
+        smelt_core::acp_session::AcpSessionState::placeholder(
+            vec![smelt_core::acp_chat::AcpEntry::User("hi".into())],
+            Some(acp_session_id.to_string()),
+            String::new(),
+        )
+        .to_snapshot(false)
+    }
+
+    #[test]
+    fn acp_session_with_valid_fds_and_session_id_is_recovered() {
+        let p = tmp_handoff("acp-ok");
+        let listen_fd = make_listen_fd("acp-ok");
+        let (stdin_fd, stdout_fd, _keep_alive, pid) = make_fake_acp_stdio();
+
+        let handoff = serde_json::json!({
+            "listen_fd": listen_fd,
+            "sessions": [],
+            "acp_sessions": [{
+                "id": "acp-1",
+                "stdin_fd": stdin_fd,
+                "stdout_fd": stdout_fd,
+                "pid": pid,
+                "cwd": "/tmp/proj",
+                "cmd": "claude --dangerously-skip-permissions",
+                "agent_needs_transcript_check": true,
+                "snapshot": sample_snapshot("sid-1"),
+                "pending_raw_line": null,
+            }],
+        });
+        std::fs::write(&p, handoff.to_string()).unwrap();
+
+        let (_l, _sessions, acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        let sess = acp.lock().unwrap().get("acp-1").cloned().expect("acp-1 应被恢复");
+        assert_eq!(sess.cwd.as_deref(), Some("/tmp/proj"));
+        assert!(sess.agent_needs_transcript_check);
+        assert!(sess.handle.lock().unwrap().is_some(), "应该已经起了 resume 连接");
+        let reduced = sess.reduced.lock().unwrap();
+        assert_eq!(reduced.entries.len(), 1);
+        assert_eq!(reduced.acp_session_id.as_deref(), Some("sid-1"));
+    }
+
+    /// 没有 agent 侧 session id 就没法 attach_session——理论上不该发生，但
+    /// 交接文件是外部数据，得防御性地跳过而不是 panic 或者留一条永远连不上
+    /// 的死会话。
+    #[test]
+    fn acp_session_without_session_id_is_skipped() {
+        let p = tmp_handoff("acp-no-sid");
+        let listen_fd = make_listen_fd("acp-no-sid");
+        let (stdin_fd, stdout_fd, _keep_alive, pid) = make_fake_acp_stdio();
+
+        let mut snapshot = sample_snapshot("whatever");
+        snapshot.acp_session_id = None;
+        let handoff = serde_json::json!({
+            "listen_fd": listen_fd,
+            "sessions": [],
+            "acp_sessions": [{
+                "id": "acp-2",
+                "stdin_fd": stdin_fd,
+                "stdout_fd": stdout_fd,
+                "pid": pid,
+                "cwd": null,
+                "cmd": "claude",
+                "agent_needs_transcript_check": true,
+                "snapshot": snapshot,
+                "pending_raw_line": null,
+            }],
+        });
+        std::fs::write(&p, handoff.to_string()).unwrap();
+
+        let (_l, _sessions, acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        assert!(acp.lock().unwrap().get("acp-2").is_none());
+    }
+
+    /// fd 号本身失效（exec 前忘了清 CLOEXEC 之类）：必须跳过，不能把野 fd
+    /// 当成活的 stdin/stdout 去用。
+    #[test]
+    fn acp_session_with_invalid_fd_is_skipped() {
+        let p = tmp_handoff("acp-bad-fd");
+        let listen_fd = make_listen_fd("acp-bad-fd");
+
+        let handoff = serde_json::json!({
+            "listen_fd": listen_fd,
+            "sessions": [],
+            "acp_sessions": [{
+                "id": "acp-3",
+                "stdin_fd": NEVER_VALID_FD,
+                "stdout_fd": NEVER_VALID_FD,
+                "pid": 1,
+                "cwd": null,
+                "cmd": "claude",
+                "agent_needs_transcript_check": true,
+                "snapshot": sample_snapshot("sid-3"),
+                "pending_raw_line": null,
+            }],
+        });
+        std::fs::write(&p, handoff.to_string()).unwrap();
+
+        let (_l, _sessions, acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        assert!(acp.lock().unwrap().get("acp-3").is_none());
+    }
+
+    /// 正卡着一张审批卡片时，pending_raw_line 应该原样透传进 resume_handoff
+    /// （具体会不会被正确回放是 acp_conn::resume_acp_from_fds 的职责，这里
+    /// 只验证 resume_handoff 这一层没有把它弄丢/挡在门外）。
+    #[test]
+    fn acp_session_with_pending_raw_line_still_recovers() {
+        let p = tmp_handoff("acp-pending");
+        let listen_fd = make_listen_fd("acp-pending");
+        let (stdin_fd, stdout_fd, _keep_alive, pid) = make_fake_acp_stdio();
+
+        let handoff = serde_json::json!({
+            "listen_fd": listen_fd,
+            "sessions": [],
+            "acp_sessions": [{
+                "id": "acp-4",
+                "stdin_fd": stdin_fd,
+                "stdout_fd": stdout_fd,
+                "pid": pid,
+                "cwd": null,
+                "cmd": "claude",
+                "agent_needs_transcript_check": true,
+                "snapshot": sample_snapshot("sid-4"),
+                "pending_raw_line": r#"{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{}}"#,
+            }],
+        });
+        std::fs::write(&p, handoff.to_string()).unwrap();
+
+        let (_l, _sessions, acp) = resume_handoff(&p, &no_subs()).expect("应能恢复");
+        assert!(acp.lock().unwrap().get("acp-4").is_some());
     }
 }
 
@@ -2818,10 +3064,15 @@ fn handle_subscribe(
 // 断开 acp_open 连接（切标签/关标签/App 退出）只摘连接，不杀会话——这正是
 // 这层要解决的问题（GUI 退出不该带走 ACP 对话）。真要杀走 acp_kill。
 //
-// 已知局限：ACP 会话不参与「无缝升级」的交接（跟 PTY master fd 能裸传不同，
-// agent 子进程另一头是一条已经完成握手的 JSON-RPC 连接，没法把这套协议状态
-// 塞进 exec() 幸存下来），`handle_upgrade` 升级前会主动关掉所有 ACP 会话，
-// 不静默留孤儿子进程。
+// 「无缝升级」交接：agent 子进程的 stdin/stdout fd 跟 PTY master fd 同一招
+// 裸传过 exec()，快照数据（entries/phase/model 等）随交接文件走。真正的
+// 难点不在 fd 本身（管道 fd 天然能存活 exec()），而在 JSON-RPC 是有状态协议
+// ——升级那一刻如果正卡着一张权限/选择题卡片，那个请求的 Rust responder
+// 对象没法序列化过 exec()。解法：`smelt_core::acp_conn` 的 `with_debug`
+// 捕获每条请求的原始 JSON-RPC 行文本一起交接，新进程接上继承来的 fd 后先
+// 把这行「回放」一遍，让 SDK 重新解析出绑定同一个原始请求 id 的等价
+// responder，见 `resume_acp_from_fds`。没连上/已经 Ended 的会话没有 fd 可
+// 传，交接不了的会在升级前主动关掉，不静默留孤儿子进程。
 
 struct AcpOut {
     client: Option<UnixStream>,
@@ -3231,16 +3482,52 @@ fn handle_upgrade(
         }
     };
 
-    // ACP 会话没法参与下面这套 fd 裸传的交接（见「ACP 会话托管」一节文件头
-    // 注释：另一头是已经握手完成的 JSON-RPC 连接，没法在 exec() 里幸存），
-    // 升级前主动关掉，不静默留孤儿子进程——退化成跟「重启守护」一样的代价，
-    // 但至少子进程干净收尾，不是被 exec 悄悄丢弃。
-    let acp_ids: Vec<String> = acp_sessions.lock().unwrap().keys().cloned().collect();
-    for id in acp_ids {
-        if let Some(s) = acp_sessions.lock().unwrap().remove(&id) {
-            if let Some(h) = s.handle.lock().unwrap().take() {
-                let _ = h.cmd_tx.try_send(smelt_core::acp_conn::AcpCommand::Shutdown);
-            }
+    // ACP 会话的 fd 裸传：跟 PTY master fd 同一招（dup + 清 CLOEXEC 活过
+    // exec()），另外还带上快照数据（entries/phase/model 等，纯数据，序列化
+    // 没有问题）和"如果正卡着一张审批/选择题卡片，那条原始请求的原文"——
+    // 新进程接上继承来的 fd 后，见 resume_acp_from_fds，先回放这行原文再
+    // 接实时字节，SDK 会重新解析出一个绑定同一个原始请求 id 的等价
+    // responder，不会丢这张卡，见 acp_conn.rs 里那条注释。
+    //
+    // 只有还活着（有 handle 且已经拿到 pid/fd——刚发起 spawn、还没跑到那一步
+    // 的极窄窗口除外）的会话才能参与；已经 Ended 的没有 fd 可传，交接后就是
+    // "这个 id 在新进程里不存在了"，GUI 侧本来就有 AcpSaved 兜底（按
+    // resume_session_id 重新走 session/load），不算回归。
+    let acp_session_list: Vec<(String, Arc<AcpSession>)> =
+        acp_sessions.lock().unwrap().iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
+    let mut acp_items = Vec::new();
+    let mut acp_fds = Vec::new();
+    for (id, sess) in &acp_session_list {
+        let stdio = sess.handle.lock().unwrap().as_ref().and_then(|h| *h.stdio.lock().unwrap());
+        let Some(stdio) = stdio else { continue }; // Ended，或还没连上——交接不了，留给 GUI 侧兜底
+        let cmd = sess.state.lock().unwrap().launch.clone().unwrap_or_default();
+        let (snapshot, pending_raw_line) = {
+            let reduced = sess.reduced.lock().unwrap();
+            (reduced.to_snapshot(false), reduced.pending_raw_request_line().map(str::to_string))
+        };
+        acp_items.push(serde_json::json!({
+            "id": id,
+            "stdin_fd": stdio.stdin_fd,
+            "stdout_fd": stdio.stdout_fd,
+            "pid": stdio.pid,
+            "cwd": sess.cwd,
+            "cmd": cmd,
+            "agent_needs_transcript_check": sess.agent_needs_transcript_check,
+            "snapshot": snapshot,
+            "pending_raw_line": pending_raw_line,
+        }));
+        acp_fds.push(stdio.stdin_fd);
+        acp_fds.push(stdio.stdout_fd);
+    }
+    // 交接不了的（没连上/已经 Ended）主动关掉，不留孤儿。
+    let handed_off_ids: std::collections::HashSet<&str> =
+        acp_items.iter().filter_map(|v| v["id"].as_str()).collect();
+    for (id, sess) in &acp_session_list {
+        if handed_off_ids.contains(id.as_str()) {
+            continue;
+        }
+        if let Some(h) = sess.handle.lock().unwrap().take() {
+            let _ = h.cmd_tx.try_send(smelt_core::acp_conn::AcpCommand::Shutdown);
         }
     }
 
@@ -3255,6 +3542,7 @@ fn handle_upgrade(
     let mut out_guards = Vec::new(); // 持有到 exec，挡住泵线程
     let mut items = Vec::new();
     let mut fds = vec![listen_fd];
+    fds.extend(&acp_fds);
     for (id, sess) in &session_list {
         // 锁序 term → out，与泵线程一致，避免死锁。
         let ctl = sess.ctl.lock().unwrap();
@@ -3287,8 +3575,12 @@ fn handle_upgrade(
     for &fd in &fds {
         set_cloexec(fd, false);
     }
-    let payload =
-        serde_json::json!({ "listen_fd": listen_fd, "sessions": items }).to_string();
+    let payload = serde_json::json!({
+        "listen_fd": listen_fd,
+        "sessions": items,
+        "acp_sessions": acp_items,
+    })
+    .to_string();
     let hp = handoff_path();
     if std::fs::write(&hp, payload).is_err() {
         for &fd in &fds {
