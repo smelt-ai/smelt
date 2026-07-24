@@ -61,6 +61,7 @@ pub struct AcpLaunch {
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
+#[derive(Debug)]
 pub struct PromptImage {
     /// `image/png` 这类 MIME。
     pub mime: String,
@@ -151,8 +152,10 @@ pub enum ReadyKind {
     ResumedKeepHistory,
 }
 
-/// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。
-#[derive(Clone, PartialEq)]
+/// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。全是纯 String/Vec
+/// 字段，没有 agent_client_protocol 的 schema 类型，直接可以序列化进
+/// acp_session 的 wire 快照，不用另造一份 View 类型。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelState {
     /// 当前模型的人类可读名（`Claude Sonnet 4.5`）。
     pub current_name: String,
@@ -891,6 +894,62 @@ pub fn content_text(content: &ContentBlock) -> String {
         ContentBlock::Resource(_) => "[内嵌资源]".to_string(),
         _ => "[未知内容]".to_string(), // schema #[non_exhaustive]，协议会长新枝
     }
+}
+
+/// agent_client_protocol 的协议类型 → `acp_chat` 共享模型类型。原来住在
+/// acp_view.rs（GUI 层），跟着 `apply_event` 归约逻辑一起搬进 acp_session——
+/// 谁跑归约谁就要做这层翻译，现在是 smeltd 不是 GUI。
+pub fn tool_kind_from_acp(k: agent_client_protocol::schema::v1::ToolKind) -> crate::acp_chat::ToolKind {
+    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    use crate::acp_chat::ToolKind;
+    match k {
+        Acp::Read => ToolKind::Read,
+        Acp::Edit => ToolKind::Edit,
+        Acp::Delete => ToolKind::Delete,
+        Acp::Move => ToolKind::Move,
+        Acp::Search => ToolKind::Search,
+        Acp::Execute => ToolKind::Execute,
+        Acp::Think => ToolKind::Think,
+        Acp::Fetch => ToolKind::Fetch,
+        Acp::SwitchMode => ToolKind::SwitchMode,
+        _ => ToolKind::Other, // #[non_exhaustive]：协议以后加的新分类先归到这
+    }
+}
+
+pub fn tool_status_from_acp(
+    s: agent_client_protocol::schema::v1::ToolCallStatus,
+) -> crate::acp_chat::ToolCallStatus {
+    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
+    use crate::acp_chat::ToolCallStatus;
+    match s {
+        Acp::Pending => ToolCallStatus::Pending,
+        Acp::InProgress => ToolCallStatus::InProgress,
+        Acp::Completed => ToolCallStatus::Completed,
+        Acp::Failed => ToolCallStatus::Failed,
+        _ => ToolCallStatus::Pending, // #[non_exhaustive]：协议以后加的新状态先当待定
+    }
+}
+
+pub fn tool_content_parts(
+    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+) -> Vec<crate::acp_chat::ToolOutputPart> {
+    use agent_client_protocol::schema::v1::ToolCallContent;
+    use crate::acp_chat::ToolOutputPart;
+    content
+        .iter()
+        .filter_map(|c| match c {
+            ToolCallContent::Content(inner) => {
+                let text = content_text(&inner.content);
+                (!text.trim().is_empty()).then(|| ToolOutputPart::Text(text))
+            }
+            ToolCallContent::Diff(d) => Some(ToolOutputPart::Diff {
+                path: d.path.display().to_string(),
+                old_text: d.old_text.clone(),
+                new_text: d.new_text.clone(),
+            }),
+            _ => None, // Terminal 等 MVP 不渲染
+        })
+        .collect()
 }
 
 /// —— 受管 bun 运行时（Zed 式按需下载）——————————————————————————

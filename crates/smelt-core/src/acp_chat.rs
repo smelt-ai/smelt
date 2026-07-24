@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 消息流里的一条。落盘持久化，进程重启/会话「重新开始」都要保住历史。
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AcpEntry {
     User(String),
     /// assistant 正文或思考块（thought 弱化显示）；连续 chunk 就地追加。
@@ -28,7 +28,7 @@ pub enum AcpEntry {
 }
 
 /// 工具调用的一段输出：纯文本，或者一份文件 diff。
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ToolOutputPart {
     Text(String),
     Diff {

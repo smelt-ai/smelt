@@ -7297,6 +7297,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "axum",
+ "chrono",
  "dirs 5.0.1",
  "rust-embed",
  "serde",
