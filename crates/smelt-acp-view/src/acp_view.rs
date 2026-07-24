@@ -138,7 +138,7 @@ impl AcpView {
         cmd: String,
         cwd: Option<String>,
     ) -> Self {
-        let mut this = Self::placeholder(cx, agent, cmd, cwd, String::new(), Vec::new(), None);
+        let mut this = Self::placeholder(cx, agent, cmd, cwd, String::new(), Vec::new(), None, None);
         this.phase = AcpPhase::Starting;
         this.starting_since = Some(std::time::Instant::now());
         this.init_input(window, cx);
@@ -157,6 +157,16 @@ impl AcpView {
     /// `entries` 是上次落盘的历史消息（`Vec::new()` = 首次创建，还没有历史）；
     /// `resume_session_id` 是上次握手成功后 agent 分配的 session id，有它才有
     /// 机会在「重新开始」时真续接。
+    ///
+    /// `saved_sid`：**这是让 GUI 重开后能真正"接上还活着的 smeltd 会话"而不是
+    /// 每次都当新会话重新 spawn 子进程的关键**——smeltd 用 id 判断"这是不是同
+    /// 一个会话"，`Some(id)` 时沿用上次持久化的 id（GUI 冷启动恢复走这条，
+    /// `main.rs` 的 `AcpSaved.sid`），id 对上了 smeltd 那边只要还没退出/没被
+    /// kill，`restart()` 发起的 `acp_open` 就是一次廉价 attach，不是重新 spawn
+    /// 子进程。`None` 生成一个全新 id——「从历史会话页继续」和真正的新会话都
+    /// 走这条：前者本质是"起一条新的 smeltd 托管连接，靠 `resume_id` 对 agent
+    /// 自己的持久化做 session/load"，不是"接上 smeltd 里已经在跑的那个会话"，
+    /// 没有理由假装是同一个 id。
     pub fn placeholder(
         cx: &mut Context<Self>,
         agent: AcpAgentKind,
@@ -165,13 +175,14 @@ impl AcpView {
         reason: String,
         entries: Vec<AcpEntry>,
         resume_session_id: Option<SessionId>,
+        saved_sid: Option<String>,
     ) -> Self {
         // 有旧 session id 的冷恢复占位才值得自动续接（没有 id 只能开全新会话，
         // 丢 agent 侧上下文，留给用户手动决定）。先算，下面 struct 初始化会 move。
         let auto_resume_pending = resume_session_id.is_some();
         Self {
             auto_resume_pending,
-            sid: format!("acp-{}", uuid::Uuid::new_v4()),
+            sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
             entries,
             permission: None,
@@ -336,8 +347,9 @@ impl AcpView {
         .detach();
     }
 
-    /// 全局状态表 / 持久化（Step 8）/ 远程透出（P2）都以它为 key。
-    #[allow(dead_code)]
+    /// smeltd 托管用的会话 id，也是持久化存档（`AcpSaved.sid`）的 key——
+    /// GUI 重开后拿它原样传回 `placeholder` 的 `saved_sid`，才能接上 smeltd
+    /// 里还活着的同一个会话，而不是每次都当新会话处理。
     pub fn session_id(&self) -> &str {
         &self.sid
     }

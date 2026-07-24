@@ -860,6 +860,14 @@ struct AcpSaved {
     entries: Vec<acp_view::AcpEntry>,
     #[serde(default)]
     resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
+    /// → None，恢复时退化成生成一个新 id——意味着即便 smeltd 里那个会话还
+    /// 活着，GUI 重开后也接不上、只能按 resume_session_id 重新 spawn 一次
+    /// （旧版反正每次都是重新 spawn，行为不会比以前差，只是错过了"廉价
+    /// attach"这个新能力）。有这个字段才能真正让 GUI 重开秒接上 smeltd 里
+    /// 还在跑的会话，见 `acp_view::AcpView::placeholder` 的 `saved_sid` 参数。
+    #[serde(default)]
+    sid: Option<String>,
 }
 
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点。
@@ -1692,6 +1700,7 @@ impl Workspace {
                     reason.to_string(),
                     saved.entries,
                     saved.resume_session_id,
+                    saved.sid,
                 )
             });
             let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
@@ -2104,6 +2113,10 @@ impl Workspace {
                         "正在续接历史会话…".to_string(),
                         entries,
                         Some(agent_client_protocol::schema::v1::SessionId::new(resume_id)),
+                        // 新起一条 smeltd 托管连接（靠 resume_id 对 agent 自己的
+                        // 持久化做 session/load），不是接上 smeltd 里已经在跑的
+                        // 某个会话，没有旧 id 可沿用，生成一个新的。
+                        None,
                     )
                 });
                 let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
@@ -2304,6 +2317,7 @@ impl Workspace {
                             agent: Some(v.agent_kind().id().to_string()),
                             entries: v.entries_for_save(),
                             resume_session_id: v.resume_session_id_for_save(),
+                            sid: Some(v.session_id().to_string()),
                         }),
                     }
                 }
