@@ -37,7 +37,6 @@ use gpui_component::ActiveTheme;
 use gpui_component::text::{MarkdownNode, MarkdownParseContext, TextView, markdown_ast};
 use sha2::{Digest, Sha256};
 
-use crate::terminal_view;
 
 /// `~/.smelt/mermaid_cache/`——照抄 `tasks_dir()`/`worktrees_root()` 的模式：
 /// `Option<PathBuf>` + 用时自己 `create_dir_all`，不在这里建目录。
@@ -247,7 +246,7 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
             )
             .child(
                 div()
-                    .font_family(terminal_view::font_family())
+                    .font_family(smelt_core::font_config::font_family())
                     .text_color(cx.theme().foreground)
                     .child(data.source.to_string()),
             )

@@ -12,9 +12,9 @@ use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use smol::Timer;
 
-use crate::NewTask;
 use crate::tasks::NewTaskPrefill;
 use crate::terminal::{self, Terminal};
+use crate::NewTask;
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
@@ -35,33 +35,9 @@ fn link_fg() -> u32 {
     }
 }
 
-/// 出厂默认终端字体：Nerd Font 的严格等宽变体（含图标/powerline 字形，且单格宽对齐）。
-pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
-
-/// 用户配置的终端字体族（设置页可改，持久化在 Appearance；跟 FONT_PX_ATOM 同一路数：
-/// 单进程一套配置，全局量足够）。None/空 = 用出厂默认。
-static FONT_FAMILY_CONF: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-/// 设置终端字体族（空白等同恢复默认）。
-pub fn set_font_family(name: &str) {
-    let name = name.trim();
-    if let Ok(mut g) = FONT_FAMILY_CONF.write() {
-        *g = if name.is_empty() {
-            None
-        } else {
-            Some(name.to_string())
-        };
-    }
-}
-
-/// 当前终端字体族。
-pub fn font_family() -> String {
-    FONT_FAMILY_CONF
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
-}
+// 终端字体族配置：搬进 smelt-core（跟 markdown_mermaid 的代码块渲染共用同一份，
+// 见 font_config.rs），这里重导出成原来的裸名字。
+pub(crate) use smelt_core::font_config::{font_family, set_font_family, DEFAULT_FONT_FAMILY};
 
 /// 兜底等宽字体：macOS 系统自带，必定存在。放在 fallback 链末尾做最后防线，
 /// 保证 cell_w 与实际字形宽度同源——否则测量和渲染各自 fallback 到不同字体，
@@ -274,7 +250,7 @@ fn classify_attention(msg: &str) -> AttentionKind {
 // 权限菜单解析已抽到 smelt_core::permission_menu（唯一真源，GUI 与 smeltd 共用）。
 // 这里只 use 自己要用的；消费者（main.rs 等）直接从 permission_menu 取类型，不经这里
 // 转发——转发一层就等于多一个「看起来像定义处」的地方。
-use crate::permission_menu::{PermissionPrompt, parse_permission_prompt};
+use crate::permission_menu::{parse_permission_prompt, PermissionPrompt};
 
 /// 同一终端同文本的系统通知最小间隔。
 const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
@@ -1009,8 +985,8 @@ impl Render for TerminalView {
                 font_px() * CELL_W_RATIO
             };
             self.cell_w = cell_w; // 供鼠标坐标换算
-            // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
-            // 等 canvas 量到真实尺寸再调（避免 w=0 把终端缩成最小 4 列）。
+                                  // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
+                                  // 等 canvas 量到真实尺寸再调（避免 w=0 把终端缩成最小 4 列）。
             if w > 1.0 && h > 1.0 {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
@@ -1250,7 +1226,11 @@ impl Render for TerminalView {
                             if cell.0 == cursor_row && cell.1 != cursor_col {
                                 let app_cursor = this.terminal.app_cursor_mode();
                                 let step: &[u8] = if cell.1 > cursor_col {
-                                    if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
+                                    if app_cursor {
+                                        b"\x1bOC"
+                                    } else {
+                                        b"\x1b[C"
+                                    }
                                 } else if app_cursor {
                                     b"\x1bOD"
                                 } else {
@@ -2481,8 +2461,8 @@ fn csi_u_modifiers(m: &Modifiers) -> u8 {
 mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
-        CellStyle, SCROLLBAR_THUMB_MIN, bg_spans, cells_to_token, keystroke_to_bytes, link_at,
-        scrollbar_thumb, text_batches, visible_end,
+        bg_spans, cells_to_token, keystroke_to_bytes, link_at, scrollbar_thumb, text_batches,
+        visible_end, CellStyle, SCROLLBAR_THUMB_MIN,
     };
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};

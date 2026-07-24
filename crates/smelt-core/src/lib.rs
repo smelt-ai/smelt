@@ -5,9 +5,20 @@
 //! 本 crate 不许出现 GPUI 依赖。
 
 pub mod acp_chat;
+pub mod acp_client;
+pub mod acp_conn;
+pub mod acp_session;
+pub mod agent_kind;
+pub mod agent_status;
 pub mod block_on;
+pub mod claude_paths;
+pub mod daemon_state;
+pub mod font_config;
+pub mod json_store;
+pub mod login_env;
 pub mod osc;
 pub mod permission_menu;
 pub mod remote_gateway;
 pub mod term_text;
 pub mod title_spinner;
+pub mod workspace_override;

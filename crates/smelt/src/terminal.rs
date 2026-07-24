@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,7 +19,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{
-    Config, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport, viewport_to_point,
+    point_to_viewport, viewport_to_point, Config, Term, TermDamage, TermMode, SEMANTIC_ESCAPE_CHARS,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 
@@ -225,7 +225,13 @@ fn indexed_rgb(i: u8) -> u32 {
         0..=15 => palette()[i as usize],
         16..=231 => {
             let i = i - 16;
-            let step = |v: u8| -> u32 { if v == 0 { 0 } else { 55 + v as u32 * 40 } };
+            let step = |v: u8| -> u32 {
+                if v == 0 {
+                    0
+                } else {
+                    55 + v as u32 * 40
+                }
+            };
             (step(i / 36) << 16) | (step((i % 36) / 6) << 8) | step(i % 6)
         }
         232..=255 => {
@@ -396,11 +402,7 @@ fn os_clipboard_read() -> String {
 // ===================== smeltd 守护连接层 =====================
 
 fn sock_path() -> std::path::PathBuf {
-    let dir = dirs::home_dir()
-        .unwrap_or_else(|| "/tmp".into())
-        .join(".smelt");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("smeltd.sock")
+    smelt_core::daemon_state::smeltd_sock_path()
 }
 
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
@@ -597,7 +599,35 @@ pub fn ensure_managed_daemon_current() -> std::io::Result<std::path::PathBuf> {
     let _gate = MANAGED_DAEMON_GATE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    ensure_managed_daemon_current_locked()
+    remember_managed_daemon_ensure(
+        ensure_managed_daemon_current_locked(),
+        &CONNECT_MANAGED_ENSURED,
+    )
+}
+
+fn remember_managed_daemon_ensure<T>(
+    result: std::io::Result<T>,
+    ensured: &AtomicBool,
+) -> std::io::Result<T> {
+    if result.is_ok() {
+        ensured.store(true, Ordering::Relaxed);
+    }
+    result
+}
+
+fn ensure_managed_daemon_for_connect<F>(
+    ensured: &AtomicBool,
+    managed: std::path::PathBuf,
+    ensure: F,
+) -> std::io::Result<std::path::PathBuf>
+where
+    F: FnOnce() -> std::io::Result<std::path::PathBuf>,
+{
+    if ensured.load(Ordering::Relaxed) {
+        Ok(managed)
+    } else {
+        remember_managed_daemon_ensure(ensure(), ensured)
+    }
 }
 
 fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf> {
@@ -706,8 +736,11 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     // 已有守护：进程内只 ensure 一次。
     if UnixStream::connect(&path).is_ok() {
         if !CONNECT_MANAGED_ENSURED.load(Ordering::Relaxed) {
-            let _ = ensure_managed_daemon_current();
-            CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
+            let _ = ensure_managed_daemon_for_connect(
+                &CONNECT_MANAGED_ENSURED,
+                managed_daemon_path(),
+                ensure_managed_daemon_current,
+            );
         }
         if let Ok(s) = UnixStream::connect(&path) {
             return Ok(s);
@@ -716,8 +749,11 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     }
 
     // 优先 managed 路径；没有则从 App/cargo 同目录同步一份。
-    CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
-    let daemon = match ensure_managed_daemon_current() {
+    let daemon = match ensure_managed_daemon_for_connect(
+        &CONNECT_MANAGED_ENSURED,
+        managed_daemon_path(),
+        ensure_managed_daemon_current,
+    ) {
         Ok(p) => p,
         Err(e) => {
             let exe = std::env::current_exe()?;
@@ -1310,124 +1346,11 @@ pub fn tunnel_status() -> TunnelStatus {
 
 // ===================== 状态通道（见 docs/state-channel-plan.md） =====================
 //
-// 这个模块本身不碰 GPUI（没有 gpui 依赖）；global/Entity 这些跟 UI 相关的东西留给
-// main.rs 处理，这里只管纯数据结构和阻塞的 socket 通信，跟文件里其它daemon 通信
-// 函数保持同一种分工。
-
-/// GUI 侧订阅状态通道的镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
-/// 字段对齐 smeltd `SessionState` 广播——B 路线「语义面板」的数据源。
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-pub struct DaemonSessionState {
-    pub id: String,
-    #[serde(default)]
-    pub phase: DaemonPhase,
-    /// hook 上报的问句 / 当前工具名（PreToolUse 时 question 常是 tool_name）。
-    #[serde(default)]
-    pub pending_question: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// 守护下发的协议字段（旧结构面板曾展示 launch 命令）；GUI 侧暂无读者，
-    /// 保留以维持与 smeltd 状态通道的结构对齐。
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub launch: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    /// unix 秒，进入当前 phase 的时刻。
-    #[serde(default)]
-    pub phase_since: u64,
-}
-
-impl DaemonSessionState {
-    /// 结构面板用：phase 中文标签。
-    pub fn phase_label(&self) -> &'static str {
-        match self.phase {
-            DaemonPhase::Thinking => "思考中",
-            DaemonPhase::ExecutingTool => "执行工具",
-            DaemonPhase::AwaitingApproval => "等你批准",
-            DaemonPhase::WaitingForUser => "等你输入",
-            DaemonPhase::Idle => "空闲",
-            DaemonPhase::Dead => "已结束",
-        }
-    }
-
-    /// 结构面板副文案：工具名或审批问句。
-    pub fn detail_line(&self) -> Option<String> {
-        let q = self.pending_question.as_deref()?.trim();
-        if q.is_empty() {
-            return None;
-        }
-        Some(match self.phase {
-            DaemonPhase::ExecutingTool => format!("🔧 {q}"),
-            DaemonPhase::AwaitingApproval => format!("⚠ {q}"),
-            DaemonPhase::WaitingForUser => format!("💬 {q}"),
-            _ => q.to_string(),
-        })
-    }
-
-    /// 进入当前 phase 多久（秒）；phase_since 为 0 则 None。
-    pub fn phase_age_secs(&self) -> Option<u64> {
-        if self.phase_since == 0 {
-            return None;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_secs();
-        Some(now.saturating_sub(self.phase_since))
-    }
-}
-
-/// 跟 smeltd.rs 的 `Phase` 对应，同样 `rename_all = "snake_case"`。
-#[derive(Clone, Copy, PartialEq, Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DaemonPhase {
-    Thinking,
-    ExecutingTool,
-    AwaitingApproval,
-    WaitingForUser,
-    #[default]
-    Idle,
-    Dead,
-}
-
-/// `subscribe` 连接推来的一行，两种形状（见 smeltd.rs 的 handle_subscribe/state op）。
-pub enum DaemonStateEvent {
-    /// 首帧：全量快照。
-    Snapshot(Vec<DaemonSessionState>),
-    /// 之后每次：单个会话的变化。
-    Update(DaemonSessionState),
-}
-
-/// 阻塞：连守护的 `subscribe`，逐行解析转发，直到连接断开（守护重启/没起来）才
-/// 返回。调用方负责重连（这个函数本身不重试，一次连接的生命周期而已）。
-pub fn subscribe_daemon_states_blocking(tx: &smol::channel::Sender<DaemonStateEvent>) {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
-        return;
-    };
-    if writeln!(s, "{}", serde_json::json!({ "op": "subscribe" })).is_err() {
-        return;
-    }
-    let reader = BufReader::new(s);
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if let Some(sessions) = v.get("sessions") {
-            if let Ok(list) = serde_json::from_value::<Vec<DaemonSessionState>>(sessions.clone()) {
-                if tx.try_send(DaemonStateEvent::Snapshot(list)).is_err() {
-                    return; // 接收端（GUI 那边的转发任务）没了，没必要继续读
-                }
-            }
-        } else if let Some(session) = v.get("session") {
-            if let Ok(state) = serde_json::from_value::<DaemonSessionState>(session.clone()) {
-                if tx.try_send(DaemonStateEvent::Update(state)).is_err() {
-                    return;
-                }
-            }
-        }
-    }
-}
+// 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
+// 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
+pub(crate) use smelt_core::daemon_state::{
+    subscribe_daemon_states_blocking, DaemonPhase, DaemonSessionState, DaemonStateEvent,
+};
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
 /// - kitty_keyboard：默认 false 时 alacritty 会把 `CSI > 1 u` 静默丢掉
@@ -2376,7 +2299,11 @@ impl Terminal {
             }
             if let Ok(mut g) = self.search_index.lock() {
                 *g = if backward {
-                    if *g == 0 { total - 1 } else { *g - 1 }
+                    if *g == 0 {
+                        total - 1
+                    } else {
+                        *g - 1
+                    }
                 } else {
                     (*g + 1) % total
                 };
@@ -2582,8 +2509,8 @@ mod damage_gate_tests {
     /// ——这正是要堵的洞，不是走个形式验证 Rust 语言特性。
     #[test]
     fn guard_cleans_up_even_when_body_panics() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
         struct Guard(Arc<AtomicBool>);
         impl Drop for Guard {
@@ -2834,6 +2761,36 @@ mod handshake_timeout_tests {
             Err(_) => panic!("握手对不回话的守护没有在超时窗口内返回——主线程会被永久卡死"),
         }
         drop(theirs); // 撑到断言之后才放，确保对端全程存活
+    }
+}
+
+#[cfg(test)]
+mod managed_daemon_ensure_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn explicit_ensure_then_connect_fallback_only_ensures_once() {
+        let ensured = AtomicBool::new(false);
+        let calls = Cell::new(0);
+        let managed = std::path::PathBuf::from("/tmp/smeltd");
+
+        let first = remember_managed_daemon_ensure(
+            {
+                calls.set(calls.get() + 1);
+                Ok(managed.clone())
+            },
+            &ensured,
+        );
+        let fallback = ensure_managed_daemon_for_connect(&ensured, managed.clone(), || {
+            calls.set(calls.get() + 1);
+            Ok(managed.clone())
+        });
+
+        assert_eq!(first.unwrap(), managed);
+        assert_eq!(fallback.unwrap(), managed);
+        assert_eq!(calls.get(), 1);
+        assert!(ensured.load(Ordering::Relaxed));
     }
 }
 
@@ -3115,7 +3072,7 @@ mod mouse_encode_tests {
 
 #[cfg(test)]
 mod scroll_wheel_plan_tests {
-    use super::{ScrollWheelPlan, scroll_wheel_plan};
+    use super::{scroll_wheel_plan, ScrollWheelPlan};
     use alacritty_terminal::term::TermMode;
 
     #[test]
@@ -3171,7 +3128,7 @@ mod scroll_wheel_plan_tests {
 
 #[cfg(test)]
 mod search_literal_tests {
-    use super::{SearchHit, escape_regex_literal, match_to_viewport_hit};
+    use super::{escape_regex_literal, match_to_viewport_hit, SearchHit};
     use alacritty_terminal::index::{Column, Line, Point};
 
     #[test]

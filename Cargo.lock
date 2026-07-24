@@ -7246,9 +7246,25 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
+ "smelt-acp-view",
  "smelt-core",
+ "smelt-ui",
  "smol",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-acp-view"
+version = "0.6.4"
+dependencies = [
+ "agent-client-protocol",
+ "base64",
+ "gpui",
+ "gpui-component",
+ "smelt-core",
+ "smelt-ui",
+ "smol",
  "uuid",
 ]
 
@@ -7276,14 +7292,20 @@ dependencies = [
 name = "smelt-core"
 version = "0.6.4"
 dependencies = [
+ "agent-client-protocol",
  "alacritty_terminal",
  "anyhow",
+ "async-process",
  "axum",
+ "chrono",
  "dirs 5.0.1",
+ "futures",
+ "libc",
  "rust-embed",
  "serde",
  "serde_json",
  "similar",
+ "smol",
  "tokio",
 ]
 
@@ -7308,9 +7330,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-ui"
+version = "0.6.4"
+dependencies = [
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "rusty-mermaid",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smelt-core",
+]
+
+[[package]]
 name = "smeltd"
 version = "0.6.4"
 dependencies = [
+ "agent-client-protocol",
  "alacritty_terminal",
  "anyhow",
  "axum",
@@ -7321,6 +7358,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-core",
+ "smol",
  "tokio",
  "uuid",
 ]

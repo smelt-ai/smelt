@@ -5,9 +5,18 @@
 //!
 //! 运行： cargo run --bin smelt
 
-mod acp;
-mod acp_completion;
-mod acp_view;
+// ACP 连接层已经搬进 smelt_core::acp_conn（给 smeltd 未来托管 ACP 会话铺路），
+// 这里不再 mod acp;，用的地方直接引 smelt_core::acp_conn。
+//
+// acp_completion / acp_view / markdown_mermaid / ui_theme / json_store 同理都已
+// 搬出主 crate（acp_view.rs 独立成 smelt-acp-view，其余几个是它和主 GUI 共用的
+// UI 基建，搬进 smelt-ui / smelt-core，见各自文件头注释）。这里用同名 `use`
+// 重新导出成原来的模块路径，全库既有的 `crate::ui_theme::x()` 之类写法不用
+// 逐处改——跟 session_history.rs 对 claude_paths 的重导出是同一个套路。
+pub(crate) use smelt_acp_view::acp_view;
+pub(crate) use smelt_core::json_store;
+pub(crate) use smelt_ui::markdown_mermaid;
+pub(crate) use smelt_ui::ui_theme;
 mod agent;
 mod claude_memory;
 mod dock;
@@ -17,8 +26,6 @@ mod git_log_view;
 mod git_panel;
 mod hotspot;
 mod inspector;
-mod json_store;
-mod markdown_mermaid;
 mod mem_usage;
 use smelt_core::osc;
 // 权限菜单解析：唯一真源，与 smeltd 共用 smelt-core 里的同一份（smeltd 解析后随
@@ -38,7 +45,7 @@ mod tasks;
 mod terminal;
 mod terminal_view;
 mod toast;
-mod ui_theme;
+
 mod updater;
 mod usage_stats;
 
@@ -50,8 +57,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
+use gpui::InteractiveElement;
 use gpui::*;
 use gpui_component::badge::Badge;
 use gpui_component::color_picker::ColorPickerState;
@@ -59,7 +66,7 @@ use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::notification::Notification;
 use gpui_component::resizable::{
-    ResizablePanelEvent, ResizableState, h_resizable, resizable_panel, v_resizable,
+    h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
 };
 use gpui_component::slider::SliderState;
 use gpui_component::*;
@@ -67,14 +74,14 @@ use notify::RecommendedWatcher;
 use terminal_view::TerminalView;
 
 use file_tree::{
-    DeleteFileTarget, OpenFile, SearchState, file_content_pane, file_tree, search_results_view,
+    file_content_pane, file_tree, search_results_view, DeleteFileTarget, OpenFile, SearchState,
 };
 use git_panel::{
-    BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo, git_view, run_git,
+    git_view, run_git, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo,
 };
 use hotspot::hotspot_view;
-use session_history::{HistoryListState, HistoryPane, history_view};
-use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
+use session_history::{history_view, HistoryListState, HistoryPane};
+use settings::{load_appearance, load_launch_config, Appearance, LlmInputs};
 use usage_stats::format_count;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
@@ -241,36 +248,10 @@ enum GitTab {
     Log,
 }
 
-/// 会话里 agent 的状态（用于总览页状态徽章）。借鉴 codex 的 ThreadStatus 细分：
-/// 「需要处理」不再一锅烩，等审批和一般等待是不同等级的行动召唤。
-/// 排列顺序即优先级（值越小越靠前 / 越紧急）。
-#[derive(Clone, Copy, PartialEq)]
-enum AgentStatus {
-    /// Claude 等你批准操作（通知文本含 permission/权限等）→ 最高优先，红色。
-    WaitingApproval,
-    /// 其他需要处理：等输入 / 响铃 / 自定义通知 → 橙色。
-    NeedsAttention,
-    /// 标题以 Braille spinner 开头 → 运行中，蓝色。
-    Running,
-    /// 任务刚完成、你还没回应过 → 「有结果可看」，绿色。
-    Done,
-    /// 其余 → 空闲，灰色。
-    Idle,
-}
-
-impl AgentStatus {
-    /// 优先级序（越小越紧急），与声明序一致：排序、聚合（项目 rail 的组内
-    /// 最高优先级状态点）共用。
-    fn rank(self) -> u8 {
-        match self {
-            AgentStatus::WaitingApproval => 0,
-            AgentStatus::NeedsAttention => 1,
-            AgentStatus::Running => 2,
-            AgentStatus::Done => 3,
-            AgentStatus::Idle => 4,
-        }
-    }
-}
+// 会话里 agent 的状态（总览页状态徽章 / 侧栏状态点）：搬进 smelt-core（跟
+// ui_theme 共用同一份判断，见 agent_status.rs），这里重导出成原来的裸名字，
+// 全库既有的 `AgentStatus::x` 写法不用逐处改。
+pub(crate) use smelt_core::agent_status::AgentStatus;
 
 /// 总览页筛选：基于 AgentStatus / 状态通道，不猜 TUI。
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -282,21 +263,11 @@ enum OverviewFilter {
     Running,
 }
 
-/// 守护上报的会话状态镜像（全局单例，跨窗口共享）。key = smeltd session id
-/// （每个 pane 一个，见 TerminalView.session_id——不是每个 GUI Session 一个）。
-/// 由 main.rs 启动时那条常驻 subscribe 转发任务维护，`Session::status`/`pane_status`
-/// 读它；daemon 没有对应 id 的数据（老版本守护/还没收到第一条上报）就退化到 OSC 猜测。
-#[derive(Clone, Default)]
-struct DaemonStates(Arc<Mutex<HashMap<String, terminal::DaemonSessionState>>>);
-
-impl Global for DaemonStates {}
-
-/// 状态通道待弹出的应用内 Notification（subscribe 线程无 Window，render 时 drain）。
-#[derive(Clone, Default)]
-struct PendingAgentNotifs(Arc<Mutex<Vec<(String, String, bool)>>>);
-// (title, message, is_approval)
-
-impl Global for PendingAgentNotifs {}
+// DaemonStates（守护上报的会话状态镜像，全局单例）/ PendingAgentNotifs（状态
+// 通道待弹出的应用内 Notification）：ACP 视图独立成 smelt-acp-view 后要跨
+// crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
+// 的裸名字。
+pub(crate) use smelt_ui::daemon_states_global::{DaemonStates, PendingAgentNotifs};
 
 /// 取某个 pane 对应的守护状态；没有全局单例（比如极早期尚未走到注册那一步）或
 /// 那个 session id 还没有数据都返回 None。
@@ -308,6 +279,28 @@ fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::D
         .unwrap()
         .get(&id)
         .cloned()
+}
+
+/// 守护状态刚进入「等你批准 / 等你输入」时，是否需要入队一条应用内通知。
+fn awaiting_notification_for_transition(
+    previous_phase: Option<terminal::DaemonPhase>,
+    state: &terminal::DaemonSessionState,
+) -> Option<(String, String, bool)> {
+    let entered_awaiting = matches!(
+        state.phase,
+        terminal::DaemonPhase::AwaitingApproval | terminal::DaemonPhase::WaitingForUser
+    ) && previous_phase != Some(state.phase);
+    if !entered_awaiting {
+        return None;
+    }
+
+    let title = state.phase_label().to_string();
+    let message = state
+        .detail_line()
+        .or_else(|| state.title.clone())
+        .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
+    let is_approval = state.phase == terminal::DaemonPhase::AwaitingApproval;
+    Some((title, message, is_approval))
 }
 
 /// 主区终端分屏布局树：叶子是一个终端，内部 Split 把区域按某轴切成多块。
@@ -908,22 +901,88 @@ struct SessionState {
     acp: Option<AcpSaved>,
 }
 
-/// ACP 会话的存档元数据：cwd/cmd 给「重新开始」按钮原样重启用；entries 是完整
+/// ACP 会话的存档元数据：cwd/launch 给「重新开始」按钮原样重启用；entries 是完整
 /// 消息历史——GUI 重开后占位视图直接显示它，不是「已结束」四个字干瞪眼；
 /// resume_session_id 是 agent 侧的会话 id，「重新开始」靠它尝试 session/load
 /// 真续接（agent 记得之前聊了什么），而不只是摆样子的新对话。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize)]
 struct AcpSaved {
     cwd: Option<String>,
-    cmd: String,
+    launch: smelt_core::agent_kind::AcpLaunchSpec,
+    #[serde(default)]
+    profile_id: Option<String>,
     /// agent 种类标识（`AcpAgentKind::id()`）。旧存档没有这个字段 → None，恢复时
-    /// 按 cmd 里的包名反推，反推不出就当 Claude（多 agent 之前只可能是它）。
+    /// 按 launch 里的命令反推，反推不出就当 Claude（多 agent 之前只可能是它）。
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
     entries: Vec<acp_view::AcpEntry>,
     #[serde(default)]
     resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
+    /// → None，恢复时退化成生成一个新 id——意味着即便 smeltd 里那个会话还
+    /// 活着，GUI 重开后也接不上、只能按 resume_session_id 重新 spawn 一次
+    /// （旧版反正每次都是重新 spawn，行为不会比以前差，只是错过了"廉价
+    /// attach"这个新能力）。有这个字段才能真正让 GUI 重开秒接上 smeltd 里
+    /// 还在跑的会话，见 `acp_view::AcpView::placeholder` 的 `saved_sid` 参数。
+    #[serde(default)]
+    sid: Option<String>,
+    /// 兼容标记：普通无 profile 会话重启时按当前设置刷新；只带旧 `cmd` 的历史
+    /// 存档则保留原 launch，避免把旧 profile 覆盖掉。旧存档无此字段 → false。
+    #[serde(default)]
+    refresh_launch_from_settings: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct AcpSavedWire {
+    cwd: Option<String>,
+    #[serde(default)]
+    launch: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+    #[serde(default)]
+    cmd: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    entries: Vec<acp_view::AcpEntry>,
+    #[serde(default)]
+    resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    #[serde(default)]
+    sid: Option<String>,
+    #[serde(default)]
+    refresh_launch_from_settings: Option<bool>,
+}
+
+impl<'de> serde::Deserialize<'de> for AcpSaved {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <AcpSavedWire as serde::Deserialize>::deserialize(deserializer)?;
+        let refresh_launch_from_settings = wire
+            .refresh_launch_from_settings
+            .unwrap_or_else(|| wire.launch.is_some() && wire.profile_id.is_none());
+        let launch = wire.launch.unwrap_or_else(|| {
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(wire.cmd.unwrap_or_default())
+        });
+        Ok(Self {
+            cwd: wire.cwd,
+            launch,
+            profile_id: wire.profile_id,
+            agent: wire.agent,
+            entries: wire.entries,
+            resume_session_id: wire.resume_session_id,
+            sid: wire.sid,
+            refresh_launch_from_settings,
+        })
+    }
+}
+
+impl AcpSaved {
+    fn refresh_launch_from_settings(&self) -> bool {
+        self.refresh_launch_from_settings
+    }
 }
 
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点 +
@@ -1448,6 +1507,8 @@ struct Workspace {
     signal_http_input: Option<Entity<gpui_component::input::InputState>>,
     /// 启动项列表编辑器（设置页「启动」分组懒创建）。
     launch_inputs: Option<settings::LaunchInputs>,
+    /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
+    profile_inputs: Option<settings::ProfileInputs>,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器。
     opacity_slider: Option<Entity<SliderState>>,
     font_size_slider: Option<Entity<SliderState>>,
@@ -1507,6 +1568,9 @@ struct Workspace {
     /// 历史会话页「会话」子页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
     /// Grok 分 tab，各自存储格式不同，见 session_history.rs 头部注释）。
     history_agent: settings::AcpAgentKind,
+    /// 选中的是手动添加的 workspace profile（而不是某个基础 agent 槽位）时是
+    /// `Some(profile_id)`；`history_agent` 这时候是该 profile 底层接的种类。
+    history_profile: Option<String>,
     /// 记忆列表缓存（cwd → (取得时刻, 数据)），跟 session_list 同一套 TTL 模板。
     memory_list: HashMap<String, (Instant, Rc<Vec<claude_memory::MemoryEntry>>)>,
     /// 正在后台扫描记忆的 cwd（防重复并发 spawn）。
@@ -1811,6 +1875,7 @@ impl Workspace {
             resume_gen: 0,
             history_pane: HistoryPane::Sessions,
             history_agent: settings::AcpAgentKind::Claude,
+            history_profile: None,
             memory_list: HashMap::new(),
             memory_list_inflight: HashSet::new(),
             memory_selected: None,
@@ -1818,6 +1883,7 @@ impl Workspace {
             llm_subs: Vec::new(),
             signal_http_input: None,
             launch_inputs: None,
+            profile_inputs: None,
             opacity_slider: None,
             font_size_slider: None,
             bg_color_picker: None,
@@ -1888,7 +1954,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // ACP 会话不走守护 reattach：进程没有持久化，UI 线程直接建「已结束」占位
-        // （一键同 cmd/cwd 重开）。摘出后剩下的照旧走后台恢复。
+        // （一键同 launch/cwd 重开）。摘出后剩下的照旧走后台恢复。
         let (acp_saved, pending): (Vec<SessionState>, Vec<SessionState>) =
             pending.into_iter().partition(|ss| ss.acp.is_some());
         for ss in acp_saved {
@@ -1904,16 +1970,20 @@ impl Workspace {
                 .agent
                 .as_deref()
                 .and_then(settings::AcpAgentKind::from_id)
-                .unwrap_or_else(|| acp_agent_from_cmd(&saved.cmd));
+                .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
+            let refresh_launch_from_settings = saved.refresh_launch_from_settings();
             let view = cx.new(|cx| {
                 acp_view::AcpView::placeholder(
                     cx,
                     agent,
-                    saved.cmd,
+                    saved.launch,
+                    refresh_launch_from_settings,
+                    saved.profile_id,
                     saved.cwd,
                     reason.to_string(),
                     saved.entries,
                     saved.resume_session_id,
+                    saved.sid,
                 )
             });
             let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
@@ -2283,12 +2353,17 @@ impl Workspace {
     fn add_acp_session(
         &mut self,
         agent: settings::AcpAgentKind,
+        launch_override: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+        profile_id: Option<String>,
         cwd: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cmd = settings::acp_cmd_for(agent, cx);
-        let view = cx.new(|cx| acp_view::AcpView::start(window, cx, agent, cmd, cwd));
+        let launch = launch_override.unwrap_or_else(|| {
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
+        });
+        let view =
+            cx.new(|cx| acp_view::AcpView::start(window, cx, agent, launch, profile_id, cwd));
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
         self.sessions.push(Session {
             kind: SessionKind::Acp(view),
@@ -2334,6 +2409,8 @@ impl Workspace {
     pub fn resume_acp_session(
         &mut self,
         agent: settings::AcpAgentKind,
+        launch_override: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+        profile_id: Option<String>,
         cwd: String,
         resume_id: String,
         path: PathBuf,
@@ -2356,7 +2433,9 @@ impl Workspace {
         self.resume_gen = self.resume_gen.wrapping_add(1);
         let my_gen = self.resume_gen;
 
-        let cmd = settings::acp_cmd_for(agent, cx);
+        let launch = launch_override.unwrap_or_else(|| {
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
+        });
         // 先把历史内容读出来转成本地快照——`session/resume`（不重放历史，见 acp.rs
         // 里 apply_event 对 ReadyKind::ResumedKeepHistory 的注释）信任的就是这份本地
         // 快照，给个空的会话开出来就是一片空白（真实教训：第一版就是这么写的，
@@ -2388,11 +2467,17 @@ impl Workspace {
                     acp_view::AcpView::placeholder(
                         cx,
                         agent,
-                        cmd,
+                        launch,
+                        profile_id.is_none(),
+                        profile_id,
                         Some(cwd),
                         "正在续接历史会话…".to_string(),
                         entries,
                         Some(agent_client_protocol::schema::v1::SessionId::new(resume_id)),
+                        // 新起一条 smeltd 托管连接（靠 resume_id 对 agent 自己的
+                        // 持久化做 session/load），不是接上 smeltd 里已经在跑的
+                        // 某个会话，没有旧 id 可沿用，生成一个新的。
+                        None,
                     )
                 });
                 let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
@@ -2590,10 +2675,13 @@ impl Workspace {
                         custom_title: s.custom_title.clone(),
                         acp: Some(AcpSaved {
                             cwd: v.cwd(),
-                            cmd: v.launch_cmd().to_string(),
+                            launch: v.launch_spec(),
+                            profile_id: v.profile_id().map(str::to_string),
                             agent: Some(v.agent_kind().id().to_string()),
                             entries: v.entries_for_save(),
                             resume_session_id: v.resume_session_id_for_save(),
+                            sid: Some(v.session_id().to_string()),
+                            refresh_launch_from_settings: v.refresh_launch_from_settings(),
                         }),
                     }
                 }
@@ -2887,6 +2975,7 @@ impl Workspace {
                         this.add_project(dir, cx);
                     }
                 }
+
                 cx.notify();
             });
         })
@@ -3451,11 +3540,19 @@ impl Workspace {
     /// 的子进程，根本不经过 smeltd，不出现在 list 结果里，不用管）。跟 list
     /// 查回来的全量做差集，剩下的就是「守护持有但没有任何侧栏在追踪」的孤儿
     /// ——测试跑出来的、忘了关的临时会话，都会落在这一类。
+    /// 会话管理弹窗判断「孤儿」的依据：守护/smeltd 那边的会话 id 有没有被
+    /// 某个侧栏标签认领。终端会话看 `term_leaves`；ACP 会话现在也托管在
+    /// smeltd 里、用同一份 `list` 汇总（见 smeltd「ACP 会话托管」一节），
+    /// 不把它们的 id 也算进「已认领」，正常开着的 ACP 对话会被误标成孤儿。
     fn tracked_session_ids(&self, cx: &App) -> std::collections::HashSet<String> {
         self.sessions
             .iter()
             .flat_map(|s| s.term_leaves())
             .map(|t| t.read(cx).session_id().to_string())
+            .chain(self.sessions.iter().filter_map(|s| match &s.kind {
+                SessionKind::Acp(view) => Some(view.read(cx).session_id().to_string()),
+                _ => None,
+            }))
             .collect()
     }
 
@@ -3482,13 +3579,25 @@ impl Workspace {
         .detach();
     }
 
-    /// 关掉守护进程里的一个会话（真杀底层 shell），关完刷新列表。
+    /// 按 id 前缀分流到对应的 kill op——ACP 会话（`acp-` 前缀）只在
+    /// `AcpSessions` 表里，终端的 `kill` op 认不出这个 id，会静默什么都不做
+    /// 却照样回 `{"ok":true}`（真实教训：两条表分开存，用错 op 表面上「成功」
+    /// 实际上会话根本没被杀掉，圈了个大坑）。
+    fn kill_daemon_session(id: &str) {
+        if id.starts_with("acp-") {
+            smelt_core::acp_client::kill_acp_session(id);
+        } else {
+            terminal::kill_remote(id);
+        }
+    }
+
+    /// 关掉守护进程里的一个会话（真杀底层 shell / ACP 子进程），关完刷新列表。
     fn kill_session_in_manager(&mut self, id: String, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .spawn({
                     let id = id.clone();
-                    async move { terminal::kill_remote(&id) }
+                    async move { Self::kill_daemon_session(&id) }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| this.refresh_session_manager(cx));
@@ -3515,7 +3624,7 @@ impl Workspace {
             cx.background_executor()
                 .spawn(async move {
                     for id in &orphan_ids {
-                        terminal::kill_remote(id);
+                        Self::kill_daemon_session(id);
                     }
                 })
                 .await;
@@ -3554,6 +3663,7 @@ impl Workspace {
                     .overflow_y_scroll();
                 for s in list {
                     let is_orphan = !tracked.contains(&s.id);
+                    let is_acp = s.id.starts_with("acp-");
                     let label = s
                         .cwd
                         .clone()
@@ -3576,6 +3686,13 @@ impl Workspace {
                                     } else {
                                         rgb(ui_theme::green())
                                     }))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .flex_shrink_0()
+                                            .text_color(muted)
+                                            .child(if is_acp { "对话" } else { "终端" }),
+                                    )
                                     .child(div().text_sm().text_color(fg).truncate().child(label))
                                     .children(is_orphan.then(|| {
                                         div()
@@ -4101,13 +4218,14 @@ impl Workspace {
             .map(|ix| {
                 let cwd_opt = self.sessions[ix].cwd(cx);
                 if let Some(c) = cwd_opt.clone() {
-                    self.ensure_session_list(settings::AcpAgentKind::Claude, c, cx);
+                    self.ensure_session_list(settings::AcpAgentKind::Claude, None, c, cx);
                 }
                 let live = cwd_opt
                     .as_deref()
                     .and_then(|c| {
                         self.session_list.get(&session_history::session_list_key(
                             settings::AcpAgentKind::Claude,
+                            None,
                             c,
                         ))
                     })
@@ -5297,9 +5415,14 @@ impl Workspace {
             }
             MainView::History => {
                 let cwd = self.cur().and_then(|s| s.cwd(cx));
-                let list_key = cwd
-                    .as_ref()
-                    .map(|c| session_history::session_list_key(self.history_agent, c));
+                let list_key = cwd.as_ref().map(|c| {
+                    session_history::session_list_key(
+                        self.history_agent,
+                        self.history_profile.as_deref(),
+                        c,
+                    )
+                });
+
                 let sessions = list_key
                     .as_ref()
                     .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
@@ -5316,6 +5439,7 @@ impl Workspace {
                 history_view(
                     self.history_pane,
                     self.history_agent,
+                    self.history_profile.clone(),
                     cwd,
                     list_state,
                     &self.session_detail,
@@ -5502,7 +5626,10 @@ impl Render for Workspace {
         if self.stage_override == Some(MainView::History) {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
                 match self.history_pane {
-                    HistoryPane::Sessions => self.ensure_session_list(self.history_agent, root, cx),
+                    HistoryPane::Sessions => {
+                        let pid = self.history_profile.clone();
+                        self.ensure_session_list(self.history_agent, pid, root, cx)
+                    }
                     HistoryPane::Memories => self.ensure_memory_list(root, cx),
                 }
             }
@@ -5627,7 +5754,8 @@ impl Render for Workspace {
         let acp_label = match self.sessions.get(self.active_session).map(|s| &s.kind) {
             Some(SessionKind::Acp(view)) => {
                 let v = view.read(cx);
-                acp_pill_label(v.agent_kind(), v.launch_cmd())
+                let launch = v.launch_spec();
+                acp_pill_label(v.agent_kind(), &launch.command)
             }
             _ => {
                 let agent = settings::AcpAgentKind::Claude;
@@ -6592,6 +6720,20 @@ fn main() {
                         let mut map = states.lock().unwrap();
                         match event {
                             terminal::DaemonStateEvent::Snapshot(list) => {
+                                if notify_on {
+                                    if let Some(q) = &pending {
+                                        for s in &list {
+                                            if let Some(entry) =
+                                                awaiting_notification_for_transition(
+                                                    map.get(&s.id).map(|p| p.phase),
+                                                    s,
+                                                )
+                                            {
+                                                q.lock().unwrap().push(entry);
+                                            }
+                                        }
+                                    }
+                                }
                                 // 只清守护侧条目：`acp-` 前缀是 GUI 内 ACP 会话自己
                                 // 维护的状态，smeltd 重连发快照时不能把它们抹掉。
                                 map.retain(|k, _| k.starts_with("acp-"));
@@ -6600,24 +6742,14 @@ fn main() {
                                 }
                             }
                             terminal::DaemonStateEvent::Update(s) => {
-                                let prev = map.get(&s.id).map(|p| p.phase);
-                                let entered_await = matches!(
-                                    s.phase,
-                                    terminal::DaemonPhase::AwaitingApproval
-                                        | terminal::DaemonPhase::WaitingForUser
-                                ) && prev != Some(s.phase);
-                                if notify_on && entered_await {
-                                    if let Some(q) = pending {
-                                        let title = s.phase_label().to_string();
-                                        let msg = s
-                                            .detail_line()
-                                            .or_else(|| s.title.clone())
-                                            .unwrap_or_else(|| {
-                                                format!("会话 {}", &s.id[..8.min(s.id.len())])
-                                            });
-                                        let is_appr =
-                                            s.phase == terminal::DaemonPhase::AwaitingApproval;
-                                        q.lock().unwrap().push((title, msg, is_appr));
+                                if notify_on {
+                                    if let Some(q) = &pending {
+                                        if let Some(entry) = awaiting_notification_for_transition(
+                                            map.get(&s.id).map(|p| p.phase),
+                                            &s,
+                                        ) {
+                                            q.lock().unwrap().push(entry);
+                                        }
                                     }
                                 }
                                 map.insert(s.id.clone(), s);
@@ -6653,39 +6785,16 @@ fn main() {
         // 没人管——会被系统收养成孤儿，一直占着信令服务器上的房间和本机网关连接
         // 直到房间 TTL 到期。退出前顺手杀掉它。
         //
-        // ACP 会话（Copilot/Claude/Codex/Grok 的 CLI 子进程）原本完全没管：
-        // Cmd+Q 直接终止整个 GUI 进程时，每条 ACP 连接线程会被系统一并带走，
-        // 没机会跑到自己的收尾逻辑（agent_client_protocol 内部靠 Drop 杀子进程），
-        // 子进程就变孤儿——真实症状：孤儿还占着旧登录会话，下次「重新开始」
-        // 新起一个进程去认证会撞上它，报出看着不相关的 Authentication required。
-        // 这里给每条活跃 ACP 连接发 Shutdown，再异步等线程真正收尾（超时兜底，
-        // 别让某个不听话的 agent 卡住整个 App 退出）。
-        let current_ws_for_quit = current_ws.clone();
+        // ACP 会话不需要在这里做任何事了：agent 子进程现在是 smeltd 托管的
+        // （见 smelt_core::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
+        // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题，参见
+        // smelt-acp-view::AcpView 的 `handle` 字段类型已经变成
+        // `smelt_core::acp_client::AcpClientHandle`，Drop 时只会断开 socket，
+        // 会话在 smeltd 里照样活着。旧版这里还要「发 Shutdown + 等线程收尾」是
+        // 因为那时子进程是 GUI 自己 fork 出来的，现在没有这个必要。
         cx.on_app_quit(move |cx| {
             settings::stop_webrtc_bridge_on_quit(cx);
-            let handles: Vec<acp::AcpHandle> = current_ws_for_quit
-                .borrow()
-                .as_ref()
-                .and_then(|w| w.upgrade())
-                .map(|ws| {
-                    ws.update(cx, |ws, cx| {
-                        ws.sessions
-                            .iter()
-                            .filter_map(|s| match &s.kind {
-                                SessionKind::Acp(view) => {
-                                    view.update(cx, |v, _cx| v.take_handle_for_quit())
-                                }
-                                _ => None,
-                            })
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-            async move {
-                for h in handles {
-                    acp::wait_for_shutdown(h, Duration::from_secs(3)).await;
-                }
-            }
+            async move {}
         })
         .detach();
         // 恢复跨网：隧道仍走下面 spawn；WebRTC 在网关 hydrate 后再拉 bridge
@@ -6893,8 +7002,8 @@ fn main() {
 #[cfg(test)]
 mod project_tests {
     use super::{
-        AcpSaved, PaneState, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
-        project_root_of, session_state_cwd,
+        disambiguate_labels, project_root_of, session_state_cwd, AcpSaved, PaneState, ProjectGroup,
+        SessionState, SplitAxis,
     };
 
     fn group(root: &str, label: &str) -> ProjectGroup {
@@ -7053,13 +7162,67 @@ mod project_tests {
             custom_title: None,
             acp: Some(AcpSaved {
                 cwd: Some("/a/acp-proj".into()),
-                cmd: "claude --acp".into(),
+                launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude --acp"),
+                profile_id: None,
                 agent: None,
                 entries: Vec::new(),
                 resume_session_id: None,
+                sid: None,
+                refresh_launch_from_settings: false,
             }),
         };
         assert_eq!(session_state_cwd(&ss).as_deref(), Some("/a/acp-proj"));
+    }
+}
+
+#[cfg(test)]
+mod daemon_state_notification_tests {
+    use super::awaiting_notification_for_transition;
+    use crate::terminal::{DaemonPhase, DaemonSessionState};
+
+    fn daemon_state(id: &str, phase: DaemonPhase) -> DaemonSessionState {
+        DaemonSessionState {
+            id: id.into(),
+            phase,
+            pending_question: None,
+            title: None,
+            launch: None,
+            cwd: None,
+            phase_since: 0,
+        }
+    }
+
+    #[test]
+    fn daemon_awaiting_notification_running_to_waiting_produces_one_choice_notification() {
+        let mut state = daemon_state("session-12345678", DaemonPhase::WaitingForUser);
+        state.pending_question = Some("Pick one".into());
+
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
+
+        assert_eq!(
+            notif,
+            Some(("等你输入".into(), "💬 Pick one".into(), false))
+        );
+    }
+
+    #[test]
+    fn daemon_awaiting_notification_waiting_to_same_waiting_produces_none() {
+        let mut state = daemon_state("session-12345678", DaemonPhase::WaitingForUser);
+        state.pending_question = Some("Still waiting".into());
+
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::WaitingForUser), &state);
+
+        assert_eq!(notif, None);
+    }
+
+    #[test]
+    fn daemon_awaiting_notification_approval_uses_title_fallback_and_marks_approval() {
+        let mut state = daemon_state("session-12345678", DaemonPhase::AwaitingApproval);
+        state.title = Some("Need review".into());
+
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::ExecutingTool), &state);
+
+        assert_eq!(notif, Some(("等你批准".into(), "Need review".into(), true)));
     }
 }
 
@@ -7125,7 +7288,7 @@ mod pane_state_tests {
 
 #[cfg(test)]
 mod acp_agent_tests {
-    use super::{AcpSaved, acp_agent_from_cmd, acp_pill_label};
+    use super::{acp_agent_from_cmd, acp_pill_label, AcpSaved};
     use crate::settings::AcpAgentKind;
 
     /// 多 agent 之前的 ACP 存档没有 `agent` 字段：必须读得进来（None），
@@ -7136,7 +7299,100 @@ mod acp_agent_tests {
             r#"{"cwd":"/tmp/x","cmd":"bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0"}"#;
         let back: AcpSaved = serde_json::from_str(old).unwrap();
         assert!(back.agent.is_none(), "旧存档不该凭空冒出 agent 字段");
-        assert_eq!(acp_agent_from_cmd(&back.cmd), AcpAgentKind::Claude);
+        assert_eq!(
+            acp_agent_from_cmd(&back.launch.command),
+            AcpAgentKind::Claude
+        );
+    }
+
+    #[test]
+    fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
+        let saved = AcpSaved {
+            cwd: Some("/repo".into()),
+            launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude")
+                .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
+            profile_id: Some("quant".into()),
+            agent: Some("claude".into()),
+            entries: Vec::new(),
+            resume_session_id: None,
+            sid: Some("acp-1".into()),
+            refresh_launch_from_settings: false,
+        };
+
+        let value = serde_json::to_value(&saved).unwrap();
+        assert!(value.get("cmd").is_none(), "新存档不该再写旧 cmd 字段");
+        let restored: AcpSaved = serde_json::from_value(value).unwrap();
+
+        assert_eq!(restored.profile_id.as_deref(), Some("quant"));
+        assert_eq!(
+            restored
+                .launch
+                .env
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("~/Claude Workspaces/quant")
+        );
+    }
+
+    #[test]
+    fn legacy_acp_saved_cmd_deserializes_into_launch_spec() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "cmd": "claude --flag",
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        assert_eq!(restored.launch.command, "claude --flag");
+        assert!(restored.profile_id.is_none());
+    }
+
+    #[test]
+    fn legacy_cmd_archive_keeps_saved_launch_on_restart() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "cmd": "CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude",
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        assert!(
+            !restored.refresh_launch_from_settings(),
+            "旧 cmd 存档缺少 profile_id 时也不能被当成普通会话刷新成当前默认命令"
+        );
+    }
+
+    #[test]
+    fn structured_launch_without_profile_id_refreshes_from_settings() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "launch": { "command": "claude", "env": {} },
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        assert!(
+            restored.refresh_launch_from_settings(),
+            "新存档的普通会话仍应沿用按当前设置刷新的行为"
+        );
+    }
+
+    #[test]
+    fn legacy_cmd_archive_round_trip_preserves_restart_refresh_behavior() {
+        let legacy: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "cmd": "CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude",
+            "agent": "claude"
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(&legacy).unwrap();
+        let restored: AcpSaved = serde_json::from_value(value).unwrap();
+
+        assert!(
+            !restored.refresh_launch_from_settings(),
+            "旧 cmd 存档升级成新格式后也必须继续保留原 launch，不得在下一次重启时退化成按默认设置刷新"
+        );
     }
 
     /// 旧存档反推：命令里带 copilot / codex 字样的归给对应 agent，其余当 Claude。

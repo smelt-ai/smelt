@@ -1,19 +1,22 @@
-//! ACP（Agent Client Protocol）会话后端：第二种会话类型的连接层。
+//! ACP（Agent Client Protocol）连接层：JSON-RPC over stdio 驱动跟子进程 agent
+//! 的连接，不含任何 GPUI——本来就是 `smelt` crate 里 acp.rs 的原文搬过来的，
+//! 移动的唯一理由是给 smeltd 托管 ACP 会话铺路（这个 crate 本来就是
+//! GUI/守护共用层，smeltd 加个 `agent-client-protocol` 依赖就能直接复用这里
+//! 的连接驱动逻辑，不用重写一遍）。
 //!
-//! 职责边界（见 docs/project-report.md 第 5 节与 plans 里的接入方案）：
+//! 职责边界（原 acp.rs 的约定继续有效）：
 //! - 每个 ACP 会话一条专用 OS 线程 `smol::block_on` 驱动整个连接（spawn 子进程、
-//!   JSON-RPC over stdio、事件翻译），与全库「专用线程 + smol::channel + UI 线程
-//!   drain」的惯用法一致；
-//! - 本模块**不许引 gpui**——未来 smeltd 托管 ACP 子进程时要原样下沉 smelt-core，
-//!   GPUI Entity/渲染都圈在 acp_view.rs；
+//!   JSON-RPC over stdio、事件翻译）；
 //! - 一切失败（找不到命令 / 握手失败 / 子进程退出）都以 `AcpEvent::Fatal` 从事件
 //!   通道出来，`spawn_acp` 本身永不阻塞、永不 panic 调用方。
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::sync::{Arc, Mutex, RwLock};
 
 use std::collections::BTreeMap;
 
-use agent_client_protocol::schema::ProtocolVersion;
+use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
+
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
@@ -26,15 +29,19 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
-    AcpAgent, ActiveSession, Agent, Client, ConnectionTo, LineDirection, SessionMessage,
+    AcpAgent, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
 };
+
+use crate::agent_kind::AcpLaunchSpec;
 
 /// 一次 ACP 会话的启动参数。
 pub struct AcpLaunch {
-    /// 启动命令（空白分词；MVP 不支持带引号的参数）。默认见 settings::acp_cmd。
-    pub cmd: String,
+    /// 启动规格：命令字符串仍是现有的空白分词语义，环境变量单独结构化存储；
+    /// legacy `VAR=value cmd` 前缀仍兼容，见 `build_agent`。
+    pub launch: AcpLaunchSpec,
     /// 会话工作目录（newSession 的 cwd）；None 用进程当前目录。
     pub cwd: Option<String>,
     /// GUI 侧会话 id，约定 `acp-` 前缀——DaemonStates 全局 map 里靠这个前缀
@@ -57,6 +64,7 @@ pub struct AcpLaunch {
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PromptImage {
     /// `image/png` 这类 MIME。
     pub mime: String,
@@ -116,6 +124,12 @@ pub enum AcpEvent {
         tool_call_id: ToolCallId,
         pub_options: Vec<PermissionOption>,
         responder: PermissionResponder,
+        /// 这条请求的原始 JSON-RPC 行文本（`with_debug` 的 `Stdout` 方向捕获的
+        /// 最近一行）。smeltd 无缝升级时若这条会话正卡着这张审批卡，会把这行
+        /// 原文一起交接过去——新进程接手继承来的 fd 后，先把这行「回放」一遍
+        /// 让 SDK 重新解析出等价的 responder（绑定同一个原始请求 id），再继续
+        /// 读实时字节，见 `resume_acp_from_fds`。GUI 直连路径不用这个字段。
+        raw_request_line: Option<String>,
     },
     /// 用户消息的回显：`session/load` 重放历史时，agent 会把旧的用户提问也
     /// 当一条更新发回来（这是 entries 里 User 记录在 replay 场景下唯一的来源，
@@ -137,6 +151,8 @@ pub enum AcpEvent {
         message: String,
         fields: Vec<ElicitField>,
         responder: ElicitationResponder,
+        /// 同 `Permission::raw_request_line`。
+        raw_request_line: Option<String>,
     },
     /// 一轮 prompt 结束（含被取消）。
     TurnEnded(StopReason),
@@ -157,8 +173,10 @@ pub enum ReadyKind {
     ResumedKeepHistory,
 }
 
-/// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。
-#[derive(Clone, PartialEq)]
+/// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。全是纯 String/Vec
+/// 字段，没有 agent_client_protocol 的 schema 类型，直接可以序列化进
+/// acp_session 的 wire 快照，不用另造一份 View 类型。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelState {
     /// 当前模型的人类可读名（`Claude Sonnet 4.5`）。
     pub current_name: String,
@@ -330,6 +348,18 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
 pub struct AcpHandle {
     pub cmd_tx: smol::channel::Sender<AcpCommand>,
     pub event_rx: smol::channel::Receiver<AcpEvent>,
+    /// 子进程 pid + 原始 stdin/stdout fd，spawn 成功后才会填（Fatal 前的极短
+    /// 窗口是 None）。smeltd 无缝升级要用它把这两个 fd 也裸传过 exec()（跟
+    /// PTY master fd 同一招），见 `resume_acp_from_fds`。GUI 直连路径用不上，
+    /// 多存三个整数不加负担。
+    pub stdio: Arc<Mutex<Option<AcpStdio>>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct AcpStdio {
+    pub pid: i32,
+    pub stdin_fd: std::os::unix::io::RawFd,
+    pub stdout_fd: std::os::unix::io::RawFd,
 }
 
 /// App 退出前等一个已发过 Shutdown 的连接线程真正收尾。`event_rx` 所有
@@ -345,10 +375,14 @@ pub async fn wait_for_shutdown(handle: AcpHandle, timeout: std::time::Duration) 
     .await;
 }
 
-/// 起一条专用线程跑 ACP 连接，立即返回句柄。
-pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
+/// 起一条专用线程跑 ACP 连接，立即返回句柄。`spawn_gate` 只包住实际创建
+/// 子进程到发布 `AcpHandle.stdio` 的区间；运行时解析/下载在拿读锁之前完成。
+/// 不需要与外部升级流程协调的调用方可传 `None`。
+pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpHandle {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
     let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
+    let stdio: Arc<Mutex<Option<AcpStdio>>> = Arc::new(Mutex::new(None));
+    let stdio_for_thread = Arc::clone(&stdio);
     let thread_name = format!("smelt-acp-{}", &launch.sid[..launch.sid.len().min(12)]);
     std::thread::Builder::new()
         .name(thread_name)
@@ -359,7 +393,7 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
             // 先解析运行时（bunx → 受管 bun，可能触发首次下载），再进连接循环。
             let cmd = {
                 let tx = event_tx.clone();
-                match resolve_runtime_command(&launch.cmd, &|msg| {
+                match resolve_runtime_command(&launch.launch.command, &|msg| {
                     let _ = tx.try_send(AcpEvent::Status(msg.to_string()));
                 }) {
                     Ok(cmd) => cmd,
@@ -369,12 +403,30 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
                     }
                 }
             };
-            let launch = AcpLaunch { cmd, ..launch };
+            let AcpLaunch {
+                launch: launch_spec,
+                cwd,
+                sid,
+                resume_session_id,
+                resume_needs_transcript_check,
+            } = launch;
+            let launch = AcpLaunch {
+                launch: AcpLaunchSpec {
+                    command: cmd,
+                    env: launch_spec.env,
+                },
+                cwd,
+                sid,
+                resume_session_id,
+                resume_needs_transcript_check,
+            };
             let result = smol::block_on(run_connection(
                 &launch,
                 cmd_rx,
                 event_tx.clone(),
                 stderr_tail.clone(),
+                stdio_for_thread,
+                spawn_gate,
             ));
             if let Err(e) = result {
                 let tail = stderr_tail.lock().unwrap().join("\n");
@@ -388,7 +440,128 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
             // Ok 结束（Shutdown）不发 Fatal——UI 主动关的，没必要再报。
         })
         .expect("spawn smelt-acp thread");
-    AcpHandle { cmd_tx, event_rx }
+    AcpHandle {
+        cmd_tx,
+        event_rx,
+        stdio,
+    }
+}
+
+fn with_spawn_gate<T>(spawn_gate: Option<&Arc<RwLock<()>>>, spawn: impl FnOnce() -> T) -> T {
+    let _permit = spawn_gate.map(|gate| gate.read().unwrap());
+    spawn()
+}
+
+/// 写一行（带换行）到异步 writer——`agent_client_protocol` 自己的同款 helper
+/// 是 `pub(crate)`，这边够简单，直接写一份。
+async fn write_line<W>(w: &mut W, line: String) -> std::io::Result<()>
+where
+    W: futures::AsyncWrite + Unpin,
+{
+    w.write_all(line.as_bytes()).await?;
+    w.write_all(b"\n").await?;
+    w.flush().await
+}
+
+/// 把一个异步 writer 包成 `Lines` transport 要的 outgoing `Sink<String>`。
+fn make_outgoing_sink<W>(writer: W) -> impl futures::Sink<String, Error = std::io::Error>
+where
+    W: futures::AsyncWrite + Send + Unpin + 'static,
+{
+    futures::sink::unfold(writer, |mut w, line: String| async move {
+        write_line(&mut w, line).await?;
+        Ok::<_, std::io::Error>(w)
+    })
+}
+
+/// 把一个异步 reader 包成 `Lines` transport 要的 incoming `Stream<Item =
+/// io::Result<String>>`，顺带把每一行原文写进 `last_stdout_line`——跟旧版
+/// `AcpAgent::with_debug` 的 `Stdout` 方向是同一件事，只是现在自己接管
+/// spawn 之后，`with_debug` 钩子不会被 SDK 调用了，得自己包一层
+/// （`futures::StreamExt::inspect` 原理跟 SDK 内部一样：逐行 `.lines()` 之后
+/// 挂一个旁路回调，不影响往下游转发的内容）。
+fn make_incoming_lines<R>(
+    reader: R,
+    last_stdout_line: Arc<Mutex<Option<String>>>,
+) -> impl futures::Stream<Item = std::io::Result<String>> + Send
+where
+    R: futures::AsyncRead + Send + Unpin + 'static,
+{
+    futures::io::BufReader::new(reader)
+        .lines()
+        .inspect(move |res| {
+            if let Ok(line) = res {
+                *last_stdout_line.lock().unwrap() = Some(line.clone());
+            }
+        })
+}
+
+/// 无缝升级续接专用：先「回放」升级前捕获到的那行原始请求（如果有——对应
+/// 一张正卡着的权限/选择题卡片），再无缝接上继承来的 fd 往后实时读。SDK 的
+/// 请求分发器看到的字节序列跟"从来没断过"完全一样，会重新解析出一个等价的
+/// responder（绑定同一个原始 JSON-RPC 请求 id），不会丢这张卡。
+///
+/// `last_stdout_line` 回放行 + 后续实时行都要写——不写的话，这条恢复出来的
+/// 连接活着期间如果 agent 又发一次新的权限/选择题请求，`raw_request_line`
+/// 会一直是 None：等真撑到*下一次*升级，这条请求就没有原文可回放，agent
+/// 会永远卡在等一个不会来的回复上，审批卡在 GUI 上直接消失（真实教训：
+/// 早期版本这里只在 `make_incoming_lines`——也就是首次 spawn 那条路——接了
+/// 这根线，`make_resume_incoming_lines` 漏接，连续两次升级期间会复现）。
+fn make_resume_incoming_lines<R>(
+    reader: R,
+    pending_raw_line: Option<String>,
+    last_stdout_line: Arc<Mutex<Option<String>>>,
+) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<String>> + Send>>
+where
+    R: futures::AsyncRead + Send + Unpin + 'static,
+{
+    let last_stdout_line_for_replay = Arc::clone(&last_stdout_line);
+    let live = futures::io::BufReader::new(reader)
+        .lines()
+        .inspect(move |res| {
+            if let Ok(line) = res {
+                *last_stdout_line.lock().unwrap() = Some(line.clone());
+            }
+        });
+    match pending_raw_line {
+        Some(line) => {
+            *last_stdout_line_for_replay.lock().unwrap() = Some(line.clone());
+            Box::pin(futures::stream::once(async move { Ok(line) }).chain(live))
+        }
+        None => Box::pin(live),
+    }
+}
+
+/// 子进程 stderr 逐行收进尾巴（原来挂在 `AcpAgent::with_debug` 的
+/// `Stderr` 分支，自己接管 spawn 之后要自己起一条任务做）。
+fn spawn_stderr_drain(stderr: async_process::ChildStderr, stderr_tail: Arc<Mutex<Vec<String>>>) {
+    smol::spawn(async move {
+        let mut lines = futures::io::BufReader::new(stderr).lines();
+        while let Some(Ok(line)) = lines.next().await {
+            let mut tail = stderr_tail.lock().unwrap();
+            if tail.len() >= 30 {
+                tail.remove(0);
+            }
+            tail.push(line);
+        }
+    })
+    .detach();
+}
+
+/// Unix 下 agent 子进程 spawn 时已经 `process_group(0)` 成了自己那组的组长
+/// （见 `AcpAgent::spawn_process` 文档：常见的 `npx …`/`uvx …` 包装启动器要
+/// 连它派生出的真身一起杀，只杀直接子进程会留孤儿）。正常走
+/// `Client::connect_with(agent, ..)` 时 SDK 自己的 `ChildGuard` 负责这个；
+/// 这里改成自己调 `spawn_process()`，没有那份内部 guard，得自己补——
+/// Drop 时对整个进程组发 SIGKILL，跟 smeltd 杀终端会话用的是同一个系统调用。
+struct KillProcessGroupOnDrop(i32);
+
+impl Drop for KillProcessGroupOnDrop {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(-self.0, libc::SIGKILL);
+        }
+    }
 }
 
 /// 连接主体：spawn agent 子进程 → initialize → newSession → 双源 loop
@@ -398,8 +571,35 @@ async fn run_connection(
     cmd_rx: smol::channel::Receiver<AcpCommand>,
     event_tx: smol::channel::Sender<AcpEvent>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
+    stdio_out: Arc<Mutex<Option<AcpStdio>>>,
+    spawn_gate: Option<Arc<RwLock<()>>>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let agent = build_agent(&launch.cmd, stderr_tail)?;
+    let agent = build_agent(&launch.launch)?;
+    let (child_stdin, child_stdout, child_stderr, child) =
+        with_spawn_gate(spawn_gate.as_ref(), || {
+            let (child_stdin, child_stdout, child_stderr, child) = agent
+                .spawn_process()
+                .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+            *stdio_out.lock().unwrap() = Some(AcpStdio {
+                pid: child.id() as i32,
+                stdin_fd: child_stdin.as_raw_fd(),
+                stdout_fd: child_stdout.as_raw_fd(),
+            });
+            Ok::<_, agent_client_protocol::Error>((child_stdin, child_stdout, child_stderr, child))
+        })?;
+    let pid = child.id() as i32;
+    // `child` 本身不能就地 drop：它是子进程唯一的活体句柄（drop async_process
+    // 的 Child 不会杀进程，跟 std 一样），得撑到整个连接结束——用不着它的
+    // 任何方法，只借它的存在期，_guard 才是真正负责杀的那个。
+    let _child_keep_alive = child;
+    let _guard = KillProcessGroupOnDrop(pid);
+    spawn_stderr_drain(child_stderr, stderr_tail);
+
+    let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let outgoing = make_outgoing_sink(child_stdin);
+    let incoming = make_incoming_lines(child_stdout, Arc::clone(&last_stdout_line));
+    let transport = Lines::new(outgoing, incoming);
+
     let cwd = launch
         .cwd
         .clone()
@@ -412,6 +612,8 @@ async fn run_connection(
 
     let perm_tx = event_tx.clone();
     let elicit_tx = event_tx.clone();
+    let perm_last_line = Arc::clone(&last_stdout_line);
+    let elicit_last_line = Arc::clone(&last_stdout_line);
     Client
         .builder()
         .name("smelt")
@@ -420,6 +622,7 @@ async fn run_connection(
         .on_receive_request(
             move |request: RequestPermissionRequest, responder, _connection| {
                 let perm_tx = perm_tx.clone();
+                let raw_request_line = perm_last_line.lock().unwrap().clone();
                 async move {
                     let question = permission_question(&request);
                     let _ = perm_tx.try_send(AcpEvent::Permission {
@@ -427,6 +630,7 @@ async fn run_connection(
                         tool_call_id: request.tool_call.tool_call_id.clone(),
                         pub_options: request.options,
                         responder: PermissionResponder(Some(responder)),
+                        raw_request_line,
                     });
                     Ok(())
                 }
@@ -438,6 +642,7 @@ async fn run_connection(
         .on_receive_request(
             move |request: CreateElicitationRequest, responder, _connection| {
                 let elicit_tx = elicit_tx.clone();
+                let raw_request_line = elicit_last_line.lock().unwrap().clone();
                 async move {
                     let fields = match &request.mode {
                         ElicitationMode::Form(form) => parse_elicit_fields(&form.requested_schema),
@@ -449,6 +654,7 @@ async fn run_connection(
                                 message: request.message,
                                 fields,
                                 responder: ElicitationResponder(Some(responder)),
+                                raw_request_line,
                             });
                             Ok(())
                         }
@@ -459,7 +665,7 @@ async fn run_connection(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
+        .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
             let init = connection
                 .send_request(
                     InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
@@ -496,13 +702,25 @@ async fn run_connection(
                     return true;
                 }
                 launch.cwd.as_deref().is_some_and(|c| {
-                    crate::session_history::transcript_path(c, &sid.to_string()).exists()
+                    // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace
+                    // profile），transcript 得去它指向的目录找，不能只看进程
+                    // 全局环境变量——那只反映"默认" workspace 那一份。
+                    let override_dir = crate::workspace_override::env_override_from_launch(
+                        &launch.launch,
+                        "CLAUDE_CONFIG_DIR",
+                    );
+                    crate::claude_paths::transcript_path(
+                        c,
+                        &sid.to_string(),
+                        override_dir.as_deref(),
+                    )
+                    .exists()
                 })
             });
             if let Some(sid) = launch.resume_session_id.clone().filter(|_| resumable) {
                 // 先试不重放的 resume
                 let mut resume_req = ResumeSessionRequest::new(sid.clone(), cwd.clone());
-                if let Some(meta) = claude_raw_sdk_meta(&launch.cmd) {
+                if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
                     resume_req = resume_req.meta(meta);
                 }
                 if let Ok(resumed) = connection.send_request(resume_req).block_task().await {
@@ -595,6 +813,163 @@ async fn run_connection(
                 ReadyKind::Fresh,
                 supports_image,
                 model_cfg,
+            )
+            .await
+        })
+        .await
+}
+
+/// smeltd 无缝升级续接：不 spawn 新子进程，直接接上继承来的 fd（`exec()` 前
+/// 清了 CLOEXEC、活过整个交接）继续跑，起一条跟 `spawn_acp` 同款的专用线程，
+/// 立即返回句柄。`AcpHandle.stdio` 一开始就是 `Some`——这几个 fd 本来就是
+/// 调用方（smeltd）传进来的，不用等 spawn。
+pub fn resume_acp_from_fds(
+    sid: String,
+    stdin_fd: RawFd,
+    stdout_fd: RawFd,
+    pid: i32,
+    acp_session_id: String,
+    supports_image: bool,
+    pending_raw_line: Option<String>,
+) -> AcpHandle {
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
+    let stdio = Arc::new(Mutex::new(Some(AcpStdio {
+        pid,
+        stdin_fd,
+        stdout_fd,
+    })));
+    let thread_name = format!("smelt-acp-r-{}", &sid[..sid.len().min(10)]);
+    std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let result = smol::block_on(run_resumed_connection(
+                stdin_fd,
+                stdout_fd,
+                pid,
+                acp_session_id,
+                supports_image,
+                pending_raw_line,
+                cmd_rx,
+                event_tx.clone(),
+            ));
+            if let Err(e) = result {
+                let _ = event_tx.try_send(AcpEvent::Fatal(format!("{e}")));
+            }
+            // Ok 结束（Shutdown）不发 Fatal——跟 run_connection 一致。
+        })
+        .expect("spawn smelt-acp resume thread");
+    AcpHandle {
+        cmd_tx,
+        event_rx,
+        stdio,
+    }
+}
+
+/// `resume_acp_from_fds` 的连接主体：接上继承来的 fd → 跳过握手直接
+/// attach_session（agent 早跟上一个进程做过 initialize/newSession 了）→
+/// 双源 loop。`.on_receive_request` 那两段处理逻辑跟 `run_connection`里的
+/// 完全一样——本想抽成共用，但 `Client.builder()` 链式调用之后的类型是个
+/// 展开不动的匿名泛型，硬拆共用函数会把签名搞得比这点重复代码还难读，
+/// protocol 这层的粘合代码本来就不常变，可以接受这份重复。
+async fn run_resumed_connection(
+    stdin_fd: RawFd,
+    stdout_fd: RawFd,
+    pid: i32,
+    acp_session_id: String,
+    supports_image: bool,
+    pending_raw_line: Option<String>,
+    cmd_rx: smol::channel::Receiver<AcpCommand>,
+    event_tx: smol::channel::Sender<AcpEvent>,
+) -> Result<(), agent_client_protocol::Error> {
+    // `unsafe`：这两个 fd 是 smeltd 从上一代进程 dup 过来、清了 CLOEXEC 活过
+    // exec() 的，调用方保证此刻整个进程里没有别的代码持有/关闭过它们
+    // （smeltd 那边交接完立刻转手，见 resume_handoff 的用法）。
+    let stdin_file = unsafe { std::fs::File::from_raw_fd(stdin_fd) };
+    let stdout_file = unsafe { std::fs::File::from_raw_fd(stdout_fd) };
+    let stdin_async = smol::Async::new(stdin_file)
+        .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+    let stdout_async = smol::Async::new(stdout_file)
+        .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+
+    let _guard = KillProcessGroupOnDrop(pid);
+
+    let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let outgoing = make_outgoing_sink(stdin_async);
+    let incoming = make_resume_incoming_lines(
+        stdout_async,
+        pending_raw_line,
+        Arc::clone(&last_stdout_line),
+    );
+    let transport = Lines::new(outgoing, incoming);
+
+    let session_id = SessionId::new(acp_session_id);
+
+    let perm_tx = event_tx.clone();
+    let elicit_tx = event_tx.clone();
+    let perm_last_line = Arc::clone(&last_stdout_line);
+    let elicit_last_line = Arc::clone(&last_stdout_line);
+    Client
+        .builder()
+        .name("smelt")
+        .on_receive_request(
+            move |request: RequestPermissionRequest, responder, _connection| {
+                let perm_tx = perm_tx.clone();
+                let raw_request_line = perm_last_line.lock().unwrap().clone();
+                async move {
+                    let question = permission_question(&request);
+                    let _ = perm_tx.try_send(AcpEvent::Permission {
+                        question,
+                        tool_call_id: request.tool_call.tool_call_id.clone(),
+                        pub_options: request.options,
+                        responder: PermissionResponder(Some(responder)),
+                        raw_request_line,
+                    });
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            move |request: CreateElicitationRequest, responder, _connection| {
+                let elicit_tx = elicit_tx.clone();
+                let raw_request_line = elicit_last_line.lock().unwrap().clone();
+                async move {
+                    let fields = match &request.mode {
+                        ElicitationMode::Form(form) => parse_elicit_fields(&form.requested_schema),
+                        _ => None,
+                    };
+                    match fields {
+                        Some(fields) => {
+                            let _ = elicit_tx.try_send(AcpEvent::Elicitation {
+                                message: request.message,
+                                fields,
+                                responder: ElicitationResponder(Some(responder)),
+                                raw_request_line,
+                            });
+                            Ok(())
+                        }
+                        None => responder
+                            .respond(CreateElicitationResponse::new(ElicitationAction::Decline)),
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
+            // 跳过 initialize/newSession/resume/load：agent 早就跟上一个进程
+            // 完成过握手了，这里只是换了个"读它输出的人"。modes/config_options
+            // /meta 留空——只影响"切模型"下拉暂时是空的，下次 agent 发 Model
+            // 更新（ConfigOptionUpdate）会自动补上，不影响对话本身。
+            let resp = NewSessionResponse::new(session_id.clone());
+            let session = connection.attach_session(resp, Default::default())?;
+            drive_session(
+                session,
+                cmd_rx,
+                event_tx,
+                ReadyKind::ResumedKeepHistory,
+                supports_image,
+                None,
             )
             .await
         })
@@ -766,12 +1141,15 @@ async fn translate_update(
     Ok(())
 }
 
-/// 组装 AcpAgent：命令按空白分词，注入 login shell 的 PATH（Finder 启动的 GUI
-/// 进程 PATH 不含 nvm/homebrew，直接 spawn `npx` 会 ENOENT），stderr 逐行收进尾巴。
-fn build_agent(
-    cmd: &str,
-    stderr_tail: Arc<Mutex<Vec<String>>>,
-) -> Result<AcpAgent, agent_client_protocol::Error> {
+/// 组装 AcpAgent 配置（不 spawn）：命令按空白分词，注入 login shell 的 PATH
+/// （Finder 启动的 GUI 进程 PATH 不含 nvm/homebrew，直接 spawn `npx` 会
+/// ENOENT）。真正的 spawn 由调用方通过 `AcpAgent::spawn_process()`（SDK 公开
+/// 的"低层逃生口"，见其文档）自己发起——这样才能拿到子进程 pid + 原始
+/// stdin/stdout fd（smeltd 无缝升级要用），不能再走 `connect_with(agent, ..)`
+/// 那条把 spawn 过程整个封在 SDK 内部、什么都拿不到的路。stderr 尾巴 / 原始
+/// 行捕获也因此改成调用方（`run_connection`）自己接管，不再挂在这个 AcpAgent
+/// 对象上的 `with_debug` 钩子。
+fn build_agent(launch: &AcpLaunchSpec) -> Result<AcpAgent, agent_client_protocol::Error> {
     // 查找命令用 login PATH + 一批常见 CLI 安装目录兜底。为什么要兜底：
     // login_shell_path 走的是 `zsh -lc`（非交互 login），只读 ~/.zprofile；很多
     // CLI 的安装脚本把 PATH 加在 ~/.zshrc（交互式）里，非交互读不到 → 明明装了
@@ -779,17 +1157,48 @@ fn build_agent(
     // 找得到；真没装的才落到下面的友好提示。子进程 PATH 也用这份扩展，免得
     // agent 起来后找它自己的子工具又缺路径。
     let search_path = extended_search_path();
-    let path_env = format!("PATH={search_path}");
-    // 命令名先解析成绝对路径再交给 SDK：spawn 直接 exec、不依赖任何 PATH；
-    // 找不到就提前返回人话，而不是让 SDK 甩 `os error 2` 天书。带 `/` 的
-    // （受管 bun 的绝对路径）跳过，本来就不查。
-    let mut tokens = cmd.split_whitespace();
-    let resolved: Vec<String> = match tokens.next() {
+    // 命令字符串允许开头带 shell 风格的 `VAR=value` 前缀（比如
+    // `CLAUDE_CONFIG_DIR=~/.claude-quant claude --dangerously-skip-permissions`，
+    // 让同一家 agent 的多个 workspace 各开一条「设置 → Agent 集成」里的独立
+    // 启动命令）——`AcpAgent::from_args` 本来就认这个语法（内部 parse_env_var
+    // 逐个 token 解析，遇到第一个不是 `VAR=value` 形状的 token 才当作程序名），
+    // 这里的 PATH 注入用的正是同一条路。真正要做的是"先把这些前缀跳过去找到
+    // 真正的程序名"，不然会把 `CLAUDE_CONFIG_DIR=...` 整个当成程序名去查 PATH，
+    // 报"未找到命令"（这是之前真实的行为，不是假设）。
+    let args = build_agent_args(launch, &search_path)?;
+    Ok(AcpAgent::from_args(args.iter().map(String::as_str))?)
+}
+
+fn build_agent_args(
+    launch: &AcpLaunchSpec,
+    search_path: &str,
+) -> Result<Vec<String>, agent_client_protocol::Error> {
+    let mut tokens = launch.command.split_whitespace();
+    let mut user_env = BTreeMap::<String, String>::new();
+    let mut prog_token = None;
+    for tok in tokens.by_ref() {
+        match crate::workspace_override::split_env_assignment(tok) {
+            Some((name, value)) => {
+                user_env.insert(
+                    name.to_string(),
+                    crate::workspace_override::expand_tilde(value),
+                );
+            }
+            None => {
+                prog_token = Some(tok);
+                break;
+            }
+        }
+    }
+    for (name, value) in &launch.env {
+        user_env.insert(name.clone(), crate::workspace_override::expand_tilde(value));
+    }
+    let resolved: Vec<String> = match prog_token {
         Some(prog) => {
             let prog = if prog.contains('/') {
                 prog.to_string()
             } else {
-                resolve_in_path(prog, &search_path).ok_or_else(|| {
+                resolve_in_path(prog, search_path).ok_or_else(|| {
                     agent_client_protocol::Error::internal_error().data(format!(
                         "未找到命令 `{prog}`。这类对话 agent 是各自独立的 CLI，需要先自行\
                          安装并登录。如果确定装了，多半是它的目录没进登录 shell 的 PATH——\
@@ -804,17 +1213,14 @@ fn build_agent(
         }
         None => Vec::new(),
     };
-    let args = std::iter::once(path_env.as_str()).chain(resolved.iter().map(String::as_str));
-    let agent = AcpAgent::from_args(args)?.with_debug(move |line, direction| {
-        if matches!(direction, LineDirection::Stderr) {
-            let mut tail = stderr_tail.lock().unwrap();
-            if tail.len() >= 30 {
-                tail.remove(0);
-            }
-            tail.push(line.to_string());
-        }
-    });
-    Ok(agent)
+    let mut args = vec![format!("PATH={search_path}")];
+    args.extend(
+        user_env
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    args.extend(resolved);
+    Ok(args)
 }
 
 /// Claude Code 适配器专用 meta：要它把原始 SDK 消息也发过来（里面带 usage /
@@ -901,6 +1307,64 @@ pub fn content_text(content: &ContentBlock) -> String {
         ContentBlock::Resource(_) => "[内嵌资源]".to_string(),
         _ => "[未知内容]".to_string(), // schema #[non_exhaustive]，协议会长新枝
     }
+}
+
+/// agent_client_protocol 的协议类型 → `acp_chat` 共享模型类型。原来住在
+/// acp_view.rs（GUI 层），跟着 `apply_event` 归约逻辑一起搬进 acp_session——
+/// 谁跑归约谁就要做这层翻译，现在是 smeltd 不是 GUI。
+pub fn tool_kind_from_acp(
+    k: agent_client_protocol::schema::v1::ToolKind,
+) -> crate::acp_chat::ToolKind {
+    use crate::acp_chat::ToolKind;
+    use agent_client_protocol::schema::v1::ToolKind as Acp;
+    match k {
+        Acp::Read => ToolKind::Read,
+        Acp::Edit => ToolKind::Edit,
+        Acp::Delete => ToolKind::Delete,
+        Acp::Move => ToolKind::Move,
+        Acp::Search => ToolKind::Search,
+        Acp::Execute => ToolKind::Execute,
+        Acp::Think => ToolKind::Think,
+        Acp::Fetch => ToolKind::Fetch,
+        Acp::SwitchMode => ToolKind::SwitchMode,
+        _ => ToolKind::Other, // #[non_exhaustive]：协议以后加的新分类先归到这
+    }
+}
+
+pub fn tool_status_from_acp(
+    s: agent_client_protocol::schema::v1::ToolCallStatus,
+) -> crate::acp_chat::ToolCallStatus {
+    use crate::acp_chat::ToolCallStatus;
+    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
+    match s {
+        Acp::Pending => ToolCallStatus::Pending,
+        Acp::InProgress => ToolCallStatus::InProgress,
+        Acp::Completed => ToolCallStatus::Completed,
+        Acp::Failed => ToolCallStatus::Failed,
+        _ => ToolCallStatus::Pending, // #[non_exhaustive]：协议以后加的新状态先当待定
+    }
+}
+
+pub fn tool_content_parts(
+    content: &[agent_client_protocol::schema::v1::ToolCallContent],
+) -> Vec<crate::acp_chat::ToolOutputPart> {
+    use crate::acp_chat::ToolOutputPart;
+    use agent_client_protocol::schema::v1::ToolCallContent;
+    content
+        .iter()
+        .filter_map(|c| match c {
+            ToolCallContent::Content(inner) => {
+                let text = content_text(&inner.content);
+                (!text.trim().is_empty()).then(|| ToolOutputPart::Text(text))
+            }
+            ToolCallContent::Diff(d) => Some(ToolOutputPart::Diff {
+                path: d.path.display().to_string(),
+                old_text: d.old_text.clone(),
+                new_text: d.new_text.clone(),
+            }),
+            _ => None, // Terminal 等 MVP 不渲染
+        })
+        .collect()
 }
 
 /// —— 受管 bun 运行时（Zed 式按需下载）——————————————————————————
@@ -1003,28 +1467,55 @@ fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
 /// 里有同名可执行则原样放行（用户自己装的）；其他命令一律不动（npx / 绝对路径
 /// 等逃生口）。
 fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, String> {
-    let mut words = cmd.split_whitespace();
-    let head = words.next().unwrap_or_default();
+    let head = command_head_after_env_prefixes(cmd).unwrap_or_default();
     if head != "bunx" && head != "bun" {
         return Ok(cmd.to_string());
     }
-    let rest: Vec<&str> = words.collect();
     match ensure_bun(status) {
         Ok(bun) => {
             let bun = bun.to_string_lossy().into_owned();
-            let mut parts = vec![bun];
-            if head == "bunx" {
-                parts.push("x".to_string());
-            }
-            parts.extend(rest.iter().map(|s| s.to_string()));
-            Ok(parts.join(" "))
+            Ok(rewrite_runtime_command_with_bun(cmd, &bun).unwrap_or_else(|| cmd.to_string()))
         }
         Err(e) => {
             // 受管失败：系统里用户自己装过 bun 就用系统的。
-            let sys_has = std::env::split_paths(login_shell_path()).any(|p| p.join(head).is_file());
-            if sys_has { Ok(cmd.to_string()) } else { Err(e) }
+            let sys_has = std::env::split_paths(crate::login_env::login_path())
+                .any(|p| p.join(head).is_file());
+            if sys_has {
+                Ok(cmd.to_string())
+            } else {
+                Err(e)
+            }
         }
     }
+}
+
+fn command_head_after_env_prefixes(cmd: &str) -> Option<&str> {
+    cmd.split_whitespace()
+        .find(|tok| crate::workspace_override::split_env_assignment(tok).is_none())
+}
+
+fn rewrite_runtime_command_with_bun(cmd: &str, bun: &str) -> Option<String> {
+    let mut words = cmd.split_whitespace();
+    let mut prefix = Vec::new();
+    let head = loop {
+        match words.next() {
+            Some(tok) if crate::workspace_override::split_env_assignment(tok).is_some() => {
+                prefix.push(tok);
+            }
+            Some(tok) => break tok,
+            None => return None,
+        }
+    };
+    if head != "bunx" && head != "bun" {
+        return None;
+    }
+    let mut parts: Vec<String> = prefix.into_iter().map(str::to_string).collect();
+    parts.push(bun.to_string());
+    if head == "bunx" {
+        parts.push("x".to_string());
+    }
+    parts.extend(words.map(str::to_string));
+    Some(parts.join(" "))
 }
 
 /// login shell 的 PATH（跑一次缓存）。GUI 进程从 Finder 启动时 PATH 只有系统
@@ -1034,7 +1525,7 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
 /// 注释）。顺序：login PATH 在前（用户显式配的优先），标准安装位在后兜底；
 /// 重复目录无所谓，resolve 取第一个命中即止。
 fn extended_search_path() -> String {
-    let mut path = login_shell_path().to_string();
+    let mut path = crate::login_env::login_path().to_string();
     let mut push = |p: String| {
         path.push(':');
         path.push_str(&p);
@@ -1072,81 +1563,10 @@ fn resolve_in_path(program: &str, path: &str) -> Option<String> {
     None
 }
 
-/// 交互式 login shell 里的 PATH（进程存活期只探一次）。
-///
-/// **为什么必须交互式（`-i`）**：非交互 login shell（`zsh -lc`）只读
-/// `.zshenv`/`.zprofile`/`.zlogin`，**不读 `.zshrc`**——而绝大多数人的 PATH 注入
-/// （各家 CLI、nvm、bun、volta …）都写在 `.zshrc`。少了它，Finder 启动的 GUI 取到
-/// 的 PATH 会漏掉一大批目录，导致明明装了、终端里能跑的 CLI（实测 grok 装在
-/// `~/.grok/bin`）被 `resolve_in_path` 判成「未找到命令」。加 `-i` 让它读 `.zshrc`，
-/// 跟用户终端里的 PATH 对齐。
-///
-/// **代价与去噪**：交互式 shell 启动会执行 shell-integration 脚本，往 stdout 打一段
-/// OSC 转义序列（形如 `\e]1337;…;shell=zsh`）。直接读会把这串噪音粘进 PATH 的第一
-/// 段、正好毁掉第一个目录（就是新装 CLI 常在的位置）。所以用一对唯一标记把 `$PATH`
-/// 夹住，再从输出里只抠中间那段，前后的噪音一律丢弃（见 `extract_marked_path`）。
-fn login_shell_path() -> &'static str {
-    static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(|| {
-        std::process::Command::new("/bin/zsh")
-            .args([
-                "-ilc",
-                "printf %s __SMELT_PATH_BEGIN__; printf %s \"$PATH\"; printf %s __SMELT_PATH_END__",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| extract_marked_path(&String::from_utf8_lossy(&o.stdout)))
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
-    })
-}
-
-/// 从交互式 shell 的输出里抠出 `__SMELT_PATH_BEGIN__` 与 `__SMELT_PATH_END__` 之间
-/// 的 PATH，丢掉 shell-integration 打在前后的 OSC 噪音。找不到标记就返回 None
-/// （交给调用方回退到进程自身的 PATH）。
-fn extract_marked_path(raw: &str) -> Option<String> {
-    const BEGIN: &str = "__SMELT_PATH_BEGIN__";
-    const END: &str = "__SMELT_PATH_END__";
-    let start = raw.find(BEGIN)? + BEGIN.len();
-    let rest = &raw[start..];
-    let stop = rest.find(END)?;
-    Some(rest[..stop].trim().to_string())
-}
-
-#[cfg(test)]
-mod path_env_tests {
-    use super::extract_marked_path;
-
-    /// 交互式 zsh 会在 `$PATH` 前粘一段 shell-integration 的 OSC 噪音（实测形如
-    /// `\e]1337;…;shell=zsh`）。抠取逻辑必须只取标记之间的内容——第一段目录（新装
-    /// CLI 常在这里，如 grok 的 `~/.grok/bin`）绝不能被噪音吃掉。这正是把 `-lc` 改
-    /// 成 `-ilc` 后若不去噪就会踩的坑，锁死防回归。
-    #[test]
-    fn strips_shell_integration_noise_before_path() {
-        let raw = "\u{1b}]1337;RemoteHost=me@host\u{1b}\\\u{1b}]1337;ShellIntegrationVersion=14;shell=zsh\
-                   __SMELT_PATH_BEGIN__/Users/me/.grok/bin:/usr/bin:/bin__SMELT_PATH_END__";
-        let got = extract_marked_path(raw).expect("应能抠出 PATH");
-        assert_eq!(got, "/Users/me/.grok/bin:/usr/bin:/bin");
-        assert!(
-            got.starts_with("/Users/me/.grok/bin"),
-            "第一段目录不能被 OSC 噪音污染"
-        );
-    }
-
-    /// 没有标记（shell 直接失败、没跑到 printf）返回 None，让调用方回退到进程 PATH。
-    #[test]
-    fn returns_none_without_markers() {
-        assert!(extract_marked_path("/usr/bin:/bin").is_none());
-        assert!(extract_marked_path("").is_none());
-    }
-
-    /// 只有起始标记、没有结束标记（输出被截断）也不 panic，返回 None。
-    #[test]
-    fn returns_none_when_end_marker_missing() {
-        assert!(extract_marked_path("noise__SMELT_PATH_BEGIN__/usr/bin").is_none());
-    }
-}
+// login shell 的 PATH 探测（连同各家 agent 的自定义 workspace 目录变量一起）
+// 挪进了 `crate::login_env`——不止 PATH 这一个变量要用同一套"起交互式 shell
+// 才能读到 .zshrc export"的机制，claude_paths.rs 的 CLAUDE_CONFIG_DIR 判断
+// 也要用它，不能各起一次慢 shell。
 
 #[cfg(test)]
 mod elicit_parse_tests {
@@ -1280,6 +1700,19 @@ mod runtime_tests {
         );
     }
 
+    #[test]
+    fn runtime_rewrite_preserves_legacy_env_prefixes_before_bunx() {
+        let out = rewrite_runtime_command_with_bun(
+            "CLAUDE_CONFIG_DIR=~/.claude bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+            "/managed/bun",
+        )
+        .expect("bunx should rewrite");
+        assert_eq!(
+            out,
+            "CLAUDE_CONFIG_DIR=~/.claude /managed/bun x --bun @agentclientprotocol/claude-agent-acp@0.59.0"
+        );
+    }
+
     /// 真实下载验证 + 预热（22MB，网络依赖）：`cargo test -- --ignored manual_ensure_bun`
     #[test]
     #[ignore]
@@ -1300,8 +1733,50 @@ mod runtime_tests {
 }
 
 #[cfg(test)]
+mod spawn_gate_tests {
+    use super::with_spawn_gate;
+    use std::sync::{mpsc, Arc, RwLock};
+    use std::time::Duration;
+
+    #[test]
+    fn write_guard_blocks_gated_spawn_section_and_permit_releases_afterward() {
+        let gate = Arc::new(RwLock::new(()));
+        let write_guard = gate.write().unwrap();
+        let gate_for_thread = Arc::clone(&gate);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            with_spawn_gate(Some(&gate_for_thread), || {
+                entered_tx.send(()).unwrap();
+            });
+        });
+
+        ready_rx.recv().unwrap();
+        let entered_while_locked = entered_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        drop(write_guard);
+        if !entered_while_locked {
+            entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("spawn section should proceed after upgrade releases the write guard");
+        }
+        worker.join().unwrap();
+        assert!(
+            !entered_while_locked,
+            "write guard must block entry into the actual spawn section"
+        );
+        assert!(
+            gate.try_write().is_ok(),
+            "spawn read permit must be released after the gated section"
+        );
+    }
+}
+
+#[cfg(test)]
 mod path_resolve_tests {
-    use super::resolve_in_path;
+    use super::{build_agent_args, resolve_in_path};
+    use crate::agent_kind::AcpLaunchSpec;
 
     #[test]
     fn absolute_or_slashed_returned_asis() {
@@ -1325,6 +1800,46 @@ mod path_resolve_tests {
         // 找不到就返回 None，让调用方保留原名、把真实 spawn 错误报出来。
         assert!(resolve_in_path("definitely-not-a-real-cmd-xyz", "/bin:/usr/bin").is_none());
     }
+
+    #[test]
+    fn build_agent_args_preserves_plain_launch_specs() {
+        let args = build_agent_args(&AcpLaunchSpec::from_command("sh -lc echo"), "/bin:/usr/bin")
+            .expect("plain launch spec should build");
+
+        assert_eq!(
+            args,
+            vec![
+                "PATH=/bin:/usr/bin".to_string(),
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "echo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_agent_args_overlays_structured_env_on_legacy_prefixes() {
+        let launch = AcpLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path sh --version")
+            .with_env(
+                "CLAUDE_CONFIG_DIR",
+                "~/Library/Application Support/Claude Quant",
+            )
+            .with_env("XDG_CONFIG_HOME", "~/.config");
+
+        let args = build_agent_args(&launch, "/bin:/usr/bin").expect("launch args");
+        let home = dirs::home_dir().unwrap();
+        let structured_config = format!(
+            "CLAUDE_CONFIG_DIR={}/Library/Application Support/Claude Quant",
+            home.display()
+        );
+        let structured_xdg = format!("XDG_CONFIG_HOME={}/.config", home.display());
+
+        assert_eq!(args.first().map(String::as_str), Some("PATH=/bin:/usr/bin"));
+        assert!(args[1..3].contains(&structured_config));
+        assert!(args[1..3].contains(&structured_xdg));
+        assert_eq!(args[3], "/bin/sh");
+        assert_eq!(args[4], "--version");
+    }
 }
 
 #[cfg(test)]
@@ -1342,6 +1857,114 @@ mod image_block_tests {
         assert_eq!(v["type"], "image");
         assert_eq!(v["data"], "QUJD");
         assert_eq!(v["mimeType"], "image/png");
+    }
+}
+
+#[cfg(test)]
+mod resume_incoming_lines_tests {
+    use super::make_resume_incoming_lines;
+    use crate::acp_session::{AcpSessionState, LivePermission};
+    use futures::StreamExt;
+    use std::sync::{Arc, Mutex};
+
+    /// 复现 code review 发现的 bug：早期版本只有 `make_incoming_lines`（首次
+    /// spawn 路径）接了 `last_stdout_line`，`make_resume_incoming_lines`（续接
+    /// 路径）漏接——连续两次升级期间，第二次升级前如果 agent 又发一次权限/
+    /// 选择题请求，`pending_raw_request_line()` 读到的永远是 None，回放不出
+    /// 那行原文，审批卡直接消失，agent 永久卡死。这里验证回放行和后续实时行
+    /// 都会写回 `last_stdout_line`，保证下一次升级能读到最新的待处理请求。
+    #[test]
+    fn replay_and_live_lines_both_update_last_stdout_line() {
+        let reader = futures::io::Cursor::new(b"live-request-line\n".to_vec());
+        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let mut stream = make_resume_incoming_lines(
+            reader,
+            Some("replayed-request-line".to_string()),
+            Arc::clone(&last_stdout_line),
+        );
+
+        smol::block_on(async {
+            let first = stream.next().await.unwrap().unwrap();
+            assert_eq!(first, "replayed-request-line");
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some("replayed-request-line"),
+                "回放行也要立刻计入 last_stdout_line：万一 agent 紧跟着又发一次新\
+                 请求，下一次升级得从这行往后看，不能还停在 None"
+            );
+
+            let second = stream.next().await.unwrap().unwrap();
+            assert_eq!(second, "live-request-line");
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some("live-request-line"),
+                "续接连接活着期间读到的实时行（模拟第二次升级前新来的权限/选择题\
+                 请求）也必须覆盖 last_stdout_line，否则下一次升级回放不出这行"
+            );
+        });
+    }
+
+    #[test]
+    fn no_pending_line_still_tracks_live_lines() {
+        let reader = futures::io::Cursor::new(b"only-live-line\n".to_vec());
+        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let mut stream = make_resume_incoming_lines(reader, None, Arc::clone(&last_stdout_line));
+
+        smol::block_on(async {
+            let line = stream.next().await.unwrap().unwrap();
+            assert_eq!(line, "only-live-line");
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some("only-live-line")
+            );
+        });
+    }
+
+    #[test]
+    fn pending_request_survives_two_resume_handoff_cycles() {
+        let replayed = r#"{"jsonrpc":"2.0","id":41,"method":"session/request_permission"}"#;
+        let live = r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission"}"#;
+        let reader = futures::io::Cursor::new(format!("{live}\n").into_bytes());
+        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let mut first_resume = make_resume_incoming_lines(
+            reader,
+            Some(replayed.to_string()),
+            Arc::clone(&last_stdout_line),
+        );
+
+        let pending_raw_line = smol::block_on(async {
+            assert_eq!(first_resume.next().await.unwrap().unwrap(), replayed);
+            assert_eq!(last_stdout_line.lock().unwrap().as_deref(), Some(replayed));
+
+            assert_eq!(first_resume.next().await.unwrap().unwrap(), live);
+            assert_eq!(last_stdout_line.lock().unwrap().as_deref(), Some(live));
+
+            let mut state = AcpSessionState::default();
+            state.permission = Some(LivePermission {
+                question: "Allow?".to_string(),
+                tool_call_id: "tool-1".to_string(),
+                options: Vec::new(),
+                responder: None,
+                raw_request_line: last_stdout_line.lock().unwrap().clone(),
+            });
+            state
+                .pending_raw_request_line()
+                .expect("handoff must capture the live raw request")
+                .to_string()
+        });
+
+        let mut second_resume = make_resume_incoming_lines(
+            futures::io::Cursor::new(Vec::<u8>::new()),
+            Some(pending_raw_line.clone()),
+            Arc::new(Mutex::new(None)),
+        );
+        let replayed_again = smol::block_on(async { second_resume.next().await.unwrap().unwrap() });
+
+        assert_eq!(replayed_again, pending_raw_line);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replayed_again).unwrap()["id"],
+            42
+        );
     }
 }
 
@@ -1388,12 +2011,10 @@ mod model_tests {
         assert_eq!(state.current_name, "Claude Sonnet 4.5");
         // 候选要带全，UI 靠它渲染下拉
         assert_eq!(state.options.len(), 2);
-        assert!(
-            state
-                .options
-                .iter()
-                .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8")
-        );
+        assert!(state
+            .options
+            .iter()
+            .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8"));
     }
 
     /// 选项按厂商/档位分组时同样要能翻出来。

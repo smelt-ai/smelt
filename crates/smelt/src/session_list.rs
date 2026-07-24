@@ -18,10 +18,10 @@ use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::*;
 
 use crate::git_panel::main_repo_root_from_common_dir;
-use crate::settings::{AcpAgentKind, active_launch_entries, icon_for_launch_command};
+use crate::settings::{active_launch_entries, icon_for_launch_command, AcpAgentKind};
 use crate::{
-    AgentStatus, MainView, RenameTarget, SessionDrag, SessionKind, Workspace, pane_status,
-    pane_title, ui_theme,
+    pane_status, pane_title, ui_theme, AgentStatus, MainView, RenameTarget, SessionDrag,
+    SessionKind, Workspace,
 };
 
 /// 会话行 hover group 名：行 `.group()` + 右端操作条 `.group_hover()` 配对，
@@ -342,7 +342,7 @@ impl Workspace {
                                             menu = menu.separator().item(PopupMenuItem::label(
                                                 "对话 · smelt 原生界面",
                                             ));
-                                            // 三家 agent 走同一条 ACP 通道，菜单项从枚举派生：
+                                            // 各家 agent 走同一条 ACP 通道，菜单项从枚举派生：
                                             // 加一家 agent 不用回来改这段。
                                             for agent in AcpAgentKind::ALL {
                                                 let e_acp = e_menu.clone();
@@ -354,7 +354,37 @@ impl Workspace {
                                                             let cwd = cwd_acp.clone();
                                                             e_acp.update(cx, |ws, cx| {
                                                                 ws.add_acp_session(
-                                                                    agent, cwd, window, cx,
+                                                                    agent, None, None, cwd, window,
+                                                                    cx,
+                                                                )
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let config = cx
+                                                .global::<crate::settings::AgentUiConfig>()
+                                                .clone();
+                                            let profiles = config.profiles.clone();
+                                            for profile in profiles {
+                                                let e_acp = e_menu.clone();
+                                                let cwd_acp = cwd_opt.clone();
+                                                let launch = config.profile_launch_spec(&profile);
+                                                let profile_id = Some(profile.id.clone());
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(profile.label.clone())
+                                                        .icon(IconName::Bot)
+                                                        .on_click(move |_ev, window, cx| {
+                                                            let cwd = cwd_acp.clone();
+                                                            let launch = launch.clone();
+                                                            let profile_id = profile_id.clone();
+                                                            e_acp.update(cx, |ws, cx| {
+                                                                ws.add_acp_session(
+                                                                    profile.kind(),
+                                                                    Some(launch),
+                                                                    profile_id,
+                                                                    cwd,
+                                                                    window,
+                                                                    cx,
                                                                 )
                                                             });
                                                         }),

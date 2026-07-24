@@ -10,11 +10,13 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
+use gpui::InteractiveElement;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::Input;
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::radio::{Radio, RadioGroup};
@@ -24,7 +26,7 @@ use gpui_component::setting::{
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::*;
 
-use crate::{Workspace, agent, pet, terminal, terminal_view, updater};
+use crate::{agent, pet, terminal, terminal_view, updater, Workspace};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -248,119 +250,14 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 }
 
 // ===================== Agent UI / Claude hooks（B 路线） =====================
-
-fn default_true() -> bool {
-    true
-}
-
-/// 审批通知 / ACP 命令等 agent UI 偏好（`~/.smelt/agent_ui.json`）。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct AgentUiConfig {
-    /// 状态通道进入「等你批准 / 等你输入」时用 Notification 组件弹出。
-    #[serde(default = "default_true")]
-    pub notify_awaiting: bool,
-    /// Claude ACP 会话的 agent 启动命令（空白分词）。默认 Claude 官方适配器；权限门
-    /// 保留——结构化审批正是这条通道的卖点，别在这里加 bypass 类参数。
-    ///
-    /// 字段名没跟着 `AcpAgentKind` 改成 `acp_claude_cmd`：老配置文件里就叫这个，
-    /// 改名等于把用户自定义过的命令悄悄重置回默认。
-    #[serde(default = "default_acp_cmd")]
-    pub acp_cmd: String,
-    /// GitHub Copilot ACP 会话的启动命令。
-    #[serde(default = "default_acp_copilot_cmd")]
-    pub acp_copilot_cmd: String,
-    /// Codex ACP 会话的启动命令。
-    #[serde(default = "default_acp_codex_cmd")]
-    pub acp_codex_cmd: String,
-    /// Grok ACP 会话的启动命令。
-    #[serde(default = "default_acp_grok_cmd")]
-    pub acp_grok_cmd: String,
-}
-
-impl AgentUiConfig {
-    /// 某个 agent 种类当前生效的启动命令。
-    pub fn acp_cmd_for(&self, agent: AcpAgentKind) -> String {
-        match agent {
-            AcpAgentKind::Claude => self.acp_cmd.clone(),
-            AcpAgentKind::Copilot => self.acp_copilot_cmd.clone(),
-            AcpAgentKind::Codex => self.acp_codex_cmd.clone(),
-            AcpAgentKind::Grok => self.acp_grok_cmd.clone(),
-        }
-    }
-
-    /// 改某个 agent 的启动命令（设置页三条输入框共用）。
-    pub fn set_acp_cmd_for(&mut self, agent: AcpAgentKind, cmd: String) {
-        match agent {
-            AcpAgentKind::Claude => self.acp_cmd = cmd,
-            AcpAgentKind::Copilot => self.acp_copilot_cmd = cmd,
-            AcpAgentKind::Codex => self.acp_codex_cmd = cmd,
-            AcpAgentKind::Grok => self.acp_grok_cmd = cmd,
-        }
-    }
-}
-
-/// ACP 会话可接的 agent 种类。**新增一种 agent = 这个枚举加一条**，命令、显示名、
-/// 设置项、新建菜单都从这里派生，别再散着写死。
-///
-/// 序列化用 `id()` 那串小写标识（存进 workspace.json 的 ACP 会话存档），不用
-/// serde 派生——枚举变体名将来改了不该炸存档。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AcpAgentKind {
-    Claude,
-    Copilot,
-    Codex,
-    Grok,
-}
-
-impl AcpAgentKind {
-    /// 新建菜单 / 设置页的排列顺序。
-    pub const ALL: [Self; 4] = [Self::Claude, Self::Copilot, Self::Codex, Self::Grok];
-
-    /// 存档标识（稳定，别改）。
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Copilot => "copilot",
-            Self::Codex => "codex",
-            Self::Grok => "grok",
-        }
-    }
-
-    /// 存档标识 → 种类；认不出（旧存档 / 手改坏了）返回 None，调用方自己兜底。
-    pub fn from_id(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.id() == s)
-    }
-
-    /// 给人看的 agent 名（会话标题、启动横幅、菜单项共用）。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude Code",
-            Self::Copilot => "GitHub Copilot",
-            Self::Codex => "Codex",
-            Self::Grok => "Grok",
-        }
-    }
-
-    /// 短名：会话标题这种窄地方用（「Copilot 对话 · smelt」）。
-    pub fn short_label(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude",
-            Self::Copilot => "Copilot",
-            Self::Codex => "Codex",
-            Self::Grok => "Grok",
-        }
-    }
-
-    /// 出厂启动命令。
-    pub fn default_cmd(self) -> String {
-        match self {
-            Self::Claude => default_acp_cmd(),
-            Self::Copilot => default_acp_copilot_cmd(),
-            Self::Codex => default_acp_codex_cmd(),
-            Self::Grok => default_acp_grok_cmd(),
-        }
-    }
-}
+//
+// AcpAgentKind / AcpProfile 搬进 smelt-core（本身不需要 GPUI），AgentUiConfig
+// （需要 `gpui::Global`）搬进 smelt-ui——都是 acp_view.rs 独立成 smelt-acp-view
+// crate 之后要跨 crate 共用的数据模型。这里重导出成原来的裸名字，本文件剩下
+// 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
+// 逐处改路径。
+pub use smelt_core::agent_kind::{AcpAgentKind, AcpProfile};
+pub use smelt_ui::agent_ui_config::{apply_agent_ui, load_agent_ui_config, AgentUiConfig};
 
 /// 全局配置里某个 agent 的启动命令；配置还没装载就退回出厂值。
 pub fn acp_cmd_for(agent: AcpAgentKind, cx: &App) -> String {
@@ -390,83 +287,6 @@ fn acp_cmd_setting_item(agent: AcpAgentKind) -> SettingItem {
         agent.label()
     ))
     .keywords(["acp", "对话", "agent", agent.id()])
-}
-
-pub fn default_acp_cmd() -> String {
-    // bunx 由 smelt 解析到受管 bun（~/.smelt/runtime，首次自动下载，见 acp.rs）；
-    // 适配器锁版本——方言适配与回归测试都对着这个版本做，升级是主动行为。
-    //
-    // --bun：强制 bunx 用 bun 自己的运行时执行，不 fallback 到系统 Node——实测
-    // 发现这个适配器声明了 `engines.node >= 22`，bunx 默认会尊重这个声明主动
-    // 切到系统 Node 去跑（哪怕我们准备了受管 bun），「受管运行时不依赖系统装了
-    // 什么」这条设计承诺不加这个 flag 就不成立。见 bunx --help 的官方说明。
-    //
-    // 锁 0.59.0 不锁最新（0.60.0）：0.60.0 依赖的 zod 4.x 那份 `zod/v4` 子目录
-    // 缺 index 文件（exports 声明了 `./v4` 但目录里只有 classic/core/locales/
-    // mini 几个子模块，没有入口文件），Node 和 Bun 的解析器都拒绝——是上游
-    // （@agentclientprotocol/sdk 的 zod 依赖）的 bug，不是我们能绕开的。0.59.0
-    // 依赖的 sdk@1.2.1 自带完整的 zod 4.4.3（`zod/v4/package.json` 齐全），
-    // 实测 initialize 握手正常返回、`agentCapabilities.loadSession: true` 也在。
-    "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0".to_string()
-}
-
-pub fn default_acp_copilot_cmd() -> String {
-    // Copilot CLI 自带 ACP 服务端，不需要适配器：`copilot --help` 里明写
-    // `--acp  Start as Agent Client Protocol server`（实测 1.0.73）。
-    // 代价是得先装 CLI（`brew install copilot` / npm `@github/copilot`）并
-    // `copilot` 登录过——找不到命令时 Fatal 会带上 stderr 说明。
-    "copilot --acp".to_string()
-}
-
-pub fn default_acp_codex_cmd() -> String {
-    // Codex CLI 自己**没有** ACP 入口（`codex --help` 只有 mcp / mcp-server），
-    // 走 Zed 维护的适配器包；它按平台分发原生二进制（optionalDependencies），
-    // bunx 会自动取对应架构那份。同样锁版本，理由见 default_acp_cmd。
-    // 登录态复用 codex CLI 的 `~/.codex`。
-    "bunx --bun @zed-industries/codex-acp@0.16.0".to_string()
-}
-
-pub fn default_acp_grok_cmd() -> String {
-    // Grok CLI 自带 ACP：`grok agent stdio`（help 里只写「Run the agent over
-    // stdio」没提协议名，实测发 initialize 能正常握手，agentCapabilities 齐全）。
-    // 需先装 grok CLI 并登录（凭据在 ~/.grok/auth.json）。
-    //
-    // 注意它 `promptCapabilities.image = false`——四家里唯一不收图的，粘贴图片
-    // 对 Grok 会话没用。
-    "grok agent stdio".to_string()
-}
-
-impl Default for AgentUiConfig {
-    fn default() -> Self {
-        Self {
-            notify_awaiting: true,
-            acp_cmd: default_acp_cmd(),
-            acp_copilot_cmd: default_acp_copilot_cmd(),
-            acp_codex_cmd: default_acp_codex_cmd(),
-            acp_grok_cmd: default_acp_grok_cmd(),
-        }
-    }
-}
-
-impl Global for AgentUiConfig {}
-
-fn agent_ui_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".smelt").join("agent_ui.json"))
-}
-
-pub fn load_agent_ui_config() -> AgentUiConfig {
-    crate::json_store::load_json(agent_ui_path())
-}
-
-fn save_agent_ui_config(c: &AgentUiConfig) {
-    crate::json_store::save_json(agent_ui_path(), c);
-}
-
-pub fn apply_agent_ui(f: impl FnOnce(&mut AgentUiConfig), cx: &mut App) {
-    let mut c = cx.global::<AgentUiConfig>().clone();
-    f(&mut c);
-    save_agent_ui_config(&c);
-    cx.set_global(c);
 }
 
 /// smelt-notify 安装路径（与 package/安装脚本约定一致）。
@@ -1664,6 +1484,16 @@ pub struct LaunchInputs {
     _subs: Vec<Subscription>,
 }
 
+/// 手动添加 workspace 列表编辑器：每项一对 label/workspace_dir 输入框；agent
+/// 种类走下拉选择（离散值，不需要输入框），选完直接存盘不用另外的 InputState。
+pub struct ProfileInputs {
+    rows: Vec<(
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+    )>,
+    _subs: Vec<Subscription>,
+}
+
 /// 独立设置窗口的根 view：只是个薄壳，真正状态都还在传进来的 Workspace 实体上，
 /// 每次渲染转手调 `render_settings_content`。
 ///
@@ -2021,6 +1851,124 @@ impl Workspace {
             cx,
         );
         self.reset_launch_inputs();
+        cx.notify();
+    }
+
+    /// 手动添加 workspace 条数变了就重建输入框（增删后调用）。
+    pub fn reset_profile_inputs(&mut self) {
+        self.profile_inputs = None;
+    }
+
+    /// 懒创建 workspace 列表编辑器（需要 window）。
+    pub fn ensure_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = cx.global::<AgentUiConfig>().profiles.len();
+        let stale = self
+            .profile_inputs
+            .as_ref()
+            .is_none_or(|i| i.rows.len() != count);
+        if stale {
+            self.init_profile_inputs(window, cx);
+        }
+    }
+
+    fn init_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::{InputEvent, InputState};
+
+        let profiles = cx.global::<AgentUiConfig>().profiles.clone();
+        let save_on = |ev: &InputEvent| matches!(ev, InputEvent::Change | InputEvent::Blur);
+        let mut rows = Vec::new();
+        let mut subs = Vec::new();
+        for (i, p) in profiles.iter().enumerate() {
+            let id = p.id.clone();
+            let label_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("显示名称")
+                    .default_value(p.label.clone())
+            });
+            let dir_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("workspace 目录，如 ~/.claude-quant")
+                    .default_value(p.workspace_dir.clone())
+            });
+            let id_for_label = id.clone();
+            subs.push(
+                cx.subscribe(&label_input, move |_, s, ev: &InputEvent, cx| {
+                    if save_on(ev) {
+                        let v = s.read(cx).value().to_string();
+                        let id = id_for_label.clone();
+                        apply_agent_ui(
+                            move |c| {
+                                if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
+                                    p.label = v;
+                                }
+                            },
+                            cx,
+                        );
+                    }
+                }),
+            );
+            let id_for_dir = id.clone();
+            subs.push(cx.subscribe(&dir_input, move |_, s, ev: &InputEvent, cx| {
+                if save_on(ev) {
+                    let v = s.read(cx).value().to_string();
+                    let id = id_for_dir.clone();
+                    apply_agent_ui(
+                        move |c| {
+                            if let Some(p) = c.profiles.iter_mut().find(|p| p.id == id) {
+                                p.workspace_dir = v;
+                            }
+                        },
+                        cx,
+                    );
+                }
+            }));
+            let _ = i;
+            rows.push((label_input, dir_input));
+        }
+        self.profile_inputs = Some(ProfileInputs { rows, _subs: subs });
+    }
+
+    /// 新增一个手动 workspace：默认接 Claude（用户改目录之前就得选个 agent，
+    /// Claude 是最常见的场景，跟「新建 ACP 对话」菜单的默认排位一致）。
+    pub fn add_profile(&mut self, cx: &mut Context<Self>) {
+        apply_agent_ui(
+            |c| {
+                c.profiles.push(AcpProfile {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    kind_id: AcpAgentKind::Claude.id().to_string(),
+                    label: "新 workspace".into(),
+                    workspace_dir: String::new(),
+                });
+            },
+            cx,
+        );
+        self.reset_profile_inputs();
+        cx.notify();
+    }
+
+    pub fn remove_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        apply_agent_ui(
+            |c| {
+                if index < c.profiles.len() {
+                    c.profiles.remove(index);
+                }
+            },
+            cx,
+        );
+        self.reset_profile_inputs();
+        cx.notify();
+    }
+
+    /// 改某个 workspace 接的 agent 种类（下拉菜单选中项回调）。
+    pub fn set_profile_kind(&mut self, index: usize, kind: AcpAgentKind, cx: &mut Context<Self>) {
+        apply_agent_ui(
+            move |c| {
+                if let Some(p) = c.profiles.get_mut(index) {
+                    p.kind_id = kind.id().to_string();
+                }
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -2808,6 +2756,175 @@ impl Workspace {
                 .item(acp_cmd_setting_item(AcpAgentKind::Copilot))
                 .item(acp_cmd_setting_item(AcpAgentKind::Codex))
                 .item(acp_cmd_setting_item(AcpAgentKind::Grok))
+                .item(
+                    SettingItem::render({
+                        let profile_editor_entity = entity.clone();
+                        move |_, window, cx: &mut App| {
+                            let muted = cx.theme().muted_foreground;
+                            let border = cx.theme().border;
+                            let fg = cx.theme().foreground;
+                            let popover = cx.theme().popover;
+                            let secondary = cx.theme().secondary;
+                            let danger = cx.theme().danger;
+                            let danger_fg = cx.theme().danger_foreground;
+                            let field_w = {
+                                let vw = f32::from(window.viewport_size().width);
+                                let w = (vw - 250. - 80.).clamp(360., 720.);
+                                px(w)
+                            };
+                            profile_editor_entity.update(cx, |ws, cx| {
+                                ws.ensure_profile_inputs(window, cx);
+                                let Some(inputs) = ws.profile_inputs.as_ref() else {
+                                    return div().into_any_element();
+                                };
+                                let mut col = v_flex()
+                                    .w(field_w)
+                                    .gap_3()
+                                    .child(
+                                        v_flex()
+                                            .w(field_w)
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_semibold()
+                                                    .text_color(fg)
+                                                    .child("手动添加 workspace"),
+                                            )
+                                            .child(
+                                                div().w(field_w).text_sm().text_color(muted).child(
+                                                    "同一家 agent 可以同时用好几个 workspace（比如 Claude \
+                                                     默认的 ~/.claude 之外再开一个 ~/.claude-quant）。选好\
+                                                     agent 类型、填上目录，启动命令自动拼好，不用自己写 \
+                                                     shell 语法。「新建对话」菜单和历史会话页都会多出对应\
+                                                     的入口。",
+                                                ),
+                                            ),
+                                    );
+
+                                let kind_w = px(120.);
+                                let name_w = px(140.);
+                                let del_w = px(28.);
+                                let dir_w = field_w - kind_w - name_w - del_w - px(56.);
+                                let mono = terminal_view::font_family();
+
+                                let mut list = v_flex()
+                                    .w(field_w)
+                                    .gap_2()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(border)
+                                    .bg(secondary)
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .items_center()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(div().w(kind_w).child("Agent"))
+                                            .child(div().w(name_w).child("名称"))
+                                            .child(div().w(dir_w).child("Workspace 目录"))
+                                            .child(div().w(del_w)),
+                                    );
+
+                                let profiles = cx.global::<AgentUiConfig>().profiles.clone();
+                                for (ix, ((label, dir), p)) in
+                                    inputs.rows.iter().zip(profiles.iter()).enumerate()
+                                {
+                                    let row_ix = ix;
+                                    let kind_entity = profile_editor_entity.clone();
+                                    let del_entity = profile_editor_entity.clone();
+                                    let current_kind = p.kind();
+                                    list = list.child(
+                                        h_flex()
+                                            .id(("profile-row", row_ix))
+                                            .w_full()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                Button::new(("profile-kind", row_ix))
+                                                    .ghost()
+                                                    .small()
+                                                    .w(kind_w)
+                                                    .label(current_kind.short_label())
+                                                    .dropdown_menu(move |mut menu, _window, _cx| {
+                                                        for kind in AcpAgentKind::ALL {
+                                                            let kind_entity = kind_entity.clone();
+                                                            menu = menu.item(
+                                                                PopupMenuItem::new(kind.label())
+                                                                    .on_click(move |_ev, _window, cx| {
+                                                                        kind_entity.update(cx, |ws, cx| {
+                                                                            ws.set_profile_kind(
+                                                                                row_ix, kind, cx,
+                                                                            );
+                                                                        });
+                                                                    }),
+                                                            );
+                                                        }
+                                                        menu
+                                                    }),
+                                            )
+                                            .child(Input::new(label).w(name_w))
+                                            .child(
+                                                Input::new(dir).w(dir_w).font_family(mono.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(("del-profile", row_ix))
+                                                    .size(del_w)
+                                                    .flex()
+                                                    .flex_none()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .text_sm()
+                                                    .text_color(muted)
+                                                    .hover(|s| s.bg(danger).text_color(danger_fg))
+                                                    .child("×")
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, _, cx: &mut App| {
+                                                            del_entity.update(cx, |ws, cx| {
+                                                                ws.remove_profile(row_ix, cx);
+                                                            });
+                                                        },
+                                                    ),
+                                            ),
+                                    );
+                                }
+                                col = col.child(list);
+                                let add_entity = profile_editor_entity.clone();
+                                col.child(
+                                    div()
+                                        .id("add-profile")
+                                        .h(px(36.))
+                                        .w(field_w)
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_lg()
+                                        .cursor_pointer()
+                                        .text_sm()
+                                        .text_color(fg)
+                                        .bg(popover)
+                                        .border_1()
+                                        .border_color(border)
+                                        .hover(|s| s.bg(border))
+                                        .child("+ 添加 workspace")
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
+                                            add_entity.update(cx, |ws, cx| ws.add_profile(cx));
+                                        }),
+                                )
+                                .into_any_element()
+                            })
+                        }
+                    })
+                    .keywords(["workspace", "claude-quant", "config dir", "多工作区", "agent"]),
+                )
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
                     let installed = claude_hooks_installed();
                     let (fg, muted, border) = {

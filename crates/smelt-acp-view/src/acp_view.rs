@@ -1,108 +1,53 @@
 //! ACP 会话的消息流视图：第二种会话类型的 GPUI 皮肤。
 //!
-//! 与 acp.rs 的分工：那边是连接层（不许引 gpui），这边持 `AcpHandle` 消费事件、
-//! 渲染消息流 + 权限审批卡片 + 输入框，并把 phase 翻译进 `DaemonStates` 全局——
-//! 四档着色 / Dock 角标 / 应用内通知全部复用终端会话的既有链路，零新增。
+//! **薄客户端**：agent 子进程由 smeltd 托管（`smelt_core::acp_session` 里的
+//! `apply_event` 归约、`AcpEvent::Permission`/`Elicitation` 的 responder 也
+//! 都在那边——responder 绑在连接线程上没法跨进程传，这里没有资格直接持有
+//! 它们）。这层只做两件事：把 `smelt_core::acp_client` 收到的 `AcpSnapshot`
+//! 摊平进本地字段渲染出来，把用户操作打包成 `AcpUserAction` 发回去。四档
+//! 着色 / Dock 角标 / 应用内待处理通知现在都由 smeltd 的集中状态订阅驱动
+//! （跟终端会话共用 subscribe 通道），这层只镜像视图态，不再自己判相位跳变。
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, px,
+    div, px, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled,
+    Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
-use gpui_component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, StyledExt};
 
-use agent_client_protocol::schema::v1::{
-    PermissionOption, PermissionOptionKind, Plan, PlanEntryStatus, SessionId, ToolCallId,
-};
+use agent_client_protocol::schema::v1::SessionId;
 
-use crate::acp::{
-    AcpCommand, AcpEvent, AcpHandle, AcpLaunch, ElicitField, ElicitFieldKind, ElicitationResponder,
-    ModelState, PermissionResponder, ReadyKind, spawn_acp,
+use smelt_core::acp_client::{spawn_acp_client, AcpClientHandle, AcpClientLaunch};
+use smelt_core::acp_conn::{ModelState, PromptImage};
+use smelt_core::acp_session::{
+    AcpPhase, AcpSnapshot, AcpUserAction, ElicitFieldKindView, PendingElicitation,
+    PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView,
 };
-use crate::settings::AcpAgentKind;
-use crate::terminal::{DaemonPhase, DaemonSessionState};
-use crate::ui_theme;
+use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec};
+use smelt_ui::ui_theme;
 
 /// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
 /// markdown 围栏这批纯逻辑现在都活在 `smelt_core::acp_chat`——不依赖 GPUI 也不
 /// 依赖 agent_client_protocol，未来 web/mobile 端渲染同一份对话时不用重新实现
 /// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
-pub(crate) use smelt_core::acp_chat::{
-    AcpEntry, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart, diff_line_stats, diff_lines,
-    is_interrupt_marker, strip_code_fence,
+pub use smelt_core::acp_chat::{
+    diff_line_stats, diff_lines, is_interrupt_marker, strip_code_fence, AcpEntry, DiffLineTag,
+    ToolCallStatus, ToolKind, ToolOutputPart,
 };
-
-/// agent_client_protocol 的协议类型 → 共享模型类型。就近放这里：那边的 crate
-/// 依赖只此一份（acp.rs / acp_view.rs），smelt_core 不许引它。
-fn tool_kind_from_acp(k: agent_client_protocol::schema::v1::ToolKind) -> ToolKind {
-    use agent_client_protocol::schema::v1::ToolKind as Acp;
-    match k {
-        Acp::Read => ToolKind::Read,
-        Acp::Edit => ToolKind::Edit,
-        Acp::Delete => ToolKind::Delete,
-        Acp::Move => ToolKind::Move,
-        Acp::Search => ToolKind::Search,
-        Acp::Execute => ToolKind::Execute,
-        Acp::Think => ToolKind::Think,
-        Acp::Fetch => ToolKind::Fetch,
-        Acp::SwitchMode => ToolKind::SwitchMode,
-        _ => ToolKind::Other, // #[non_exhaustive]：协议以后加的新分类先归到这
-    }
-}
-
-fn tool_status_from_acp(s: agent_client_protocol::schema::v1::ToolCallStatus) -> ToolCallStatus {
-    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
-    match s {
-        Acp::Pending => ToolCallStatus::Pending,
-        Acp::InProgress => ToolCallStatus::InProgress,
-        Acp::Completed => ToolCallStatus::Completed,
-        Acp::Failed => ToolCallStatus::Failed,
-        _ => ToolCallStatus::Pending, // #[non_exhaustive]：协议以后加的新状态先当待定
-    }
-}
-
-/// 会话相位（UI 侧状态机；翻译成 DaemonPhase 进全局）。
-enum AcpPhase {
-    /// spawn 到 Ready 之间。
-    Starting,
-    Idle,
-    Running,
-    AwaitingApproval,
-    /// agent 出了选择题（elicitation），等用户点选。
-    AwaitingChoice,
-    /// 连接不可恢复地结束（Fatal / 占位恢复）。带原因文本。
-    Ended(String),
-}
 
 /// `@` / `/` 补全弹层的状态。回合态，不落盘。
 struct CompletionPopup {
     /// 触发 token 在输入框文本里的字节范围（含 `@`/`/`），接受候选时按它替换。
     start: usize,
     end: usize,
-    items: Vec<crate::acp_completion::Candidate>,
+    items: Vec<smelt_ui::acp_completion::Candidate>,
     selected: usize,
-}
-
-/// 待审批卡片：responder 是 Option 因为 select 消费所有权（从 &mut self take）。
-struct PermissionCard {
-    question: String,
-    /// 关联的工具调用：消息流里有对应卡片时按钮内嵌进卡片底部，没有则独立渲染。
-    tool_call_id: ToolCallId,
-    options: Vec<PermissionOption>,
-    responder: Option<PermissionResponder>,
-}
-
-/// 选择题卡片（elicitation form）。chosen 按字段存选中的 option 下标。
-struct ElicitCard {
-    message: String,
-    fields: Vec<ElicitField>,
-    chosen: std::collections::BTreeMap<usize, Vec<usize>>,
-    responder: Option<ElicitationResponder>,
 }
 
 /// AcpView 对外发的唯一事件：内容有实质变化，该存盘了。main.rs 订阅它触发
@@ -117,8 +62,8 @@ pub struct AcpView {
     sid: String,
     cwd: Option<String>,
     entries: Vec<AcpEntry>,
-    permission: Option<PermissionCard>,
-    elicitation: Option<ElicitCard>,
+    permission: Option<PendingPermission>,
+    elicitation: Option<PendingElicitation>,
     phase: AcpPhase,
     /// 回合结束且用户还没回应过 → Session 状态给绿点「有结果可看」。
     completed_unread: bool,
@@ -126,9 +71,16 @@ pub struct AcpView {
     status_line: Option<String>,
     /// None = 已结束的占位视图（重开后才建；Ended 态没有输入框）。
     input: Option<Entity<InputState>>,
-    handle: Option<AcpHandle>,
-    /// 重启用的启动参数（placeholder / restart 共用）。
-    cmd: String,
+    /// smeltd 连接句柄——`None` 只在真正的冷恢复占位（没连过）出现；只要连过
+    /// 一次就一直持有到视图销毁，Drop 时只会断开 socket（见 `AcpClientHandle`
+    /// 文件头注释），不影响 smeltd 那边的会话存活。
+    handle: Option<AcpClientHandle>,
+    /// 重启用的启动规格（placeholder / restart 共用）。
+    launch: AcpLaunchSpec,
+    /// true = 普通会话重启时按当前设置刷新命令；false = 保留持久化下来的 launch。
+    refresh_launch_from_settings: bool,
+    /// workspace profile 的稳定 id；普通 agent 会话为 None。
+    profile_id: Option<String>,
     /// 这条会话接的是哪个 agent（Claude / Copilot / Codex）：决定显示名，也决定
     /// 「重新开始」时该去全局配置的哪一条命令上取最新值。
     agent: AcpAgentKind,
@@ -146,15 +98,11 @@ pub struct AcpView {
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
     /// 会明显卡手，所以一次会话只列一次。
     file_cache: Option<std::rc::Rc<Vec<String>>>,
-    /// agent 侧真实的 session id：握手成功后写入，`restart()` 拿它去尝试
-    /// `session/load` 真续接；也存盘（main.rs AcpSaved），GUI 重开后同样能续。
+    /// agent 侧真实的 session id：握手成功后写入（从 smeltd 的快照里镜像过来），
+    /// `restart()` 拿它去尝试真续接；也存盘（main.rs AcpSaved），GUI 重开后
+    /// 同样能续。「等自己刚发那条 prompt 的回声」这类归约细节已经完全下沉到
+    /// smeltd（见 smelt_core::acp_session），这里不用再操心。
     acp_session_id: Option<SessionId>,
-    /// 「等自己刚发那条 prompt 的回声」——不确定 adapter 是否会在 live 对话时也
-    /// 回显 UserMessageChunk（已确认的是 session/load 重放一定会发）；两种可能
-    /// 都要处理对：send_prompt 已经手动 push 过一次，这段窗口内若真收到回声就
-    /// 吞掉不重复；等到 agent 给出实质响应/turn 收尾就清掉，之后的 UserChunk
-    /// （只可能来自 replay）正常追加显示。
-    awaiting_user_echo: bool,
     /// 会话当前可用的斜杠命令 (名字, 说明)；空 = agent 没发过这个更新。
     /// 胶囊点开列出来、点一条填进输入框——只显示数量没有任何用处。
     available_commands: Vec<(String, String)>,
@@ -166,7 +114,7 @@ pub struct AcpView {
     starting_since: Option<std::time::Instant>,
     /// agent 最近一次上报的任务计划（每次全量覆盖）。回合态：不落盘，
     /// TurnEnded 保留最后一份供回看，「重新开始」清空。
-    plan: Option<Plan>,
+    plan: Option<PlanView>,
     /// PLAN 条折叠态（默认展开，跟设计稿一致）。
     plan_collapsed: bool,
     /// 模型状态：当前名 + 可切换的候选（协议给什么显示什么）；None = agent
@@ -184,25 +132,56 @@ pub struct AcpView {
     _input_sub: Option<gpui::Subscription>,
 }
 
+pub(crate) fn resolve_restart_launch(
+    current_launch: &AcpLaunchSpec,
+    profile_id: Option<&str>,
+    config: &smelt_ui::agent_ui_config::AgentUiConfig,
+    agent: AcpAgentKind,
+    refresh_launch_from_settings: bool,
+) -> AcpLaunchSpec {
+    if let Some(profile_id) = profile_id {
+        return config
+            .find_profile(profile_id)
+            .map(|profile| config.profile_launch_spec(profile))
+            .unwrap_or_else(|| current_launch.clone());
+    }
+    if refresh_launch_from_settings {
+        return AcpLaunchSpec::from_command(config.acp_cmd_for(agent));
+    }
+    current_launch.clone()
+}
+
 impl AcpView {
-    /// 建视图并立即起连接线程（spawn_acp 非阻塞，握手结果以事件回来）。
+    /// 建视图并立即向 smeltd 发起 `acp_open`（非阻塞，握手结果以快照回来）。
     pub fn start(
         window: &mut Window,
         cx: &mut Context<Self>,
         agent: AcpAgentKind,
-        cmd: String,
+        launch: AcpLaunchSpec,
+        profile_id: Option<String>,
         cwd: Option<String>,
     ) -> Self {
-        let mut this = Self::placeholder(cx, agent, cmd, cwd, String::new(), Vec::new(), None);
+        let mut this = Self::placeholder(
+            cx,
+            agent,
+            launch,
+            profile_id.is_none(),
+            profile_id,
+            cwd,
+            String::new(),
+            Vec::new(),
+            None,
+            None,
+        );
         this.phase = AcpPhase::Starting;
         this.starting_since = Some(std::time::Instant::now());
         this.init_input(window, cx);
-        let handle = spawn_acp(AcpLaunch {
-            cmd: this.cmd.clone(),
+        let handle = spawn_acp_client(AcpClientLaunch {
+            id: this.sid.clone(),
             cwd: this.cwd.clone(),
-            sid: this.sid.clone(),
-            resume_session_id: None, // 第一次开，没有旧会话可续
-            resume_needs_transcript_check: matches!(agent, AcpAgentKind::Claude),
+            launch: this.launch.clone(),
+            agent_id: agent.id().to_string(),
+            resume_id: None, // 第一次开，没有旧会话可续
         });
         this.attach_handle(handle, cx);
         this
@@ -212,21 +191,34 @@ impl AcpView {
     /// `entries` 是上次落盘的历史消息（`Vec::new()` = 首次创建，还没有历史）；
     /// `resume_session_id` 是上次握手成功后 agent 分配的 session id，有它才有
     /// 机会在「重新开始」时真续接。
+    ///
+    /// `saved_sid`：**这是让 GUI 重开后能真正"接上还活着的 smeltd 会话"而不是
+    /// 每次都当新会话重新 spawn 子进程的关键**——smeltd 用 id 判断"这是不是同
+    /// 一个会话"，`Some(id)` 时沿用上次持久化的 id（GUI 冷启动恢复走这条，
+    /// `main.rs` 的 `AcpSaved.sid`），id 对上了 smeltd 那边只要还没退出/没被
+    /// kill，`restart()` 发起的 `acp_open` 就是一次廉价 attach，不是重新 spawn
+    /// 子进程。`None` 生成一个全新 id——「从历史会话页继续」和真正的新会话都
+    /// 走这条：前者本质是"起一条新的 smeltd 托管连接，靠 `resume_id` 对 agent
+    /// 自己的持久化做 session/load"，不是"接上 smeltd 里已经在跑的那个会话"，
+    /// 没有理由假装是同一个 id。
     pub fn placeholder(
         cx: &mut Context<Self>,
         agent: AcpAgentKind,
-        cmd: String,
+        launch: AcpLaunchSpec,
+        refresh_launch_from_settings: bool,
+        profile_id: Option<String>,
         cwd: Option<String>,
         reason: String,
         entries: Vec<AcpEntry>,
         resume_session_id: Option<SessionId>,
+        saved_sid: Option<String>,
     ) -> Self {
         // 有旧 session id 的冷恢复占位才值得自动续接（没有 id 只能开全新会话，
         // 丢 agent 侧上下文，留给用户手动决定）。先算，下面 struct 初始化会 move。
         let auto_resume_pending = resume_session_id.is_some();
         Self {
             auto_resume_pending,
-            sid: format!("acp-{}", uuid::Uuid::new_v4()),
+            sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
             entries,
             permission: None,
@@ -236,7 +228,9 @@ impl AcpView {
             completed_unread: false,
             input: None,
             handle: None,
-            cmd,
+            launch,
+            refresh_launch_from_settings,
+            profile_id,
             agent,
             pending_images: Vec::new(),
             supports_image: true,
@@ -244,7 +238,6 @@ impl AcpView {
             completion: None,
             file_cache: None,
             acp_session_id: resume_session_id,
-            awaiting_user_echo: false,
             available_commands: Vec::new(),
             usage: None,
             starting_since: None,
@@ -258,22 +251,21 @@ impl AcpView {
         }
     }
 
-    /// 「重新开始」：带着上次的 session id（如果有）尝试 `session/load` 真续接
-    /// ——agent 记得之前聊了什么，会重放完整历史（此时 apply_event 收到
-    /// `Ready{resumed:true}` 会清空本地历史，让 replay 重建，避免重复）。
-    /// adapter 不支持该能力、或旧会话已失效，自动退回全新会话：本地历史保留在
-    /// 分割线上方（`Ready{resumed:false}` 触发），不会丢。
+    /// 「重新开始」：带着上次的 session id（如果有）尝试真续接——smeltd 那边
+    /// 如果这个会话还活着就是普通 attach，已经 Ended 才会真的重新 spawn
+    /// 子进程（见 smeltd `acp_open` 的 attach-vs-relaunch 判断，这里不用关心
+    /// 是哪一种，反正结果都会以快照回来：`ReadyKind::ResumedWithReplay` 时
+    /// 服务端已经清空 entries 让 replay 重建，`Fresh` 且本地有历史时服务端
+    /// 已经插好分割线——这层拿到的快照就是最终结果，不用再猜）。
     fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 用当前全局配置刷新命令，不死守创建时固化的旧值——「重新开始」的直觉
-        // 语义是「用现在认为对的命令再来一次」，不是「原样复刻可能早就被发现
-        // 有 bug、用户已经在设置页改掉的旧配置」。真实教训：默认命令曾经指向
-        // 一个有 zod 依赖 bug 的适配器版本，改了默认值后，已存在的旧会话点
-        // 「重新开始」却因为这里死守 self.cmd 而继续用旧版本，看起来像「修复
-        // 没生效」。
-        // 取的是**本会话这个 agent** 那一条配置：多 agent 之后死拿 acp_cmd 会让
-        // Copilot / Codex 会话一点「重新开始」就变成 Claude 会话。
-        if let Some(cfg) = cx.try_global::<crate::settings::AgentUiConfig>() {
-            self.cmd = cfg.acp_cmd_for(self.agent);
+        if let Some(cfg) = cx.try_global::<smelt_ui::agent_ui_config::AgentUiConfig>() {
+            self.launch = resolve_restart_launch(
+                &self.launch,
+                self.profile_id.as_deref(),
+                cfg,
+                self.agent,
+                self.refresh_launch_from_settings,
+            );
         }
         self.permission = None;
         self.elicitation = None;
@@ -284,12 +276,12 @@ impl AcpView {
         self.phase = AcpPhase::Starting;
         self.starting_since = Some(std::time::Instant::now());
         self.init_input(window, cx);
-        let handle = spawn_acp(AcpLaunch {
-            cmd: self.cmd.clone(),
+        let handle = spawn_acp_client(AcpClientLaunch {
+            id: self.sid.clone(),
             cwd: self.cwd.clone(),
-            sid: self.sid.clone(),
-            resume_session_id: self.acp_session_id.clone(),
-            resume_needs_transcript_check: matches!(self.agent, AcpAgentKind::Claude),
+            launch: self.launch.clone(),
+            agent_id: self.agent.id().to_string(),
+            resume_id: self.acp_session_id.as_ref().map(|s| s.to_string()),
         });
         self.attach_handle(handle, cx);
         cx.notify();
@@ -300,7 +292,7 @@ impl AcpView {
     /// ACP 有自己的相位机，不能经 DaemonStates 那套五态绕一圈拿——`Starting`
     /// 和 `Ended` 在映射里都会塌成「空闲」，于是「正在启动」的横幅底下顶着一个
     /// 「空闲」胶囊，自相矛盾。
-    pub(crate) fn phase_label(&self) -> (&'static str, u32) {
+    pub fn phase_label(&self) -> (&'static str, u32) {
         match &self.phase {
             AcpPhase::Starting => ("启动中", ui_theme::blue()),
             AcpPhase::Idle => ("空闲", ui_theme::text_faint()),
@@ -313,7 +305,7 @@ impl AcpView {
 
     /// 切到本会话时的自动续接：冷恢复占位（Ended + 有旧 session id）第一次被
     /// 激活就 restart，像终端一样「点开就是活的」。只触发一次，见字段注释。
-    pub(crate) fn maybe_auto_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn maybe_auto_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.auto_resume_pending {
             return;
         }
@@ -356,35 +348,33 @@ impl AcpView {
     /// 启动期每秒重绘一次，让横幅上的「已 N 秒」真的在走。
     /// 相位离开 Starting 就自然停（不占常驻定时器）。
     fn tick_starting(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                smol::Timer::after(std::time::Duration::from_secs(1)).await;
-                let keep = this
-                    .update(cx, |v, cx| {
-                        let starting = matches!(v.phase, AcpPhase::Starting);
-                        if starting {
-                            cx.notify();
-                        }
-                        starting
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    return;
-                }
+        cx.spawn(async move |this, cx| loop {
+            smol::Timer::after(std::time::Duration::from_secs(1)).await;
+            let keep = this
+                .update(cx, |v, cx| {
+                    let starting = matches!(v.phase, AcpPhase::Starting);
+                    if starting {
+                        cx.notify();
+                    }
+                    starting
+                })
+                .unwrap_or(false);
+            if !keep {
+                return;
             }
         })
         .detach();
     }
 
-    /// 挂上连接句柄并起事件 drain（start / restart 共用）。
-    fn attach_handle(&mut self, handle: AcpHandle, cx: &mut Context<Self>) {
-        let event_rx = handle.event_rx.clone();
+    /// 挂上连接句柄并起快照 drain（start / restart 共用）。
+    fn attach_handle(&mut self, handle: AcpClientHandle, cx: &mut Context<Self>) {
+        let snapshot_rx = handle.snapshot_rx.clone();
         self.handle = Some(handle);
         self.tick_starting(cx);
         cx.spawn(async move |this, cx| {
-            while let Ok(ev) = event_rx.recv().await {
+            while let Ok(snap) = snapshot_rx.recv().await {
                 if this
-                    .update(cx, |view, cx| view.apply_event(ev, cx))
+                    .update(cx, |view, cx| view.apply_snapshot(snap, cx))
                     .is_err()
                 {
                     return; // 视图已销毁
@@ -394,8 +384,9 @@ impl AcpView {
         .detach();
     }
 
-    /// 全局状态表 / 持久化（Step 8）/ 远程透出（P2）都以它为 key。
-    #[allow(dead_code)]
+    /// smeltd 托管用的会话 id，也是持久化存档（`AcpSaved.sid`）的 key——
+    /// GUI 重开后拿它原样传回 `placeholder` 的 `saved_sid`，才能接上 smeltd
+    /// 里还活着的同一个会话，而不是每次都当新会话处理。
     pub fn session_id(&self) -> &str {
         &self.sid
     }
@@ -414,7 +405,7 @@ impl AcpView {
     /// 停止当前 turn（session/cancel）。agent 会以 Cancelled 收尾，相位随 TurnEnded 回 Idle。
     fn cancel_turn(&mut self) {
         if let Some(h) = &self.handle {
-            let _ = h.cmd_tx.try_send(AcpCommand::Cancel);
+            let _ = h.action_tx.try_send(AcpUserAction::Cancel);
         }
     }
 
@@ -422,9 +413,17 @@ impl AcpView {
         self.cwd.clone()
     }
 
-    /// 启动命令（存档用：重开 GUI 后按它「重新开始」）。
-    pub fn launch_cmd(&self) -> &str {
-        &self.cmd
+    /// 启动规格（存档用：重开 GUI 后按它「重新开始」）。
+    pub fn launch_spec(&self) -> AcpLaunchSpec {
+        self.launch.clone()
+    }
+
+    pub fn refresh_launch_from_settings(&self) -> bool {
+        self.refresh_launch_from_settings
+    }
+
+    pub fn profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
     }
 
     /// 这条会话接的 agent 种类（存档 / 标题 / 舞台头胶囊用）。
@@ -440,7 +439,7 @@ impl AcpView {
         let list = self
             .cwd
             .as_deref()
-            .map(crate::acp_completion::list_files)
+            .map(smelt_ui::acp_completion::list_files)
             .unwrap_or_else(|| std::rc::Rc::new(Vec::new()));
         self.file_cache = Some(list.clone());
         list
@@ -464,7 +463,7 @@ impl AcpView {
         if !text.is_char_boundary(cursor) {
             return;
         }
-        let Some(trigger) = crate::acp_completion::detect_trigger(&text[..cursor]) else {
+        let Some(trigger) = smelt_ui::acp_completion::detect_trigger(&text[..cursor]) else {
             if self.completion.is_some() {
                 self.completion = None;
                 cx.notify();
@@ -472,10 +471,11 @@ impl AcpView {
             return;
         };
         let files = match trigger.kind {
-            crate::acp_completion::Kind::At => self.file_list(),
-            crate::acp_completion::Kind::Slash => std::rc::Rc::new(Vec::new()),
+            smelt_ui::acp_completion::Kind::At => self.file_list(),
+            smelt_ui::acp_completion::Kind::Slash => std::rc::Rc::new(Vec::new()),
         };
-        let items = crate::acp_completion::candidates(&trigger, &files, &self.available_commands);
+        let items =
+            smelt_ui::acp_completion::candidates(&trigger, &files, &self.available_commands);
         self.completion = (!items.is_empty()).then(|| CompletionPopup {
             start: trigger.start,
             end: cursor,
@@ -580,12 +580,7 @@ impl AcpView {
 
     /// 把一段文本塞进输入框并聚焦（SKILLS 面板点一条 skill 用）。
     /// 不自动发送——skill 后面常还要补一句话，发不发由人定。
-    pub(crate) fn insert_prompt_text(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn insert_prompt_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(input) = self.input.clone() else {
             return;
         };
@@ -605,42 +600,28 @@ impl AcpView {
     }
 
     /// 总览快捷回复直达（对齐终端会话的 send_key_to_session 语义）。
-    /// 连带把已粘贴的待发图片一起发出去并清空。
+    /// 连带把已粘贴的待发图片一起发出去并清空。发出去之后不再本地手动追加
+    /// 用户消息/改相位——那是 smeltd 的事（见 `apply_acp_user_action` 里的
+    /// `note_prompt_sent`），本地 socket 往返是毫秒级，等下一份快照回来就有。
     pub fn send_prompt(&mut self, text: String, cx: &mut Context<Self>) {
         // 光有图没有字也算一条有效 prompt（「这截图什么意思」式的用法）。
         if text.trim().is_empty() && self.pending_images.is_empty() {
             return;
         }
-        let images: Vec<crate::acp::PromptImage> = self
+        let images: Vec<PromptImage> = self
             .pending_images
             .iter()
-            .map(|im| crate::acp::PromptImage {
+            .map(|im| PromptImage {
                 mime: image_mime(im.format).to_string(),
                 data_b64: base64_encode(&im.bytes),
             })
             .collect();
-        let img_count = images.len();
         if let Some(h) = &self.handle {
-            if h.cmd_tx
-                .try_send(AcpCommand::Prompt {
-                    text: text.clone(),
-                    images,
-                })
+            if h.action_tx
+                .try_send(AcpUserAction::Prompt { text, images })
                 .is_ok()
             {
-                // 历史里只留「带了几张图」的标记：base64 动辄几 MB，进不得
-                // workspace.json（那是每条消息都要落盘的存档）。
-                let shown = match (text.is_empty(), img_count) {
-                    (_, 0) => text,
-                    (true, n) => format!("[{n} 张图片]"),
-                    (false, n) => format!("{text}\n[{n} 张图片]"),
-                };
-                self.entries.push(AcpEntry::User(shown));
                 self.pending_images.clear();
-                self.awaiting_user_echo = true;
-                self.phase = AcpPhase::Running;
-                self.completed_unread = false;
-                self.sync_daemon_state(cx);
                 cx.notify();
             }
         }
@@ -679,29 +660,17 @@ impl AcpView {
         true
     }
 
-    /// 关闭会话：让连接收摊（drop 子进程），并从全局状态表摘掉自己。
-    pub fn shutdown(&mut self, cx: &mut App) {
-        if let Some(h) = self.handle.take() {
-            let _ = h.cmd_tx.try_send(AcpCommand::Shutdown);
-        }
-        if let Some(states) = cx.try_global::<crate::DaemonStates>() {
-            states.0.lock().unwrap().remove(&self.sid);
-        }
-    }
-
-    /// App 真退出前专用：发 Shutdown，但**不**在这里就地扔掉 handle——子进程
-    /// 是不是真被杀掉，取决于连接线程有没有机会跑到收尾（内部 ChildGuard 在
-    /// Drop 时才杀子进程，含整个进程组）。这里只发信号，`acp::wait_for_shutdown`
-    /// 由调用方（main.rs 的 on_app_quit）异步等这份 handle 的 event 通道关闭，
-    /// 确认线程真收尾了再放行退出——不然 Cmd+Q 直接杀掉整个 GUI 进程时，ACP
-    /// 连接线程会被系统一起带走，根本没机会 Drop，子进程就变孤儿（真实教训：
-    /// Copilot 这类 agent 的孤儿子进程还占着旧登录会话，下次「重新开始」新起
-    /// 一个进程会撞上它，报出 Authentication required 这种看着不相关的错）。
-    pub(crate) fn take_handle_for_quit(&mut self) -> Option<AcpHandle> {
-        if let Some(h) = self.handle.as_ref() {
-            let _ = h.cmd_tx.try_send(AcpCommand::Shutdown);
-        }
-        self.handle.take()
+    /// 关闭标签：只摘掉本地连接（`AcpClientHandle` Drop 会断开 socket），
+    /// **不**终止 smeltd 里的会话——跟关一个终端标签不会杀掉底下的 shell 是
+    /// 唯一调用方是 `main.rs::close_session`（用户点 × 主动关标签）——那条
+    /// 路径本来就跟终端会话共用同一个"用户主动关 = 让守护杀掉底层进程"的
+    /// 语气（挨着的 `terminal::kill_remote` 调用是同一个意图），不是"切标签/
+    /// 退出 App 这种先不看了"，所以这里要真的终结 smeltd 里的会话，不能只是
+    /// 摘本地连接。真正的"GUI 退出/切标签不该带走会话"体现在别处：没有任何
+    /// 代码路径会在那些场景调用这个函数。
+    pub fn shutdown(&mut self, _cx: &mut App) {
+        smelt_core::acp_client::kill_acp_session(&self.sid);
+        self.handle = None;
     }
 
     fn submit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -717,293 +686,52 @@ impl AcpView {
         self.send_prompt(text, cx);
     }
 
-    /// 事件应用：entries 合并 + phase 机 + 全局状态同步。
-    fn apply_event(&mut self, ev: AcpEvent, cx: &mut Context<Self>) {
-        // 持久化要排除的事件（match 会消费 ev，得在此之前先记下来）：
-        // AgentChunk 是逐块流式增量，触发太密；Plan 本来就不落盘，触发没意义。
-        let skip_persist = matches!(
-            ev,
-            AcpEvent::AgentChunk { .. }
-                | AcpEvent::Plan(_)
-                | AcpEvent::Model(_)
-                | AcpEvent::Usage { .. }
-        );
-        // 除 UserChunk/Status/AvailableCommands 外的任何事件都代表「已经过了
-        // 等自己那条 prompt 回声的窗口」——后两者是跟对话轮次推进无关的元数据
-        // 更新，agent 给出实质响应或者 turn 收尾才算真的翻篇。
-        if !matches!(
-            ev,
-            AcpEvent::UserChunk(_)
-                | AcpEvent::Status(_)
-                | AcpEvent::AvailableCommands(_)
-                | AcpEvent::Usage { .. }
-        ) {
-            self.awaiting_user_echo = false;
+    /// 快照应用：整份状态从 smeltd 镜像过来。归约（entries 合并/phase 机/
+    /// 回声去重）已经在服务端做完了，这里只做两件事：
+    /// 1. 摊平快照字段进本地同名字段，渲染代码不用碰；
+    /// 2. 持久化 / 重绘时机跟着快照走。四色状态、Dock 角标、待处理通知都由
+    ///    外面的集中状态订阅维护，这里不再自己判相位跳变。
+    fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
+        let should_persist = snap.should_persist;
+        self.entries = snap.entries;
+        self.phase = snap.phase;
+        self.permission = snap.pending_permission;
+        self.elicitation = snap.pending_elicitation;
+        self.status_line = snap.status_line;
+        self.acp_session_id = snap.acp_session_id.map(SessionId::new);
+        self.supports_image = snap.supports_image;
+        self.available_commands = snap.available_commands;
+        self.usage = snap.usage;
+        self.plan = snap.plan;
+        self.model = snap.model;
+        self.completed_unread = snap.completed_unread;
+
+        if matches!(self.phase, AcpPhase::Ended(_)) {
+            self.handle = None;
         }
-        match ev {
-            AcpEvent::AvailableCommands(list) => {
-                self.available_commands = list;
-            }
-            AcpEvent::Usage { used, size, .. } => {
-                self.usage = (size > 0).then_some((used, size));
-            }
-            AcpEvent::Status(msg) => {
-                self.status_line = Some(msg);
-            }
-            AcpEvent::UserChunk(text) => {
-                if self.awaiting_user_echo {
-                    // 自己刚发那条的回声——本地已经在 send_prompt 时显示过了。
-                } else {
-                    // 没有 pending 的自己发的消息，只可能是 session/load 重放
-                    // 的历史用户提问——正常追加显示（连续 chunk 合并）。
-                    match self.entries.last_mut() {
-                        Some(AcpEntry::User(t)) => t.push_str(&text),
-                        _ => self.entries.push(AcpEntry::User(text)),
-                    }
-                }
-            }
-            AcpEvent::Ready {
-                session_id,
-                kind,
-                supports_image,
-            } => {
-                self.acp_session_id = Some(session_id);
-                self.supports_image = supports_image;
-                match kind {
-                    // `session/load` 续接：agent 马上把完整历史重放一遍，本地
-                    // 快照先清空避免变成两份（重放内容比本地快照权威）。
-                    ReadyKind::ResumedWithReplay => self.entries.clear(),
-                    // `session/resume` 续接：不重放，本地快照就是全部内容——
-                    // 既不能清（清了就真没了），也别插分割线（对话是连着的）。
-                    ReadyKind::ResumedKeepHistory => {}
-                    // 全新会话，但本地还留着上一段——插分割线标明断点，
-                    // 不能让人以为 agent 记得上面的内容。
-                    ReadyKind::Fresh if !self.entries.is_empty() => {
-                        self.entries.push(AcpEntry::Divider(format!(
-                            "新会话 · agent 不记得以上内容 · {}",
-                            chrono::Local::now().format("%m-%d %H:%M")
-                        )));
-                    }
-                    ReadyKind::Fresh => {}
-                }
-                self.phase = AcpPhase::Idle;
-                self.status_line = None;
-            }
-            AcpEvent::AgentChunk { thought, text } => {
-                // 连续同类 chunk 并入最后一条，流式追加不炸条目数。
-                match self.entries.last_mut() {
-                    Some(AcpEntry::Assistant {
-                        text: t,
-                        thought: th,
-                    }) if *th == thought => {
-                        t.push_str(&text);
-                    }
-                    _ => self.entries.push(AcpEntry::Assistant { text, thought }),
-                }
-                self.phase = AcpPhase::Running;
-            }
-            AcpEvent::ToolCall(tc) => {
-                self.entries.push(AcpEntry::ToolCall {
-                    id: tc.tool_call_id.to_string(),
-                    title: tc.title,
-                    kind: tool_kind_from_acp(tc.kind),
-                    status: tool_status_from_acp(tc.status),
-                    output: tool_content_parts(&tc.content),
-                });
-                self.phase = AcpPhase::Running;
-            }
-            AcpEvent::ToolCallUpdate(u) => {
-                let update_id = u.tool_call_id.to_string();
-                if let Some(AcpEntry::ToolCall {
-                    title,
-                    kind,
-                    status,
-                    output,
-                    ..
-                }) = self
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .find(|e| matches!(e, AcpEntry::ToolCall { id, .. } if *id == update_id))
-                {
-                    if let Some(t) = u.fields.title {
-                        *title = t;
-                    }
-                    if let Some(k) = u.fields.kind {
-                        *kind = tool_kind_from_acp(k);
-                    }
-                    if let Some(s) = u.fields.status {
-                        *status = tool_status_from_acp(s);
-                    }
-                    if let Some(c) = u.fields.content {
-                        *output = tool_content_parts(&c);
-                    }
-                }
-            }
-            AcpEvent::Model(state) => {
-                self.model = Some(state);
-            }
-            AcpEvent::Plan(p) => {
-                // 每次全量覆盖：协议约定 Plan 更新携带完整清单，不做增量合并。
-                self.plan = Some(p);
-                self.phase = AcpPhase::Running;
-            }
-            AcpEvent::Permission {
-                question,
-                tool_call_id,
-                pub_options,
-                responder,
-            } => {
-                self.permission = Some(PermissionCard {
-                    question: question.clone(),
-                    tool_call_id,
-                    options: pub_options,
-                    responder: Some(responder),
-                });
-                self.phase = AcpPhase::AwaitingApproval;
-                // 应用内通知（镜像 main.rs 状态转发循环的推送；设置可关）。
-                let notify_on = cx
-                    .try_global::<crate::settings::AgentUiConfig>()
-                    .map(|c| c.notify_awaiting)
-                    .unwrap_or(true);
-                if notify_on {
-                    if let Some(p) = cx.try_global::<crate::PendingAgentNotifs>() {
-                        p.0.lock()
-                            .unwrap()
-                            .push(("等你批准".to_string(), question, true));
-                    }
-                }
-            }
-            AcpEvent::Elicitation {
-                message,
-                fields,
-                responder,
-            } => {
-                self.elicitation = Some(ElicitCard {
-                    message: message.clone(),
-                    fields,
-                    chosen: Default::default(),
-                    responder: Some(responder),
-                });
-                self.phase = AcpPhase::AwaitingChoice;
-                let notify_on = cx
-                    .try_global::<crate::settings::AgentUiConfig>()
-                    .map(|c| c.notify_awaiting)
-                    .unwrap_or(true);
-                if notify_on {
-                    if let Some(p) = cx.try_global::<crate::PendingAgentNotifs>() {
-                        p.0.lock()
-                            .unwrap()
-                            .push(("等你选择".to_string(), message, false));
-                    }
-                }
-            }
-            AcpEvent::TurnEnded(reason) => {
-                // turn 收尾时卡片一并作废（responder Drop 兜底回 Cancelled/Cancel）
-                self.permission = None;
-                self.elicitation = None;
-                self.phase = AcpPhase::Idle;
-                self.completed_unread = true;
-                let _ = reason;
-            }
-            AcpEvent::Fatal(msg) => {
-                self.permission = None;
-                self.elicitation = None;
-                self.phase = AcpPhase::Ended(msg);
-                self.handle = None;
-            }
-        }
-        self.sync_daemon_state(cx);
+
         self.scroll.scroll_to_bottom(); // 消息流跟随最新内容
-        // 持久化触发：排除 AgentChunk——那是逐块流式增量，触发太密会把每次落盘
-        // 变成写盘风暴；完整文本在 TurnEnded 时已经在 self.entries 里了，那时存
-        // 一次就够。真被强制退出打断在流式中间，最多丢当前这一轮还没打完的字，
-        // 之前所有已完成的对话都在上一次 TurnEnded 落盘时保住了。
-        if !skip_persist {
+        if should_persist {
             cx.emit(AcpViewEvent::Changed);
         }
         cx.notify();
     }
 
-    /// 把当前相位写进 DaemonStates 全局（key = `acp-` 前缀 sid）——Session::status、
-    /// Dock 角标、菜单栏、总览全部经既有链路自动点亮。
-    fn sync_daemon_state(&self, cx: &mut App) {
-        let Some(states) = cx.try_global::<crate::DaemonStates>() else {
-            return;
-        };
-        let phase = match &self.phase {
-            AcpPhase::Starting | AcpPhase::Idle => DaemonPhase::Idle,
-            AcpPhase::Running => {
-                // 有进行中的工具调用报「执行工具」，否则「思考中」。
-                let executing = self.entries.iter().any(|e| {
-                    matches!(
-                        e,
-                        AcpEntry::ToolCall {
-                            status: ToolCallStatus::InProgress | ToolCallStatus::Pending,
-                            ..
-                        }
-                    )
-                });
-                if executing {
-                    DaemonPhase::ExecutingTool
-                } else {
-                    DaemonPhase::Thinking
-                }
-            }
-            AcpPhase::AwaitingApproval => DaemonPhase::AwaitingApproval,
-            AcpPhase::AwaitingChoice => DaemonPhase::WaitingForUser,
-            AcpPhase::Ended(_) => DaemonPhase::Dead,
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        states.0.lock().unwrap().insert(
-            self.sid.clone(),
-            DaemonSessionState {
-                id: self.sid.clone(),
-                phase,
-                pending_question: self
-                    .permission
-                    .as_ref()
-                    .map(|p| p.question.clone())
-                    .or_else(|| self.elicitation.as_ref().map(|e| e.message.clone())),
-                title: None,
-                launch: Some("claude".to_string()),
-                cwd: self.cwd.clone(),
-                phase_since: now,
-            },
-        );
-    }
-
-    /// 选择题点选：单选字段直接置换；多选字段 toggle。单字段单选点了立即提交。
-    fn pick_elicit_option(&mut self, field_ix: usize, opt_ix: usize, cx: &mut Context<Self>) {
-        let Some(card) = &mut self.elicitation else {
-            return;
-        };
-        let Some(field) = card.fields.get(field_ix) else {
-            return;
-        };
-        match &field.kind {
-            ElicitFieldKind::Select(_) => {
-                card.chosen.insert(field_ix, vec![opt_ix]);
-            }
-            ElicitFieldKind::MultiSelect(_) => {
-                let sel = card.chosen.entry(field_ix).or_default();
-                if let Some(pos) = sel.iter().position(|&i| i == opt_ix) {
-                    sel.remove(pos);
-                } else {
-                    sel.push(opt_ix);
-                }
-            }
-        }
-        // 快捷路径：整卡只有一个单选字段，点了就是答案，不用再按提交。
-        let single_select =
-            card.fields.len() == 1 && matches!(card.fields[0].kind, ElicitFieldKind::Select(_));
+    /// 选择题点选：动作发给 smeltd（真正的选中/提交状态机在服务端跑，见
+    /// `smelt_core::acp_session::choose_elicitation`），下一份快照回来就带着
+    /// 更新后的 `chosen`——本地 socket 往返够快，不用做乐观本地更新，免得
+    /// 跟服务端真相分叉。单字段单选点了自动追发一条 Submit，跟服务端那边
+    /// 「整卡只有一个单选字段，点了就是答案」的判断保持一致。
+    fn pick_elicit_option(&mut self, field_ix: usize, opt_ix: usize, _cx: &mut Context<Self>) {
+        let Some(h) = &self.handle else { return };
+        let _ = h
+            .action_tx
+            .try_send(AcpUserAction::ElicitationChoose { field_ix, opt_ix });
+        let single_select = self.elicitation.as_ref().is_some_and(|card| {
+            card.fields.len() == 1 && matches!(card.fields[0].kind, ElicitFieldKindView::Select(_))
+        });
         if single_select {
-            self.submit_elicitation(cx);
-        } else {
-            cx.notify();
+            let _ = h.action_tx.try_send(AcpUserAction::ElicitationSubmit);
         }
     }
 
@@ -1017,54 +745,22 @@ impl AcpView {
         })
     }
 
-    fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
-        use agent_client_protocol::schema::v1::ElicitationContentValue as V;
-        let Some(mut card) = self.elicitation.take() else {
-            return;
-        };
-        let Some(responder) = card.responder.take() else {
-            return;
-        };
-        let mut content = std::collections::BTreeMap::new();
-        for (ix, field) in card.fields.iter().enumerate() {
-            let Some(sel) = card.chosen.get(&ix) else {
-                continue;
-            };
-            match &field.kind {
-                ElicitFieldKind::Select(options) => {
-                    if let Some(opt) = sel.first().and_then(|&i| options.get(i)) {
-                        content.insert(field.key.clone(), opt.value.clone());
-                    }
-                }
-                ElicitFieldKind::MultiSelect(options) => {
-                    let values: Vec<String> = sel
-                        .iter()
-                        .filter_map(|&i| options.get(i))
-                        .filter_map(|o| match &o.value {
-                            V::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    content.insert(field.key.clone(), V::StringArray(values));
-                }
-            }
+    fn submit_elicitation(&mut self, _cx: &mut Context<Self>) {
+        if let Some(h) = &self.handle {
+            let _ = h.action_tx.try_send(AcpUserAction::ElicitationSubmit);
         }
-        responder.accept(content);
-        self.phase = AcpPhase::Running;
-        self.sync_daemon_state(cx);
-        cx.notify();
     }
 
-    /// 「跳过」：丢弃卡片（responder Drop 自动回 Cancel），继续文本对话。
-    fn dismiss_elicitation(&mut self, cx: &mut Context<Self>) {
-        self.elicitation = None;
-        self.phase = AcpPhase::Running;
-        self.sync_daemon_state(cx);
-        cx.notify();
+    /// 「跳过」：丢弃卡片（服务端那边的 responder Drop 自动回 Cancel），继续
+    /// 文本对话。
+    fn dismiss_elicitation(&mut self, _cx: &mut Context<Self>) {
+        if let Some(h) = &self.handle {
+            let _ = h.action_tx.try_send(AcpUserAction::ElicitationDismiss);
+        }
     }
 
     /// 当前模型的人类可读名（舞台头显示用）；None = agent 没上报过。
-    pub(crate) fn model_name(&self) -> Option<String> {
+    pub fn model_name(&self) -> Option<String> {
         self.model.as_ref().map(|m| m.current_name.clone())
     }
 
@@ -1072,7 +768,7 @@ impl AcpView {
     /// 生效范围由 agent 决定（通常下一轮起效），我们不替它加限制。
     fn set_model(&mut self, value_id: String) {
         if let Some(h) = &self.handle {
-            let _ = h.cmd_tx.try_send(AcpCommand::SetModel(value_id));
+            let _ = h.action_tx.try_send(AcpUserAction::SetModel(value_id));
         }
     }
 
@@ -1081,7 +777,8 @@ impl AcpView {
     /// `copilot --acp` → `copilot`）。没有模型名数据源，不硬编。
     fn agent_label(&self) -> String {
         let tok = self
-            .cmd
+            .launch
+            .command
             .split_whitespace()
             .rev()
             .find(|t| !t.starts_with('-'))
@@ -1105,12 +802,12 @@ impl AcpView {
         let done = plan
             .entries
             .iter()
-            .filter(|e| matches!(e.status, PlanEntryStatus::Completed))
+            .filter(|e| matches!(e.status, PlanEntryStatusView::Completed))
             .count();
         let in_progress = plan
             .entries
             .iter()
-            .filter(|e| matches!(e.status, PlanEntryStatus::InProgress))
+            .filter(|e| matches!(e.status, PlanEntryStatusView::InProgress))
             .count();
         // 「第几步 of 总数」：正在跑的算当前步；全完成就是 n of n。
         let current = (done + in_progress).min(total);
@@ -1184,7 +881,7 @@ impl AcpView {
             for entry in &plan.entries {
                 let row = h_flex().gap_2p5().items_center().py_0p5();
                 let row = match entry.status {
-                    PlanEntryStatus::Completed => row
+                    PlanEntryStatusView::Completed => row
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -1205,7 +902,7 @@ impl AcpView {
                                 .line_through()
                                 .child(entry.content.clone()),
                         ),
-                    PlanEntryStatus::InProgress => row
+                    PlanEntryStatusView::InProgress => row
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -1271,7 +968,7 @@ impl AcpView {
         let Some(pix) = card.options.iter().position(|o| {
             matches!(
                 o.kind,
-                PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+                PermissionOptionKindView::AllowOnce | PermissionOptionKindView::AllowAlways
             )
         }) else {
             return;
@@ -1279,22 +976,19 @@ impl AcpView {
         self.pick_permission(pix, cx);
     }
 
-    /// 审批按钮：消费 responder 回 RPC，卡片收起，相位回 Running（agent 会继续）。
-    fn pick_permission(&mut self, option_ix: usize, cx: &mut Context<Self>) {
-        let Some(card) = &mut self.permission else {
-            return;
-        };
+    /// 审批按钮：把选中项发给 smeltd（真正消费 responder 回 RPC 是服务端的
+    /// 事），卡片收起、相位回 Running 等下一份快照即可，不用本地抢跑。
+    fn pick_permission(&mut self, option_ix: usize, _cx: &mut Context<Self>) {
+        let Some(card) = &self.permission else { return };
         let Some(opt) = card.options.get(option_ix) else {
             return;
         };
         let option_id = opt.option_id.clone();
-        if let Some(responder) = card.responder.take() {
-            responder.select(option_id);
+        if let Some(h) = &self.handle {
+            let _ = h
+                .action_tx
+                .try_send(AcpUserAction::PermissionSelect { option_id });
         }
-        self.permission = None;
-        self.phase = AcpPhase::Running;
-        self.sync_daemon_state(cx);
-        cx.notify();
     }
 }
 
@@ -1386,7 +1080,7 @@ impl Render for AcpView {
             let primary_ix = card.options.iter().position(|o| {
                 matches!(
                     o.kind,
-                    PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+                    PermissionOptionKindView::AllowOnce | PermissionOptionKindView::AllowAlways
                 )
             });
             let mut buttons = h_flex().gap_2().items_center().flex_wrap();
@@ -1416,7 +1110,7 @@ impl Render for AcpView {
                 }
                 let danger = matches!(
                     opt.kind,
-                    PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
+                    PermissionOptionKindView::RejectOnce | PermissionOptionKindView::RejectAlways
                 );
                 buttons = buttons.child(
                     div()
@@ -1473,7 +1167,7 @@ impl Render for AcpView {
                             .rounded_lg()
                             .bg(t.muted)
                             .text_sm()
-                            .child(crate::markdown_mermaid::markdown_view(
+                            .child(smelt_ui::markdown_mermaid::markdown_view(
                                 ("acp-user-md", i),
                                 text.clone(),
                             )),
@@ -1490,7 +1184,7 @@ impl Render for AcpView {
                             .pt(px(2.)) // 跟头像文字视觉基线对齐
                             .text_sm()
                             .when(*thought, |d| d.text_color(muted).italic())
-                            .child(crate::markdown_mermaid::markdown_view(
+                            .child(smelt_ui::markdown_mermaid::markdown_view(
                                 ("acp-md", i),
                                 text.clone(),
                             )),
@@ -1771,11 +1465,11 @@ impl Render for AcpView {
                 || card
                     .fields
                     .first()
-                    .is_some_and(|f| matches!(f.kind, ElicitFieldKind::MultiSelect(_)));
+                    .is_some_and(|f| matches!(f.kind, ElicitFieldKindView::MultiSelect(_)));
             for (fix, field) in card.fields.iter().enumerate() {
                 let (options, is_multi) = match &field.kind {
-                    ElicitFieldKind::Select(o) => (o, false),
-                    ElicitFieldKind::MultiSelect(o) => (o, true),
+                    ElicitFieldKindView::Select(o) => (o, false),
+                    ElicitFieldKindView::MultiSelect(o) => (o, true),
                 };
                 let chosen = card.chosen.get(&fix).cloned().unwrap_or_default();
                 let mut row = h_flex().gap_2().flex_wrap();
@@ -2392,14 +2086,14 @@ fn render_diff_lines(
     for line in diff_lines(old, new) {
         let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
             DiffLineTag::Removed => (
-                Some(crate::ui_theme::tint(crate::ui_theme::red(), 0x22).into()),
+                Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::red(), 0x22).into()),
                 "-",
-                gpui::rgb(crate::ui_theme::red()).into(),
+                gpui::rgb(smelt_ui::ui_theme::red()).into(),
             ),
             DiffLineTag::Added => (
-                Some(crate::ui_theme::tint(crate::ui_theme::green(), 0x22).into()),
+                Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::green(), 0x22).into()),
                 "+",
-                gpui::rgb(crate::ui_theme::diff_add_text()).into(),
+                gpui::rgb(smelt_ui::ui_theme::diff_add_text()).into(),
             ),
             DiffLineTag::Context => (None, " ", muted_color),
         };
@@ -2421,28 +2115,89 @@ fn render_diff_lines(
     rows.into_any_element()
 }
 
-/// tool call content → 结构化的输出片段（文本走 acp.rs 的 ContentBlock 规则文本化；
-/// diff 保留 old/new 原文，留给渲染层逐行算差异，不在这里压扁）。
-fn tool_content_parts(
-    content: &[agent_client_protocol::schema::v1::ToolCallContent],
-) -> Vec<ToolOutputPart> {
-    use agent_client_protocol::schema::v1::ToolCallContent;
-    content
-        .iter()
-        .filter_map(|c| match c {
-            ToolCallContent::Content(inner) => {
-                let text = crate::acp::content_text(&inner.content);
-                (!text.trim().is_empty()).then(|| ToolOutputPart::Text(text))
-            }
-            ToolCallContent::Diff(d) => Some(ToolOutputPart::Diff {
-                path: d.path.display().to_string(),
-                old_text: d.old_text.clone(),
-                new_text: d.new_text.clone(),
-            }),
-            _ => None, // Terminal 等 MVP 不渲染
-        })
-        .collect()
-}
-
 // strip_code_fence / is_interrupt_marker 的单测随实现一起搬进了
 // smelt_core::acp_chat（见该模块的 #[cfg(test)]），这里不再重复。
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_restart_launch;
+    use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
+    use smelt_ui::agent_ui_config::AgentUiConfig;
+
+    #[test]
+    fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
+        let current = AcpLaunchSpec::from_command("claude --old")
+            .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/old");
+        let config = AgentUiConfig {
+            acp_cmd: "claude --current".into(),
+            profiles: vec![AcpProfile {
+                id: "quant".into(),
+                kind_id: "claude".into(),
+                label: "Quant".into(),
+                workspace_dir: "~/Claude Workspaces/new quant".into(),
+            }],
+            ..AgentUiConfig::default()
+        };
+
+        let resolved = resolve_restart_launch(
+            &current,
+            Some("quant"),
+            &config,
+            AcpAgentKind::Claude,
+            false,
+        );
+
+        assert_eq!(
+            resolved.command, "claude --current",
+            "profile 会话重启时应沿用该 agent 当前配置的命令"
+        );
+        assert_eq!(
+            resolved.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("~/Claude Workspaces/new quant"),
+            "profile 会话重启时应重新读取 profile 的当前 workspace 配置"
+        );
+    }
+
+    #[test]
+    fn restart_keeps_persisted_launch_when_profile_was_deleted() {
+        let current = AcpLaunchSpec::from_command("claude --persisted")
+            .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant");
+
+        let resolved = resolve_restart_launch(
+            &current,
+            Some("quant"),
+            &AgentUiConfig::default(),
+            AcpAgentKind::Claude,
+            false,
+        );
+
+        assert_eq!(resolved, current);
+    }
+
+    #[test]
+    fn restart_refreshes_ordinary_session_from_current_agent_command() {
+        let current = AcpLaunchSpec::from_command("claude --stale");
+        let config = AgentUiConfig {
+            acp_cmd: "claude --current".into(),
+            ..AgentUiConfig::default()
+        };
+
+        let resolved = resolve_restart_launch(&current, None, &config, AcpAgentKind::Claude, true);
+
+        assert_eq!(resolved, AcpLaunchSpec::from_command("claude --current"));
+    }
+
+    #[test]
+    fn restart_keeps_legacy_launch_when_refresh_is_disabled() {
+        let current =
+            AcpLaunchSpec::from_command("CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude");
+        let config = AgentUiConfig {
+            acp_cmd: "claude --current".into(),
+            ..AgentUiConfig::default()
+        };
+
+        let resolved = resolve_restart_launch(&current, None, &config, AcpAgentKind::Claude, false);
+
+        assert_eq!(resolved, current);
+    }
+}
