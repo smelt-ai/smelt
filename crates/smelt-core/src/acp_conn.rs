@@ -457,16 +457,32 @@ where
 /// 一张正卡着的权限/选择题卡片），再无缝接上继承来的 fd 往后实时读。SDK 的
 /// 请求分发器看到的字节序列跟"从来没断过"完全一样，会重新解析出一个等价的
 /// responder（绑定同一个原始 JSON-RPC 请求 id），不会丢这张卡。
+///
+/// `last_stdout_line` 回放行 + 后续实时行都要写——不写的话，这条恢复出来的
+/// 连接活着期间如果 agent 又发一次新的权限/选择题请求，`raw_request_line`
+/// 会一直是 None：等真撑到*下一次*升级，这条请求就没有原文可回放，agent
+/// 会永远卡在等一个不会来的回复上，审批卡在 GUI 上直接消失（真实教训：
+/// 早期版本这里只在 `make_incoming_lines`——也就是首次 spawn 那条路——接了
+/// 这根线，`make_resume_incoming_lines` 漏接，连续两次升级期间会复现）。
 fn make_resume_incoming_lines<R>(
     reader: R,
     pending_raw_line: Option<String>,
+    last_stdout_line: Arc<Mutex<Option<String>>>,
 ) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<String>> + Send>>
 where
     R: futures::AsyncRead + Send + Unpin + 'static,
 {
-    let live = futures::io::BufReader::new(reader).lines();
+    let last_stdout_line_for_replay = Arc::clone(&last_stdout_line);
+    let live = futures::io::BufReader::new(reader).lines().inspect(move |res| {
+        if let Ok(line) = res {
+            *last_stdout_line.lock().unwrap() = Some(line.clone());
+        }
+    });
     match pending_raw_line {
-        Some(line) => Box::pin(futures::stream::once(async move { Ok(line) }).chain(live)),
+        Some(line) => {
+            *last_stdout_line_for_replay.lock().unwrap() = Some(line.clone());
+            Box::pin(futures::stream::once(async move { Ok(line) }).chain(live))
+        }
         None => Box::pin(live),
     }
 }
@@ -799,15 +815,19 @@ async fn run_resumed_connection(
 
     let _guard = KillProcessGroupOnDrop(pid);
 
+    let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let outgoing = make_outgoing_sink(stdin_async);
-    let incoming = make_resume_incoming_lines(stdout_async, pending_raw_line);
+    let incoming = make_resume_incoming_lines(
+        stdout_async,
+        pending_raw_line,
+        Arc::clone(&last_stdout_line),
+    );
     let transport = Lines::new(outgoing, incoming);
 
     let session_id = SessionId::new(acp_session_id);
 
     let perm_tx = event_tx.clone();
     let elicit_tx = event_tx.clone();
-    let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let perm_last_line = Arc::clone(&last_stdout_line);
     let elicit_last_line = Arc::clone(&last_stdout_line);
     Client
@@ -1574,6 +1594,67 @@ mod image_block_tests {
         assert_eq!(v["type"], "image");
         assert_eq!(v["data"], "QUJD");
         assert_eq!(v["mimeType"], "image/png");
+    }
+}
+
+#[cfg(test)]
+mod resume_incoming_lines_tests {
+    use super::make_resume_incoming_lines;
+    use futures::StreamExt;
+    use std::sync::{Arc, Mutex};
+
+    /// 复现 code review 发现的 bug：早期版本只有 `make_incoming_lines`（首次
+    /// spawn 路径）接了 `last_stdout_line`，`make_resume_incoming_lines`（续接
+    /// 路径）漏接——连续两次升级期间，第二次升级前如果 agent 又发一次权限/
+    /// 选择题请求，`pending_raw_request_line()` 读到的永远是 None，回放不出
+    /// 那行原文，审批卡直接消失，agent 永久卡死。这里验证回放行和后续实时行
+    /// 都会写回 `last_stdout_line`，保证下一次升级能读到最新的待处理请求。
+    #[test]
+    fn replay_and_live_lines_both_update_last_stdout_line() {
+        let reader = futures::io::Cursor::new(b"live-request-line\n".to_vec());
+        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let mut stream = make_resume_incoming_lines(
+            reader,
+            Some("replayed-request-line".to_string()),
+            Arc::clone(&last_stdout_line),
+        );
+
+        smol::block_on(async {
+            let first = stream.next().await.unwrap().unwrap();
+            assert_eq!(first, "replayed-request-line");
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some("replayed-request-line"),
+                "回放行也要立刻计入 last_stdout_line：万一 agent 紧跟着又发一次新\
+                 请求，下一次升级得从这行往后看，不能还停在 None"
+            );
+
+            let second = stream.next().await.unwrap().unwrap();
+            assert_eq!(second, "live-request-line");
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some("live-request-line"),
+                "续接连接活着期间读到的实时行（模拟第二次升级前新来的权限/选择题\
+                 请求）也必须覆盖 last_stdout_line，否则下一次升级回放不出这行"
+            );
+        });
+    }
+
+    #[test]
+    fn no_pending_line_still_tracks_live_lines() {
+        let reader = futures::io::Cursor::new(b"only-live-line\n".to_vec());
+        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let mut stream =
+            make_resume_incoming_lines(reader, None, Arc::clone(&last_stdout_line));
+
+        smol::block_on(async {
+            let line = stream.next().await.unwrap().unwrap();
+            assert_eq!(line, "only-live-line");
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some("only-live-line")
+            );
+        });
     }
 }
 
