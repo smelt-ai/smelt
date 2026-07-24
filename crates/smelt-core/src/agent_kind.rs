@@ -2,6 +2,8 @@
 //! 会话标题、历史会话页）和未来的 acp-view 渲染层都要认同一份身份标识，放在
 //! smelt-core 避免各自复制一份判断逻辑（本身也不需要 GPUI）。
 
+use std::collections::BTreeMap;
+
 /// ACP 会话可接的 agent 种类。**新增一种 agent = 这个枚举加一条**，命令、显示名、
 /// 设置项、新建菜单都从这里派生，别再散着写死。
 ///
@@ -109,6 +111,29 @@ pub fn default_acp_grok_cmd() -> String {
     "grok agent stdio".to_string()
 }
 
+/// ACP 启动规格：命令本体保留现有的空白分词语义，环境变量单独结构化存储，
+/// 避免把带空格的值硬塞回 `VAR=value cmd` 这种不可靠的字符串拼接。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AcpLaunchSpec {
+    pub command: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+impl AcpLaunchSpec {
+    pub fn from_command(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(name.into(), value.into());
+        self
+    }
+}
+
 /// 手动添加的一个 workspace：底层还是四家基础 agent 之一，只是换了个数据目录
 /// （比如 Claude 的 `CLAUDE_CONFIG_DIR`）。命令不用手填——按 `kind` 的出厂命令
 /// 加一段 `ENV=workspace_dir` 前缀自动拼出来（见 `command()`），用户只需要选
@@ -138,10 +163,59 @@ impl AcpProfile {
         crate::workspace_override::config_dir_env_var(&self.kind_id).unwrap_or("CLAUDE_CONFIG_DIR")
     }
 
-    /// 自动拼出的完整启动命令：`ENV=workspace_dir <该 kind 的出厂命令>`。
-    /// 不持久化——`kind` 的出厂命令以后升级版本号，已存在的 profile 也跟着变，
-    /// 不用用户手动同步。
+    /// 该 profile 的结构化启动规格：命令仍跟着 kind 的出厂值走，workspace 目录
+    /// 作为独立环境变量保留原样（包括空格），由下游统一处理兼容旧字符串前缀。
+    pub fn launch_spec(&self) -> AcpLaunchSpec {
+        AcpLaunchSpec::from_command(self.kind().default_cmd())
+            .with_env(self.env_var(), self.workspace_dir.clone())
+    }
+
+    /// 兼容旧调用方的字符串命令。保留到 GUI/daemon 全链路升级完成为止。
     pub fn command(&self) -> String {
-        format!("{}={} {}", self.env_var(), self.workspace_dir, self.kind().default_cmd())
+        format!(
+            "{}={} {}",
+            self.env_var(),
+            self.workspace_dir,
+            self.kind().default_cmd()
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_spec_collects_structured_env() {
+        let spec = AcpLaunchSpec::from_command("claude --print")
+            .with_env("CLAUDE_CONFIG_DIR", "~/Library/Application Support/Claude")
+            .with_env("XDG_CONFIG_HOME", "/Users/example/.config");
+
+        assert_eq!(spec.command, "claude --print");
+        assert_eq!(
+            spec.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("~/Library/Application Support/Claude")
+        );
+        assert_eq!(
+            spec.env.get("XDG_CONFIG_HOME").map(String::as_str),
+            Some("/Users/example/.config")
+        );
+    }
+
+    #[test]
+    fn profile_launch_spec_keeps_workspace_path_with_spaces_in_one_env_value() {
+        let profile = AcpProfile {
+            id: "claude-quant".to_string(),
+            kind_id: "claude".to_string(),
+            label: "Claude Quant".to_string(),
+            workspace_dir: "~/Library/Application Support/Claude Quant".to_string(),
+        };
+
+        let spec = profile.launch_spec();
+        assert_eq!(spec.command, profile.kind().default_cmd());
+        assert_eq!(
+            spec.env.get(profile.env_var()).map(String::as_str),
+            Some("~/Library/Application Support/Claude Quant")
+        );
     }
 }

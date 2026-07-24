@@ -5,6 +5,8 @@
 //!   浏览都要从同一条启动命令里读出「这个会话实际用的是哪个 workspace 目录」，
 //!   不能只看进程当前的全局环境变量——那只反映"默认"那一个。
 
+use crate::agent_kind::AcpLaunchSpec;
+
 /// 判断 token 是不是 shell 风格的 `VAR=value` 赋值——规则跟
 /// `agent_client_protocol` 自己的 `parse_env_var` 保持一致（变量名以字母/下划线
 /// 开头，后续字符是字母数字下划线），两边判断不一致就会出现"这边当程序名去查
@@ -58,6 +60,16 @@ pub fn env_override_from_cmd(cmd: &str, var_name: &str) -> Option<String> {
     None
 }
 
+/// 从结构化启动规格里取某个环境变量的覆盖值。优先看 `launch.env`（支持包含空格
+/// 的值），没有再回退到 legacy `VAR=value cmd` 前缀，方便旧配置继续工作。
+pub fn env_override_from_launch(launch: &AcpLaunchSpec, var_name: &str) -> Option<String> {
+    launch
+        .env
+        .get(var_name)
+        .map(|value| expand_tilde(value))
+        .or_else(|| env_override_from_cmd(&launch.command, var_name))
+}
+
 /// 各家 agent 自定义 workspace 目录用的环境变量名（`AcpAgentKind::id()` →
 /// 变量名），跟 `login_env.rs` 头部注释是同一份调研结论。Copilot 有
 /// `COPILOT_HOME`/`XDG_CONFIG_HOME` 两种，这里给手动添加 workspace 用的是
@@ -78,22 +90,42 @@ mod tests {
 
     #[test]
     fn splits_valid_assignment() {
-        assert_eq!(split_env_assignment("CLAUDE_CONFIG_DIR=~/.claude-quant"), Some(("CLAUDE_CONFIG_DIR", "~/.claude-quant")));
+        assert_eq!(
+            split_env_assignment("CLAUDE_CONFIG_DIR=~/.claude-quant"),
+            Some(("CLAUDE_CONFIG_DIR", "~/.claude-quant"))
+        );
         assert_eq!(split_env_assignment("_X=1"), Some(("_X", "1")));
-        assert_eq!(split_env_assignment("A1_B=val=ue"), Some(("A1_B", "val=ue")));
+        assert_eq!(
+            split_env_assignment("A1_B=val=ue"),
+            Some(("A1_B", "val=ue"))
+        );
     }
 
     #[test]
     fn rejects_non_assignment_tokens() {
-        for tok in ["claude", "/usr/local/bin/claude", "--flag=1", "=leading-eq", "pkg@1.0=x", "1VAR=x"] {
-            assert_eq!(split_env_assignment(tok), None, "{tok} 不该被当成 VAR=value");
+        for tok in [
+            "claude",
+            "/usr/local/bin/claude",
+            "--flag=1",
+            "=leading-eq",
+            "pkg@1.0=x",
+            "1VAR=x",
+        ] {
+            assert_eq!(
+                split_env_assignment(tok),
+                None,
+                "{tok} 不该被当成 VAR=value"
+            );
         }
     }
 
     #[test]
     fn expands_leading_tilde_only() {
         let home = dirs::home_dir().unwrap();
-        assert_eq!(expand_tilde("~/.claude-quant"), format!("{}/.claude-quant", home.display()));
+        assert_eq!(
+            expand_tilde("~/.claude-quant"),
+            format!("{}/.claude-quant", home.display())
+        );
         assert_eq!(expand_tilde("~"), home.display().to_string());
         assert_eq!(expand_tilde("~foo/bar"), "~foo/bar");
         assert_eq!(expand_tilde("/already/absolute"), "/already/absolute");
@@ -103,8 +135,40 @@ mod tests {
     fn extracts_matching_var_and_stops_at_program_name() {
         let cmd = "CLAUDE_CONFIG_DIR=~/.claude-quant claude --dangerously-skip-permissions";
         let home = dirs::home_dir().unwrap();
-        assert_eq!(env_override_from_cmd(cmd, "CLAUDE_CONFIG_DIR"), Some(format!("{}/.claude-quant", home.display())));
+        assert_eq!(
+            env_override_from_cmd(cmd, "CLAUDE_CONFIG_DIR"),
+            Some(format!("{}/.claude-quant", home.display()))
+        );
         assert_eq!(env_override_from_cmd(cmd, "CODEX_HOME"), None);
-        assert_eq!(env_override_from_cmd("claude --flag", "CLAUDE_CONFIG_DIR"), None);
+        assert_eq!(
+            env_override_from_cmd("claude --flag", "CLAUDE_CONFIG_DIR"),
+            None
+        );
+    }
+
+    #[test]
+    fn structured_override_wins_and_expands_tilde() {
+        let launch = crate::agent_kind::AcpLaunchSpec::from_command(
+            "CLAUDE_CONFIG_DIR=/legacy/path claude --flag",
+        )
+        .with_env("CLAUDE_CONFIG_DIR", "~/.claude-quant");
+
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            env_override_from_launch(&launch, "CLAUDE_CONFIG_DIR"),
+            Some(format!("{}/.claude-quant", home.display()))
+        );
+    }
+
+    #[test]
+    fn launch_override_falls_back_to_legacy_prefixes() {
+        let launch =
+            crate::agent_kind::AcpLaunchSpec::from_command("CODEX_HOME=~/.codex-alt codex --help");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            env_override_from_launch(&launch, "CODEX_HOME"),
+            Some(format!("{}/.codex-alt", home.display()))
+        );
+        assert_eq!(env_override_from_launch(&launch, "CLAUDE_CONFIG_DIR"), None);
     }
 }

@@ -10,7 +10,6 @@
 //! - 一切失败（找不到命令 / 握手失败 / 子进程退出）都以 `AcpEvent::Fatal` 从事件
 //!   通道出来，`spawn_acp` 本身永不阻塞、永不 panic 调用方。
 
-
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 
@@ -20,28 +19,29 @@ use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest,
-    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction,
-    ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities,
-    ElicitationMode, ElicitationPropertySchema, ElicitationSchema, ImageContent, InitializeRequest,
+    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
+    ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
+    ElicitationPropertySchema, ElicitationSchema, ImageContent, InitializeRequest,
     LoadSessionRequest, MultiSelectItems, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PromptRequest, PromptResponse,
-    Plan, ResumeSessionRequest, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory,
-    SessionConfigSelectOptions, SessionConfigValueId, SetSessionConfigOptionRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, StopReason,
-    ToolCall, ToolCallId, ToolCallUpdate,
+    Plan, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigId,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
-    ActiveSession, AcpAgent, Agent, Client, ConnectionTo, Lines, SessionMessage,
+    AcpAgent, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
 };
+
+use crate::agent_kind::AcpLaunchSpec;
 
 /// 一次 ACP 会话的启动参数。
 pub struct AcpLaunch {
-    /// 启动命令（空白分词；MVP 不支持带引号的参数）。默认见 settings::acp_cmd。
-    pub cmd: String,
+    /// 启动规格：命令字符串仍是现有的空白分词语义，环境变量单独结构化存储；
+    /// legacy `VAR=value cmd` 前缀仍兼容，见 `build_agent`。
+    pub launch: AcpLaunchSpec,
     /// 会话工作目录（newSession 的 cwd）；None 用进程当前目录。
     pub cwd: Option<String>,
     /// GUI 侧会话 id，约定 `acp-` 前缀——DaemonStates 全局 map 里靠这个前缀
@@ -76,7 +76,10 @@ pub struct PromptImage {
 pub enum AcpCommand {
     /// 发一轮 prompt（agent 空闲时才该发；UI 侧负责在 turn 进行中排队/禁用）。
     /// `images` 空 = 纯文本那条老路径。
-    Prompt { text: String, images: Vec<PromptImage> },
+    Prompt {
+        text: String,
+        images: Vec<PromptImage>,
+    },
     /// 取消当前 turn（session/cancel 通知）。
     Cancel,
     /// 切换模型：值 id 来自 `AcpEvent::Model` 给的候选列表。
@@ -99,7 +102,10 @@ pub enum AcpEvent {
         supports_image: bool,
     },
     /// assistant 正文 / 思考块的流式增量（content 已文本化）。
-    AgentChunk { thought: bool, text: String },
+    AgentChunk {
+        thought: bool,
+        text: String,
+    },
     ToolCall(ToolCall),
     ToolCallUpdate(ToolCallUpdate),
     /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
@@ -135,7 +141,11 @@ pub enum AcpEvent {
     AvailableCommands(Vec<(String, String)>),
     /// 上下文用量：已用 / 窗口大小（token），外加本轮缓存读取量（agent 给才有）。
     /// UI 据此显示「上下文 32%」这类指示。
-    Usage { used: u64, size: u64, cached_read: Option<u64> },
+    Usage {
+        used: u64,
+        size: u64,
+        cached_read: Option<u64>,
+    },
     /// agent 的选择题 / 表单（AskUserQuestion 类）：UI 渲染字段，凭 responder 回填。
     Elicitation {
         message: String,
@@ -176,9 +186,7 @@ pub struct ModelState {
 
 /// 权限回执守卫：UI 点按钮时消费；**被 drop（视图关闭、卡片被弃置）自动回
 /// Cancelled**，保证 agent 侧永远等得到答案、不会挂起。
-pub struct PermissionResponder(
-    Option<agent_client_protocol::Responder<RequestPermissionResponse>>,
-);
+pub struct PermissionResponder(Option<agent_client_protocol::Responder<RequestPermissionResponse>>);
 
 impl PermissionResponder {
     /// 选中某个选项（allow / reject 都是「选中」，语义在 option.kind 里）。
@@ -285,8 +293,14 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                 key: key.clone(),
                 title: b.title.clone().unwrap_or_else(|| key.clone()),
                 kind: ElicitFieldKind::Select(vec![
-                    ElicitOption { value: ElicitationContentValue::Boolean(true), label: "是".into() },
-                    ElicitOption { value: ElicitationContentValue::Boolean(false), label: "否".into() },
+                    ElicitOption {
+                        value: ElicitationContentValue::Boolean(true),
+                        label: "是".into(),
+                    },
+                    ElicitOption {
+                        value: ElicitationContentValue::Boolean(false),
+                        label: "否".into(),
+                    },
                 ]),
             }),
             ElicitationPropertySchema::Array(a) => {
@@ -323,7 +337,11 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
             None => {} // 可选且按钮化不了：跳过
         }
     }
-    if fields.is_empty() { None } else { Some(fields) }
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields)
+    }
 }
 
 /// UI 侧持有的会话句柄。drop cmd_tx（整个句柄）即请求连接收摊。
@@ -351,14 +369,9 @@ pub struct AcpStdio {
 /// 漏杀一个不听话的 agent，也不能让整个 App 退出卡死在它上面。
 pub async fn wait_for_shutdown(handle: AcpHandle, timeout: std::time::Duration) {
     let AcpHandle { event_rx, .. } = handle;
-    smol::future::race(
-        async {
-            while event_rx.recv().await.is_ok() {}
-        },
-        async {
-            smol::Timer::after(timeout).await;
-        },
-    )
+    smol::future::race(async { while event_rx.recv().await.is_ok() {} }, async {
+        smol::Timer::after(timeout).await;
+    })
     .await;
 }
 
@@ -378,7 +391,7 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
             // 先解析运行时（bunx → 受管 bun，可能触发首次下载），再进连接循环。
             let cmd = {
                 let tx = event_tx.clone();
-                match resolve_runtime_command(&launch.cmd, &|msg| {
+                match resolve_runtime_command(&launch.launch.command, &|msg| {
                     let _ = tx.try_send(AcpEvent::Status(msg.to_string()));
                 }) {
                     Ok(cmd) => cmd,
@@ -388,7 +401,23 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
                     }
                 }
             };
-            let launch = AcpLaunch { cmd, ..launch };
+            let AcpLaunch {
+                launch: launch_spec,
+                cwd,
+                sid,
+                resume_session_id,
+                resume_needs_transcript_check,
+            } = launch;
+            let launch = AcpLaunch {
+                launch: AcpLaunchSpec {
+                    command: cmd,
+                    env: launch_spec.env,
+                },
+                cwd,
+                sid,
+                resume_session_id,
+                resume_needs_transcript_check,
+            };
             let result = smol::block_on(run_connection(
                 &launch,
                 cmd_rx,
@@ -408,7 +437,11 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
             // Ok 结束（Shutdown）不发 Fatal——UI 主动关的，没必要再报。
         })
         .expect("spawn smelt-acp thread");
-    AcpHandle { cmd_tx, event_rx, stdio }
+    AcpHandle {
+        cmd_tx,
+        event_rx,
+        stdio,
+    }
 }
 
 /// 写一行（带换行）到异步 writer——`agent_client_protocol` 自己的同款 helper
@@ -446,11 +479,13 @@ fn make_incoming_lines<R>(
 where
     R: futures::AsyncRead + Send + Unpin + 'static,
 {
-    futures::io::BufReader::new(reader).lines().inspect(move |res| {
-        if let Ok(line) = res {
-            *last_stdout_line.lock().unwrap() = Some(line.clone());
-        }
-    })
+    futures::io::BufReader::new(reader)
+        .lines()
+        .inspect(move |res| {
+            if let Ok(line) = res {
+                *last_stdout_line.lock().unwrap() = Some(line.clone());
+            }
+        })
 }
 
 /// 无缝升级续接专用：先「回放」升级前捕获到的那行原始请求（如果有——对应
@@ -473,11 +508,13 @@ where
     R: futures::AsyncRead + Send + Unpin + 'static,
 {
     let last_stdout_line_for_replay = Arc::clone(&last_stdout_line);
-    let live = futures::io::BufReader::new(reader).lines().inspect(move |res| {
-        if let Ok(line) = res {
-            *last_stdout_line.lock().unwrap() = Some(line.clone());
-        }
-    });
+    let live = futures::io::BufReader::new(reader)
+        .lines()
+        .inspect(move |res| {
+            if let Ok(line) = res {
+                *last_stdout_line.lock().unwrap() = Some(line.clone());
+            }
+        });
     match pending_raw_line {
         Some(line) => {
             *last_stdout_line_for_replay.lock().unwrap() = Some(line.clone());
@@ -489,10 +526,7 @@ where
 
 /// 子进程 stderr 逐行收进尾巴（原来挂在 `AcpAgent::with_debug` 的
 /// `Stderr` 分支，自己接管 spawn 之后要自己起一条任务做）。
-fn spawn_stderr_drain(
-    stderr: async_process::ChildStderr,
-    stderr_tail: Arc<Mutex<Vec<String>>>,
-) {
+fn spawn_stderr_drain(stderr: async_process::ChildStderr, stderr_tail: Arc<Mutex<Vec<String>>>) {
     smol::spawn(async move {
         let mut lines = futures::io::BufReader::new(stderr).lines();
         while let Some(Ok(line)) = lines.next().await {
@@ -531,14 +565,18 @@ async fn run_connection(
     stderr_tail: Arc<Mutex<Vec<String>>>,
     stdio_out: Arc<Mutex<Option<AcpStdio>>>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let agent = build_agent(&launch.cmd)?;
+    let agent = build_agent(&launch.launch)?;
     let (child_stdin, child_stdout, child_stderr, child) = agent
         .spawn_process()
         .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
     let pid = child.id() as i32;
     let stdin_fd = child_stdin.as_raw_fd();
     let stdout_fd = child_stdout.as_raw_fd();
-    *stdio_out.lock().unwrap() = Some(AcpStdio { pid, stdin_fd, stdout_fd });
+    *stdio_out.lock().unwrap() = Some(AcpStdio {
+        pid,
+        stdin_fd,
+        stdout_fd,
+    });
     // `child` 本身不能就地 drop：它是子进程唯一的活体句柄（drop async_process
     // 的 Child 不会杀进程，跟 std 一样），得撑到整个连接结束——用不着它的
     // 任何方法，只借它的存在期，_guard 才是真正负责杀的那个。
@@ -554,7 +592,11 @@ async fn run_connection(
     let cwd = launch
         .cwd
         .clone()
-        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "/".to_string());
 
     let perm_tx = event_tx.clone();
@@ -605,9 +647,8 @@ async fn run_connection(
                             });
                             Ok(())
                         }
-                        None => responder.respond(CreateElicitationResponse::new(
-                            ElicitationAction::Decline,
-                        )),
+                        None => responder
+                            .respond(CreateElicitationResponse::new(ElicitationAction::Decline)),
                     }
                 }
             },
@@ -653,18 +694,22 @@ async fn run_connection(
                     // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace
                     // profile），transcript 得去它指向的目录找，不能只看进程
                     // 全局环境变量——那只反映"默认" workspace 那一份。
-                    let override_dir = crate::workspace_override::env_override_from_cmd(
-                        &launch.cmd,
+                    let override_dir = crate::workspace_override::env_override_from_launch(
+                        &launch.launch,
                         "CLAUDE_CONFIG_DIR",
                     );
-                    crate::claude_paths::transcript_path(c, &sid.to_string(), override_dir.as_deref())
-                        .exists()
+                    crate::claude_paths::transcript_path(
+                        c,
+                        &sid.to_string(),
+                        override_dir.as_deref(),
+                    )
+                    .exists()
                 })
             });
             if let Some(sid) = launch.resume_session_id.clone().filter(|_| resumable) {
                 // 先试不重放的 resume
                 let mut resume_req = ResumeSessionRequest::new(sid.clone(), cwd.clone());
-                if let Some(meta) = claude_raw_sdk_meta(&launch.cmd) {
+                if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
                     resume_req = resume_req.meta(meta);
                 }
                 if let Ok(resumed) = connection.send_request(resume_req).block_task().await {
@@ -712,8 +757,15 @@ async fn run_connection(
                                 .config_options(loaded.config_options)
                                 .meta(loaded.meta);
                             let session = connection.attach_session(resp, Default::default())?;
-                            return drive_session(session, cmd_rx, event_tx, ReadyKind::ResumedWithReplay, supports_image, model_cfg)
-                                .await;
+                            return drive_session(
+                                session,
+                                cmd_rx,
+                                event_tx,
+                                ReadyKind::ResumedWithReplay,
+                                supports_image,
+                                model_cfg,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             // 旧会话可能已被清理/损坏——不是致命错误，退回全新会话，
@@ -743,7 +795,15 @@ async fn run_connection(
                     id
                 });
             let session = connection.attach_session(created, Default::default())?;
-            drive_session(session, cmd_rx, event_tx, ReadyKind::Fresh, supports_image, model_cfg).await
+            drive_session(
+                session,
+                cmd_rx,
+                event_tx,
+                ReadyKind::Fresh,
+                supports_image,
+                model_cfg,
+            )
+            .await
         })
         .await
 }
@@ -763,7 +823,11 @@ pub fn resume_acp_from_fds(
 ) -> AcpHandle {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
     let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
-    let stdio = Arc::new(Mutex::new(Some(AcpStdio { pid, stdin_fd, stdout_fd })));
+    let stdio = Arc::new(Mutex::new(Some(AcpStdio {
+        pid,
+        stdin_fd,
+        stdout_fd,
+    })));
     let thread_name = format!("smelt-acp-r-{}", &sid[..sid.len().min(10)]);
     std::thread::Builder::new()
         .name(thread_name)
@@ -784,7 +848,11 @@ pub fn resume_acp_from_fds(
             // Ok 结束（Shutdown）不发 Fatal——跟 run_connection 一致。
         })
         .expect("spawn smelt-acp resume thread");
-    AcpHandle { cmd_tx, event_rx, stdio }
+    AcpHandle {
+        cmd_tx,
+        event_rx,
+        stdio,
+    }
 }
 
 /// `resume_acp_from_fds` 的连接主体：接上继承来的 fd → 跳过握手直接
@@ -870,9 +938,8 @@ async fn run_resumed_connection(
                             });
                             Ok(())
                         }
-                        None => responder.respond(CreateElicitationResponse::new(
-                            ElicitationAction::Decline,
-                        )),
+                        None => responder
+                            .respond(CreateElicitationResponse::new(ElicitationAction::Decline)),
                     }
                 }
             },
@@ -885,8 +952,15 @@ async fn run_resumed_connection(
             // 更新（ConfigOptionUpdate）会自动补上，不影响对话本身。
             let resp = NewSessionResponse::new(session_id.clone());
             let session = connection.attach_session(resp, Default::default())?;
-            drive_session(session, cmd_rx, event_tx, ReadyKind::ResumedKeepHistory, supports_image, None)
-                .await
+            drive_session(
+                session,
+                cmd_rx,
+                event_tx,
+                ReadyKind::ResumedKeepHistory,
+                supports_image,
+                None,
+            )
+            .await
         })
         .await
 }
@@ -918,10 +992,9 @@ async fn drive_session<'r>(
         }
         let next = {
             let read = session.read_update();
-            smol::future::race(
-                async { Next::Cmd(cmd_rx.recv().await.ok()) },
-                async move { Next::Update(read.await) },
-            )
+            smol::future::race(async { Next::Cmd(cmd_rx.recv().await.ok()) }, async move {
+                Next::Update(read.await)
+            })
             .await
         };
         match next {
@@ -966,7 +1039,9 @@ async fn drive_session<'r>(
             Next::Cmd(Some(AcpCommand::SetModel(value_id))) => {
                 // 没拿到模型配置项 id 说明这个 agent 压根没报模型 → 无从切起，
                 // UI 侧本来也不会给出下拉（options 为空）。
-                let Some(cfg_id) = model_config_id.clone() else { continue };
+                let Some(cfg_id) = model_config_id.clone() else {
+                    continue;
+                };
                 let req = SetSessionConfigOptionRequest::new(
                     session.session_id().clone(),
                     cfg_id,
@@ -1063,7 +1138,7 @@ async fn translate_update(
 /// 那条把 spawn 过程整个封在 SDK 内部、什么都拿不到的路。stderr 尾巴 / 原始
 /// 行捕获也因此改成调用方（`run_connection`）自己接管，不再挂在这个 AcpAgent
 /// 对象上的 `with_debug` 钩子。
-fn build_agent(cmd: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
+fn build_agent(launch: &AcpLaunchSpec) -> Result<AcpAgent, agent_client_protocol::Error> {
     // 查找命令用 login PATH + 一批常见 CLI 安装目录兜底。为什么要兜底：
     // login_shell_path 走的是 `zsh -lc`（非交互 login），只读 ~/.zprofile；很多
     // CLI 的安装脚本把 PATH 加在 ~/.zshrc（交互式）里，非交互读不到 → 明明装了
@@ -1071,7 +1146,6 @@ fn build_agent(cmd: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
     // 找得到；真没装的才落到下面的友好提示。子进程 PATH 也用这份扩展，免得
     // agent 起来后找它自己的子工具又缺路径。
     let search_path = extended_search_path();
-    let path_env = format!("PATH={search_path}");
     // 命令字符串允许开头带 shell 风格的 `VAR=value` 前缀（比如
     // `CLAUDE_CONFIG_DIR=~/.claude-quant claude --dangerously-skip-permissions`，
     // 让同一家 agent 的多个 workspace 各开一条「设置 → Agent 集成」里的独立
@@ -1080,13 +1154,24 @@ fn build_agent(cmd: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
     // 这里的 PATH 注入用的正是同一条路。真正要做的是"先把这些前缀跳过去找到
     // 真正的程序名"，不然会把 `CLAUDE_CONFIG_DIR=...` 整个当成程序名去查 PATH，
     // 报"未找到命令"（这是之前真实的行为，不是假设）。
-    let mut tokens = cmd.split_whitespace();
-    let mut user_env: Vec<String> = Vec::new();
+    let args = build_agent_args(launch, &search_path)?;
+    Ok(AcpAgent::from_args(args.iter().map(String::as_str))?)
+}
+
+fn build_agent_args(
+    launch: &AcpLaunchSpec,
+    search_path: &str,
+) -> Result<Vec<String>, agent_client_protocol::Error> {
+    let mut tokens = launch.command.split_whitespace();
+    let mut user_env = BTreeMap::<String, String>::new();
     let mut prog_token = None;
     for tok in tokens.by_ref() {
         match crate::workspace_override::split_env_assignment(tok) {
             Some((name, value)) => {
-                user_env.push(format!("{name}={}", crate::workspace_override::expand_tilde(value)))
+                user_env.insert(
+                    name.to_string(),
+                    crate::workspace_override::expand_tilde(value),
+                );
             }
             None => {
                 prog_token = Some(tok);
@@ -1094,15 +1179,15 @@ fn build_agent(cmd: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
             }
         }
     }
-    // 命令名先解析成绝对路径再交给 SDK：spawn 直接 exec、不依赖任何 PATH；
-    // 找不到就提前返回人话，而不是让 SDK 甩 `os error 2` 天书。带 `/` 的
-    // （受管 bun 的绝对路径）跳过，本来就不查。
+    for (name, value) in &launch.env {
+        user_env.insert(name.clone(), crate::workspace_override::expand_tilde(value));
+    }
     let resolved: Vec<String> = match prog_token {
         Some(prog) => {
             let prog = if prog.contains('/') {
                 prog.to_string()
             } else {
-                resolve_in_path(prog, &search_path).ok_or_else(|| {
+                resolve_in_path(prog, search_path).ok_or_else(|| {
                     agent_client_protocol::Error::internal_error().data(format!(
                         "未找到命令 `{prog}`。这类对话 agent 是各自独立的 CLI，需要先自行\
                          安装并登录。如果确定装了，多半是它的目录没进登录 shell 的 PATH——\
@@ -1111,14 +1196,20 @@ fn build_agent(cmd: &str) -> Result<AcpAgent, agent_client_protocol::Error> {
                     ))
                 })?
             };
-            std::iter::once(prog).chain(tokens.map(String::from)).collect()
+            std::iter::once(prog)
+                .chain(tokens.map(String::from))
+                .collect()
         }
         None => Vec::new(),
     };
-    let args = std::iter::once(path_env.as_str())
-        .chain(user_env.iter().map(String::as_str))
-        .chain(resolved.iter().map(String::as_str));
-    Ok(AcpAgent::from_args(args)?)
+    let mut args = vec![format!("PATH={search_path}")];
+    args.extend(
+        user_env
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    args.extend(resolved);
+    Ok(args)
 }
 
 /// Claude Code 适配器专用 meta：要它把原始 SDK 消息也发过来（里面带 usage /
@@ -1129,7 +1220,10 @@ fn claude_raw_sdk_meta(cmd: &str) -> Option<serde_json::Map<String, serde_json::
         return None;
     }
     let mut inner = serde_json::Map::new();
-    inner.insert("emitRawSDKMessages".to_string(), serde_json::Value::Bool(true));
+    inner.insert(
+        "emitRawSDKMessages".to_string(),
+        serde_json::Value::Bool(true),
+    );
     let mut meta = serde_json::Map::new();
     meta.insert("claudeCode".to_string(), serde_json::Value::Object(inner));
     Some(meta)
@@ -1147,7 +1241,9 @@ pub(crate) fn model_from_config(
     let opt = options
         .iter()
         .find(|o| matches!(o.category, Some(SessionConfigOptionCategory::Model)))?;
-    let SessionConfigKind::Select(sel) = &opt.kind else { return None };
+    let SessionConfigKind::Select(sel) = &opt.kind else {
+        return None;
+    };
     let cur = &sel.current_value;
     // 选项可能是平铺的，也可能按厂商/档位分组，两种都要翻。
     let flat: Vec<&agent_client_protocol::schema::v1::SessionConfigSelectOption> =
@@ -1170,7 +1266,13 @@ pub(crate) fn model_from_config(
         .iter()
         .map(|o| (o.value.to_string(), o.name.clone()))
         .collect();
-    Some((opt.id.clone(), ModelState { current_name: name, options }))
+    Some((
+        opt.id.clone(),
+        ModelState {
+            current_name: name,
+            options,
+        },
+    ))
 }
 
 /// 权限卡片的问题摘要：tool call 有标题用标题，否则退回工具 id。
@@ -1199,9 +1301,11 @@ pub fn content_text(content: &ContentBlock) -> String {
 /// agent_client_protocol 的协议类型 → `acp_chat` 共享模型类型。原来住在
 /// acp_view.rs（GUI 层），跟着 `apply_event` 归约逻辑一起搬进 acp_session——
 /// 谁跑归约谁就要做这层翻译，现在是 smeltd 不是 GUI。
-pub fn tool_kind_from_acp(k: agent_client_protocol::schema::v1::ToolKind) -> crate::acp_chat::ToolKind {
-    use agent_client_protocol::schema::v1::ToolKind as Acp;
+pub fn tool_kind_from_acp(
+    k: agent_client_protocol::schema::v1::ToolKind,
+) -> crate::acp_chat::ToolKind {
     use crate::acp_chat::ToolKind;
+    use agent_client_protocol::schema::v1::ToolKind as Acp;
     match k {
         Acp::Read => ToolKind::Read,
         Acp::Edit => ToolKind::Edit,
@@ -1219,8 +1323,8 @@ pub fn tool_kind_from_acp(k: agent_client_protocol::schema::v1::ToolKind) -> cra
 pub fn tool_status_from_acp(
     s: agent_client_protocol::schema::v1::ToolCallStatus,
 ) -> crate::acp_chat::ToolCallStatus {
-    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
     use crate::acp_chat::ToolCallStatus;
+    use agent_client_protocol::schema::v1::ToolCallStatus as Acp;
     match s {
         Acp::Pending => ToolCallStatus::Pending,
         Acp::InProgress => ToolCallStatus::InProgress,
@@ -1233,8 +1337,8 @@ pub fn tool_status_from_acp(
 pub fn tool_content_parts(
     content: &[agent_client_protocol::schema::v1::ToolCallContent],
 ) -> Vec<crate::acp_chat::ToolOutputPart> {
-    use agent_client_protocol::schema::v1::ToolCallContent;
     use crate::acp_chat::ToolOutputPart;
+    use agent_client_protocol::schema::v1::ToolCallContent;
     content
         .iter()
         .filter_map(|c| match c {
@@ -1275,7 +1379,12 @@ const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
 const BUN_ZIP_DIR: &str = "bun-darwin-x64";
 
 fn managed_bun_path() -> Option<std::path::PathBuf> {
-    Some(dirs::home_dir()?.join(".smelt/runtime").join(format!("bun-v{BUN_VERSION}")).join("bun"))
+    Some(
+        dirs::home_dir()?
+            .join(".smelt/runtime")
+            .join(format!("bun-v{BUN_VERSION}"))
+            .join("bun"),
+    )
 }
 
 /// 确保受管 bun 就位（不在则下载 + sha256 校验 + 冒烟），返回可执行路径。
@@ -1311,7 +1420,9 @@ fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
     let got = got.split_whitespace().next().unwrap_or("");
     if got != want_sha {
         let _ = std::fs::remove_file(&zip);
-        return Err(format!("Bun 下载校验失败（期望 {want_sha}，实际 {got}），已丢弃"));
+        return Err(format!(
+            "Bun 下载校验失败（期望 {want_sha}，实际 {got}），已丢弃"
+        ));
     }
     let unzip = std::process::Command::new("unzip")
         .args(["-o", "-q"])
@@ -1321,7 +1432,10 @@ fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
         .output()
         .map_err(|e| format!("无法执行 unzip：{e}"))?;
     if !unzip.status.success() {
-        return Err(format!("解压 Bun 失败：{}", String::from_utf8_lossy(&unzip.stderr).trim()));
+        return Err(format!(
+            "解压 Bun 失败：{}",
+            String::from_utf8_lossy(&unzip.stderr).trim()
+        ));
     }
     let _ = std::fs::remove_file(&zip);
     std::fs::rename(dir.join(BUN_ZIP_DIR).join("bun"), &bun)
@@ -1342,21 +1456,14 @@ fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
 /// 里有同名可执行则原样放行（用户自己装的）；其他命令一律不动（npx / 绝对路径
 /// 等逃生口）。
 fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, String> {
-    let mut words = cmd.split_whitespace();
-    let head = words.next().unwrap_or_default();
+    let head = command_head_after_env_prefixes(cmd).unwrap_or_default();
     if head != "bunx" && head != "bun" {
         return Ok(cmd.to_string());
     }
-    let rest: Vec<&str> = words.collect();
     match ensure_bun(status) {
         Ok(bun) => {
             let bun = bun.to_string_lossy().into_owned();
-            let mut parts = vec![bun];
-            if head == "bunx" {
-                parts.push("x".to_string());
-            }
-            parts.extend(rest.iter().map(|s| s.to_string()));
-            Ok(parts.join(" "))
+            Ok(rewrite_runtime_command_with_bun(cmd, &bun).unwrap_or_else(|| cmd.to_string()))
         }
         Err(e) => {
             // 受管失败：系统里用户自己装过 bun 就用系统的。
@@ -1369,6 +1476,35 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
             }
         }
     }
+}
+
+fn command_head_after_env_prefixes(cmd: &str) -> Option<&str> {
+    cmd.split_whitespace()
+        .find(|tok| crate::workspace_override::split_env_assignment(tok).is_none())
+}
+
+fn rewrite_runtime_command_with_bun(cmd: &str, bun: &str) -> Option<String> {
+    let mut words = cmd.split_whitespace();
+    let mut prefix = Vec::new();
+    let head = loop {
+        match words.next() {
+            Some(tok) if crate::workspace_override::split_env_assignment(tok).is_some() => {
+                prefix.push(tok);
+            }
+            Some(tok) => break tok,
+            None => return None,
+        }
+    };
+    if head != "bunx" && head != "bun" {
+        return None;
+    }
+    let mut parts: Vec<String> = prefix.into_iter().map(str::to_string).collect();
+    parts.push(bun.to_string());
+    if head == "bunx" {
+        parts.push("x".to_string());
+    }
+    parts.extend(words.map(str::to_string));
+    Some(parts.join(" "))
 }
 
 /// login shell 的 PATH（跑一次缓存）。GUI 进程从 Finder 启动时 PATH 只有系统
@@ -1504,7 +1640,11 @@ mod runtime_tests {
     #[test]
     fn non_bun_commands_pass_through() {
         let noop = |_: &str| {};
-        for cmd in ["npx -y foo@1", "/usr/local/bin/some-acp --flag", "node adapter.js"] {
+        for cmd in [
+            "npx -y foo@1",
+            "/usr/local/bin/some-acp --flag",
+            "node adapter.js",
+        ] {
             assert_eq!(resolve_runtime_command(cmd, &noop).unwrap(), cmd);
         }
     }
@@ -1512,7 +1652,9 @@ mod runtime_tests {
     /// 受管 bun 已就位时，bunx 前缀改写为 `<managed-bun> x …`。
     #[test]
     fn bunx_rewrites_to_managed_bun_when_present() {
-        let Some(bun) = managed_bun_path() else { return };
+        let Some(bun) = managed_bun_path() else {
+            return;
+        };
         if !bun.is_file() {
             return; // 受管 bun 未安装的机器上跳过（真实下载见 manual_ensure_bun）
         }
@@ -1526,7 +1668,9 @@ mod runtime_tests {
     /// `x` 后面、包名前面——`bun x --bun pkg@version`，不能被误吞或挪位置。
     #[test]
     fn bunx_dash_dash_bun_flag_passes_through_in_order() {
-        let Some(bun) = managed_bun_path() else { return };
+        let Some(bun) = managed_bun_path() else {
+            return;
+        };
         if !bun.is_file() {
             return;
         }
@@ -1538,7 +1682,23 @@ mod runtime_tests {
         .unwrap();
         assert_eq!(
             out,
-            format!("{} x --bun @agentclientprotocol/claude-agent-acp@0.59.0", bun.to_string_lossy())
+            format!(
+                "{} x --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+                bun.to_string_lossy()
+            )
+        );
+    }
+
+    #[test]
+    fn runtime_rewrite_preserves_legacy_env_prefixes_before_bunx() {
+        let out = rewrite_runtime_command_with_bun(
+            "CLAUDE_CONFIG_DIR=~/.claude bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+            "/managed/bun",
+        )
+        .expect("bunx should rewrite");
+        assert_eq!(
+            out,
+            "CLAUDE_CONFIG_DIR=~/.claude /managed/bun x --bun @agentclientprotocol/claude-agent-acp@0.59.0"
         );
     }
 
@@ -1548,20 +1708,31 @@ mod runtime_tests {
     fn manual_ensure_bun() {
         let path = ensure_bun(&|msg| eprintln!("[status] {msg}")).expect("ensure_bun");
         assert!(path.is_file());
-        let out = std::process::Command::new(&path).arg("--version").output().unwrap();
+        let out = std::process::Command::new(&path)
+            .arg("--version")
+            .output()
+            .unwrap();
         assert!(out.status.success());
-        eprintln!("bun @ {} → {}", path.display(), String::from_utf8_lossy(&out.stdout).trim());
+        eprintln!(
+            "bun @ {} → {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stdout).trim()
+        );
     }
 }
 
 #[cfg(test)]
 mod path_resolve_tests {
-    use super::resolve_in_path;
+    use super::{build_agent_args, resolve_in_path};
+    use crate::agent_kind::AcpLaunchSpec;
 
     #[test]
     fn absolute_or_slashed_returned_asis() {
         // 带斜杠的（绝对路径 / 受管 bun 全路径）不查 PATH，原样返回。
-        assert_eq!(resolve_in_path("/usr/bin/env", "/nonexistent").as_deref(), Some("/usr/bin/env"));
+        assert_eq!(
+            resolve_in_path("/usr/bin/env", "/nonexistent").as_deref(),
+            Some("/usr/bin/env")
+        );
         assert_eq!(resolve_in_path("./x", "/bin").as_deref(), Some("./x"));
     }
 
@@ -1576,6 +1747,46 @@ mod path_resolve_tests {
     fn missing_command_returns_none() {
         // 找不到就返回 None，让调用方保留原名、把真实 spawn 错误报出来。
         assert!(resolve_in_path("definitely-not-a-real-cmd-xyz", "/bin:/usr/bin").is_none());
+    }
+
+    #[test]
+    fn build_agent_args_preserves_plain_launch_specs() {
+        let args = build_agent_args(&AcpLaunchSpec::from_command("sh -lc echo"), "/bin:/usr/bin")
+            .expect("plain launch spec should build");
+
+        assert_eq!(
+            args,
+            vec![
+                "PATH=/bin:/usr/bin".to_string(),
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "echo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_agent_args_overlays_structured_env_on_legacy_prefixes() {
+        let launch = AcpLaunchSpec::from_command("CLAUDE_CONFIG_DIR=/legacy/path sh --version")
+            .with_env(
+                "CLAUDE_CONFIG_DIR",
+                "~/Library/Application Support/Claude Quant",
+            )
+            .with_env("XDG_CONFIG_HOME", "~/.config");
+
+        let args = build_agent_args(&launch, "/bin:/usr/bin").expect("launch args");
+        let home = dirs::home_dir().unwrap();
+        let structured_config = format!(
+            "CLAUDE_CONFIG_DIR={}/Library/Application Support/Claude Quant",
+            home.display()
+        );
+        let structured_xdg = format!("XDG_CONFIG_HOME={}/.config", home.display());
+
+        assert_eq!(args.first().map(String::as_str), Some("PATH=/bin:/usr/bin"));
+        assert!(args[1..3].contains(&structured_config));
+        assert!(args[1..3].contains(&structured_xdg));
+        assert_eq!(args[3], "/bin/sh");
+        assert_eq!(args[4], "--version");
     }
 }
 
@@ -1644,8 +1855,7 @@ mod resume_incoming_lines_tests {
     fn no_pending_line_still_tracks_live_lines() {
         let reader = futures::io::Cursor::new(b"only-live-line\n".to_vec());
         let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let mut stream =
-            make_resume_incoming_lines(reader, None, Arc::clone(&last_stdout_line));
+        let mut stream = make_resume_incoming_lines(reader, None, Arc::clone(&last_stdout_line));
 
         smol::block_on(async {
             let line = stream.next().await.unwrap().unwrap();
@@ -1668,7 +1878,10 @@ mod model_tests {
     use agent_client_protocol::schema::v1::SessionConfigValueId;
 
     fn opt(value: &str, name: &str) -> SessionConfigSelectOption {
-        SessionConfigSelectOption::new(SessionConfigValueId::new(value.to_string()), name.to_string())
+        SessionConfigSelectOption::new(
+            SessionConfigValueId::new(value.to_string()),
+            name.to_string(),
+        )
     }
 
     fn model_option(current: &str, options: SessionConfigSelectOptions) -> SessionConfigOption {
@@ -1698,7 +1911,10 @@ mod model_tests {
         assert_eq!(state.current_name, "Claude Sonnet 4.5");
         // 候选要带全，UI 靠它渲染下拉
         assert_eq!(state.options.len(), 2);
-        assert!(state.options.iter().any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8"));
+        assert!(state
+            .options
+            .iter()
+            .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8"));
     }
 
     /// 选项按厂商/档位分组时同样要能翻出来。

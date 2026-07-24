@@ -3212,7 +3212,7 @@ fn acp_relaunch(
     smelt_core::acp_session::reset_for_restart(&mut sess.reduced.lock().unwrap());
     let needs_check = sess.agent_needs_transcript_check;
     let handle = smelt_core::acp_conn::spawn_acp(smelt_core::acp_conn::AcpLaunch {
-        cmd: cmd.clone(),
+        launch: smelt_core::agent_kind::AcpLaunchSpec::from_command(cmd.clone()),
         cwd: sess.cwd.clone(),
         sid: id.to_string(),
         resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
