@@ -563,7 +563,35 @@ pub fn ensure_managed_daemon_current() -> std::io::Result<std::path::PathBuf> {
     let _gate = MANAGED_DAEMON_GATE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    ensure_managed_daemon_current_locked()
+    remember_managed_daemon_ensure(
+        ensure_managed_daemon_current_locked(),
+        &CONNECT_MANAGED_ENSURED,
+    )
+}
+
+fn remember_managed_daemon_ensure<T>(
+    result: std::io::Result<T>,
+    ensured: &AtomicBool,
+) -> std::io::Result<T> {
+    if result.is_ok() {
+        ensured.store(true, Ordering::Relaxed);
+    }
+    result
+}
+
+fn ensure_managed_daemon_for_connect<F>(
+    ensured: &AtomicBool,
+    managed: std::path::PathBuf,
+    ensure: F,
+) -> std::io::Result<std::path::PathBuf>
+where
+    F: FnOnce() -> std::io::Result<std::path::PathBuf>,
+{
+    if ensured.load(Ordering::Relaxed) {
+        Ok(managed)
+    } else {
+        remember_managed_daemon_ensure(ensure(), ensured)
+    }
 }
 
 fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf> {
@@ -672,8 +700,11 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     // 已有守护：进程内只 ensure 一次。
     if UnixStream::connect(&path).is_ok() {
         if !CONNECT_MANAGED_ENSURED.load(Ordering::Relaxed) {
-            let _ = ensure_managed_daemon_current();
-            CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
+            let _ = ensure_managed_daemon_for_connect(
+                &CONNECT_MANAGED_ENSURED,
+                managed_daemon_path(),
+                ensure_managed_daemon_current,
+            );
         }
         if let Ok(s) = UnixStream::connect(&path) {
             return Ok(s);
@@ -682,8 +713,11 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     }
 
     // 优先 managed 路径；没有则从 App/cargo 同目录同步一份。
-    CONNECT_MANAGED_ENSURED.store(true, Ordering::Relaxed);
-    let daemon = match ensure_managed_daemon_current() {
+    let daemon = match ensure_managed_daemon_for_connect(
+        &CONNECT_MANAGED_ENSURED,
+        managed_daemon_path(),
+        ensure_managed_daemon_current,
+    ) {
         Ok(p) => p,
         Err(e) => {
             let exe = std::env::current_exe()?;
@@ -2607,6 +2641,36 @@ mod handshake_timeout_tests {
             Err(_) => panic!("握手对不回话的守护没有在超时窗口内返回——主线程会被永久卡死"),
         }
         drop(theirs); // 撑到断言之后才放，确保对端全程存活
+    }
+}
+
+#[cfg(test)]
+mod managed_daemon_ensure_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn explicit_ensure_then_connect_fallback_only_ensures_once() {
+        let ensured = AtomicBool::new(false);
+        let calls = Cell::new(0);
+        let managed = std::path::PathBuf::from("/tmp/smeltd");
+
+        let first = remember_managed_daemon_ensure(
+            {
+                calls.set(calls.get() + 1);
+                Ok(managed.clone())
+            },
+            &ensured,
+        );
+        let fallback = ensure_managed_daemon_for_connect(&ensured, managed.clone(), || {
+            calls.set(calls.get() + 1);
+            Ok(managed.clone())
+        });
+
+        assert_eq!(first.unwrap(), managed);
+        assert_eq!(fallback.unwrap(), managed);
+        assert_eq!(calls.get(), 1);
+        assert!(ensured.load(Ordering::Relaxed));
     }
 }
 
