@@ -1863,6 +1863,7 @@ mod image_block_tests {
 #[cfg(test)]
 mod resume_incoming_lines_tests {
     use super::make_resume_incoming_lines;
+    use crate::acp_session::{AcpSessionState, LivePermission};
     use futures::StreamExt;
     use std::sync::{Arc, Mutex};
 
@@ -1917,6 +1918,57 @@ mod resume_incoming_lines_tests {
                 Some("only-live-line")
             );
         });
+    }
+
+    #[test]
+    fn pending_request_survives_two_resume_handoff_cycles() {
+        let replayed = r#"{"jsonrpc":"2.0","id":41,"method":"session/request_permission"}"#;
+        let live = r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission"}"#;
+        let reader = futures::io::Cursor::new(format!("{live}\n").into_bytes());
+        let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let mut first_resume = make_resume_incoming_lines(
+            reader,
+            Some(replayed.to_string()),
+            Arc::clone(&last_stdout_line),
+        );
+
+        let pending_raw_line = smol::block_on(async {
+            assert_eq!(first_resume.next().await.unwrap().unwrap(), replayed);
+            assert_eq!(
+                last_stdout_line.lock().unwrap().as_deref(),
+                Some(replayed)
+            );
+
+            assert_eq!(first_resume.next().await.unwrap().unwrap(), live);
+            assert_eq!(last_stdout_line.lock().unwrap().as_deref(), Some(live));
+
+            let mut state = AcpSessionState::default();
+            state.permission = Some(LivePermission {
+                question: "Allow?".to_string(),
+                tool_call_id: "tool-1".to_string(),
+                options: Vec::new(),
+                responder: None,
+                raw_request_line: last_stdout_line.lock().unwrap().clone(),
+            });
+            state
+                .pending_raw_request_line()
+                .expect("handoff must capture the live raw request")
+                .to_string()
+        });
+
+        let mut second_resume = make_resume_incoming_lines(
+            futures::io::Cursor::new(Vec::<u8>::new()),
+            Some(pending_raw_line.clone()),
+            Arc::new(Mutex::new(None)),
+        );
+        let replayed_again =
+            smol::block_on(async { second_resume.next().await.unwrap().unwrap() });
+
+        assert_eq!(replayed_again, pending_raw_line);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replayed_again).unwrap()["id"],
+            42
+        );
     }
 }
 

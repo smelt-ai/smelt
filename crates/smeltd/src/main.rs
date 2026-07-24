@@ -4145,6 +4145,69 @@ fn handle_acp_kill(conn: UnixStream, v: &serde_json::Value, acp_sessions: &AcpSe
     let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
 }
 
+fn collect_acp_handoff(
+    acp_sessions: &AcpSessions,
+) -> (Vec<serde_json::Value>, Vec<RawFd>) {
+    let acp_session_list = acp_sessions.snapshot();
+    let mut acp_items = Vec::new();
+    let mut acp_fds = Vec::new();
+    for (id, slot) in &acp_session_list {
+        let sess = &slot.value;
+        let stdio = sess
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|h| *h.stdio.lock().unwrap());
+        let Some(stdio) = stdio else { continue };
+        let cmd = sess
+            .state
+            .lock()
+            .unwrap()
+            .launch
+            .clone()
+            .unwrap_or_default();
+        let (snapshot, pending_raw_line) = {
+            let reduced = sess.reduced.lock().unwrap();
+            (
+                reduced.to_snapshot(false),
+                reduced.pending_raw_request_line().map(str::to_string),
+            )
+        };
+        acp_items.push(serde_json::json!({
+            "id": id,
+            "stdin_fd": stdio.stdin_fd,
+            "stdout_fd": stdio.stdout_fd,
+            "pid": stdio.pid,
+            "cwd": sess.cwd,
+            "cmd": cmd,
+            "agent_needs_transcript_check": sess.agent_needs_transcript_check,
+            "snapshot": snapshot,
+            "pending_raw_line": pending_raw_line,
+        }));
+        acp_fds.push(stdio.stdin_fd);
+        acp_fds.push(stdio.stdout_fd);
+    }
+
+    let handed_off_ids: std::collections::HashSet<&str> = acp_items
+        .iter()
+        .filter_map(|v| v["id"].as_str())
+        .collect();
+    for (id, slot) in &acp_session_list {
+        if handed_off_ids.contains(id.as_str()) {
+            continue;
+        }
+        let sess = &slot.value;
+        if let Some(h) = sess.handle.lock().unwrap().take() {
+            let _ = h
+                .cmd_tx
+                .try_send(smelt_core::acp_conn::AcpCommand::Shutdown);
+        }
+    }
+
+    (acp_items, acp_fds)
+}
+
 /// 无缝升级：快照会话表 → 写交接文件 → exec 磁盘上的新二进制（流程见文件头注释）。
 ///
 /// 锁策略：只短暂持 sessions 锁拿一份 Arc 列表就放掉——不像早期版本那样一直攥到
@@ -4206,60 +4269,7 @@ fn handle_upgrade(
     // 的极窄窗口除外）的会话才能参与；已经 Ended 的没有 fd 可传，交接后就是
     // "这个 id 在新进程里不存在了"，GUI 侧本来就有 AcpSaved 兜底（按
     // resume_session_id 重新走 session/load），不算回归。
-    let acp_session_list = acp_sessions.snapshot();
-    let mut acp_items = Vec::new();
-    let mut acp_fds = Vec::new();
-    for (id, slot) in &acp_session_list {
-        let sess = &slot.value;
-        let stdio = sess
-            .handle
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|h| *h.stdio.lock().unwrap());
-        let Some(stdio) = stdio else { continue }; // Ended，或还没连上——交接不了，留给 GUI 侧兜底
-        let cmd = sess
-            .state
-            .lock()
-            .unwrap()
-            .launch
-            .clone()
-            .unwrap_or_default();
-        let (snapshot, pending_raw_line) = {
-            let reduced = sess.reduced.lock().unwrap();
-            (
-                reduced.to_snapshot(false),
-                reduced.pending_raw_request_line().map(str::to_string),
-            )
-        };
-        acp_items.push(serde_json::json!({
-            "id": id,
-            "stdin_fd": stdio.stdin_fd,
-            "stdout_fd": stdio.stdout_fd,
-            "pid": stdio.pid,
-            "cwd": sess.cwd,
-            "cmd": cmd,
-            "agent_needs_transcript_check": sess.agent_needs_transcript_check,
-            "snapshot": snapshot,
-            "pending_raw_line": pending_raw_line,
-        }));
-        acp_fds.push(stdio.stdin_fd);
-        acp_fds.push(stdio.stdout_fd);
-    }
-    // 交接不了的（没连上/已经 Ended）主动关掉，不留孤儿。
-    let handed_off_ids: std::collections::HashSet<&str> =
-        acp_items.iter().filter_map(|v| v["id"].as_str()).collect();
-    for (id, slot) in &acp_session_list {
-        if handed_off_ids.contains(id.as_str()) {
-            continue;
-        }
-        let sess = &slot.value;
-        if let Some(h) = sess.handle.lock().unwrap().take() {
-            let _ = h
-                .cmd_tx
-                .try_send(smelt_core::acp_conn::AcpCommand::Shutdown);
-        }
-    }
+    let (acp_items, acp_fds) = collect_acp_handoff(acp_sessions);
 
     let session_list: Vec<(String, Arc<Session>)> = sessions
         .lock()
@@ -6062,6 +6072,48 @@ mod acp_tests {
             Arc::ptr_eq(&first, &second),
             "重开应该复用已登记的会话，不能是 acp_spawn 又建了一个新对象（否则旧 agent 进程/线程直接泄漏）"
         );
+    }
+
+    #[test]
+    fn open_then_handoff_keeps_one_stable_registry_slot() {
+        let acp_sessions = new_acp_sessions();
+        let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+        let (stdin_fd_owner, _stdin_peer) = UnixStream::pair().unwrap();
+        let (stdout_fd_owner, _stdout_peer) = UnixStream::pair().unwrap();
+        let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        let (slot, created) = acp_sessions.reserve_with("acp-handoff", || {
+            let sess =
+                make_acp_session_value("acp-handoff", AcpSessionState::default());
+            *sess.handle.lock().unwrap() = Some(smelt_core::acp_conn::AcpHandle {
+                cmd_tx,
+                event_rx,
+                stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
+                    pid: std::process::id() as i32,
+                    stdin_fd: stdin_fd_owner.as_raw_fd(),
+                    stdout_fd: stdout_fd_owner.as_raw_fd(),
+                }))),
+            });
+            sess
+        });
+        assert!(created);
+
+        let opened = open_acp_session_once("acp-handoff", &acp_sessions, &subscribers);
+        assert!(Arc::ptr_eq(&opened, &slot));
+
+        let (items, fds) = collect_acp_handoff(&acp_sessions);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "acp-handoff");
+        assert_eq!(
+            fds,
+            vec![stdin_fd_owner.as_raw_fd(), stdout_fd_owner.as_raw_fd()]
+        );
+        assert_eq!(acp_sessions.snapshot().len(), 1);
+        assert!(Arc::ptr_eq(
+            &acp_sessions.get("acp-handoff").unwrap(),
+            &slot
+        ));
     }
 
     #[test]
