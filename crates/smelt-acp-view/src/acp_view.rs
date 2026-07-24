@@ -601,10 +601,14 @@ impl AcpView {
 
     /// 关闭标签：只摘掉本地连接（`AcpClientHandle` Drop 会断开 socket），
     /// **不**终止 smeltd 里的会话——跟关一个终端标签不会杀掉底下的 shell 是
-    /// 同一个模型，会话继续在后台跑，下次同 id 重新 `acp_open` 还能接上。
-    /// 真要结束对话得走显式的「结束会话」（session 管理面板，`acp_kill`），
-    /// 这里不做那件事：关标签和结束会话是两个不同强度的操作，不能混为一谈。
+    /// 唯一调用方是 `main.rs::close_session`（用户点 × 主动关标签）——那条
+    /// 路径本来就跟终端会话共用同一个"用户主动关 = 让守护杀掉底层进程"的
+    /// 语气（挨着的 `terminal::kill_remote` 调用是同一个意图），不是"切标签/
+    /// 退出 App 这种先不看了"，所以这里要真的终结 smeltd 里的会话，不能只是
+    /// 摘本地连接。真正的"GUI 退出/切标签不该带走会话"体现在别处：没有任何
+    /// 代码路径会在那些场景调用这个函数。
     pub fn shutdown(&mut self, _cx: &mut App) {
+        smelt_core::acp_client::kill_acp_session(&self.sid);
         self.handle = None;
     }
 

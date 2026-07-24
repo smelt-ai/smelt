@@ -163,3 +163,18 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
 
     AcpClientHandle { action_tx, snapshot_rx, conn_cell }
 }
+
+/// 显式结束一个 smeltd 托管的 ACP 会话：杀子进程、摘表、踢掉所有连接
+/// （`acp_kill` op）。跟 `AcpClientHandle` 的 Drop **不是**同一件事——Drop
+/// 只是"这个客户端不再关心这个会话了"，会话本身照样在 smeltd 里活着；这个
+/// 函数才是真的把会话终结掉，只在用户明确要求"结束这段对话"（比如点 ×
+/// 关掉标签）时调用，跟 GUI 退出/切标签这种"我先不看了"完全是两回事。
+///
+/// 阻塞：等守护回执再返回，跟 `terminal::kill_remote` 同一个理由——避免
+/// 关闭动作和后续可能的 App 退出之间有个窗口，kill 命令还没送达就被中断。
+pub fn kill_acp_session(id: &str) {
+    let Ok(mut s) = UnixStream::connect(crate::daemon_state::smeltd_sock_path()) else { return };
+    let _ = writeln!(s, "{}", serde_json::json!({ "op": "acp_kill", "id": id }));
+    let mut resp = String::new();
+    let _ = BufReader::new(s).read_line(&mut resp);
+}
