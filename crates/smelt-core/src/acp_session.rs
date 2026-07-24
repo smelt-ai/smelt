@@ -167,6 +167,13 @@ pub struct AcpSnapshot {
     /// 回合结束且没人看过 → 「有结果可看」绿点，跟旧版 `completed_unread` 同一
     /// 语义，只是现在从服务端算，客户端不用自己维护。
     pub completed_unread: bool,
+    /// 这份快照值不值得触发一次落盘。**不是**"数据有没有变"（每次推送数据
+    /// 都变了），是旧版 `apply_event` 里 `skip_persist` 那条线的服务端版本：
+    /// 流式增量（AgentChunk/Plan/Model/Usage）推快照是为了实时画面，但不该
+    /// 把每次落盘都变成写盘风暴——完整内容在 TurnEnded 时已经在 entries 里
+    /// 了，那时候存一次就够。客户端拿这个字段决定要不要 `cx.emit(Changed)`，
+    /// 不用自己在两次快照之间做增量判断。
+    pub should_persist: bool,
 }
 
 // ===================== 服务端活体状态 =====================
@@ -236,7 +243,10 @@ impl AcpSessionState {
         Self { entries, phase: AcpPhase::Ended(reason), acp_session_id: resume_session_id, ..Self::default() }
     }
 
-    pub fn to_snapshot(&self) -> AcpSnapshot {
+    /// `should_persist` 不是从 `self` 能算出来的——它是"这次变化是怎么发生的"
+    /// 这个上下文信息，调用方（smeltd 的事件循环）从 `apply_event` 的返回值
+    /// 里拿，这里只负责原样塞进快照，见该字段注释。
+    pub fn to_snapshot(&self, should_persist: bool) -> AcpSnapshot {
         AcpSnapshot {
             entries: self.entries.clone(),
             phase: self.phase.clone(),
@@ -258,6 +268,7 @@ impl AcpSessionState {
             plan: self.plan.clone(),
             model: self.model.clone(),
             completed_unread: self.completed_unread,
+            should_persist,
         }
     }
 }

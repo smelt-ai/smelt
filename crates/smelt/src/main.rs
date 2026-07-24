@@ -5985,39 +5985,16 @@ fn main() {
         // 没人管——会被系统收养成孤儿，一直占着信令服务器上的房间和本机网关连接
         // 直到房间 TTL 到期。退出前顺手杀掉它。
         //
-        // ACP 会话（Copilot/Claude/Codex/Grok 的 CLI 子进程）原本完全没管：
-        // Cmd+Q 直接终止整个 GUI 进程时，每条 ACP 连接线程会被系统一并带走，
-        // 没机会跑到自己的收尾逻辑（agent_client_protocol 内部靠 Drop 杀子进程），
-        // 子进程就变孤儿——真实症状：孤儿还占着旧登录会话，下次「重新开始」
-        // 新起一个进程去认证会撞上它，报出看着不相关的 Authentication required。
-        // 这里给每条活跃 ACP 连接发 Shutdown，再异步等线程真正收尾（超时兜底，
-        // 别让某个不听话的 agent 卡住整个 App 退出）。
-        let current_ws_for_quit = current_ws.clone();
+        // ACP 会话不需要在这里做任何事了：agent 子进程现在是 smeltd 托管的
+        // （见 smelt_core::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
+        // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题，参见
+        // smelt-acp-view::AcpView 的 `handle` 字段类型已经变成
+        // `smelt_core::acp_client::AcpClientHandle`，Drop 时只会断开 socket，
+        // 会话在 smeltd 里照样活着。旧版这里还要「发 Shutdown + 等线程收尾」是
+        // 因为那时子进程是 GUI 自己 fork 出来的，现在没有这个必要。
         cx.on_app_quit(move |cx| {
             settings::stop_webrtc_bridge_on_quit(cx);
-            let handles: Vec<smelt_core::acp_conn::AcpHandle> = current_ws_for_quit
-                .borrow()
-                .as_ref()
-                .and_then(|w| w.upgrade())
-                .map(|ws| {
-                    ws.update(cx, |ws, cx| {
-                        ws.sessions
-                            .iter()
-                            .filter_map(|s| match &s.kind {
-                                SessionKind::Acp(view) => {
-                                    view.update(cx, |v, _cx| v.take_handle_for_quit())
-                                }
-                                _ => None,
-                            })
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-            async move {
-                for h in handles {
-                    smelt_core::acp_conn::wait_for_shutdown(h, Duration::from_secs(3)).await;
-                }
-            }
+            async move {}
         })
         .detach();
         // 恢复跨网：隧道仍走下面 spawn；WebRTC 在网关 hydrate 后再拉 bridge

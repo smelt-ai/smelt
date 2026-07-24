@@ -7260,7 +7260,6 @@ version = "0.6.3"
 dependencies = [
  "agent-client-protocol",
  "base64",
- "chrono",
  "gpui",
  "gpui-component",
  "smelt-core",

@@ -5,6 +5,7 @@
 //! 本 crate 不许出现 GPUI 依赖。
 
 pub mod acp_chat;
+pub mod acp_client;
 pub mod acp_conn;
 pub mod acp_session;
 pub mod agent_kind;

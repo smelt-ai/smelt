@@ -2899,9 +2899,13 @@ fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
 }
 
 /// 推一份最新快照给控制连接 + 全部旁观者，写失败的直接摘掉（对齐终端
-/// `out.watchers.retain_mut`/PTY 泵的写失败清理策略）。
-fn push_acp_snapshot(sess: &AcpSession) {
-    let snap = sess.reduced.lock().unwrap().to_snapshot();
+/// `out.watchers.retain_mut`/PTY 泵的写失败清理策略）。`should_persist` 是
+/// "这次变化是怎么发生的"这个上下文，调用方按场景传：事件驱动的走
+/// `ApplyOutcome::should_persist`；用户动作（发 prompt/选权限）驱动的固定
+/// false——跟旧版行为一致，用户主动发起的变化不单独触发落盘，等下一次
+/// 协议事件（通常是 TurnEnded）时一并存。
+fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
+    let snap = sess.reduced.lock().unwrap().to_snapshot(should_persist);
     let payload = serde_json::json!({ "snapshot": snap }).to_string();
     let mut out = sess.out.lock().unwrap();
     if let Some(c) = &mut out.client {
@@ -2925,11 +2929,11 @@ fn start_acp_event_drain(
     thread::spawn(move || {
         smol::block_on(async {
             while let Ok(ev) = event_rx.recv().await {
-                {
+                let outcome = {
                     let mut st = sess.reduced.lock().unwrap();
-                    smelt_core::acp_session::apply_event(&mut st, ev);
-                }
-                push_acp_snapshot(&sess);
+                    smelt_core::acp_session::apply_event(&mut st, ev)
+                };
+                push_acp_snapshot(&sess, outcome.should_persist);
                 update_acp_daemon_state(&sess, &subscribers);
             }
         });
@@ -2939,7 +2943,7 @@ fn start_acp_event_drain(
         if !already_ended {
             sess.reduced.lock().unwrap().phase =
                 smelt_core::acp_session::AcpPhase::Ended("连接意外中断".to_string());
-            push_acp_snapshot(&sess);
+            push_acp_snapshot(&sess, true);
         }
         update_acp_daemon_state(&sess, &subscribers);
     });
@@ -2966,7 +2970,7 @@ fn acp_relaunch(
     let event_rx = handle.event_rx.clone();
     *sess.handle.lock().unwrap() = Some(handle);
     sess.state.lock().unwrap().launch = Some(cmd);
-    push_acp_snapshot(sess);
+    push_acp_snapshot(sess, false); // 刚 spawn，还没有新内容，不用触发落盘
     update_acp_daemon_state(sess, subscribers);
     start_acp_event_drain(Arc::clone(sess), event_rx, subscribers.clone());
 }
@@ -3024,7 +3028,7 @@ fn apply_acp_user_action(
             };
             if cmd_tx.try_send(AcpCommand::Prompt { text, images }).is_ok() {
                 smelt_core::acp_session::note_prompt_sent(&mut sess.reduced.lock().unwrap(), shown);
-                push_acp_snapshot(sess);
+                push_acp_snapshot(sess, false);
                 update_acp_daemon_state(sess, subscribers);
             }
         }
@@ -3040,7 +3044,7 @@ fn apply_acp_user_action(
         }
         AcpUserAction::PermissionSelect { option_id } => {
             smelt_core::acp_session::select_permission(&mut sess.reduced.lock().unwrap(), &option_id);
-            push_acp_snapshot(sess);
+            push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
         AcpUserAction::ElicitationChoose { field_ix, opt_ix } => {
@@ -3052,17 +3056,17 @@ fn apply_acp_user_action(
             if auto_submit {
                 smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
             }
-            push_acp_snapshot(sess);
+            push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
         AcpUserAction::ElicitationSubmit => {
             smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
-            push_acp_snapshot(sess);
+            push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
         AcpUserAction::ElicitationDismiss => {
             smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock().unwrap());
-            push_acp_snapshot(sess);
+            push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
     }
@@ -3104,7 +3108,7 @@ fn handle_acp_open(
         let Ok(mut c) = conn.try_clone() else { return };
         let fd = c.as_raw_fd();
         let _ = c.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
-        let snapshot = sess.reduced.lock().unwrap().to_snapshot();
+        let snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
         if writeln!(c, "{}", serde_json::json!({ "snapshot": snapshot })).is_err() {
             return;
         }
@@ -3153,7 +3157,7 @@ fn handle_acp_watch(
         let Ok(mut c) = conn.try_clone() else { return };
         let fd = c.as_raw_fd();
         let _ = c.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
-        let snapshot = sess.reduced.lock().unwrap().to_snapshot();
+        let snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
         if writeln!(c, "{}", serde_json::json!({ "snapshot": snapshot })).is_err() {
             return;
         }
@@ -4607,7 +4611,7 @@ mod acp_tests {
         let mut reduced = AcpSessionState::default();
         reduced.entries.push(AcpEntry::User("hi".into()));
         reduced.phase = AcpPhase::Idle;
-        let expected = reduced.to_snapshot();
+        let expected = reduced.to_snapshot(false);
 
         let sess = make_acp_session("acp-1", reduced);
         let acp_sessions: AcpSessions = Arc::new(Mutex::new(HashMap::new()));
@@ -4650,7 +4654,7 @@ mod acp_tests {
         }
         drop(c_client); // 控制连接对端已经断了：推送应该发现写失败并自己摘掉
 
-        push_acp_snapshot(&sess);
+        push_acp_snapshot(&sess, false);
 
         assert!(sess.out.lock().unwrap().client.is_none(), "写失败的 client 该被摘掉");
         assert_eq!(sess.out.lock().unwrap().watchers.len(), 1, "还活着的 watcher 不该被牵连摘掉");
