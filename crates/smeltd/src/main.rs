@@ -70,9 +70,9 @@
 //!
 //! fd 属于进程而非二进制：`exec()` 换掉程序映像但 PID 与打开的 fd 都还在，只要
 //! PTY master fd 不关，shell 就活着。流程：
-//! 1. 短暂持一下 sessions 锁，只做「克隆一份 Arc 列表」这一步就放开——不长期占着，
-//!    避免这期间 open/list/kill/version 全部卡死；随后拿 SPAWN_GATE 独占锁挡住新
-//!    shell 的 fork（防止 fork 意外继承正被清 CLOEXEC 的 fd，见 SPAWN_GATE 注释）；
+//! 1. 先拿 SPAWN_GATE 独占锁挡住新 shell/ACP 子进程的 fork，再短暂持 sessions 锁
+//!    克隆一份 Arc 列表后放开——避免 open/list/kill/version 长期卡在 sessions 锁上，
+//!    同时保证任何已 fork 的 ACP 都先把 pid/fd 发布完，才开始收集交接快照；
 //! 2. 逐会话拿 ctl/out 锁做快照（master fd / shell pid / 尺寸 / **Term 可视区 keyframe**）
 //!    ——out 锁在 handle_open 里配了写超时（CLIENT_WRITE_TIMEOUT），泵线程不会无限期攥着；
 //! 3. 给 master fd 和监听 socket fd 清掉 CLOEXEC，快照写入交接文件（fd 号 + grid ANSI，
@@ -157,7 +157,7 @@ use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -180,11 +180,81 @@ const SNAPSHOT_MAX_LINES: usize = 10_000;
 /// 快照时也要挨个拿这把锁，泵线程如果永久攥着，会把整个 upgrade 拖成全局死锁。
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 挡住「spawn 新 shell 的 fork」与「upgrade 清 CLOEXEC 准备 exec」并发的门闩：不挡会
-/// 有极小窗口——CLOEXEC 刚被清、我们自己还没 exec 时，恰好 fork 出一个新 shell，会把
-/// 当时暴露出去的全部 fd（其它会话的 PTY master、监听 socket）一并带给这个新 shell。
+/// 挡住「spawn 新 shell/ACP 子进程」与「upgrade 清 CLOEXEC 准备 exec」并发的门闩：
+/// 不挡会有极小窗口——CLOEXEC 刚被清、我们自己还没 exec 时，恰好 fork 出一个新进程，
+/// 会把当时暴露出去的全部 fd（其它会话的 PTY master、监听 socket）一并带走。
 /// spawn 拿共享锁（多个新会话可以互相并发起），upgrade 拿独占锁（跟所有 spawn 互斥）。
-static SPAWN_GATE: RwLock<()> = RwLock::new(());
+static SPAWN_GATE: LazyLock<Arc<RwLock<()>>> = LazyLock::new(|| Arc::new(RwLock::new(())));
+
+fn acquire_upgrade_spawn_gate(gate: &Arc<RwLock<()>>) -> std::sync::RwLockWriteGuard<'_, ()> {
+    gate.write().unwrap()
+}
+
+#[cfg(test)]
+mod spawn_gate_sync_tests {
+    use super::{acquire_upgrade_spawn_gate, new_acp_sessions, SPAWN_GATE};
+    use std::sync::{mpsc, Arc, RwLock};
+    use std::time::Duration;
+
+    #[test]
+    fn daemon_write_guard_blocks_acp_spawn_permit() {
+        let acp_sessions = new_acp_sessions();
+        let acp_gate = acp_sessions.spawn_gate();
+        let write_guard = SPAWN_GATE.write().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let _permit = acp_gate.read().unwrap();
+            entered_tx.send(()).unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let entered_while_locked = entered_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        drop(write_guard);
+        if !entered_while_locked {
+            entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("ACP spawn permit should proceed after upgrade releases the gate");
+        }
+        worker.join().unwrap();
+        assert!(
+            !entered_while_locked,
+            "terminal upgrade gate and ACP registry must share the same lock"
+        );
+    }
+
+    #[test]
+    fn upgrade_snapshot_waits_for_preexisting_spawn_readers() {
+        let gate = Arc::new(RwLock::new(()));
+        let spawn_permit = gate.read().unwrap();
+        let gate_for_upgrade = Arc::clone(&gate);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+
+        let upgrade = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let _write_guard = acquire_upgrade_spawn_gate(&gate_for_upgrade);
+            snapshot_tx.send(()).unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let snapshot_while_reader_held =
+            snapshot_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        drop(spawn_permit);
+        if !snapshot_while_reader_held {
+            snapshot_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("snapshot collection should start after existing readers finish");
+        }
+        upgrade.join().unwrap();
+        assert!(
+            !snapshot_while_reader_held,
+            "upgrade must not collect snapshots until existing spawns publish their metadata"
+        );
+    }
+}
 
 fn sock_path() -> std::path::PathBuf {
     let dir = dirs::home_dir()
@@ -3350,7 +3420,7 @@ struct AcpSession {
 type AcpSessions = Arc<AcpRegistry<AcpSession>>;
 
 fn new_acp_sessions() -> AcpSessions {
-    Arc::new(AcpRegistry::new(Arc::new(RwLock::new(()))))
+    Arc::new(AcpRegistry::new(Arc::clone(&SPAWN_GATE)))
 }
 
 struct AcpOpenRequest {
@@ -3512,18 +3582,22 @@ fn acp_relaunch(
     id: &str,
     launch: smelt_core::agent_kind::AcpLaunchSpec,
     resume_id: Option<String>,
+    spawn_gate: Arc<RwLock<()>>,
     subscribers: &Subscribers,
 ) {
     let sess = &slot.value;
     smelt_core::acp_session::reset_for_restart(&mut sess.reduced.lock().unwrap());
     let needs_check = sess.agent_needs_transcript_check;
-    let handle = smelt_core::acp_conn::spawn_acp(smelt_core::acp_conn::AcpLaunch {
-        launch: launch.clone(),
-        cwd: sess.cwd.clone(),
-        sid: id.to_string(),
-        resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
-        resume_needs_transcript_check: needs_check,
-    });
+    let handle = smelt_core::acp_conn::spawn_acp(
+        smelt_core::acp_conn::AcpLaunch {
+            launch: launch.clone(),
+            cwd: sess.cwd.clone(),
+            sid: id.to_string(),
+            resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
+            resume_needs_transcript_check: needs_check,
+        },
+        Some(spawn_gate),
+    );
     let event_rx = handle.event_rx.clone();
     *sess.handle.lock().unwrap() = Some(handle);
     sess.state.lock().unwrap().launch = Some(launch.command.clone());
@@ -3677,6 +3751,7 @@ fn handle_acp_open(
                 &id,
                 launch.clone(),
                 known.or_else(|| req_resume_id.clone()),
+                acp_sessions.spawn_gate(),
                 &subscribers,
             );
         }
@@ -3828,6 +3903,11 @@ fn handle_upgrade(
         }
     };
 
+    // 从收集任何会话列表/快照之前就冻结全部真实 spawn，并一直持有到 exec 成功
+    // （不返回）或失败回滚结束。这样快照里不会漏掉已经 fork、但尚未把 pid/fd
+    // 发布到 AcpHandle.stdio 的 ACP 子进程。
+    let _spawn_gate = acquire_upgrade_spawn_gate(&SPAWN_GATE);
+
     // ACP 会话的 fd 裸传：跟 PTY master fd 同一招（dup + 清 CLOEXEC 活过
     // exec()），另外还带上快照数据（entries/phase/model 等，纯数据，序列化
     // 没有问题）和"如果正卡着一张审批/选择题卡片，那条原始请求的原文"——
@@ -3900,11 +3980,6 @@ fn handle_upgrade(
         .iter()
         .map(|(k, v)| (k.clone(), Arc::clone(v)))
         .collect();
-
-    // 挡住并发 spawn：跟 spawn_session 共用 SPAWN_GATE，独占锁一直拿到 exec（或本函数
-    // 提前失败返回）为止，防止清 CLOEXEC 的窗口里恰好 fork 出新 shell，把这些 fd
-    // 也带过去（见 SPAWN_GATE 定义处注释）。
-    let _spawn_gate = SPAWN_GATE.write().unwrap();
 
     let mut out_guards = Vec::new(); // 持有到 exec，挡住泵线程
     let mut items = Vec::new();

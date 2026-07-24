@@ -11,7 +11,7 @@
 //!   通道出来，`spawn_acp` 本身永不阻塞、永不 panic 调用方。
 
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use std::collections::BTreeMap;
 
@@ -375,8 +375,10 @@ pub async fn wait_for_shutdown(handle: AcpHandle, timeout: std::time::Duration) 
     .await;
 }
 
-/// 起一条专用线程跑 ACP 连接，立即返回句柄。
-pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
+/// 起一条专用线程跑 ACP 连接，立即返回句柄。`spawn_gate` 只包住实际创建
+/// 子进程到发布 `AcpHandle.stdio` 的区间；运行时解析/下载在拿读锁之前完成。
+/// 不需要与外部升级流程协调的调用方可传 `None`。
+pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpHandle {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
     let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
     let stdio: Arc<Mutex<Option<AcpStdio>>> = Arc::new(Mutex::new(None));
@@ -424,6 +426,7 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
                 event_tx.clone(),
                 stderr_tail.clone(),
                 stdio_for_thread,
+                spawn_gate,
             ));
             if let Err(e) = result {
                 let tail = stderr_tail.lock().unwrap().join("\n");
@@ -442,6 +445,11 @@ pub fn spawn_acp(launch: AcpLaunch) -> AcpHandle {
         event_rx,
         stdio,
     }
+}
+
+fn with_spawn_gate<T>(spawn_gate: Option<&Arc<RwLock<()>>>, spawn: impl FnOnce() -> T) -> T {
+    let _permit = spawn_gate.map(|gate| gate.read().unwrap());
+    spawn()
 }
 
 /// 写一行（带换行）到异步 writer——`agent_client_protocol` 自己的同款 helper
@@ -564,19 +572,22 @@ async fn run_connection(
     event_tx: smol::channel::Sender<AcpEvent>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
     stdio_out: Arc<Mutex<Option<AcpStdio>>>,
+    spawn_gate: Option<Arc<RwLock<()>>>,
 ) -> Result<(), agent_client_protocol::Error> {
     let agent = build_agent(&launch.launch)?;
-    let (child_stdin, child_stdout, child_stderr, child) = agent
-        .spawn_process()
-        .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+    let (child_stdin, child_stdout, child_stderr, child) =
+        with_spawn_gate(spawn_gate.as_ref(), || {
+            let (child_stdin, child_stdout, child_stderr, child) = agent
+                .spawn_process()
+                .map_err(|e| agent_client_protocol::Error::internal_error().data(e.to_string()))?;
+            *stdio_out.lock().unwrap() = Some(AcpStdio {
+                pid: child.id() as i32,
+                stdin_fd: child_stdin.as_raw_fd(),
+                stdout_fd: child_stdout.as_raw_fd(),
+            });
+            Ok::<_, agent_client_protocol::Error>((child_stdin, child_stdout, child_stderr, child))
+        })?;
     let pid = child.id() as i32;
-    let stdin_fd = child_stdin.as_raw_fd();
-    let stdout_fd = child_stdout.as_raw_fd();
-    *stdio_out.lock().unwrap() = Some(AcpStdio {
-        pid,
-        stdin_fd,
-        stdout_fd,
-    });
     // `child` 本身不能就地 drop：它是子进程唯一的活体句柄（drop async_process
     // 的 Child 不会杀进程，跟 std 一样），得撑到整个连接结束——用不着它的
     // 任何方法，只借它的存在期，_guard 才是真正负责杀的那个。
@@ -1717,6 +1728,47 @@ mod runtime_tests {
             "bun @ {} → {}",
             path.display(),
             String::from_utf8_lossy(&out.stdout).trim()
+        );
+    }
+}
+
+#[cfg(test)]
+mod spawn_gate_tests {
+    use super::with_spawn_gate;
+    use std::sync::{mpsc, Arc, RwLock};
+    use std::time::Duration;
+
+    #[test]
+    fn write_guard_blocks_gated_spawn_section_and_permit_releases_afterward() {
+        let gate = Arc::new(RwLock::new(()));
+        let write_guard = gate.write().unwrap();
+        let gate_for_thread = Arc::clone(&gate);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            with_spawn_gate(Some(&gate_for_thread), || {
+                entered_tx.send(()).unwrap();
+            });
+        });
+
+        ready_rx.recv().unwrap();
+        let entered_while_locked = entered_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        drop(write_guard);
+        if !entered_while_locked {
+            entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("spawn section should proceed after upgrade releases the write guard");
+        }
+        worker.join().unwrap();
+        assert!(
+            !entered_while_locked,
+            "write guard must block entry into the actual spawn section"
+        );
+        assert!(
+            gate.try_write().is_ok(),
+            "spawn read permit must be released after the gated section"
         );
     }
 }

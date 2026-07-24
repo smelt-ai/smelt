@@ -8,7 +8,6 @@ pub(crate) struct AcpSlot<T> {
 
 pub(crate) struct AcpRegistry<T> {
     sessions: Mutex<HashMap<String, Arc<AcpSlot<T>>>>,
-    #[allow(dead_code)]
     spawn_gate: Arc<RwLock<()>>,
 }
 
@@ -66,7 +65,6 @@ impl<T> AcpRegistry<T> {
         sessions.remove(id)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn spawn_gate(&self) -> Arc<RwLock<()>> {
         Arc::clone(&self.spawn_gate)
     }
