@@ -1407,6 +1407,10 @@ enum AcpHandoffItemValidation {
     Restore(ValidatedAcpHandoff),
 }
 
+fn owned_process_group_cleanup_pid(pid: i32) -> Option<i32> {
+    (pid > 1).then_some(pid)
+}
+
 fn validate_acp_handoff_item(
     item: &serde_json::Value,
     fd_is_valid: impl Fn(RawFd) -> bool,
@@ -1432,8 +1436,13 @@ fn validate_acp_handoff_item(
     let Some(pid) = item["pid"]
         .as_i64()
         .and_then(|pid| i32::try_from(pid).ok())
-        .filter(|pid| *pid > 0)
     else {
+        return AcpHandoffItemValidation::CloseDescriptors {
+            stdin_fd,
+            stdout_fd,
+        };
+    };
+    let Some(pid) = owned_process_group_cleanup_pid(pid) else {
         return AcpHandoffItemValidation::CloseDescriptors {
             stdin_fd,
             stdout_fd,
@@ -1489,27 +1498,31 @@ fn cleanup_rejected_acp_handoff(owned: OwnedAcpHandoff) {
         libc::close(owned.stdout_fd);
     }
 
-    let group_kill = unsafe { libc::kill(-owned.pid, libc::SIGKILL) };
+    let Some(pid) = owned_process_group_cleanup_pid(owned.pid) else {
+        return;
+    };
+
+    let group_kill = unsafe { libc::kill(-pid, libc::SIGKILL) };
     if group_kill < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         unsafe {
-            libc::kill(owned.pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
         }
     }
 
-    let initial_wait = waitpid_retry(owned.pid, libc::WNOHANG);
+    let initial_wait = waitpid_retry(pid, libc::WNOHANG);
     if initial_wait != 0 {
         return;
     }
 
     let (reaped_tx, reaped_rx) = std::sync::mpsc::sync_channel(1);
     thread::spawn(move || {
-        let waited = waitpid_retry(owned.pid, 0);
+        let waited = waitpid_retry(pid, 0);
         let _ = reaped_tx.send(waited);
     });
     if reaped_rx.recv_timeout(Duration::from_secs(1)).is_err() {
         dlog(&format!(
             "handoff: ACP pid={} 未在 1 秒内退出，后台继续 waitpid 收尸",
-            owned.pid
+            pid
         ));
     }
 }
@@ -2147,6 +2160,27 @@ mod resume_handoff_tests {
                 stdout_fd: 21,
             }
         );
+    }
+
+    #[test]
+    fn pid_one_is_never_accepted_as_owned_cleanup_target() {
+        let item = serde_json::json!({
+            "id": "acp-pid-one",
+            "stdin_fd": 30,
+            "stdout_fd": 31,
+            "pid": 1,
+            "snapshot": sample_snapshot("sid-pid-one"),
+        });
+
+        let validation = validate_acp_handoff_item(&item, |_| true);
+        let AcpHandoffItemValidation::CloseDescriptors {
+            stdin_fd,
+            stdout_fd,
+        } = validation
+        else {
+            panic!("pid 1 must never be accepted as an owned cleanup target");
+        };
+        assert_eq!((stdin_fd, stdout_fd), (30, 31));
     }
 
     #[test]
