@@ -1026,6 +1026,12 @@ impl Render for TerminalView {
         if focused != self.was_focused {
             self.was_focused = focused;
             self.terminal.report_focus(focused);
+            // 获得焦点时强制重发 resize：远程端（手机）可能在这个终端失焦期间改过
+            // PTY 尺寸，需要把本机尺寸同步回去。标记 pty_kick_pending，下一帧会走
+            // force_resize 路径（见上面 if self.pty_kick_pending 分支）。
+            if focused {
+                self.pty_kick_pending = true;
+            }
         }
         let hover_url = self.hover_url;
         let has_hover = hover_url.is_some();
