@@ -116,11 +116,7 @@ fn parse_osc99_payload(pt: &str) -> Option<String> {
     if b64 {
         let decoded = decode_base64_utf8(payload)?;
         let s = decoded.trim().to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     } else {
         Some(payload.to_string())
     }

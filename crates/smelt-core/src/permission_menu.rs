@@ -344,10 +344,8 @@ mod permission_prompt_tests {
 
     #[test]
     fn accepts_bracket_style_with_permission_hint() {
-        let p = parse_permission_prompt(&lines(
-            "Permission required\n[1] Allow\n[2] Deny",
-        ))
-        .expect("prompt");
+        let p = parse_permission_prompt(&lines("Permission required\n[1] Allow\n[2] Deny"))
+            .expect("prompt");
         assert_eq!(p.options[0].kind, PermissionOptionKind::Allow);
         assert_eq!(p.options[1].kind, PermissionOptionKind::Deny);
     }
@@ -380,9 +378,7 @@ mod permission_prompt_tests {
     #[test]
     fn accepts_alternate_highlight_pointers() {
         for ptr in ["›", "▶", "►", "→", "➜", "✦", "➢", "➤"] {
-            let src = format!(
-                "Do you want to proceed?\n{ptr} 1. Yes\n  2. No, cancel"
-            );
+            let src = format!("Do you want to proceed?\n{ptr} 1. Yes\n  2. No, cancel");
             let p = parse_permission_prompt(&lines(&src))
                 .unwrap_or_else(|| panic!("指针 {ptr} 开头的菜单该认出来"));
             assert_eq!(p.options.len(), 2, "指针 {ptr}");
@@ -398,8 +394,16 @@ mod permission_prompt_tests {
             let p = parse_permission_prompt(&lines(&src))
                 .unwrap_or_else(|| panic!("分隔符 {sep} 的菜单该认出来"));
             assert_eq!(p.options.len(), 2, "分隔符 {sep}");
-            assert_eq!(p.options[0].kind, PermissionOptionKind::Allow, "分隔符 {sep}");
-            assert_eq!(p.options[1].kind, PermissionOptionKind::Deny, "分隔符 {sep}");
+            assert_eq!(
+                p.options[0].kind,
+                PermissionOptionKind::Allow,
+                "分隔符 {sep}"
+            );
+            assert_eq!(
+                p.options[1].kind,
+                PermissionOptionKind::Deny,
+                "分隔符 {sep}"
+            );
         }
     }
 
@@ -435,10 +439,9 @@ mod permission_prompt_tests {
     /// 注意这只是视觉提示——选中一律靠打 key，不依赖高亮位置。
     #[test]
     fn marks_highlighted_option_as_active() {
-        let p = parse_permission_prompt(&lines(
-            "Do you want to proceed?\n  1. Yes\n❯ 2. No, cancel",
-        ))
-        .expect("prompt");
+        let p =
+            parse_permission_prompt(&lines("Do you want to proceed?\n  1. Yes\n❯ 2. No, cancel"))
+                .expect("prompt");
         assert!(!p.options[0].active, "没有指针的项不该是 active");
         assert!(p.options[1].active, "带 ❯ 的项应标记为 active");
     }
@@ -454,9 +457,11 @@ mod permission_prompt_tests {
              Enter to select · esc to cancel",
         ))
         .expect("prompt");
-        assert_eq!(p.options[0].description.as_deref(), Some("runs the command once"));
+        assert_eq!(
+            p.options[0].description.as_deref(),
+            Some("runs the command once")
+        );
         // 页脚提示不是副文案，不能被吸进最后一个选项
         assert_eq!(p.options[1].description, None, "页脚行不该被当成副文案");
     }
 }
-

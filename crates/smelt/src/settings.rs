@@ -10,8 +10,8 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
@@ -26,7 +26,7 @@ use gpui_component::setting::{
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::*;
 
-use crate::{agent, pet, terminal, terminal_view, updater, Workspace};
+use crate::{Workspace, agent, pet, terminal, terminal_view, updater};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -257,7 +257,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
 // 逐处改路径。
 pub use smelt_core::agent_kind::{AcpAgentKind, AcpProfile};
-pub use smelt_ui::agent_ui_config::{apply_agent_ui, load_agent_ui_config, AgentUiConfig};
+pub use smelt_ui::agent_ui_config::{AgentUiConfig, apply_agent_ui, load_agent_ui_config};
 
 /// 全局配置里某个 agent 的启动命令；配置还没装载就退回出厂值。
 pub fn acp_cmd_for(agent: AcpAgentKind, cx: &App) -> String {

@@ -16,7 +16,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -192,9 +192,8 @@ fn build_share_url(cfg: &Config, room: &str, secret: &str) -> String {
         .share_base
         .clone()
         .unwrap_or_else(|| format!("{}/", cfg.signal_http.trim_end_matches('/')));
-    let mut u = url::Url::parse(&base).unwrap_or_else(|_| {
-        url::Url::parse("https://example.invalid/").expect("static")
-    });
+    let mut u = url::Url::parse(&base)
+        .unwrap_or_else(|_| url::Url::parse("https://example.invalid/").expect("static"));
     {
         let mut q = u.query_pairs_mut();
         q.append_pair("room", room);

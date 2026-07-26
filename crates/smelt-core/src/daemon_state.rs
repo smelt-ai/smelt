@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 /// smeltd 的 unix socket 路径（`~/.smelt/smeltd.sock`），用时顺手建好父目录。
 pub fn smeltd_sock_path() -> PathBuf {
-    let dir = dirs::home_dir().unwrap_or_else(|| "/tmp".into()).join(".smelt");
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| "/tmp".into())
+        .join(".smelt");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("smeltd.sock")
 }
@@ -70,7 +72,10 @@ impl DaemonSessionState {
         if self.phase_since == 0 {
             return None;
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
         Some(now.saturating_sub(self.phase_since))
     }
 }
@@ -99,13 +104,17 @@ pub enum DaemonStateEvent {
 /// 阻塞：连守护的 `subscribe`，逐行解析转发，直到连接断开（守护重启/没起来）才
 /// 返回。调用方负责重连（这个函数本身不重试，一次连接的生命周期而已）。
 pub fn subscribe_daemon_states_blocking(tx: &smol::channel::Sender<DaemonStateEvent>) {
-    let Ok(mut s) = UnixStream::connect(smeltd_sock_path()) else { return };
+    let Ok(mut s) = UnixStream::connect(smeltd_sock_path()) else {
+        return;
+    };
     if writeln!(s, "{}", serde_json::json!({ "op": "subscribe" })).is_err() {
         return;
     }
     let reader = BufReader::new(s);
     for line in reader.lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if let Some(sessions) = v.get("sessions") {
             if let Ok(list) = serde_json::from_value::<Vec<DaemonSessionState>>(sessions.clone()) {
                 if tx.try_send(DaemonStateEvent::Snapshot(list)).is_err() {

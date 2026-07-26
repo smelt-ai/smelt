@@ -10,10 +10,7 @@ use tracing::{info, warn};
 use crate::protocol::{ClientMsg, Role, ServerMsg};
 use crate::state::{AppState, Outbound};
 
-pub async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -88,18 +85,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         );
                         if ok.peer_online {
                             // 告诉新来的：对端已在
-                            send_json(
-                                &out_tx,
-                                ServerMsg::PeerJoined {
-                                    role: role.other(),
-                                },
-                            );
+                            send_json(&out_tx, ServerMsg::PeerJoined { role: role.other() });
                             // 告诉对端：新角色上线
-                            state.relay_to_other(
-                                &room,
-                                role,
-                                &ServerMsg::PeerJoined { role },
-                            );
+                            state.relay_to_other(&room, role, &ServerMsg::PeerJoined { role });
                         }
                         // 特意用 info：这是排查"某个用户连不上"最关键的一条——出问题时
                         // 先看这条有没有出现，没出现说明 hello 压根没到，问题在更早的
@@ -125,7 +113,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     continue;
                 }
                 let kind = payload.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-                if !state.relay_to_other(room, role, &ServerMsg::Signal { from, payload: payload.clone() }) {
+                if !state.relay_to_other(
+                    room,
+                    role,
+                    &ServerMsg::Signal {
+                        from,
+                        payload: payload.clone(),
+                    },
+                ) {
                     // 对端不在线：offer/answer/ice 全部有去无回，客户端会一直等，
                     // 表现就是"卡在正在建立跨网连接"。这条能直接告诉你是不是这个原因。
                     info!(room = %room, role = role.as_str(), kind, "signal relay dropped: peer not online");

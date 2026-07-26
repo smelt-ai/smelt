@@ -10,19 +10,18 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled,
-    Window,
+    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
-use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, StyledExt};
+use gpui_component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
 
 use agent_client_protocol::schema::v1::SessionId;
 
-use smelt_core::acp_client::{spawn_acp_client, AcpClientHandle, AcpClientLaunch};
+use smelt_core::acp_client::{AcpClientHandle, AcpClientLaunch, spawn_acp_client};
 use smelt_core::acp_conn::{ModelState, PromptImage};
 use smelt_core::acp_session::{
     AcpPhase, AcpSnapshot, AcpUserAction, ElicitFieldKindView, PendingElicitation,
@@ -37,8 +36,8 @@ use smelt_ui::ui_theme;
 /// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
 pub use smelt_core::acp_chat::{
-    diff_line_stats, diff_lines, is_interrupt_marker, strip_code_fence, AcpEntry, DiffLineTag,
-    ToolCallStatus, ToolKind, ToolOutputPart,
+    AcpEntry, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart, diff_line_stats, diff_lines,
+    is_interrupt_marker, strip_code_fence,
 };
 
 /// `@` / `/` 补全弹层的状态。回合态，不落盘。
@@ -348,19 +347,21 @@ impl AcpView {
     /// 启动期每秒重绘一次，让横幅上的「已 N 秒」真的在走。
     /// 相位离开 Starting 就自然停（不占常驻定时器）。
     fn tick_starting(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            smol::Timer::after(std::time::Duration::from_secs(1)).await;
-            let keep = this
-                .update(cx, |v, cx| {
-                    let starting = matches!(v.phase, AcpPhase::Starting);
-                    if starting {
-                        cx.notify();
-                    }
-                    starting
-                })
-                .unwrap_or(false);
-            if !keep {
-                return;
+        cx.spawn(async move |this, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_secs(1)).await;
+                let keep = this
+                    .update(cx, |v, cx| {
+                        let starting = matches!(v.phase, AcpPhase::Starting);
+                        if starting {
+                            cx.notify();
+                        }
+                        starting
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    return;
+                }
             }
         })
         .detach();

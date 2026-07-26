@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,7 +19,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{
-    point_to_viewport, viewport_to_point, Config, Term, TermDamage, TermMode, SEMANTIC_ESCAPE_CHARS,
+    Config, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport, viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 
@@ -225,13 +225,7 @@ fn indexed_rgb(i: u8) -> u32 {
         0..=15 => palette()[i as usize],
         16..=231 => {
             let i = i - 16;
-            let step = |v: u8| -> u32 {
-                if v == 0 {
-                    0
-                } else {
-                    55 + v as u32 * 40
-                }
-            };
+            let step = |v: u8| -> u32 { if v == 0 { 0 } else { 55 + v as u32 * 40 } };
             (step(i / 36) << 16) | (step((i % 36) / 6) << 8) | step(i % 6)
         }
         232..=255 => {
@@ -1349,7 +1343,7 @@ pub fn tunnel_status() -> TunnelStatus {
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
 // 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
 pub(crate) use smelt_core::daemon_state::{
-    subscribe_daemon_states_blocking, DaemonPhase, DaemonSessionState, DaemonStateEvent,
+    DaemonPhase, DaemonSessionState, DaemonStateEvent, subscribe_daemon_states_blocking,
 };
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
@@ -2299,11 +2293,7 @@ impl Terminal {
             }
             if let Ok(mut g) = self.search_index.lock() {
                 *g = if backward {
-                    if *g == 0 {
-                        total - 1
-                    } else {
-                        *g - 1
-                    }
+                    if *g == 0 { total - 1 } else { *g - 1 }
                 } else {
                     (*g + 1) % total
                 };
@@ -2509,8 +2499,8 @@ mod damage_gate_tests {
     /// ——这正是要堵的洞，不是走个形式验证 Rust 语言特性。
     #[test]
     fn guard_cleans_up_even_when_body_panics() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         struct Guard(Arc<AtomicBool>);
         impl Drop for Guard {
@@ -3072,7 +3062,7 @@ mod mouse_encode_tests {
 
 #[cfg(test)]
 mod scroll_wheel_plan_tests {
-    use super::{scroll_wheel_plan, ScrollWheelPlan};
+    use super::{ScrollWheelPlan, scroll_wheel_plan};
     use alacritty_terminal::term::TermMode;
 
     #[test]
@@ -3128,7 +3118,7 @@ mod scroll_wheel_plan_tests {
 
 #[cfg(test)]
 mod search_literal_tests {
-    use super::{escape_regex_literal, match_to_viewport_hit, SearchHit};
+    use super::{SearchHit, escape_regex_literal, match_to_viewport_hit};
     use alacritty_terminal::index::{Column, Line, Point};
 
     #[test]

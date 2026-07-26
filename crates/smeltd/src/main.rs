@@ -192,8 +192,8 @@ fn acquire_upgrade_spawn_gate(gate: &Arc<RwLock<()>>) -> std::sync::RwLockWriteG
 
 #[cfg(test)]
 mod spawn_gate_sync_tests {
-    use super::{acquire_upgrade_spawn_gate, new_acp_sessions, SPAWN_GATE};
-    use std::sync::{mpsc, Arc, RwLock};
+    use super::{SPAWN_GATE, acquire_upgrade_spawn_gate, new_acp_sessions};
+    use std::sync::{Arc, RwLock, mpsc};
     use std::time::Duration;
 
     #[test]
@@ -1433,10 +1433,7 @@ fn validate_acp_handoff_item(
         return AcpHandoffItemValidation::SkipUnowned;
     }
 
-    let Some(pid) = item["pid"]
-        .as_i64()
-        .and_then(|pid| i32::try_from(pid).ok())
-    else {
+    let Some(pid) = item["pid"].as_i64().and_then(|pid| i32::try_from(pid).ok()) else {
         return AcpHandoffItemValidation::CloseDescriptors {
             stdin_fd,
             stdout_fd,
@@ -4145,9 +4142,7 @@ fn handle_acp_kill(conn: UnixStream, v: &serde_json::Value, acp_sessions: &AcpSe
     let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
 }
 
-fn collect_acp_handoff(
-    acp_sessions: &AcpSessions,
-) -> (Vec<serde_json::Value>, Vec<RawFd>) {
+fn collect_acp_handoff(acp_sessions: &AcpSessions) -> (Vec<serde_json::Value>, Vec<RawFd>) {
     let acp_session_list = acp_sessions.snapshot();
     let mut acp_items = Vec::new();
     let mut acp_fds = Vec::new();
@@ -4189,10 +4184,8 @@ fn collect_acp_handoff(
         acp_fds.push(stdio.stdout_fd);
     }
 
-    let handed_off_ids: std::collections::HashSet<&str> = acp_items
-        .iter()
-        .filter_map(|v| v["id"].as_str())
-        .collect();
+    let handed_off_ids: std::collections::HashSet<&str> =
+        acp_items.iter().filter_map(|v| v["id"].as_str()).collect();
     for (id, slot) in &acp_session_list {
         if handed_off_ids.contains(id.as_str()) {
             continue;
@@ -6083,8 +6076,7 @@ mod acp_tests {
         let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
         let (_event_tx, event_rx) = smol::channel::unbounded();
         let (slot, created) = acp_sessions.reserve_with("acp-handoff", || {
-            let sess =
-                make_acp_session_value("acp-handoff", AcpSessionState::default());
+            let sess = make_acp_session_value("acp-handoff", AcpSessionState::default());
             *sess.handle.lock().unwrap() = Some(smelt_core::acp_conn::AcpHandle {
                 cmd_tx,
                 event_rx,

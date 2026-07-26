@@ -13,8 +13,8 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use webrtc::data_channel::RTCDataChannel;
 
-use crate::gateway::{self, PtyFrame};
 use crate::Config;
+use crate::gateway::{self, PtyFrame};
 
 /// 单条 DataChannel 上的连接态（鉴权 + 任务句柄）。
 pub struct DcSession {
@@ -129,16 +129,15 @@ pub async fn handle_frame(
                 s.authed = true;
                 s.write = write;
             }
-            send_json(
-                &dc,
-                &serde_json::json!({ "t": "hello_ok", "write": write }),
-            )
-            .await;
+            send_json(&dc, &serde_json::json!({ "t": "hello_ok", "write": write })).await;
             info!(write, "dc hello_ok");
         }
         "sessions" => match gateway::fetch_sessions(&cfg).await {
             Ok(body) => {
-                let sessions = body.get("sessions").cloned().unwrap_or(Value::Array(vec![]));
+                let sessions = body
+                    .get("sessions")
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![]));
                 send_json(
                     &dc,
                     &serde_json::json!({ "t": "sessions_ok", "sessions": sessions }),
@@ -155,7 +154,11 @@ pub async fn handle_frame(
         },
         "open" => {
             let Some(id) = f.id.clone() else {
-                send_json(&dc, &serde_json::json!({ "t": "err", "msg": "open needs id" })).await;
+                send_json(
+                    &dc,
+                    &serde_json::json!({ "t": "err", "msg": "open needs id" }),
+                )
+                .await;
                 return Ok(());
             };
             // 停旧 PTY + state watch
@@ -249,7 +252,11 @@ pub async fn handle_frame(
         }
         "menu" => {
             let Some(id) = f.id else {
-                send_json(&dc, &serde_json::json!({ "t": "err", "msg": "menu needs id" })).await;
+                send_json(
+                    &dc,
+                    &serde_json::json!({ "t": "err", "msg": "menu needs id" }),
+                )
+                .await;
                 return Ok(());
             };
             match gateway::fetch_menu(&cfg, &id).await {

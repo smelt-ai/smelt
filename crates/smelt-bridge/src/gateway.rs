@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -88,7 +88,8 @@ pub async fn post_json(cfg: &Config, path: &str, body: Value) -> Result<Value> {
     if text.is_empty() {
         return Ok(serde_json::json!({ "ok": true }));
     }
-    Ok(serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "ok": true, "raw": text })))
+    Ok(serde_json::from_str(&text)
+        .unwrap_or_else(|_| serde_json::json!({ "ok": true, "raw": text })))
 }
 
 /// 订阅 PTY 流：header 文本 + binary 字节 → 回调。

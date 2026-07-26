@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 pub enum AcpEntry {
     User(String),
     /// assistant 正文或思考块（thought 弱化显示）；连续 chunk 就地追加。
-    Assistant { text: String, thought: bool },
+    Assistant {
+        text: String,
+        thought: bool,
+    },
     ToolCall {
         id: String,
         title: String,
@@ -109,7 +112,10 @@ pub fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
 pub fn diff_line_stats(old: &str, new: &str) -> (usize, usize) {
     let lines = diff_lines(old, new);
     let added = lines.iter().filter(|l| l.tag == DiffLineTag::Added).count();
-    let removed = lines.iter().filter(|l| l.tag == DiffLineTag::Removed).count();
+    let removed = lines
+        .iter()
+        .filter(|l| l.tag == DiffLineTag::Removed)
+        .count();
     (added, removed)
 }
 
@@ -117,10 +123,16 @@ pub fn diff_line_stats(old: &str, new: &str) -> (usize, usize) {
 /// 一个围栏块」时剥——正文里穿插的代码块交给 markdown 渲染器，别在这里瞎切。
 pub fn strip_code_fence(text: &str) -> &str {
     let t = text.trim();
-    let Some(rest) = t.strip_prefix("```") else { return text };
+    let Some(rest) = t.strip_prefix("```") else {
+        return text;
+    };
     // 跳过围栏后面的语言标注那一行
-    let Some(nl) = rest.find('\n') else { return text };
-    let Some(body) = rest[nl + 1..].strip_suffix("```") else { return text };
+    let Some(nl) = rest.find('\n') else {
+        return text;
+    };
+    let Some(body) = rest[nl + 1..].strip_suffix("```") else {
+        return text;
+    };
     body.trim_end_matches('\n')
 }
 
@@ -138,7 +150,10 @@ mod tests {
     #[test]
     fn strips_whole_output_code_fence_only() {
         // adapter 把工具输出整段包在围栏里 → 剥掉，别把 ``` 显示给人看
-        assert_eq!(strip_code_fence("```console\nhello\nworld\n```"), "hello\nworld");
+        assert_eq!(
+            strip_code_fence("```console\nhello\nworld\n```"),
+            "hello\nworld"
+        );
         // 无语言标注同理
         assert_eq!(strip_code_fence("```\nplain\n```"), "plain");
         // 正文里穿插的代码块不属于「整段就是一个围栏」，原样返回交给 markdown
@@ -151,7 +166,9 @@ mod tests {
     #[test]
     fn detects_interrupt_marker() {
         assert!(is_interrupt_marker("[Request interrupted by user]"));
-        assert!(is_interrupt_marker("[Request interrupted by user for tool use]"));
+        assert!(is_interrupt_marker(
+            "[Request interrupted by user for tool use]"
+        ));
         assert!(!is_interrupt_marker("请把这段中断逻辑说清楚"));
     }
 
@@ -161,14 +178,29 @@ mod tests {
         let new = "a\nx\nc\n";
         let lines = diff_lines(old, new);
         let (added, removed) = diff_line_stats(old, new);
-        assert_eq!(added, lines.iter().filter(|l| l.tag == DiffLineTag::Added).count());
-        assert_eq!(removed, lines.iter().filter(|l| l.tag == DiffLineTag::Removed).count());
+        assert_eq!(
+            added,
+            lines.iter().filter(|l| l.tag == DiffLineTag::Added).count()
+        );
+        assert_eq!(
+            removed,
+            lines
+                .iter()
+                .filter(|l| l.tag == DiffLineTag::Removed)
+                .count()
+        );
     }
 
     #[test]
     fn tool_kind_roundtrips_snake_case_json() {
-        assert_eq!(serde_json::to_string(&ToolKind::SwitchMode).unwrap(), "\"switch_mode\"");
-        assert_eq!(serde_json::to_string(&ToolCallStatus::InProgress).unwrap(), "\"in_progress\"");
+        assert_eq!(
+            serde_json::to_string(&ToolKind::SwitchMode).unwrap(),
+            "\"switch_mode\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolCallStatus::InProgress).unwrap(),
+            "\"in_progress\""
+        );
         let unknown: ToolKind = serde_json::from_str("\"some_future_kind\"").unwrap();
         assert_eq!(unknown, ToolKind::Other);
     }
@@ -181,7 +213,13 @@ mod tests {
         let old_json = r#"{"ToolCall":{"id":"call-1","title":"Read foo.rs","kind":"read","status":"completed","output":[{"Text":"ok"},{"Diff":{"path":"foo.rs","old_text":"a\n","new_text":"b\n"}}]}}"#;
         let entry: AcpEntry = serde_json::from_str(old_json).expect("旧存档 ToolCall 条目应能读入");
         match entry {
-            AcpEntry::ToolCall { id, title, kind, status, output } => {
+            AcpEntry::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                output,
+            } => {
                 assert_eq!(id, "call-1");
                 assert_eq!(title, "Read foo.rs");
                 assert_eq!(kind, ToolKind::Read);

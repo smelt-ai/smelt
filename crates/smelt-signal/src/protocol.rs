@@ -99,8 +99,7 @@ impl ServerMsg {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| {
-            r#"{"op":"err","msg":"encode failed"}"#.to_string()
-        })
+        serde_json::to_string(self)
+            .unwrap_or_else(|_| r#"{"op":"err","msg":"encode failed"}"#.to_string())
     }
 }

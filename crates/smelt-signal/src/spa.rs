@@ -1,7 +1,7 @@
 //! 托管 remote-web SPA（与信令同域，跨网手机只打开 signal 域名）。
 
 use axum::extract::Path;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -16,7 +16,10 @@ fn safe_rel(rel: &str) -> Option<String> {
         return None;
     }
     // 仅允许相对段
-    if rel.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+    if rel
+        .split('/')
+        .any(|s| s.is_empty() || s == "." || s == "..")
+    {
         return None;
     }
     Some(rel.to_string())

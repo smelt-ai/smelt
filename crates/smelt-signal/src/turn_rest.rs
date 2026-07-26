@@ -52,12 +52,16 @@ pub fn mint(cfg: &TurnRestConfig) -> EphemeralTurnCred {
     let username = expiry.to_string();
 
     // 密钥可以是任意长度，HMAC 本身接受任意 key size，这里不会失败。
-    let mut mac = HmacSha1::new_from_slice(cfg.secret.as_bytes()).expect("hmac accepts any key size");
+    let mut mac =
+        HmacSha1::new_from_slice(cfg.secret.as_bytes()).expect("hmac accepts any key size");
     mac.update(username.as_bytes());
     let sig = mac.finalize().into_bytes();
     let credential = base64::engine::general_purpose::STANDARD.encode(sig);
 
-    EphemeralTurnCred { username, credential }
+    EphemeralTurnCred {
+        username,
+        credential,
+    }
 }
 
 #[cfg(test)]

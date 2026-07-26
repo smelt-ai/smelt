@@ -9,8 +9,8 @@
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions; // Term::columns() 由它提供
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::term::cell::Flags;
 
 /// 可视区逐格拼成文本行（一行一个 String，行尾空白已裁）。
 pub fn text_lines<T: EventListener>(term: &Term<T>) -> Vec<String> {

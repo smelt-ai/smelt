@@ -58,7 +58,10 @@ fn main() {
     // rerun-if-changed 的相对路径按 CARGO_MANIFEST_DIR（crates/smelt-core）解析，
     // 必须用拼好的绝对路径指向仓库根下的 remote-web。
     println!("cargo:rerun-if-changed={}", index.display());
-    println!("cargo:rerun-if-changed={}", remote_web.join("package.json").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        remote_web.join("package.json").display()
+    );
     if let Ok(entries) = fs::read_dir(dist.join("assets")) {
         for e in entries.flatten() {
             println!("cargo:rerun-if-changed={}", e.path().display());

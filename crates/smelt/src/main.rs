@@ -34,6 +34,7 @@ use smelt_core::permission_menu;
 // 网格 → 文本行：同样与 smeltd 共用，避免两端各写一遍逐格拼行的宽字符/零宽处理。
 use smelt_core::term_text;
 mod pet;
+mod rate_limits;
 mod session_history;
 mod session_list;
 mod settings;
@@ -57,8 +58,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::badge::Badge;
 use gpui_component::color_picker::ColorPickerState;
@@ -66,7 +67,7 @@ use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::notification::Notification;
 use gpui_component::resizable::{
-    h_resizable, resizable_panel, v_resizable, ResizablePanelEvent, ResizableState,
+    ResizablePanelEvent, ResizableState, h_resizable, resizable_panel, v_resizable,
 };
 use gpui_component::slider::SliderState;
 use gpui_component::*;
@@ -74,12 +75,12 @@ use notify::RecommendedWatcher;
 use terminal_view::TerminalView;
 
 use file_tree::{
-    file_content_pane, file_tree, search_results_view, DeleteFileTarget, OpenFile, SearchState,
+    DeleteFileTarget, OpenFile, SearchState, file_content_pane, file_tree, search_results_view,
 };
-use git_panel::{git_view, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo};
+use git_panel::{BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo, git_view};
 use hotspot::hotspot_view;
-use session_history::{history_view, HistoryListState, HistoryPane};
-use settings::{load_appearance, load_launch_config, Appearance, LlmInputs};
+use session_history::{HistoryListState, HistoryPane, history_view};
+use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
 use usage_stats::format_count;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
@@ -874,6 +875,9 @@ struct WsState {
     /// 会话侧栏里被折叠起来的项目根。
     #[serde(default)]
     collapsed_projects: Vec<String>,
+    /// 会话侧栏的分组方式；旧存档默认按项目。
+    #[serde(default)]
+    sidebar_grouping: SidebarGrouping,
     /// Git 页左栏（变更文件列表）拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     git_left_w: Option<f32>,
@@ -887,6 +891,16 @@ struct WsState {
     /// 旧格式的活动索引。
     #[serde(default)]
     active: usize,
+}
+
+/// 会话侧栏的组织方式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SidebarGrouping {
+    None,
+    Status,
+    #[default]
+    Project,
 }
 
 /// 单个会话的持久化镜像：分屏树 + 会话内活动叶子（遍历序）+ 用户重命名过的会话名。
@@ -1428,6 +1442,8 @@ struct Workspace {
     active_project: Option<String>,
     /// 会话列表里被折叠起来的项目（存 root 路径，同上）。
     collapsed_projects: HashSet<String>,
+    /// 会话列表分组方式（默认按项目）。
+    sidebar_grouping: SidebarGrouping,
     /// 文件树里被用户折叠起来的项目根目录（多根工作区才有；默认全展开，只有在这个
     /// 集合里的才收起，见 file_tree / toggle_root_collapsed）。持久化。
     collapsed_roots: HashSet<String>,
@@ -1619,6 +1635,10 @@ struct Workspace {
     usage_cache: Option<(Instant, Rc<usage_stats::UsageData>)>,
     /// 正在后台扫描用量数据（防重复并发 spawn）。
     usage_inflight: bool,
+    /// Codex / Claude 订阅额度快照；后台刷新，侧栏 render 只读。
+    rate_limits: rate_limits::RateLimitSnapshot,
+    /// 额度刷新循环是否已经启动。
+    rate_limits_refresh_started: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话, 插它前面?)。由 drop 层的 on_drag_move
     /// 维护，驱动插入指示条的出现动画；起拖时清空，避免上次拖拽的残留闪一帧。
     sess_drop_hint: Option<(EntityId, bool)>,
@@ -1820,6 +1840,10 @@ impl Workspace {
                 .as_ref()
                 .map(|s| s.collapsed_projects.iter().cloned().collect())
                 .unwrap_or_default(),
+            sidebar_grouping: saved
+                .as_ref()
+                .map(|s| s.sidebar_grouping)
+                .unwrap_or_default(),
             collapsed_roots: saved
                 .as_ref()
                 .map(|s| s.collapsed_file_tree_roots.iter().cloned().collect())
@@ -1908,6 +1932,8 @@ impl Workspace {
             status_menu_snapshot: None,
             usage_cache: None,
             usage_inflight: false,
+            rate_limits: rate_limits::RateLimitSnapshot::default(),
+            rate_limits_refresh_started: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
             rename_target: None,
@@ -1935,6 +1961,7 @@ impl Workspace {
         ws.save_state(cx);
         updater::cleanup_stale_backup();
         ws.check_for_update(true, cx);
+        ws.start_rate_limit_refresh(cx);
         // 有待恢复会话：ensure+reattach 在 restore 线程串行做完后再 check_daemon_outdated，
         // 避免与 ensure handoff 三线并行踩踏。无会话则直接查守护状态。
         if !pending_sessions.is_empty() {
@@ -1949,6 +1976,33 @@ impl Workspace {
         ws
     }
 
+    /// 后台刷新订阅额度。Codex app-server 最慢可等 10 秒，绝不能放进 render/UI 线程。
+    fn start_rate_limit_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.rate_limits_refresh_started {
+            return;
+        }
+        self.rate_limits_refresh_started = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let snapshot = cx
+                    .background_executor()
+                    .spawn(async { rate_limits::fetch_all() })
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        this.rate_limits = snapshot;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                smol::Timer::after(Duration::from_secs(300)).await;
+            }
+        })
+        .detach();
+    }
+
     /// 冷启动：专用 OS 线程里 **先 ensure managed 守护，再 reattach 全部会话**。
     /// 完成后才 `check_daemon_outdated`（不与 restore 并行 upgrade）。
     fn schedule_session_restore(
@@ -1957,64 +2011,28 @@ impl Workspace {
         active_session: usize,
         cx: &mut Context<Self>,
     ) {
-        // ACP 会话不走守护 reattach：进程没有持久化，UI 线程直接建「已结束」占位
-        // （一键同 launch/cwd 重开）。摘出后剩下的照旧走后台恢复。
+        // ACP 与终端都由 smeltd 托管。先拆开只是因为两者的 GUI 重建方式不同；
+        // 两边都必须等 managed daemon 完成 ensure/handoff 后才能开始连接。
         let (acp_saved, pending): (Vec<SessionState>, Vec<SessionState>) =
             pending.into_iter().partition(|ss| ss.acp.is_some());
-        for ss in acp_saved {
-            let Some(saved) = ss.acp else { continue };
-            // 有旧 session id 的会在切到它时自动续接（见 maybe_auto_resume），
-            // 文案别再让人去点按钮；没有 id 的只能手动开新会话。
-            let reason = if saved.resume_session_id.is_some() {
-                "上次的对话已随 GUI 退出（历史消息已保留，切到本会话会自动续接）"
-            } else {
-                "上次的对话已随 GUI 退出结束（历史消息已保留，点击重新开始继续）"
-            };
-            let agent = saved
-                .agent
-                .as_deref()
-                .and_then(settings::AcpAgentKind::from_id)
-                .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
-            let refresh_launch_from_settings = saved.refresh_launch_from_settings();
-            let view = cx.new(|cx| {
-                acp_view::AcpView::placeholder(
-                    cx,
-                    agent,
-                    saved.launch,
-                    refresh_launch_from_settings,
-                    saved.profile_id,
-                    saved.cwd,
-                    reason.to_string(),
-                    saved.entries,
-                    saved.resume_session_id,
-                    saved.sid,
-                )
-            });
-            let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
-            self.sessions.push(Session {
-                kind: SessionKind::Acp(view),
-                custom_title: ss.custom_title,
-                _acp_persist_sub,
-            });
-        }
-        if pending.is_empty() {
-            // 只有 ACP 会话（已在上面同步建好占位）→ 恢复到此为止。
-            self.sessions_restored = true;
-            self.check_daemon_outdated(cx);
-            cx.notify();
-            return;
-        }
         // 逐个交货，别攒成一整包：会话之间互不依赖，攒一包等于让窗口空等最慢的那次
         // attach——表现为「冷启动后一个会话都不显示，过一会才全部冒出来」。改成恢复好
         // 一个就发一个，第一个会话立刻上屏，其余陆续补齐。unbounded 保证后台线程不会
         // 因为 UI 还没来得及收而卡住。
         let (tx, rx) = smol::channel::unbounded();
+        let (daemon_ready_tx, daemon_ready_rx) = smol::channel::bounded(1);
         std::thread::Builder::new()
             .name("smelt-restore-sessions".into())
             .spawn(move || {
                 // 1) 完整 ensure（可能 handoff）→ 2) 再 reattach。禁止与 UI 侧并行 upgrade。
                 let _ = terminal::ensure_managed_daemon_current();
                 terminal::ensure_daemon_running();
+                // ACP 占位只有收到这道闸门后才会在 UI 线程创建；否则当前活动会话
+                // 会立刻 auto-resume，随后 ensure/handoff 重启守护，把刚建的 socket
+                // 踢成「与 smeltd 的连接已断开」。
+                if daemon_ready_tx.send_blocking(()).is_err() {
+                    return;
+                }
                 let mut daemon_ok = true;
                 for ss in pending {
                     let outcome = if daemon_ok {
@@ -2041,6 +2059,55 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let mut failed: Vec<SessionState> = Vec::new();
             let mut restored = 0usize;
+
+            // managed daemon 已经稳定后再把 ACP 会话放回视图树。当前活动 ACP 随后
+            // 触发 maybe_auto_resume 时，连接面对的是最终守护进程，不会刚接上又断。
+            if daemon_ready_rx.recv().await.is_err() {
+                return;
+            }
+            if this
+                .update(cx, |this, cx| {
+                    for ss in acp_saved {
+                        let Some(saved) = ss.acp else { continue };
+                        let reason = if saved.resume_session_id.is_some() {
+                            "正在恢复上次的对话…"
+                        } else {
+                            "上次的对话已结束（历史消息已保留，点击重新开始继续）"
+                        };
+                        let agent = saved
+                            .agent
+                            .as_deref()
+                            .and_then(settings::AcpAgentKind::from_id)
+                            .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
+                        let refresh_launch_from_settings = saved.refresh_launch_from_settings();
+                        let view = cx.new(|cx| {
+                            acp_view::AcpView::placeholder(
+                                cx,
+                                agent,
+                                saved.launch,
+                                refresh_launch_from_settings,
+                                saved.profile_id,
+                                saved.cwd,
+                                reason.to_string(),
+                                saved.entries,
+                                saved.resume_session_id,
+                                saved.sid,
+                            )
+                        });
+                        let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
+                        this.sessions.push(Session {
+                            kind: SessionKind::Acp(view),
+                            custom_title: ss.custom_title,
+                            _acp_persist_sub,
+                        });
+                        restored += 1;
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
 
             // 收一个渲染一个。后台线程跑完会 drop sender，recv 报错即代表全部处理完。
             while let Ok((ss, result)) = rx.recv().await {
@@ -2730,6 +2797,7 @@ impl Workspace {
             pinned_file_tree_roots: self.pinned_roots.clone(),
             collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
             collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
+            sidebar_grouping: self.sidebar_grouping,
             ..Default::default()
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -5751,20 +5819,6 @@ impl Render for Workspace {
             .and_then(|c| self.repo_info.get(c.as_str()).cloned())
             .and_then(|(_, i)| i)
             .map(|i| i.branch);
-        // 标题栏 agent 胶囊：跟着**当前会话**的 agent 走（多 agent 之后死盯全局
-        // Claude 命令，会在 Copilot 会话上顶着「Claude Code」）；当前不是 ACP 会话
-        // 就退回 Claude 那条配置，跟以前一致。
-        let acp_label = match self.sessions.get(self.active_session).map(|s| &s.kind) {
-            Some(SessionKind::Acp(view)) => {
-                let v = view.read(cx);
-                let launch = v.launch_spec();
-                acp_pill_label(v.agent_kind(), &launch.command)
-            }
-            _ => {
-                let agent = settings::AcpAgentKind::Claude;
-                acp_pill_label(agent, &settings::acp_cmd_for(agent, cx))
-            }
-        };
         // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
         let active_title = titles
             .iter()
@@ -6143,39 +6197,13 @@ impl Render for Workspace {
                                         .child(b)
                                 })),
                         )
-                        // 右侧：帮助、用量、通知、Agent 与设置。stop_propagation 避免触发拖拽。
+                        // 右侧：用量、通知、设置与帮助。stop_propagation 避免触发拖拽。
                         .child(
                             h_flex()
                                 .items_center()
                                 .gap_1()
                                 // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
                                 .pr_2()
-                                .child(
-                                    div()
-                                        .id("help-entry")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child("?")
-                                        .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("帮助文档")
-                                                .build(window, cx)
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|_this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                cx.open_url("https://smelt.onoo.io/");
-                                            }),
-                                        ),
-                                )
                                 .child(
                                     div()
                                         .id("usage-entry")
@@ -6239,45 +6267,6 @@ impl Render for Workspace {
                                             }),
                                         ),
                                 )
-                                .child(
-                                    // agent 胶囊：紫点 + 当前 ACP agent 展示名，点击开
-                                    // 设置窗「Agent 集成」页（换 agent 命令的入口）。
-                                    div()
-                                        .id("agent-pill")
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .px_2()
-                                        .py(px(3.))
-                                        .rounded(px(6.))
-                                        .bg(rgb(ui_theme::bg_hover()))
-                                        .border_1()
-                                        .border_color(rgb(ui_theme::border_mid()))
-                                        .cursor_pointer()
-                                        .hover(|s| s.border_color(rgb(ui_theme::border_focus())))
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .text_color(rgb(ui_theme::text_mid()))
-                                        .child(
-                                            div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .bg(rgb(ui_theme::purple())),
-                                        )
-                                        .child(acp_label.clone())
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                if this.llm_inputs.is_none() {
-                                                    this.init_llm_inputs(window, cx);
-                                                }
-                                                this.settings_page_ix = 3; // Agent 集成页
-                                                this.settings_page_nonce += 1;
-                                                this.open_settings_window(cx);
-                                            }),
-                                        ),
-                                )
                                 .child({
                                     // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
                                     // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
@@ -6316,7 +6305,33 @@ impl Render for Workspace {
                                                 this.open_settings_window(cx);
                                             }),
                                         )
-                                }),
+                                })
+                                .child(
+                                    div()
+                                        .id("help-entry")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .text_color(c_muted)
+                                        .hover(|s| s.bg(c_border))
+                                        .child("?")
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("帮助文档")
+                                                .build(window, cx)
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|_this, _, _w, cx| {
+                                                cx.stop_propagation();
+                                                cx.open_url("https://smelt.onoo.io/");
+                                            }),
+                                        ),
+                                ),
                         ),
                 ),
             )
@@ -6489,32 +6504,6 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
         .justify_center()
         .text_color(muted)
         .child(text.to_string())
-}
-
-/// ACP 启动命令 → 标题栏胶囊的展示名（`bunx @scope/claude-agent-acp@0.59.0` →
-/// `claude-agent-acp`，`copilot --acp` → `copilot`）。与 acp_view 输入栏胶囊
-/// 同一套抠名逻辑；没有模型名数据源，不硬编。
-fn acp_agent_label(cmd: &str) -> String {
-    let tok = cmd
-        .split_whitespace()
-        .rev()
-        .find(|t| !t.starts_with('-'))
-        .unwrap_or("agent");
-    let name = tok.rsplit('/').next().unwrap_or(tok);
-    name.split('@')
-        .find(|s| !s.is_empty())
-        .unwrap_or(name)
-        .to_string()
-}
-
-/// 标题栏 agent 胶囊的文字：命令还是出厂值就显示人话名（`Claude Code`），用户
-/// 自定义过就显示命令里抠出的包名——自定义了还写「Claude Code」等于撒谎。
-fn acp_pill_label(agent: settings::AcpAgentKind, cmd: &str) -> String {
-    if cmd.trim() == agent.default_cmd() {
-        agent.label().to_string()
-    } else {
-        acp_agent_label(cmd)
-    }
 }
 
 /// 旧存档没记 agent 种类时，从启动命令反推一把（命令里出现过 copilot / codex
@@ -7029,8 +7018,8 @@ fn main() {
 #[cfg(test)]
 mod project_tests {
     use super::{
-        disambiguate_labels, project_root_of, session_state_cwd, AcpSaved, PaneState, ProjectGroup,
-        SessionState, SplitAxis,
+        AcpSaved, PaneState, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
+        project_root_of, session_state_cwd,
     };
 
     fn group(root: &str, label: &str) -> ProjectGroup {
@@ -7315,7 +7304,7 @@ mod pane_state_tests {
 
 #[cfg(test)]
 mod workspace_state_tests {
-    use super::WsState;
+    use super::{SidebarGrouping, WsState};
 
     #[test]
     fn collapsed_projects_roundtrip() {
@@ -7335,12 +7324,26 @@ mod workspace_state_tests {
         let restored: WsState = serde_json::from_str(r#"{"projects":["/repo/smelt"]}"#).unwrap();
 
         assert!(restored.collapsed_projects.is_empty());
+        assert_eq!(restored.sidebar_grouping, SidebarGrouping::Project);
+    }
+
+    #[test]
+    fn sidebar_grouping_roundtrip() {
+        let state = WsState {
+            sidebar_grouping: SidebarGrouping::Status,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: WsState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.sidebar_grouping, SidebarGrouping::Status);
     }
 }
 
 #[cfg(test)]
 mod acp_agent_tests {
-    use super::{acp_agent_from_cmd, acp_pill_label, AcpSaved};
+    use super::{AcpSaved, acp_agent_from_cmd};
     use crate::settings::AcpAgentKind;
 
     /// 多 agent 之前的 ACP 存档没有 `agent` 字段：必须读得进来（None），
@@ -7465,16 +7468,5 @@ mod acp_agent_tests {
             assert_eq!(AcpAgentKind::from_id(a.id()), Some(a));
         }
         assert_eq!(AcpAgentKind::from_id("gemini"), None);
-    }
-
-    /// 胶囊文案：出厂命令显示人话名，自定义过就显示命令里抠出的包名。
-    #[test]
-    fn pill_label_tells_truth_about_custom_cmd() {
-        let claude = AcpAgentKind::Claude;
-        assert_eq!(acp_pill_label(claude, &claude.default_cmd()), "Claude Code");
-        assert_eq!(
-            acp_pill_label(claude, "bunx my-own-acp@1.2.3"),
-            "my-own-acp"
-        );
     }
 }

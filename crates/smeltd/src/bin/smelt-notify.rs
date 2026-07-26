@@ -128,7 +128,10 @@ fn describe_tool_call(hook: &serde_json::Value) -> Option<String> {
     let input = &hook["tool_input"];
     Some(if let Some(cmd) = input["command"].as_str() {
         format!("Bash: {}", truncate_chars(cmd, 48))
-    } else if let Some(p) = input["file_path"].as_str().or_else(|| input["path"].as_str()) {
+    } else if let Some(p) = input["file_path"]
+        .as_str()
+        .or_else(|| input["path"].as_str())
+    {
         let name = p.rsplit('/').next().unwrap_or(p);
         format!("{tool}: {name}")
     } else {
@@ -167,7 +170,10 @@ mod tests {
     #[test]
     fn pre_tool_use_carries_tool_name_as_question() {
         let hook = json!({ "hook_event_name": "PreToolUse", "tool_name": "Bash" });
-        assert_eq!(map_hook_event(&hook), Some(("executing_tool", Some("Bash".to_string()))));
+        assert_eq!(
+            map_hook_event(&hook),
+            Some(("executing_tool", Some("Bash".to_string())))
+        );
     }
 
     /// 命令摘要按**字符**截断，不能按字节切：`&cmd[..48]` 遇到第 48 字节落在多字节
@@ -177,7 +183,10 @@ mod tests {
     fn long_cjk_command_does_not_panic_on_char_boundary() {
         // 第 48 字节落在「图」的三字节编码中间
         let cmd = "echo \"=== 卷内容（应见中文软链 + 卷图标）===\"; ls -la /tmp/x; echo done";
-        assert!(!cmd.is_char_boundary(48), "用例前提：第 48 字节须落在字符中间");
+        assert!(
+            !cmd.is_char_boundary(48),
+            "用例前提：第 48 字节须落在字符中间"
+        );
         assert!(cmd.chars().count() > 48, "用例前提：字符数须超过截断阈值");
 
         let hook = json!({
@@ -235,7 +244,10 @@ mod tests {
         });
         assert_eq!(
             map_hook_event(&hook),
-            Some(("awaiting_approval", Some("需要批准执行 rm 命令".to_string())))
+            Some((
+                "awaiting_approval",
+                Some("需要批准执行 rm 命令".to_string())
+            ))
         );
     }
 
@@ -295,13 +307,19 @@ mod tests {
     #[test]
     fn subagent_start_carries_agent_type() {
         let hook = json!({ "hook_event_name": "SubagentStart", "agent_type": "Explore" });
-        assert_eq!(map_hook_event(&hook), Some(("executing_tool", Some("子任务：Explore".to_string()))));
+        assert_eq!(
+            map_hook_event(&hook),
+            Some(("executing_tool", Some("子任务：Explore".to_string())))
+        );
     }
 
     #[test]
     fn subagent_start_without_agent_type_falls_back() {
         let hook = json!({ "hook_event_name": "SubagentStart" });
-        assert_eq!(map_hook_event(&hook), Some(("executing_tool", Some("运行子任务".to_string()))));
+        assert_eq!(
+            map_hook_event(&hook),
+            Some(("executing_tool", Some("运行子任务".to_string())))
+        );
     }
 
     #[test]
@@ -353,7 +371,10 @@ mod tests {
         assert_eq!(q.as_deref(), Some("⚠ 因错误中断：rate_limit"));
         // 跟正常 Stop 同一个 phase，但 question 不同——detail_line 上能看出区别，
         // 不会跟「说完了等你」混淆。
-        assert_ne!(map_hook_event(&hook), map_hook_event(&json!({ "hook_event_name": "Stop" })));
+        assert_ne!(
+            map_hook_event(&hook),
+            map_hook_event(&json!({ "hook_event_name": "Stop" }))
+        );
     }
 
     #[test]

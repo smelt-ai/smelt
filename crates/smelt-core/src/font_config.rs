@@ -19,5 +19,9 @@ pub fn set_font_family(name: &str) {
 
 /// 当前生效的等宽字体名；没设置过就是内嵌默认字体。
 pub fn font_family() -> String {
-    FONT_FAMILY_CONF.read().ok().and_then(|g| g.clone()).unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
+    FONT_FAMILY_CONF
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
 }

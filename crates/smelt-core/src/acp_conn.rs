@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
@@ -29,7 +30,6 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
 };
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
     AcpAgent, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
@@ -1480,11 +1480,7 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
             // 受管失败：系统里用户自己装过 bun 就用系统的。
             let sys_has = std::env::split_paths(crate::login_env::login_path())
                 .any(|p| p.join(head).is_file());
-            if sys_has {
-                Ok(cmd.to_string())
-            } else {
-                Err(e)
-            }
+            if sys_has { Ok(cmd.to_string()) } else { Err(e) }
         }
     }
 }
@@ -1735,7 +1731,7 @@ mod runtime_tests {
 #[cfg(test)]
 mod spawn_gate_tests {
     use super::with_spawn_gate;
-    use std::sync::{mpsc, Arc, RwLock};
+    use std::sync::{Arc, RwLock, mpsc};
     use std::time::Duration;
 
     #[test]
@@ -2011,10 +2007,12 @@ mod model_tests {
         assert_eq!(state.current_name, "Claude Sonnet 4.5");
         // 候选要带全，UI 靠它渲染下拉
         assert_eq!(state.options.len(), 2);
-        assert!(state
-            .options
-            .iter()
-            .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8"));
+        assert!(
+            state
+                .options
+                .iter()
+                .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8")
+        );
     }
 
     /// 选项按厂商/档位分组时同样要能翻出来。

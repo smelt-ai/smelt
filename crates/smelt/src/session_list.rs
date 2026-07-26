@@ -14,14 +14,14 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
 use crate::git_panel::main_repo_root_from_common_dir;
-use crate::settings::{active_launch_entries, icon_for_launch_command, AcpAgentKind};
+use crate::settings::{AcpAgentKind, active_launch_entries, icon_for_launch_command};
 use crate::{
-    pane_status, pane_title, ui_theme, AgentStatus, MainView, RenameTarget, SessionDrag,
-    SessionKind, Workspace,
+    AgentStatus, MainView, RenameTarget, SessionDrag, SessionKind, SidebarGrouping, Workspace,
+    pane_status, pane_title, ui_theme,
 };
 
 /// 会话行 hover group 名：行 `.group()` + 右端操作条 `.group_hover()` 配对，
@@ -47,6 +47,99 @@ fn status_text(status: AgentStatus) -> &'static str {
         AgentStatus::Done => "已完成",
         AgentStatus::Idle => "空闲",
     }
+}
+
+fn quota_color(percent: f64) -> u32 {
+    if percent >= 90.0 {
+        ui_theme::red()
+    } else if percent >= 75.0 {
+        ui_theme::yellow()
+    } else {
+        ui_theme::text_muted()
+    }
+}
+
+fn quota_reset_text(window: &crate::rate_limits::RateLimitWindow) -> Option<String> {
+    let dt = chrono::DateTime::from_timestamp(window.resets_at?, 0)?;
+    Some(
+        dt.with_timezone(&chrono::Local)
+            .format("%m/%d %H:%M")
+            .to_string(),
+    )
+}
+
+fn quota_remaining_text(window: &crate::rate_limits::RateLimitWindow) -> Option<String> {
+    let seconds = window.resets_at? - chrono::Utc::now().timestamp();
+    if seconds <= 0 {
+        return Some("即将重置".to_string());
+    }
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    Some(if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{}m", minutes.max(1))
+    })
+}
+
+fn quota_row(
+    label: &'static str,
+    limits: &crate::rate_limits::ProviderRateLimits,
+) -> Stateful<Div> {
+    let session = limits.session.as_ref().map(|w| {
+        (
+            format!(
+                "{:.0}% {}",
+                w.used_percent,
+                quota_remaining_text(w).unwrap_or_else(|| "5h".to_string())
+            ),
+            quota_color(w.used_percent),
+        )
+    });
+    let weekly = limits.weekly.as_ref().map(|w| {
+        (
+            format!(
+                "{:.0}% {}",
+                w.used_percent,
+                quota_remaining_text(w).unwrap_or_else(|| "7d".to_string())
+            ),
+            quota_color(w.used_percent),
+        )
+    });
+    let mut reset_parts = Vec::new();
+    if let Some(reset) = limits.session.as_ref().and_then(quota_reset_text) {
+        reset_parts.push(format!("5h 重置：{reset}"));
+    }
+    if let Some(reset) = limits.weekly.as_ref().and_then(quota_reset_text) {
+        reset_parts.push(format!("7d 重置：{reset}"));
+    }
+    let tooltip = reset_parts.join(" · ");
+
+    h_flex()
+        .id(label)
+        .h(px(22.))
+        .px_3()
+        .gap_2()
+        .items_center()
+        .text_xs()
+        .child(
+            div()
+                .w(px(48.))
+                .font_family("monospace")
+                .text_color(rgb(ui_theme::text_mid()))
+                .child(label),
+        )
+        .child(div().text_color(rgb(ui_theme::text_muted())).child("已用"))
+        .children(session.map(|(text, color)| div().text_color(rgb(color)).child(text)))
+        .children(weekly.map(|(text, color)| div().text_color(rgb(color)).child(text)))
+        .when(!tooltip.is_empty(), |row| {
+            row.tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+        })
 }
 
 impl Workspace {
@@ -76,7 +169,7 @@ impl Workspace {
         // 注：项目实体化后允许关到一个会话都不剩（侧栏还有项目行撑着，舞台落到引导页），
         // 所以关闭键不再有「最后一个不许关」那道门槛，全都常显。
         let this = cx.entity();
-        let groups = self.project_groups(cx);
+        let project_groups = self.project_groups(cx);
         let active_root = self.active_project_root(cx);
 
         let titles: Vec<(usize, String)> = self
@@ -87,12 +180,59 @@ impl Workspace {
             .collect();
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
         let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.anchor_id()).collect();
+        // 非项目分组会拿掉项目标题，因此把每个会话所属项目的标签摊到行内展示，
+        // 否则同名会话按状态混在一起后完全看不出来自哪个项目。
+        let mut session_projects = vec![None; self.sessions.len()];
+        for group in &project_groups {
+            let branch = self
+                .repo_info
+                .get(group.root.as_str())
+                .and_then(|(_, info)| info.as_ref())
+                .map(|info| info.branch.clone());
+            for &ix in &group.sessions {
+                session_projects[ix] = Some((group.label.clone(), branch.clone()));
+            }
+        }
+        let groups = match self.sidebar_grouping {
+            SidebarGrouping::Project => project_groups,
+            SidebarGrouping::Status => {
+                let buckets = [
+                    (AgentStatus::WaitingApproval, "等你批准"),
+                    (AgentStatus::NeedsAttention, "需要处理"),
+                    (AgentStatus::Running, "运行中"),
+                    (AgentStatus::Done, "已完成"),
+                    (AgentStatus::Idle, "空闲"),
+                ];
+                buckets
+                    .into_iter()
+                    .filter_map(|(status, label)| {
+                        let sessions = statuses
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(ix, value)| (*value == status).then_some(ix))
+                            .collect::<Vec<_>>();
+                        (!sessions.is_empty()).then(|| crate::ProjectGroup {
+                            root: format!("__status_{}", status.rank()),
+                            label: label.to_string(),
+                            sessions,
+                        })
+                    })
+                    .collect()
+            }
+            SidebarGrouping::None => vec![crate::ProjectGroup {
+                root: "__all_sessions".into(),
+                label: String::new(),
+                sessions: (0..self.sessions.len()).collect(),
+            }],
+        };
 
         // ---- 头部：SESSIONS · 总数 + 历史入口 ----
         // 新建入口全撤：建会话一律走「项目行 hover 出的 +」（落到那个项目），不属于任何
         // 项目的裸终端走底部「终端」。顶部只留查看类的「历史」——原来的「对话 / 终端」是
         // 落到当前项目的快捷新建，跟 + 重复，且两个彩色词太吵。
         let e_hist = this.clone();
+        let e_group = this.clone();
+        let grouping = self.sidebar_grouping;
         let header = div()
             .flex_shrink_0()
             .flex()
@@ -103,10 +243,56 @@ impl Workspace {
             .pb_2()
             .child(
                 div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child(format!("SESSIONS · {}", self.sessions.len())),
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::text_faint()))
+                            .child("WORKSPACES"),
+                    )
+                    .child(
+                        Button::new("session-grouping")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Settings)
+                            .dropdown_menu(move |menu, _window, _cx| {
+                                let menu = menu.item(PopupMenuItem::label("分组依据"));
+                                let add_item = |
+                                    menu: PopupMenu,
+                                    mode: SidebarGrouping,
+                                    label: &'static str,
+                                    entity: Entity<Workspace>,
+                                | {
+                                    let mut entry = PopupMenuItem::new(label);
+                                    if grouping == mode {
+                                        entry = entry.icon(IconName::Check);
+                                    }
+                                    menu.item(entry.on_click(move |_ev, _window, cx| {
+                                        entity.update(cx, |ws, cx| {
+                                            ws.sidebar_grouping = mode;
+                                            ws.save_state(cx);
+                                            cx.notify();
+                                        });
+                                    }))
+                                };
+                                let menu = add_item(
+                                    menu,
+                                    SidebarGrouping::Project,
+                                    "项目",
+                                    e_group.clone(),
+                                );
+                                let menu = add_item(
+                                    menu,
+                                    SidebarGrouping::Status,
+                                    "状态",
+                                    e_group.clone(),
+                                );
+                                add_item(menu, SidebarGrouping::None, "没有任何", e_group.clone())
+                            }),
+                    ),
             )
             .child(
                 // 历史会话页入口（原顶部 TabBar 的「历史会话」标签迁到这里）。
@@ -137,6 +323,7 @@ impl Workspace {
             .pb_2();
 
         for (pix, group) in groups.iter().enumerate() {
+            let is_project_group = grouping == SidebarGrouping::Project;
             // ---- 项目分组标题行 ----
             // 分组身份一律用 root 路径（末段同名的两个目录是两个项目，见 ProjectGroup）；
             // name 只是显示用的。
@@ -171,326 +358,340 @@ impl Workspace {
             let e_toggle = this.clone();
             let toggle_root = cwd.clone();
             let e_menu = this.clone();
-            let menu_cwd = cwd.clone();
+            let menu_cwd = if is_project_group {
+                cwd.clone()
+            } else {
+                active_root.clone().unwrap_or_default()
+            };
             let group_name: SharedString = name.clone().into();
 
-            rows = rows.child(
-                div()
-                    .id(("proj-group", pix))
-                    // relative：右端的 + 浮层靠 absolute 定位到这行内。
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    // 第一组贴近列表顶部；后续项目保留 8px 组间距，兼顾层级和信息密度。
-                    .when(pix > 0, |d| d.mt_2())
-                    .px_3()
-                    .py(px(4.))
-                    .cursor_pointer()
-                    .group(PROJ_HEADER_GROUP)
-                    // 常态无底，hover 才浮起一层（跟会话行同一个 bg_row_hover，
-                    // 「鼠标在这行」在整个侧栏是同一种说法）。
-                    .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                    .child(
-                        // 折叠指示：跟文件树同一套 chevron（展开朝下 / 收起朝右），
-                        // 不再用 9px 的 Unicode 三角——那个字号太小、字体渲染还不稳，
-                        // 在色带底上几乎看不出朝向，等于没有状态提示。
-                        div()
-                            .w(px(14.))
-                            .flex_shrink_0()
-                            .flex()
-                            .justify_center()
-                            .text_color(rgb(ui_theme::text_muted()))
-                            .group_hover(PROJ_HEADER_GROUP, |s| {
-                                s.text_color(rgb(ui_theme::text_bright()))
-                            })
-                            .child(
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
+            if grouping != SidebarGrouping::None {
+                rows = rows.child(
+                    div()
+                        .id(("proj-group", pix))
+                        // relative：右端的 + 浮层靠 absolute 定位到这行内。
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        // 第一组贴近列表顶部；后续项目保留 8px 组间距，兼顾层级和信息密度。
+                        .when(pix > 0, |d| d.mt_2())
+                        .px_3()
+                        .py(px(4.))
+                        .cursor_pointer()
+                        .group(PROJ_HEADER_GROUP)
+                        // 常态无底，hover 才浮起一层（跟会话行同一个 bg_row_hover，
+                        // 「鼠标在这行」在整个侧栏是同一种说法）。
+                        .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
+                        .child(
+                            // 折叠指示：跟文件树同一套 chevron（展开朝下 / 收起朝右），
+                            // 不再用 9px 的 Unicode 三角——那个字号太小、字体渲染还不稳，
+                            // 在色带底上几乎看不出朝向，等于没有状态提示。
+                            div()
+                                .w(px(14.))
+                                .flex_shrink_0()
+                                .flex()
+                                .justify_center()
+                                .text_color(rgb(ui_theme::text_muted()))
+                                .group_hover(PROJ_HEADER_GROUP, |s| {
+                                    s.text_color(rgb(ui_theme::text_bright()))
                                 })
-                                .size(px(13.)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            // 基线对齐：项目名 12.5px、分支名 10px，居中对齐会让
-                            // 小字看起来往上飘，对齐基线才是一条线上的。
-                            .items_baseline()
-                            .gap_1p5()
-                            .overflow_hidden()
-                            .child(
-                                // 项目名是「分组标签」不是主体：驾驶舱日常盯的是会话（agent
-                                // 状态），项目只是把会话归类的容器。所以项目名压成小灰标签
-                                //（13px semibold muted），把视觉主体让给会话名——像 Discord
-                                // 你盯频道、category 标题只是个小灰标签，不抢戏。
-                                //
-                                // 当前项目（+ 的落点）靠亮度拎出来：亮白 vs 其余的灰。
+                                .child(
+                                    Icon::new(if collapsed {
+                                        IconName::ChevronRight
+                                    } else {
+                                        IconName::ChevronDown
+                                    })
+                                    .size(px(13.)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                // 基线对齐：项目名 12.5px、分支名 10px，居中对齐会让
+                                // 小字看起来往上飘，对齐基线才是一条线上的。
+                                .items_baseline()
+                                .gap_1p5()
+                                .overflow_hidden()
+                                .child(
+                                    // 项目名是「分组标签」不是主体：驾驶舱日常盯的是会话（agent
+                                    // 状态），项目只是把会话归类的容器。所以项目名压成小灰标签
+                                    //（13px semibold muted），把视觉主体让给会话名——像 Discord
+                                    // 你盯频道、category 标题只是个小灰标签，不抢戏。
+                                    //
+                                    // 当前项目（+ 的落点）靠亮度拎出来：亮白 vs 其余的灰。
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(px(13.))
+                                        .font_semibold()
+                                        .text_color(rgb(if is_active_group {
+                                            ui_theme::text_bright()
+                                        } else {
+                                            ui_theme::text_muted()
+                                        }))
+                                        .child(group_name.clone()),
+                                )
+                                .children(branch_label.map(|b| {
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .font_family("monospace")
+                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .child(b)
+                                })),
+                        )
+                        // 折叠时把组内状态收成一个点，展开时数量足够
+                        .when(collapsed && agg != AgentStatus::Idle, |d| {
+                            d.child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(px(13.))
-                                    .font_semibold()
-                                    .text_color(rgb(if is_active_group {
-                                        ui_theme::text_bright()
-                                    } else {
-                                        ui_theme::text_muted()
-                                    }))
-                                    .child(group_name.clone()),
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(ui_theme::session_dot_color(agg)),
                             )
-                            .children(branch_label.map(|b| {
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(11.))
-                                    .font_family("monospace")
-                                    .text_color(rgb(ui_theme::text_faint()))
-                                    .child(b)
-                            })),
-                    )
-                    // 折叠时把组内状态收成一个点，展开时数量足够
-                    .when(collapsed && agg != AgentStatus::Idle, |d| {
-                        d.child(
+                        })
+                        .child(
                             div()
                                 .flex_shrink_0()
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(ui_theme::session_dot_color(agg)),
+                                .text_size(px(11.))
+                                .text_color(rgb(ui_theme::text_faint()))
+                                .child(ixs.len().to_string()),
                         )
-                    })
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(11.))
-                            .text_color(rgb(ui_theme::text_faint()))
-                            .child(ixs.len().to_string()),
-                    )
-                    .child(
-                        // 「+」新建下拉：在本项目里新建（终端通道 / 对话通道）。
-                        // absolute 浮在行右端，平时不占位（会话数因此贴到最右、无留白），
-                        // hover 整行才淡入、盖在会话数上。背景取 bg_row_hover（= 项目行
-                        // hover 底），无缝把下面的数字盖住。
-                        div()
-                            .absolute()
-                            .top(px(3.))
-                            .bottom(px(3.))
-                            .right(px(6.))
-                            .flex()
-                            .items_center()
-                            .pl_3()
-                            .rounded(px(4.))
-                            .bg(rgb(ui_theme::bg_row_hover()))
-                            .opacity(0.0)
-                            .group_hover(PROJ_HEADER_GROUP, |s| s.opacity(1.0))
-                            .child(
-                                Button::new(("proj-new", pix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Plus)
-                                    .dropdown_menu({
-                                        let e_menu = e_menu.clone();
-                                        let menu_cwd = menu_cwd.clone();
-                                        move |menu, _window, cx| {
-                                            let cwd_opt =
-                                                (!menu_cwd.is_empty()).then(|| menu_cwd.clone());
-                                            let entries = active_launch_entries(cx);
-                                            let e_term = e_menu.clone();
-                                            let cwd_new = cwd_opt.clone();
-                                            // 按「通道」分组：同一个 agent 既能跑在终端里
-                                            // （它自带的 TUI），也能接进 smelt 原生界面对话。
-                                            // 分组标题把差别说清，菜单项就不用背长名字了。
-                                            let mut menu = menu
-                                                .item(PopupMenuItem::label("终端 · agent 自带 TUI"))
-                                                .item(
-                                                    PopupMenuItem::new("新建终端")
-                                                        .icon(IconName::SquareTerminal)
-                                                        .on_click(move |_ev, _window, cx| {
-                                                            let cwd = cwd_new.clone();
-                                                            e_term.update(cx, |ws, cx| {
-                                                                ws.add_session(cwd, cx)
-                                                            });
-                                                        }),
-                                                );
-                                            for entry in entries {
-                                                let label = entry.label;
-                                                let command = entry.command;
-                                                let cwd_launch = cwd_opt.clone();
-                                                let e_launch = e_menu.clone();
-                                                let icon = icon_for_launch_command(&command);
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(label.clone())
-                                                        .icon(icon)
-                                                        .on_click(move |_ev, _window, cx| {
-                                                            let cwd = cwd_launch.clone();
-                                                            let cmd = command.clone();
-                                                            let name = label.clone();
-                                                            e_launch.update(cx, |ws, cx| {
-                                                                ws.add_session_with_launch(
-                                                                    cwd,
-                                                                    Some(cmd.as_str()),
-                                                                    Some(name.as_str()),
-                                                                    cx,
-                                                                );
-                                                            });
-                                                        }),
-                                                );
+                        .child(
+                            // 「+」新建下拉：在本项目里新建（终端通道 / 对话通道）。
+                            // absolute 浮在行右端，平时不占位（会话数因此贴到最右、无留白），
+                            // hover 整行才淡入、盖在会话数上。背景取 bg_row_hover（= 项目行
+                            // hover 底），无缝把下面的数字盖住。
+                            div()
+                                .when(!is_project_group, |d| d.hidden())
+                                .absolute()
+                                .top(px(3.))
+                                .bottom(px(3.))
+                                .right(px(6.))
+                                .flex()
+                                .items_center()
+                                .pl_3()
+                                .rounded(px(4.))
+                                .bg(rgb(ui_theme::bg_row_hover()))
+                                .opacity(0.0)
+                                .group_hover(PROJ_HEADER_GROUP, |s| s.opacity(1.0))
+                                .child(
+                                    Button::new(("proj-new", pix))
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Plus)
+                                        .dropdown_menu({
+                                            let e_menu = e_menu.clone();
+                                            let menu_cwd = menu_cwd.clone();
+                                            move |menu, _window, cx| {
+                                                let cwd_opt = (!menu_cwd.is_empty())
+                                                    .then(|| menu_cwd.clone());
+                                                let entries = active_launch_entries(cx);
+                                                let e_term = e_menu.clone();
+                                                let cwd_new = cwd_opt.clone();
+                                                // 按「通道」分组：同一个 agent 既能跑在终端里
+                                                // （它自带的 TUI），也能接进 smelt 原生界面对话。
+                                                // 分组标题把差别说清，菜单项就不用背长名字了。
+                                                let mut menu =
+                                                    menu.item(PopupMenuItem::label("终端")).item(
+                                                        PopupMenuItem::new("新建终端")
+                                                            .icon(IconName::SquareTerminal)
+                                                            .on_click(move |_ev, _window, cx| {
+                                                                let cwd = cwd_new.clone();
+                                                                e_term.update(cx, |ws, cx| {
+                                                                    ws.add_session(cwd, cx)
+                                                                });
+                                                            }),
+                                                    );
+                                                for entry in entries {
+                                                    let label = entry.label;
+                                                    let command = entry.command;
+                                                    let cwd_launch = cwd_opt.clone();
+                                                    let e_launch = e_menu.clone();
+                                                    let icon = icon_for_launch_command(&command);
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(label.clone())
+                                                            .icon(icon)
+                                                            .on_click(move |_ev, _window, cx| {
+                                                                let cwd = cwd_launch.clone();
+                                                                let cmd = command.clone();
+                                                                let name = label.clone();
+                                                                e_launch.update(cx, |ws, cx| {
+                                                                    ws.add_session_with_launch(
+                                                                        cwd,
+                                                                        Some(cmd.as_str()),
+                                                                        Some(name.as_str()),
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                            }),
+                                                    );
+                                                }
+                                                menu = menu
+                                                    .separator()
+                                                    .item(PopupMenuItem::label("对话"));
+                                                // 各家 agent 走同一条 ACP 通道，菜单项从枚举派生：
+                                                // 加一家 agent 不用回来改这段。
+                                                for agent in AcpAgentKind::ALL {
+                                                    let e_acp = e_menu.clone();
+                                                    let cwd_acp = cwd_opt.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(agent.label())
+                                                            .icon(IconName::Bot)
+                                                            .on_click(move |_ev, window, cx| {
+                                                                let cwd = cwd_acp.clone();
+                                                                e_acp.update(cx, |ws, cx| {
+                                                                    ws.add_acp_session(
+                                                                        agent, None, None, cwd,
+                                                                        window, cx,
+                                                                    )
+                                                                });
+                                                            }),
+                                                    );
+                                                }
+                                                let config = cx
+                                                    .global::<crate::settings::AgentUiConfig>()
+                                                    .clone();
+                                                let profiles = config.profiles.clone();
+                                                for profile in profiles {
+                                                    let e_acp = e_menu.clone();
+                                                    let cwd_acp = cwd_opt.clone();
+                                                    let launch =
+                                                        config.profile_launch_spec(&profile);
+                                                    let profile_id = Some(profile.id.clone());
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(profile.label.clone())
+                                                            .icon(IconName::Bot)
+                                                            .on_click(move |_ev, window, cx| {
+                                                                let cwd = cwd_acp.clone();
+                                                                let launch = launch.clone();
+                                                                let profile_id = profile_id.clone();
+                                                                e_acp.update(cx, |ws, cx| {
+                                                                    ws.add_acp_session(
+                                                                        profile.kind(),
+                                                                        Some(launch),
+                                                                        profile_id,
+                                                                        cwd,
+                                                                        window,
+                                                                        cx,
+                                                                    )
+                                                                });
+                                                            }),
+                                                    );
+                                                }
+                                                menu
                                             }
-                                            menu = menu.separator().item(PopupMenuItem::label(
-                                                "对话 · smelt 原生界面",
-                                            ));
-                                            // 各家 agent 走同一条 ACP 通道，菜单项从枚举派生：
-                                            // 加一家 agent 不用回来改这段。
-                                            for agent in AcpAgentKind::ALL {
-                                                let e_acp = e_menu.clone();
-                                                let cwd_acp = cwd_opt.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(agent.label())
-                                                        .icon(IconName::Bot)
-                                                        .on_click(move |_ev, window, cx| {
-                                                            let cwd = cwd_acp.clone();
-                                                            e_acp.update(cx, |ws, cx| {
-                                                                ws.add_acp_session(
-                                                                    agent, None, None, cwd, window,
-                                                                    cx,
-                                                                )
-                                                            });
-                                                        }),
-                                                );
-                                            }
-                                            let config = cx
-                                                .global::<crate::settings::AgentUiConfig>()
-                                                .clone();
-                                            let profiles = config.profiles.clone();
-                                            for profile in profiles {
-                                                let e_acp = e_menu.clone();
-                                                let cwd_acp = cwd_opt.clone();
-                                                let launch = config.profile_launch_spec(&profile);
-                                                let profile_id = Some(profile.id.clone());
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(profile.label.clone())
-                                                        .icon(IconName::Bot)
-                                                        .on_click(move |_ev, window, cx| {
-                                                            let cwd = cwd_acp.clone();
-                                                            let launch = launch.clone();
-                                                            let profile_id = profile_id.clone();
-                                                            e_acp.update(cx, |ws, cx| {
-                                                                ws.add_acp_session(
-                                                                    profile.kind(),
-                                                                    Some(launch),
-                                                                    profile_id,
-                                                                    cwd,
-                                                                    window,
-                                                                    cx,
-                                                                )
-                                                            });
-                                                        }),
-                                                );
-                                            }
-                                            menu
-                                        }
-                                    }),
-                            ),
-                    )
-                    .on_click(move |_ev, _window, cx| {
-                        let root = toggle_root.clone();
-                        e_toggle.update(cx, |ws, cx| {
-                            if !ws.collapsed_projects.remove(&root) {
-                                ws.collapsed_projects.insert(root);
-                            }
-                            ws.save_state(cx);
-                            cx.notify();
-                        });
-                    })
-                    .context_menu({
-                        // 复制路径人人有份；「删除 Worktree」只给 worktree 分组
-                        //（`when` 的两个分支类型必须一致，所以是菜单项按条件加，
-                        // 不是整个 context_menu 按条件挂）。
-                        let e_del = e_menu.clone();
-                        let e_pin = e_menu.clone();
-                        let e_close_proj = e_menu.clone();
-                        let path = cwd.clone();
-                        let close_root = cwd.clone();
-                        let sess_n = ixs.len();
-                        let del_main_root = worktree_main_root.clone();
-                        let del_branch = worktree_branch.clone();
-                        move |menu, _window, cx| {
-                            let copy_path = path.clone();
-                            let del_path = path.clone();
-                            let pin_path = path.clone();
-                            let e_del = e_del.clone();
-                            let e_pin = e_pin.clone();
-                            let e_close_proj = e_close_proj.clone();
-                            let close_root = close_root.clone();
-                            let del_main_root = del_main_root.clone();
-                            let del_branch = del_branch.clone();
-                            // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
-                            // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
-                            let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
-                            let pin_label = if pinned {
-                                "从文件树移除"
-                            } else {
-                                "加到文件树"
-                            };
-                            menu.item(PopupMenuItem::new("复制项目路径").on_click(
-                                move |_ev, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_path.clone(),
-                                    ));
-                                },
-                            ))
-                            .item(
-                                PopupMenuItem::new(pin_label)
-                                    .icon(IconName::Folder)
-                                    .on_click(move |_ev, _window, cx| {
-                                        let pin_path = pin_path.clone();
-                                        e_pin.update(cx, |ws, cx| {
-                                            ws.toggle_file_tree_root(pin_path, cx)
-                                        });
-                                    }),
-                            )
-                            // 关项目 = 从工作台移走这个项目，连带关掉它下面的会话
-                            //（标数量，别让人点完才发现关掉了一堆活）。
-                            .separator()
-                            .item(
-                                PopupMenuItem::new(if sess_n > 0 {
-                                    format!("关闭项目（含 {sess_n} 个会话）")
-                                } else {
-                                    "关闭项目".to_string()
-                                })
-                                .icon(IconName::CircleX)
-                                .on_click(
-                                    move |_ev, _window, cx| {
-                                        let root = close_root.clone();
-                                        e_close_proj
-                                            .update(cx, |ws, cx| ws.start_close_project(root, cx));
-                                    },
+                                        }),
                                 ),
-                            )
-                            .when(is_worktree_group, move |menu| {
-                                menu.separator().item(
-                                    PopupMenuItem::new("删除 Worktree")
-                                        .icon(IconName::Delete)
+                        )
+                        .on_click(move |_ev, _window, cx| {
+                            let root = toggle_root.clone();
+                            e_toggle.update(cx, |ws, cx| {
+                                if !ws.collapsed_projects.remove(&root) {
+                                    ws.collapsed_projects.insert(root);
+                                }
+                                ws.save_state(cx);
+                                cx.notify();
+                            });
+                        })
+                        .context_menu({
+                            // 复制路径人人有份；「删除 Worktree」只给 worktree 分组
+                            //（`when` 的两个分支类型必须一致，所以是菜单项按条件加，
+                            // 不是整个 context_menu 按条件挂）。
+                            let e_del = e_menu.clone();
+                            let e_pin = e_menu.clone();
+                            let e_close_proj = e_menu.clone();
+                            let path = cwd.clone();
+                            let close_root = cwd.clone();
+                            let sess_n = ixs.len();
+                            let del_main_root = worktree_main_root.clone();
+                            let del_branch = worktree_branch.clone();
+                            move |menu, _window, cx| {
+                                if !is_project_group {
+                                    return menu;
+                                }
+                                let copy_path = path.clone();
+                                let del_path = path.clone();
+                                let pin_path = path.clone();
+                                let e_del = e_del.clone();
+                                let e_pin = e_pin.clone();
+                                let e_close_proj = e_close_proj.clone();
+                                let close_root = close_root.clone();
+                                let del_main_root = del_main_root.clone();
+                                let del_branch = del_branch.clone();
+                                // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
+                                // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
+                                let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
+                                let pin_label = if pinned {
+                                    "从文件树移除"
+                                } else {
+                                    "加到文件树"
+                                };
+                                menu.item(PopupMenuItem::new("复制项目路径").on_click(
+                                    move |_ev, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_path.clone(),
+                                        ));
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new(pin_label)
+                                        .icon(IconName::Folder)
                                         .on_click(move |_ev, _window, cx| {
-                                            let del_path = del_path.clone();
-                                            let del_main_root = del_main_root.clone();
-                                            let del_branch = del_branch.clone();
-                                            e_del.update(cx, |ws, cx| {
-                                                ws.start_delete_worktree(
-                                                    del_path,
-                                                    del_main_root,
-                                                    del_branch,
-                                                    cx,
-                                                )
+                                            let pin_path = pin_path.clone();
+                                            e_pin.update(cx, |ws, cx| {
+                                                ws.toggle_file_tree_root(pin_path, cx)
                                             });
                                         }),
                                 )
-                            })
-                        }
-                    }),
-            );
+                                // 关项目 = 从工作台移走这个项目，连带关掉它下面的会话
+                                //（标数量，别让人点完才发现关掉了一堆活）。
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new(if sess_n > 0 {
+                                        format!("关闭项目（含 {sess_n} 个会话）")
+                                    } else {
+                                        "关闭项目".to_string()
+                                    })
+                                    .icon(IconName::CircleX)
+                                    .on_click(
+                                        move |_ev, _window, cx| {
+                                            let root = close_root.clone();
+                                            e_close_proj.update(cx, |ws, cx| {
+                                                ws.start_close_project(root, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .when(
+                                    is_worktree_group,
+                                    move |menu| {
+                                        menu.separator().item(
+                                            PopupMenuItem::new("删除 Worktree")
+                                                .icon(IconName::Delete)
+                                                .on_click(move |_ev, _window, cx| {
+                                                    let del_path = del_path.clone();
+                                                    let del_main_root = del_main_root.clone();
+                                                    let del_branch = del_branch.clone();
+                                                    e_del.update(cx, |ws, cx| {
+                                                        ws.start_delete_worktree(
+                                                            del_path,
+                                                            del_main_root,
+                                                            del_branch,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                    },
+                                )
+                            }
+                        }),
+                );
+            }
 
             if collapsed {
                 continue;
@@ -533,10 +734,13 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(1.))
-                .ml(px(17.))
-                .pl(px(10.))
-                .border_l_1()
-                .border_color(rgb(ui_theme::border()));
+                .when(grouping != SidebarGrouping::None, |d| {
+                    d.ml(px(17.))
+                        .pl(px(10.))
+                        .border_l_1()
+                        .border_color(rgb(ui_theme::border()))
+                })
+                .when(grouping == SidebarGrouping::None, |d| d.px_2());
             for &ix in ixs {
                 let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
                 let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
@@ -558,6 +762,9 @@ impl Workspace {
                     AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
                 )
                 .then(|| status_text(status));
+                let project_context = (grouping != SidebarGrouping::Project)
+                    .then(|| session_projects.get(ix).cloned().flatten())
+                    .flatten();
                 let hint_before = self.sess_drop_hint == Some((entity_id, true));
                 let hint_after = self.sess_drop_hint == Some((entity_id, false));
                 let e_act = this.clone();
@@ -685,6 +892,28 @@ impl Workspace {
                             .font_family("monospace")
                             .text_color(rgb(ui_theme::text_faint()))
                             .child(s)
+                    }))
+                    // 按状态 / 不分组时，项目标题已经不存在，把来源项目与分支补到行内。
+                    .children(project_context.map(|(project, branch)| {
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1p5()
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(rgb(ui_theme::border()))
+                            .text_size(px(10.))
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .child(project)
+                            .children(branch.map(|name| {
+                                div()
+                                    .font_family("monospace")
+                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .child(name)
+                            }))
                     }))
                     // 状态文字只在「要人管」时才出（空闲/运行中靠状态点表达就够，
                     // 每行都写一遍「空闲」等于用一整行高度说一句废话）。
@@ -1110,6 +1339,19 @@ impl Workspace {
         // ---- 底部：打开项目 / 临时终端（原项目 rail 底部的「+」）----
         let e_open = this.clone();
         let e_scratch = this.clone();
+        let quota_footer = {
+            let codex = self.rate_limits.codex.as_ref();
+            let claude = self.rate_limits.claude.as_ref();
+            (codex.is_some() || claude.is_some()).then(|| {
+                v_flex()
+                    .flex_shrink_0()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(ui_theme::border_dim()))
+                    .children(codex.map(|limits| quota_row("Codex", limits)))
+                    .children(claude.map(|limits| quota_row("Claude", limits)))
+            })
+        };
         let footer = div()
             .flex_shrink_0()
             .flex()
@@ -1162,5 +1404,6 @@ impl Workspace {
             .child(header)
             .child(rows)
             .child(footer)
+            .children(quota_footer)
     }
 }

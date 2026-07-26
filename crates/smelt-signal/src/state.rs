@@ -80,10 +80,7 @@ impl AppState {
             return Err(CreateRoomErr::TooManyRooms);
         }
         {
-            let mut w = self
-                .create_window
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut w = self.create_window.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             if now.duration_since(w.0) > Duration::from_secs(60) {
                 *w = (now, 0);
@@ -130,10 +127,7 @@ impl AppState {
         tx: Outbound,
     ) -> Result<JoinOk, JoinErr> {
         self.gc_expired();
-        let mut entry = self
-            .rooms
-            .get_mut(room_id)
-            .ok_or(JoinErr::NotFound)?;
+        let mut entry = self.rooms.get_mut(room_id).ok_or(JoinErr::NotFound)?;
 
         if Instant::now() >= entry.expires_at {
             drop(entry);
@@ -200,9 +194,7 @@ impl AppState {
             other.map(|p| p.tx.clone())
         };
         if let Some(tx) = other_tx {
-            let _ = tx.send(
-                crate::protocol::ServerMsg::PeerLeft { role }.to_json(),
-            );
+            let _ = tx.send(crate::protocol::ServerMsg::PeerLeft { role }.to_json());
         }
         debug!(room = %room_id, role = role.as_str(), "peer left");
     }

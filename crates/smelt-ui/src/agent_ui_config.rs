@@ -5,8 +5,8 @@
 use gpui::{App, Global};
 
 use smelt_core::agent_kind::{
-    default_acp_cmd, default_acp_codex_cmd, default_acp_copilot_cmd, default_acp_grok_cmd,
-    AcpAgentKind, AcpLaunchSpec, AcpProfile,
+    AcpAgentKind, AcpLaunchSpec, AcpProfile, default_acp_cmd, default_acp_codex_cmd,
+    default_acp_copilot_cmd, default_acp_grok_cmd,
 };
 
 fn default_true() -> bool {

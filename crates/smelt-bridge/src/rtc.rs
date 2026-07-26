@@ -7,23 +7,23 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
 
+use crate::Config;
 use crate::dc;
 use crate::signal::{IceServerJson, IceUrls};
-use crate::Config;
 
 pub struct HostPeer {
     pc: Arc<RTCPeerConnection>,
@@ -181,10 +181,7 @@ impl HostPeer {
     }
 
     pub async fn handle_signal(&mut self, payload: Value) -> Result<()> {
-        let kind = payload
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .unwrap_or("");
+        let kind = payload.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         match kind {
             "offer" => {
                 let is_restart = payload
@@ -208,11 +205,7 @@ impl HostPeer {
                 self.remote_set = true;
                 self.flush_ice().await?;
 
-                let answer = self
-                    .pc
-                    .create_answer(None)
-                    .await
-                    .context("create_answer")?;
+                let answer = self.pc.create_answer(None).await.context("create_answer")?;
                 let mut gather_complete = self.pc.gathering_complete_promise().await;
                 self.pc
                     .set_local_description(answer)
@@ -289,7 +282,9 @@ impl HostPeer {
 }
 
 fn bail_offer_reuse() -> Result<()> {
-    Err(anyhow::anyhow!("peer already negotiated; need new HostPeer"))
+    Err(anyhow::anyhow!(
+        "peer already negotiated; need new HostPeer"
+    ))
 }
 
 fn wire_dc(cfg: Arc<Config>, d: Arc<RTCDataChannel>) {

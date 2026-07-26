@@ -11,7 +11,7 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -94,7 +94,9 @@ fn spa_ready() -> bool {
 }
 
 pub fn sock_path() -> std::path::PathBuf {
-    let dir = dirs::home_dir().unwrap_or_else(|| "/tmp".into()).join(".smelt");
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| "/tmp".into())
+        .join(".smelt");
     dir.join("smeltd.sock")
 }
 
@@ -142,7 +144,10 @@ struct ResizeBody {
 /// 前端：优先托管 `remote-web/dist`（Preact + Tailwind + xterm 的 CLI 面板）。
 /// 未构建时回退内嵌 HTML（list / console / xterm）。
 pub fn build_router(token: String, write_enabled: bool) -> Router {
-    let state = AppState { token: Arc::new(token), write_enabled };
+    let state = AppState {
+        token: Arc::new(token),
+        write_enabled,
+    };
     let mut r = Router::new()
         .route("/sessions", get(sessions_json_handler))
         .route("/s/{id}/stream", get(stream_handler))
@@ -199,10 +204,7 @@ fn spa_index_html(write_enabled: bool) -> Response {
         .into_response()
 }
 
-async fn spa_index_handler(
-    Query(q): Query<AuthQuery>,
-    State(state): State<AppState>,
-) -> Response {
+async fn spa_index_handler(Query(q): Query<AuthQuery>, State(state): State<AppState>) -> Response {
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
@@ -229,10 +231,7 @@ async fn spa_asset_handler(Path(path): Path<String>) -> Response {
     let Some(bytes) = spa_read(&rel) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let ct = match PathBuf::from(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-    {
+    let ct = match PathBuf::from(&path).extension().and_then(|e| e.to_str()) {
         Some("js") => "application/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("svg") => "image/svg+xml",
@@ -256,14 +255,19 @@ async fn spa_asset_handler(Path(path): Path<String>) -> Response {
 /// 反斜杠，额外把尖括号转成 Unicode 转义序列——防止 id/token 里带 `</script>`
 /// 提前把这段脚本切断（HTML 解析器找 `</script` 是纯文本匹配，不管有没有在字符串里）。
 fn js_string_literal(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()).replace('<', "\\u003c")
+    serde_json::to_string(s)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003c")
 }
 
 /// 把字符串安全地嵌进 HTML 正文/属性：转义 `& < > "`。会话列表页用它嵌 session id——
 /// 现在 id 都是 GUI 用 `uuid::Uuid::new_v4()` 生成的（见 workspace/main.rs），字符集
 /// 天然安全，这里是防御性的，防止以后 id 格式变了变成新的注入面。
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// 远程列表里一条可 attach 的终端（smeltd 会话）。展示名优先走 GUI 的
@@ -299,7 +303,10 @@ struct GuiLeafMeta {
 }
 
 fn workspace_json_path() -> std::path::PathBuf {
-    dirs::home_dir().unwrap_or_else(|| "/tmp".into()).join(".smelt").join("workspace.json")
+    dirs::home_dir()
+        .unwrap_or_else(|| "/tmp".into())
+        .join(".smelt")
+        .join("workspace.json")
 }
 
 /// cwd → 项目分组名：取目录末段（跟 workspace/main.rs 的 `project_name_for_cwd` 对齐）。
@@ -356,7 +363,14 @@ fn collect_gui_leaves(
     if let Some(split) = pane.get("Split") {
         if let Some(children) = split.get("children").and_then(|c| c.as_array()) {
             for child in children {
-                collect_gui_leaves(child, session_title, multi_pane, session_ord, leaf_counter, out);
+                collect_gui_leaves(
+                    child,
+                    session_title,
+                    multi_pane,
+                    session_ord,
+                    leaf_counter,
+                    out,
+                );
             }
         }
     }
@@ -380,16 +394,24 @@ fn load_gui_leaf_meta() -> std::collections::HashMap<String, GuiLeafMeta> {
             .get("custom_title")
             .and_then(|t| t.as_str())
             .filter(|s| !s.is_empty());
-        let Some(layout) = sess.get("layout") else { continue };
+        let Some(layout) = sess.get("layout") else {
+            continue;
+        };
         // 先数这个会话有几个带 id 的叶子，决定要不要嵌套显示。
         let mut count_ids = 0usize;
         fn count_leaves(pane: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = pane.get("Leaf") {
-                if leaf.get("id").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+                if leaf
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                {
                     *n += 1;
                 }
-            } else if let Some(children) =
-                pane.get("Split").and_then(|s| s.get("children")).and_then(|c| c.as_array())
+            } else if let Some(children) = pane
+                .get("Split")
+                .and_then(|s| s.get("children"))
+                .and_then(|c| c.as_array())
             {
                 for c in children {
                     count_leaves(c, n);
@@ -420,10 +442,7 @@ fn clean_agent_title(raw: &str) -> Option<String> {
     // 常见 agent 标题：`✳ Claude Code` / spinner 前缀 / `… — working`
     let stripped = t
         .trim_start_matches(|c: char| {
-            c.is_whitespace()
-                || c == '✳'
-                || c == '*'
-                || ('\u{2800}'..='\u{28FF}').contains(&c) // braille spinners
+            c.is_whitespace() || c == '✳' || c == '*' || ('\u{2800}'..='\u{28FF}').contains(&c) // braille spinners
         })
         .trim();
     let stripped = stripped
@@ -496,8 +515,12 @@ fn short_id(id: &str) -> String {
 /// 问 smeltd 要当前活会话列表 + 状态，再叠 workspace.json 的展示名。
 /// 阻塞 IO，调用方需要丢进 `spawn_blocking`。
 fn list_sessions_info() -> Vec<SessionInfo> {
-    let Ok(conn) = UnixStream::connect(sock_path()) else { return Vec::new() };
-    let Ok(mut writer) = conn.try_clone() else { return Vec::new() };
+    let Ok(conn) = UnixStream::connect(sock_path()) else {
+        return Vec::new();
+    };
+    let Ok(mut writer) = conn.try_clone() else {
+        return Vec::new();
+    };
     if writeln!(writer, "{}", serde_json::json!({ "op": "list" })).is_err() {
         return Vec::new();
     }
@@ -506,7 +529,9 @@ fn list_sessions_info() -> Vec<SessionInfo> {
     if reader.read_line(&mut line).is_err() {
         return Vec::new();
     }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+        return Vec::new();
+    };
     let empty = Vec::new();
     let ids = v["sessions"].as_array().unwrap_or(&empty);
     let states = v["states"].as_array().unwrap_or(&empty);
@@ -517,9 +542,13 @@ fn list_sessions_info() -> Vec<SessionInfo> {
         .zip(states.iter().map(Some).chain(std::iter::repeat(None)))
         .filter_map(|(id, state)| {
             let id = id.as_str()?.to_string();
-            let phase = state.and_then(|s| s["phase"].as_str()).unwrap_or("idle").to_string();
-            let pending_question =
-                state.and_then(|s| s["pending_question"].as_str()).map(String::from);
+            let phase = state
+                .and_then(|s| s["phase"].as_str())
+                .unwrap_or("idle")
+                .to_string();
+            let pending_question = state
+                .and_then(|s| s["pending_question"].as_str())
+                .map(String::from);
             let cwd = state
                 .and_then(|s| s["cwd"].as_str())
                 .map(String::from)
@@ -614,7 +643,8 @@ fn render_session_list(infos: &[SessionInfo], token: &str) -> String {
 
     let mut html = String::new();
     for project in &project_order {
-        let in_project: Vec<&SessionInfo> = infos.iter().filter(|i| &i.project == project).collect();
+        let in_project: Vec<&SessionInfo> =
+            infos.iter().filter(|i| &i.project == project).collect();
         html.push_str(&format!(
             "<section class=\"project\">\
                <div class=\"project-name\">📁 {}</div>\
@@ -656,11 +686,16 @@ fn render_session_list(infos: &[SessionInfo], token: &str) -> String {
     LIST_PAGE.replace("__ROWS__", &html)
 }
 
-async fn list_page_handler(Query(q): Query<AuthQuery>, State(state): State<AppState>) -> impl IntoResponse {
+async fn list_page_handler(
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    let infos = tokio::task::spawn_blocking(list_sessions_info).await.unwrap_or_default();
+    let infos = tokio::task::spawn_blocking(list_sessions_info)
+        .await
+        .unwrap_or_default();
     Html(render_session_list(&infos, &q.token)).into_response()
 }
 
@@ -671,7 +706,9 @@ async fn sessions_json_handler(
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    let infos = tokio::task::spawn_blocking(list_sessions_info).await.unwrap_or_default();
+    let infos = tokio::task::spawn_blocking(list_sessions_info)
+        .await
+        .unwrap_or_default();
     Json(serde_json::json!({ "sessions": infos })).into_response()
 }
 
@@ -686,7 +723,10 @@ async fn page_handler(
     let page = REFERENCE_PAGE
         .replace("__ID_JSON__", &js_string_literal(&id))
         .replace("__TOKEN_JSON__", &js_string_literal(&q.token))
-        .replace("__WRITE_ENABLED__", if state.write_enabled { "true" } else { "false" });
+        .replace(
+            "__WRITE_ENABLED__",
+            if state.write_enabled { "true" } else { "false" },
+        );
     Html(page).into_response()
 }
 
@@ -699,7 +739,8 @@ async fn stream_handler(
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    ws.on_upgrade(move |socket| pump_watch(socket, id)).into_response()
+    ws.on_upgrade(move |socket| pump_watch(socket, id))
+        .into_response()
 }
 
 /// Phase 5+6：手机友好的"操作台"——大状态 + 问题文案，不嵌 xterm（roadmap 原则 3：
@@ -724,8 +765,13 @@ async fn console_handler(
             .map(|i| (i.name, i.project, i.parent_session))
             .or_else(|| {
                 let g = gui.get(&id_for_meta);
-                let (name, parent, project) =
-                    resolve_display_name(&id_for_meta, g.and_then(|x| x.cwd.as_deref()), None, None, g);
+                let (name, parent, project) = resolve_display_name(
+                    &id_for_meta,
+                    g.and_then(|x| x.cwd.as_deref()),
+                    None,
+                    None,
+                    g,
+                );
                 Some((name, project, parent))
             })
             .unwrap_or_else(|| (short_id(&id_for_meta), "会话".into(), None))
@@ -743,7 +789,10 @@ async fn console_handler(
         .replace("__TOKEN_JSON__", &js_string_literal(&q.token))
         .replace("__NAME_JSON__", &js_string_literal(&name))
         .replace("__SUBTITLE_JSON__", &js_string_literal(&subtitle))
-        .replace("__WRITE_ENABLED__", if state.write_enabled { "true" } else { "false" });
+        .replace(
+            "__WRITE_ENABLED__",
+            if state.write_enabled { "true" } else { "false" },
+        );
     Html(page).into_response()
 }
 
@@ -756,7 +805,8 @@ async fn state_stream_handler(
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    ws.on_upgrade(move |socket| pump_state(socket, id)).into_response()
+    ws.on_upgrade(move |socket| pump_state(socket, id))
+        .into_response()
 }
 
 /// 操作台的状态流：连 smeltd 的 `subscribe`（全量订阅），按 id 过滤只转发这一个
@@ -767,7 +817,11 @@ async fn pump_state(mut socket: WebSocket, id: String) {
     let task = tokio::task::spawn_blocking(move || subscribe_and_forward(&id, tx));
 
     while let Some(state) = rx.recv().await {
-        if socket.send(Message::Text(state.to_string().into())).await.is_err() {
+        if socket
+            .send(Message::Text(state.to_string().into()))
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -779,17 +833,24 @@ async fn pump_state(mut socket: WebSocket, id: String) {
 /// channel——subscribe 本身是全量订阅（见 smeltd.rs 的 Subscribers），过滤是
 /// 网关自己做的，不改 smeltd 协议。
 fn subscribe_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<serde_json::Value>) {
-    let Ok(conn) = UnixStream::connect(sock_path()) else { return };
-    let Ok(mut writer) = conn.try_clone() else { return };
+    let Ok(conn) = UnixStream::connect(sock_path()) else {
+        return;
+    };
+    let Ok(mut writer) = conn.try_clone() else {
+        return;
+    };
     if writeln!(writer, "{}", serde_json::json!({ "op": "subscribe" })).is_err() {
         return;
     }
     let reader = BufReader::new(conn);
     for line in reader.lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) {
-            if let Some(state) =
-                sessions.iter().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(id))
+            if let Some(state) = sessions
+                .iter()
+                .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(id))
             {
                 if tx.blocking_send(state.clone()).is_err() {
                     return;
@@ -838,9 +899,10 @@ async fn action_handler(
     if !state.write_enabled {
         return (StatusCode::FORBIDDEN, "这条链接没有写权限").into_response();
     }
-    let result = tokio::task::spawn_blocking(move || send_action(&id, &body.kind, body.text.as_deref()))
-        .await
-        .unwrap_or_else(|_| serde_json::json!({ "ok": false, "err": "内部错误" }));
+    let result =
+        tokio::task::spawn_blocking(move || send_action(&id, &body.kind, body.text.as_deref()))
+            .await
+            .unwrap_or_else(|_| serde_json::json!({ "ok": false, "err": "内部错误" }));
     Json(result).into_response()
 }
 
@@ -940,16 +1002,16 @@ async fn resize_handler(
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
     if body.cols == 0 || body.rows == 0 {
-        return Json(serde_json::json!({ "ok": false, "err": "cols/rows 必须 > 0" })).into_response();
+        return Json(serde_json::json!({ "ok": false, "err": "cols/rows 必须 > 0" }))
+            .into_response();
     }
     // 防离谱尺寸
     let cols = body.cols.min(300);
     let rows = body.rows.min(200);
-    let result = tokio::task::spawn_blocking(move || {
-        send_resize(&id, cols, rows, body.cell_w, body.cell_h)
-    })
-    .await
-    .unwrap_or_else(|_| serde_json::json!({ "ok": false, "err": "内部错误" }));
+    let result =
+        tokio::task::spawn_blocking(move || send_resize(&id, cols, rows, body.cell_w, body.cell_h))
+            .await
+            .unwrap_or_else(|_| serde_json::json!({ "ok": false, "err": "内部错误" }));
     Json(result).into_response()
 }
 
@@ -988,9 +1050,11 @@ async fn pump_watch(mut socket: WebSocket, id: String) {
 
     while let Some(frame) = rx.recv().await {
         let msg = match frame {
-            Frame::Header { cols, rows } => {
-                Message::Text(serde_json::json!({ "cols": cols, "rows": rows }).to_string().into())
-            }
+            Frame::Header { cols, rows } => Message::Text(
+                serde_json::json!({ "cols": cols, "rows": rows })
+                    .to_string()
+                    .into(),
+            ),
             Frame::Bytes(b) => Message::Binary(b.into()),
         };
         if socket.send(msg).await.is_err() {
@@ -1004,8 +1068,12 @@ async fn pump_watch(mut socket: WebSocket, id: String) {
 /// 阻塞线程里跑：连 smeltd、发 watch、读 header、snapshot、后续实时字节，
 /// 都塞进 channel 交给上面那个 async 循环转发。
 fn watch_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<Frame>) {
-    let Ok(conn) = UnixStream::connect(sock_path()) else { return };
-    let Ok(mut writer) = conn.try_clone() else { return };
+    let Ok(conn) = UnixStream::connect(sock_path()) else {
+        return;
+    };
+    let Ok(mut writer) = conn.try_clone() else {
+        return;
+    };
     if writeln!(writer, "{}", serde_json::json!({ "op": "watch", "id": id })).is_err() {
         return;
     }
@@ -1015,7 +1083,9 @@ fn watch_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<Frame>) {
     if reader.read_line(&mut line).is_err() || line.is_empty() {
         return; // 会话不存在：smeltd 直接关连接，什么都不发（见 handle_watch）
     }
-    let Ok(header) = serde_json::from_str::<serde_json::Value>(&line) else { return };
+    let Ok(header) = serde_json::from_str::<serde_json::Value>(&line) else {
+        return;
+    };
     let cols = header["cols"].as_u64().unwrap_or(80) as u16;
     let rows = header["rows"].as_u64().unwrap_or(24) as u16;
     let replay_len = header["replay_len"].as_u64().unwrap_or(0) as usize;
@@ -1056,8 +1126,14 @@ mod tests {
     fn js_string_literal_escapes_script_breakout() {
         let evil = "</script><script>alert(1)</script>";
         let escaped = js_string_literal(evil);
-        assert!(!escaped.contains("</script>"), "转义后仍含裸露的 </script>：{escaped}");
-        assert!(escaped.contains("\\u003c"), "尖括号应被转成 \\u003c：{escaped}");
+        assert!(
+            !escaped.contains("</script>"),
+            "转义后仍含裸露的 </script>：{escaped}"
+        );
+        assert!(
+            escaped.contains("\\u003c"),
+            "尖括号应被转成 \\u003c：{escaped}"
+        );
     }
 
     #[test]
@@ -1077,7 +1153,10 @@ mod tests {
     fn html_escape_neutralizes_tag_breakout() {
         let evil = "<img src=x onerror=alert(1)>";
         let escaped = html_escape(evil);
-        assert!(!escaped.contains('<') && !escaped.contains('>'), "尖括号应被转义：{escaped}");
+        assert!(
+            !escaped.contains('<') && !escaped.contains('>'),
+            "尖括号应被转义：{escaped}"
+        );
     }
 
     #[test]
@@ -1095,10 +1174,22 @@ mod tests {
             cwd: None,
         };
         let page = render_session_list(&[evil], "tok");
-        assert!(!page.contains("<script>alert(1)</script>"), "未转义的 id 混进了列表页：{page}");
-        assert!(!page.contains("<img onerror=1>"), "未转义的 name 混进了列表页：{page}");
-        assert!(page.contains("&lt;img"), "转义后的 name 应该出现在列表里：{page}");
-        assert!(!page.contains("<b>问题</b>"), "未转义的 pending_question 混进了列表页：{page}");
+        assert!(
+            !page.contains("<script>alert(1)</script>"),
+            "未转义的 id 混进了列表页：{page}"
+        );
+        assert!(
+            !page.contains("<img onerror=1>"),
+            "未转义的 name 混进了列表页：{page}"
+        );
+        assert!(
+            page.contains("&lt;img"),
+            "转义后的 name 应该出现在列表里：{page}"
+        );
+        assert!(
+            !page.contains("<b>问题</b>"),
+            "未转义的 pending_question 混进了列表页：{page}"
+        );
         // 列表主标题是 name，不是裸 uuid
         assert!(page.contains("primary"), "应有主链接：{page}");
     }
@@ -1120,8 +1211,13 @@ mod tests {
             session_ord: 0,
             leaf_ord: 0,
         };
-        let (name, parent, project) =
-            resolve_display_name("uuid-here", Some("/p/quant-above-all"), None, None, Some(&gui));
+        let (name, parent, project) = resolve_display_name(
+            "uuid-here",
+            Some("/p/quant-above-all"),
+            None,
+            None,
+            Some(&gui),
+        );
         assert_eq!(name, "claude-quant");
         assert!(parent.is_none());
         assert_eq!(project, "quant-above-all");

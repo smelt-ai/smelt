@@ -31,7 +31,9 @@ fn claude_home(override_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = crate::login_env::claude_config_dir() {
         return PathBuf::from(dir);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".claude")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".claude")
 }
 
 /// 某个会话的 transcript 文件路径（`<项目目录>/<会话 id>.jsonl`）。
@@ -40,12 +42,16 @@ fn claude_home(override_dir: Option<&str>) -> PathBuf {
 /// 存在与否 = 这段对话有没有真正落盘 = 续接有没有可能成功。ACP 连接层靠它
 /// 避开注定失败的 `session/resume`（省下约 2 秒白等）。
 pub fn transcript_path(cwd: &str, session_id: &str, override_dir: Option<&str>) -> PathBuf {
-    projects_root(override_dir).join(project_dir(cwd)).join(format!("{session_id}.jsonl"))
+    projects_root(override_dir)
+        .join(project_dir(cwd))
+        .join(format!("{session_id}.jsonl"))
 }
 
 /// 某个项目的记忆目录（`<项目目录>/memory`）。
 pub fn memory_dir(cwd: &str, override_dir: Option<&str>) -> PathBuf {
-    projects_root(override_dir).join(project_dir(cwd)).join("memory")
+    projects_root(override_dir)
+        .join(project_dir(cwd))
+        .join("memory")
 }
 
 #[cfg(test)]
@@ -54,6 +60,9 @@ mod tests {
 
     #[test]
     fn project_dir_replaces_slashes_and_dots() {
-        assert_eq!(project_dir("/Users/c.chen/dev/smelt"), "-Users-c-chen-dev-smelt");
+        assert_eq!(
+            project_dir("/Users/c.chen/dev/smelt"),
+            "-Users-c-chen-dev-smelt"
+        );
     }
 }

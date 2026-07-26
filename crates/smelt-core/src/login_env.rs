@@ -26,8 +26,14 @@ struct LoginEnv {
 
 /// 要探测的变量：(名字, marker 前缀)。PATH 永远有值（进程自身 PATH 兜底），
 /// 其余四个探测不到/未设置时是 `None`，调用方回退各自的默认目录。
-const VARS: &[&str] =
-    &["PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "COPILOT_HOME", "XDG_CONFIG_HOME"];
+const VARS: &[&str] = &[
+    "PATH",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GROK_HOME",
+    "COPILOT_HOME",
+    "XDG_CONFIG_HOME",
+];
 
 fn login_env() -> &'static LoginEnv {
     static ENV: OnceLock<LoginEnv> = OnceLock::new();
@@ -49,7 +55,9 @@ fn probe() -> LoginEnv {
 
     let mut env = LoginEnv::default();
     if let Some(raw) = &raw {
-        env.path = extract_marked(raw, "PATH").filter(|p| !p.is_empty()).unwrap_or_default();
+        env.path = extract_marked(raw, "PATH")
+            .filter(|p| !p.is_empty())
+            .unwrap_or_default();
         env.claude_config_dir = extract_marked(raw, "CLAUDE_CONFIG_DIR").filter(|s| !s.is_empty());
         env.codex_home = extract_marked(raw, "CODEX_HOME").filter(|s| !s.is_empty());
         env.grok_home = extract_marked(raw, "GROK_HOME").filter(|s| !s.is_empty());
@@ -97,7 +105,10 @@ pub fn login_path() -> &'static str {
 /// 就真的踩过"开发机全局设了 CLAUDE_CONFIG_DIR，historia 测试假 HOME 沙盒
 /// 被越过"这个坑。
 fn resolve_override(var: &str, cached: &'static Option<String>) -> Option<String> {
-    std::env::var(var).ok().filter(|s| !s.is_empty()).or_else(|| cached.clone())
+    std::env::var(var)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cached.clone())
 }
 
 /// Claude Code 自定义 workspace 目录（`CLAUDE_CONFIG_DIR`），没设就是 `None`
@@ -145,10 +156,16 @@ mod tests {
                    __V_CLAUDE_CONFIG_DIR_B____V_CLAUDE_CONFIG_DIR_E__";
         let path = extract_marked(raw, "PATH").expect("应能抠出 PATH");
         assert_eq!(path, "/Users/me/.grok/bin:/usr/bin:/bin");
-        assert!(path.starts_with("/Users/me/.grok/bin"), "第一段目录不能被 OSC 噪音污染");
+        assert!(
+            path.starts_with("/Users/me/.grok/bin"),
+            "第一段目录不能被 OSC 噪音污染"
+        );
         // 没设置的变量应该是空字符串（"$VAR" 展开成空），不是 None——None 是
         // "没找到标记"这种更严重的失败，两者含义不同。
-        assert_eq!(extract_marked(raw, "CLAUDE_CONFIG_DIR"), Some(String::new()));
+        assert_eq!(
+            extract_marked(raw, "CLAUDE_CONFIG_DIR"),
+            Some(String::new())
+        );
     }
 
     #[test]
@@ -168,7 +185,10 @@ mod tests {
                    __V_CODEX_HOME_B__/custom/.codex__V_CODEX_HOME_E__\
                    __V_GROK_HOME_B____V_GROK_HOME_E__";
         assert_eq!(extract_marked(raw, "PATH").as_deref(), Some("/bin"));
-        assert_eq!(extract_marked(raw, "CODEX_HOME").as_deref(), Some("/custom/.codex"));
+        assert_eq!(
+            extract_marked(raw, "CODEX_HOME").as_deref(),
+            Some("/custom/.codex")
+        );
         assert_eq!(extract_marked(raw, "GROK_HOME").as_deref(), Some(""));
     }
 }

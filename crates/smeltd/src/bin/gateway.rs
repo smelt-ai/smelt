@@ -62,9 +62,15 @@ async fn main() {
 
     println!(
         "smelt 远程操作网关（{}）",
-        if write { "可写：input + approve/deny/reply" } else { "只读观战" }
+        if write {
+            "可写：input + approve/deny/reply"
+        } else {
+            "只读观战"
+        }
     );
-    println!("绑定：{addr}（默认只回环，不监听 0.0.0.0；跨机器访问用你自己的网：Tailscale / SSH 隧道）");
+    println!(
+        "绑定：{addr}（默认只回环，不监听 0.0.0.0；跨机器访问用你自己的网：Tailscale / SSH 隧道）"
+    );
     println!("分享链接（会话列表）：http://{addr}/?token={token}");
 
     if let Err(e) = axum::serve(listener, app).await {

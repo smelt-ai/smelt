@@ -100,9 +100,7 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind {bind}: {e}"));
     info!(%bind, "listening");
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, app).await.expect("server error");
 }
 
 fn load_ice_servers() -> Vec<IceServerConfig> {
@@ -122,7 +120,9 @@ fn load_ice_servers() -> Vec<IceServerConfig> {
 /// （`SMELT_ICE_SERVERS` 里直接写死 username/credential）照常工作，这个是
 /// 可选的升级路径，不强制迁移。
 fn load_turn_rest_config(room_ttl_secs: u64) -> Option<TurnRestConfig> {
-    let secret = env::var("SMELT_TURN_SECRET").ok().filter(|s| !s.is_empty())?;
+    let secret = env::var("SMELT_TURN_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let host = match env::var("SMELT_TURN_HOST").ok().filter(|s| !s.is_empty()) {
         Some(h) => h,
         None => {
@@ -194,17 +194,12 @@ async fn create_room(
     State(state): State<AppState>,
     body: Option<Json<CreateRoomReq>>,
 ) -> Result<Json<CreateRoomResp>, (StatusCode, Json<serde_json::Value>)> {
-    let ttl = body
-        .and_then(|b| b.ttl_secs)
-        .map(|s| s.min(86_400).max(60));
+    let ttl = body.and_then(|b| b.ttl_secs).map(|s| s.min(86_400).max(60));
     let created = state
         .create_room(ttl.map(Duration::from_secs))
         .map_err(|e| {
             let code = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
-            (
-                code,
-                Json(serde_json::json!({ "error": e.msg() })),
-            )
+            (code, Json(serde_json::json!({ "error": e.msg() })))
         })?;
     Ok(Json(CreateRoomResp {
         room: created.room,

@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use agent_client_protocol::schema::v1::{
-    ElicitationContentValue, Plan, PlanEntryStatus, PermissionOptionKind,
+    ElicitationContentValue, PermissionOptionKind, Plan, PlanEntryStatus,
 };
 
 use crate::acp_chat::AcpEntry;
@@ -244,8 +244,17 @@ impl Default for AcpSessionState {
 impl AcpSessionState {
     /// 冷恢复占位：只有落盘的历史消息 + 上次的 agent session id，还没有
     /// 连接。跟旧版 `AcpView::placeholder` 的字段初始化一一对应。
-    pub fn placeholder(entries: Vec<AcpEntry>, resume_session_id: Option<String>, reason: String) -> Self {
-        Self { entries, phase: AcpPhase::Ended(reason), acp_session_id: resume_session_id, ..Self::default() }
+    pub fn placeholder(
+        entries: Vec<AcpEntry>,
+        resume_session_id: Option<String>,
+        reason: String,
+    ) -> Self {
+        Self {
+            entries,
+            phase: AcpPhase::Ended(reason),
+            acp_session_id: resume_session_id,
+            ..Self::default()
+        }
     }
 
     /// smeltd 无缝升级续接：从升级前落进交接文件的快照重建活体状态。
@@ -282,7 +291,11 @@ impl AcpSessionState {
         self.permission
             .as_ref()
             .and_then(|p| p.raw_request_line.as_deref())
-            .or_else(|| self.elicitation.as_ref().and_then(|e| e.raw_request_line.as_deref()))
+            .or_else(|| {
+                self.elicitation
+                    .as_ref()
+                    .and_then(|e| e.raw_request_line.as_deref())
+            })
     }
 
     /// `should_persist` 不是从 `self` 能算出来的——它是"这次变化是怎么发生的"
@@ -321,10 +334,18 @@ fn elicit_field_view(f: &ElicitField) -> ElicitFieldView {
         title: f.title.clone(),
         kind: match &f.kind {
             ElicitFieldKind::Select(opts) => ElicitFieldKindView::Select(
-                opts.iter().map(|o| ElicitOptionView { label: o.label.clone() }).collect(),
+                opts.iter()
+                    .map(|o| ElicitOptionView {
+                        label: o.label.clone(),
+                    })
+                    .collect(),
             ),
             ElicitFieldKind::MultiSelect(opts) => ElicitFieldKindView::MultiSelect(
-                opts.iter().map(|o| ElicitOptionView { label: o.label.clone() }).collect(),
+                opts.iter()
+                    .map(|o| ElicitOptionView {
+                        label: o.label.clone(),
+                    })
+                    .collect(),
             ),
         },
     }
@@ -350,11 +371,17 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
 
     let skip_persist = matches!(
         ev,
-        AcpEvent::AgentChunk { .. } | AcpEvent::Plan(_) | AcpEvent::Model(_) | AcpEvent::Usage { .. }
+        AcpEvent::AgentChunk { .. }
+            | AcpEvent::Plan(_)
+            | AcpEvent::Model(_)
+            | AcpEvent::Usage { .. }
     );
     if !matches!(
         ev,
-        AcpEvent::UserChunk(_) | AcpEvent::Status(_) | AcpEvent::AvailableCommands(_) | AcpEvent::Usage { .. }
+        AcpEvent::UserChunk(_)
+            | AcpEvent::Status(_)
+            | AcpEvent::AvailableCommands(_)
+            | AcpEvent::Usage { .. }
     ) {
         state.awaiting_user_echo = false;
     }
@@ -379,7 +406,11 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 }
             }
         }
-        AcpEvent::Ready { session_id, kind, supports_image } => {
+        AcpEvent::Ready {
+            session_id,
+            kind,
+            supports_image,
+        } => {
             state.acp_session_id = Some(session_id.to_string());
             state.supports_image = supports_image;
             match kind {
@@ -398,7 +429,10 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         }
         AcpEvent::AgentChunk { thought, text } => {
             match state.entries.last_mut() {
-                Some(AcpEntry::Assistant { text: t, thought: th }) if *th == thought => {
+                Some(AcpEntry::Assistant {
+                    text: t,
+                    thought: th,
+                }) if *th == thought => {
                     t.push_str(&text);
                 }
                 _ => state.entries.push(AcpEntry::Assistant { text, thought }),
@@ -417,7 +451,13 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         }
         AcpEvent::ToolCallUpdate(u) => {
             let update_id = u.tool_call_id.to_string();
-            if let Some(AcpEntry::ToolCall { title, kind, status, output, .. }) = state
+            if let Some(AcpEntry::ToolCall {
+                title,
+                kind,
+                status,
+                output,
+                ..
+            }) = state
                 .entries
                 .iter_mut()
                 .rev()
@@ -444,7 +484,13 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.plan = Some(plan_view_from_acp(&p));
             state.phase = AcpPhase::Running;
         }
-        AcpEvent::Permission { question, tool_call_id, pub_options, responder, raw_request_line } => {
+        AcpEvent::Permission {
+            question,
+            tool_call_id,
+            pub_options,
+            responder,
+            raw_request_line,
+        } => {
             let options: Vec<PermissionOptionView> = pub_options
                 .iter()
                 .map(|o| PermissionOptionView {
@@ -463,7 +509,12 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.phase = AcpPhase::AwaitingApproval;
             outcome.notify = Some(("等你批准".to_string(), question, true));
         }
-        AcpEvent::Elicitation { message, fields, responder, raw_request_line } => {
+        AcpEvent::Elicitation {
+            message,
+            fields,
+            responder,
+            raw_request_line,
+        } => {
             state.elicitation = Some(LiveElicitation {
                 message: message.clone(),
                 raw_fields: fields,
@@ -517,7 +568,9 @@ pub fn note_prompt_sent(state: &mut AcpSessionState, shown_text: String) {
 /// 权限审批：`option_id` 对不上当前卡片的任何选项就什么都不做（客户端发的
 /// action 可能是过期请求——卡片已经因为别的原因被清掉）。
 pub fn select_permission(state: &mut AcpSessionState, option_id: &str) {
-    let Some(card) = &mut state.permission else { return };
+    let Some(card) = &mut state.permission else {
+        return;
+    };
     if !card.options.iter().any(|o| o.option_id == option_id) {
         return;
     }
@@ -534,8 +587,12 @@ pub fn select_permission(state: &mut AcpSessionState, option_id: &str) {
 /// 返回 true 表示这是「整卡单字段单选」的快捷路径，调用方应该紧接着调用
 /// `submit_elicitation`（旧版点了就直接提交，不用等再按一次「确定」）。
 pub fn choose_elicitation(state: &mut AcpSessionState, field_ix: usize, opt_ix: usize) -> bool {
-    let Some(card) = &mut state.elicitation else { return false };
-    let Some(field) = card.raw_fields.get(field_ix) else { return false };
+    let Some(card) = &mut state.elicitation else {
+        return false;
+    };
+    let Some(field) = card.raw_fields.get(field_ix) else {
+        return false;
+    };
     match &field.kind {
         ElicitFieldKind::Select(_) => {
             card.chosen.insert(field_ix, vec![opt_ix]);
@@ -556,11 +613,17 @@ pub fn choose_elicitation(state: &mut AcpSessionState, field_ix: usize, opt_ix: 
 /// 跟旧版 `submit_elicitation` 一致；字段没有選択就跳过（agent 那边按 schema
 /// 自己决定必填与否，这里不做客户端校验）。
 pub fn submit_elicitation(state: &mut AcpSessionState) {
-    let Some(mut card) = state.elicitation.take() else { return };
-    let Some(responder) = card.responder.take() else { return };
+    let Some(mut card) = state.elicitation.take() else {
+        return;
+    };
+    let Some(responder) = card.responder.take() else {
+        return;
+    };
     let mut content = BTreeMap::new();
     for (ix, field) in card.raw_fields.iter().enumerate() {
-        let Some(sel) = card.chosen.get(&ix) else { continue };
+        let Some(sel) = card.chosen.get(&ix) else {
+            continue;
+        };
         match &field.kind {
             ElicitFieldKind::Select(options) => {
                 if let Some(opt) = sel.first().and_then(|&i| options.get(i)) {
@@ -576,7 +639,10 @@ pub fn submit_elicitation(state: &mut AcpSessionState) {
                         _ => None,
                     })
                     .collect();
-                content.insert(field.key.clone(), ElicitationContentValue::StringArray(values));
+                content.insert(
+                    field.key.clone(),
+                    ElicitationContentValue::StringArray(values),
+                );
             }
         }
     }
@@ -609,11 +675,19 @@ pub fn should_auto_resume(state: &AcpSessionState) -> bool {
 /// smeltd 里活着，这正是这一整层要解决的问题。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AcpUserAction {
-    Prompt { text: String, images: Vec<PromptImage> },
+    Prompt {
+        text: String,
+        images: Vec<PromptImage>,
+    },
     Cancel,
     SetModel(String),
-    PermissionSelect { option_id: String },
-    ElicitationChoose { field_ix: usize, opt_ix: usize },
+    PermissionSelect {
+        option_id: String,
+    },
+    ElicitationChoose {
+        field_ix: usize,
+        opt_ix: usize,
+    },
     ElicitationSubmit,
     ElicitationDismiss,
 }
@@ -630,10 +704,24 @@ mod tests {
     #[test]
     fn agent_chunk_appends_and_merges_consecutive_same_kind() {
         let mut s = fresh_state();
-        apply_event(&mut s, AcpEvent::AgentChunk { thought: false, text: "he".into() });
-        apply_event(&mut s, AcpEvent::AgentChunk { thought: false, text: "llo".into() });
+        apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                thought: false,
+                text: "he".into(),
+            },
+        );
+        apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                thought: false,
+                text: "llo".into(),
+            },
+        );
         assert_eq!(s.entries.len(), 1);
-        assert!(matches!(&s.entries[0], AcpEntry::Assistant { text, thought: false } if text == "hello"));
+        assert!(
+            matches!(&s.entries[0], AcpEntry::Assistant { text, thought: false } if text == "hello")
+        );
         assert!(matches!(s.phase, AcpPhase::Running));
     }
 
@@ -646,7 +734,13 @@ mod tests {
         apply_event(&mut s, AcpEvent::UserChunk("hi".into()));
         assert_eq!(s.entries.len(), 1);
         // 任何非 UserChunk/Status/AvailableCommands/Usage 事件都清掉等回声窗口。
-        apply_event(&mut s, AcpEvent::AgentChunk { thought: false, text: "ok".into() });
+        apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                thought: false,
+                text: "ok".into(),
+            },
+        );
         assert!(!s.awaiting_user_echo);
         // 窗口关闭后再来的 UserChunk 是重放历史，正常追加。
         apply_event(&mut s, AcpEvent::UserChunk("old question".into()));
@@ -720,7 +814,13 @@ mod tests {
     #[test]
     fn should_persist_excludes_streaming_and_ephemeral_events() {
         let mut s = fresh_state();
-        let o = apply_event(&mut s, AcpEvent::AgentChunk { thought: false, text: "x".into() });
+        let o = apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                thought: false,
+                text: "x".into(),
+            },
+        );
         assert!(!o.should_persist);
         let o = apply_event(&mut s, AcpEvent::TurnEnded(StopReason::EndTurn));
         assert!(o.should_persist);
@@ -736,8 +836,14 @@ mod tests {
                 key: "k".into(),
                 title: "t".into(),
                 kind: ElicitFieldKind::Select(vec![
-                    crate::acp_conn::ElicitOption { value: V::String("a".into()), label: "A".into() },
-                    crate::acp_conn::ElicitOption { value: V::String("b".into()), label: "B".into() },
+                    crate::acp_conn::ElicitOption {
+                        value: V::String("a".into()),
+                        label: "A".into(),
+                    },
+                    crate::acp_conn::ElicitOption {
+                        value: V::String("b".into()),
+                        label: "B".into(),
+                    },
                 ]),
             }],
             chosen: Default::default(),
@@ -746,7 +852,10 @@ mod tests {
         });
         let auto_submit = choose_elicitation(&mut s, 0, 1);
         assert!(auto_submit);
-        assert_eq!(s.elicitation.as_ref().unwrap().chosen.get(&0), Some(&vec![1]));
+        assert_eq!(
+            s.elicitation.as_ref().unwrap().chosen.get(&0),
+            Some(&vec![1])
+        );
     }
 
     #[test]
@@ -759,8 +868,14 @@ mod tests {
                 key: "k".into(),
                 title: "t".into(),
                 kind: ElicitFieldKind::MultiSelect(vec![
-                    crate::acp_conn::ElicitOption { value: V::String("a".into()), label: "A".into() },
-                    crate::acp_conn::ElicitOption { value: V::String("b".into()), label: "B".into() },
+                    crate::acp_conn::ElicitOption {
+                        value: V::String("a".into()),
+                        label: "A".into(),
+                    },
+                    crate::acp_conn::ElicitOption {
+                        value: V::String("b".into()),
+                        label: "B".into(),
+                    },
                 ]),
             }],
             chosen: Default::default(),
@@ -769,9 +884,15 @@ mod tests {
         });
         let auto_submit = choose_elicitation(&mut s, 0, 0);
         assert!(!auto_submit); // multi-select 从不自动提交
-        assert_eq!(s.elicitation.as_ref().unwrap().chosen.get(&0), Some(&vec![0]));
+        assert_eq!(
+            s.elicitation.as_ref().unwrap().chosen.get(&0),
+            Some(&vec![0])
+        );
         choose_elicitation(&mut s, 0, 0); // 再点一次 = 取消
-        assert_eq!(s.elicitation.as_ref().unwrap().chosen.get(&0), Some(&vec![]));
+        assert_eq!(
+            s.elicitation.as_ref().unwrap().chosen.get(&0),
+            Some(&vec![])
+        );
     }
 
     #[test]

@@ -37,7 +37,6 @@ use gpui_component::ActiveTheme;
 use gpui_component::text::{MarkdownNode, MarkdownParseContext, TextView, markdown_ast};
 use sha2::{Digest, Sha256};
 
-
 /// `~/.smelt/mermaid_cache/`——照抄 `tasks_dir()`/`worktrees_root()` 的模式：
 /// `Option<PathBuf>` + 用时自己 `create_dir_all`，不在这里建目录。
 fn mermaid_cache_dir() -> Option<PathBuf> {

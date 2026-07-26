@@ -7,7 +7,7 @@
 //! 运行时内部任何 panic 都转成 `Err`，而不是让调用方所在的进程整个消失。
 
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// 在临时 tokio current-thread 运行时里跑一个 future，捕获其中的 panic。
 ///
