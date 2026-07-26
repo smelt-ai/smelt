@@ -873,6 +873,9 @@ struct WsState {
     /// 文件树里被折叠起来的项目根（多根时）。
     #[serde(default)]
     collapsed_file_tree_roots: Vec<String>,
+    /// 会话侧栏里被折叠起来的项目根。
+    #[serde(default)]
+    collapsed_projects: Vec<String>,
     /// Git 页左栏（变更文件列表）拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     git_left_w: Option<f32>,
@@ -1815,7 +1818,10 @@ impl Workspace {
             close_project_target: None,
             projects,
             active_project: None,
-            collapsed_projects: HashSet::new(),
+            collapsed_projects: saved
+                .as_ref()
+                .map(|s| s.collapsed_projects.iter().cloned().collect())
+                .unwrap_or_default(),
             collapsed_roots: saved
                 .as_ref()
                 .map(|s| s.collapsed_file_tree_roots.iter().cloned().collect())
@@ -2759,6 +2765,7 @@ impl Workspace {
                 .map(f32::from),
             pinned_file_tree_roots: self.pinned_roots.clone(),
             collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
+            collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
             ..Default::default()
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
@@ -7315,6 +7322,31 @@ mod pane_state_tests {
             }
             _ => panic!("应当反序列化成 Leaf"),
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_state_tests {
+    use super::WsState;
+
+    #[test]
+    fn collapsed_projects_roundtrip() {
+        let state = WsState {
+            collapsed_projects: vec!["/repo/smelt".into(), "/repo/pulse".into()],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: WsState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.collapsed_projects, state.collapsed_projects);
+    }
+
+    #[test]
+    fn old_archive_without_collapsed_projects_still_loads() {
+        let restored: WsState = serde_json::from_str(r#"{"projects":["/repo/smelt"]}"#).unwrap();
+
+        assert!(restored.collapsed_projects.is_empty());
     }
 }
 

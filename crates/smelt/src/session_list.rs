@@ -401,6 +401,7 @@ impl Workspace {
                             if !ws.collapsed_projects.remove(&root) {
                                 ws.collapsed_projects.insert(root);
                             }
+                            ws.save_state(cx);
                             cx.notify();
                         });
                     })
