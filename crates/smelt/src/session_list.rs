@@ -182,9 +182,8 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    // 组间留白：十来个项目排下来，靠这一档间距 + 项目名比会话名大一档 +
-                    // group_body 的缩进引导线一起把层级立住，不靠色带。
-                    .mt_4()
+                    // 第一组贴近列表顶部；后续项目保留 8px 组间距，兼顾层级和信息密度。
+                    .when(pix > 0, |d| d.mt_2())
                     .px_3()
                     .py(px(4.))
                     .cursor_pointer()

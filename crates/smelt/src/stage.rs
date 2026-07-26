@@ -1,14 +1,12 @@
-//! 会话舞台的头部（44px：类型点 + 会话名 + 状态胶囊 + 副标题 + split/菜单）
-//! 与终端会话的底条（26px：launch 名 · 相位 · 快捷键提示）。
+//! 会话舞台的头部（44px：类型点 + 会话名 + 状态胶囊 + 副标题 + split）
+//! 终端与 ACP 会话共用这一层，避免在终端底部重复展示状态和快捷键。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::*;
 
-use crate::{AgentStatus, MainView, RenameTarget, SessionKind, Workspace, ui_theme};
+use crate::{AgentStatus, MainView, SessionKind, Workspace, ui_theme};
 
 /// 状态胶囊文案（与会话列表副标题同一套口径）。
 fn phase_text(status: AgentStatus) -> &'static str {
@@ -132,9 +130,6 @@ impl Workspace {
         };
 
         let e_split = this.clone();
-        let e_menu = this.clone();
-        // 分屏会话里「关闭会话」= 连所有分屏一起关，文案要点明（关单个 pane 用 ⌘W）。
-        let multi_pane = sess.pane_count() > 1;
         Some(
             div()
                 .h(px(44.))
@@ -211,93 +206,8 @@ impl Workspace {
                         .on_click(move |_ev, _window, cx| {
                             e_split.update(cx, |ws, cx| ws.split_active(Axis::Horizontal, cx));
                         })
-                }))
-                .child(
-                    // ⋯ 菜单：重命名 / 关闭会话（与会话行右键同款操作）。
-                    div()
-                        .id("stage-more")
-                        .px_1()
-                        .text_base()
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                        .child("⋯")
-                        .context_menu(move |menu, _window, _cx| {
-                            let e_rename = e_menu.clone();
-                            let e_close = e_menu.clone();
-                            menu.item(PopupMenuItem::new("重命名").on_click(
-                                move |_ev, window, cx| {
-                                    e_rename.update(cx, |ws, cx| {
-                                        let ix = ws.active_session;
-                                        ws.start_rename(RenameTarget::Session(ix), window, cx);
-                                    });
-                                },
-                            ))
-                            .item(
-                                PopupMenuItem::new(if multi_pane {
-                                    "关闭整个会话（含全部分屏）"
-                                } else {
-                                    "关闭会话"
-                                })
-                                .on_click(
-                                    move |_ev, _window, cx| {
-                                        e_close.update(cx, |ws, cx| {
-                                            let ix = ws.active_session;
-                                            ws.close_session(ix, cx);
-                                        });
-                                    },
-                                ),
-                            )
-                        }),
-                ),
+                })),
         )
     }
 
-    /// 26px 终端底条：launch 名 · 相位 · 右侧快捷键提示。仅 Term 会话显示。
-    pub(crate) fn render_terminal_status_bar(&mut self, cx: &mut Context<Self>) -> Option<Div> {
-        let sess = self.sessions.get(self.active_session)?;
-        let SessionKind::Term { active, .. } = &sess.kind else {
-            return None;
-        };
-        let status = sess.status(cx);
-        let launch = match active.read(cx).launch_kind() {
-            crate::terminal_view::LaunchKind::Claude => "claude",
-            crate::terminal_view::LaunchKind::Codex => "codex",
-            crate::terminal_view::LaunchKind::Copilot => "copilot",
-            _ => "shell",
-        };
-        let panes = sess.pane_count();
-        Some(
-            div()
-                .h(px(26.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_4()
-                .bg(rgb(ui_theme::bg_status()))
-                .border_t_1()
-                .border_color(rgb(ui_theme::border_dim()))
-                .text_xs()
-                .font_family("monospace")
-                .text_color(rgb(ui_theme::text_faint()))
-                .child(launch)
-                .when(panes > 1, |d| d.child(format!("{panes} 分屏")))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .child(
-                            div()
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(ui_theme::session_dot_color(status)),
-                        )
-                        .child(phase_text(status)),
-                )
-                .child(div().flex_1())
-                .child("split ⌘D · 关闭 ⌘W"),
-        )
-    }
 }

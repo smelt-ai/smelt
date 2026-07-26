@@ -4742,13 +4742,13 @@ impl Workspace {
                     .font_bold()
                     .text_color(fg)
                     .text_lg()
-                    .child("确定退出 Smelt 吗？"),
+                    .child("退出 Smelt？"),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(muted)
-                    .child("退出工作台后，后台守护进程仍在运行，但当前活动的终端连接将被断开。"),
+                    .child("后台会话将继续运行，当前连接会断开。"),
             )
             .child(
                 h_flex()
@@ -4768,7 +4768,7 @@ impl Workspace {
                     ))
                     .child(Self::modal_button(
                         "confirm-quit",
-                        "确定退出",
+                        "退出",
                         tint,
                         hover,
                         accent_text,
@@ -5795,12 +5795,11 @@ impl Render for Workspace {
             view.update(cx, |v, cx| v.maybe_auto_resume(window, cx));
         }
 
-        // 主内容（会话舞台）：舞台头 + 当前会话（分屏树 / ACP 消息流）+ 终端底条。
+        // 主内容（会话舞台）：统一舞台头 + 当前会话（分屏树 / ACP 消息流）。
         // 需 .flex()，否则单 pane 的叶子 flex_1 不生效、塌缩到内容高度（边框不到底）。
         // 旧右侧「结构面板」已被 inspector + 舞台头承接，不再渲染。
         let content = if self.sessions.get(self.active_session).is_some() {
             let stage_header = self.render_stage_header(cx);
-            let term_bar = self.render_terminal_status_bar(cx);
             div()
                 .flex_1()
                 .min_w_0()
@@ -5823,7 +5822,6 @@ impl Render for Workspace {
                         },
                     ),
                 )
-                .children(term_bar)
         } else {
             // 空状态：引导用户新建会话 / 打开项目。
             let btn = |id: &'static str, label: &'static str| {
@@ -6145,13 +6143,39 @@ impl Render for Workspace {
                                         .child(b)
                                 })),
                         )
-                        // 右侧：铃铛（通知面板）+ 齿轮（外观设置）。stop_propagation 避免触发拖拽。
+                        // 右侧：帮助、用量、通知、Agent 与设置。stop_propagation 避免触发拖拽。
                         .child(
                             h_flex()
                                 .items_center()
                                 .gap_1()
                                 // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
                                 .pr_2()
+                                .child(
+                                    div()
+                                        .id("help-entry")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .text_color(c_muted)
+                                        .hover(|s| s.bg(c_border))
+                                        .child("?")
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("帮助文档")
+                                                .build(window, cx)
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|_this, _, _w, cx| {
+                                                cx.stop_propagation();
+                                                cx.open_url("https://smelt.onoo.io/");
+                                            }),
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .id("usage-entry")
