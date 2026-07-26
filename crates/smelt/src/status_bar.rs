@@ -1,17 +1,15 @@
-//! 底部状态栏（26px，mono）：⎇ 分支 · agent 状态 · 项目/阻塞计数（点击进总览）
+//! 底部状态栏（26px，mono）：⎇ 分支 · agent 状态 · 项目/阻塞计数
 //! · 右侧版本号（带更新红点，点击跳 GitHub）。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::*;
 
-use crate::{AgentStatus, MainView, Workspace, ui_theme};
+use crate::{AgentStatus, Workspace, ui_theme};
 
 impl Workspace {
     /// 26px 底部状态栏。
     pub(crate) fn render_status_bar(&mut self, cx: &mut Context<Self>) -> Div {
-        let this = cx.entity();
-
         // ⎇ 当前项目分支（repo_info 缓存；拿不到就不显示）。
         let cwd = self.cur().and_then(|s| s.cwd(cx));
         let branch = cwd
@@ -65,7 +63,6 @@ impl Workspace {
             concat!("v", env!("CARGO_PKG_VERSION")).into_any_element()
         };
 
-        let e_overview = this.clone();
         div()
             .h(px(26.))
             .flex_shrink_0()
@@ -93,7 +90,8 @@ impl Workspace {
                     .child(div().text_color(rgb(agent_color)).child(agent_text)),
             )
             .child(
-                // 项目/阻塞计数：点击盖出会话总览（旧「总览」页入口落位在这）。
+                // 项目/阻塞计数只做状态展示；会话操作统一留在左侧列表，不再跳转
+                // 到重复展示同一批会话的“总览”卡片页。
                 div()
                     .id("status-projects")
                     .text_color(if blocked > 0 {
@@ -101,15 +99,7 @@ impl Workspace {
                     } else {
                         rgb(ui_theme::text_muted())
                     })
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                    .child(projects_text)
-                    .on_click(move |_ev, window, cx| {
-                        e_overview.update(cx, |ws, cx| {
-                            ws.refresh_git(cx); // 进总览 → 后台刷新 git 卡片信息
-                            ws.set_stage_override(Some(MainView::Overview), window, cx);
-                        });
-                    }),
+                    .child(projects_text),
             )
             .child(div().flex_1())
             .child(

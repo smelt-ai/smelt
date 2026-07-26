@@ -76,9 +76,7 @@ use terminal_view::TerminalView;
 use file_tree::{
     file_content_pane, file_tree, search_results_view, DeleteFileTarget, OpenFile, SearchState,
 };
-use git_panel::{
-    git_view, run_git, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo,
-};
+use git_panel::{git_view, BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo};
 use hotspot::hotspot_view;
 use session_history::{history_view, HistoryListState, HistoryPane};
 use settings::{load_appearance, load_launch_config, Appearance, LlmInputs};
@@ -2097,40 +2095,6 @@ impl Workspace {
                 );
                 // restore 完成后再查/升级守护，避免与 reattach 并行 handoff
                 this.check_daemon_outdated(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 后台刷新所有会话 cwd 的 git 信息（分支 + 改动数）到缓存，进总览时调用。
-    fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        let cwds: Vec<String> = self.sessions.iter().filter_map(|s| s.cwd(cx)).collect();
-        cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut out: Vec<(String, String, usize)> = Vec::new();
-                    for cwd in cwds {
-                        let branch = run_git(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
-                            .ok()
-                            .filter(|o| o.status.success())
-                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                        if let Some(branch) = branch {
-                            let changed = run_git(&cwd, &["status", "--porcelain"])
-                                .ok()
-                                .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
-                                .unwrap_or(0);
-                            out.push((cwd, branch, changed));
-                        }
-                    }
-                    out
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                for (cwd, branch, changed) in results {
-                    this.git_cache.insert(cwd, (branch, changed));
-                }
                 cx.notify();
             });
         })

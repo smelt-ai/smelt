@@ -1,5 +1,5 @@
 //! inspector：窗口右侧的图标条（56px 常驻）+ 面板（344px 可整体隐藏）。
-//! FILES / GIT / TASKS / MCP / SETTINGS 五个 tab，点击图标切换或收合；面板头
+//! FILES / GIT / TASKS / SKILL 四个 tab，点击图标切换或收合；面板头
 //! 带「展开」把对应的旧全屏页盖到会话舞台上（stage_override），功能零删除。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
@@ -9,20 +9,19 @@ use gpui::*;
 use gpui_component::*;
 
 use crate::tasks::TaskStore;
-use crate::{MainView, SETTINGS_PAGE_APPEARANCE, Workspace, ui_theme};
+use crate::{MainView, Workspace, ui_theme};
 
 /// 侧栏任务卡片的 hover group 名：卡片 `.group()` + 操作条 `.group_hover()` 配对，
 /// 鼠标移到卡片才显形「编辑 / 删除」。名字全卡共享，靠 DOM 祖先关系就近生效。
 const TASK_CARD_GROUP: &str = "insp-task-card";
 
-/// inspector 面板的五个 tab。
+/// inspector 面板的四个 tab。
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum InspectorTab {
     Files,
     Git,
     Tasks,
     Skills,
-    Settings,
 }
 
 impl InspectorTab {
@@ -32,7 +31,6 @@ impl InspectorTab {
             Self::Git => "GIT",
             Self::Tasks => "TASKS",
             Self::Skills => "SKILL",
-            Self::Settings => "SET",
         }
     }
 
@@ -43,7 +41,7 @@ impl InspectorTab {
             Self::Files => Some(MainView::Files),
             Self::Git => Some(MainView::Git),
             Self::Tasks => Some(MainView::Tasks),
-            Self::Skills | Self::Settings => None,
+            Self::Skills => None,
         }
     }
 }
@@ -182,15 +180,9 @@ impl Workspace {
                 InspectorTab::Skills,
                 0,
                 open && cur == InspectorTab::Skills,
-                this.clone(),
-            ))
-            .child(div().flex_1())
-            .child(item(
-                InspectorTab::Settings,
-                0,
-                open && cur == InspectorTab::Settings,
                 this,
             ))
+            .child(div().flex_1())
     }
 
     /// 面板统一头：36px，标题 + 可选「展开」（盖到舞台）按钮 + 自定义右侧内容。
@@ -242,7 +234,6 @@ impl Workspace {
             InspectorTab::Git => self.render_inspector_git(window, cx),
             InspectorTab::Tasks => self.render_inspector_tasks(cx),
             InspectorTab::Skills => self.render_inspector_skills(cx),
-            InspectorTab::Settings => self.render_inspector_settings(cx),
         };
         div()
             .w(px(344.))
@@ -651,63 +642,4 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// SETTINGS 面板：分组列表，点击跳独立设置窗对应页（面板内嵌不现实——
-    /// 设置页组件按 900px 窗口版式设计，见方案）。
-    fn render_inspector_settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let this = cx.entity();
-        let header = self.inspector_header("SETTINGS", InspectorTab::Settings, cx);
-        // 页序与 settings.rs `render_settings_content` 末尾 pages(vec![...]) 一致。
-        let pages: [(&'static str, usize); 6] = [
-            ("外观", SETTINGS_PAGE_APPEARANCE),
-            ("桌面宠物", 1),
-            ("启动", 2),
-            ("Agent 集成", 3),
-            ("更新", crate::SETTINGS_PAGE_UPDATE),
-            ("远程", 5),
-        ];
-        let mut list = div()
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2();
-        for (label, ix) in pages {
-            let e = this.clone();
-            list = list.child(
-                div()
-                    .id(("inspector-set", ix))
-                    .px_3()
-                    .py_2()
-                    .rounded(px(7.))
-                    .text_sm()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .cursor_pointer()
-                    .hover(|d| {
-                        d.bg(rgb(ui_theme::bg_hover()))
-                            .text_color(rgb(ui_theme::text_bright()))
-                    })
-                    .child(label)
-                    .on_click(move |_ev, window, cx| {
-                        e.update(cx, |ws, cx| {
-                            if ws.llm_inputs.is_none() {
-                                ws.init_llm_inputs(window, cx);
-                            }
-                            ws.settings_page_ix = ix;
-                            ws.settings_page_nonce += 1;
-                            ws.open_settings_window(cx);
-                        });
-                    }),
-            );
-        }
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(list)
-            .into_any_element()
-    }
 }
