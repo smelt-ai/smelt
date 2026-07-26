@@ -323,7 +323,7 @@ impl AcpView {
             InputState::new(window, cx)
                 .placeholder("给 agent 的指令：@ 引文件，/ 用命令，Enter 发送，Shift+Enter 换行")
                 .multi_line(true)
-                .auto_grow(1, 8)
+                .auto_grow(3, 10)
         });
         self._input_sub = Some(cx.subscribe_in(
             &input,
@@ -1635,156 +1635,93 @@ impl Render for AcpView {
         });
 
         let input_row = self.input.as_ref().map(|input| {
-            v_flex()
-                .border_t_1()
-                .border_color(t.border)
-                .child(
-                    // 底部工具栏：上下文/命令数量/agent 名这类元信息用小胶囊展示，
-                    // 跟输入框本体分层，不抢文字输入的视觉重量。
-                    h_flex()
-                        .px_3()
-                        .pt_2()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            // 点一下就在输入框补个 `@` 并聚焦，补全菜单随即弹出
-                            // ——这个胶囊以前是纯装饰，点不动。
-                            div()
-                                .id("acp-at-pill")
-                                .px_2p5()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(ui_theme::overlay(0x18))
-                                .text_xs()
-                                .text_color(gpui::rgb(ui_theme::text_muted()))
-                                .cursor_pointer()
-                                .hover(|d| d.opacity(0.8))
-                                .child("@ 引用文件")
-                                .on_click(cx.listener(|this, _ev, window, cx| {
-                                    this.insert_prompt_text("@", window, cx);
-                                })),
-                        )
-                        .when(!self.available_commands.is_empty(), |row| {
-                            // 斜杠命令：点开列出来、点一条填进输入框。以前只显示
-                            // 「N 条命令」这个数字——看得见、点不开、用不上。
-                            let cmds = self.available_commands.clone();
-                            let n = cmds.len();
-                            let this = cx.entity();
-                            row.child(
-                                // 触发器必须是 Button：gpui-component 的
-                                // DropdownMenu（左键）只对 Button 实现，挂在普通
-                                // div 上只能用 context_menu，那是右键——等于点不动。
-                                Button::new("acp-commands-pill")
-                                    .ghost()
-                                    .xsmall()
-                                    .label(format!("/ {n} 条命令 ▾"))
-                                    .text_color(gpui::rgb(ui_theme::text_muted()))
-                                    .dropdown_menu(move |menu, _window, _cx| {
-                                        let mut menu = menu.item(PopupMenuItem::label("斜杠命令"));
-                                        // 菜单塞不下几十条，列前 20 条（够覆盖常用的）
-                                        for (name, desc) in cmds.iter().take(20) {
-                                            let label = if desc.trim().is_empty() {
-                                                format!("/{name}")
-                                            } else {
-                                                format!("/{name} — {desc}")
-                                            };
-                                            let insert = format!("/{name}");
-                                            let this = this.clone();
-                                            menu = menu.item(PopupMenuItem::new(label).on_click(
-                                                move |_ev, window, cx| {
-                                                    let insert = insert.clone();
-                                                    this.update(cx, |v, cx| {
-                                                        v.insert_prompt_text(&insert, window, cx)
-                                                    });
-                                                },
-                                            ));
-                                        }
-                                        menu
-                                    }),
-                            )
-                        })
-                        .children(self.usage.map(|(used, size)| {
-                            // 上下文用量：接近用满时变色告警——「还剩多少」是决定
-                            // 要不要 /compact 的依据，不该藏起来。
-                            let pct = ((used as f64 / size as f64) * 100.0).round() as u32;
-                            let color = if pct >= 90 {
-                                ui_theme::red()
-                            } else if pct >= 75 {
-                                ui_theme::yellow()
-                            } else {
-                                ui_theme::text_muted()
-                            };
-                            div()
-                                .px_2p5()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(gpui::rgba(0x80808020))
-                                .text_xs()
-                                .text_color(gpui::rgb(color))
-                                .child(format!("上下文 {pct}%"))
-                        }))
-                        .child({
-                            // 模型胶囊：紫色。协议没上报模型时显示适配器名并加
-                            // 「适配器」前缀，免得把包名读成模型名。
-                            // 有候选就用 Button 触发左键下拉（见上面命令胶囊的注释）。
-                            let label = if pill_is_model {
-                                pill_text.clone()
-                            } else {
-                                format!("适配器 {pill_text}")
-                            };
-                            let color = if pill_is_model {
-                                ui_theme::purple()
-                            } else {
-                                ui_theme::text_muted()
-                            };
-                            if model_options.len() > 1 {
-                                let cur = current_model.clone();
-                                let opts = model_options.clone();
-                                let this = cx.entity();
-                                Button::new("acp-model-pill")
-                                    .ghost()
-                                    .xsmall()
-                                    .label(format!("{label} ▾"))
-                                    .text_color(gpui::rgb(color))
-                                    .dropdown_menu(move |menu, _window, _cx| {
-                                        let mut menu = menu.item(PopupMenuItem::label("切换模型"));
-                                        for (value, name) in &opts {
-                                            let is_cur = cur.as_deref() == Some(name.as_str());
+            let usage_pill = self.usage.map(|(used, size)| {
+                let pct = ((used as f64 / size as f64) * 100.0).round() as u32;
+                let color = if pct >= 90 {
+                    ui_theme::red()
+                } else if pct >= 75 {
+                    ui_theme::yellow()
+                } else {
+                    ui_theme::text_muted()
+                };
+                div()
+                    .px_2p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(gpui::rgba(0x80808020))
+                    .text_xs()
+                    .text_color(gpui::rgb(color))
+                    .child(format!("上下文 {pct}%"))
+            });
+            let model_pill = {
+                let label = if pill_is_model {
+                    pill_text.clone()
+                } else {
+                    format!("适配器 {pill_text}")
+                };
+                let color = if pill_is_model {
+                    ui_theme::purple()
+                } else {
+                    ui_theme::text_muted()
+                };
+                if model_options.len() > 1 {
+                    let cur = current_model.clone();
+                    let opts = model_options.clone();
+                    let this = cx.entity();
+                    Button::new("acp-model-pill")
+                        .ghost()
+                        .xsmall()
+                        .label(format!("{label} ▾"))
+                        .text_color(gpui::rgb(color))
+                        .dropdown_menu(move |menu, _window, _cx| {
+                            let mut menu = menu.item(PopupMenuItem::label("切换模型"));
+                            for (value, name) in &opts {
+                                let is_cur = cur.as_deref() == Some(name.as_str());
+                                let value = value.clone();
+                                let this = this.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(name.clone()).checked(is_cur).on_click(
+                                        move |_ev, _window, cx| {
                                             let value = value.clone();
-                                            let this = this.clone();
-                                            // 用组件自带的 checked：勾选位由它统一
-                                            // 预留，所有名字对齐。自己拿 "✓ " / "   "
-                                            // 凑缩进对不齐——两者宽度并不相等。
-                                            menu = menu.item(
-                                                PopupMenuItem::new(name.clone())
-                                                    .checked(is_cur)
-                                                    .on_click(move |_ev, _window, cx| {
-                                                        let value = value.clone();
-                                                        this.update(cx, |v, _cx| {
-                                                            v.set_model(value)
-                                                        });
-                                                    }),
-                                            );
-                                        }
-                                        menu
-                                    })
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .px_2p5()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(ui_theme::overlay(0x18))
-                                    .text_xs()
-                                    .text_color(gpui::rgb(color))
-                                    .child(label)
-                                    .into_any_element()
+                                            this.update(cx, |v, _cx| v.set_model(value));
+                                        },
+                                    ),
+                                );
                             }
-                        }),
+                            menu
+                        })
+                        .into_any_element()
+                } else {
+                    div()
+                        .px_2p5()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(ui_theme::overlay(0x18))
+                        .text_xs()
+                        .text_color(gpui::rgb(color))
+                        .child(label)
+                        .into_any_element()
+                }
+            };
+            let composer = v_flex()
+                .w_full()
+                .max_w(px(920.))
+                .rounded_xl()
+                .border_1()
+                .border_color(t.border)
+                .bg(ui_theme::overlay(0x0c))
+                .shadow_sm()
+                .child(
+                    div()
+                        .px_4()
+                        .pt_4()
+                        .pb_2()
+                        .min_h(px(88.))
+                        .child(Input::new(input)),
                 )
                 // 待发图片的缩略图条：粘完得看得见「贴上了」，还得能反悔。
                 .when(!self.pending_images.is_empty(), |col| {
-                    let mut strip = h_flex().px_3().pt_2().gap_2().items_center().flex_wrap();
+                    let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
                     for (ix, im) in self.pending_images.iter().enumerate() {
                         strip = strip.child(
                             div()
@@ -1832,10 +1769,14 @@ impl Render for AcpView {
                 })
                 .child(
                     h_flex()
-                        .p_3()
+                        .px_4()
+                        .pt_2()
+                        .pb_4()
                         .gap_2()
-                        .items_end()
-                        .child(div().flex_1().child(Input::new(input)))
+                        .items_center()
+                        .children(usage_pill)
+                        .child(model_pill)
+                        .child(div().flex_1())
                         .when(matches!(self.phase, AcpPhase::Running), |row| {
                             row.child(
                                 div()
@@ -1873,7 +1814,16 @@ impl Render for AcpView {
                                     this.submit_input(window, cx);
                                 })),
                         ),
-                )
+                );
+
+            v_flex()
+                .border_t_1()
+                .border_color(t.border)
+                .bg(ui_theme::overlay(0x08))
+                .px_4()
+                .py_3()
+                .items_center()
+                .child(composer)
         });
 
         let plan_bar = self.render_plan_bar(cx);
