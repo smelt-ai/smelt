@@ -2141,6 +2141,26 @@ impl Workspace {
         project_root_of(&self.projects, cwd)
     }
 
+    /// 确保一个会话 cwd 背后的项目是实体，而不是只靠 `project_groups` 临时推导出来的
+    /// “隐式组”。否则最后一个会话关闭后，组会跟着 cwd 一起消失，看起来就像删会话
+    /// 顺手删了项目。
+    ///
+    /// 已落在某个已打开项目之下时不新增子项目；只有完全无主的 cwd 才成为项目根。
+    fn remember_session_project(&mut self, cwd: Option<&str>) {
+        let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
+            return;
+        };
+        let root = cwd.trim_end_matches('/');
+        if self.project_root_for_cwd(root).is_none()
+            && !self
+                .projects
+                .iter()
+                .any(|p| p.trim_end_matches('/') == root)
+        {
+            self.projects.push(root.to_string());
+        }
+    }
+
     /// 侧栏分组（见 ProjectGroup）。骨架是 `self.projects`——项目独立于会话存在，所以
     /// 一个会话都没有的项目照样出现（sessions 为空）。会话按 cwd 挂到所属项目下；挂不上
     /// 的（旧会话、临时目录）仍按自己的 cwd 自建隐式组接在后面。
@@ -2359,6 +2379,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_session_project(cwd.as_deref());
         let launch = launch_override.unwrap_or_else(|| {
             smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
         });
@@ -2512,6 +2533,9 @@ impl Workspace {
         label: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        self.remember_session_project(cwd.as_deref());
+        // spawn 在后台；先把项目落盘，即使进程启动失败也不能让用户刚选中的项目消失。
+        self.save_state(cx);
         let sid = new_sid();
         let cwd_bg = cwd.clone();
         let launch_owned = launch.map(str::to_string);
@@ -2992,6 +3016,14 @@ impl Workspace {
         if ix >= self.sessions.len() {
             return;
         }
+        // 兼容旧存档/旧创建路径留下的隐式项目：在移除最后一个能提供 cwd 的会话前，
+        // 先把它对应的项目实体化。这样“关闭会话”和“关闭项目”始终是两件事。
+        let project_root = self
+            .project_groups(cx)
+            .into_iter()
+            .find(|g| g.sessions.contains(&ix))
+            .map(|g| g.root);
+        self.remember_session_project(project_root.as_deref());
         for t in &self.sessions[ix].term_leaves() {
             terminal::kill_remote(t.read(cx).session_id());
         }
