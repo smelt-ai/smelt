@@ -99,7 +99,7 @@ fn fallback_snapshot(reason: &str) -> AcpSnapshot {
     AcpSnapshot {
         entries: Vec::new(),
         phase: AcpPhase::Ended(reason.to_string()),
-        pending_permission: None,
+        pending_permissions: Vec::new(),
         pending_elicitation: None,
         status_line: None,
         acp_session_id: None,
@@ -108,6 +108,7 @@ fn fallback_snapshot(reason: &str) -> AcpSnapshot {
         usage: None,
         plan: None,
         model: None,
+        config_options: Vec::new(),
         completed_unread: false,
         // 连接终态（连不上 smeltd / 握手失败 / 断线）值得存盘，跟旧版 Fatal
         // 事件一样不在"跳过持久化"的名单里。

@@ -22,13 +22,27 @@ use gpui_component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
 use agent_client_protocol::schema::v1::SessionId;
 
 use smelt_core::acp_client::{AcpClientHandle, AcpClientLaunch, spawn_acp_client};
-use smelt_core::acp_conn::{ModelState, PromptImage};
+use smelt_core::acp_conn::{ModelState, PromptImage, SessionConfigState};
 use smelt_core::acp_session::{
     AcpPhase, AcpSnapshot, AcpUserAction, ElicitFieldKindView, PendingElicitation,
     PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView,
 };
 use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec};
 use smelt_ui::ui_theme;
+
+/// Codex ACP 的 mode 值定义了审批与沙箱预设。只翻译其稳定的公开值；其他
+/// agent 的自定义模式保持 agent 自己给出的名称，避免 Smelt 误导权限语义。
+fn config_value_label(config_id: &str, value: &str, fallback: &str) -> String {
+    if config_id != "mode" {
+        return fallback.to_string();
+    }
+    match value {
+        "read-only" => "只读".to_string(),
+        "agent" => "需审批（工作区）".to_string(),
+        "agent-full-access" => "全自动（免审批，完整访问）".to_string(),
+        _ => fallback.to_string(),
+    }
+}
 
 /// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
 /// markdown 围栏这批纯逻辑现在都活在 `smelt_core::acp_chat`——不依赖 GPUI 也不
@@ -61,7 +75,7 @@ pub struct AcpView {
     sid: String,
     cwd: Option<String>,
     entries: Vec<AcpEntry>,
-    permission: Option<PendingPermission>,
+    permissions: Vec<PendingPermission>,
     elicitation: Option<PendingElicitation>,
     phase: AcpPhase,
     /// 回合结束且用户还没回应过 → Session 状态给绿点「有结果可看」。
@@ -119,12 +133,19 @@ pub struct AcpView {
     /// 模型状态：当前名 + 可切换的候选（协议给什么显示什么）；None = agent
     /// 没上报过，UI 就不显示模型胶囊，不拿适配器包名冒充。
     model: Option<ModelState>,
+    /// 除模型以外的 ACP 会话配置。agent 未上报则不显示。
+    config_options: Vec<SessionConfigState>,
     /// 手动展开了完整输出的工具调用（key = tool_call_id）。长输出默认折叠成
     /// 前几行 + 「展开」，回合态不落盘。
     expanded_tools: std::collections::HashSet<String>,
-    /// 冷恢复占位待自动续接：GUI 重启后第一次切到这个会话时自动 restart
-    /// （协议级 session/load 续接），免去手点「重新开始」。只消费一次——
-    /// 自动续接失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
+    /// 手动展开 / 收起了整个工具卡片（key = tool_call_id）。默认规则：
+    /// completed 收起，pending/in-progress/failed/等权限展开；用户点过后按这两组
+    /// 覆盖默认值。只属于本地浏览状态，不落盘。
+    expanded_tool_cards: std::collections::HashSet<String>,
+    collapsed_tool_cards: std::collections::HashSet<String>,
+    /// 冷恢复占位待自动启动：GUI 重启后第一次切到这个会话时自动 restart，
+    /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
+    /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
     auto_resume_pending: bool,
     scroll: gpui::ScrollHandle,
     focus_handle: FocusHandle,
@@ -186,10 +207,9 @@ impl AcpView {
         this
     }
 
-    /// 冷启动恢复用的占位：不起进程、没有输入框，显示「已结束」+「重新开始」。
-    /// `entries` 是上次落盘的历史消息（`Vec::new()` = 首次创建，还没有历史）；
-    /// `resume_session_id` 是上次握手成功后 agent 分配的 session id，有它才有
-    /// 机会在「重新开始」时真续接。
+    /// 冷启动恢复用的占位：首次显示时自动启动。`entries` 是上次落盘的历史消息
+    /// （`Vec::new()` = 首次创建，还没有历史）；`resume_session_id` 是上次握手
+    /// 成功后 agent 分配的 session id，有它时优先真续接。
     ///
     /// `saved_sid`：**这是让 GUI 重开后能真正"接上还活着的 smeltd 会话"而不是
     /// 每次都当新会话重新 spawn 子进程的关键**——smeltd 用 id 判断"这是不是同
@@ -212,15 +232,15 @@ impl AcpView {
         resume_session_id: Option<SessionId>,
         saved_sid: Option<String>,
     ) -> Self {
-        // 有旧 session id 的冷恢复占位才值得自动续接（没有 id 只能开全新会话，
-        // 丢 agent 侧上下文，留给用户手动决定）。先算，下面 struct 初始化会 move。
-        let auto_resume_pending = resume_session_id.is_some();
+        // 冷恢复会话首次显示就直接进入可用的对话页：有旧 session id 时续接，
+        // 没有时启动新一轮。历史仍先留在本地，守护端若能 attach 会用其快照覆盖。
+        let auto_resume_pending = true;
         Self {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
             entries,
-            permission: None,
+            permissions: Vec::new(),
             elicitation: None,
             status_line: None,
             phase: AcpPhase::Ended(reason),
@@ -243,7 +263,10 @@ impl AcpView {
             plan: None,
             plan_collapsed: false,
             model: None,
+            config_options: Vec::new(),
             expanded_tools: std::collections::HashSet::new(),
+            expanded_tool_cards: std::collections::HashSet::new(),
+            collapsed_tool_cards: std::collections::HashSet::new(),
             scroll: gpui::ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             _input_sub: None,
@@ -266,10 +289,11 @@ impl AcpView {
                 self.refresh_launch_from_settings,
             );
         }
-        self.permission = None;
+        self.permissions.clear();
         self.elicitation = None;
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
         self.model = None; // 模型等新会话握手后重新上报
+        self.config_options.clear();
         self.usage = None; // 上下文用量属于旧会话，别带到新的上
         self.completed_unread = false;
         self.phase = AcpPhase::Starting;
@@ -302,8 +326,8 @@ impl AcpView {
         }
     }
 
-    /// 切到本会话时的自动续接：冷恢复占位（Ended + 有旧 session id）第一次被
-    /// 激活就 restart，像终端一样「点开就是活的」。只触发一次，见字段注释。
+    /// 切到本会话时自动启动：冷恢复占位（Ended）第一次被激活就 restart，
+    /// 像终端一样「点开就是活的」。只触发一次，见字段注释。
     pub fn maybe_auto_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.auto_resume_pending {
             return;
@@ -696,7 +720,7 @@ impl AcpView {
         let should_persist = snap.should_persist;
         self.entries = snap.entries;
         self.phase = snap.phase;
-        self.permission = snap.pending_permission;
+        self.permissions = snap.pending_permissions;
         self.elicitation = snap.pending_elicitation;
         self.status_line = snap.status_line;
         self.acp_session_id = snap.acp_session_id.map(SessionId::new);
@@ -705,7 +729,9 @@ impl AcpView {
         self.usage = snap.usage;
         self.plan = snap.plan;
         self.model = snap.model;
+        self.config_options = snap.config_options;
         self.completed_unread = snap.completed_unread;
+        self.prune_tool_ui_state();
 
         if matches!(self.phase, AcpPhase::Ended(_)) {
             self.handle = None;
@@ -714,6 +740,54 @@ impl AcpView {
         self.scroll.scroll_to_bottom(); // 消息流跟随最新内容
         if should_persist {
             cx.emit(AcpViewEvent::Changed);
+        }
+        cx.notify();
+    }
+
+    /// 快照是全量覆盖，历史重放 / 新会话可能清空旧 entries；把只属于本地 UI
+    /// 的工具展开状态同步裁剪掉，避免长会话来回续接后集合无限长。
+    fn prune_tool_ui_state(&mut self) {
+        let live_ids: std::collections::HashSet<String> = self
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                AcpEntry::ToolCall { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        self.expanded_tools.retain(|id| live_ids.contains(id));
+        self.expanded_tool_cards.retain(|id| live_ids.contains(id));
+        self.collapsed_tool_cards.retain(|id| live_ids.contains(id));
+    }
+
+    fn tool_card_is_expanded(
+        &self,
+        id: &str,
+        status: ToolCallStatus,
+        has_pending_permission: bool,
+    ) -> bool {
+        if self.expanded_tool_cards.contains(id) {
+            return true;
+        }
+        if self.collapsed_tool_cards.contains(id) {
+            return false;
+        }
+        tool_card_default_expanded(status, has_pending_permission)
+    }
+
+    fn toggle_tool_card(
+        &mut self,
+        id: String,
+        status: ToolCallStatus,
+        has_pending_permission: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tool_card_is_expanded(&id, status, has_pending_permission) {
+            self.expanded_tool_cards.remove(&id);
+            self.collapsed_tool_cards.insert(id);
+        } else {
+            self.collapsed_tool_cards.remove(&id);
+            self.expanded_tool_cards.insert(id);
         }
         cx.notify();
     }
@@ -765,11 +839,13 @@ impl AcpView {
         self.model.as_ref().map(|m| m.current_name.clone())
     }
 
-    /// 切模型：值 id 来自协议给的候选列表。turn 跑着时也能切——协议允许，
-    /// 生效范围由 agent 决定（通常下一轮起效），我们不替它加限制。
-    fn set_model(&mut self, value_id: String) {
+    /// 写回 agent 上报的会话配置。四个 agent 共用 ACP 的标准接口。
+    fn set_config_option(&mut self, config_id: String, value_id: String) {
         if let Some(h) = &self.handle {
-            let _ = h.action_tx.try_send(AcpUserAction::SetModel(value_id));
+            let _ = h.action_tx.try_send(AcpUserAction::SetConfigOption {
+                config_id,
+                value_id,
+            });
         }
     }
 
@@ -965,7 +1041,9 @@ impl AcpView {
 
     /// ⌘⏎ 快捷批准：选第一个 allow 类选项（跟绿色主按钮同一目标）。
     fn pick_permission_primary(&mut self, cx: &mut Context<Self>) {
-        let Some(card) = &self.permission else { return };
+        let Some(card) = self.permissions.first() else {
+            return;
+        };
         let Some(pix) = card.options.iter().position(|o| {
             matches!(
                 o.kind,
@@ -974,21 +1052,21 @@ impl AcpView {
         }) else {
             return;
         };
-        self.pick_permission(pix, cx);
+        let option_id = card.options[pix].option_id.clone();
+        let tool_call_id = card.tool_call_id.clone();
+        self.pick_permission(&tool_call_id, &option_id, cx);
     }
 
     /// 审批按钮：把选中项发给 smeltd（真正消费 responder 回 RPC 是服务端的
     /// 事），卡片收起、相位回 Running 等下一份快照即可，不用本地抢跑。
-    fn pick_permission(&mut self, option_ix: usize, _cx: &mut Context<Self>) {
-        let Some(card) = &self.permission else { return };
-        let Some(opt) = card.options.get(option_ix) else {
-            return;
-        };
-        let option_id = opt.option_id.clone();
+    fn pick_permission(&mut self, tool_call_id: &str, option_id: &str, _cx: &mut Context<Self>) {
+        let tool_call_id = tool_call_id.to_string();
+        let option_id = option_id.to_string();
         if let Some(h) = &self.handle {
-            let _ = h
-                .action_tx
-                .try_send(AcpUserAction::PermissionSelect { option_id });
+            let _ = h.action_tx.try_send(AcpUserAction::PermissionSelect {
+                tool_call_id,
+                option_id,
+            });
         }
     }
 }
@@ -1066,18 +1144,15 @@ impl Render for AcpView {
             _ => None,
         };
 
-        // 权限审批按钮条：构建一次，优先内嵌进消息流里对应的工具卡片底部
-        // （凭 tool_call_id 关联，对齐设计稿「diff 卡片自带 Approve/Reject」）；
-        // 消息流里找不到对应卡片时退回独立卡片渲染——责任链只有一个出口，
-        // responder 不会既没人展示又没人消费。
-        let perm_target: Option<String> =
-            self.permission.as_ref().map(|c| c.tool_call_id.to_string());
-        let perm_embedded = perm_target.as_ref().is_some_and(|tid| {
-            self.entries
-                .iter()
-                .any(|e| matches!(e, AcpEntry::ToolCall { id, .. } if id == tid))
-        });
-        let mut perm_buttons: Option<gpui::AnyElement> = self.permission.as_ref().map(|card| {
+        // 每一条权限请求都有独立 responder，必须独立渲染和回执；不能再用单个
+        // `Option`/`take()`，否则同时到达的请求会互相覆盖。
+        let permission_tool_ids: std::collections::HashSet<String> = self
+            .permissions
+            .iter()
+            .map(|card| card.tool_call_id.clone())
+            .collect();
+        let permission_buttons = |card: &PendingPermission| {
+            let tool_call_id = card.tool_call_id.clone();
             let primary_ix = card.options.iter().position(|o| {
                 matches!(
                     o.kind,
@@ -1087,9 +1162,11 @@ impl Render for AcpView {
             let mut buttons = h_flex().gap_2().items_center().flex_wrap();
             if let Some(pix) = primary_ix {
                 let name = card.options[pix].name.clone();
+                let option_id = card.options[pix].option_id.clone();
+                let tool_call_id = tool_call_id.clone();
                 buttons = buttons.child(
                     div()
-                        .id(("acp-perm-primary", pix))
+                        .id(format!("acp-perm-primary-{option_id}"))
                         .px_4()
                         .py_2()
                         .rounded_lg()
@@ -1101,7 +1178,7 @@ impl Render for AcpView {
                         .hover(|d| d.opacity(0.9))
                         .child(format!("{name} ⌘⏎"))
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.pick_permission(pix, cx);
+                            this.pick_permission(&tool_call_id, &option_id, cx);
                         })),
                 );
             }
@@ -1113,9 +1190,11 @@ impl Render for AcpView {
                     opt.kind,
                     PermissionOptionKindView::RejectOnce | PermissionOptionKindView::RejectAlways
                 );
+                let option_id = opt.option_id.clone();
+                let tool_call_id = tool_call_id.clone();
                 buttons = buttons.child(
                     div()
-                        .id(("acp-perm-opt", ix))
+                        .id(format!("acp-perm-opt-{option_id}"))
                         .px_3()
                         .py_2()
                         .rounded_lg()
@@ -1127,12 +1206,12 @@ impl Render for AcpView {
                         .hover(|d| d.opacity(0.85))
                         .child(opt.name.clone())
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.pick_permission(ix, cx);
+                            this.pick_permission(&tool_call_id, &option_id, cx);
                         })),
                 );
             }
             buttons.into_any_element()
-        });
+        };
 
         // 消息流。
         let mut list = v_flex()
@@ -1223,6 +1302,9 @@ impl Render for AcpView {
                     let (total_added, total_removed) = diff_totals
                         .iter()
                         .fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
+                    let has_pending_permission = permission_tool_ids.contains(id);
+                    let card_expanded =
+                        self.tool_card_is_expanded(id, *status, has_pending_permission);
 
                     let header_right: gpui::AnyElement = if has_diff {
                         h_flex()
@@ -1249,16 +1331,40 @@ impl Render for AcpView {
                             .into_any_element()
                     };
 
+                    let id_for_toggle = id.clone();
+                    let status_for_toggle = *status;
                     let mut card = v_flex()
                         .rounded_lg()
                         .border_1()
                         .border_color(t.border)
                         .child(
                             h_flex()
+                                .id(("acp-tool-card-toggle", i))
                                 .px_4()
                                 .py_2p5()
                                 .gap_2()
                                 .items_center()
+                                .cursor_pointer()
+                                .hover(|d| d.bg(ui_theme::overlay(0x10)))
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        this.toggle_tool_card(
+                                            id_for_toggle.clone(),
+                                            status_for_toggle,
+                                            has_pending_permission,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(10.))
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(if card_expanded { "▾" } else { "▸" }),
+                                )
                                 .child(
                                     div()
                                         .text_sm()
@@ -1278,87 +1384,120 @@ impl Render for AcpView {
                                 )
                                 .child(header_right),
                         );
-                    for (part_ix, part) in output.iter().enumerate() {
-                        card = match part {
-                            ToolOutputPart::Diff {
-                                path,
-                                old_text,
-                                new_text,
-                            } => card.child(
-                                v_flex()
+                    if card_expanded {
+                        let mut rendered_output_part = false;
+                        for (part_ix, part) in output.iter().enumerate() {
+                            card = match part {
+                                ToolOutputPart::Diff {
+                                    path,
+                                    old_text,
+                                    new_text,
+                                } => {
+                                    rendered_output_part = true;
+                                    card.child(
+                                        v_flex()
+                                            .px_4()
+                                            .pb_3()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(path.clone()),
+                                            )
+                                            .child(render_diff_lines(
+                                                old_text.as_deref().unwrap_or(""),
+                                                new_text,
+                                                (i, part_ix),
+                                                t.border,
+                                                t.muted_foreground,
+                                            )),
+                                    )
+                                }
+                                ToolOutputPart::Text(text) if !text.trim().is_empty() => {
+                                    rendered_output_part = true;
+                                    // adapter 把工具输出包在 markdown 围栏里（```console…```），
+                                    // 当纯文本渲染会把 ``` 直接显示出来。剥掉再展示。
+                                    let body = strip_code_fence(text);
+                                    let lines: Vec<&str> = body.lines().collect();
+                                    let total = lines.len();
+                                    let key = id.to_string();
+                                    let expanded = self.expanded_tools.contains(&key);
+                                    // 默认只出前 8 行：以前是 max_h + overflow_hidden，
+                                    // 内容被硬切掉且没有任何展开入口，等于看不到全部。
+                                    let shown = if expanded || total <= TOOL_OUTPUT_PREVIEW_LINES {
+                                        body.to_string()
+                                    } else {
+                                        lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
+                                    };
+                                    let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
+                                    card.child(
+                                        v_flex()
+                                            .px_4()
+                                            .pb_3()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .font_family("monospace")
+                                                    .child(shown),
+                                            )
+                                            .when(need_toggle, |d| {
+                                                let key = key.clone();
+                                                d.child(
+                                                    div()
+                                                        .id(("acp-tool-toggle", i * 100 + part_ix))
+                                                        .text_xs()
+                                                        .text_color(gpui::rgb(ui_theme::blue()))
+                                                        .cursor_pointer()
+                                                        .hover(|d| d.opacity(0.8))
+                                                        .child(if expanded {
+                                                            "收起".to_string()
+                                                        } else {
+                                                            format!("展开全部 {total} 行")
+                                                        })
+                                                        .on_mouse_down(
+                                                            gpui::MouseButton::Left,
+                                                            cx.listener(
+                                                                move |this, _ev, _window, cx| {
+                                                                    if !this
+                                                                        .expanded_tools
+                                                                        .remove(&key)
+                                                                    {
+                                                                        this.expanded_tools
+                                                                            .insert(key.clone());
+                                                                    }
+                                                                    cx.stop_propagation();
+                                                                    cx.notify();
+                                                                },
+                                                            ),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                }
+                                ToolOutputPart::Text(_) => card,
+                            };
+                        }
+                        if !rendered_output_part {
+                            card = card.child(
+                                div()
                                     .px_4()
                                     .pb_3()
-                                    .gap_1()
-                                    .child(div().text_xs().text_color(muted).child(path.clone()))
-                                    .child(render_diff_lines(
-                                        old_text.as_deref().unwrap_or(""),
-                                        new_text,
-                                        (i, part_ix),
-                                        t.border,
-                                        t.muted_foreground,
-                                    )),
-                            ),
-                            ToolOutputPart::Text(text) if !text.trim().is_empty() => {
-                                // adapter 把工具输出包在 markdown 围栏里（```console…```），
-                                // 当纯文本渲染会把 ``` 直接显示出来。剥掉再展示。
-                                let body = strip_code_fence(text);
-                                let lines: Vec<&str> = body.lines().collect();
-                                let total = lines.len();
-                                let key = id.to_string();
-                                let expanded = self.expanded_tools.contains(&key);
-                                // 默认只出前 8 行：以前是 max_h + overflow_hidden，
-                                // 内容被硬切掉且没有任何展开入口，等于看不到全部。
-                                let shown = if expanded || total <= TOOL_OUTPUT_PREVIEW_LINES {
-                                    body.to_string()
-                                } else {
-                                    lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
-                                };
-                                let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
-                                card.child(
-                                    v_flex()
-                                        .px_4()
-                                        .pb_3()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .font_family("monospace")
-                                                .child(shown),
-                                        )
-                                        .when(need_toggle, |d| {
-                                            let key = key.clone();
-                                            d.child(
-                                                div()
-                                                    .id(("acp-tool-toggle", i * 100 + part_ix))
-                                                    .text_xs()
-                                                    .text_color(gpui::rgb(ui_theme::blue()))
-                                                    .cursor_pointer()
-                                                    .hover(|d| d.opacity(0.8))
-                                                    .child(if expanded {
-                                                        "收起".to_string()
-                                                    } else {
-                                                        format!("展开全部 {total} 行")
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |this, _ev, _window, cx| {
-                                                            if !this.expanded_tools.remove(&key) {
-                                                                this.expanded_tools
-                                                                    .insert(key.clone());
-                                                            }
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                            )
-                                        }),
-                                )
-                            }
-                            ToolOutputPart::Text(_) => card,
-                        };
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("无可展示输出"),
+                            );
+                        }
                     }
-                    // 这条工具调用正在等审批 → 按钮条内嵌进卡片底部。
-                    if perm_target.as_ref() == Some(id) {
-                        if let Some(btns) = perm_buttons.take() {
+                    // 一条工具调用可能同时挂多张权限卡；逐张内嵌，不能 take 掉别张。
+                    if has_pending_permission {
+                        for pending in self
+                            .permissions
+                            .iter()
+                            .filter(|pending| pending.tool_call_id == *id)
+                        {
                             card = card.child(
                                 v_flex()
                                     .px_4()
@@ -1366,7 +1505,17 @@ impl Render for AcpView {
                                     .gap_2()
                                     .border_t_1()
                                     .border_color(t.border)
-                                    .child(btns),
+                                    .child(
+                                        v_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(pending.question.clone()),
+                                            )
+                                            .child(permission_buttons(pending)),
+                                    ),
                             );
                         }
                     }
@@ -1406,37 +1555,40 @@ impl Render for AcpView {
             );
         }
 
-        // 独立权限卡片：仅当消息流里没有可内嵌的工具卡片时兜底渲染
-        // （按钮条构建见循环前的 perm_buttons；内嵌成功时这里拿到的是 None）。
-        let permission = (!perm_embedded)
-            .then(|| {
-                let card = self.permission.as_ref()?;
-                let buttons = perm_buttons.take()?;
-                Some(
-                    v_flex()
-                        .mx_4()
-                        .mb_3()
-                        .p_4()
-                        .gap_3()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(t.border)
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(div().text_sm().font_semibold().child("等你批准"))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(card.question.clone()),
-                                ),
-                        )
-                        .child(buttons),
+        // 消息流中没有对应工具卡的请求独立渲染；每张都保留，不能只显示第一张。
+        let permissions: Vec<gpui::AnyElement> = self
+            .permissions
+            .iter()
+            .filter(|pending| {
+                !self.entries.iter().any(
+                    |entry| matches!(entry, AcpEntry::ToolCall { id, .. } if id == &pending.tool_call_id),
                 )
             })
-            .flatten();
+            .map(|pending| {
+                v_flex()
+                    .mx_4()
+                    .mb_3()
+                    .p_4()
+                    .gap_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(t.border)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_sm().font_semibold().child("等你批准"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .child(pending.question.clone()),
+                            ),
+                    )
+                    .child(permission_buttons(pending))
+                    .into_any_element()
+            })
+            .collect();
 
         // 选择题卡片：message + 逐字段按钮组；单字段单选点击即提交，
         // 其余选齐后亮「提交」；「跳过」丢卡（responder Drop 回 Cancel）。
@@ -1571,6 +1723,8 @@ impl Render for AcpView {
             .map(|m| m.options.clone())
             .unwrap_or_default();
         let current_model = self.model.as_ref().map(|m| m.current_name.clone());
+        let model_config_id = self.model.as_ref().map(|m| m.config_id.clone());
+        let config_options = self.config_options.clone();
         // 补全弹层：画在输入框**上方**，而且是正常流式元素不是绝对定位浮层——
         // 输入框贴着窗口底边，往下开的菜单一定会被窗口边缘裁掉（组件自带那套
         // 就是这么废的，见 acp_completion.rs 文件头）。往上顶消息流反而符合
@@ -1668,6 +1822,7 @@ impl Render for AcpView {
                 if model_options.len() > 1 {
                     let cur = current_model.clone();
                     let opts = model_options.clone();
+                    let config_id = model_config_id.clone();
                     let this = cx.entity();
                     Button::new("acp-model-pill")
                         .ghost()
@@ -1679,12 +1834,17 @@ impl Render for AcpView {
                             for (value, name) in &opts {
                                 let is_cur = cur.as_deref() == Some(name.as_str());
                                 let value = value.clone();
+                                let config_id = config_id.clone();
                                 let this = this.clone();
                                 menu = menu.item(
                                     PopupMenuItem::new(name.clone()).checked(is_cur).on_click(
                                         move |_ev, _window, cx| {
                                             let value = value.clone();
-                                            this.update(cx, |v, _cx| v.set_model(value));
+                                            if let Some(config_id) = config_id.clone() {
+                                                this.update(cx, |v, _cx| {
+                                                    v.set_config_option(config_id, value)
+                                                });
+                                            }
                                         },
                                     ),
                                 );
@@ -1704,6 +1864,64 @@ impl Render for AcpView {
                         .into_any_element()
                 }
             };
+            let config_pills: Vec<gpui::AnyElement> = config_options
+                .into_iter()
+                .filter(|config| config.options.len() > 1)
+                .map(|config| {
+                    let current_value = config
+                        .options
+                        .iter()
+                        .find(|(_, name)| *name == config.current_name)
+                        .map(|(value, _)| value.as_str())
+                        .unwrap_or_default();
+                    let config_label = if config.config_id == "mode" {
+                        "权限".to_string()
+                    } else {
+                        config.name.clone()
+                    };
+                    let current_label =
+                        config_value_label(&config.config_id, current_value, &config.current_name);
+                    // 输入栏只放当前值；配置名称留在下拉菜单标题，避免把同一语义
+                    // 重复写一遍，也给窄窗口留出空间。
+                    let label = current_label;
+                    let config_id = config.config_id.clone();
+                    let current = config.current_name.clone();
+                    let options = config.options.clone();
+                    let menu_title = config_label;
+                    let this = cx.entity();
+                    Button::new(format!("acp-config-pill-{config_id}"))
+                        .ghost()
+                        .xsmall()
+                        .label(format!("{label} ▾"))
+                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .dropdown_menu(move |menu, _window, _cx| {
+                            let mut menu = menu.item(PopupMenuItem::label(menu_title.clone()));
+                            for (value, name) in &options {
+                                let is_cur = current == *name;
+                                let value = value.clone();
+                                let config_id = config_id.clone();
+                                let this = this.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(config_value_label(
+                                        &config_id, &value, name,
+                                    ))
+                                    .checked(is_cur)
+                                    .on_click(
+                                        move |_ev, _window, cx| {
+                                            let value = value.clone();
+                                            let config_id = config_id.clone();
+                                            this.update(cx, |v, _cx| {
+                                                v.set_config_option(config_id, value)
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            menu
+                        })
+                        .into_any_element()
+                })
+                .collect();
             let composer = v_flex()
                 .w_full()
                 .max_w(px(920.))
@@ -1774,14 +1992,25 @@ impl Render for AcpView {
                         .pt_2()
                         .pb_4()
                         .gap_2()
-                        .items_center()
-                        .children(usage_pill)
-                        .child(model_pill)
-                        .child(div().flex_1())
+                        .items_end()
+                        // 配置项数量由 agent 决定，不能和发送按钮争同一行宽度。
+                        // 左侧独立换行，右侧命令按钮保持固定可点。
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .gap_2()
+                                .items_center()
+                                .flex_wrap()
+                                .children(usage_pill)
+                                .child(model_pill)
+                                .children(config_pills),
+                        )
                         .when(matches!(self.phase, AcpPhase::Running), |row| {
                             row.child(
                                 div()
                                     .id("acp-stop")
+                                    .flex_shrink_0()
                                     .px_2p5()
                                     .py_1()
                                     .rounded_lg()
@@ -1801,6 +2030,7 @@ impl Render for AcpView {
                             // 主发送按钮（橙实心，对齐设计稿 Send ⏎）。
                             div()
                                 .id("acp-send")
+                                .flex_shrink_0()
                                 .px_4()
                                 .py_1p5()
                                 .rounded_lg()
@@ -1837,7 +2067,7 @@ impl Render for AcpView {
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
                 if ev.keystroke.modifiers.platform
                     && ev.keystroke.key == "enter"
-                    && this.permission.is_some()
+                    && !this.permissions.is_empty()
                 {
                     this.pick_permission_primary(cx);
                     cx.stop_propagation();
@@ -1915,7 +2145,7 @@ impl Render for AcpView {
             .children(banner)
             .children(plan_bar)
             .child(list)
-            .children(permission)
+            .children(permissions)
             .children(elicitation)
             .children(completion_bar)
             .children(self.paste_hint.as_ref().map(|msg| {
@@ -1976,6 +2206,12 @@ fn assistant_avatar() -> impl IntoElement {
 
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
+
+/// 整个工具卡片的默认展开策略：已完成的工具收起，正在跑、失败、待审批的工具展开。
+/// 用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards` 覆盖这个默认值。
+fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bool) -> bool {
+    has_pending_permission || !matches!(status, ToolCallStatus::Completed)
+}
 
 /// 工具标题里去掉与 kind 标签重复的前缀：adapter 常把标题写成
 /// `Read crates/foo.rs`，而卡片左边已经有一个 `Read` 标签了。
@@ -2071,7 +2307,8 @@ fn render_diff_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_restart_launch;
+    use super::{resolve_restart_launch, tool_card_default_expanded};
+    use smelt_core::acp_chat::ToolCallStatus;
     use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
     use smelt_ui::agent_ui_config::AgentUiConfig;
 
@@ -2150,5 +2387,20 @@ mod tests {
         let resolved = resolve_restart_launch(&current, None, &config, AcpAgentKind::Claude, false);
 
         assert_eq!(resolved, current);
+    }
+
+    #[test]
+    fn tool_card_defaults_keep_active_or_attention_states_expanded() {
+        assert!(!tool_card_default_expanded(
+            ToolCallStatus::Completed,
+            false
+        ));
+        assert!(tool_card_default_expanded(ToolCallStatus::Completed, true));
+        assert!(tool_card_default_expanded(ToolCallStatus::Pending, false));
+        assert!(tool_card_default_expanded(
+            ToolCallStatus::InProgress,
+            false
+        ));
+        assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
     }
 }
