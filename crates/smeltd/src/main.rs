@@ -3371,9 +3371,7 @@ fn parse_missing_session_action(v: &serde_json::Value) -> MissingSessionAction {
             Some("launch") => missing["command"]
                 .as_str()
                 .map(|command| MissingSessionAction::Launch(command.to_string()))
-                .unwrap_or_else(|| {
-                    MissingSessionAction::Reject("无法恢复：缺少启动命令".into())
-                }),
+                .unwrap_or_else(|| MissingSessionAction::Reject("无法恢复：缺少启动命令".into())),
             Some("reject") => MissingSessionAction::Reject(
                 missing["reason"]
                     .as_str()
@@ -3398,9 +3396,7 @@ fn select_missing_session_command(
     }
     match action {
         MissingSessionAction::Shell => MissingSessionDecision::Spawn(None),
-        MissingSessionAction::Launch(command) => {
-            MissingSessionDecision::Spawn(Some(command))
-        }
+        MissingSessionAction::Launch(command) => MissingSessionDecision::Spawn(Some(command)),
         MissingSessionAction::Reject(reason) => MissingSessionDecision::Reject(reason),
     }
 }
@@ -3471,12 +3467,7 @@ fn handle_open(
             let (sess, pty_reader) = match result {
                 Ok(result) => result,
                 Err(error) => {
-                    write_rejected_terminal(
-                        &conn,
-                        &format!("终端启动失败：{error:#}"),
-                        rows,
-                        cols,
-                    );
+                    write_rejected_terminal(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
                     return;
                 }
             };

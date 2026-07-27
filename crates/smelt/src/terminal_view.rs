@@ -586,13 +586,9 @@ impl TerminalView {
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         // 带 launch_cmd：硬重启后守护里 id 已不存在，新建会话时要重跑 agent。
         let action = self.missing_session_action();
-        let Ok(terminal) = Terminal::spawn_with_action(
-            24,
-            80,
-            self.cwd.as_deref(),
-            &self.session_id,
-            &action,
-        ) else {
+        let Ok(terminal) =
+            Terminal::spawn_with_action(24, 80, self.cwd.as_deref(), &self.session_id, &action)
+        else {
             return;
         };
         self.adopt_terminal(terminal, cx);

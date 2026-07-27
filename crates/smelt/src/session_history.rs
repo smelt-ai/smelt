@@ -1819,11 +1819,13 @@ mod tests {
         PreparedTerminalAgentLaunch, current_profile_launch, discover_unique_session_id,
         list_codex_sessions, list_copilot_sessions, list_grok_sessions, list_sessions,
         list_sessions_for, load_codex_session_detail, load_copilot_session_detail,
-        load_grok_session_detail, load_session_detail, normalized_profile_override_dir, project_dir,
-        prepare_terminal_agent_launch, terminal_resume_command,
+        load_grok_session_detail, load_session_detail, normalized_profile_override_dir,
+        prepare_terminal_agent_launch, project_dir, terminal_resume_command,
     };
     use crate::settings::AgentUiConfig;
-    use smelt_core::agent_kind::{AcpAgentKind, AcpProfile, TerminalAgentKind, TerminalResumeState};
+    use smelt_core::agent_kind::{
+        AcpAgentKind, AcpProfile, TerminalAgentKind, TerminalResumeState,
+    };
     use std::collections::HashSet;
     use std::path::Path;
     use std::sync::Mutex;
@@ -1887,9 +1889,8 @@ mod tests {
             )
             .unwrap(),
             PreparedTerminalAgentLaunch::Discover {
-                command:
-                    "CODEX_HOME=~/.codex-alt codex --dangerously-bypass-approvals-and-sandbox"
-                        .into(),
+                command: "CODEX_HOME=~/.codex-alt codex --dangerously-bypass-approvals-and-sandbox"
+                    .into(),
                 workspace_dir: smelt_core::workspace_override::expand_tilde("~/.codex-alt").into(),
             }
         );
@@ -1929,16 +1930,10 @@ mod tests {
     #[test]
     fn unsafe_or_mismatched_commands_are_rejected() {
         assert!(
-            terminal_resume_command(
-                TerminalAgentKind::Claude,
-                "claude; echo unsafe",
-                "sid-1"
-            )
-            .is_err()
+            terminal_resume_command(TerminalAgentKind::Claude, "claude; echo unsafe", "sid-1")
+                .is_err()
         );
-        assert!(
-            terminal_resume_command(TerminalAgentKind::Claude, "codex", "sid-1").is_err()
-        );
+        assert!(terminal_resume_command(TerminalAgentKind::Claude, "codex", "sid-1").is_err());
         assert!(
             prepare_terminal_agent_launch(
                 TerminalAgentKind::Claude,

@@ -27,8 +27,8 @@ mod git_panel;
 mod hotspot;
 mod inspector;
 mod mem_usage;
-use smelt_core::osc;
 use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
+use smelt_core::osc;
 // 权限菜单解析：唯一真源，与 smeltd 共用 smelt-core 里的同一份（smeltd 解析后随
 // SessionState 下发给手机端）。曾经 Rust/TS 各一份并已实测漂移，别再在别处另写一版。
 use smelt_core::permission_menu;
@@ -1381,11 +1381,8 @@ fn prepare_terminal_launch(
         });
     };
     let generated_id = uuid::Uuid::new_v4().to_string();
-    match session_history::prepare_terminal_agent_launch(
-        agent_kind,
-        &entry.command,
-        &generated_id,
-    )? {
+    match session_history::prepare_terminal_agent_launch(agent_kind, &entry.command, &generated_id)?
+    {
         session_history::PreparedTerminalAgentLaunch::Known { command, state } => {
             Ok(PreparedTerminalLaunch {
                 original_command: Some(entry.command.clone()),
@@ -1402,11 +1399,8 @@ fn prepare_terminal_launch(
             workspace_dir,
         } => {
             let cwd = cwd.ok_or_else(|| "Codex 会话绑定需要项目工作目录".to_string())?;
-            let baseline = session_history::terminal_session_ids(
-                agent_kind,
-                cwd,
-                workspace_dir.as_deref(),
-            );
+            let baseline =
+                session_history::terminal_session_ids(agent_kind, cwd, workspace_dir.as_deref());
             Ok(PreparedTerminalLaunch {
                 original_command: Some(entry.command.clone()),
                 spawn_command: Some(command),
@@ -1480,9 +1474,7 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
             let history_exists = resume_state
                 .as_ref()
                 .zip(cwd.as_deref())
-                .is_some_and(|(state, cwd)| {
-                    session_history::terminal_session_exists(state, cwd)
-                });
+                .is_some_and(|(state, cwd)| session_history::terminal_session_exists(state, cwd));
             let action = terminal_restore_action(
                 *agent_kind,
                 launch_cmd.as_deref(),
@@ -1490,17 +1482,12 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
                 cwd.as_deref(),
                 history_exists,
             );
-            let terminal = terminal::Terminal::spawn_with_action(
-                24,
-                80,
-                cwd.as_deref(),
-                &sid,
-                &action,
-            )
-            .map_err(|e| {
-                eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
-                e.to_string()
-            })?;
+            let terminal =
+                terminal::Terminal::spawn_with_action(24, 80, cwd.as_deref(), &sid, &action)
+                    .map_err(|e| {
+                        eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
+                        e.to_string()
+                    })?;
             out.push(SpawnedLeaf {
                 terminal,
                 sid,
@@ -7864,8 +7851,17 @@ mod pane_state_tests {
             agent_kind: Some(TerminalAgentKind::Claude),
         };
         let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
-        assert_eq!(prepared.original_command.as_deref(), Some(entry.command.as_str()));
-        assert!(prepared.spawn_command.as_deref().unwrap().contains("--session-id"));
+        assert_eq!(
+            prepared.original_command.as_deref(),
+            Some(entry.command.as_str())
+        );
+        assert!(
+            prepared
+                .spawn_command
+                .as_deref()
+                .unwrap()
+                .contains("--session-id")
+        );
         assert!(prepared.resume_state.is_some());
         assert!(prepared.codex_baseline.is_none());
     }
@@ -7878,7 +7874,10 @@ mod pane_state_tests {
             agent_kind: Some(TerminalAgentKind::Codex),
         };
         let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
-        assert_eq!(prepared.spawn_command.as_deref(), Some(entry.command.as_str()));
+        assert_eq!(
+            prepared.spawn_command.as_deref(),
+            Some(entry.command.as_str())
+        );
         assert!(prepared.resume_state.is_none());
         assert!(prepared.codex_baseline.is_some());
         assert!(prepared.workspace_dir.unwrap().ends_with("/.codex-alt"));
