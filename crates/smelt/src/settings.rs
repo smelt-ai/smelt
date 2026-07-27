@@ -408,7 +408,7 @@ mod tests {
         let path = sandbox.join("launch.json");
         let raw = r#"{
   "entries": [
-    {"label": "Continue Claude", "command": "claude --continue"}
+    {"label": "Continue Claude", "command": "claude -c"}
   ]
 }"#;
         fs::write(&path, raw).unwrap();

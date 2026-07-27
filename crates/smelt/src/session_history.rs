@@ -56,7 +56,7 @@ fn safe_agent_command(
     Ok((words, executable_index))
 }
 
-fn has_existing_session_control(args: &[String]) -> bool {
+fn has_existing_session_control(kind: TerminalAgentKind, args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg == "resume"
             || arg == "--continue"
@@ -64,13 +64,20 @@ fn has_existing_session_control(args: &[String]) -> bool {
             || arg.starts_with("--resume=")
             || arg == "--session-id"
             || arg.starts_with("--session-id=")
+            || match kind {
+                TerminalAgentKind::Claude | TerminalAgentKind::Grok => {
+                    arg == "-c" || arg == "-r" || arg.starts_with("-r=")
+                }
+                TerminalAgentKind::Copilot => arg == "-r" || arg.starts_with("-r="),
+                TerminalAgentKind::Codex => false,
+            }
     })
 }
 
 pub(crate) fn infer_terminal_agent_kind(command: &str) -> Option<TerminalAgentKind> {
     TerminalAgentKind::ALL.into_iter().find_map(|kind| {
         let (words, executable_index) = safe_agent_command(kind, command).ok()?;
-        (!has_existing_session_control(&words[executable_index + 1..])).then_some(kind)
+        (!has_existing_session_control(kind, &words[executable_index + 1..])).then_some(kind)
     })
 }
 
@@ -105,7 +112,7 @@ pub(crate) fn prepare_terminal_agent_launch(
 ) -> Result<PreparedTerminalAgentLaunch, String> {
     let (words, executable_index) = safe_agent_command(kind, command)?;
     let args = &words[executable_index + 1..];
-    if has_existing_session_control(args) {
+    if has_existing_session_control(kind, args) {
         return Err("启动命令已包含会话恢复或会话 ID 参数".into());
     }
     let workspace_dir = terminal_workspace_dir(kind, &words, executable_index);
@@ -2015,6 +2022,45 @@ mod tests {
                 "{command} must remain an ordinary terminal command"
             );
         }
+    }
+
+    #[test]
+    fn agent_short_existing_session_controls_are_not_managed() {
+        for (kind, command) in [
+            (TerminalAgentKind::Claude, "claude -c"),
+            (TerminalAgentKind::Claude, "claude -r old"),
+            (TerminalAgentKind::Copilot, "copilot -r=old"),
+            (TerminalAgentKind::Copilot, "copilot -r old"),
+            (TerminalAgentKind::Grok, "grok -c"),
+            (TerminalAgentKind::Grok, "grok -r old"),
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                None,
+                "{command} must remain an ordinary terminal command"
+            );
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_err(),
+                "{command} must not be used as a managed initial launch"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_config_short_flag_remains_an_ordinary_launch_option() {
+        let command = "codex -c model='gpt-5'";
+
+        assert_eq!(
+            infer_terminal_agent_kind(command),
+            Some(TerminalAgentKind::Codex)
+        );
+        assert_eq!(
+            prepare_terminal_agent_launch(TerminalAgentKind::Codex, command, "new").unwrap(),
+            PreparedTerminalAgentLaunch::Discover {
+                command: command.into(),
+                workspace_dir: None,
+            }
+        );
     }
 
     #[test]
