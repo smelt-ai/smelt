@@ -425,6 +425,38 @@ mod tests {
         );
         fs::remove_dir_all(&sandbox).unwrap();
     }
+
+    #[test]
+    fn load_launch_config_leaves_audited_session_selectors_absent_without_writeback() {
+        let sandbox = test_sandbox("audited-session-selectors");
+        let path = sandbox.join("launch.json");
+        let raw = r#"{
+  "entries": [
+    {"label": "Claude PR", "command": "claude --from-pr=123"},
+    {"label": "Connect Copilot", "command": "copilot --connect"},
+    {"label": "Connect Copilot task", "command": "copilot --connect task-id"},
+    {"label": "Connect Copilot task equals", "command": "copilot --connect=task-id"},
+    {"label": "Resume old Codex", "command": "codex -c experimental_resume=rollout.jsonl"}
+  ]
+}"#;
+        fs::write(&path, raw).unwrap();
+
+        let config = super::load_launch_config_from_path(&path);
+
+        assert!(
+            config
+                .entries
+                .iter()
+                .all(|entry| entry.agent_kind.is_none()),
+            "session-selecting entries with absent metadata must remain ordinary terminals"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            raw,
+            "ineligible absent metadata must not trigger migration writeback"
+        );
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
 }
 
 /// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
