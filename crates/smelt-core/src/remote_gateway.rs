@@ -1646,26 +1646,52 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
     let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
 
     let mut summaries = Vec::new();
-    if let Some(acp_sessions) = resp["acp_sessions"].as_array() {
-        for s in acp_sessions {
+
+    // 从 states 中筛选有 launch 字段的会话（这些是 ACP 会话）
+    if let Some(states) = resp["states"].as_array() {
+        for s in states {
+            // 只选择有 launch 命令的会话（ACP 会话）
+            let launch = s["launch"].as_str();
+            if launch.is_none() {
+                continue;
+            }
+            let launch_cmd = launch.unwrap();
+
             let id = s["id"].as_str().unwrap_or_default().to_string();
             let phase = s["phase"].as_str().unwrap_or("idle").to_string();
             let cwd = s["cwd"].as_str().map(String::from);
 
-            let title = cwd
-                .as_ref()
-                .and_then(|p| std::path::Path::new(p).file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or(&id)
-                .to_string();
+            // 从 launch 命令推断 agent 类型
+            let agent = if launch_cmd.contains("claude") {
+                "claude"
+            } else if launch_cmd.contains("copilot") {
+                "copilot"
+            } else if launch_cmd.contains("codex") {
+                "codex"
+            } else {
+                "other"
+            };
+
+            // 优先使用 title，否则用目录名
+            let title = s["title"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .or_else(|| {
+                    cwd.as_ref()
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| id.clone());
 
             summaries.push(AcpSessionSummary {
                 id,
                 title,
                 phase,
-                agent: s["agent"].as_str().unwrap_or("claude").to_string(),
+                agent: agent.to_string(),
                 cwd,
-                updated_at: chrono::Utc::now().timestamp(),
+                updated_at: s["updated_at"].as_i64().unwrap_or(0),
             });
         }
     }
