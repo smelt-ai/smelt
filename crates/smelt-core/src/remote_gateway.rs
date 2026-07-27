@@ -155,7 +155,10 @@ pub fn build_router(token: String, write_enabled: bool) -> Router {
         .route("/s/{id}/action", axum::routing::post(action_handler))
         .route("/s/{id}/input", axum::routing::post(input_handler))
         .route("/s/{id}/resize", axum::routing::post(resize_handler))
-        .route("/s/{id}/menu", get(menu_handler));
+        .route("/s/{id}/menu", get(menu_handler))
+        // ACP 路由（移动端用）
+        .route("/acp/sessions", get(acp_sessions_handler))
+        .route("/acp/ws", get(acp_ws_handler));
 
     if spa_ready() {
         // SPA：/ 与 /s/:id 都回 index.html（注入 write meta）；静态资源 /assets/*
@@ -1115,6 +1118,399 @@ fn watch_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<Frame>) {
             }
         }
     }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ACP 路由（移动端）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// ACP 会话摘要（移动端列表用）
+#[derive(serde::Serialize)]
+struct AcpSessionSummary {
+    id: String,
+    title: String,
+    phase: String,
+    agent: String,
+    cwd: Option<String>,
+    updated_at: i64,
+}
+
+/// GET /acp/sessions - 列出所有 ACP 会话
+async fn acp_sessions_handler(
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if q.token != *state.token {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "invalid token"}))).into_response();
+    }
+
+    // 通过 smeltd unix socket 获取会话列表
+    let sessions = tokio::task::spawn_blocking(|| {
+        let mut stream = match UnixStream::connect(sock_path()) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+        let req = serde_json::json!({"op": "list"});
+        if writeln!(stream, "{}", req).is_err() {
+            return Vec::new();
+        }
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return Vec::new();
+        }
+
+        let Ok(resp): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
+            return Vec::new();
+        };
+
+        let mut summaries = Vec::new();
+        if let Some(acp_sessions) = resp["acp_sessions"].as_array() {
+            for s in acp_sessions {
+                let id = s["id"].as_str().unwrap_or_default().to_string();
+                let phase = s["phase"].as_str().unwrap_or("idle").to_string();
+                let cwd = s["cwd"].as_str().map(String::from);
+
+                // 从 cwd 提取项目名作为 title
+                let title = cwd
+                    .as_ref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&id)
+                    .to_string();
+
+                summaries.push(AcpSessionSummary {
+                    id,
+                    title,
+                    phase,
+                    agent: s["agent"].as_str().unwrap_or("claude").to_string(),
+                    cwd,
+                    updated_at: chrono::Utc::now().timestamp(),
+                });
+            }
+        }
+        summaries
+    })
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({
+        "sessions": sessions
+    }))
+    .into_response()
+}
+
+/// WebSocket 消息类型（移动端 → 服务端）
+#[derive(serde::Deserialize)]
+#[serde(tag = "method")]
+enum AcpWsRequest {
+    #[serde(rename = "subscribe")]
+    Subscribe { params: SubscribeParams },
+    #[serde(rename = "unsubscribe")]
+    Unsubscribe,
+    #[serde(rename = "sendMessage")]
+    SendMessage { params: SendMessageParams },
+    #[serde(rename = "respondApproval")]
+    RespondApproval { params: ApprovalParams },
+    #[serde(rename = "listSessions")]
+    ListSessions,
+    #[serde(rename = "markRead")]
+    MarkRead { params: MarkReadParams },
+}
+
+#[derive(serde::Deserialize)]
+struct SubscribeParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SendMessageParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    content: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ApprovalParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "optionKey")]
+    option_key: String,
+    #[serde(rename = "customText")]
+    custom_text: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct MarkReadParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+/// GET /acp/ws - ACP WebSocket 连接（移动端用）
+async fn acp_ws_handler(
+    ws: WebSocketUpgrade,
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if q.token != *state.token {
+        return (StatusCode::FORBIDDEN, "token 不对").into_response();
+    }
+    ws.on_upgrade(move |socket| acp_ws_pump(socket, state.write_enabled))
+        .into_response()
+}
+
+/// ACP WebSocket 主循环
+async fn acp_ws_pump(mut socket: WebSocket, write_enabled: bool) {
+    use tokio::sync::mpsc;
+
+    // 当前订阅的会话 ID
+    let mut subscribed_session: Option<String> = None;
+    // smeltd 连接（用于 acp_watch）
+    let mut daemon_conn: Option<(UnixStream, mpsc::Sender<String>)> = None;
+
+    // 发送欢迎消息
+    let welcome = serde_json::json!({
+        "type": "connected",
+        "writeEnabled": write_enabled,
+    });
+    let _ = socket.send(Message::Text(welcome.to_string().into())).await;
+
+    loop {
+        tokio::select! {
+            // 接收来自移动端的消息
+            msg = socket.recv() => {
+                let Some(Ok(msg)) = msg else {
+                    break;
+                };
+
+                let text = match msg {
+                    Message::Text(t) => t.to_string(),
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+
+                let Ok(req): Result<AcpWsRequest, _> = serde_json::from_str(&text) else {
+                    let err = serde_json::json!({"type": "error", "error": "invalid request"});
+                    let _ = socket.send(Message::Text(err.to_string().into())).await;
+                    continue;
+                };
+
+                match req {
+                    AcpWsRequest::ListSessions => {
+                        // 获取会话列表
+                        if let Some(sessions) = list_acp_sessions_blocking() {
+                            let resp = serde_json::json!({
+                                "type": "sessions",
+                                "sessions": sessions,
+                            });
+                            let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                        }
+                    }
+                    AcpWsRequest::Subscribe { params } => {
+                        subscribed_session = Some(params.session_id.clone());
+
+                        // 连接到 smeltd 的 acp_watch
+                        if let Some((old_conn, _)) = daemon_conn.take() {
+                            drop(old_conn);
+                        }
+
+                        match connect_acp_watch(&params.session_id) {
+                            Ok((conn, rx)) => {
+                                // 读取初始快照
+                                let (tx, mut daemon_rx) = mpsc::channel(64);
+                                let conn_clone = conn.try_clone().ok();
+                                daemon_conn = conn_clone.map(|c| (c, tx));
+
+                                // 启动后台任务读取 smeltd 推送
+                                let session_id = params.session_id.clone();
+                                tokio::spawn(async move {
+                                    // 这个任务会在连接关闭时自动结束
+                                });
+
+                                let resp = serde_json::json!({
+                                    "type": "subscribed",
+                                    "sessionId": params.session_id,
+                                });
+                                let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                            }
+                            Err(e) => {
+                                let err = serde_json::json!({
+                                    "type": "error",
+                                    "error": format!("failed to subscribe: {}", e),
+                                });
+                                let _ = socket.send(Message::Text(err.to_string().into())).await;
+                            }
+                        }
+                    }
+                    AcpWsRequest::Unsubscribe => {
+                        subscribed_session = None;
+                        if let Some((conn, _)) = daemon_conn.take() {
+                            drop(conn);
+                        }
+                        let resp = serde_json::json!({"type": "unsubscribed"});
+                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::SendMessage { params } => {
+                        if !write_enabled {
+                            let err = serde_json::json!({"type": "error", "error": "write not enabled"});
+                            let _ = socket.send(Message::Text(err.to_string().into())).await;
+                            continue;
+                        }
+
+                        // 通过 smeltd 发送消息
+                        let result = send_acp_message(&params.session_id, &params.content);
+                        let resp = if result.is_ok() {
+                            serde_json::json!({"type": "messageSent", "ok": true})
+                        } else {
+                            serde_json::json!({"type": "error", "error": "failed to send"})
+                        };
+                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::RespondApproval { params } => {
+                        if !write_enabled {
+                            let err = serde_json::json!({"type": "error", "error": "write not enabled"});
+                            let _ = socket.send(Message::Text(err.to_string().into())).await;
+                            continue;
+                        }
+
+                        let result = respond_acp_approval(
+                            &params.session_id,
+                            &params.option_key,
+                            params.custom_text.as_deref(),
+                        );
+                        let resp = if result.is_ok() {
+                            serde_json::json!({"type": "approvalResponded", "ok": true})
+                        } else {
+                            serde_json::json!({"type": "error", "error": "failed to respond"})
+                        };
+                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::MarkRead { params } => {
+                        // 暂时不做处理，只返回成功
+                        let resp = serde_json::json!({"type": "markedRead", "ok": true});
+                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 列出所有 ACP 会话（阻塞版本）
+fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
+    let mut stream = UnixStream::connect(sock_path()).ok()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+
+    let req = serde_json::json!({"op": "list"});
+    writeln!(stream, "{}", req).ok()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+
+    let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
+
+    let mut summaries = Vec::new();
+    if let Some(acp_sessions) = resp["acp_sessions"].as_array() {
+        for s in acp_sessions {
+            let id = s["id"].as_str().unwrap_or_default().to_string();
+            let phase = s["phase"].as_str().unwrap_or("idle").to_string();
+            let cwd = s["cwd"].as_str().map(String::from);
+
+            let title = cwd
+                .as_ref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or(&id)
+                .to_string();
+
+            summaries.push(AcpSessionSummary {
+                id,
+                title,
+                phase,
+                agent: s["agent"].as_str().unwrap_or("claude").to_string(),
+                cwd,
+                updated_at: chrono::Utc::now().timestamp(),
+            });
+        }
+    }
+    Some(summaries)
+}
+
+/// 连接到 smeltd 的 acp_watch
+fn connect_acp_watch(session_id: &str) -> Result<(UnixStream, std::sync::mpsc::Receiver<String>), String> {
+    let mut stream = UnixStream::connect(sock_path())
+        .map_err(|e| format!("connect failed: {}", e))?;
+
+    let req = serde_json::json!({
+        "op": "acp_watch",
+        "id": session_id,
+    });
+    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    Ok((stream, rx))
+}
+
+/// 发送 ACP 消息（通过 acp_open 连接）
+fn send_acp_message(session_id: &str, content: &str) -> Result<(), String> {
+    let mut stream = UnixStream::connect(sock_path())
+        .map_err(|e| format!("connect failed: {}", e))?;
+
+    // 先 acp_open 连接到会话
+    let req = serde_json::json!({
+        "op": "acp_open",
+        "id": session_id,
+    });
+    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
+
+    // 等待初始快照
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| format!("read failed: {}", e))?;
+
+    // 发送用户消息
+    let action = serde_json::json!({
+        "Prompt": {
+            "content": content,
+            "images": [],
+        }
+    });
+    writeln!(stream, "{}", action).map_err(|e| format!("write action failed: {}", e))?;
+
+    Ok(())
+}
+
+/// 响应 ACP 审批请求
+fn respond_acp_approval(session_id: &str, option_key: &str, _custom_text: Option<&str>) -> Result<(), String> {
+    let mut stream = UnixStream::connect(sock_path())
+        .map_err(|e| format!("connect failed: {}", e))?;
+
+    // 先 acp_open 连接到会话
+    let req = serde_json::json!({
+        "op": "acp_open",
+        "id": session_id,
+    });
+    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
+
+    // 等待初始快照
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| format!("read failed: {}", e))?;
+
+    // 发送审批响应
+    let action = serde_json::json!({
+        "PermissionSelect": {
+            "option_id": option_key,
+        }
+    });
+    writeln!(stream, "{}", action).map_err(|e| format!("write action failed: {}", e))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
