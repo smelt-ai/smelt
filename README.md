@@ -102,6 +102,20 @@ smelt 把终端——agent 真正干活的地方——变成主战场。
 需要 Rust stable 与 macOS。**无需安装完整 Xcode**——项目通过 `gpui_platform` 的
 `runtime_shaders` feature 把 Metal 着色器改到运行时编译，只装 Command Line Tools 即可。
 
+普通 `cargo` 开发不依赖 Python；打包 DMG 的 `make dist-build` 还需要 **Python 3.10
+或以上版本**。Command Line Tools 提供的 `/usr/bin/python3` 可能仍是 3.9，请先检查：
+
+```sh
+python3 --version
+brew install python  # 如果版本低于 3.10
+```
+
+如果兼容版本不在 `python3`，可显式指定解释器：
+
+```sh
+SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build
+```
+
 ```sh
 cargo run --bin smelt       # 开发模式直接跑 GUI
 make dist-build             # 编译 release 并打包出 dist/Smelt.dmg
