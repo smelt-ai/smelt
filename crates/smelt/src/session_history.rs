@@ -1847,12 +1847,12 @@ mod tests {
         project_dir, terminal_resume_command,
     };
     use crate::settings::AgentUiConfig;
+    use crate::test_support::with_home;
     use smelt_core::agent_kind::{
         AcpAgentKind, AcpProfile, TerminalAgentKind, TerminalResumeState,
     };
     use std::collections::HashSet;
     use std::path::Path;
-    use std::sync::Mutex;
 
     fn ids(values: &[&str]) -> HashSet<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -2028,59 +2028,12 @@ mod tests {
     }
 
     fn test_sandbox(name: &str) -> std::path::PathBuf {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/test-artifacts")
+        let dir = crate::test_support::test_artifacts_root()
+            .join("sh")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    /// 好几个测试都要临时改 `HOME` 指向沙盒目录再复原——`cargo test` 默认多线程
-    /// 并发跑同一个二进制里的测试，两个测试同时改这个进程级环境变量会互相踩
-    /// （一个测试的 HOME 被另一个测试的复原覆盖掉）。拿这把锁把"改 HOME → 跑
-    /// 逻辑 → 复原 HOME"这段区间串行化，锁本身不检查什么，只借它的互斥语义。
-    static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// 在锁保护下临时把 HOME 指向 `home`，跑完 `f` 再复原。
-    /// 除了 HOME，四个 workspace 覆盖变量也得在测试期间清空——`login_env` 的
-    /// 访问器现在优先直查进程自身环境（见该模块注释），`cargo test` 是从
-    /// 开发者的真实 shell 里跑起来的，会原样继承那边 export 的
-    /// `CLAUDE_CONFIG_DIR` 等值，不清空的话这几个测试会读到开发机的真实
-    /// workspace 目录而不是这里搭的假 HOME 沙盒（真实踩过这个坑，不是假设）。
-    const OVERRIDE_VARS: [&str; 5] = [
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "GROK_HOME",
-        "COPILOT_HOME",
-        "XDG_CONFIG_HOME",
-    ];
-
-    fn with_home<R>(home: &Path, f: impl FnOnce() -> R) -> R {
-        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev_home = std::env::var_os("HOME");
-        let prev_overrides: Vec<Option<std::ffi::OsString>> =
-            OVERRIDE_VARS.iter().map(|v| std::env::var_os(v)).collect();
-        unsafe {
-            std::env::set_var("HOME", home);
-            for v in OVERRIDE_VARS {
-                std::env::remove_var(v);
-            }
-        }
-        let result = f();
-        unsafe {
-            match prev_home {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
-            }
-            for (v, prev) in OVERRIDE_VARS.iter().zip(prev_overrides) {
-                match prev {
-                    Some(val) => std::env::set_var(v, val),
-                    None => std::env::remove_var(v),
-                }
-            }
-        }
-        result
     }
 
     #[test]
@@ -2093,7 +2046,7 @@ mod tests {
 
     #[test]
     fn history_profile_override_dir_expands_tilde_and_preserves_spaces() {
-        let home = test_sandbox("session-history-override-helper");
+        let home = test_sandbox("ovh");
         let profile = AcpProfile {
             id: "quant".into(),
             kind_id: "claude".into(),
@@ -2115,7 +2068,7 @@ mod tests {
 
     #[test]
     fn history_reader_finds_workspace_override_with_tilde_and_spaces() {
-        let home = test_sandbox("session-history-override-reader");
+        let home = test_sandbox("ovr");
         let profile = AcpProfile {
             id: "quant".into(),
             kind_id: "claude".into(),
@@ -2170,7 +2123,7 @@ mod tests {
 
     #[test]
     fn list_sessions_summarizes_title_and_counts_and_sorts_by_recency() {
-        let tmp = std::env::temp_dir().join("smelt-session-history-test-list");
+        let tmp = test_sandbox("list");
         let _ = std::fs::remove_dir_all(&tmp);
         let proj_root = tmp
             .join(".claude")
@@ -2237,7 +2190,7 @@ mod tests {
 
     #[test]
     fn codex_reader_filters_by_cwd_skips_synthetic_context_and_groups_tool_calls() {
-        let tmp = std::env::temp_dir().join("smelt-session-history-test-codex");
+        let tmp = test_sandbox("codex");
         let _ = std::fs::remove_dir_all(&tmp);
         let day_dir = tmp
             .join(".codex")
@@ -2285,7 +2238,7 @@ mod tests {
 
     #[test]
     fn grok_reader_reads_summary_json_and_skips_synthetic_rows() {
-        let tmp = std::env::temp_dir().join("smelt-session-history-test-grok");
+        let tmp = test_sandbox("grok");
         let _ = std::fs::remove_dir_all(&tmp);
         let session_dir = tmp.join(".grok").join("sessions").join("proj").join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -2324,7 +2277,7 @@ mod tests {
 
     #[test]
     fn copilot_reader_reads_workspace_yaml_and_events_jsonl() {
-        let tmp = std::env::temp_dir().join("smelt-session-history-test-copilot");
+        let tmp = test_sandbox("copilot");
         let _ = std::fs::remove_dir_all(&tmp);
         let session_dir = tmp.join(".copilot").join("session-state").join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
