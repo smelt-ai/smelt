@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import 'src/rust/api.dart' as api;
-import 'src/rust/frb_generated.dart';
+import 'services/gateway_service.dart';
+import 'models/acp_snapshot.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await RustLib.init();
   runApp(const SmeltApp());
 }
 
@@ -35,8 +34,30 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  api.ConnectionState _connectionState = api.ConnectionState.disconnected;
-  List<api.SessionSummary> _sessions = [];
+  WsState _connectionState = WsState.disconnected;
+  List<SessionSummary> _sessions = [];
+  String? _errorMessage;
+  
+  // 临时配对信息（后续改为 QR 扫描）
+  final _endpointController = TextEditingController(text: 'ws://192.168.1.100:9877');
+  final _tokenController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    gatewayService.stateStream.listen((state) {
+      setState(() => _connectionState = state);
+    });
+    gatewayService.sessionsStream.listen((sessions) {
+      setState(() => _sessions = sessions);
+    });
+    gatewayService.errorStream.listen((error) {
+      setState(() => _errorMessage = error);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error)),
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -49,12 +70,18 @@ class _HomePageState extends State<HomePage> {
             onPressed: _scanQrCode,
             tooltip: 'Pair with Desktop',
           ),
+          if (_connectionState == WsState.connected)
+            IconButton(
+              icon: const Icon(Icons.logout),
+              onPressed: () => gatewayService.disconnect(),
+              tooltip: 'Disconnect',
+            ),
         ],
       ),
       body: _buildBody(),
-      floatingActionButton: _connectionState == api.ConnectionState.connected
+      floatingActionButton: _connectionState == WsState.connected
           ? FloatingActionButton(
-              onPressed: _refreshSessions,
+              onPressed: () => gatewayService.listSessions(),
               child: const Icon(Icons.refresh),
             )
           : null,
@@ -63,29 +90,57 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildBody() {
     switch (_connectionState) {
-      case api.ConnectionState.disconnected:
+      case WsState.disconnected:
         return _buildDisconnectedView();
-      case api.ConnectionState.connecting:
-      case api.ConnectionState.handshaking:
+      case WsState.connecting:
         return const Center(child: CircularProgressIndicator());
-      case api.ConnectionState.connected:
+      case WsState.connected:
         return _buildSessionList();
-      case api.ConnectionState.authFailed:
-        return _buildErrorView('Authentication failed');
-      case api.ConnectionState.reconnecting:
+      case WsState.reconnecting:
         return _buildReconnectingView();
     }
   }
 
   Widget _buildDisconnectedView() {
-    return Center(
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const Icon(Icons.link_off, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
-          const Text('Not connected'),
+          const Text('Not connected', textAlign: TextAlign.center),
           const SizedBox(height: 24),
+          
+          // 临时手动连接 UI（后续改为 QR）
+          TextField(
+            controller: _endpointController,
+            decoration: const InputDecoration(
+              labelText: 'Gateway Endpoint',
+              hintText: 'ws://192.168.1.x:9877',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _tokenController,
+            decoration: const InputDecoration(
+              labelText: 'Token',
+              hintText: 'Enter token from desktop',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            onPressed: _manualConnect,
+            icon: const Icon(Icons.link),
+            label: const Text('Connect'),
+          ),
+          
+          const SizedBox(height: 24),
+          const Divider(),
+          const SizedBox(height: 24),
+          
           ElevatedButton.icon(
             onPressed: _scanQrCode,
             icon: const Icon(Icons.qr_code_scanner),
@@ -108,40 +163,13 @@ class _HomePageState extends State<HomePage> {
       itemBuilder: (context, index) {
         final session = _sessions[index];
         return ListTile(
-          leading: _getAgentIcon(session.agentKind),
-          title: Text(session.title),
-          subtitle: Text(session.lastMessage ?? ''),
-          trailing: session.unread
-              ? Container(
-                  width: 12,
-                  height: 12,
-                  decoration: const BoxDecoration(
-                    color: Colors.blue,
-                    shape: BoxShape.circle,
-                  ),
-                )
-              : null,
+          leading: _getAgentIcon(session.agent),
+          title: Text(session.title.isNotEmpty ? session.title : session.id),
+          subtitle: Text(session.cwd ?? session.phase),
+          trailing: _getPhaseChip(session.phase),
           onTap: () => _openSession(session),
         );
       },
-    );
-  }
-
-  Widget _buildErrorView(String message) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.error_outline, size: 64, color: Colors.red),
-          const SizedBox(height: 16),
-          Text(message),
-          const SizedBox(height: 24),
-          ElevatedButton(
-            onPressed: _scanQrCode,
-            child: const Text('Try Again'),
-          ),
-        ],
-      ),
     );
   }
 
@@ -158,54 +186,54 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _getAgentIcon(api.AgentKind kind) {
-    switch (kind) {
-      case api.AgentKind.claude:
-        return const CircleAvatar(
-          backgroundColor: Colors.orange,
-          child: Text('C'),
-        );
-      case api.AgentKind.codex:
-        return const CircleAvatar(
-          backgroundColor: Colors.green,
-          child: Text('X'),
-        );
-      case api.AgentKind.copilot:
-        return const CircleAvatar(
-          backgroundColor: Colors.blue,
-          child: Text('P'),
-        );
-      case api.AgentKind.grok:
-        return const CircleAvatar(
-          backgroundColor: Colors.purple,
-          child: Text('G'),
-        );
-      case api.AgentKind.other:
-        return const CircleAvatar(child: Text('?'));
-    }
+  Widget _getAgentIcon(String agent) {
+    final (color, letter) = switch (agent.toLowerCase()) {
+      'claude' => (Colors.orange, 'C'),
+      'codex' => (Colors.green, 'X'),
+      'copilot' => (Colors.blue, 'P'),
+      'grok' => (Colors.purple, 'G'),
+      _ => (Colors.grey, '?'),
+    };
+    return CircleAvatar(
+      backgroundColor: color,
+      child: Text(letter),
+    );
+  }
+
+  Widget _getPhaseChip(String phase) {
+    final (color, label) = switch (phase.toLowerCase()) {
+      'running' => (Colors.green, 'Running'),
+      'idle' => (Colors.grey, 'Idle'),
+      'ended' => (Colors.red, 'Ended'),
+      _ => (Colors.grey, phase),
+    };
+    return Chip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      backgroundColor: color.withAlpha(50),
+      side: BorderSide.none,
+      padding: EdgeInsets.zero,
+    );
   }
 
   void _scanQrCode() {
-    // TODO: Implement QR code scanning
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('QR scanning not yet implemented')),
     );
   }
 
-  Future<void> _refreshSessions() async {
-    try {
-      final sessions = await api.listSessions();
-      setState(() {
-        _sessions = sessions;
-      });
-    } catch (e) {
+  void _manualConnect() {
+    final endpoint = _endpointController.text.trim();
+    final token = _tokenController.text.trim();
+    if (endpoint.isEmpty || token.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load sessions: $e')),
+        const SnackBar(content: Text('Please enter endpoint and token')),
       );
+      return;
     }
+    gatewayService.connect(endpoint, token);
   }
 
-  void _openSession(api.SessionSummary session) {
+  void _openSession(SessionSummary session) {
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -213,10 +241,17 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+  
+  @override
+  void dispose() {
+    _endpointController.dispose();
+    _tokenController.dispose();
+    super.dispose();
+  }
 }
 
 class SessionPage extends StatefulWidget {
-  final api.SessionSummary session;
+  final SessionSummary session;
 
   const SessionPage({super.key, required this.session});
 
@@ -226,44 +261,66 @@ class SessionPage extends StatefulWidget {
 
 class _SessionPageState extends State<SessionPage> {
   final TextEditingController _messageController = TextEditingController();
-  final List<api.AcpEntry> _entries = [];
+  final ScrollController _scrollController = ScrollController();
+  AcpSnapshot? _snapshot;
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadSession();
+    _subscribeSession();
   }
 
-  Future<void> _loadSession() async {
-    try {
-      final entries = await api.subscribeSession(sessionId: widget.session.id);
-      setState(() {
-        _entries.addAll(entries);
-        _loading = false;
-      });
-    } catch (e) {
-      setState(() => _loading = false);
-    }
+  void _subscribeSession() {
+    gatewayService.snapshotStream.listen((snapshot) {
+      if (snapshot.acpSessionId == widget.session.id) {
+        setState(() {
+          _snapshot = snapshot;
+          _loading = false;
+        });
+        _scrollToBottom();
+      }
+    });
+    gatewayService.subscribe(widget.session.id);
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.session.title),
+        title: Text(widget.session.title.isNotEmpty 
+            ? widget.session.title 
+            : widget.session.id),
+        actions: [
+          if (_snapshot != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Center(child: _buildPhaseIndicator()),
+            ),
+        ],
       ),
       body: Column(
         children: [
+          // 权限请求横幅
+          if (_snapshot?.pendingPermission != null)
+            _buildPermissionBanner(_snapshot!.pendingPermission!),
+          
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    itemCount: _entries.length,
-                    itemBuilder: (context, index) {
-                      return _buildEntry(_entries[index]);
-                    },
-                  ),
+                : _buildEntryList(),
           ),
           _buildInputBar(),
         ],
@@ -271,13 +328,85 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
-  Widget _buildEntry(api.AcpEntry entry) {
-    return entry.when(
-      user: (text) => _buildUserMessage(text),
-      assistant: (text, thought) => _buildAssistantMessage(text, thought),
-      toolCall: (id, title, kind, status, output) =>
-          _buildToolCall(id, title, kind, status, output),
+  Widget _buildPhaseIndicator() {
+    final phase = _snapshot!.phase;
+    return switch (phase) {
+      AcpPhaseIdle() => const Icon(Icons.pause_circle, color: Colors.grey),
+      AcpPhaseStarting() => const SizedBox(
+          width: 20, height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      AcpPhaseRunning() => const SizedBox(
+          width: 20, height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      AcpPhaseAwaitingApproval() => const Icon(Icons.warning_amber, color: Colors.orange),
+      AcpPhaseAwaitingChoice() => const Icon(Icons.help_outline, color: Colors.blue),
+      AcpPhaseEnded(reason: final r) => Tooltip(
+          message: r,
+          child: const Icon(Icons.stop_circle, color: Colors.red),
+        ),
+    };
+  }
+
+  Widget _buildPermissionBanner(PendingPermission permission) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      color: Colors.orange.withAlpha(40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Permission Required',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          if (permission.question.isNotEmpty)
+            Text(permission.question),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: permission.options.map((opt) {
+              return ElevatedButton(
+                onPressed: () => _respondApproval(opt.optionId),
+                style: opt.isAllow
+                    ? ElevatedButton.styleFrom(backgroundColor: Colors.green)
+                    : null,
+                child: Text(opt.name),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
     );
+  }
+
+  Widget _buildEntryList() {
+    final entries = _snapshot?.entries ?? [];
+    if (entries.isEmpty) {
+      return const Center(child: Text('No messages yet'));
+    }
+    
+    return ListView.builder(
+      controller: _scrollController,
+      itemCount: entries.length,
+      itemBuilder: (context, index) {
+        return _buildEntry(entries[index]);
+      },
+    );
+  }
+
+  Widget _buildEntry(AcpEntry entry) {
+    return switch (entry) {
+      AcpEntryUser(text: final text) => _buildUserMessage(text),
+      AcpEntryAssistant(text: final text, thought: final thought) => 
+          _buildAssistantMessage(text, thought),
+      AcpEntryToolCall(id: _, title: final title, kind: final kind, 
+          status: final status, output: final output) =>
+          _buildToolCall(title, kind, status, output),
+      AcpEntryDivider(label: final label) => _buildDivider(label),
+      AcpEntryUnknown() => const SizedBox.shrink(),
+    };
   }
 
   Widget _buildUserMessage(String text) {
@@ -286,6 +415,9 @@ class _SessionPageState extends State<SessionPage> {
       child: Container(
         margin: const EdgeInsets.all(8),
         padding: const EdgeInsets.all(12),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.8,
+        ),
         decoration: BoxDecoration(
           color: Colors.blue,
           borderRadius: BorderRadius.circular(12),
@@ -296,11 +428,16 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildAssistantMessage(String text, bool thought) {
+    if (text.isEmpty) return const SizedBox.shrink();
+    
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.all(8),
         padding: const EdgeInsets.all(12),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.8,
+        ),
         decoration: BoxDecoration(
           color: thought ? Colors.grey[800] : Colors.grey[700],
           borderRadius: BorderRadius.circular(12),
@@ -317,41 +454,74 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildToolCall(
-    String id,
     String title,
-    api.ToolKind kind,
-    api.ToolStatus status,
-    List<String> output,
+    ToolKind kind,
+    ToolCallStatus status,
+    List<ToolOutputPart> output,
   ) {
+    final statusIcon = switch (status) {
+      ToolCallStatus.pending || ToolCallStatus.inProgress => const SizedBox(
+          width: 16, height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ToolCallStatus.completed => const Icon(Icons.check_circle, 
+          color: Colors.green, size: 16),
+      ToolCallStatus.failed => const Icon(Icons.error, color: Colors.red, size: 16),
+    };
+
+    final kindIcon = switch (kind) {
+      ToolKind.read => Icons.visibility,
+      ToolKind.edit => Icons.edit,
+      ToolKind.execute => Icons.terminal,
+      ToolKind.other => Icons.build,
+    };
+
     return Card(
-      margin: const EdgeInsets.all(8),
-      child: ListTile(
-        leading: _getToolIcon(kind, status),
-        title: Text(title),
-        subtitle: output.isNotEmpty ? Text(output.last) : null,
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: ExpansionTile(
+        leading: Icon(kindIcon, size: 20),
+        title: Text(title, style: const TextStyle(fontSize: 14)),
+        trailing: statusIcon,
+        children: output.isEmpty
+            ? []
+            : [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  color: Colors.black26,
+                  child: Text(
+                    output.map((p) => switch (p) {
+                      ToolOutputText(text: final t) => t,
+                      ToolOutputDiff(path: final path, hunks: _) => '[Diff: $path]',
+                      ToolOutputImage() => '[Image]',
+                    }).join('\n'),
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  ),
+                ),
+              ],
       ),
     );
   }
 
-  Widget _getToolIcon(api.ToolKind kind, api.ToolStatus status) {
-    final color = switch (status) {
-      api.ToolStatus.running => Colors.yellow,
-      api.ToolStatus.completed => Colors.green,
-      api.ToolStatus.failed => Colors.red,
-    };
-
-    final icon = switch (kind) {
-      api.ToolKind.read => Icons.visibility,
-      api.ToolKind.write => Icons.create,
-      api.ToolKind.edit => Icons.edit,
-      api.ToolKind.bash => Icons.terminal,
-      api.ToolKind.other => Icons.build,
-    };
-
-    return Icon(icon, color: color);
+  Widget _buildDivider(String label) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          const Expanded(child: Divider()),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Text(label, style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+          ),
+          const Expanded(child: Divider()),
+        ],
+      ),
+    );
   }
 
   Widget _buildInputBar() {
+    final isIdle = _snapshot?.phase is AcpPhaseIdle;
+    
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
@@ -365,16 +535,17 @@ class _SessionPageState extends State<SessionPage> {
           Expanded(
             child: TextField(
               controller: _messageController,
-              decoration: const InputDecoration(
-                hintText: 'Send a message...',
-                border: OutlineInputBorder(),
+              enabled: isIdle,
+              decoration: InputDecoration(
+                hintText: isIdle ? 'Send a message...' : 'Waiting for response...',
+                border: const OutlineInputBorder(),
               ),
               onSubmitted: (_) => _sendMessage(),
             ),
           ),
           const SizedBox(width: 8),
           IconButton(
-            onPressed: _sendMessage,
+            onPressed: isIdle ? _sendMessage : null,
             icon: const Icon(Icons.send),
           ),
         ],
@@ -382,24 +553,23 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
-  Future<void> _sendMessage() async {
+  void _sendMessage() {
     final text = _messageController.text.trim();
     if (text.isEmpty) return;
 
     _messageController.clear();
+    gatewayService.sendMessage(widget.session.id, text);
+  }
 
-    try {
-      await api.sendMessage(sessionId: widget.session.id, text: text);
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to send: $e')),
-      );
-    }
+  void _respondApproval(String optionKey) {
+    gatewayService.respondApproval(widget.session.id, optionKey);
   }
 
   @override
   void dispose() {
+    gatewayService.unsubscribe();
     _messageController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 }
