@@ -212,6 +212,8 @@ pub struct TerminalView {
     /// 快捷启动实际命令行（硬重启守护 / 冷启动 id 不存在时用来重跑 agent）。
     /// 与 launch_label 分离：label 给人看，cmd 给 shell 跑。
     launch_cmd: Option<String>,
+    agent_kind: Option<TerminalAgentKind>,
+    resume_state: Option<TerminalResumeState>,
     /// 首帧布局后强制发一次 PTY resize（含真实 cell 像素）。reattach 后守护 jolt
     /// 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺像素」的 TUI 排版。
     pty_kick_pending: bool,
@@ -251,6 +253,7 @@ fn classify_attention(msg: &str) -> AttentionKind {
 // 这里只 use 自己要用的；消费者（main.rs 等）直接从 permission_menu 取类型，不经这里
 // 转发——转发一层就等于多一个「看起来像定义处」的地方。
 use crate::permission_menu::{PermissionPrompt, parse_permission_prompt};
+use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
 
 /// 同一终端同文本的系统通知最小间隔。
 const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
@@ -298,6 +301,28 @@ impl TerminalView {
         session_id: String,
         launch: Option<&str>,
         launch_label: Option<&str>,
+    ) -> Self {
+        Self::from_terminal_with_resume(
+            cx,
+            terminal,
+            cwd,
+            session_id,
+            launch,
+            launch_label,
+            None,
+            None,
+        )
+    }
+
+    pub fn from_terminal_with_resume(
+        cx: &mut Context<Self>,
+        terminal: Terminal,
+        cwd: Option<String>,
+        session_id: String,
+        launch: Option<&str>,
+        launch_label: Option<&str>,
+        agent_kind: Option<TerminalAgentKind>,
+        resume_state: Option<TerminalResumeState>,
     ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
         Self::drive_redraws(terminal.redraw_channel(), cx);
@@ -460,6 +485,8 @@ impl TerminalView {
             launch_kind,
             launch_label,
             launch_cmd,
+            agent_kind,
+            resume_state,
             pty_kick_pending: true,
         }
     }
@@ -477,6 +504,35 @@ impl TerminalView {
     /// 快捷启动实际命令行（硬重启守护时重跑 agent 用）；裸终端为 None。
     pub fn launch_cmd(&self) -> Option<&str> {
         self.launch_cmd.as_deref()
+    }
+
+    pub fn agent_kind(&self) -> Option<TerminalAgentKind> {
+        self.agent_kind
+    }
+
+    pub fn resume_state(&self) -> Option<&TerminalResumeState> {
+        self.resume_state.as_ref()
+    }
+
+    pub fn set_resume_state(&mut self, state: Option<TerminalResumeState>) {
+        self.resume_state = state;
+    }
+
+    pub fn missing_session_action(&self) -> crate::terminal::MissingSessionAction {
+        let history_exists = self
+            .resume_state
+            .as_ref()
+            .zip(self.cwd.as_deref())
+            .is_some_and(|(state, cwd)| {
+                crate::session_history::terminal_session_exists(state, cwd)
+            });
+        crate::terminal_restore_action(
+            self.agent_kind,
+            self.launch_cmd.as_deref(),
+            self.resume_state.as_ref(),
+            self.cwd.as_deref(),
+            history_exists,
+        )
     }
 
     /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。
@@ -529,12 +585,13 @@ impl TerminalView {
     /// 硬重启请走 [`Self::adopt_terminal`]（后台建好再塞进来）。
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         // 带 launch_cmd：硬重启后守护里 id 已不存在，新建会话时要重跑 agent。
-        let Ok(terminal) = Terminal::spawn(
+        let action = self.missing_session_action();
+        let Ok(terminal) = Terminal::spawn_with_action(
             24,
             80,
             self.cwd.as_deref(),
             &self.session_id,
-            self.launch_cmd.as_deref(),
+            &action,
         ) else {
             return;
         };
