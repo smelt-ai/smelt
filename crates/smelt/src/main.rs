@@ -1042,6 +1042,43 @@ pub(crate) struct ProjectGroup {
     pub sessions: Vec<usize>,
 }
 
+pub(crate) fn sidebar_groups(
+    grouping: SidebarGrouping,
+    project_groups: Vec<ProjectGroup>,
+    statuses: &[AgentStatus],
+    session_count: usize,
+) -> Vec<ProjectGroup> {
+    match grouping {
+        SidebarGrouping::Project => project_groups,
+        SidebarGrouping::Status => [
+            (AgentStatus::WaitingApproval, "等你批准"),
+            (AgentStatus::NeedsAttention, "需要处理"),
+            (AgentStatus::Running, "运行中"),
+            (AgentStatus::Done, "已完成"),
+            (AgentStatus::Idle, "空闲"),
+        ]
+        .into_iter()
+        .filter_map(|(status, label)| {
+            let sessions = statuses
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, value)| (*value == status).then_some(ix))
+                .collect::<Vec<_>>();
+            (!sessions.is_empty()).then(|| ProjectGroup {
+                root: format!("__status_{}", status.rank()),
+                label: label.to_string(),
+                sessions,
+            })
+        })
+        .collect(),
+        SidebarGrouping::None => vec![ProjectGroup {
+            root: "__all_sessions".into(),
+            label: String::new(),
+            sessions: (0..session_count).collect(),
+        }],
+    }
+}
+
 /// 显示名撞车时往前补 `extra` 段父目录：`/a/b/smelt` + 1 → `b · smelt`。
 /// base 是这一组本来的显示名（worktree 是「仓库 · 分支」，普通项目是目录末段）。
 fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
@@ -1112,6 +1149,15 @@ fn project_root_of(projects: &[String], cwd: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn remove_projects_under(projects: &mut Vec<String>, path: &str) {
+    let path = path.trim_end_matches('/');
+    let prefix = format!("{path}/");
+    projects.retain(|project| {
+        let project = project.trim_end_matches('/');
+        project != path && !project.starts_with(&prefix)
+    });
+}
+
 /// 存档里一个会话的代表 cwd：ACP 取自身 cwd，终端取分屏树里第一个有 cwd 的叶子。
 /// 旧存档迁移（反推项目列表）用。
 fn session_state_cwd(s: &SessionState) -> Option<String> {
@@ -1125,6 +1171,106 @@ fn session_state_cwd(s: &SessionState) -> Option<String> {
         }
     }
     first_cwd(&s.layout)
+}
+
+fn split_restore_queue(
+    pending: Vec<SessionState>,
+) -> (Vec<(usize, SessionState)>, Vec<(usize, SessionState)>) {
+    pending
+        .into_iter()
+        .enumerate()
+        .partition(|(_, session)| session.acp.is_some())
+}
+
+fn restored_insert_position(restored_indices: &[usize], original_index: usize) -> usize {
+    restored_indices.partition_point(|index| *index < original_index)
+}
+
+fn planned_restore_insert_position(
+    restored_indices: &[usize],
+    original_index: usize,
+    live_session_count: usize,
+) -> Option<usize> {
+    (restored_indices.len() == live_session_count)
+        .then(|| restored_insert_position(restored_indices, original_index))
+}
+
+fn record_restored_index(
+    restored_indices: &mut Vec<usize>,
+    insert_at: usize,
+    original_index: usize,
+    restore_order_intact: bool,
+) {
+    if restore_order_intact {
+        restored_indices.insert(insert_at, original_index);
+    }
+}
+
+fn restored_active_position(restored_indices: &[usize], saved_active: usize) -> usize {
+    if restored_indices.is_empty() {
+        return 0;
+    }
+    restored_indices
+        .binary_search(&saved_active)
+        .unwrap_or_else(|position| position.min(restored_indices.len() - 1))
+}
+
+fn merge_restore_orphans(
+    mut sessions: Vec<SessionState>,
+    orphans: &[(usize, SessionState)],
+) -> Vec<SessionState> {
+    let mut orphans = orphans.to_vec();
+    orphans.sort_by_key(|(index, _)| *index);
+    for (index, session) in orphans {
+        sessions.insert(index.min(sessions.len()), session);
+    }
+    sessions
+}
+
+fn persisted_active_position(
+    active_session: usize,
+    orphans: &[(usize, SessionState)],
+    sessions_restored: bool,
+) -> usize {
+    if !sessions_restored {
+        return active_session;
+    }
+    let mut position = active_session;
+    let mut orphan_indices = orphans.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+    orphan_indices.sort_unstable();
+    for index in orphan_indices {
+        if index <= position {
+            position += 1;
+        }
+    }
+    position
+}
+
+fn should_auto_resume_active_acp(sessions_restored: bool) -> bool {
+    sessions_restored
+}
+
+fn should_restore_saved_active(
+    restore_order_intact: bool,
+    current_list_revision: u64,
+    restore_list_revision: u64,
+    current_active_revision: u64,
+    restore_active_revision: u64,
+) -> bool {
+    restore_order_intact
+        && current_list_revision == restore_list_revision
+        && current_active_revision == restore_active_revision
+}
+
+fn restore_path_is_cancelled(cwd: Option<&str>, cancelled_paths: &[String]) -> bool {
+    let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
+        return false;
+    };
+    let cwd = cwd.trim_end_matches('/');
+    cancelled_paths.iter().any(|path| {
+        let path = path.trim_end_matches('/');
+        cwd == path || cwd.starts_with(&format!("{path}/"))
+    })
 }
 
 /// 新会话 id（uuid v4）：GUI 与 smeltd 之间的持久身份。
@@ -1697,7 +1843,13 @@ struct Workspace {
     session_manager_list: Option<Vec<terminal::DaemonSessionState>>,
     /// 启动时从存档恢复失败的会话（守护未就绪等）。仍写回 workspace.json，避免
     /// 「恢复失败 → 写空盘 → 会话永久蒸发」。侧栏本帧看不到它们，下次冷启动会重试。
-    restore_orphans: Vec<SessionState>,
+    restore_orphans: Vec<(usize, SessionState)>,
+    /// 用户在后台恢复期间删除的项目路径；尚未交货的恢复结果命中这些路径时直接丢弃。
+    cancelled_restore_paths: Vec<String>,
+    /// 会话列表被用户增删/重排的版本号。后台恢复只在版本未变化时按旧存档索引插入。
+    session_list_revision: u64,
+    /// 活动会话被用户切换的版本号。后台恢复只在版本未变化时恢复存档中的活动项。
+    active_session_revision: u64,
     /// 根节点自己的焦点句柄：总览/文件树/Git/热力图/历史会话这些页面自身没有可
     /// 聚焦的元素，切过去后如果谁都不 focus，窗口的 focus 仍停在切走前那个（可能
     /// 已经不在当前渲染树里的）终端上——GPUI 找不到就把 focus 兜底纠正到 window 的
@@ -1760,7 +1912,7 @@ impl Workspace {
             .map(normalize_saved_sessions)
             .unwrap_or_default();
         // 恢复完成前先放进 orphans：save_state 会合并 orphans，避免空 sessions 窗口期抹盘。
-        let restore_orphans = pending_sessions.clone();
+        let restore_orphans = pending_sessions.iter().cloned().enumerate().collect();
         let sessions: Vec<Session> = Vec::new();
 
         // 项目列表：新存档直接读；旧存档（没有 projects 字段）从各会话 cwd 反推一份，
@@ -1955,6 +2107,9 @@ impl Workspace {
             session_manager_open: false,
             session_manager_list: None,
             restore_orphans,
+            cancelled_restore_paths: Vec::new(),
+            session_list_revision: 0,
+            active_session_revision: 0,
             focus_handle: cx.focus_handle(),
         };
         // orphans 已挂上全部待恢复会话 → 写盘不会抹掉存档。
@@ -2011,10 +2166,11 @@ impl Workspace {
         active_session: usize,
         cx: &mut Context<Self>,
     ) {
+        let restore_revision = self.session_list_revision;
+        let restore_active_revision = self.active_session_revision;
         // ACP 与终端都由 smeltd 托管。先拆开只是因为两者的 GUI 重建方式不同；
         // 两边都必须等 managed daemon 完成 ensure/handoff 后才能开始连接。
-        let (acp_saved, pending): (Vec<SessionState>, Vec<SessionState>) =
-            pending.into_iter().partition(|ss| ss.acp.is_some());
+        let (acp_saved, pending) = split_restore_queue(pending);
         // 逐个交货，别攒成一整包：会话之间互不依赖，攒一包等于让窗口空等最慢的那次
         // attach——表现为「冷启动后一个会话都不显示，过一会才全部冒出来」。改成恢复好
         // 一个就发一个，第一个会话立刻上屏，其余陆续补齐。unbounded 保证后台线程不会
@@ -2034,7 +2190,7 @@ impl Workspace {
                     return;
                 }
                 let mut daemon_ok = true;
-                for ss in pending {
+                for (original_index, ss) in pending {
                     let outcome = if daemon_ok {
                         match spawn_layout_leaves(&ss.layout) {
                             Ok(leaves) => Ok(leaves),
@@ -2049,7 +2205,7 @@ impl Workspace {
                         Err("smeltd 未就绪（先前会话已失败）".to_string())
                     };
                     // 接收端没了（窗口已关）就别再白跑剩下的
-                    if tx.send_blocking((ss, outcome)).is_err() {
+                    if tx.send_blocking((original_index, ss, outcome)).is_err() {
                         return;
                     }
                 }
@@ -2057,8 +2213,9 @@ impl Workspace {
             .expect("spawn smelt-restore-sessions 线程");
 
         cx.spawn(async move |this, cx| {
-            let mut failed: Vec<SessionState> = Vec::new();
             let mut restored = 0usize;
+            let mut restored_order = Vec::new();
+            let mut restore_order_intact = true;
 
             // managed daemon 已经稳定后再把 ACP 会话放回视图树。当前活动 ACP 随后
             // 触发 maybe_auto_resume 时，连接面对的是最终守护进程，不会刚接上又断。
@@ -2067,7 +2224,15 @@ impl Workspace {
             }
             if this
                 .update(cx, |this, cx| {
-                    for ss in acp_saved {
+                    for (original_index, ss) in acp_saved {
+                        if restore_path_is_cancelled(
+                            session_state_cwd(&ss).as_deref(),
+                            &this.cancelled_restore_paths,
+                        ) {
+                            this.restore_orphans
+                                .retain(|(index, _)| *index != original_index);
+                            continue;
+                        }
                         let Some(saved) = ss.acp else { continue };
                         let reason = if saved.resume_session_id.is_some() {
                             "正在恢复上次的对话…"
@@ -2095,11 +2260,38 @@ impl Workspace {
                             )
                         });
                         let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
-                        this.sessions.push(Session {
-                            kind: SessionKind::Acp(view),
-                            custom_title: ss.custom_title,
-                            _acp_persist_sub,
-                        });
+                        if this.session_list_revision != restore_revision {
+                            restore_order_intact = false;
+                        }
+                        let insert_at = if restore_order_intact {
+                            planned_restore_insert_position(
+                                &restored_order,
+                                original_index,
+                                this.sessions.len(),
+                            )
+                            .unwrap_or_else(|| {
+                                restore_order_intact = false;
+                                this.sessions.len()
+                            })
+                        } else {
+                            this.sessions.len()
+                        };
+                        this.sessions.insert(
+                            insert_at,
+                            Session {
+                                kind: SessionKind::Acp(view),
+                                custom_title: ss.custom_title,
+                                _acp_persist_sub,
+                            },
+                        );
+                        record_restored_index(
+                            &mut restored_order,
+                            insert_at,
+                            original_index,
+                            restore_order_intact,
+                        );
+                        this.restore_orphans
+                            .retain(|(index, _)| *index != original_index);
                         restored += 1;
                     }
                     cx.notify();
@@ -2110,13 +2302,26 @@ impl Workspace {
             }
 
             // 收一个渲染一个。后台线程跑完会 drop sender，recv 报错即代表全部处理完。
-            while let Ok((ss, result)) = rx.recv().await {
+            while let Ok((original_index, ss, result)) = rx.recv().await {
                 let outcome = this.update(cx, |this, cx| {
+                    if restore_path_is_cancelled(
+                        session_state_cwd(&ss).as_deref(),
+                        &this.cancelled_restore_paths,
+                    ) {
+                        if let Ok(leaves) = result {
+                            for leaf in leaves {
+                                terminal::kill_remote(&leaf.sid);
+                            }
+                        }
+                        this.restore_orphans
+                            .retain(|(index, _)| *index != original_index);
+                        return false;
+                    }
                     let leaves = match result {
                         Ok(leaves) => leaves,
                         Err(e) => {
                             eprintln!("[workspace] 会话恢复失败，保留 orphan：{e}");
-                            return Some(ss);
+                            return false;
                         }
                     };
                     let mut leaf_iter = leaves.into_iter();
@@ -2124,31 +2329,65 @@ impl Workspace {
                     let Some(layout) =
                         rebuild_pane_ready(&ss.layout, &mut leaf_iter, &mut tabs, cx)
                     else {
-                        return Some(ss);
+                        return false;
                     };
                     let Some(active) = tabs.get(ss.active).or_else(|| tabs.first()).cloned() else {
-                        return Some(ss);
+                        return false;
                     };
-                    this.sessions.push(Session {
-                        kind: SessionKind::Term { layout, active },
-                        custom_title: ss.custom_title,
-                        _acp_persist_sub: None,
-                    });
+                    if this.session_list_revision != restore_revision {
+                        restore_order_intact = false;
+                    }
+                    let insert_at = if restore_order_intact {
+                        planned_restore_insert_position(
+                            &restored_order,
+                            original_index,
+                            this.sessions.len(),
+                        )
+                        .unwrap_or_else(|| {
+                            restore_order_intact = false;
+                            this.sessions.len()
+                        })
+                    } else {
+                        this.sessions.len()
+                    };
+                    this.sessions.insert(
+                        insert_at,
+                        Session {
+                            kind: SessionKind::Term { layout, active },
+                            custom_title: ss.custom_title,
+                            _acp_persist_sub: None,
+                        },
+                    );
+                    record_restored_index(
+                        &mut restored_order,
+                        insert_at,
+                        original_index,
+                        restore_order_intact,
+                    );
+                    this.restore_orphans
+                        .retain(|(index, _)| *index != original_index);
                     // 让这一个立刻上屏，不等其余的
                     cx.notify();
-                    None
+                    true
                 });
                 match outcome {
-                    Ok(Some(ss)) => failed.push(ss),
-                    Ok(None) => restored += 1,
+                    Ok(true) => restored += 1,
+                    Ok(false) => {}
                     Err(_) => return, // 窗口已关，收摊
                 }
             }
 
             let _ = this.update(cx, |this, cx| {
-                this.restore_orphans = failed;
                 this.sessions_restored = true;
-                this.active_session = active_session.min(this.sessions.len().saturating_sub(1));
+                if should_restore_saved_active(
+                    restore_order_intact,
+                    this.session_list_revision,
+                    restore_revision,
+                    this.active_session_revision,
+                    restore_active_revision,
+                ) {
+                    this.active_session = restored_active_position(&restored_order, active_session);
+                }
                 this.save_state(cx);
                 if !this.restore_orphans.is_empty() {
                     eprintln!(
@@ -2321,6 +2560,7 @@ impl Workspace {
         };
         let insert_at = adjusted_target_ix + if before { 0 } else { 1 };
         self.sessions.insert(insert_at, session);
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
 
         if let Some(id) = active_id {
             if let Some(ix) = self.sessions.iter().position(|s| s.anchor_id() == id) {
@@ -2373,6 +2613,7 @@ impl Workspace {
         for (i, s) in moved.into_iter().enumerate() {
             self.sessions.insert(insert_at + i, s);
         }
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
 
         if let Some(id) = active_id {
             if let Some(ix) = self.sessions.iter().position(|s| s.anchor_id() == id) {
@@ -2428,6 +2669,7 @@ impl Workspace {
             custom_title: None,
             _acp_persist_sub,
         });
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
         self.stage_override = None;
         self.save_state(cx);
@@ -2544,6 +2786,7 @@ impl Workspace {
                     custom_title: None,
                     _acp_persist_sub,
                 });
+                this.session_list_revision = this.session_list_revision.wrapping_add(1);
                 let ix = this.sessions.len() - 1;
                 // 只有还是"最新一次点击"才抢激活态——连点两条不同历史记录时，
                 // 加载慢的那条完成得晚也不该把已经激活的那条顶掉，但会话本身
@@ -2634,6 +2877,7 @@ impl Workspace {
                     )
                 });
                 this.sessions.push(Session::single(view));
+                this.session_list_revision = this.session_list_revision.wrapping_add(1);
                 this.active_session = this.sessions.len() - 1;
                 this.stage_override = None;
                 this.save_state(cx);
@@ -2748,8 +2992,8 @@ impl Workspace {
                 }
             })
             .collect();
-        // 启动时恢复失败的会话继续挂在存档里，下次冷启动重试。
-        sessions.extend(self.restore_orphans.iter().cloned());
+        // 启动时恢复失败的会话按原位置写回，下次冷启动重试。
+        sessions = merge_restore_orphans(sessions, &self.restore_orphans);
 
         // 安全阀：内存里一个会话都没有、也没有 orphan，但磁盘上还有旧存档 → 绝不
         // 用空列表覆盖（历史上「守护未就绪 → 恢复全失败 → save_state 抹盘」会把
@@ -2783,7 +3027,11 @@ impl Workspace {
         let state = WsState {
             sessions,
             projects: self.projects.clone(),
-            active_session: self.active_session,
+            active_session: persisted_active_position(
+                self.active_session,
+                &self.restore_orphans,
+                self.sessions_restored,
+            ),
             // 旧档的 sidebar_w 字段保留声明只为 serde 兼容；新布局固定宽，不再写。
             sidebar_w: None,
             file_tree_w,
@@ -3070,6 +3318,7 @@ impl Workspace {
             view.update(cx, |v, cx| v.shutdown(cx));
         }
         self.sessions.remove(ix);
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
         // 空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
         if self.sessions.is_empty() {
             self.active_session = 0;
@@ -3086,7 +3335,21 @@ impl Workspace {
     /// 指向即将被删除目录的死会话。顺带把这个目录从项目列表里摘掉——目录都要没了，
     /// 留一条指向不存在路径的项目没有意义。
     fn close_sessions_under(&mut self, path: &str, cx: &mut Context<Self>) {
-        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let path = path.trim_end_matches('/').to_string();
+        if !self
+            .cancelled_restore_paths
+            .iter()
+            .any(|existing| existing == &path)
+        {
+            self.cancelled_restore_paths.push(path.clone());
+        }
+        self.restore_orphans.retain(|(_, session)| {
+            !restore_path_is_cancelled(
+                session_state_cwd(session).as_deref(),
+                std::slice::from_ref(&path),
+            )
+        });
+        let prefix = format!("{path}/");
         let mut ixs: Vec<usize> = self
             .sessions
             .iter()
@@ -3097,15 +3360,14 @@ impl Workspace {
             })
             .map(|(ix, _)| ix)
             .collect();
-        self.projects.retain(|p| {
-            let p = p.trim_end_matches('/');
-            p != path.trim_end_matches('/') && !p.starts_with(&prefix)
-        });
         // 降序关闭：前面的下标不受后面 remove 影响（同 move_project_near 的做法）。
         ixs.sort_unstable_by(|a, b| b.cmp(a));
         for ix in ixs {
             self.close_session(ix, cx);
         }
+        remove_projects_under(&mut self.projects, &path);
+        self.save_state(cx);
+        cx.notify();
     }
 
     /// 关掉第 ix 个会话里的指定 pane：会话内还有别的 pane 就只拆这一个（守护真正杀掉
@@ -3275,11 +3537,20 @@ impl Workspace {
     /// 快捷键 cmd-up / cmd-down；顺序跟眼睛看到的一致（跨项目一路顺下去），
     /// 不是 self.sessions 的数组序——那个跟侧栏显示序未必一致，切起来会乱跳。
     fn cycle_session(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let order: Vec<usize> = self
-            .project_groups(cx)
+        let statuses = self
+            .sessions
             .iter()
-            .flat_map(|g| g.sessions.iter().copied())
-            .collect();
+            .map(|session| session.status(cx))
+            .collect::<Vec<_>>();
+        let order: Vec<usize> = sidebar_groups(
+            self.sidebar_grouping,
+            self.project_groups(cx),
+            &statuses,
+            self.sessions.len(),
+        )
+        .iter()
+        .flat_map(|g| g.sessions.iter().copied())
+        .collect();
         if order.is_empty() {
             return;
         }
@@ -3294,6 +3565,7 @@ impl Workspace {
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix < self.sessions.len() {
+            self.active_session_revision = self.active_session_revision.wrapping_add(1);
             self.active_session = ix;
             // 活动项目跟着活动会话走：切到别的项目的会话时侧栏高亮同步换过去。
             if let Some(g) = self
@@ -3312,7 +3584,9 @@ impl Workspace {
             if let SessionKind::Acp(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动续接（免手点「重新开始」）。
-                    v.maybe_auto_resume(window, cx);
+                    if should_auto_resume_active_acp(self.sessions_restored) {
+                        v.maybe_auto_resume(window, cx);
+                    }
                     v.mark_read();
                     v.focus_input(window, cx);
                 });
@@ -5842,8 +6116,9 @@ impl Render for Workspace {
         // 后停在哪个会话上，那个会话压根不会收到 activate 调用，只挂那边的话
         // 「重开 GUI 后当前这个 ACP 会话仍要手点重新开始」。maybe_auto_resume
         // 自带一次性闸门，每帧调无副作用。
-        if let Some(SessionKind::Acp(view)) =
-            self.sessions.get(self.active_session).map(|s| &s.kind)
+        if should_auto_resume_active_acp(self.sessions_restored)
+            && let Some(SessionKind::Acp(view)) =
+                self.sessions.get(self.active_session).map(|s| &s.kind)
         {
             let view = view.clone();
             view.update(cx, |v, cx| v.maybe_auto_resume(window, cx));
@@ -7019,7 +7294,7 @@ fn main() {
 mod project_tests {
     use super::{
         AcpSaved, PaneState, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
-        project_root_of, session_state_cwd,
+        project_root_of, remove_projects_under, session_state_cwd,
     };
 
     fn group(root: &str, label: &str) -> ProjectGroup {
@@ -7151,6 +7426,19 @@ mod project_tests {
         assert_eq!(project_root_of(&p, "/a/b").as_deref(), Some("/a/b"));
         assert_eq!(project_root_of(&p, "/a/b/").as_deref(), Some("/a/b"));
         assert_eq!(project_root_of(&p, "/a/b/c").as_deref(), Some("/a/b"));
+    }
+
+    #[test]
+    fn deleting_worktree_removes_project_even_if_session_close_readded_it() {
+        let mut p = projects(&[
+            "/repo",
+            "/repo-worktrees/feature",
+            "/repo-worktrees/feature/sub",
+        ]);
+
+        remove_projects_under(&mut p, "/repo-worktrees/feature/");
+
+        assert_eq!(p, projects(&["/repo"]));
     }
 
     /// 旧存档迁移：项目列表从会话 cwd 反推，终端会话取分屏树里第一个叶子的 cwd。
@@ -7317,6 +7605,177 @@ mod workspace_state_tests {
         let restored: WsState = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.collapsed_projects, state.collapsed_projects);
+    }
+
+    #[cfg(test)]
+    mod sidebar_group_tests {
+        use crate::{AgentStatus, ProjectGroup, SidebarGrouping, sidebar_groups};
+
+        fn group(root: &str, sessions: &[usize]) -> ProjectGroup {
+            ProjectGroup {
+                root: root.into(),
+                label: root.into(),
+                sessions: sessions.to_vec(),
+            }
+        }
+
+        #[test]
+        fn status_grouping_order_matches_rendered_status_buckets() {
+            let projects = vec![group("a", &[0, 1]), group("b", &[2, 3])];
+            let statuses = vec![
+                AgentStatus::Idle,
+                AgentStatus::Running,
+                AgentStatus::WaitingApproval,
+                AgentStatus::Done,
+            ];
+
+            let groups = sidebar_groups(SidebarGrouping::Status, projects, &statuses, 4);
+            let order = groups
+                .iter()
+                .flat_map(|group| group.sessions.iter().copied())
+                .collect::<Vec<_>>();
+
+            assert_eq!(order, vec![2, 1, 3, 0]);
+        }
+
+        #[test]
+        fn project_grouping_keeps_project_order() {
+            let projects = vec![group("a", &[2, 0]), group("b", &[1])];
+
+            let groups = sidebar_groups(
+                SidebarGrouping::Project,
+                projects,
+                &[AgentStatus::Idle; 3],
+                3,
+            );
+
+            assert_eq!(groups[0].sessions, vec![2, 0]);
+            assert_eq!(groups[1].sessions, vec![1]);
+        }
+    }
+
+    #[cfg(test)]
+    mod restore_order_tests {
+        use crate::{
+            AcpSaved, PaneState, SessionState, merge_restore_orphans, persisted_active_position,
+            planned_restore_insert_position, record_restored_index, restore_path_is_cancelled,
+            restored_active_position, restored_insert_position, should_auto_resume_active_acp,
+            should_restore_saved_active, split_restore_queue,
+        };
+
+        fn state(name: &str, acp: bool) -> SessionState {
+            SessionState {
+                layout: PaneState::Leaf {
+                    cwd: Some(format!("/{name}")),
+                    id: None,
+                    custom_title: None,
+                    launch_label: None,
+                    launch_cmd: None,
+                },
+                active: 0,
+                custom_title: Some(name.into()),
+                acp: acp.then(|| AcpSaved {
+                    cwd: Some(format!("/{name}")),
+                    launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude"),
+                    profile_id: None,
+                    agent: Some("claude".into()),
+                    entries: Vec::new(),
+                    resume_session_id: None,
+                    sid: Some(format!("sid-{name}")),
+                    refresh_launch_from_settings: false,
+                }),
+            }
+        }
+
+        #[test]
+        fn split_restore_queue_retains_original_indices() {
+            let pending = vec![
+                state("term-0", false),
+                state("acp-1", true),
+                state("term-2", false),
+                state("acp-3", true),
+            ];
+
+            let (acp, terminals) = split_restore_queue(pending);
+
+            assert_eq!(
+                acp.iter().map(|(ix, _)| *ix).collect::<Vec<_>>(),
+                vec![1, 3]
+            );
+            assert_eq!(
+                terminals.iter().map(|(ix, _)| *ix).collect::<Vec<_>>(),
+                vec![0, 2]
+            );
+        }
+
+        #[test]
+        fn incremental_restore_inserts_sessions_in_saved_order() {
+            let mut restored = vec![1, 3];
+
+            let pos = restored_insert_position(&restored, 0);
+            restored.insert(pos, 0);
+            let pos = restored_insert_position(&restored, 2);
+            restored.insert(pos, 2);
+
+            assert_eq!(restored, vec![0, 1, 2, 3]);
+            assert_eq!(restored_active_position(&restored, 2), 2);
+        }
+
+        #[test]
+        fn missing_active_session_falls_back_to_last_restored_session() {
+            assert_eq!(restored_active_position(&[0, 1, 3], 2), 2);
+        }
+
+        #[test]
+        fn restore_orphans_are_merged_at_their_saved_indices() {
+            let live = vec![state("acp-1", true), state("acp-3", true)];
+            let orphans = vec![(0, state("term-0", false)), (2, state("term-2", false))];
+
+            let merged = merge_restore_orphans(live, &orphans);
+            let names = merged
+                .iter()
+                .map(|session| session.custom_title.as_deref().unwrap())
+                .collect::<Vec<_>>();
+
+            assert_eq!(names, vec!["term-0", "acp-1", "term-2", "acp-3"]);
+            assert_eq!(persisted_active_position(1, &orphans, true), 3);
+        }
+
+        #[test]
+        fn active_acp_waits_for_full_restore_before_auto_resuming() {
+            assert!(!should_auto_resume_active_acp(false));
+            assert!(should_auto_resume_active_acp(true));
+        }
+
+        #[test]
+        fn user_session_mutation_disables_saved_index_insertion() {
+            assert_eq!(planned_restore_insert_position(&[1, 3], 2, 2), Some(1));
+            assert_eq!(planned_restore_insert_position(&[1, 3], 2, 0), None);
+            assert_eq!(planned_restore_insert_position(&[1], 2, 2), None);
+
+            let mut restored = vec![1, 3];
+            record_restored_index(&mut restored, 4, 2, false);
+            assert_eq!(restored, vec![1, 3]);
+        }
+
+        #[test]
+        fn user_selection_prevents_saved_active_session_from_overwriting_it() {
+            assert!(should_restore_saved_active(true, 4, 4, 7, 7));
+            assert!(!should_restore_saved_active(true, 4, 4, 8, 7));
+            assert!(!should_restore_saved_active(false, 4, 4, 7, 7));
+        }
+
+        #[test]
+        fn deleting_worktree_cancels_nested_pending_restores() {
+            assert!(restore_path_is_cancelled(
+                Some("/repo-worktrees/feature/sub"),
+                &["/repo-worktrees/feature".into()]
+            ));
+            assert!(!restore_path_is_cancelled(
+                Some("/repo-worktrees/feature-old"),
+                &["/repo-worktrees/feature".into()]
+            ));
+        }
     }
 
     #[test]

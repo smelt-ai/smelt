@@ -193,38 +193,12 @@ impl Workspace {
                 session_projects[ix] = Some((group.label.clone(), branch.clone()));
             }
         }
-        let groups = match self.sidebar_grouping {
-            SidebarGrouping::Project => project_groups,
-            SidebarGrouping::Status => {
-                let buckets = [
-                    (AgentStatus::WaitingApproval, "等你批准"),
-                    (AgentStatus::NeedsAttention, "需要处理"),
-                    (AgentStatus::Running, "运行中"),
-                    (AgentStatus::Done, "已完成"),
-                    (AgentStatus::Idle, "空闲"),
-                ];
-                buckets
-                    .into_iter()
-                    .filter_map(|(status, label)| {
-                        let sessions = statuses
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(ix, value)| (*value == status).then_some(ix))
-                            .collect::<Vec<_>>();
-                        (!sessions.is_empty()).then(|| crate::ProjectGroup {
-                            root: format!("__status_{}", status.rank()),
-                            label: label.to_string(),
-                            sessions,
-                        })
-                    })
-                    .collect()
-            }
-            SidebarGrouping::None => vec![crate::ProjectGroup {
-                root: "__all_sessions".into(),
-                label: String::new(),
-                sessions: (0..self.sessions.len()).collect(),
-            }],
-        };
+        let groups = crate::sidebar_groups(
+            self.sidebar_grouping,
+            project_groups,
+            &statuses,
+            self.sessions.len(),
+        );
 
         // ---- 头部：SESSIONS · 总数 + 历史入口 ----
         // 新建入口全撤：建会话一律走「项目行 hover 出的 +」（落到那个项目），不属于任何
