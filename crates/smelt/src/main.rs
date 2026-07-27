@@ -2025,7 +2025,7 @@ fn turns_to_acp_entries(turns: &[session_history::Turn]) -> Vec<acp_view::AcpEnt
 }
 
 impl Workspace {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let saved = load_ws_state();
@@ -2249,7 +2249,7 @@ impl Workspace {
                 "[workspace] 后台恢复 {} 个会话（不堵 UI）…",
                 pending_sessions.len()
             );
-            ws.schedule_session_restore(pending_sessions, active_session, cx);
+            ws.schedule_session_restore(pending_sessions, active_session, window, cx);
         } else {
             ws.check_daemon_outdated(cx);
         }
@@ -2289,6 +2289,7 @@ impl Workspace {
         &mut self,
         pending: Vec<SessionState>,
         active_session: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let restore_revision = self.session_list_revision;
@@ -2337,7 +2338,7 @@ impl Workspace {
             })
             .expect("spawn smelt-restore-sessions 线程");
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let mut restored = 0usize;
             let mut restored_order = Vec::new();
             let mut restore_order_intact = true;
@@ -2348,7 +2349,7 @@ impl Workspace {
                 return;
             }
             if this
-                .update(cx, |this, cx| {
+                .update_in(cx, |this, _window, cx| {
                     for (original_index, ss) in acp_saved {
                         if restore_path_is_cancelled(
                             session_state_cwd(&ss).as_deref(),
@@ -2359,11 +2360,7 @@ impl Workspace {
                             continue;
                         }
                         let Some(saved) = ss.acp else { continue };
-                        let reason = if saved.resume_session_id.is_some() {
-                            "正在恢复上次的对话…"
-                        } else {
-                            "上次的对话已结束（历史消息已保留，点击重新开始继续）"
-                        };
+                        let reason = "正在恢复上次的对话…";
                         let agent = saved
                             .agent
                             .as_deref()
@@ -2428,7 +2425,7 @@ impl Workspace {
 
             // 收一个渲染一个。后台线程跑完会 drop sender，recv 报错即代表全部处理完。
             while let Ok((original_index, ss, result)) = rx.recv().await {
-                let outcome = this.update(cx, |this, cx| {
+                let outcome = this.update_in(cx, |this, _window, cx| {
                     if restore_path_is_cancelled(
                         session_state_cwd(&ss).as_deref(),
                         &this.cancelled_restore_paths,
@@ -2502,7 +2499,7 @@ impl Workspace {
                 }
             }
 
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.sessions_restored = true;
                 if should_restore_saved_active(
                     restore_order_intact,
@@ -2512,6 +2509,13 @@ impl Workspace {
                     restore_active_revision,
                 ) {
                     this.active_session = restored_active_position(&restored_order, active_session);
+                }
+                if let Some(Session {
+                    kind: SessionKind::Acp(view),
+                    ..
+                }) = this.sessions.get(this.active_session)
+                {
+                    view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
                 }
                 this.save_state(cx);
                 if !this.restore_orphans.is_empty() {
@@ -3828,7 +3832,7 @@ impl Workspace {
             // ACP 会话例外：绿点「有结果可看」查看即清（消息流全文可见，看到=处理）。
             if let SessionKind::Acp(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
-                    // 冷恢复占位第一次被切到 → 自动续接（免手点「重新开始」）。
+                    // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
                     if should_auto_resume_active_acp(self.sessions_restored) {
                         v.maybe_auto_resume(window, cx);
                     }
@@ -7113,7 +7117,7 @@ fn open_workspace_window(
         // 逐个改 .text_xs()/.text_sm()。终端内容本身的字号另由 terminal_view.rs
         // 的 FONT_PX 控制，不受这个影响。
         window.set_rem_size(px(19.));
-        let view = cx.new(|cx| Workspace::new(cx));
+        let view = cx.new(|cx| Workspace::new(window, cx));
         workspace = Some(view.clone());
         // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
         cx.new(|cx| Root::new(view, window, cx))
@@ -8271,6 +8275,10 @@ mod acp_agent_tests {
         assert_eq!(acp_agent_from_cmd("copilot --acp"), AcpAgentKind::Copilot);
         assert_eq!(
             acp_agent_from_cmd("bunx --bun @zed-industries/codex-acp"),
+            AcpAgentKind::Codex
+        );
+        assert_eq!(
+            acp_agent_from_cmd("bunx --bun @agentclientprotocol/codex-acp"),
             AcpAgentKind::Codex
         );
         assert_eq!(acp_agent_from_cmd("some-other-agent"), AcpAgentKind::Claude);

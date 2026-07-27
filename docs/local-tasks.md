@@ -50,18 +50,35 @@ Task {
   id,
   title,               // 给人看的侧栏名（可空→用 body 首行）
   body,                // 给 agent 的首包（开跑唯一进 CLI 的内容）
-  column,              // 待办(backlog) | 执行中(running) | 完成(done)；旧 ready/waiting 读入后归并展示
+  column,              // 待办 | 执行中 | 待审查 | 失败 | 完成
   project_cwd,         // 在哪跑
   session_id?,         // smeltd 会话
+  current_run_id?,     // 当前/最近一次执行
   launch?,             // base 命令（不含首包拼接）
   kind,                // once | scheduled（缺省 once，兼容旧数据）
   run_at?,             // Unix 秒；kind=scheduled 时计划开跑时间
   auto_run,            // 是否允许系统自动开跑（缺省 true）；false = 仅手动
   created_at, updated_at,
 }
+
+TaskRun {
+  id,
+  task_id,
+  attempt,             // 第几次尝试
+  channel,             // 当前为 pty；预留 acp
+  launch,              // 本次执行使用的启动命令快照
+  session_id?,
+  status,              // starting | running | completed | failed | cancelled
+  error?,
+  created_at, started_at?, finished_at?,
+}
 ```
 
-落盘：`~/.smelt/tasks.json`；首包文件：`~/.smelt/tasks/prompts/<id>.txt`（内容 = body）。
+`Task` 表示用户要完成的目标，`TaskRun` 表示一次具体执行尝试；重试不会覆盖上次失败记录。
+agent 从 Running 变 Idle 时，本次 Run 标 `completed`，Task 进入「待审查」，由人确认后才算完成。
+
+落盘：`~/.smelt/tasks.json`（`tasks` + `runs`）；首包文件：
+`~/.smelt/tasks/prompts/<id>.txt`（内容 = body）。旧文件没有 `runs/current_run_id` 时按空值兼容读取。
 
 **全局行为（无 config 总开关）：** 只要存在「待办 + `auto_run` + 可跑」的任务，系统会在合适时机自动执行。
 
@@ -71,7 +88,8 @@ Task {
 
 ```text
 spinner 落下（Running→Idle）
-  → 绑了该 session 的任务 → Done
+  → 当前 TaskRun → Completed
+  → 绑了该 session 的任务 → Review
   → claim 同 project_cwd 下一条 auto_run 待办（FIFO / created_at）
   → run_task（新开终端 + startup-arg）
 ```
