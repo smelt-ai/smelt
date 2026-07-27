@@ -403,12 +403,13 @@ mod tests {
     }
 
     #[test]
-    fn load_launch_config_leaves_legacy_resume_command_ordinary_without_writeback() {
+    fn load_launch_config_leaves_legacy_short_session_commands_ordinary_without_writeback() {
         let sandbox = test_sandbox("legacy-resume-command");
         let path = sandbox.join("launch.json");
         let raw = r#"{
   "entries": [
-    {"label": "Continue Claude", "command": "claude -c"}
+    {"label": "Grok session", "command": "grok -sold"},
+    {"label": "Resume Grok", "command": "grok -rold"}
   ]
 }"#;
         fs::write(&path, raw).unwrap();
@@ -416,6 +417,7 @@ mod tests {
         let config = super::load_launch_config_from_path(&path);
 
         assert_eq!(config.entries[0].agent_kind, None);
+        assert_eq!(config.entries[1].agent_kind, None);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             raw,
