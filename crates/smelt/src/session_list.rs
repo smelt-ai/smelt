@@ -481,8 +481,8 @@ impl Workspace {
                                                             }),
                                                     );
                                                 for entry in entries {
-                                                    let label = entry.label;
-                                                    let command = entry.command;
+                                                    let label = entry.label.clone();
+                                                    let command = entry.command.clone();
                                                     let cwd_launch = cwd_opt.clone();
                                                     let e_launch = e_menu.clone();
                                                     let icon = icon_for_launch_command(&command);
@@ -491,13 +491,11 @@ impl Workspace {
                                                             .icon(icon)
                                                             .on_click(move |_ev, _window, cx| {
                                                                 let cwd = cwd_launch.clone();
-                                                                let cmd = command.clone();
-                                                                let name = label.clone();
+                                                                let entry = entry.clone();
                                                                 e_launch.update(cx, |ws, cx| {
                                                                     ws.add_session_with_launch(
                                                                         cwd,
-                                                                        Some(cmd.as_str()),
-                                                                        Some(name.as_str()),
+                                                                        Some(entry),
                                                                         cx,
                                                                     );
                                                                 });

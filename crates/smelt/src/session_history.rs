@@ -15,6 +15,184 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedTerminalAgentLaunch {
+    Known {
+        command: String,
+        state: TerminalResumeState,
+    },
+    Discover {
+        command: String,
+        workspace_dir: Option<String>,
+    },
+}
+
+fn safe_agent_command(
+    kind: TerminalAgentKind,
+    command: &str,
+) -> Result<(Vec<String>, usize), String> {
+    if command
+        .chars()
+        .any(|ch| matches!(ch, ';' | '|' | '&' | '\n' | '\r'))
+    {
+        return Err("自动恢复不支持 shell 管道或控制符".into());
+    }
+    let words =
+        shell_words::split(command).map_err(|error| format!("启动命令解析失败：{error}"))?;
+    let executable_index = words
+        .iter()
+        .position(|word| smelt_core::workspace_override::split_env_assignment(word).is_none())
+        .ok_or_else(|| "启动命令为空".to_string())?;
+    let executable = &words[executable_index];
+    let basename = Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(executable);
+    if basename != kind.id() {
+        return Err(format!("启动命令不是 {}", kind.label()));
+    }
+    Ok((words, executable_index))
+}
+
+fn safe_session_id(session_id: &str) -> Result<&str, String> {
+    if !session_id.is_empty()
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        Ok(session_id)
+    } else {
+        Err("会话 ID 含有不安全字符".into())
+    }
+}
+
+fn terminal_workspace_dir(
+    kind: TerminalAgentKind,
+    words: &[String],
+    executable_index: usize,
+) -> Option<String> {
+    let variable = smelt_core::workspace_override::config_dir_env_var(kind.id())?;
+    words[..executable_index].iter().find_map(|word| {
+        let (name, value) = smelt_core::workspace_override::split_env_assignment(word)?;
+        (name == variable).then(|| smelt_core::workspace_override::expand_tilde(value))
+    })
+}
+
+pub(crate) fn prepare_terminal_agent_launch(
+    kind: TerminalAgentKind,
+    command: &str,
+    session_id: &str,
+) -> Result<PreparedTerminalAgentLaunch, String> {
+    let (words, executable_index) = safe_agent_command(kind, command)?;
+    let args = &words[executable_index + 1..];
+    if args.iter().any(|arg| {
+        arg == "resume"
+            || arg == "--continue"
+            || arg == "--resume"
+            || arg.starts_with("--resume=")
+            || arg == "--session-id"
+            || arg.starts_with("--session-id=")
+    }) {
+        return Err("启动命令已包含会话恢复或会话 ID 参数".into());
+    }
+    let workspace_dir = terminal_workspace_dir(kind, &words, executable_index);
+    if kind == TerminalAgentKind::Codex {
+        return Ok(PreparedTerminalAgentLaunch::Discover {
+            command: command.to_string(),
+            workspace_dir,
+        });
+    }
+    let session_id = safe_session_id(session_id)?;
+    Ok(PreparedTerminalAgentLaunch::Known {
+        command: format!("{command} --session-id {session_id}"),
+        state: TerminalResumeState {
+            agent: kind,
+            session_id: session_id.to_string(),
+            workspace_dir,
+        },
+    })
+}
+
+pub(crate) fn terminal_resume_command(
+    kind: TerminalAgentKind,
+    command: &str,
+    session_id: &str,
+) -> Result<String, String> {
+    let (mut words, executable_index) = safe_agent_command(kind, command)?;
+    let session_id = safe_session_id(session_id)?;
+    if kind == TerminalAgentKind::Codex {
+        words.insert(executable_index + 1, "resume".into());
+        words.insert(executable_index + 2, session_id.into());
+        let rendered = shell_words::join(words);
+        return Ok(if executable_index == 0 {
+            rendered
+        } else {
+            format!("env {rendered}")
+        });
+    }
+    let flag = match kind {
+        TerminalAgentKind::Claude | TerminalAgentKind::Grok => {
+            format!("--resume {session_id}")
+        }
+        TerminalAgentKind::Copilot => format!("--resume={session_id}"),
+        TerminalAgentKind::Codex => unreachable!(),
+    };
+    Ok(format!("{command} {flag}"))
+}
+
+fn list_terminal_sessions(
+    agent: TerminalAgentKind,
+    cwd: &str,
+    override_dir: Option<&str>,
+) -> Vec<SessionSummary> {
+    match agent {
+        TerminalAgentKind::Claude => list_sessions(cwd, override_dir),
+        TerminalAgentKind::Codex => list_codex_sessions(cwd, override_dir),
+        TerminalAgentKind::Grok => list_grok_sessions(cwd, override_dir),
+        TerminalAgentKind::Copilot => list_copilot_sessions(cwd, override_dir),
+    }
+}
+
+pub(crate) fn terminal_session_ids(
+    agent: TerminalAgentKind,
+    cwd: &str,
+    override_dir: Option<&str>,
+) -> HashSet<String> {
+    list_terminal_sessions(agent, cwd, override_dir)
+        .into_iter()
+        .map(|session| session.resume_id)
+        .collect()
+}
+
+pub(crate) fn terminal_session_exists(state: &TerminalResumeState, cwd: &str) -> bool {
+    terminal_session_ids(state.agent, cwd, state.workspace_dir.as_deref())
+        .contains(&state.session_id)
+}
+
+pub(crate) fn discover_unique_session_id(
+    baseline: &HashSet<String>,
+    current: &HashSet<String>,
+) -> Result<Option<String>, String> {
+    let mut added = current.difference(baseline);
+    let first = added.next().cloned();
+    if added.next().is_some() {
+        return Err("发现多个新 Codex 会话，无法确定当前终端对应哪一个".into());
+    }
+    Ok(first)
+}
+
+pub(crate) fn discover_unclaimed_session_id(
+    baseline: &HashSet<String>,
+    current: &HashSet<String>,
+    claimed: &HashSet<String>,
+) -> Result<Option<String>, String> {
+    let mut effective_baseline = baseline.clone();
+    effective_baseline.extend(claimed.iter().cloned());
+    discover_unique_session_id(&effective_baseline, current)
+}
+
 // 项目目录编码 / transcript 路径 / 记忆目录：唯一权威来源现在是 smelt_core::
 // claude_paths（ACP 连接层挪进 smelt-core 后，续接可行性预检也要用同一份规则，
 // 不能这边一份那边一份）。这里整段 re-export，本文件里原有的裸函数名用法
@@ -1655,15 +1833,166 @@ mod tests {
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
     use super::{
-        current_profile_launch, list_codex_sessions, list_copilot_sessions, list_grok_sessions,
+        PreparedTerminalAgentLaunch, current_profile_launch, discover_unclaimed_session_id,
+        discover_unique_session_id, list_codex_sessions, list_copilot_sessions, list_grok_sessions,
         list_sessions, list_sessions_for, load_codex_session_detail, load_copilot_session_detail,
         load_grok_session_detail, load_session_detail, normalized_profile_override_dir,
-        project_dir,
+        prepare_terminal_agent_launch, project_dir, terminal_resume_command,
     };
     use crate::settings::AgentUiConfig;
-    use smelt_core::agent_kind::{AcpAgentKind, AcpProfile};
+    use smelt_core::agent_kind::{
+        AcpAgentKind, AcpProfile, TerminalAgentKind, TerminalResumeState,
+    };
+    use std::collections::HashSet;
     use std::path::Path;
     use std::sync::Mutex;
+
+    fn ids(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn generated_id_agents_receive_safe_initial_arguments() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let prepared = prepare_terminal_agent_launch(
+            TerminalAgentKind::Claude,
+            "claude --dangerously-skip-permissions",
+            id,
+        )
+        .unwrap();
+        assert_eq!(
+            prepared,
+            PreparedTerminalAgentLaunch::Known {
+                command: format!("claude --dangerously-skip-permissions --session-id {id}"),
+                state: TerminalResumeState {
+                    agent: TerminalAgentKind::Claude,
+                    session_id: id.into(),
+                    workspace_dir: None,
+                },
+            }
+        );
+        assert!(matches!(
+            prepare_terminal_agent_launch(TerminalAgentKind::Copilot, "copilot --allow-all", id),
+            Ok(PreparedTerminalAgentLaunch::Known { .. })
+        ));
+        assert!(matches!(
+            prepare_terminal_agent_launch(TerminalAgentKind::Grok, "grok", id),
+            Ok(PreparedTerminalAgentLaunch::Known { .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_prefix_is_preserved_and_bound_to_identity() {
+        let prepared = prepare_terminal_agent_launch(
+            TerminalAgentKind::Claude,
+            "CLAUDE_CONFIG_DIR=\"~/Library/Application Support/Claude Alt\" claude",
+            "11111111-1111-4111-8111-111111111111",
+        )
+        .unwrap();
+        let PreparedTerminalAgentLaunch::Known { command, state } = prepared else {
+            panic!("Claude should have a known ID");
+        };
+        assert!(command.contains("CLAUDE_CONFIG_DIR="));
+        assert!(
+            state
+                .workspace_dir
+                .unwrap()
+                .ends_with("/Library/Application Support/Claude Alt")
+        );
+    }
+
+    #[test]
+    fn codex_waits_for_history_assigned_id() {
+        assert_eq!(
+            prepare_terminal_agent_launch(
+                TerminalAgentKind::Codex,
+                "CODEX_HOME=~/.codex-alt codex --dangerously-bypass-approvals-and-sandbox",
+                "unused",
+            )
+            .unwrap(),
+            PreparedTerminalAgentLaunch::Discover {
+                command: "CODEX_HOME=~/.codex-alt codex --dangerously-bypass-approvals-and-sandbox"
+                    .into(),
+                workspace_dir: smelt_core::workspace_override::expand_tilde("~/.codex-alt").into(),
+            }
+        );
+    }
+
+    #[test]
+    fn resume_commands_keep_original_flags() {
+        assert_eq!(
+            terminal_resume_command(
+                TerminalAgentKind::Claude,
+                "claude --dangerously-skip-permissions",
+                "sid-1",
+            )
+            .unwrap(),
+            "claude --dangerously-skip-permissions --resume sid-1"
+        );
+        assert_eq!(
+            terminal_resume_command(TerminalAgentKind::Copilot, "copilot --allow-all", "sid-1")
+                .unwrap(),
+            "copilot --allow-all --resume=sid-1"
+        );
+        assert_eq!(
+            terminal_resume_command(TerminalAgentKind::Grok, "grok --yolo", "sid-1").unwrap(),
+            "grok --yolo --resume sid-1"
+        );
+        assert_eq!(
+            terminal_resume_command(
+                TerminalAgentKind::Codex,
+                "codex --dangerously-bypass-approvals-and-sandbox",
+                "sid-1",
+            )
+            .unwrap(),
+            "codex resume sid-1 --dangerously-bypass-approvals-and-sandbox"
+        );
+    }
+
+    #[test]
+    fn unsafe_or_mismatched_commands_are_rejected() {
+        assert!(
+            terminal_resume_command(TerminalAgentKind::Claude, "claude; echo unsafe", "sid-1")
+                .is_err()
+        );
+        assert!(terminal_resume_command(TerminalAgentKind::Claude, "codex", "sid-1").is_err());
+        assert!(
+            prepare_terminal_agent_launch(
+                TerminalAgentKind::Claude,
+                "claude --resume old",
+                "sid-1"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn codex_delta_requires_exactly_one_new_id() {
+        let baseline = ids(&["old"]);
+        assert_eq!(
+            discover_unique_session_id(&baseline, &ids(&["old", "new"])),
+            Ok(Some("new".into()))
+        );
+        assert_eq!(discover_unique_session_id(&baseline, &baseline), Ok(None));
+        assert!(discover_unique_session_id(&baseline, &ids(&["old", "a", "b"])).is_err());
+    }
+
+    #[test]
+    fn codex_delta_excludes_ids_claimed_by_other_tabs() {
+        let baseline = ids(&["old"]);
+        assert_eq!(
+            discover_unclaimed_session_id(&baseline, &ids(&["old", "first"]), &ids(&["first"]),),
+            Ok(None)
+        );
+        assert_eq!(
+            discover_unclaimed_session_id(
+                &baseline,
+                &ids(&["old", "first", "second"]),
+                &ids(&["first"]),
+            ),
+            Ok(Some("second".into()))
+        );
+    }
 
     fn write(dir: &Path, name: &str, lines: &[&str]) {
         std::fs::write(dir.join(name), lines.join("\n")).unwrap();
