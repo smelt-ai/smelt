@@ -56,19 +56,37 @@ fn safe_agent_command(
     Ok((words, executable_index))
 }
 
+fn is_long_session_control(arg: &str) -> bool {
+    arg == "resume"
+        || arg == "--continue"
+        || arg == "--resume"
+        || arg.starts_with("--resume=")
+        || arg == "--session-id"
+        || arg.starts_with("--session-id=")
+}
+
+fn is_short_session_control(arg: &str, flag: &str, supports_attached_value: bool) -> bool {
+    match arg.strip_prefix(flag) {
+        Some("") => true,
+        Some(suffix) if suffix.starts_with('=') => true,
+        Some(_) => supports_attached_value,
+        None => false,
+    }
+}
+
 fn has_existing_session_control(kind: TerminalAgentKind, args: &[String]) -> bool {
     args.iter().any(|arg| {
-        arg == "resume"
-            || arg == "--continue"
-            || arg == "--resume"
-            || arg.starts_with("--resume=")
-            || arg == "--session-id"
-            || arg.starts_with("--session-id=")
+        is_long_session_control(arg)
             || match kind {
-                TerminalAgentKind::Claude | TerminalAgentKind::Grok => {
-                    arg == "-c" || arg == "-r" || arg.starts_with("-r=")
+                TerminalAgentKind::Claude => {
+                    arg == "-c" || is_short_session_control(arg, "-r", false)
                 }
-                TerminalAgentKind::Copilot => arg == "-r" || arg.starts_with("-r="),
+                TerminalAgentKind::Copilot => is_short_session_control(arg, "-r", false),
+                TerminalAgentKind::Grok => {
+                    arg == "-c"
+                        || is_short_session_control(arg, "-r", true)
+                        || is_short_session_control(arg, "-s", true)
+                }
                 TerminalAgentKind::Codex => false,
             }
     })
@@ -2032,7 +2050,6 @@ mod tests {
             (TerminalAgentKind::Copilot, "copilot -r=old"),
             (TerminalAgentKind::Copilot, "copilot -r old"),
             (TerminalAgentKind::Grok, "grok -c"),
-            (TerminalAgentKind::Grok, "grok -r old"),
         ] {
             assert_eq!(
                 infer_terminal_agent_kind(command),
@@ -2042,6 +2059,50 @@ mod tests {
             assert!(
                 prepare_terminal_agent_launch(kind, command, "new").is_err(),
                 "{command} must not be used as a managed initial launch"
+            );
+        }
+    }
+
+    #[test]
+    fn grok_session_id_and_attached_resume_controls_are_not_managed() {
+        for command in [
+            "grok --session-id old",
+            "grok --session-id=old",
+            "grok -s old",
+            "grok -s=old",
+            "grok -sold",
+            "grok -r old",
+            "grok -r=old",
+            "grok -rold",
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                None,
+                "{command} must remain an ordinary terminal command"
+            );
+            assert!(
+                prepare_terminal_agent_launch(TerminalAgentKind::Grok, command, "new").is_err(),
+                "{command} must not be used as a managed initial launch"
+            );
+        }
+    }
+
+    #[test]
+    fn grok_attached_short_controls_do_not_match_other_agents_or_long_flags() {
+        for (kind, command) in [
+            (TerminalAgentKind::Claude, "claude -sold"),
+            (TerminalAgentKind::Claude, "claude -rold"),
+            (TerminalAgentKind::Copilot, "copilot -sold"),
+            (TerminalAgentKind::Copilot, "copilot -rold"),
+            (TerminalAgentKind::Grok, "grok --search web"),
+            (TerminalAgentKind::Grok, "grok --remote"),
+            (TerminalAgentKind::Grok, "grok --session-idle"),
+            (TerminalAgentKind::Grok, "grok --resume-latest"),
+        ] {
+            assert_eq!(infer_terminal_agent_kind(command), Some(kind));
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_ok(),
+                "{command} is not an existing-session launch"
             );
         }
     }
