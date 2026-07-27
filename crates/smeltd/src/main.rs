@@ -3662,7 +3662,10 @@ fn handle_subscribe(
 //       `AcpLaunchSpec::from_command(cmd)`。
 //     → 已存在且还活着（有 handle）就直接接上；已存在但 Ended（没有 handle）
 //       就用请求带的 launch + 已知的旧 session id（没有才退回请求带的 resume_id）
-//       重新 spawn（「重新开始」）；都不存在就全新建。回一份
+//       重新 spawn（「重新开始」）；都不存在就全新建。丢失 daemon slot 时会先起
+//       一个 replacement 进程，再尝试按 resume_id 恢复协议状态；只有 typed
+//       unsupported / not-found 这两类恢复结果才会继续创建新的 conversation，
+//       transient failure 只返回可重试错误，不会偷偷新建。回一份
 //       `{"snapshot": AcpSnapshot}`，之后每次归约有实质变化再推一份同形状的
 //       行。同 id 只允许一个控制连接，第二次 open 顶掉前一个。
 //   {"op":"acp_watch","id":".."} → 只读镜像，会话必须已存在，可多个并存。
@@ -3738,6 +3741,10 @@ fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
         agent_needs_transcript_check: v["agent"].as_str().unwrap_or("claude") == "claude",
         resume_id: v["resume_id"].as_str().map(String::from),
     })
+}
+
+fn select_resume_id(known: Option<String>, requested: Option<String>) -> Option<String> {
+    known.or(requested)
 }
 
 /// ACP 相位 → 四色 Phase。`Running` 还要看 entries 里有没有进行中的工具调用，
@@ -4034,7 +4041,7 @@ fn handle_acp_open(
                 &slot,
                 &id,
                 launch.clone(),
-                known.or_else(|| req_resume_id.clone()),
+                select_resume_id(known, req_resume_id.clone()),
                 acp_sessions.spawn_gate(),
                 &subscribers,
             );
@@ -6230,5 +6237,20 @@ mod acp_tests {
 
         assert_eq!(req.launch.command, "claude --dangerously-skip-permissions");
         assert!(req.launch.env.is_empty());
+    }
+
+    #[test]
+    fn daemon_known_resume_id_wins_after_gui_reconnect() {
+        assert_eq!(
+            select_resume_id(
+                Some("daemon-session".to_string()),
+                Some("saved-session".to_string())
+            ),
+            Some("daemon-session".to_string())
+        );
+        assert_eq!(
+            select_resume_id(None, Some("saved-session".to_string())),
+            Some("saved-session".to_string())
+        );
     }
 }
