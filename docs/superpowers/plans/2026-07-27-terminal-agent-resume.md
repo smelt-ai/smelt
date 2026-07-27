@@ -155,6 +155,8 @@ impl TerminalAgentKind {
 pub struct TerminalResumeState {
     pub agent: TerminalAgentKind,
     pub session_id: String,
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
 }
 ```
 
@@ -272,6 +274,7 @@ fn generated_id_agents_receive_safe_initial_arguments() {
             state: TerminalResumeState {
                 agent: TerminalAgentKind::Claude,
                 session_id: id.into(),
+                workspace_dir: None,
             },
         }
     );
@@ -349,6 +352,21 @@ fn unsafe_or_mismatched_commands_are_rejected() {
 }
 
 #[test]
+fn workspace_prefix_is_preserved_and_bound_to_identity() {
+    let prepared = prepare_terminal_agent_launch(
+        TerminalAgentKind::Claude,
+        "CLAUDE_CONFIG_DIR=~/.claude-alt claude",
+        "11111111-1111-4111-8111-111111111111",
+    )
+    .unwrap();
+    let PreparedTerminalAgentLaunch::Known { command, state } = prepared else {
+        panic!("Claude should have a known ID");
+    };
+    assert!(command.starts_with("CLAUDE_CONFIG_DIR="));
+    assert!(state.workspace_dir.unwrap().ends_with("/.claude-alt"));
+}
+
+#[test]
 fn codex_delta_requires_exactly_one_new_id() {
     let baseline = ids(&["old"]);
     assert_eq!(
@@ -395,7 +413,10 @@ fn safe_agent_command(
     }
     let words = shell_words::split(command)
         .map_err(|error| format!("启动命令解析失败：{error}"))?;
-    let executable = words.first().ok_or_else(|| "启动命令为空".to_string())?;
+    let executable = words
+        .iter()
+        .find(|word| smelt_core::workspace_override::split_env_assignment(word).is_none())
+        .ok_or_else(|| "启动命令为空".to_string())?;
     let basename = std::path::Path::new(executable)
         .file_name()
         .and_then(|name| name.to_str())
@@ -412,8 +433,11 @@ fn quote_words(words: impl IntoIterator<Item = String>) -> String {
 ```
 
 `prepare_terminal_agent_launch` rejects existing `--resume`, `--continue`, and
-`--session-id` flags. It returns `Discover` unchanged for Codex. For the other
-agents it appends `--session-id`, quotes the words, and returns `Known`.
+`--session-id` flags. It obtains the supported workspace override with
+`config_dir_env_var(kind.id())` plus `env_override_from_cmd`, stores it on the
+resume state, and preserves all leading assignments. It returns `Discover`
+unchanged for Codex. For the other agents it appends `--session-id`, quotes
+the words, and returns `Known`.
 
 `terminal_resume_command` parses the original command again. It appends the
 agent-specific resume flag for Claude, Copilot, and Grok. For Codex it inserts
@@ -457,7 +481,9 @@ pub(crate) fn discover_unique_session_id(
 ```
 
 `list_terminal_sessions` dispatches to the existing four list functions and
-does not duplicate any private history path.
+does not duplicate any private history path. Every call passes
+`state.workspace_dir.as_deref()` (or the workspace override captured before a
+Codex launch), never an unconditional `None`.
 
 - [ ] **Step 6: Run adapter tests and checks**
 

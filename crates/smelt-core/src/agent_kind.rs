@@ -4,6 +4,58 @@
 
 use std::collections::BTreeMap;
 
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalAgentKind {
+    Claude,
+    Codex,
+    Copilot,
+    Grok,
+}
+
+impl TerminalAgentKind {
+    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Copilot, Self::Grok];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Copilot => "copilot",
+            Self::Grok => "grok",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.id() == id)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Copilot => "GitHub Copilot",
+            Self::Grok => "Grok",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TerminalResumeState {
+    pub agent: TerminalAgentKind,
+    pub session_id: String,
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
+}
+
 /// ACP 会话可接的 agent 种类。**新增一种 agent = 这个枚举加一条**，命令、显示名、
 /// 设置项、新建菜单都从这里派生，别再散着写死。
 ///
@@ -184,6 +236,28 @@ impl AcpProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_agent_kind_roundtrips_by_stable_id() {
+        for kind in TerminalAgentKind::ALL {
+            assert_eq!(TerminalAgentKind::from_id(kind.id()), Some(kind));
+        }
+        assert_eq!(TerminalAgentKind::from_id("unknown"), None);
+    }
+
+    #[test]
+    fn terminal_resume_state_roundtrips_json() {
+        let state = TerminalResumeState {
+            agent: TerminalAgentKind::Claude,
+            session_id: "session-1".into(),
+            workspace_dir: Some("/tmp/claude-alt".into()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TerminalResumeState>(&json).unwrap(),
+            state
+        );
+    }
 
     #[test]
     fn launch_spec_collects_structured_env() {

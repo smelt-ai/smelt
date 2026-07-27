@@ -29,6 +29,7 @@ Each persisted terminal leaf may contain:
 
 - The terminal agent kind.
 - The agent-owned session ID.
+- The agent data/workspace directory override used by that launch.
 - The original launch command.
 
 Older workspace and launch configuration files omit the new fields and retain
@@ -41,6 +42,12 @@ conversation. Before first launch, smelt generates an ID and asks the adapter
 to add the agent's session-ID argument to the original command. The same ID is
 stored on the terminal view immediately, so simultaneous tabs cannot be
 confused.
+
+Launch commands may begin with the supported agent workspace environment
+variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, or `GROK_HOME`).
+The adapter preserves that prefix and stores its expanded directory with the
+session identity. History discovery and restoration always use the persisted
+directory instead of accidentally searching the default agent workspace.
 
 Codex assigns its own ID. Before launch, smelt snapshots the Codex session IDs
 for the project. It polls the existing history reader after launch and binds
