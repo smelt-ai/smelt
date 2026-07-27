@@ -57,8 +57,7 @@ fn safe_agent_command(
 }
 
 fn is_long_session_control(arg: &str) -> bool {
-    arg == "resume"
-        || arg == "--continue"
+    arg == "--continue"
         || arg == "--resume"
         || arg.starts_with("--resume=")
         || arg == "--session-id"
@@ -100,17 +99,347 @@ fn is_codex_resume_override(args: &[String], index: usize) -> bool {
         .is_some_and(selects_resume)
 }
 
+struct ManagedInitialLaunchGrammar {
+    incompatible_subcommands: &'static [&'static str],
+    incompatible_modes: &'static [&'static str],
+    value_options: &'static [&'static str],
+    variadic_value_options: &'static [&'static str],
+    accepts_positional_prompt: bool,
+}
+
+// Snapshot of the audited top-level grammar. Keep subcommands, noninteractive modes, and
+// split-value options together so adding a CLI flag cannot silently turn its value into a command.
+fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaunchGrammar {
+    match kind {
+        TerminalAgentKind::Claude => ManagedInitialLaunchGrammar {
+            incompatible_subcommands: &[
+                "agents",
+                "auth",
+                "auto-mode",
+                "doctor",
+                "gateway",
+                "install",
+                "mcp",
+                "plugin",
+                "plugins",
+                "project",
+                "setup-token",
+                "ultrareview",
+                "update",
+                "upgrade",
+            ],
+            incompatible_modes: &[
+                "--",
+                "-h",
+                "--help",
+                "-v",
+                "--version",
+                "-p",
+                "--print",
+                "--bg",
+                "--background",
+                "--fallback-model",
+                "--forward-subagent-text",
+                "--include-hook-events",
+                "--include-partial-messages",
+                "--input-format",
+                "--max-budget-usd",
+                "--no-session-persistence",
+                "--output-format",
+                "--replay-user-messages",
+            ],
+            value_options: &[
+                "--agent",
+                "--agents",
+                "--append-system-prompt",
+                "-d",
+                "--debug",
+                "--debug-file",
+                "--effort",
+                "--json-schema",
+                "--model",
+                "-n",
+                "--name",
+                "--permission-mode",
+                "--plugin-dir",
+                "--plugin-url",
+                "--prompt-suggestions",
+                "--remote-control",
+                "--remote-control-session-name-prefix",
+                "--setting-sources",
+                "--settings",
+                "--system-prompt",
+                "--tmux",
+                "-w",
+                "--worktree",
+            ],
+            variadic_value_options: &[
+                "--add-dir",
+                "--allowedTools",
+                "--allowed-tools",
+                "--betas",
+                "--disallowedTools",
+                "--disallowed-tools",
+                "--file",
+                "--mcp-config",
+                "--tools",
+            ],
+            accepts_positional_prompt: true,
+        },
+        TerminalAgentKind::Copilot => ManagedInitialLaunchGrammar {
+            incompatible_subcommands: &[
+                "completion",
+                "help",
+                "init",
+                "login",
+                "mcp",
+                "plugin",
+                "plugins",
+                "skill",
+                "update",
+                "version",
+            ],
+            incompatible_modes: &[
+                "--",
+                "-h",
+                "--help",
+                "-v",
+                "--version",
+                "--acp",
+                "--attachment",
+                "--enable-memory",
+                "-p",
+                "--prompt",
+                "-s",
+                "--silent",
+                "--output-format",
+                "--share",
+                "--share-gist",
+            ],
+            value_options: &[
+                "--add-dir",
+                "--add-github-mcp-tool",
+                "--add-github-mcp-toolset",
+                "--additional-mcp-config",
+                "--agent",
+                "-C",
+                "--context",
+                "--disable-mcp-server",
+                "--effort",
+                "--reasoning-effort",
+                "--extension-sdk-path",
+                "-i",
+                "--interactive",
+                "--log-dir",
+                "--log-level",
+                "--max-ai-credits",
+                "--max-autopilot-continues",
+                "--mode",
+                "--model",
+                "-n",
+                "--name",
+                "--plugin-dir",
+                "--stream",
+            ],
+            variadic_value_options: &[],
+            accepts_positional_prompt: false,
+        },
+        TerminalAgentKind::Grok => ManagedInitialLaunchGrammar {
+            incompatible_subcommands: &[
+                "agent",
+                "completions",
+                "dashboard",
+                "doctor",
+                "export",
+                "help",
+                "inspect",
+                "leader",
+                "login",
+                "logout",
+                "mcp",
+                "memory",
+                "models",
+                "plugin",
+                "sessions",
+                "setup",
+                "trace",
+                "update",
+                "version",
+                "v",
+                "worktree",
+                "wrap",
+            ],
+            incompatible_modes: &[
+                "--",
+                "-h",
+                "--help",
+                "-v",
+                "--version",
+                "-p",
+                "--single",
+                "--prompt-file",
+                "--prompt-json",
+                "--output-format",
+                "--json-schema",
+            ],
+            value_options: &[
+                "--agent",
+                "--agents",
+                "--allow",
+                "--cwd",
+                "--debug-file",
+                "--deny",
+                "--disallowed-tools",
+                "--leader-socket",
+                "-m",
+                "--model",
+                "--max-turns",
+                "--permission-mode",
+                "--reasoning-effort",
+                "--effort",
+                "--rules",
+                "--sandbox",
+                "--system-prompt-override",
+                "--system-prompt",
+                "--tools",
+                "-w",
+                "--worktree",
+                "--worktree-ref",
+                "--ref",
+            ],
+            variadic_value_options: &[],
+            accepts_positional_prompt: true,
+        },
+        TerminalAgentKind::Codex => ManagedInitialLaunchGrammar {
+            incompatible_subcommands: &[
+                "exec",
+                "e",
+                "review",
+                "login",
+                "logout",
+                "mcp",
+                "plugin",
+                "mcp-server",
+                "app-server",
+                "remote-control",
+                "app",
+                "completion",
+                "update",
+                "doctor",
+                "sandbox",
+                "debug",
+                "apply",
+                "a",
+                "resume",
+                "archive",
+                "delete",
+                "unarchive",
+                "fork",
+                "cloud",
+                "exec-server",
+                "features",
+                "help",
+                "proto",
+                "p",
+                "generate-ts",
+            ],
+            incompatible_modes: &["-h", "--help", "-V", "--version"],
+            value_options: &[
+                "-c",
+                "--config",
+                "--enable",
+                "--disable",
+                "--remote",
+                "--remote-auth-token-env",
+                "-m",
+                "--model",
+                "--local-provider",
+                "-p",
+                "--profile",
+                "-s",
+                "--sandbox",
+                "-C",
+                "--cd",
+                "--add-dir",
+                "-a",
+                "--ask-for-approval",
+            ],
+            variadic_value_options: &["-i", "--image"],
+            accepts_positional_prompt: true,
+        },
+    }
+}
+
+fn option_matches(arg: &str, option: &str) -> bool {
+    arg == option
+        || (option.starts_with("--")
+            && arg
+                .strip_prefix(option)
+                .is_some_and(|suffix| suffix.starts_with('=')))
+}
+
+fn value_option_match(arg: &str, options: &[&str]) -> Option<bool> {
+    options.iter().find_map(|option| {
+        if arg == *option {
+            return Some(true);
+        }
+        if option.starts_with("--") {
+            return arg
+                .strip_prefix(option)
+                .is_some_and(|suffix| suffix.starts_with('='))
+                .then_some(false);
+        }
+        (option.len() == 2 && arg.starts_with(option) && arg.len() > option.len()).then_some(false)
+    })
+}
+
+fn first_top_level_positional<'a>(
+    args: &'a [String],
+    grammar: &ManagedInitialLaunchGrammar,
+) -> Option<&'a str> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            return args.get(index + 1).map(String::as_str);
+        }
+        if let Some(consumes_next) = value_option_match(arg, grammar.variadic_value_options) {
+            index += 1;
+            if consumes_next {
+                while index < args.len() && !args[index].starts_with('-') {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(consumes_next) = value_option_match(arg, grammar.value_options) {
+            let has_split_value = consumes_next
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| !value.starts_with('-'));
+            index += 1 + usize::from(has_split_value);
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
+
 fn has_existing_session_control(kind: TerminalAgentKind, args: &[String]) -> bool {
     args.iter().enumerate().any(|(index, arg)| {
         is_long_session_control(arg)
             || match kind {
                 TerminalAgentKind::Claude => {
                     arg == "-c"
-                        || is_short_session_control(arg, "-r", false)
+                        || is_short_session_control(arg, "-r", true)
                         || is_long_session_option(arg, "--from-pr")
                 }
                 TerminalAgentKind::Copilot => {
-                    is_short_session_control(arg, "-r", false)
+                    is_short_session_control(arg, "-r", true)
                         || is_long_session_option(arg, "--connect")
                 }
                 TerminalAgentKind::Grok => {
@@ -123,10 +452,39 @@ fn has_existing_session_control(kind: TerminalAgentKind, args: &[String]) -> boo
     })
 }
 
+fn validate_managed_initial_launch(kind: TerminalAgentKind, args: &[String]) -> Result<(), String> {
+    if has_existing_session_control(kind, args) {
+        return Err("启动命令已包含会话恢复或会话 ID 参数".into());
+    }
+
+    let grammar = managed_initial_launch_grammar(kind);
+    if let Some(mode) = args.iter().find(|arg| {
+        grammar
+            .incompatible_modes
+            .iter()
+            .any(|option| option_matches(arg, option))
+    }) {
+        return Err(format!("启动命令的 {mode} 模式不是可托管的新交互会话"));
+    }
+
+    if let Some(positional) = first_top_level_positional(args, &grammar) {
+        if grammar.incompatible_subcommands.contains(&positional) {
+            return Err(format!("启动命令的 {positional} 子命令不是新的交互会话"));
+        }
+        if !grammar.accepts_positional_prompt {
+            return Err(format!("启动命令包含不支持的顶层参数：{positional}"));
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn infer_terminal_agent_kind(command: &str) -> Option<TerminalAgentKind> {
     TerminalAgentKind::ALL.into_iter().find_map(|kind| {
         let (words, executable_index) = safe_agent_command(kind, command).ok()?;
-        (!has_existing_session_control(kind, &words[executable_index + 1..])).then_some(kind)
+        validate_managed_initial_launch(kind, &words[executable_index + 1..])
+            .is_ok()
+            .then_some(kind)
     })
 }
 
@@ -161,9 +519,7 @@ pub(crate) fn prepare_terminal_agent_launch(
 ) -> Result<PreparedTerminalAgentLaunch, String> {
     let (words, executable_index) = safe_agent_command(kind, command)?;
     let args = &words[executable_index + 1..];
-    if has_existing_session_control(kind, args) {
-        return Err("启动命令已包含会话恢复或会话 ID 参数".into());
-    }
+    validate_managed_initial_launch(kind, args)?;
     let workspace_dir = terminal_workspace_dir(kind, &words, executable_index);
     if kind == TerminalAgentKind::Codex {
         return Ok(PreparedTerminalAgentLaunch::Discover {
@@ -1918,6 +2274,23 @@ mod tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
+    fn assert_not_managed(kind: TerminalAgentKind, commands: &[&str]) {
+        for command in commands {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                None,
+                "{command} must remain an ordinary terminal command"
+            );
+            let Err(error) = prepare_terminal_agent_launch(kind, command, "new") else {
+                panic!("{command} must not be used as a managed initial launch");
+            };
+            assert!(
+                !error.trim().is_empty(),
+                "{command} must report a visible managed-launch error"
+            );
+        }
+    }
+
     #[test]
     fn generated_id_agents_receive_safe_initial_arguments() {
         let id = "11111111-1111-4111-8111-111111111111";
@@ -2111,6 +2484,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_and_copilot_attached_short_resume_values_are_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &["claude -rold", "claude -r12345678"],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Copilot,
+            &["copilot -rold", "copilot -r12345678"],
+        );
+    }
+
+    #[test]
+    fn generated_id_agents_reject_option_delimiters_before_injected_identity() {
+        assert_not_managed(TerminalAgentKind::Claude, &["claude -- 'fix bug'"]);
+        assert_not_managed(TerminalAgentKind::Copilot, &["copilot --"]);
+        assert_not_managed(TerminalAgentKind::Grok, &["grok -- 'fix bug'"]);
+    }
+
+    #[test]
     fn grok_session_id_and_attached_resume_controls_are_not_managed() {
         for command in [
             "grok --session-id old",
@@ -2138,9 +2530,7 @@ mod tests {
     fn grok_attached_short_controls_do_not_match_other_agents_or_long_flags() {
         for (kind, command) in [
             (TerminalAgentKind::Claude, "claude -sold"),
-            (TerminalAgentKind::Claude, "claude -rold"),
             (TerminalAgentKind::Copilot, "copilot -sold"),
-            (TerminalAgentKind::Copilot, "copilot -rold"),
             (TerminalAgentKind::Grok, "grok --search web"),
             (TerminalAgentKind::Grok, "grok --remote"),
             (TerminalAgentKind::Grok, "grok --session-idle"),
@@ -2205,6 +2595,200 @@ mod tests {
             assert!(
                 prepare_terminal_agent_launch(kind, command, "new").is_ok(),
                 "{command} does not select or assign a conflicting session ID"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_non_conversation_subcommands_are_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &[
+                "claude agents",
+                "claude auth",
+                "claude auto-mode",
+                "claude doctor",
+                "claude gateway",
+                "claude install",
+                "claude mcp",
+                "claude --remote-control --model sonnet mcp",
+                "claude plugin",
+                "claude plugins",
+                "claude project",
+                "claude setup-token",
+                "claude ultrareview",
+                "claude update",
+                "claude upgrade",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Copilot,
+            &[
+                "copilot completion",
+                "copilot help",
+                "copilot init",
+                "copilot login",
+                "copilot mcp",
+                "copilot --mouse mcp",
+                "copilot plugin",
+                "copilot plugins",
+                "copilot skill",
+                "copilot update",
+                "copilot version",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Grok,
+            &[
+                "grok agent",
+                "grok completions",
+                "grok dashboard",
+                "grok doctor",
+                "grok export",
+                "grok help",
+                "grok inspect",
+                "grok leader",
+                "grok login",
+                "grok logout",
+                "grok mcp",
+                "grok memory",
+                "grok models",
+                "grok plugin",
+                "grok sessions",
+                "grok setup",
+                "grok trace",
+                "grok update",
+                "grok version",
+                "grok v",
+                "grok worktree",
+                "grok wrap",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Codex,
+            &[
+                "codex exec",
+                "codex e",
+                "codex review",
+                "codex login",
+                "codex logout",
+                "codex mcp",
+                "codex plugin",
+                "codex mcp-server",
+                "codex app-server",
+                "codex remote-control",
+                "codex app",
+                "codex completion",
+                "codex update",
+                "codex doctor",
+                "codex sandbox",
+                "codex debug",
+                "codex apply",
+                "codex a",
+                "codex resume",
+                "codex archive",
+                "codex delete",
+                "codex unarchive",
+                "codex fork",
+                "codex cloud",
+                "codex exec-server",
+                "codex features",
+                "codex help",
+                "codex proto",
+                "codex p",
+                "codex generate-ts",
+            ],
+        );
+    }
+
+    #[test]
+    fn documented_noninteractive_modes_are_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &[
+                "claude --print hello",
+                "claude -p hello",
+                "claude --background",
+                "claude --bg",
+                "claude --help",
+                "claude --version",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Copilot,
+            &[
+                "copilot --prompt hello",
+                "copilot -p hello",
+                "copilot --acp",
+                "copilot --help",
+                "copilot --version",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Grok,
+            &[
+                "grok --single hello",
+                "grok -p hello",
+                "grok --prompt-file prompt.md",
+                "grok --prompt-json '{}'",
+                "grok --help",
+                "grok --version",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Codex,
+            &["codex --help", "codex --version"],
+        );
+    }
+
+    #[test]
+    fn interactive_flags_with_split_values_remain_managed() {
+        for (kind, command) in [
+            (
+                TerminalAgentKind::Claude,
+                "claude --model sonnet --settings ./settings.json",
+            ),
+            (
+                TerminalAgentKind::Claude,
+                "claude --model mcp --add-dir ../shared",
+            ),
+            (TerminalAgentKind::Claude, "claude --model resume"),
+            (
+                TerminalAgentKind::Copilot,
+                "copilot --model gpt-5.4 --plugin-dir ./plugins",
+            ),
+            (
+                TerminalAgentKind::Copilot,
+                "copilot --model mcp --add-dir ../shared",
+            ),
+            (TerminalAgentKind::Copilot, "copilot --model resume"),
+            (
+                TerminalAgentKind::Grok,
+                "grok --model grok-code-fast-1 --cwd ../repo",
+            ),
+            (
+                TerminalAgentKind::Grok,
+                "grok --model dashboard --rules ./rules.md",
+            ),
+            (TerminalAgentKind::Grok, "grok --model resume"),
+            (
+                TerminalAgentKind::Codex,
+                "codex --model gpt-5.4 --cd ../repo",
+            ),
+            (
+                TerminalAgentKind::Codex,
+                "codex --model review --add-dir ../shared",
+            ),
+            (TerminalAgentKind::Codex, "codex --model resume"),
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                Some(kind),
+                "{command} is an interactive launch"
+            );
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_ok(),
+                "{command} must accept managed initial launch preparation"
             );
         }
     }
