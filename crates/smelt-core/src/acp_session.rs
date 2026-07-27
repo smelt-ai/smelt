@@ -24,7 +24,7 @@ use agent_client_protocol::schema::v1::{
 use crate::acp_chat::AcpEntry;
 use crate::acp_conn::{
     AcpEvent, ElicitField, ElicitFieldKind, ElicitationResponder, ModelState, PermissionResponder,
-    PromptImage, ReadyKind,
+    PromptImage, ReadyKind, SessionConfigState,
 };
 
 // ===================== wire 快照类型（无 agent_client_protocol 依赖） =====================
@@ -155,7 +155,8 @@ fn plan_view_from_acp(p: &Plan) -> PlanView {
 pub struct AcpSnapshot {
     pub entries: Vec<AcpEntry>,
     pub phase: AcpPhase,
-    pub pending_permission: Option<PendingPermission>,
+    #[serde(default)]
+    pub pending_permissions: Vec<PendingPermission>,
     pub pending_elicitation: Option<PendingElicitation>,
     pub status_line: Option<String>,
     pub acp_session_id: Option<String>,
@@ -164,6 +165,7 @@ pub struct AcpSnapshot {
     pub usage: Option<(u64, u64)>,
     pub plan: Option<PlanView>,
     pub model: Option<ModelState>,
+    pub config_options: Vec<SessionConfigState>,
     /// 回合结束且没人看过 → 「有结果可看」绿点，跟旧版 `completed_unread` 同一
     /// 语义，只是现在从服务端算，客户端不用自己维护。
     pub completed_unread: bool,
@@ -207,7 +209,7 @@ pub struct LiveElicitation {
 pub struct AcpSessionState {
     pub entries: Vec<AcpEntry>,
     pub phase: AcpPhase,
-    pub permission: Option<LivePermission>,
+    pub permissions: Vec<LivePermission>,
     pub elicitation: Option<LiveElicitation>,
     pub completed_unread: bool,
     pub status_line: Option<String>,
@@ -219,6 +221,7 @@ pub struct AcpSessionState {
     pub usage: Option<(u64, u64)>,
     pub plan: Option<PlanView>,
     pub model: Option<ModelState>,
+    pub config_options: Vec<SessionConfigState>,
 }
 
 impl Default for AcpSessionState {
@@ -226,7 +229,7 @@ impl Default for AcpSessionState {
         Self {
             entries: Vec::new(),
             phase: AcpPhase::Starting,
-            permission: None,
+            permissions: Vec::new(),
             elicitation: None,
             completed_unread: false,
             status_line: None,
@@ -237,6 +240,7 @@ impl Default for AcpSessionState {
             usage: None,
             plan: None,
             model: None,
+            config_options: Vec::new(),
         }
     }
 }
@@ -268,7 +272,7 @@ impl AcpSessionState {
         Self {
             entries: snap.entries,
             phase: snap.phase,
-            permission: None,
+            permissions: Vec::new(),
             elicitation: None,
             completed_unread: snap.completed_unread,
             status_line: snap.status_line,
@@ -279,6 +283,7 @@ impl AcpSessionState {
             usage: snap.usage,
             plan: snap.plan,
             model: snap.model,
+            config_options: snap.config_options,
         }
     }
 
@@ -288,9 +293,9 @@ impl AcpSessionState {
     /// 有一张卡挂起（agent 等到上一个请求有回应才会发下一个），不用管两者
     /// 都有值的情况。
     pub fn pending_raw_request_line(&self) -> Option<&str> {
-        self.permission
-            .as_ref()
-            .and_then(|p| p.raw_request_line.as_deref())
+        self.permissions
+            .iter()
+            .find_map(|p| p.raw_request_line.as_deref())
             .or_else(|| {
                 self.elicitation
                     .as_ref()
@@ -305,11 +310,15 @@ impl AcpSessionState {
         AcpSnapshot {
             entries: self.entries.clone(),
             phase: self.phase.clone(),
-            pending_permission: self.permission.as_ref().map(|p| PendingPermission {
-                question: p.question.clone(),
-                tool_call_id: p.tool_call_id.clone(),
-                options: p.options.clone(),
-            }),
+            pending_permissions: self
+                .permissions
+                .iter()
+                .map(|p| PendingPermission {
+                    question: p.question.clone(),
+                    tool_call_id: p.tool_call_id.clone(),
+                    options: p.options.clone(),
+                })
+                .collect(),
             pending_elicitation: self.elicitation.as_ref().map(|e| PendingElicitation {
                 message: e.message.clone(),
                 fields: e.raw_fields.iter().map(elicit_field_view).collect(),
@@ -322,6 +331,7 @@ impl AcpSessionState {
             usage: self.usage,
             plan: self.plan.clone(),
             model: self.model.clone(),
+            config_options: self.config_options.clone(),
             completed_unread: self.completed_unread,
             should_persist,
         }
@@ -374,6 +384,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::AgentChunk { .. }
             | AcpEvent::Plan(_)
             | AcpEvent::Model(_)
+            | AcpEvent::ConfigOptions(_)
             | AcpEvent::Usage { .. }
     );
     if !matches!(
@@ -481,6 +492,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::Model(m) => {
             state.model = Some(m);
         }
+        AcpEvent::ConfigOptions(options) => {
+            state.config_options = options;
+        }
         AcpEvent::Plan(p) => {
             state.plan = Some(plan_view_from_acp(&p));
             state.phase = AcpPhase::Running;
@@ -500,7 +514,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                     kind: PermissionOptionKindView::from_acp(o.kind),
                 })
                 .collect();
-            state.permission = Some(LivePermission {
+            state.permissions.push(LivePermission {
                 question: question.clone(),
                 tool_call_id: tool_call_id.to_string(),
                 options,
@@ -527,14 +541,14 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             outcome.notify = Some(("等你选择".to_string(), message, false));
         }
         AcpEvent::TurnEnded(reason) => {
-            state.permission = None;
+            state.permissions.clear();
             state.elicitation = None;
             state.phase = AcpPhase::Idle;
             state.completed_unread = true;
             let _ = reason;
         }
         AcpEvent::Fatal(msg) => {
-            state.permission = None;
+            state.permissions.clear();
             state.elicitation = None;
             state.phase = AcpPhase::Ended(msg);
         }
@@ -547,7 +561,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
 /// 「重新开始」/新建时的相位重置：跟旧版 `AcpView::restart` 里那几行对应（cmd/
 /// spawn 那部分是 smeltd 的事，不在这个纯状态函数里）。
 pub fn reset_for_restart(state: &mut AcpSessionState) {
-    state.permission = None;
+    state.permissions.clear();
     state.elicitation = None;
     state.plan = None;
     state.model = None;
@@ -566,22 +580,25 @@ pub fn note_prompt_sent(state: &mut AcpSessionState, shown_text: String) {
     state.completed_unread = false;
 }
 
-/// 权限审批：`option_id` 对不上当前卡片的任何选项就什么都不做（客户端发的
-/// action 可能是过期请求——卡片已经因为别的原因被清掉）。
-pub fn select_permission(state: &mut AcpSessionState, option_id: &str) {
-    let Some(card) = &mut state.permission else {
+/// 权限审批：按工具调用与 option id 精确定位。批准一项只移除对应卡片，其余
+/// 请求继续保持待审批状态；旧按钮也不能误命中另一张卡的同名 option。
+pub fn select_permission(state: &mut AcpSessionState, tool_call_id: &str, option_id: &str) {
+    let Some(ix) = state.permissions.iter().position(|card| {
+        card.tool_call_id == tool_call_id && card.options.iter().any(|o| o.option_id == option_id)
+    }) else {
         return;
     };
-    if !card.options.iter().any(|o| o.option_id == option_id) {
-        return;
-    }
+    let mut card = state.permissions.remove(ix);
     if let Some(responder) = card.responder.take() {
         responder.select(agent_client_protocol::schema::v1::PermissionOptionId::new(
             option_id.to_string(),
         ));
     }
-    state.permission = None;
-    state.phase = AcpPhase::Running;
+    state.phase = if state.permissions.is_empty() {
+        AcpPhase::Running
+    } else {
+        AcpPhase::AwaitingApproval
+    };
 }
 
 /// 选择题点选：单选替换，多选 toggle，跟旧版 `pick_elicit_option` 一致。
@@ -681,8 +698,12 @@ pub enum AcpUserAction {
         images: Vec<PromptImage>,
     },
     Cancel,
-    SetModel(String),
+    SetConfigOption {
+        config_id: String,
+        value_id: String,
+    },
     PermissionSelect {
+        tool_call_id: String,
         option_id: String,
     },
     ElicitationChoose {
@@ -813,6 +834,65 @@ mod tests {
         apply_event(&mut s, AcpEvent::TurnEnded(StopReason::EndTurn));
         assert!(matches!(s.phase, AcpPhase::Idle));
         assert!(s.completed_unread);
+    }
+
+    #[test]
+    fn selecting_one_permission_keeps_other_requests_visible() {
+        let mut s = fresh_state();
+        s.permissions = vec![
+            LivePermission {
+                question: "first".into(),
+                tool_call_id: "tool-1".into(),
+                options: vec![PermissionOptionView {
+                    option_id: "allow-first".into(),
+                    name: "Allow".into(),
+                    kind: PermissionOptionKindView::AllowOnce,
+                }],
+                responder: None,
+                raw_request_line: None,
+            },
+            LivePermission {
+                question: "second".into(),
+                tool_call_id: "tool-2".into(),
+                options: vec![PermissionOptionView {
+                    option_id: "allow-second".into(),
+                    name: "Allow".into(),
+                    kind: PermissionOptionKindView::AllowOnce,
+                }],
+                responder: None,
+                raw_request_line: None,
+            },
+        ];
+        s.phase = AcpPhase::AwaitingApproval;
+
+        select_permission(&mut s, "tool-1", "allow-first");
+
+        assert_eq!(s.permissions.len(), 1);
+        assert_eq!(s.permissions[0].tool_call_id, "tool-2");
+        assert!(matches!(s.phase, AcpPhase::AwaitingApproval));
+    }
+
+    #[test]
+    fn permission_selection_needs_the_matching_tool_call() {
+        let mut s = fresh_state();
+        for tool_call_id in ["tool-1", "tool-2"] {
+            s.permissions.push(LivePermission {
+                question: tool_call_id.into(),
+                tool_call_id: tool_call_id.into(),
+                options: vec![PermissionOptionView {
+                    option_id: "allow".into(),
+                    name: "Allow".into(),
+                    kind: PermissionOptionKindView::AllowOnce,
+                }],
+                responder: None,
+                raw_request_line: None,
+            });
+        }
+
+        select_permission(&mut s, "tool-2", "allow");
+
+        assert_eq!(s.permissions.len(), 1);
+        assert_eq!(s.permissions[0].tool_call_id, "tool-1");
     }
 
     #[test]
