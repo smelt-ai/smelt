@@ -11,6 +11,7 @@ members = [
     "crates/smelt",
     "crates/smelt-signal",
     "crates/smelt-bridge",
+    "crates/smelt-mobile",
 ]
 resolver = "3"
 
