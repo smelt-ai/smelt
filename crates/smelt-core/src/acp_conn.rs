@@ -564,6 +564,43 @@ impl Drop for KillProcessGroupOnDrop {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RestoreDecision {
+    TryLoad,
+    StartFresh(String),
+    Retryable,
+}
+
+fn classify_resume_failure(
+    error: &agent_client_protocol::Error,
+    load_supported: bool,
+) -> RestoreDecision {
+    match error.code {
+        agent_client_protocol::ErrorCode::ResourceNotFound => {
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        }
+        agent_client_protocol::ErrorCode::MethodNotFound if load_supported => {
+            RestoreDecision::TryLoad
+        }
+        agent_client_protocol::ErrorCode::MethodNotFound => RestoreDecision::StartFresh(
+            "agent 不支持恢复会话，已创建新对话".into(),
+        ),
+        _ => RestoreDecision::Retryable,
+    }
+}
+
+fn classify_load_failure(error: &agent_client_protocol::Error) -> RestoreDecision {
+    match error.code {
+        agent_client_protocol::ErrorCode::ResourceNotFound => {
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        }
+        agent_client_protocol::ErrorCode::MethodNotFound => RestoreDecision::StartFresh(
+            "agent 不支持恢复会话，已创建新对话".into(),
+        ),
+        _ => RestoreDecision::Retryable,
+    }
+}
+
 /// 连接主体：spawn agent 子进程 → initialize → newSession → 双源 loop
 /// （UI 指令 / agent 更新流）。返回 Ok 表示用户主动 Shutdown。
 async fn run_connection(
@@ -1724,6 +1761,51 @@ mod runtime_tests {
             "bun @ {} → {}",
             path.display(),
             String::from_utf8_lossy(&out.stdout).trim()
+        );
+    }
+}
+
+#[cfg(test)]
+mod restore_failure_tests {
+    use super::{classify_load_failure, classify_resume_failure, RestoreDecision};
+    use agent_client_protocol::Error;
+
+    #[test]
+    fn resume_method_not_found_with_load_support_tries_load() {
+        let decision = classify_resume_failure(&Error::method_not_found(), true);
+        assert_eq!(decision, RestoreDecision::TryLoad);
+    }
+
+    #[test]
+    fn resume_method_not_found_without_load_support_starts_fresh() {
+        let decision = classify_resume_failure(&Error::method_not_found(), false);
+        assert_eq!(
+            decision,
+            RestoreDecision::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    fn resource_not_found_from_resume_and_load_starts_fresh() {
+        assert_eq!(
+            classify_resume_failure(&Error::resource_not_found(None), true),
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+        assert_eq!(
+            classify_load_failure(&Error::resource_not_found(None)),
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    fn internal_error_from_resume_and_load_is_retryable() {
+        assert_eq!(
+            classify_resume_failure(&Error::internal_error(), true),
+            RestoreDecision::Retryable
+        );
+        assert_eq!(
+            classify_load_failure(&Error::internal_error()),
+            RestoreDecision::Retryable
         );
     }
 }
