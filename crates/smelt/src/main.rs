@@ -1355,6 +1355,71 @@ struct SpawnedLeaf {
     resume_state: Option<TerminalResumeState>,
 }
 
+struct PreparedTerminalLaunch {
+    original_command: Option<String>,
+    spawn_command: Option<String>,
+    label: Option<String>,
+    agent_kind: Option<TerminalAgentKind>,
+    resume_state: Option<TerminalResumeState>,
+    codex_baseline: Option<HashSet<String>>,
+    workspace_dir: Option<String>,
+}
+
+fn prepare_terminal_launch(
+    entry: &settings::LaunchEntry,
+    cwd: Option<&str>,
+) -> Result<PreparedTerminalLaunch, String> {
+    let Some(agent_kind) = entry.agent_kind else {
+        return Ok(PreparedTerminalLaunch {
+            original_command: Some(entry.command.clone()),
+            spawn_command: Some(entry.command.clone()),
+            label: Some(entry.label.clone()),
+            agent_kind: None,
+            resume_state: None,
+            codex_baseline: None,
+            workspace_dir: None,
+        });
+    };
+    let generated_id = uuid::Uuid::new_v4().to_string();
+    match session_history::prepare_terminal_agent_launch(
+        agent_kind,
+        &entry.command,
+        &generated_id,
+    )? {
+        session_history::PreparedTerminalAgentLaunch::Known { command, state } => {
+            Ok(PreparedTerminalLaunch {
+                original_command: Some(entry.command.clone()),
+                spawn_command: Some(command),
+                label: Some(entry.label.clone()),
+                agent_kind: Some(agent_kind),
+                resume_state: Some(state.clone()),
+                codex_baseline: None,
+                workspace_dir: state.workspace_dir,
+            })
+        }
+        session_history::PreparedTerminalAgentLaunch::Discover {
+            command,
+            workspace_dir,
+        } => {
+            let cwd = cwd.ok_or_else(|| "Codex 会话绑定需要项目工作目录".to_string())?;
+            let baseline = session_history::terminal_session_ids(
+                agent_kind,
+                cwd,
+                workspace_dir.as_deref(),
+            );
+            Ok(PreparedTerminalLaunch {
+                original_command: Some(entry.command.clone()),
+                spawn_command: Some(command),
+                label: Some(entry.label.clone()),
+                agent_kind: Some(agent_kind),
+                resume_state: None,
+                codex_baseline: Some(baseline),
+                workspace_dir,
+            })
+        }
+    }
+}
+
 fn terminal_restore_action(
     agent_kind: Option<TerminalAgentKind>,
     original_launch: Option<&str>,
@@ -2699,7 +2764,7 @@ impl Workspace {
 
     /// 「+」/新建：开一个独立新会话（单终端），并切过去。
     fn add_session(&mut self, cwd: Option<String>, cx: &mut Context<Self>) {
-        self.add_session_with_launch(cwd, None, None, cx);
+        self.add_session_with_launch(cwd, None, cx);
     }
 
     /// ACP 会话内容变化（AcpViewEvent::Changed）→ 立即 save_state。与侧栏/文件树
@@ -2882,34 +2947,59 @@ impl Workspace {
     fn add_session_with_launch(
         &mut self,
         cwd: Option<String>,
-        launch: Option<&str>,
-        label: Option<&str>,
+        entry: Option<settings::LaunchEntry>,
         cx: &mut Context<Self>,
     ) {
         self.remember_session_project(cwd.as_deref());
         // spawn 在后台；先把项目落盘，即使进程启动失败也不能让用户刚选中的项目消失。
         self.save_state(cx);
+        let prepared = match entry.as_ref() {
+            Some(entry) => match prepare_terminal_launch(entry, cwd.as_deref()) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.background_error = Some(format!("无法启动 agent：{error}"));
+                    cx.notify();
+                    return;
+                }
+            },
+            None => PreparedTerminalLaunch {
+                original_command: None,
+                spawn_command: None,
+                label: None,
+                agent_kind: None,
+                resume_state: None,
+                codex_baseline: None,
+                workspace_dir: None,
+            },
+        };
         let sid = new_sid();
         let cwd_bg = cwd.clone();
-        let launch_owned = launch.map(str::to_string);
-        let label_owned = label.map(str::to_string);
+        let launch_owned = prepared.original_command;
+        let label_owned = prepared.label;
+        let agent_kind = prepared.agent_kind;
+        let resume_state = prepared.resume_state;
+        let codex_baseline = prepared.codex_baseline;
+        let workspace_dir = prepared.workspace_dir;
         let sid_bg = sid.clone();
-        let launch_bg = launch_owned.clone();
+        let action = prepared
+            .spawn_command
+            .map(terminal::MissingSessionAction::Launch)
+            .unwrap_or(terminal::MissingSessionAction::Shell);
         // 立刻给反馈，避免「点了像没点」。
         self.stage_override = None;
-        eprintln!("[workspace] 新建会话 cwd={cwd:?} launch={launch:?} sid={sid}");
+        eprintln!("[workspace] 新建会话 cwd={cwd:?} launch={launch_owned:?} sid={sid}");
         cx.notify();
 
         let (tx, rx) = smol::channel::bounded(1);
         std::thread::Builder::new()
             .name("smelt-spawn-session".into())
             .spawn(move || {
-                let r = terminal::Terminal::spawn(
+                let r = terminal::Terminal::spawn_with_action(
                     24,
                     80,
                     cwd_bg.as_deref(),
                     &sid_bg,
-                    launch_bg.as_deref(),
+                    &action,
                 );
                 let _ = tx.send_blocking(r);
             })
@@ -2940,26 +3030,85 @@ impl Workspace {
             };
             let _ = this.update(cx, |this, cx| {
                 let view = cx.new(|cx| {
-                    TerminalView::from_terminal(
+                    TerminalView::from_terminal_with_resume(
                         cx,
                         terminal,
-                        cwd,
+                        cwd.clone(),
                         sid,
                         launch_owned.as_deref(),
                         label_owned.as_deref(),
+                        agent_kind,
+                        resume_state,
                     )
                 });
-                this.sessions.push(Session::single(view));
+                this.sessions.push(Session::single(view.clone()));
                 this.session_list_revision = this.session_list_revision.wrapping_add(1);
                 this.active_session = this.sessions.len() - 1;
                 this.stage_override = None;
                 this.save_state(cx);
+                if let (Some(baseline), Some(cwd)) = (codex_baseline, cwd.clone()) {
+                    this.start_codex_binding(view, cwd, baseline, workspace_dir, cx);
+                }
                 eprintln!(
                     "[workspace] 新建会话成功，当前共 {} 个",
                     this.sessions.len()
                 );
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    fn start_codex_binding(
+        &self,
+        view: Entity<TerminalView>,
+        cwd: String,
+        baseline: HashSet<String>,
+        workspace_dir: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            for _ in 0..20 {
+                smol::Timer::after(Duration::from_millis(500)).await;
+                let current = session_history::terminal_session_ids(
+                    TerminalAgentKind::Codex,
+                    &cwd,
+                    workspace_dir.as_deref(),
+                );
+                match session_history::discover_unique_session_id(&baseline, &current) {
+                    Ok(Some(session_id)) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            let still_open = workspace.sessions.iter().any(|session| {
+                                session
+                                    .term_leaves()
+                                    .iter()
+                                    .any(|leaf| leaf.entity_id() == view.entity_id())
+                            });
+                            if !still_open {
+                                return;
+                            }
+                            view.update(cx, |view, _| {
+                                view.set_resume_state(Some(TerminalResumeState {
+                                    agent: TerminalAgentKind::Codex,
+                                    session_id,
+                                    workspace_dir,
+                                }));
+                            });
+                            workspace.save_state(cx);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.background_error = Some(error);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
         })
         .detach();
     }
@@ -7613,7 +7762,8 @@ mod daemon_state_notification_tests {
 
 #[cfg(test)]
 mod pane_state_tests {
-    use super::{PaneState, terminal_restore_action};
+    use super::{PaneState, prepare_terminal_launch, terminal_restore_action};
+    use crate::settings::LaunchEntry;
     use crate::terminal::MissingSessionAction;
     use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
 
@@ -7704,6 +7854,34 @@ mod pane_state_tests {
             ),
             MissingSessionAction::Reject(_)
         ));
+    }
+
+    #[test]
+    fn known_id_agent_launch_keeps_original_and_persists_identity() {
+        let entry = LaunchEntry {
+            label: "Claude Code".into(),
+            command: "CLAUDE_CONFIG_DIR=~/.claude-alt claude".into(),
+            agent_kind: Some(TerminalAgentKind::Claude),
+        };
+        let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
+        assert_eq!(prepared.original_command.as_deref(), Some(entry.command.as_str()));
+        assert!(prepared.spawn_command.as_deref().unwrap().contains("--session-id"));
+        assert!(prepared.resume_state.is_some());
+        assert!(prepared.codex_baseline.is_none());
+    }
+
+    #[test]
+    fn codex_launch_records_baseline_for_discovery() {
+        let entry = LaunchEntry {
+            label: "Codex".into(),
+            command: "CODEX_HOME=~/.codex-alt codex".into(),
+            agent_kind: Some(TerminalAgentKind::Codex),
+        };
+        let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
+        assert_eq!(prepared.spawn_command.as_deref(), Some(entry.command.as_str()));
+        assert!(prepared.resume_state.is_none());
+        assert!(prepared.codex_baseline.is_some());
+        assert!(prepared.workspace_dir.unwrap().ends_with("/.codex-alt"));
     }
 
     /// 旧存档没有 custom_title / launch_label / launch_cmd 字段，必须读成 None 而不是解析失败。
