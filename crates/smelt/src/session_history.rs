@@ -56,6 +56,12 @@ fn safe_agent_command(
     Ok((words, executable_index))
 }
 
+pub(crate) fn infer_terminal_agent_kind(command: &str) -> Option<TerminalAgentKind> {
+    TerminalAgentKind::ALL
+        .into_iter()
+        .find(|kind| safe_agent_command(*kind, command).is_ok())
+}
+
 fn safe_session_id(session_id: &str) -> Result<&str, String> {
     if !session_id.is_empty()
         && session_id
@@ -1834,10 +1840,11 @@ mod tests {
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
     use super::{
         PreparedTerminalAgentLaunch, current_profile_launch, discover_unclaimed_session_id,
-        discover_unique_session_id, list_codex_sessions, list_copilot_sessions, list_grok_sessions,
-        list_sessions, list_sessions_for, load_codex_session_detail, load_copilot_session_detail,
-        load_grok_session_detail, load_session_detail, normalized_profile_override_dir,
-        prepare_terminal_agent_launch, project_dir, terminal_resume_command,
+        discover_unique_session_id, infer_terminal_agent_kind, list_codex_sessions,
+        list_copilot_sessions, list_grok_sessions, list_sessions, list_sessions_for,
+        load_codex_session_detail, load_copilot_session_detail, load_grok_session_detail,
+        load_session_detail, normalized_profile_override_dir, prepare_terminal_agent_launch,
+        project_dir, terminal_resume_command,
     };
     use crate::settings::AgentUiConfig;
     use smelt_core::agent_kind::{
@@ -1964,6 +1971,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn infers_terminal_agent_only_from_exact_executable() {
+        assert_eq!(
+            infer_terminal_agent_kind("copilot --allow-all"),
+            Some(TerminalAgentKind::Copilot)
+        );
+        assert_eq!(
+            infer_terminal_agent_kind("COPILOT_HOME='~/Copilot Data' copilot --allow-all"),
+            Some(TerminalAgentKind::Copilot)
+        );
+        assert_eq!(
+            infer_terminal_agent_kind("/opt/bin/claude"),
+            Some(TerminalAgentKind::Claude)
+        );
+        assert_eq!(
+            infer_terminal_agent_kind("claude-quant --dangerously-skip-permissions"),
+            None
+        );
+        assert_eq!(infer_terminal_agent_kind("echo copilot"), None);
+        assert_eq!(infer_terminal_agent_kind("copilot | cat"), None);
     }
 
     #[test]
