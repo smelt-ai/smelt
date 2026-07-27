@@ -224,6 +224,20 @@ struct LaunchConfigFile {
     entries: Option<Vec<LaunchEntry>>,
 }
 
+/// 迁移旧版启动项：仅补全缺失的 agent_kind，不覆盖用户已经显式设置过的值。
+fn migrate_launch_entries(entries: &mut [LaunchEntry]) -> bool {
+    let mut changed = false;
+    for entry in entries.iter_mut() {
+        if entry.agent_kind.is_none() {
+            if let Some(kind) = crate::session_history::infer_terminal_agent_kind(&entry.command) {
+                entry.agent_kind = Some(kind);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// 读取启动配置；缺失/损坏/旧格式（无 `entries`）回退出厂默认并写成新格式。
 pub fn load_launch_config() -> LaunchConfig {
     let Some(path) = launch_config_path() else {
@@ -236,7 +250,14 @@ pub fn load_launch_config() -> LaunchConfig {
         return LaunchConfig::default();
     };
     match file.entries {
-        Some(entries) => LaunchConfig { entries },
+        Some(mut entries) => {
+            let changed = migrate_launch_entries(&mut entries);
+            let c = LaunchConfig { entries };
+            if changed {
+                save_launch_config(&c);
+            }
+            c
+        }
         None => {
             // 旧版只有全权限开关：直接用出厂默认（已含全权限参数）并回写。
             let c = LaunchConfig::default();
@@ -249,6 +270,134 @@ pub fn load_launch_config() -> LaunchConfig {
 /// 写回启动配置（失败静默忽略）。
 fn save_launch_config(c: &LaunchConfig) {
     crate::json_store::save_json(launch_config_path(), c)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::settings::LaunchEntry;
+    use std::fs;
+
+    fn test_sandbox(name: &str) -> std::path::PathBuf {
+        let root = std::env::current_dir().unwrap().join(".test-sandboxes");
+        let path = root.join(format!(
+            "settings-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn with_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let old_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home) };
+        let result = f();
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        result
+    }
+
+    #[test]
+    fn migrate_launch_entries_infers_missing_kinds_and_is_idempotent() {
+        let mut entries = vec![
+            LaunchEntry {
+                label: "Copilot".into(),
+                command: "copilot --allow-all".into(),
+                agent_kind: None,
+            },
+            LaunchEntry {
+                label: "Claude".into(),
+                command: "COPILOT_HOME='~/Copilot Data' copilot --allow-all".into(),
+                agent_kind: None,
+            },
+            LaunchEntry {
+                label: "Legacy".into(),
+                command: "claude-quant --dangerously-skip-permissions".into(),
+                agent_kind: None,
+            },
+            LaunchEntry {
+                label: "Pinned".into(),
+                command: "claude --dangerously-skip-permissions".into(),
+                agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Copilot),
+            },
+        ];
+
+        let changed = super::migrate_launch_entries(&mut entries);
+        assert!(changed);
+        assert_eq!(
+            entries[0].agent_kind,
+            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+        );
+        assert_eq!(
+            entries[1].agent_kind,
+            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+        );
+        assert_eq!(entries[2].agent_kind, None);
+        assert_eq!(
+            entries[3].agent_kind,
+            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+        );
+
+        let changed = super::migrate_launch_entries(&mut entries);
+        assert!(!changed);
+        assert_eq!(
+            entries[3].agent_kind,
+            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+        );
+    }
+
+    #[test]
+    fn load_launch_config_migrates_and_writes_back_when_needed() {
+        let home = test_sandbox("load-launch-config");
+        let smelt_dir = home.join(".smelt");
+        fs::create_dir_all(&smelt_dir).unwrap();
+        fs::write(
+            smelt_dir.join("launch.json"),
+            serde_json::json!({
+                "entries": [
+                    {
+                        "label": "Copilot",
+                        "command": "copilot --allow-all"
+                    },
+                    {
+                        "label": "Pinned",
+                        "command": "claude --dangerously-skip-permissions",
+                        "agent_kind": "copilot"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = with_home(&home, super::load_launch_config);
+        assert_eq!(
+            config.entries[0].agent_kind,
+            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+        );
+        assert_eq!(
+            config.entries[1].agent_kind,
+            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+        );
+
+        let saved = fs::read_to_string(smelt_dir.join("launch.json")).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            saved_json["entries"][0]["agent_kind"],
+            serde_json::Value::String("copilot".into())
+        );
+        assert_eq!(
+            saved_json["entries"][1]["agent_kind"],
+            serde_json::Value::String("copilot".into())
+        );
+        fs::remove_dir_all(&home).unwrap();
+    }
 }
 
 /// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
