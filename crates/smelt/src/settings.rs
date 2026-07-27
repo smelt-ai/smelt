@@ -275,32 +275,15 @@ fn save_launch_config(c: &LaunchConfig) {
 #[cfg(test)]
 mod tests {
     use crate::settings::LaunchEntry;
+    use crate::test_support::with_home;
     use std::fs;
 
     fn test_sandbox(name: &str) -> std::path::PathBuf {
-        let root = std::env::current_dir().unwrap().join(".test-sandboxes");
-        let path = root.join(format!(
-            "settings-{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let path = crate::test_support::test_artifacts_root()
+            .join("set")
+            .join(name);
         fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    fn with_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
-        let old_home = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", home) };
-        let result = f();
-        match old_home {
-            Some(value) => unsafe { std::env::set_var("HOME", value) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        result
     }
 
     #[test]

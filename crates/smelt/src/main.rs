@@ -17,6 +17,8 @@ pub(crate) use smelt_acp_view::acp_view;
 pub(crate) use smelt_core::json_store;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
+pub(crate) mod test_support;
+
 mod agent;
 mod claude_memory;
 mod dock;
