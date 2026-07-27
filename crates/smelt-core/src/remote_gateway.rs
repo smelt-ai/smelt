@@ -1403,13 +1403,10 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                     }
                 }
             }
-            // 接收来自 smeltd 的推送
+            // 接收来自 smeltd 的推送，直接透传原始格式
             Some(line) = daemon_rx.recv() => {
-                // 解析 smeltd 的快照并转发给移动端
-                if let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let mobile_msg = convert_snapshot_to_mobile(&snapshot);
-                    let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(mobile_msg.to_string().into())).await;
-                }
+                // 直接转发 smeltd 的原始 JSON（与 PC GUI 一致）
+                let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(line.into())).await;
             }
         }
     }
@@ -1471,166 +1468,6 @@ fn acp_watch_loop(
     }
 }
 
-/// 将 smeltd 的 AcpSnapshot 转换为移动端格式
-fn convert_snapshot_to_mobile(snapshot: &serde_json::Value) -> serde_json::Value {
-    // 提取快照内容
-    let inner = snapshot.get("snapshot").unwrap_or(snapshot);
-
-    // 转换 entries
-    let entries: Vec<serde_json::Value> = inner
-        .get("entries")
-        .and_then(|e| e.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|entry| convert_entry_to_mobile(entry))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // 转换 phase
-    let phase = inner
-        .get("phase")
-        .and_then(|p| {
-            if p.is_string() {
-                Some(p.as_str().unwrap_or("idle").to_string())
-            } else if let Some(obj) = p.as_object() {
-                // Ended(reason) 格式
-                if obj.contains_key("Ended") {
-                    Some("ended".to_string())
-                } else {
-                    Some("idle".to_string())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "idle".to_string());
-
-    // 转换 pending_permission → approval
-    let approval = inner.get("pending_permission").and_then(|perm| {
-        if perm.is_null() {
-            return None;
-        }
-        Some(serde_json::json!({
-            "key": perm.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or(""),
-            "prompt": perm.get("question").and_then(|v| v.as_str()).unwrap_or("Permission required"),
-            "options": perm.get("options").and_then(|opts| opts.as_array()).map(|arr| {
-                arr.iter().map(|opt| {
-                    serde_json::json!({
-                        "key": opt.get("option_id").and_then(|v| v.as_str()).unwrap_or(""),
-                        "label": opt.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                        "kind": match opt.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
-                            "AllowOnce" | "AllowAlways" => "approve",
-                            "RejectOnce" | "RejectAlways" => "deny",
-                            _ => "custom",
-                        },
-                    })
-                }).collect::<Vec<_>>()
-            }).unwrap_or_default(),
-            "allowsTextInput": false,
-        }))
-    });
-
-    serde_json::json!({
-        "type": "snapshot",
-        "phase": phase,
-        "entries": entries,
-        "approval": approval,
-        "statusLine": inner.get("status_line"),
-        "usage": inner.get("usage"),
-    })
-}
-
-/// 将 AcpEntry 转换为移动端格式
-fn convert_entry_to_mobile(entry: &serde_json::Value) -> serde_json::Value {
-    // AcpEntry 是枚举，可能是 {"User": "text"} 或 {"Assistant": {...}} 等
-    if let Some(text) = entry.get("User").and_then(|v| v.as_str()) {
-        return serde_json::json!({
-            "type": "entry",
-            "entry": {"User": {"text": text}}
-        });
-    }
-
-    if let Some(assistant) = entry.get("Assistant") {
-        return serde_json::json!({
-            "type": "entry",
-            "entry": {
-                "Assistant": {
-                    "text": assistant.get("text").and_then(|v| v.as_str()).unwrap_or(""),
-                    "thought": assistant.get("thought").and_then(|v| v.as_bool()).unwrap_or(false),
-                }
-            }
-        });
-    }
-
-    if let Some(tool_call) = entry.get("ToolCall") {
-        let status = tool_call
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("pending");
-        let mobile_status = match status {
-            "in_progress" => "Running",
-            "completed" => "Completed",
-            "failed" => "Failed",
-            _ => "Running",
-        };
-
-        let kind = tool_call
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .unwrap_or("other");
-        let mobile_kind = match kind {
-            "read" => "Read",
-            "edit" | "delete" | "move" => "Edit",
-            "execute" => "Bash",
-            _ => "Other",
-        };
-
-        // 转换 output
-        let output: Vec<String> = tool_call
-            .get("output")
-            .and_then(|o| o.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|part| {
-                        if let Some(text) = part.get("Text").and_then(|v| v.as_str()) {
-                            Some(text.to_string())
-                        } else if let Some(diff) = part.get("Diff") {
-                            let path = diff.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                            Some(format!("[diff] {}", path))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        return serde_json::json!({
-            "type": "entry",
-            "entry": {
-                "ToolCall": {
-                    "id": tool_call.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "title": tool_call.get("title").and_then(|v| v.as_str()).unwrap_or(""),
-                    "kind": mobile_kind,
-                    "status": mobile_status,
-                    "output": output,
-                }
-            }
-        });
-    }
-
-    if let Some(divider) = entry.get("Divider").and_then(|v| v.as_str()) {
-        return serde_json::json!({
-            "type": "entry",
-            "entry": {"Divider": divider}
-        });
-    }
-
-    // 未知类型，原样返回
-    serde_json::json!({"type": "entry", "entry": entry})
-}
-
 /// 列出所有 ACP 会话（阻塞版本）
 fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
     let mut stream = UnixStream::connect(sock_path()).ok()?;
@@ -1646,11 +1483,12 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
     let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
 
     let mut summaries = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
-    // 从 states 中筛选有 launch 字段的会话（这些是 ACP 会话）
+    // 1. 从 states 中筛选有 launch 字段的会话（终端内启动的 agent）
     if let Some(states) = resp["states"].as_array() {
         for s in states {
-            // 只选择有 launch 命令的会话（ACP 会话）
+            // 只选择有 launch 命令的会话
             let launch = s["launch"].as_str();
             if launch.is_none() {
                 continue;
@@ -1658,6 +1496,11 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
             let launch_cmd = launch.unwrap();
 
             let id = s["id"].as_str().unwrap_or_default().to_string();
+            if id.is_empty() || seen_ids.contains(&id) {
+                continue;
+            }
+            seen_ids.insert(id.clone());
+
             let phase = s["phase"].as_str().unwrap_or("idle").to_string();
             let cwd = s["cwd"].as_str().map(String::from);
 
@@ -1668,6 +1511,8 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
                 "copilot"
             } else if launch_cmd.contains("codex") {
                 "codex"
+            } else if launch_cmd.contains("grok") {
+                "grok"
             } else {
                 "other"
             };
@@ -1695,6 +1540,43 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
             });
         }
     }
+
+    // 2. 从 acp_sessions 中添加纯 ACP 会话（通过 acp_open 创建）
+    if let Some(acp_sessions) = resp["acp_sessions"].as_array() {
+        for s in acp_sessions {
+            let id = s["id"].as_str().unwrap_or_default().to_string();
+            if id.is_empty() || seen_ids.contains(&id) {
+                continue;
+            }
+            seen_ids.insert(id.clone());
+
+            let phase = s["phase"].as_str().unwrap_or("idle").to_string();
+            let cwd = s["cwd"].as_str().map(String::from);
+            let agent = s["agent"].as_str().unwrap_or("claude").to_string();
+
+            let title = s["title"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .or_else(|| {
+                    cwd.as_ref()
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| id.clone());
+
+            summaries.push(AcpSessionSummary {
+                id,
+                title,
+                phase,
+                agent,
+                cwd,
+                updated_at: s["updated_at"].as_i64().unwrap_or(0),
+            });
+        }
+    }
+
     Some(summaries)
 }
 
