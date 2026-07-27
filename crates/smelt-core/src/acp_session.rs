@@ -409,6 +409,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::Ready {
             session_id,
             kind,
+            fallback_reason,
             supports_image,
         } => {
             state.acp_session_id = Some(session_id.to_string());
@@ -425,7 +426,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 ReadyKind::Fresh => {}
             }
             state.phase = AcpPhase::Idle;
-            state.status_line = None;
+            state.status_line = fallback_reason;
         }
         AcpEvent::AgentChunk { thought, text } => {
             match state.entries.last_mut() {
@@ -758,6 +759,7 @@ mod tests {
                 session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
                 kind: ReadyKind::ResumedWithReplay,
                 supports_image: true,
+                fallback_reason: None,
             },
         );
         assert!(s.entries.is_empty());
@@ -774,24 +776,33 @@ mod tests {
                 session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
                 kind: ReadyKind::ResumedKeepHistory,
                 supports_image: true,
+                fallback_reason: None,
             },
         );
         assert_eq!(s.entries.len(), 1);
     }
 
     #[test]
-    fn ready_fresh_with_existing_history_inserts_divider() {
+    fn ready_fresh_with_fallback_replaces_id_and_preserves_history_with_divider() {
         let mut s = fresh_state();
         s.entries.push(AcpEntry::User("old".into()));
+        s.acp_session_id = Some("old-sid".into());
+        apply_event(&mut s, AcpEvent::Status("正在恢复".into()));
+        assert_eq!(s.acp_session_id.as_deref(), Some("old-sid"));
+
         apply_event(
             &mut s,
             AcpEvent::Ready {
-                session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+                session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
                 kind: ReadyKind::Fresh,
                 supports_image: true,
+                fallback_reason: Some("旧会话不存在，已创建新对话".into()),
             },
         );
+        assert_eq!(s.acp_session_id.as_deref(), Some("new-sid"));
+        assert_eq!(s.status_line.as_deref(), Some("旧会话不存在，已创建新对话"));
         assert_eq!(s.entries.len(), 2);
+        assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
         assert!(matches!(s.entries[1], AcpEntry::Divider(_)));
     }
 
@@ -807,8 +818,16 @@ mod tests {
     #[test]
     fn fatal_ends_session_and_keeps_reason() {
         let mut s = fresh_state();
-        apply_event(&mut s, AcpEvent::Fatal("boom".into()));
-        assert!(matches!(&s.phase, AcpPhase::Ended(reason) if reason == "boom"));
+        s.acp_session_id = Some("old-sid".into());
+        s.entries.push(AcpEntry::User("old".into()));
+        let message = "恢复失败，可重试：temporary failure";
+
+        apply_event(&mut s, AcpEvent::Fatal(message.into()));
+
+        assert_eq!(s.acp_session_id.as_deref(), Some("old-sid"));
+        assert_eq!(s.entries.len(), 1);
+        assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
+        assert!(matches!(&s.phase, AcpPhase::Ended(reason) if reason == message));
     }
 
     #[test]

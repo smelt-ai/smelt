@@ -1593,6 +1593,44 @@ const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// 恢复会话时主线程卡死，强杀重开又 abort）。取值对齐 probe_daemon 的 5s。
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MissingSessionAction {
+    Shell,
+    Launch(String),
+    Reject(String),
+}
+
+fn open_request(
+    rows: usize,
+    cols: usize,
+    cwd: Option<&str>,
+    id: &str,
+    action: &MissingSessionAction,
+) -> serde_json::Value {
+    let missing = match action {
+        MissingSessionAction::Shell => serde_json::json!({"kind": "shell"}),
+        MissingSessionAction::Launch(command) => {
+            serde_json::json!({"kind": "launch", "command": command})
+        }
+        MissingSessionAction::Reject(reason) => {
+            serde_json::json!({"kind": "reject", "reason": reason})
+        }
+    };
+    let legacy_launch = match action {
+        MissingSessionAction::Launch(command) => Some(command.as_str()),
+        _ => None,
+    };
+    serde_json::json!({
+        "op": "open",
+        "id": id,
+        "cwd": cwd,
+        "cols": cols,
+        "rows": rows,
+        "launch": legacy_launch,
+        "missing": missing,
+    })
+}
+
 /// reattach 快照整段灌进客户端 Term 之后：贴底 + 补鼠标模式位。
 ///
 /// 快照灌完后的 reattach 收尾。
@@ -1622,6 +1660,19 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
+        let action = launch
+            .map(|command| MissingSessionAction::Launch(command.to_string()))
+            .unwrap_or(MissingSessionAction::Shell);
+        Self::spawn_with_action(rows, cols, cwd, id, &action)
+    }
+
+    pub fn spawn_with_action(
+        rows: usize,
+        cols: usize,
+        cwd: Option<&str>,
+        id: &str,
+        action: &MissingSessionAction,
+    ) -> anyhow::Result<Self> {
         // 1) 连守护（不在则自动拉起）并声明要打开的会话，握手失败带几次短重试。
         //
         // 守护无缝升级 exec 交接期间，恰好在这一瞬间新开的 pane 可能撞上这个连接
@@ -1643,7 +1694,7 @@ impl Terminal {
                 // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
                 // upgrade 交接的百毫秒抖动，重连一次就好。
                 let writer = connect_daemon()?;
-                match Self::handshake_on(writer, rows, cols, cwd, id, launch) {
+                match Self::handshake_on(writer, rows, cols, cwd, id, action) {
                     Ok(x) => {
                         result = Some(x);
                         break;
@@ -1785,16 +1836,12 @@ impl Terminal {
         cols: usize,
         cwd: Option<&str>,
         id: &str,
-        launch: Option<&str>,
+        action: &MissingSessionAction,
     ) -> anyhow::Result<(BufReader<UnixStream>, TermSize, usize)> {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
-        writeln!(
-            writer,
-            "{}",
-            serde_json::json!({ "op": "open", "id": id, "cwd": cwd, "cols": cols, "rows": rows, "launch": launch })
-        )?;
+        writeln!(writer, "{}", open_request(rows, cols, cwd, id, action))?;
         let mut buffered = BufReader::new(writer);
         let mut line = String::new();
         buffered.read_line(&mut line)?;
@@ -2730,6 +2777,25 @@ mod damage_gate_tests {
 /// 写回去，不用起真实 shell/PTY——直接喂原始转义序列给 alacritty 的 Processor，
 /// 用 UnixStream::pair() 在另一头当"假守护"读回应帧即可，快且不 flaky。
 #[cfg(test)]
+mod missing_session_action_tests {
+    use super::{MissingSessionAction, open_request};
+
+    #[test]
+    fn open_request_serializes_missing_session_action() {
+        let value = open_request(
+            24,
+            80,
+            Some("/tmp/project"),
+            "sid-1",
+            &MissingSessionAction::Launch("claude --resume old".into()),
+        );
+        assert_eq!(value["missing"]["kind"], "launch");
+        assert_eq!(value["missing"]["command"], "claude --resume old");
+        assert_eq!(value["launch"], "claude --resume old");
+    }
+}
+
+#[cfg(test)]
 mod handshake_timeout_tests {
     use super::*;
 
@@ -2743,7 +2809,14 @@ mod handshake_timeout_tests {
         let (ours, theirs) = UnixStream::pair().expect("pair 失败");
         let (tx, rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            let r = Terminal::handshake_on(ours, 24, 80, None, "mute-daemon-test", None);
+            let r = Terminal::handshake_on(
+                ours,
+                24,
+                80,
+                None,
+                "mute-daemon-test",
+                &MissingSessionAction::Shell,
+            );
             let _ = tx.send(r.is_err());
         });
         match rx.recv_timeout(HANDSHAKE_READ_TIMEOUT + Duration::from_secs(2)) {
