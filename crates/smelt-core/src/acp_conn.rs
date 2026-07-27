@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
@@ -30,6 +29,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
     AcpAgent, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
@@ -603,6 +603,25 @@ fn classify_load_failure(error: &agent_client_protocol::Error) -> RestoreDecisio
     }
 }
 
+fn claude_transcript_confirmed_missing(launch: &AcpLaunch, sid: &SessionId) -> bool {
+    if !launch.resume_needs_transcript_check {
+        return false;
+    }
+    let Some(cwd) = launch.cwd.as_deref() else {
+        return false;
+    };
+
+    // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace profile），
+    // transcript 得去它指向的目录找，不能只看进程全局环境变量——那只反映
+    // "默认" workspace 那一份。
+    let override_dir =
+        crate::workspace_override::env_override_from_launch(&launch.launch, "CLAUDE_CONFIG_DIR");
+    let transcript =
+        crate::claude_paths::transcript_path(cwd, &sid.to_string(), override_dir.as_deref());
+    // 只有能明确判定为“不存在”时才提前回退；IO / 权限错误都交给协议自己试。
+    matches!(transcript.try_exists(), Ok(false))
+}
+
 /// 连接主体：spawn agent 子进程 → initialize → newSession → 双源 loop
 /// （UI 指令 / agent 更新流）。返回 Ok 表示用户主动 Shutdown。
 async fn run_connection(
@@ -738,22 +757,8 @@ async fn run_connection(
             // 都躲不掉（Claude 实测 new 10.4s / load 15.7s / resume 17.6s）。
             let mut fallback_reason = None;
             if let Some(sid) = launch.resume_session_id.clone() {
-                let transcript_confirmed_missing = launch.resume_needs_transcript_check
-                    && launch.cwd.as_deref().is_some_and(|c| {
-                        // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace
-                        // profile），transcript 得去它指向的目录找，不能只看进程
-                        // 全局环境变量——那只反映"默认" workspace 那一份。
-                        let override_dir = crate::workspace_override::env_override_from_launch(
-                            &launch.launch,
-                            "CLAUDE_CONFIG_DIR",
-                        );
-                        crate::claude_paths::transcript_path(
-                            c,
-                            &sid.to_string(),
-                            override_dir.as_deref(),
-                        )
-                        .exists()
-                    });
+                let transcript_confirmed_missing =
+                    claude_transcript_confirmed_missing(launch, &sid);
 
                 if transcript_confirmed_missing {
                     fallback_reason = Some("旧会话记录已不存在，已创建新对话".into());
@@ -1559,7 +1564,11 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
             // 受管失败：系统里用户自己装过 bun 就用系统的。
             let sys_has = std::env::split_paths(crate::login_env::login_path())
                 .any(|p| p.join(head).is_file());
-            if sys_has { Ok(cmd.to_string()) } else { Err(e) }
+            if sys_has {
+                Ok(cmd.to_string())
+            } else {
+                Err(e)
+            }
         }
     }
 }
@@ -1809,8 +1818,46 @@ mod runtime_tests {
 
 #[cfg(test)]
 mod restore_failure_tests {
-    use super::{RestoreDecision, classify_load_failure, classify_resume_failure};
-    use agent_client_protocol::Error;
+    use super::{
+        classify_load_failure, classify_resume_failure, claude_transcript_confirmed_missing,
+        AcpLaunch, RestoreDecision,
+    };
+    use crate::agent_kind::AcpLaunchSpec;
+    use crate::claude_paths::transcript_path;
+    use agent_client_protocol::{schema::v1::SessionId, Error};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    fn sandbox_root(test_name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("transcript-precheck-tests")
+            .join(format!("{}-{test_name}", std::process::id()))
+    }
+
+    fn make_launch(
+        command: &str,
+        cwd: Option<&str>,
+        resume_needs_transcript_check: bool,
+        config_dir: Option<&Path>,
+        resume_session_id: SessionId,
+    ) -> AcpLaunch {
+        let mut launch = AcpLaunch {
+            launch: AcpLaunchSpec::from_command(command),
+            cwd: cwd.map(str::to_string),
+            sid: "gui-session".to_string(),
+            resume_session_id: Some(resume_session_id),
+            resume_needs_transcript_check,
+        };
+        if let Some(dir) = config_dir {
+            launch.launch = launch
+                .launch
+                .with_env("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned());
+        }
+        launch
+    }
 
     #[test]
     fn resume_method_not_found_with_load_support_tries_load() {
@@ -1850,12 +1897,93 @@ mod restore_failure_tests {
             RestoreDecision::Retryable
         );
     }
+
+    #[test]
+    fn claude_with_existing_transcript_is_not_confirmed_missing() {
+        let root = sandbox_root("existing");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-existing".to_string());
+        let cwd = "/Users/zehua.wang/projects/smelt.app";
+        let launch = make_launch(
+            &crate::agent_kind::default_acp_cmd(),
+            Some(cwd),
+            true,
+            Some(&root),
+            session_id.clone(),
+        );
+        let transcript = transcript_path(
+            cwd,
+            &session_id.to_string(),
+            Some(root.to_string_lossy().as_ref()),
+        );
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "history").unwrap();
+
+        assert!(!claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_with_absent_transcript_is_confirmed_missing() {
+        let root = sandbox_root("absent");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-absent".to_string());
+        let cwd = "/Users/zehua.wang/projects/smelt.app";
+        let launch = make_launch(
+            &crate::agent_kind::default_acp_cmd(),
+            Some(cwd),
+            true,
+            Some(&root),
+            session_id.clone(),
+        );
+
+        assert!(claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_without_cwd_is_not_confirmed_missing() {
+        let root = sandbox_root("nocwd");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-nocwd".to_string());
+        let launch = make_launch(
+            &crate::agent_kind::default_acp_cmd(),
+            None,
+            true,
+            Some(&root),
+            session_id.clone(),
+        );
+
+        assert!(!claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_claude_is_not_confirmed_missing() {
+        let root = sandbox_root("nonclaude");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-nonclaude".to_string());
+        let launch = make_launch(
+            "copilot --acp",
+            Some("/Users/zehua.wang/projects/smelt.app"),
+            false,
+            Some(&root),
+            session_id.clone(),
+        );
+
+        assert!(!claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
 mod spawn_gate_tests {
     use super::with_spawn_gate;
-    use std::sync::{Arc, RwLock, mpsc};
+    use std::sync::{mpsc, Arc, RwLock};
     use std::time::Duration;
 
     #[test]
@@ -2131,12 +2259,10 @@ mod model_tests {
         assert_eq!(state.current_name, "Claude Sonnet 4.5");
         // 候选要带全，UI 靠它渲染下拉
         assert_eq!(state.options.len(), 2);
-        assert!(
-            state
-                .options
-                .iter()
-                .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8")
-        );
+        assert!(state
+            .options
+            .iter()
+            .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8"));
     }
 
     /// 选项按厂商/档位分组时同样要能翻出来。
