@@ -4362,9 +4362,16 @@ fn handle_upgrade(
 
 /// 开 PTY + 起 shell（环境设置与 GUI 内嵌版完全一致，见 workspace/terminal.rs 的注释）。
 /// `launch`：项目「+」悬浮菜单的 Claude Code / Codex 快捷入口——把要跑的命令直接编进
-/// 启动命令行（`-c '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
+/// 启动命令行（`-ilc '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
 /// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个
 /// 正常交互 login shell，之后就是一个普通会话。
+fn shell_launch_args(shell: &str, launch: Option<&str>) -> Vec<String> {
+    match launch {
+        Some(launch) => vec!["-ilc".to_string(), format!("{launch}; exec {shell} -l")],
+        None => vec!["-l".to_string()],
+    }
+}
+
 fn spawn_session(
     id: &str,
     rows: u16,
@@ -4383,11 +4390,10 @@ fn spawn_session(
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(shell.clone());
-    // login shell：拿完整 PATH（.app 双击启动时系统 PATH 很精简）。
-    cmd.arg("-l");
-    if let Some(launch) = launch {
-        cmd.arg("-c");
-        cmd.arg(format!("{launch}; exec {shell} -l"));
+    // 快捷启动必须同时是 interactive + login：用户级 CLI 安装器通常把 PATH
+    // 写进 .zshrc，只用 `-lc` 读不到，Dock 启动的 smeltd 又只有系统 PATH。
+    for arg in shell_launch_args(&shell, launch) {
+        cmd.arg(arg);
     }
     if let Some(dir) = cwd {
         cmd.cwd(dir);
@@ -5311,6 +5317,18 @@ mod snapshot_tests {
         assert!(is_agent_tui_launch(Some("codex")));
         assert!(!is_agent_tui_launch(Some("zsh")));
         assert!(!is_agent_tui_launch(None));
+    }
+
+    #[test]
+    fn agent_launch_reads_interactive_shell_config() {
+        assert_eq!(
+            shell_launch_args("/bin/zsh", Some("claude --dangerously-skip-permissions")),
+            vec![
+                "-ilc".to_string(),
+                "claude --dangerously-skip-permissions; exec /bin/zsh -l".to_string(),
+            ]
+        );
+        assert_eq!(shell_launch_args("/bin/zsh", None), vec!["-l".to_string()]);
     }
 
     #[test]
