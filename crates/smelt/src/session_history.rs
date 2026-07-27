@@ -74,20 +74,51 @@ fn is_short_session_control(arg: &str, flag: &str, supports_attached_value: bool
     }
 }
 
+fn is_long_session_option(arg: &str, flag: &str) -> bool {
+    arg == flag
+        || arg
+            .strip_prefix(flag)
+            .is_some_and(|suffix| suffix.starts_with('='))
+}
+
+fn is_codex_resume_override(args: &[String], index: usize) -> bool {
+    fn selects_resume(value: &str) -> bool {
+        value
+            .trim_start_matches('=')
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "experimental_resume")
+    }
+
+    let arg = &args[index];
+    if arg == "-c" || arg == "--config" {
+        return args
+            .get(index + 1)
+            .is_some_and(|value| selects_resume(value));
+    }
+    arg.strip_prefix("--config=")
+        .or_else(|| arg.strip_prefix("-c"))
+        .is_some_and(selects_resume)
+}
+
 fn has_existing_session_control(kind: TerminalAgentKind, args: &[String]) -> bool {
-    args.iter().any(|arg| {
+    args.iter().enumerate().any(|(index, arg)| {
         is_long_session_control(arg)
             || match kind {
                 TerminalAgentKind::Claude => {
-                    arg == "-c" || is_short_session_control(arg, "-r", false)
+                    arg == "-c"
+                        || is_short_session_control(arg, "-r", false)
+                        || is_long_session_option(arg, "--from-pr")
                 }
-                TerminalAgentKind::Copilot => is_short_session_control(arg, "-r", false),
+                TerminalAgentKind::Copilot => {
+                    is_short_session_control(arg, "-r", false)
+                        || is_long_session_option(arg, "--connect")
+                }
                 TerminalAgentKind::Grok => {
                     arg == "-c"
                         || is_short_session_control(arg, "-r", true)
                         || is_short_session_control(arg, "-s", true)
                 }
-                TerminalAgentKind::Codex => false,
+                TerminalAgentKind::Codex => is_codex_resume_override(args, index),
             }
     })
 }
@@ -2025,6 +2056,22 @@ mod tests {
     }
 
     #[test]
+    fn exact_fresh_agent_commands_remain_managed() {
+        for (kind, command) in [
+            (TerminalAgentKind::Claude, "claude"),
+            (TerminalAgentKind::Copilot, "copilot"),
+            (TerminalAgentKind::Grok, "grok"),
+            (TerminalAgentKind::Codex, "codex"),
+        ] {
+            assert_eq!(infer_terminal_agent_kind(command), Some(kind));
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_ok(),
+                "{command} must remain a valid managed initial launch"
+            );
+        }
+    }
+
+    #[test]
     fn does_not_infer_managed_agent_for_existing_session_controls() {
         for command in [
             "claude --continue",
@@ -2103,6 +2150,61 @@ mod tests {
             assert!(
                 prepare_terminal_agent_launch(kind, command, "new").is_ok(),
                 "{command} is not an existing-session launch"
+            );
+        }
+    }
+
+    #[test]
+    fn audited_session_selectors_are_not_managed() {
+        for (kind, command) in [
+            (TerminalAgentKind::Claude, "claude --from-pr"),
+            (TerminalAgentKind::Claude, "claude --from-pr 123"),
+            (TerminalAgentKind::Claude, "claude --from-pr=123"),
+            (TerminalAgentKind::Copilot, "copilot --connect"),
+            (TerminalAgentKind::Copilot, "copilot --connect task-id"),
+            (TerminalAgentKind::Copilot, "copilot --connect=task-id"),
+            (
+                TerminalAgentKind::Codex,
+                "codex -c experimental_resume=rollout.jsonl",
+            ),
+            (
+                TerminalAgentKind::Codex,
+                "codex --config experimental_resume=rollout.jsonl",
+            ),
+            (
+                TerminalAgentKind::Codex,
+                "codex --config=experimental_resume=rollout.jsonl",
+            ),
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                None,
+                "{command} must remain an ordinary terminal command"
+            );
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_err(),
+                "{command} must not be used as a managed initial launch"
+            );
+        }
+    }
+
+    #[test]
+    fn audited_session_adjacent_options_remain_managed() {
+        for (kind, command) in [
+            (TerminalAgentKind::Claude, "claude --name sprint"),
+            (
+                TerminalAgentKind::Claude,
+                "claude --remote-control remote-name",
+            ),
+            (TerminalAgentKind::Copilot, "copilot --name sprint"),
+            (TerminalAgentKind::Copilot, "copilot --remote"),
+            (TerminalAgentKind::Copilot, "copilot --remote-export"),
+            (TerminalAgentKind::Codex, "codex -c model='gpt-5'"),
+        ] {
+            assert_eq!(infer_terminal_agent_kind(command), Some(kind));
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_ok(),
+                "{command} does not select or assign a conflicting session ID"
             );
         }
     }
