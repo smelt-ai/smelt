@@ -3351,6 +3351,75 @@ fn handle_conn(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MissingSessionAction {
+    Shell,
+    Launch(String),
+    Reject(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MissingSessionDecision {
+    Attach,
+    Spawn(Option<String>),
+    Reject(String),
+}
+
+fn parse_missing_session_action(v: &serde_json::Value) -> MissingSessionAction {
+    if let Some(missing) = v.get("missing") {
+        return match missing["kind"].as_str() {
+            Some("launch") => missing["command"]
+                .as_str()
+                .map(|command| MissingSessionAction::Launch(command.to_string()))
+                .unwrap_or_else(|| MissingSessionAction::Reject("无法恢复：缺少启动命令".into())),
+            Some("reject") => MissingSessionAction::Reject(
+                missing["reason"]
+                    .as_str()
+                    .unwrap_or("无法恢复：客户端拒绝重新创建会话")
+                    .to_string(),
+            ),
+            _ => MissingSessionAction::Shell,
+        };
+    }
+    v["launch"]
+        .as_str()
+        .map(|command| MissingSessionAction::Launch(command.to_string()))
+        .unwrap_or(MissingSessionAction::Shell)
+}
+
+fn select_missing_session_command(
+    exists: bool,
+    action: MissingSessionAction,
+) -> MissingSessionDecision {
+    if exists {
+        return MissingSessionDecision::Attach;
+    }
+    match action {
+        MissingSessionAction::Shell => MissingSessionDecision::Spawn(None),
+        MissingSessionAction::Launch(command) => MissingSessionDecision::Spawn(Some(command)),
+        MissingSessionAction::Reject(reason) => MissingSessionDecision::Reject(reason),
+    }
+}
+
+fn rejected_terminal_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
+    let reason: String = reason
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let header = serde_json::json!({
+        "ok": false,
+        "rejected": reason,
+        "rows": rows,
+        "cols": cols,
+        "replay_len": 0,
+    });
+    format!("{header}\n\r\n\x1b[31m{reason}\x1b[0m\r\n").into_bytes()
+}
+
+fn write_rejected_terminal(mut conn: &UnixStream, reason: &str, rows: u16, cols: u16) {
+    let _ = conn.write_all(&rejected_terminal_reply(reason, rows, cols));
+}
+
 fn handle_open(
     conn: UnixStream,
     mut reader: BufReader<UnixStream>,
@@ -3365,12 +3434,12 @@ fn handle_open(
     let cols = v["cols"].as_u64().unwrap_or(80) as u16;
     let rows = v["rows"].as_u64().unwrap_or(24) as u16;
     let cwd = v["cwd"].as_str().map(String::from);
-    // 只在新建会话时生效（reattach 到已存在的会话没有"起始命令"这回事）。
-    let launch = v["launch"].as_str().map(String::from);
+    let missing_action = parse_missing_session_action(v);
 
     // 取既有会话（reattach）或新建。
     let existing = sessions.lock().unwrap().get(&id).cloned();
     let reattach = existing.is_some();
+    let decision = select_missing_session_command(reattach, missing_action);
     let sess = match existing {
         Some(s) => {
             // reattach：等客户端首帧 resize（含真实 cell 像素）再 jolt，避免在错误
@@ -3379,15 +3448,28 @@ fn handle_open(
             s
         }
         None => {
-            let Ok((sess, pty_reader)) = spawn_session(
+            let launch = match decision {
+                MissingSessionDecision::Spawn(launch) => launch,
+                MissingSessionDecision::Reject(reason) => {
+                    write_rejected_terminal(&conn, &reason, rows, cols);
+                    return;
+                }
+                MissingSessionDecision::Attach => unreachable!(),
+            };
+            let result = spawn_session(
                 &id,
                 rows,
                 cols,
                 cwd.as_deref(),
                 launch.as_deref(),
                 &subscribers,
-            ) else {
-                return;
+            );
+            let (sess, pty_reader) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    write_rejected_terminal(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
+                    return;
+                }
             };
             let sess = Arc::new(sess);
             sessions
@@ -3662,7 +3744,10 @@ fn handle_subscribe(
 //       `AcpLaunchSpec::from_command(cmd)`。
 //     → 已存在且还活着（有 handle）就直接接上；已存在但 Ended（没有 handle）
 //       就用请求带的 launch + 已知的旧 session id（没有才退回请求带的 resume_id）
-//       重新 spawn（「重新开始」）；都不存在就全新建。回一份
+//       重新 spawn（「重新开始」）；都不存在就全新建。丢失 daemon slot 时会先起
+//       一个 replacement 进程，再尝试按 resume_id 恢复协议状态；只有 typed
+//       unsupported / not-found 这两类恢复结果才会继续创建新的 conversation，
+//       transient failure 只返回可重试错误，不会偷偷新建。回一份
 //       `{"snapshot": AcpSnapshot}`，之后每次归约有实质变化再推一份同形状的
 //       行。同 id 只允许一个控制连接，第二次 open 顶掉前一个。
 //   {"op":"acp_watch","id":".."} → 只读镜像，会话必须已存在，可多个并存。
@@ -3738,6 +3823,10 @@ fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
         agent_needs_transcript_check: v["agent"].as_str().unwrap_or("claude") == "claude",
         resume_id: v["resume_id"].as_str().map(String::from),
     })
+}
+
+fn select_resume_id(known: Option<String>, requested: Option<String>) -> Option<String> {
+    known.or(requested)
 }
 
 /// ACP 相位 → 四色 Phase。`Running` 还要看 entries 里有没有进行中的工具调用，
@@ -4034,7 +4123,7 @@ fn handle_acp_open(
                 &slot,
                 &id,
                 launch.clone(),
-                known.or_else(|| req_resume_id.clone()),
+                select_resume_id(known, req_resume_id.clone()),
                 acp_sessions.spawn_gate(),
                 &subscribers,
             );
@@ -5407,6 +5496,48 @@ mod snapshot_tests {
 
 /// Phase 0：`watch` 只读旁观必须能跟 `open` 独占连接并存，且互不干扰。
 #[cfg(test)]
+mod missing_session_action_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_open_request_preserves_launch_behavior() {
+        assert_eq!(
+            parse_missing_session_action(&serde_json::json!({"launch":"claude"})),
+            MissingSessionAction::Launch("claude".into())
+        );
+    }
+
+    #[test]
+    fn reject_action_never_produces_a_spawn_command() {
+        assert_eq!(
+            parse_missing_session_action(&serde_json::json!({
+                "missing":{"kind":"reject","reason":"无法恢复"}
+            })),
+            MissingSessionAction::Reject("无法恢复".into())
+        );
+    }
+
+    #[test]
+    fn existing_session_ignores_reject_action() {
+        assert_eq!(
+            select_missing_session_command(
+                true,
+                MissingSessionAction::Reject("must not run".into())
+            ),
+            MissingSessionDecision::Attach
+        );
+    }
+
+    #[test]
+    fn rejected_terminal_reply_contains_actionable_reason() {
+        let reply = rejected_terminal_reply("无法恢复：历史不存在", 24, 80);
+        let text = String::from_utf8_lossy(&reply);
+        assert!(text.contains(r#""rejected":"无法恢复：历史不存在""#));
+        assert!(text.contains("\u{1b}[31m无法恢复：历史不存在\u{1b}[0m"));
+    }
+}
+
+#[cfg(test)]
 mod watch_tests {
     use super::*;
 
@@ -6248,5 +6379,20 @@ mod acp_tests {
 
         assert_eq!(req.launch.command, "claude --dangerously-skip-permissions");
         assert!(req.launch.env.is_empty());
+    }
+
+    #[test]
+    fn daemon_known_resume_id_wins_after_gui_reconnect() {
+        assert_eq!(
+            select_resume_id(
+                Some("daemon-session".to_string()),
+                Some("saved-session".to_string())
+            ),
+            Some("daemon-session".to_string())
+        );
+        assert_eq!(
+            select_resume_id(None, Some("saved-session".to_string())),
+            Some("saved-session".to_string())
+        );
     }
 }
