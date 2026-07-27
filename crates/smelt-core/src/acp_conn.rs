@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest,
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
@@ -29,7 +30,6 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallId, ToolCallUpdate,
 };
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
     AcpAgent, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
@@ -573,6 +573,27 @@ enum RestoreDecision {
     Retryable,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TerminalRestoreOutcome {
+    StartFresh(String),
+    RetryableFatal(String),
+}
+
+fn terminal_restore_outcome(
+    decision: RestoreDecision,
+    error: &agent_client_protocol::Error,
+) -> TerminalRestoreOutcome {
+    match decision {
+        RestoreDecision::StartFresh(reason) => TerminalRestoreOutcome::StartFresh(reason),
+        RestoreDecision::Retryable => {
+            TerminalRestoreOutcome::RetryableFatal(format!("恢复失败，可重试：{error}"))
+        }
+        RestoreDecision::TryLoad => {
+            unreachable!("TryLoad is not a terminal restore decision");
+        }
+    }
+}
+
 fn classify_resume_failure(
     error: &agent_client_protocol::Error,
     load_supported: bool,
@@ -836,33 +857,29 @@ async fn run_connection(
                                             )
                                             .await;
                                         }
-                                        Err(error) => match classify_load_failure(&error) {
-                                            RestoreDecision::StartFresh(reason) => {
+                                        Err(error) => match terminal_restore_outcome(
+                                            classify_load_failure(&error),
+                                            &error,
+                                        ) {
+                                            TerminalRestoreOutcome::StartFresh(reason) => {
                                                 fallback_reason = Some(reason);
                                             }
-                                            RestoreDecision::Retryable => {
-                                                let _ = event_tx.try_send(AcpEvent::Fatal(
-                                                    format!("恢复失败，可重试：{error}"),
-                                                ));
+                                            TerminalRestoreOutcome::RetryableFatal(message) => {
+                                                let _ = event_tx.try_send(AcpEvent::Fatal(message));
                                                 return Ok(());
-                                            }
-                                            RestoreDecision::TryLoad => {
-                                                unreachable!(
-                                                    "load failure cannot request another load"
-                                                );
                                             }
                                         },
                                     }
                                 }
-                                RestoreDecision::StartFresh(reason) => {
-                                    fallback_reason = Some(reason);
-                                }
-                                RestoreDecision::Retryable => {
-                                    let _ = event_tx.try_send(AcpEvent::Fatal(format!(
-                                        "恢复失败，可重试：{error}"
-                                    )));
-                                    return Ok(());
-                                }
+                                decision => match terminal_restore_outcome(decision, &error) {
+                                    TerminalRestoreOutcome::StartFresh(reason) => {
+                                        fallback_reason = Some(reason);
+                                    }
+                                    TerminalRestoreOutcome::RetryableFatal(message) => {
+                                        let _ = event_tx.try_send(AcpEvent::Fatal(message));
+                                        return Ok(());
+                                    }
+                                },
                             }
                         }
                     }
@@ -1564,11 +1581,7 @@ fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, S
             // 受管失败：系统里用户自己装过 bun 就用系统的。
             let sys_has = std::env::split_paths(crate::login_env::login_path())
                 .any(|p| p.join(head).is_file());
-            if sys_has {
-                Ok(cmd.to_string())
-            } else {
-                Err(e)
-            }
+            if sys_has { Ok(cmd.to_string()) } else { Err(e) }
         }
     }
 }
@@ -1819,12 +1832,12 @@ mod runtime_tests {
 #[cfg(test)]
 mod restore_failure_tests {
     use super::{
-        classify_load_failure, classify_resume_failure, claude_transcript_confirmed_missing,
-        AcpLaunch, RestoreDecision,
+        AcpLaunch, RestoreDecision, TerminalRestoreOutcome, classify_load_failure,
+        classify_resume_failure, claude_transcript_confirmed_missing, terminal_restore_outcome,
     };
     use crate::agent_kind::AcpLaunchSpec;
     use crate::claude_paths::transcript_path;
-    use agent_client_protocol::{schema::v1::SessionId, Error};
+    use agent_client_protocol::{Error, schema::v1::SessionId};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1896,6 +1909,70 @@ mod restore_failure_tests {
             classify_load_failure(&Error::internal_error()),
             RestoreDecision::Retryable
         );
+    }
+
+    #[test]
+    fn resume_internal_error_terminal_outcome_is_retryable_message() {
+        let error = Error::internal_error();
+        let decision = classify_resume_failure(&error, true);
+
+        let outcome = terminal_restore_outcome(decision, &error);
+
+        assert_eq!(
+            outcome,
+            TerminalRestoreOutcome::RetryableFatal(format!("恢复失败，可重试：{error}"))
+        );
+        assert!(!matches!(outcome, TerminalRestoreOutcome::StartFresh(_)));
+    }
+
+    #[test]
+    fn load_internal_error_terminal_outcome_is_retryable_message() {
+        let error = Error::internal_error();
+        let decision = classify_load_failure(&error);
+
+        let outcome = terminal_restore_outcome(decision, &error);
+
+        assert_eq!(
+            outcome,
+            TerminalRestoreOutcome::RetryableFatal(format!("恢复失败，可重试：{error}"))
+        );
+        assert!(!matches!(outcome, TerminalRestoreOutcome::StartFresh(_)));
+    }
+
+    #[test]
+    fn resource_not_found_terminal_outcome_starts_fresh() {
+        let error = Error::resource_not_found(None);
+
+        assert_eq!(
+            terminal_restore_outcome(classify_resume_failure(&error, true), &error),
+            TerminalRestoreOutcome::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+        assert_eq!(
+            terminal_restore_outcome(classify_load_failure(&error), &error),
+            TerminalRestoreOutcome::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    fn unsupported_terminal_outcome_starts_fresh() {
+        let error = Error::method_not_found();
+
+        assert_eq!(
+            terminal_restore_outcome(classify_resume_failure(&error, false), &error),
+            TerminalRestoreOutcome::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        );
+        assert_eq!(
+            terminal_restore_outcome(classify_load_failure(&error), &error),
+            TerminalRestoreOutcome::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TryLoad is not a terminal restore decision")]
+    fn try_load_is_not_terminal_restore_outcome() {
+        let error = Error::method_not_found();
+
+        let _ = terminal_restore_outcome(RestoreDecision::TryLoad, &error);
     }
 
     #[test]
@@ -1983,7 +2060,7 @@ mod restore_failure_tests {
 #[cfg(test)]
 mod spawn_gate_tests {
     use super::with_spawn_gate;
-    use std::sync::{mpsc, Arc, RwLock};
+    use std::sync::{Arc, RwLock, mpsc};
     use std::time::Duration;
 
     #[test]
@@ -2259,10 +2336,12 @@ mod model_tests {
         assert_eq!(state.current_name, "Claude Sonnet 4.5");
         // 候选要带全，UI 靠它渲染下拉
         assert_eq!(state.options.len(), 2);
-        assert!(state
-            .options
-            .iter()
-            .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8"));
+        assert!(
+            state
+                .options
+                .iter()
+                .any(|(v, n)| v == "opus-4-8" && n == "Claude Opus 4.8")
+        );
     }
 
     /// 选项按厂商/档位分组时同样要能翻出来。
