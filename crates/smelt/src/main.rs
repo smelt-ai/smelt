@@ -3062,29 +3062,63 @@ impl Workspace {
                     &cwd,
                     workspace_dir.as_deref(),
                 );
-                match session_history::discover_unique_session_id(&baseline, &current) {
+                let claimed = this
+                    .update(cx, |workspace, cx| {
+                        workspace
+                            .sessions
+                            .iter()
+                            .flat_map(Session::term_leaves)
+                            .filter_map(|leaf| {
+                                leaf.read(cx)
+                                    .resume_state()
+                                    .filter(|state| state.agent == TerminalAgentKind::Codex)
+                                    .map(|state| state.session_id.clone())
+                            })
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default();
+                match session_history::discover_unclaimed_session_id(&baseline, &current, &claimed)
+                {
                     Ok(Some(session_id)) => {
-                        let _ = this.update(cx, |workspace, cx| {
-                            let still_open = workspace.sessions.iter().any(|session| {
-                                session
-                                    .term_leaves()
+                        let bound = this
+                            .update(cx, |workspace, cx| {
+                                let still_open = workspace.sessions.iter().any(|session| {
+                                    session
+                                        .term_leaves()
+                                        .iter()
+                                        .any(|leaf| leaf.entity_id() == view.entity_id())
+                                });
+                                if !still_open {
+                                    return false;
+                                }
+                                let already_claimed = workspace
+                                    .sessions
                                     .iter()
-                                    .any(|leaf| leaf.entity_id() == view.entity_id())
-                            });
-                            if !still_open {
-                                return;
-                            }
-                            view.update(cx, |view, _| {
-                                view.set_resume_state(Some(TerminalResumeState {
-                                    agent: TerminalAgentKind::Codex,
-                                    session_id,
-                                    workspace_dir,
-                                }));
-                            });
-                            workspace.save_state(cx);
-                            cx.notify();
-                        });
-                        return;
+                                    .flat_map(Session::term_leaves)
+                                    .any(|leaf| {
+                                        leaf.read(cx).resume_state().is_some_and(|state| {
+                                            state.agent == TerminalAgentKind::Codex
+                                                && state.session_id == session_id
+                                        })
+                                    });
+                                if already_claimed {
+                                    return false;
+                                }
+                                view.update(cx, |view, _| {
+                                    view.set_resume_state(Some(TerminalResumeState {
+                                        agent: TerminalAgentKind::Codex,
+                                        session_id,
+                                        workspace_dir: workspace_dir.clone(),
+                                    }));
+                                });
+                                workspace.save_state(cx);
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if bound {
+                            return;
+                        }
                     }
                     Ok(None) => {}
                     Err(error) => {

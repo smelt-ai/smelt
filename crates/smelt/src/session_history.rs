@@ -68,9 +68,16 @@ fn safe_session_id(session_id: &str) -> Result<&str, String> {
     }
 }
 
-fn terminal_workspace_dir(kind: TerminalAgentKind, command: &str) -> Option<String> {
+fn terminal_workspace_dir(
+    kind: TerminalAgentKind,
+    words: &[String],
+    executable_index: usize,
+) -> Option<String> {
     let variable = smelt_core::workspace_override::config_dir_env_var(kind.id())?;
-    smelt_core::workspace_override::env_override_from_cmd(command, variable)
+    words[..executable_index].iter().find_map(|word| {
+        let (name, value) = smelt_core::workspace_override::split_env_assignment(word)?;
+        (name == variable).then(|| smelt_core::workspace_override::expand_tilde(value))
+    })
 }
 
 pub(crate) fn prepare_terminal_agent_launch(
@@ -90,7 +97,7 @@ pub(crate) fn prepare_terminal_agent_launch(
     }) {
         return Err("启动命令已包含会话恢复或会话 ID 参数".into());
     }
-    let workspace_dir = terminal_workspace_dir(kind, command);
+    let workspace_dir = terminal_workspace_dir(kind, &words, executable_index);
     if kind == TerminalAgentKind::Codex {
         return Ok(PreparedTerminalAgentLaunch::Discover {
             command: command.to_string(),
@@ -174,6 +181,16 @@ pub(crate) fn discover_unique_session_id(
         return Err("发现多个新 Codex 会话，无法确定当前终端对应哪一个".into());
     }
     Ok(first)
+}
+
+pub(crate) fn discover_unclaimed_session_id(
+    baseline: &HashSet<String>,
+    current: &HashSet<String>,
+    claimed: &HashSet<String>,
+) -> Result<Option<String>, String> {
+    let mut effective_baseline = baseline.clone();
+    effective_baseline.extend(claimed.iter().cloned());
+    discover_unique_session_id(&effective_baseline, current)
 }
 
 // 项目目录编码 / transcript 路径 / 记忆目录：唯一权威来源现在是 smelt_core::
@@ -1816,9 +1833,9 @@ mod tests {
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
     use super::{
-        PreparedTerminalAgentLaunch, current_profile_launch, discover_unique_session_id,
-        list_codex_sessions, list_copilot_sessions, list_grok_sessions, list_sessions,
-        list_sessions_for, load_codex_session_detail, load_copilot_session_detail,
+        PreparedTerminalAgentLaunch, current_profile_launch, discover_unclaimed_session_id,
+        discover_unique_session_id, list_codex_sessions, list_copilot_sessions, list_grok_sessions,
+        list_sessions, list_sessions_for, load_codex_session_detail, load_copilot_session_detail,
         load_grok_session_detail, load_session_detail, normalized_profile_override_dir,
         prepare_terminal_agent_launch, project_dir, terminal_resume_command,
     };
@@ -1868,7 +1885,7 @@ mod tests {
     fn workspace_prefix_is_preserved_and_bound_to_identity() {
         let prepared = prepare_terminal_agent_launch(
             TerminalAgentKind::Claude,
-            "CLAUDE_CONFIG_DIR=~/.claude-alt claude",
+            "CLAUDE_CONFIG_DIR=\"~/Library/Application Support/Claude Alt\" claude",
             "11111111-1111-4111-8111-111111111111",
         )
         .unwrap();
@@ -1876,7 +1893,12 @@ mod tests {
             panic!("Claude should have a known ID");
         };
         assert!(command.contains("CLAUDE_CONFIG_DIR="));
-        assert!(state.workspace_dir.unwrap().ends_with("/.claude-alt"));
+        assert!(
+            state
+                .workspace_dir
+                .unwrap()
+                .ends_with("/Library/Application Support/Claude Alt")
+        );
     }
 
     #[test]
@@ -1953,6 +1975,23 @@ mod tests {
         );
         assert_eq!(discover_unique_session_id(&baseline, &baseline), Ok(None));
         assert!(discover_unique_session_id(&baseline, &ids(&["old", "a", "b"])).is_err());
+    }
+
+    #[test]
+    fn codex_delta_excludes_ids_claimed_by_other_tabs() {
+        let baseline = ids(&["old"]);
+        assert_eq!(
+            discover_unclaimed_session_id(&baseline, &ids(&["old", "first"]), &ids(&["first"]),),
+            Ok(None)
+        );
+        assert_eq!(
+            discover_unclaimed_session_id(
+                &baseline,
+                &ids(&["old", "first", "second"]),
+                &ids(&["first"]),
+            ),
+            Ok(Some("second".into()))
+        );
     }
 
     fn write(dir: &Path, name: &str, lines: &[&str]) {
