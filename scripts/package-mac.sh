@@ -25,6 +25,22 @@ BIN="$ROOT/target/release/$BIN_NAME"
 DAEMON_BIN="$ROOT/target/release/smeltd"   # 终端持久化守护（GUI 按同目录寻址拉起）
 BRIDGE_BIN="$ROOT/target/release/smelt-bridge"  # 跨网 WebRTC 桥（设置页「跨网」拉起）
 
+# dmgbuild 1.6.7 要求 Python >= 3.10；Command Line Tools 自带的
+# /usr/bin/python3 在新 macOS 上仍可能是 3.9，必须在耗时编译前报清楚。
+PYTHON_COMMAND="${SMELT_PYTHON:-python3}"
+if ! PYTHON="$(command -v "$PYTHON_COMMAND")"; then
+  echo "✗ 找不到 Python 解释器：$PYTHON_COMMAND" >&2
+  echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
+  exit 1
+fi
+if ! PYTHON_VERSION="$("$PYTHON" -c \
+  'import sys; print(".".join(map(str, sys.version_info[:3]))); sys.exit(sys.version_info < (3, 10))')"; then
+  echo "✗ 打包需要 Python >= 3.10，当前为 ${PYTHON_VERSION}（${PYTHON}）" >&2
+  echo "  macOS Command Line Tools 的 /usr/bin/python3 可能仍是 3.9。" >&2
+  echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
+  exit 1
+fi
+
 if [[ "${1:-}" == "--build" ]]; then
   echo "▶ 编译 release …"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-bridge
@@ -192,7 +208,7 @@ VENV="$DIST/.dmgvenv"
 if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
   echo "  … 准备打包工具链（dmgbuild + Pillow）"
   rm -rf "$VENV"
-  python3 -m venv "$VENV"
+  "$PYTHON" -m venv "$VENV"
   # 拉长超时，避免默认 15s 被掐断
   export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
   pip_base=( "$VENV/bin/pip" install --upgrade )
