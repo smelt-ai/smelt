@@ -29,15 +29,46 @@ pub(crate) enum PreparedTerminalAgentLaunch {
     },
 }
 
+fn has_unquoted_shell_operator(command: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in command.chars() {
+        if matches!(ch, '\n' | '\r') {
+            return true;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => {}
+            },
+            Some(_) => unreachable!(),
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => escaped = true,
+                ';' | '|' | '&' | '<' | '>' => return true,
+                _ => {}
+            },
+        }
+    }
+    false
+}
+
 fn safe_agent_command(
     kind: TerminalAgentKind,
     command: &str,
 ) -> Result<(Vec<String>, usize), String> {
-    if command
-        .chars()
-        .any(|ch| matches!(ch, ';' | '|' | '&' | '\n' | '\r'))
-    {
-        return Err("自动恢复不支持 shell 管道或控制符".into());
+    if has_unquoted_shell_operator(command) {
+        return Err("自动恢复不支持 shell 管道、重定向或控制符".into());
     }
     let words =
         shell_words::split(command).map_err(|error| format!("启动命令解析失败：{error}"))?;
@@ -376,6 +407,7 @@ fn option_matches(arg: &str, option: &str) -> bool {
             && arg
                 .strip_prefix(option)
                 .is_some_and(|suffix| suffix.starts_with('=')))
+        || (option == "-p" && arg.starts_with(option) && arg.len() > option.len())
 }
 
 fn value_option_match(arg: &str, options: &[&str]) -> Option<bool> {
@@ -393,15 +425,17 @@ fn value_option_match(arg: &str, options: &[&str]) -> Option<bool> {
     })
 }
 
-fn first_top_level_positional<'a>(
+fn top_level_positionals<'a>(
     args: &'a [String],
     grammar: &ManagedInitialLaunchGrammar,
-) -> Option<&'a str> {
+) -> Vec<&'a str> {
+    let mut positionals = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if arg == "--" {
-            return args.get(index + 1).map(String::as_str);
+            positionals.extend(args[index + 1..].iter().map(String::as_str));
+            break;
         }
         if let Some(consumes_next) = value_option_match(arg, grammar.variadic_value_options) {
             index += 1;
@@ -424,9 +458,10 @@ fn first_top_level_positional<'a>(
             index += 1;
             continue;
         }
-        return Some(arg);
+        positionals.push(arg);
+        index += 1;
     }
-    None
+    positionals
 }
 
 fn has_existing_session_control(kind: TerminalAgentKind, args: &[String]) -> bool {
@@ -467,13 +502,17 @@ fn validate_managed_initial_launch(kind: TerminalAgentKind, args: &[String]) -> 
         return Err(format!("启动命令的 {mode} 模式不是可托管的新交互会话"));
     }
 
-    if let Some(positional) = first_top_level_positional(args, &grammar) {
-        if grammar.incompatible_subcommands.contains(&positional) {
-            return Err(format!("启动命令的 {positional} 子命令不是新的交互会话"));
-        }
-        if !grammar.accepts_positional_prompt {
-            return Err(format!("启动命令包含不支持的顶层参数：{positional}"));
-        }
+    let positionals = top_level_positionals(args, &grammar);
+    if let Some(subcommand) = positionals
+        .iter()
+        .find(|positional| grammar.incompatible_subcommands.contains(positional))
+    {
+        return Err(format!("启动命令的 {subcommand} 子命令不是新的交互会话"));
+    }
+    if !grammar.accepts_positional_prompt
+        && let Some(positional) = positionals.first()
+    {
+        return Err(format!("启动命令包含不支持的顶层参数：{positional}"));
     }
 
     Ok(())
@@ -2702,6 +2741,40 @@ mod tests {
     }
 
     #[test]
+    fn grok_prompt_followed_by_management_command_is_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Grok,
+            &[
+                "grok sentinel version",
+                "grok 'fix the bug' dashboard",
+                "grok sentinel mcp",
+            ],
+        );
+    }
+
+    #[test]
+    fn grok_prompt_only_launch_remains_managed() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let command = "grok 'fix the bug'";
+
+        assert_eq!(
+            infer_terminal_agent_kind(command),
+            Some(TerminalAgentKind::Grok)
+        );
+        assert_eq!(
+            prepare_terminal_agent_launch(TerminalAgentKind::Grok, command, id).unwrap(),
+            PreparedTerminalAgentLaunch::Known {
+                command: format!("{command} --session-id {id}"),
+                state: TerminalResumeState {
+                    agent: TerminalAgentKind::Grok,
+                    session_id: id.into(),
+                    workspace_dir: None,
+                },
+            }
+        );
+    }
+
+    #[test]
     fn documented_noninteractive_modes_are_not_managed() {
         assert_not_managed(
             TerminalAgentKind::Claude,
@@ -2738,6 +2811,50 @@ mod tests {
         assert_not_managed(
             TerminalAgentKind::Codex,
             &["codex --help", "codex --version"],
+        );
+    }
+
+    #[test]
+    fn attached_short_noninteractive_prompts_are_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &["claude -phello", "claude -p=hello"],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Copilot,
+            &["copilot -phello", "copilot -p=hello"],
+        );
+        assert_not_managed(TerminalAgentKind::Grok, &["grok -phello", "grok -p=hello"]);
+    }
+
+    #[test]
+    fn shell_redirections_are_rejected_but_quoted_literals_remain_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &[
+                "claude > output.log",
+                "claude 2> output.log",
+                "claude >> output.log",
+                "claude 2>>output.log",
+                "claude < prompt.txt",
+                "claude 0<input.txt",
+                "claude << prompt.txt",
+                "claude 2>&1",
+            ],
+        );
+
+        let quoted = "claude 'explain > and < operators'";
+        assert_eq!(
+            infer_terminal_agent_kind(quoted),
+            Some(TerminalAgentKind::Claude)
+        );
+        assert!(
+            prepare_terminal_agent_launch(
+                TerminalAgentKind::Claude,
+                quoted,
+                "11111111-1111-4111-8111-111111111111",
+            )
+            .is_ok()
         );
     }
 

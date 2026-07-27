@@ -490,6 +490,36 @@ mod tests {
         );
         fs::remove_dir_all(&sandbox).unwrap();
     }
+
+    #[test]
+    fn load_launch_config_leaves_final_ineligible_forms_absent_without_writeback() {
+        let sandbox = test_sandbox("final-ineligible-forms");
+        let path = sandbox.join("launch.json");
+        let raw = r#"{
+  "entries": [
+    {"label": "Grok prompt command", "command": "grok sentinel version"},
+    {"label": "Grok single attached", "command": "grok -phello"},
+    {"label": "Redirected Claude", "command": "claude 2>> output.log"}
+  ]
+}"#;
+        fs::write(&path, raw).unwrap();
+
+        let config = super::load_launch_config_from_path(&path);
+
+        assert!(
+            config
+                .entries
+                .iter()
+                .all(|entry| entry.agent_kind.is_none()),
+            "ineligible entries with absent metadata must remain ordinary terminals"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            raw,
+            "ineligible absent metadata must not trigger migration writeback"
+        );
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
 }
 
 /// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
