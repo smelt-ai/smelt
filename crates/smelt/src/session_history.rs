@@ -56,10 +56,22 @@ fn safe_agent_command(
     Ok((words, executable_index))
 }
 
+fn has_existing_session_control(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "resume"
+            || arg == "--continue"
+            || arg == "--resume"
+            || arg.starts_with("--resume=")
+            || arg == "--session-id"
+            || arg.starts_with("--session-id=")
+    })
+}
+
 pub(crate) fn infer_terminal_agent_kind(command: &str) -> Option<TerminalAgentKind> {
-    TerminalAgentKind::ALL
-        .into_iter()
-        .find(|kind| safe_agent_command(*kind, command).is_ok())
+    TerminalAgentKind::ALL.into_iter().find_map(|kind| {
+        let (words, executable_index) = safe_agent_command(kind, command).ok()?;
+        (!has_existing_session_control(&words[executable_index + 1..])).then_some(kind)
+    })
 }
 
 fn safe_session_id(session_id: &str) -> Result<&str, String> {
@@ -93,14 +105,7 @@ pub(crate) fn prepare_terminal_agent_launch(
 ) -> Result<PreparedTerminalAgentLaunch, String> {
     let (words, executable_index) = safe_agent_command(kind, command)?;
     let args = &words[executable_index + 1..];
-    if args.iter().any(|arg| {
-        arg == "resume"
-            || arg == "--continue"
-            || arg == "--resume"
-            || arg.starts_with("--resume=")
-            || arg == "--session-id"
-            || arg.starts_with("--session-id=")
-    }) {
+    if has_existing_session_control(args) {
         return Err("启动命令已包含会话恢复或会话 ID 参数".into());
     }
     let workspace_dir = terminal_workspace_dir(kind, &words, executable_index);
@@ -1992,6 +1997,24 @@ mod tests {
         );
         assert_eq!(infer_terminal_agent_kind("echo copilot"), None);
         assert_eq!(infer_terminal_agent_kind("copilot | cat"), None);
+    }
+
+    #[test]
+    fn does_not_infer_managed_agent_for_existing_session_controls() {
+        for command in [
+            "claude --continue",
+            "claude --resume old",
+            "COPILOT_HOME=~/.copilot-alt copilot --resume=old",
+            "codex resume id",
+            "claude --session-id existing",
+            "copilot --session-id=existing",
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                None,
+                "{command} must remain an ordinary terminal command"
+            );
+        }
     }
 
     #[test]
