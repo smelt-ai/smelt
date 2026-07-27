@@ -276,24 +276,34 @@ pub fn acp_cmd_for(agent: AcpAgentKind, cx: &App) -> String {
         .unwrap_or_else(|| agent.default_cmd())
 }
 
-/// 设置页「Agent 集成」里每个 agent 一条启动命令输入框（从枚举派生，加一家
-/// agent 不用回来抄第四遍）。
+/// 设置页只在用户覆盖内置适配器时显示原始命令；默认 `bunx`、CLI 参数等属于
+/// smelt 的实现细节，不应要求用户理解或维护。
+fn acp_cmd_setting_value(agent: AcpAgentKind, command: String) -> SharedString {
+    if command == agent.default_cmd() {
+        SharedString::default()
+    } else {
+        command.into()
+    }
+}
+
+/// 设置页「Agent 集成」里每个 agent 一条自定义启动命令输入框（从枚举派生，加
+/// 一家 agent 不用回来抄第四遍）。
 fn acp_cmd_setting_item(agent: AcpAgentKind) -> SettingItem {
     SettingItem::new(
-        format!("{} 启动命令", agent.label()),
+        format!("{} 自定义启动命令", agent.label()),
         SettingField::input(
-            move |cx: &App| acp_cmd_for(agent, cx).into(),
+            move |cx: &App| acp_cmd_setting_value(agent, acp_cmd_for(agent, cx)),
             move |v: SharedString, cx: &mut App| {
                 let v = v.trim().to_string();
-                // 留空 = 恢复该 agent 的出厂命令（不是清成空串跑不起来）。
+                // 留空 = 使用内置适配器（不是清成空串跑不起来）。
                 let cmd = if v.is_empty() { agent.default_cmd() } else { v };
                 apply_agent_ui(move |c| c.set_acp_cmd_for(agent, cmd), cx);
             },
         ),
     )
     .description(format!(
-        "「{}」对话会话的 agent 启动命令（ACP 协议，空白分词）。\
-         留空恢复默认；改动只影响之后新建的会话。",
+        "留空使用内置适配器；仅在需要替换适配器或追加参数时填写。\
+         改动只影响之后新建的「{}」对话会话。",
         agent.label()
     ))
     .keywords(["acp", "对话", "agent", agent.id()])
@@ -3764,9 +3774,11 @@ impl Workspace {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{LaunchEntry, daemon_info_line, default_launch_entries, fmt_uptime};
+    use super::{
+        LaunchEntry, acp_cmd_setting_value, daemon_info_line, default_launch_entries, fmt_uptime,
+    };
     use crate::terminal::DaemonInfo;
-    use smelt_core::agent_kind::TerminalAgentKind;
+    use smelt_core::agent_kind::{AcpAgentKind, TerminalAgentKind};
 
     #[test]
     fn old_launch_entry_without_agent_kind_stays_plain_terminal() {
@@ -3782,6 +3794,20 @@ mod daemon_info_tests {
             .filter_map(|entry| entry.agent_kind)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(kinds, TerminalAgentKind::ALL.into_iter().collect());
+    }
+
+    #[test]
+    fn builtin_agent_command_is_hidden_in_settings() {
+        let agent = AcpAgentKind::Codex;
+        assert!(acp_cmd_setting_value(agent, agent.default_cmd()).is_empty());
+    }
+
+    #[test]
+    fn custom_agent_command_remains_visible_in_settings() {
+        assert_eq!(
+            acp_cmd_setting_value(AcpAgentKind::Codex, "codex-acp --custom".into()).as_ref(),
+            "codex-acp --custom"
+        );
     }
 
     #[test]
