@@ -401,6 +401,28 @@ mod tests {
         );
         fs::remove_dir_all(&sandbox).unwrap();
     }
+
+    #[test]
+    fn load_launch_config_leaves_legacy_resume_command_ordinary_without_writeback() {
+        let sandbox = test_sandbox("legacy-resume-command");
+        let path = sandbox.join("launch.json");
+        let raw = r#"{
+  "entries": [
+    {"label": "Continue Claude", "command": "claude --continue"}
+  ]
+}"#;
+        fs::write(&path, raw).unwrap();
+
+        let config = super::load_launch_config_from_path(&path);
+
+        assert_eq!(config.entries[0].agent_kind, None);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            raw,
+            "an ineligible legacy command must not trigger migration writeback"
+        );
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
 }
 
 /// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
