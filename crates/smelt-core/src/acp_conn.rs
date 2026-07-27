@@ -47,9 +47,9 @@ pub struct AcpLaunch {
     /// GUI 侧会话 id，约定 `acp-` 前缀——DaemonStates 全局 map 里靠这个前缀
     /// 与 smeltd 会话共存（见 main.rs 状态转发循环的 retain）。
     pub sid: String,
-    /// 上一次连接的 agent 侧 session id：有就先尝试 `session/load` 真正续接
-    /// （agent 记得之前聊了什么），adapter 不支持该能力或 load 失败则自动
-    /// 退回 `session/new`（全新会话，见 AcpEvent::Ready 的 resumed 字段）。
+    /// 上一次连接的 agent 侧 session id：有就先尝试 `session/resume`，仅在协议
+    /// 明确表示旧会话不存在或不支持恢复时才退回 `session/new`（全新会话，见
+    /// `AcpEvent::Ready` 的 kind/fallback_reason 字段）。
     pub resume_session_id: Option<SessionId>,
     /// 只有 Claude Code 才该为 true：它的 ACP 会话 id 就是自己的 transcript
     /// 文件名，本地文件不存在时续接必然失败，值得靠这个提前跳过白等（见
@@ -97,6 +97,8 @@ pub enum AcpEvent {
     Ready {
         session_id: SessionId,
         kind: ReadyKind,
+        /// 恢复明确失败后新建会话的原因；正常新建和所有续接路径都是 None。
+        fallback_reason: Option<String>,
         /// agent 是否收图（`promptCapabilities.image`）。Grok 是 false——UI 据此
         /// 拦下粘贴，别让图片进了 prompt 被静默丢弃。
         supports_image: bool,
@@ -564,6 +566,83 @@ impl Drop for KillProcessGroupOnDrop {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RestoreDecision {
+    TryLoad,
+    StartFresh(String),
+    Retryable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TerminalRestoreOutcome {
+    StartFresh(String),
+    RetryableFatal(String),
+}
+
+fn terminal_restore_outcome(
+    decision: RestoreDecision,
+    error: &agent_client_protocol::Error,
+) -> TerminalRestoreOutcome {
+    match decision {
+        RestoreDecision::StartFresh(reason) => TerminalRestoreOutcome::StartFresh(reason),
+        RestoreDecision::Retryable => {
+            TerminalRestoreOutcome::RetryableFatal(format!("恢复失败，可重试：{error}"))
+        }
+        RestoreDecision::TryLoad => {
+            unreachable!("TryLoad is not a terminal restore decision");
+        }
+    }
+}
+
+fn classify_resume_failure(
+    error: &agent_client_protocol::Error,
+    load_supported: bool,
+) -> RestoreDecision {
+    match error.code {
+        agent_client_protocol::ErrorCode::ResourceNotFound => {
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        }
+        agent_client_protocol::ErrorCode::MethodNotFound if load_supported => {
+            RestoreDecision::TryLoad
+        }
+        agent_client_protocol::ErrorCode::MethodNotFound => {
+            RestoreDecision::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        }
+        _ => RestoreDecision::Retryable,
+    }
+}
+
+fn classify_load_failure(error: &agent_client_protocol::Error) -> RestoreDecision {
+    match error.code {
+        agent_client_protocol::ErrorCode::ResourceNotFound => {
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        }
+        agent_client_protocol::ErrorCode::MethodNotFound => {
+            RestoreDecision::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        }
+        _ => RestoreDecision::Retryable,
+    }
+}
+
+fn claude_transcript_confirmed_missing(launch: &AcpLaunch, sid: &SessionId) -> bool {
+    if !launch.resume_needs_transcript_check {
+        return false;
+    }
+    let Some(cwd) = launch.cwd.as_deref() else {
+        return false;
+    };
+
+    // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace profile），
+    // transcript 得去它指向的目录找，不能只看进程全局环境变量——那只反映
+    // "默认" workspace 那一份。
+    let override_dir =
+        crate::workspace_override::env_override_from_launch(&launch.launch, "CLAUDE_CONFIG_DIR");
+    let transcript =
+        crate::claude_paths::transcript_path(cwd, &sid.to_string(), override_dir.as_deref());
+    // 只有能明确判定为“不存在”时才提前回退；IO / 权限错误都交给协议自己试。
+    matches!(transcript.try_exists(), Ok(false))
+}
+
 /// 连接主体：spawn agent 子进程 → initialize → newSession → 双源 loop
 /// （UI 指令 / agent 更新流）。返回 Ok 表示用户主动 Shutdown。
 async fn run_connection(
@@ -680,12 +759,12 @@ async fn run_connection(
             // 收图能力：三条恢复路径共用（bool 是 Copy，多次读没问题）。
             let supports_image = init.agent_capabilities.prompt_capabilities.image;
 
-            // 恢复链：resume → load → new。
+            // 恢复链：resume →（仅 MethodNotFound 且支持 load 时）load → new。
             //
             // - `session/resume` **不重放历史**（实测 0 条通知）：我们本地已经存着
             //   完整消息流，让 agent 再吐一遍纯属浪费，还得处理去重。协议能力位里
-            //   没声明它（claude-agent-acp 只报 loadSession），但实测可用，所以按
-            //   「试了不亏」处理——失败就落到 load。
+            //   没声明它（claude-agent-acp 只报 loadSession），但实测可用，所以先
+            //   尝试；只有明确可降级的错误才继续 load/new，临时错误保留旧会话。
             // - 前置检查 transcript 在不在：只对 Claude Code 成立（它的 ACP 会话 id
             //   就是自己的 transcript 文件名，文件不存在时续接必然「Resource not
             //   found」，实测白等约 2 秒，值得靠这个跳过）。别家 agent 各自管自己
@@ -697,65 +776,22 @@ async fn run_connection(
             //
             // 速度上 resume/load 都要十几秒——那是 agent 自身启动的成本，换哪条路
             // 都躲不掉（Claude 实测 new 10.4s / load 15.7s / resume 17.6s）。
-            let resumable = launch.resume_session_id.as_ref().is_some_and(|sid| {
-                if !launch.resume_needs_transcript_check {
-                    return true;
-                }
-                launch.cwd.as_deref().is_some_and(|c| {
-                    // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace
-                    // profile），transcript 得去它指向的目录找，不能只看进程
-                    // 全局环境变量——那只反映"默认" workspace 那一份。
-                    let override_dir = crate::workspace_override::env_override_from_launch(
-                        &launch.launch,
-                        "CLAUDE_CONFIG_DIR",
-                    );
-                    crate::claude_paths::transcript_path(
-                        c,
-                        &sid.to_string(),
-                        override_dir.as_deref(),
-                    )
-                    .exists()
-                })
-            });
-            if let Some(sid) = launch.resume_session_id.clone().filter(|_| resumable) {
-                // 先试不重放的 resume
-                let mut resume_req = ResumeSessionRequest::new(sid.clone(), cwd.clone());
-                if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
-                    resume_req = resume_req.meta(meta);
-                }
-                if let Ok(resumed) = connection.send_request(resume_req).block_task().await {
-                    let model_cfg = resumed
-                        .config_options
-                        .as_deref()
-                        .and_then(model_from_config)
-                        .map(|(id, state)| {
-                            let _ = event_tx.try_send(AcpEvent::Model(state));
-                            id
-                        });
-                    let resp = NewSessionResponse::new(sid.clone())
-                        .modes(resumed.modes)
-                        .config_options(resumed.config_options)
-                        .meta(resumed.meta);
-                    let session = connection.attach_session(resp, Default::default())?;
-                    // resume 不重放：本地历史原样留着，也别插「新会话」分割线。
-                    return drive_session(
-                        session,
-                        cmd_rx,
-                        event_tx,
-                        ReadyKind::ResumedKeepHistory,
-                        supports_image,
-                        model_cfg,
-                    )
-                    .await;
-                }
-                if init.agent_capabilities.load_session {
-                    match connection
-                        .send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                        .block_task()
-                        .await
-                    {
-                        Ok(loaded) => {
-                            let model_cfg = loaded
+            let mut fallback_reason = None;
+            if let Some(sid) = launch.resume_session_id.clone() {
+                let transcript_confirmed_missing =
+                    claude_transcript_confirmed_missing(launch, &sid);
+
+                if transcript_confirmed_missing {
+                    fallback_reason = Some("旧会话记录已不存在，已创建新对话".into());
+                } else {
+                    // cwd 缺失时无法做 Claude transcript 预检；仍必须交给协议恢复。
+                    let mut resume_req = ResumeSessionRequest::new(sid.clone(), cwd.clone());
+                    if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
+                        resume_req = resume_req.meta(meta);
+                    }
+                    match connection.send_request(resume_req).block_task().await {
+                        Ok(resumed) => {
+                            let model_cfg = resumed
                                 .config_options
                                 .as_deref()
                                 .and_then(model_from_config)
@@ -763,27 +799,88 @@ async fn run_connection(
                                     let _ = event_tx.try_send(AcpEvent::Model(state));
                                     id
                                 });
-                            let resp = NewSessionResponse::new(sid)
-                                .modes(loaded.modes)
-                                .config_options(loaded.config_options)
-                                .meta(loaded.meta);
+                            let resp = NewSessionResponse::new(sid.clone())
+                                .modes(resumed.modes)
+                                .config_options(resumed.config_options)
+                                .meta(resumed.meta);
                             let session = connection.attach_session(resp, Default::default())?;
+                            // resume 不重放：本地历史原样留着，也别插「新会话」分割线。
                             return drive_session(
                                 session,
                                 cmd_rx,
                                 event_tx,
-                                ReadyKind::ResumedWithReplay,
+                                ReadyKind::ResumedKeepHistory,
+                                None,
                                 supports_image,
                                 model_cfg,
                             )
                             .await;
                         }
-                        Err(e) => {
-                            // 旧会话可能已被清理/损坏——不是致命错误，退回全新会话，
-                            // 只告知用户「这不是真续接」。
-                            let _ = event_tx.try_send(AcpEvent::Status(format!(
-                                "旧会话恢复失败，已开新对话（{e}）"
-                            )));
+                        Err(error) => {
+                            match classify_resume_failure(
+                                &error,
+                                init.agent_capabilities.load_session,
+                            ) {
+                                RestoreDecision::TryLoad => {
+                                    match connection
+                                        .send_request(LoadSessionRequest::new(
+                                            sid.clone(),
+                                            cwd.clone(),
+                                        ))
+                                        .block_task()
+                                        .await
+                                    {
+                                        Ok(loaded) => {
+                                            let model_cfg = loaded
+                                                .config_options
+                                                .as_deref()
+                                                .and_then(model_from_config)
+                                                .map(|(id, state)| {
+                                                    let _ =
+                                                        event_tx.try_send(AcpEvent::Model(state));
+                                                    id
+                                                });
+                                            let resp = NewSessionResponse::new(sid)
+                                                .modes(loaded.modes)
+                                                .config_options(loaded.config_options)
+                                                .meta(loaded.meta);
+                                            let session = connection
+                                                .attach_session(resp, Default::default())?;
+                                            return drive_session(
+                                                session,
+                                                cmd_rx,
+                                                event_tx,
+                                                ReadyKind::ResumedWithReplay,
+                                                None,
+                                                supports_image,
+                                                model_cfg,
+                                            )
+                                            .await;
+                                        }
+                                        Err(error) => match terminal_restore_outcome(
+                                            classify_load_failure(&error),
+                                            &error,
+                                        ) {
+                                            TerminalRestoreOutcome::StartFresh(reason) => {
+                                                fallback_reason = Some(reason);
+                                            }
+                                            TerminalRestoreOutcome::RetryableFatal(message) => {
+                                                let _ = event_tx.try_send(AcpEvent::Fatal(message));
+                                                return Ok(());
+                                            }
+                                        },
+                                    }
+                                }
+                                decision => match terminal_restore_outcome(decision, &error) {
+                                    TerminalRestoreOutcome::StartFresh(reason) => {
+                                        fallback_reason = Some(reason);
+                                    }
+                                    TerminalRestoreOutcome::RetryableFatal(message) => {
+                                        let _ = event_tx.try_send(AcpEvent::Fatal(message));
+                                        return Ok(());
+                                    }
+                                },
+                            }
                         }
                     }
                 }
@@ -811,6 +908,7 @@ async fn run_connection(
                 cmd_rx,
                 event_tx,
                 ReadyKind::Fresh,
+                fallback_reason,
                 supports_image,
                 model_cfg,
             )
@@ -968,6 +1066,7 @@ async fn run_resumed_connection(
                 cmd_rx,
                 event_tx,
                 ReadyKind::ResumedKeepHistory,
+                None,
                 supports_image,
                 None,
             )
@@ -977,12 +1076,13 @@ async fn run_resumed_connection(
 }
 
 /// 驱动一个已建立的会话：发 Ready → 双源 loop（UI 指令 / agent 更新流）。
-/// `session/load`（attach_session）与 `session/new`（run_until）两条路径共用。
+/// `session/resume` / `session/load` / `session/new` 与继承 fd 的路径共用。
 async fn drive_session<'r>(
     mut session: ActiveSession<'r, Agent>,
     cmd_rx: smol::channel::Receiver<AcpCommand>,
     event_tx: smol::channel::Sender<AcpEvent>,
     ready_kind: ReadyKind,
+    fallback_reason: Option<String>,
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
     // 模型配置项的 id（agent 报了才有）——切模型时按它下发 set_config_option。
@@ -991,6 +1091,7 @@ async fn drive_session<'r>(
     let _ = event_tx.try_send(AcpEvent::Ready {
         session_id: session.session_id().clone(),
         kind: ready_kind,
+        fallback_reason,
         supports_image,
     });
     loop {
@@ -1725,6 +1826,234 @@ mod runtime_tests {
             path.display(),
             String::from_utf8_lossy(&out.stdout).trim()
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_failure_tests {
+    use super::{
+        AcpLaunch, RestoreDecision, TerminalRestoreOutcome, classify_load_failure,
+        classify_resume_failure, claude_transcript_confirmed_missing, terminal_restore_outcome,
+    };
+    use crate::agent_kind::AcpLaunchSpec;
+    use crate::claude_paths::transcript_path;
+    use agent_client_protocol::{Error, schema::v1::SessionId};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    fn sandbox_root(test_name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("transcript-precheck-tests")
+            .join(format!("{}-{test_name}", std::process::id()))
+    }
+
+    fn make_launch(
+        command: &str,
+        cwd: Option<&str>,
+        resume_needs_transcript_check: bool,
+        config_dir: Option<&Path>,
+        resume_session_id: SessionId,
+    ) -> AcpLaunch {
+        let mut launch = AcpLaunch {
+            launch: AcpLaunchSpec::from_command(command),
+            cwd: cwd.map(str::to_string),
+            sid: "gui-session".to_string(),
+            resume_session_id: Some(resume_session_id),
+            resume_needs_transcript_check,
+        };
+        if let Some(dir) = config_dir {
+            launch.launch = launch
+                .launch
+                .with_env("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned());
+        }
+        launch
+    }
+
+    #[test]
+    fn resume_method_not_found_with_load_support_tries_load() {
+        let decision = classify_resume_failure(&Error::method_not_found(), true);
+        assert_eq!(decision, RestoreDecision::TryLoad);
+    }
+
+    #[test]
+    fn resume_method_not_found_without_load_support_starts_fresh() {
+        let decision = classify_resume_failure(&Error::method_not_found(), false);
+        assert_eq!(
+            decision,
+            RestoreDecision::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    fn resource_not_found_from_resume_and_load_starts_fresh() {
+        assert_eq!(
+            classify_resume_failure(&Error::resource_not_found(None), true),
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+        assert_eq!(
+            classify_load_failure(&Error::resource_not_found(None)),
+            RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    fn internal_error_from_resume_and_load_is_retryable() {
+        assert_eq!(
+            classify_resume_failure(&Error::internal_error(), true),
+            RestoreDecision::Retryable
+        );
+        assert_eq!(
+            classify_load_failure(&Error::internal_error()),
+            RestoreDecision::Retryable
+        );
+    }
+
+    #[test]
+    fn resume_internal_error_terminal_outcome_is_retryable_message() {
+        let error = Error::internal_error();
+        let decision = classify_resume_failure(&error, true);
+
+        let outcome = terminal_restore_outcome(decision, &error);
+
+        assert_eq!(
+            outcome,
+            TerminalRestoreOutcome::RetryableFatal(format!("恢复失败，可重试：{error}"))
+        );
+        assert!(!matches!(outcome, TerminalRestoreOutcome::StartFresh(_)));
+    }
+
+    #[test]
+    fn load_internal_error_terminal_outcome_is_retryable_message() {
+        let error = Error::internal_error();
+        let decision = classify_load_failure(&error);
+
+        let outcome = terminal_restore_outcome(decision, &error);
+
+        assert_eq!(
+            outcome,
+            TerminalRestoreOutcome::RetryableFatal(format!("恢复失败，可重试：{error}"))
+        );
+        assert!(!matches!(outcome, TerminalRestoreOutcome::StartFresh(_)));
+    }
+
+    #[test]
+    fn resource_not_found_terminal_outcome_starts_fresh() {
+        let error = Error::resource_not_found(None);
+
+        assert_eq!(
+            terminal_restore_outcome(classify_resume_failure(&error, true), &error),
+            TerminalRestoreOutcome::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+        assert_eq!(
+            terminal_restore_outcome(classify_load_failure(&error), &error),
+            TerminalRestoreOutcome::StartFresh("旧会话不存在，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    fn unsupported_terminal_outcome_starts_fresh() {
+        let error = Error::method_not_found();
+
+        assert_eq!(
+            terminal_restore_outcome(classify_resume_failure(&error, false), &error),
+            TerminalRestoreOutcome::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        );
+        assert_eq!(
+            terminal_restore_outcome(classify_load_failure(&error), &error),
+            TerminalRestoreOutcome::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TryLoad is not a terminal restore decision")]
+    fn try_load_is_not_terminal_restore_outcome() {
+        let error = Error::method_not_found();
+
+        let _ = terminal_restore_outcome(RestoreDecision::TryLoad, &error);
+    }
+
+    #[test]
+    fn claude_with_existing_transcript_is_not_confirmed_missing() {
+        let root = sandbox_root("existing");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-existing".to_string());
+        let cwd = "/Users/zehua.wang/projects/smelt.app";
+        let launch = make_launch(
+            &crate::agent_kind::default_acp_cmd(),
+            Some(cwd),
+            true,
+            Some(&root),
+            session_id.clone(),
+        );
+        let transcript = transcript_path(
+            cwd,
+            &session_id.to_string(),
+            Some(root.to_string_lossy().as_ref()),
+        );
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "history").unwrap();
+
+        assert!(!claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_with_absent_transcript_is_confirmed_missing() {
+        let root = sandbox_root("absent");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-absent".to_string());
+        let cwd = "/Users/zehua.wang/projects/smelt.app";
+        let launch = make_launch(
+            &crate::agent_kind::default_acp_cmd(),
+            Some(cwd),
+            true,
+            Some(&root),
+            session_id.clone(),
+        );
+
+        assert!(claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_without_cwd_is_not_confirmed_missing() {
+        let root = sandbox_root("nocwd");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-nocwd".to_string());
+        let launch = make_launch(
+            &crate::agent_kind::default_acp_cmd(),
+            None,
+            true,
+            Some(&root),
+            session_id.clone(),
+        );
+
+        assert!(!claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_claude_is_not_confirmed_missing() {
+        let root = sandbox_root("nonclaude");
+        let _ = fs::remove_dir_all(&root);
+        let session_id = SessionId::new("session-nonclaude".to_string());
+        let launch = make_launch(
+            "copilot --acp",
+            Some("/Users/zehua.wang/projects/smelt.app"),
+            false,
+            Some(&root),
+            session_id.clone(),
+        );
+
+        assert!(!claude_transcript_confirmed_missing(&launch, &session_id));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
