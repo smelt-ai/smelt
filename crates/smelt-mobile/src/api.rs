@@ -75,6 +75,8 @@ pub enum AcpEntry {
         status: ToolStatus,
         output: Vec<String>,
     },
+    /// 分割线
+    Divider { label: String },
 }
 
 /// 工具类型

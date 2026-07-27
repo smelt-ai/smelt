@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::api::{AcpEntry, ApprovalKind, ApprovalMenu, ApprovalOption, SessionSummary};
+use crate::api::{AcpEntry, ApprovalKind, ApprovalMenu, ApprovalOption, SessionSummary, ToolKind, ToolStatus};
 
 /// 全局会话存储
 static SESSIONS: once_cell::sync::Lazy<RwLock<HashMap<String, SessionState>>> =
@@ -21,6 +21,7 @@ static SUBSCRIBED_SESSION: once_cell::sync::Lazy<RwLock<Option<String>>> =
 struct SessionState {
     summary: Option<SessionSummary>,
     entries: Vec<AcpEntry>,
+    phase: Option<String>,
     pending_approval: Option<ApprovalMenu>,
 }
 
@@ -168,6 +169,7 @@ pub fn handle_message(message: &str) {
 
     match msg_type {
         "sessions" => handle_sessions_list(&msg),
+        "snapshot" => handle_snapshot(&msg),
         "entry" => handle_entry(&msg),
         "approval" => handle_approval(&msg),
         "sessionUpdate" => handle_session_update(&msg),
@@ -224,6 +226,152 @@ fn handle_entry(msg: &serde_json::Value) {
     if subscribed {
         log::debug!("New entry for subscribed session: {:?}", entry);
     }
+}
+
+/// 处理完整快照
+fn handle_snapshot(msg: &serde_json::Value) {
+    let session_id = msg
+        .get("sessionId")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
+
+    let snapshot = msg.get("snapshot").cloned().unwrap_or(serde_json::json!({}));
+
+    // 解析 entries
+    let entries: Vec<AcpEntry> = snapshot
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| parse_entry(entry))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 解析 phase
+    let phase = snapshot
+        .get("phase")
+        .and_then(|p| p.as_str())
+        .unwrap_or("Idle")
+        .to_string();
+
+    // 解析 pending approval
+    let pending_approval = snapshot
+        .get("pendingApproval")
+        .and_then(|a| parse_approval_menu(a));
+
+    // 更新状态
+    {
+        let mut store = SESSIONS.write().unwrap();
+        let state = store.entry(session_id.to_string()).or_default();
+        state.entries = entries;
+        state.phase = Some(phase);
+        state.pending_approval = pending_approval;
+    }
+
+    log::debug!("Snapshot received for session {}", session_id);
+}
+
+/// 解析单个 entry
+fn parse_entry(entry: &serde_json::Value) -> Option<AcpEntry> {
+    let entry_type = entry.get("type")?.as_str()?;
+
+    match entry_type {
+        "User" => {
+            let data = entry.get("data")?;
+            Some(AcpEntry::User {
+                text: data.get("text")?.as_str()?.to_string(),
+            })
+        }
+        "Assistant" => {
+            let data = entry.get("data")?;
+            Some(AcpEntry::Assistant {
+                text: data.get("text")?.as_str()?.to_string(),
+                thought: data.get("thought").and_then(|t| t.as_bool()).unwrap_or(false),
+            })
+        }
+        "ToolCall" => {
+            let data = entry.get("data")?;
+
+            let status = match data.get("status")?.as_str()? {
+                "Running" => ToolStatus::Running,
+                "Completed" => ToolStatus::Completed,
+                "Failed" => ToolStatus::Failed,
+                _ => ToolStatus::Running,
+            };
+
+            let kind = match data.get("kind")?.as_str()? {
+                "Read" => ToolKind::Read,
+                "Edit" => ToolKind::Edit,
+                "Bash" => ToolKind::Bash,
+                _ => ToolKind::Other,
+            };
+
+            Some(AcpEntry::ToolCall {
+                id: data.get("toolId")?.as_str()?.to_string(),
+                title: data.get("name")?.as_str()?.to_string(),
+                status,
+                kind,
+                output: data
+                    .get("output")
+                    .and_then(|o| o.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default(),
+            })
+        }
+        "Divider" => {
+            let data = entry.get("data")?;
+            Some(AcpEntry::Divider {
+                label: data.get("label")?.as_str()?.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// 解析审批菜单
+fn parse_approval_menu(approval: &serde_json::Value) -> Option<ApprovalMenu> {
+    let key = approval.get("key")?.as_str()?.to_string();
+    let prompt = approval
+        .get("prompt")
+        .or_else(|| approval.get("title"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("Permission Required")
+        .to_string();
+
+    let allows_text_input = approval
+        .get("allowsTextInput")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+
+    let options = approval
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|opt| {
+                    let kind_str = opt.get("kind").and_then(|k| k.as_str()).unwrap_or("custom");
+                    let kind = match kind_str {
+                        "approve" | "allow" => ApprovalKind::Approve,
+                        "deny" | "reject" => ApprovalKind::Deny,
+                        _ => ApprovalKind::Custom,
+                    };
+                    Some(ApprovalOption {
+                        key: opt.get("key")?.as_str()?.to_string(),
+                        label: opt.get("label")?.as_str()?.to_string(),
+                        kind,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(ApprovalMenu {
+        key,
+        prompt,
+        options,
+        allows_text_input,
+    })
 }
 
 /// 处理审批请求

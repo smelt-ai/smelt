@@ -1218,7 +1218,10 @@ enum AcpWsRequest {
     #[serde(rename = "listSessions")]
     ListSessions,
     #[serde(rename = "markRead")]
-    MarkRead { params: MarkReadParams },
+    MarkRead {
+        #[allow(dead_code)]
+        params: MarkReadParams,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -1246,6 +1249,7 @@ struct ApprovalParams {
 
 #[derive(serde::Deserialize)]
 struct MarkReadParams {
+    #[allow(dead_code)]
     #[serde(rename = "sessionId")]
     session_id: String,
 }
@@ -1264,25 +1268,33 @@ async fn acp_ws_handler(
 }
 
 /// ACP WebSocket 主循环
-async fn acp_ws_pump(mut socket: WebSocket, write_enabled: bool) {
+async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
+    use futures::stream::StreamExt;
     use tokio::sync::mpsc;
 
-    // 当前订阅的会话 ID
-    let mut subscribed_session: Option<String> = None;
-    // smeltd 连接（用于 acp_watch）
-    let mut daemon_conn: Option<(UnixStream, mpsc::Sender<String>)> = None;
+    let (mut ws_tx, mut ws_rx) = socket.split();
 
     // 发送欢迎消息
     let welcome = serde_json::json!({
         "type": "connected",
         "writeEnabled": write_enabled,
     });
-    let _ = socket.send(Message::Text(welcome.to_string().into())).await;
+    if futures::SinkExt::send(&mut ws_tx, Message::Text(welcome.to_string().into())).await.is_err() {
+        return;
+    }
+
+    // 用于从后台任务接收 smeltd 推送
+    let (daemon_tx, mut daemon_rx) = mpsc::channel::<String>(64);
+    // 用于通知后台任务停止
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+    // 当前订阅的会话 ID 和后台任务句柄
+    let mut current_subscription: Option<(String, tokio::task::JoinHandle<()>)> = None;
 
     loop {
         tokio::select! {
             // 接收来自移动端的消息
-            msg = socket.recv() => {
+            msg = ws_rx.next() => {
                 let Some(Ok(msg)) = msg else {
                     break;
                 };
@@ -1295,109 +1307,328 @@ async fn acp_ws_pump(mut socket: WebSocket, write_enabled: bool) {
 
                 let Ok(req): Result<AcpWsRequest, _> = serde_json::from_str(&text) else {
                     let err = serde_json::json!({"type": "error", "error": "invalid request"});
-                    let _ = socket.send(Message::Text(err.to_string().into())).await;
+                    let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(err.to_string().into())).await;
                     continue;
                 };
 
                 match req {
                     AcpWsRequest::ListSessions => {
-                        // 获取会话列表
-                        if let Some(sessions) = list_acp_sessions_blocking() {
-                            let resp = serde_json::json!({
-                                "type": "sessions",
-                                "sessions": sessions,
-                            });
-                            let _ = socket.send(Message::Text(resp.to_string().into())).await;
-                        }
+                        let sessions = tokio::task::spawn_blocking(list_acp_sessions_blocking)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        let resp = serde_json::json!({
+                            "type": "sessions",
+                            "sessions": sessions,
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::Subscribe { params } => {
-                        subscribed_session = Some(params.session_id.clone());
-
-                        // 连接到 smeltd 的 acp_watch
-                        if let Some((old_conn, _)) = daemon_conn.take() {
-                            drop(old_conn);
+                        // 停止旧的订阅
+                        if let Some((_, handle)) = current_subscription.take() {
+                            let _ = stop_tx.send(true);
+                            handle.abort();
                         }
 
-                        match connect_acp_watch(&params.session_id) {
-                            Ok((conn, rx)) => {
-                                // 读取初始快照
-                                let (tx, mut daemon_rx) = mpsc::channel(64);
-                                let conn_clone = conn.try_clone().ok();
-                                daemon_conn = conn_clone.map(|c| (c, tx));
+                        // 启动新的订阅
+                        let session_id = params.session_id.clone();
+                        let tx = daemon_tx.clone();
+                        let stop = stop_rx.clone();
 
-                                // 启动后台任务读取 smeltd 推送
-                                let session_id = params.session_id.clone();
-                                tokio::spawn(async move {
-                                    // 这个任务会在连接关闭时自动结束
-                                });
+                        let handle = tokio::task::spawn_blocking(move || {
+                            acp_watch_loop(&session_id, tx, stop);
+                        });
 
-                                let resp = serde_json::json!({
-                                    "type": "subscribed",
-                                    "sessionId": params.session_id,
-                                });
-                                let _ = socket.send(Message::Text(resp.to_string().into())).await;
-                            }
-                            Err(e) => {
-                                let err = serde_json::json!({
-                                    "type": "error",
-                                    "error": format!("failed to subscribe: {}", e),
-                                });
-                                let _ = socket.send(Message::Text(err.to_string().into())).await;
-                            }
-                        }
+                        current_subscription = Some((params.session_id.clone(), handle));
+
+                        let resp = serde_json::json!({
+                            "type": "subscribed",
+                            "sessionId": params.session_id,
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::Unsubscribe => {
-                        subscribed_session = None;
-                        if let Some((conn, _)) = daemon_conn.take() {
-                            drop(conn);
+                        if let Some((_, handle)) = current_subscription.take() {
+                            let _ = stop_tx.send(true);
+                            handle.abort();
                         }
                         let resp = serde_json::json!({"type": "unsubscribed"});
-                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::SendMessage { params } => {
                         if !write_enabled {
                             let err = serde_json::json!({"type": "error", "error": "write not enabled"});
-                            let _ = socket.send(Message::Text(err.to_string().into())).await;
+                            let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(err.to_string().into())).await;
                             continue;
                         }
 
-                        // 通过 smeltd 发送消息
-                        let result = send_acp_message(&params.session_id, &params.content);
-                        let resp = if result.is_ok() {
+                        let session_id = params.session_id.clone();
+                        let content = params.content.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            send_acp_message(&session_id, &content)
+                        }).await;
+
+                        let resp = if result.is_ok() && result.unwrap().is_ok() {
                             serde_json::json!({"type": "messageSent", "ok": true})
                         } else {
                             serde_json::json!({"type": "error", "error": "failed to send"})
                         };
-                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::RespondApproval { params } => {
                         if !write_enabled {
                             let err = serde_json::json!({"type": "error", "error": "write not enabled"});
-                            let _ = socket.send(Message::Text(err.to_string().into())).await;
+                            let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(err.to_string().into())).await;
                             continue;
                         }
 
-                        let result = respond_acp_approval(
-                            &params.session_id,
-                            &params.option_key,
-                            params.custom_text.as_deref(),
-                        );
-                        let resp = if result.is_ok() {
+                        let session_id = params.session_id.clone();
+                        let option_key = params.option_key.clone();
+                        let custom_text = params.custom_text.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            respond_acp_approval(&session_id, &option_key, custom_text.as_deref())
+                        }).await;
+
+                        let resp = if result.is_ok() && result.unwrap().is_ok() {
                             serde_json::json!({"type": "approvalResponded", "ok": true})
                         } else {
                             serde_json::json!({"type": "error", "error": "failed to respond"})
                         };
-                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
-                    AcpWsRequest::MarkRead { params } => {
-                        // 暂时不做处理，只返回成功
+                    AcpWsRequest::MarkRead { params: _ } => {
                         let resp = serde_json::json!({"type": "markedRead", "ok": true});
-                        let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
+                }
+            }
+            // 接收来自 smeltd 的推送
+            Some(line) = daemon_rx.recv() => {
+                // 解析 smeltd 的快照并转发给移动端
+                if let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let mobile_msg = convert_snapshot_to_mobile(&snapshot);
+                    let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(mobile_msg.to_string().into())).await;
                 }
             }
         }
     }
+
+    // 清理
+    if let Some((_, handle)) = current_subscription.take() {
+        let _ = stop_tx.send(true);
+        handle.abort();
+    }
+}
+
+/// 后台任务：监听 smeltd 的 acp_watch 推送
+fn acp_watch_loop(
+    session_id: &str,
+    tx: tokio::sync::mpsc::Sender<String>,
+    stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let Ok(mut stream) = UnixStream::connect(sock_path()) else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(100)));
+
+    // 发送 acp_watch 请求
+    let req = serde_json::json!({
+        "op": "acp_watch",
+        "id": session_id,
+    });
+    if writeln!(stream, "{}", req).is_err() {
+        return;
+    }
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+
+    loop {
+        // 检查是否需要停止
+        if *stop.borrow() {
+            break;
+        }
+
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    // 发送到 WebSocket 任务
+                    if tx.blocking_send(trimmed.to_string()).is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // 超时，继续循环检查 stop
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// 将 smeltd 的 AcpSnapshot 转换为移动端格式
+fn convert_snapshot_to_mobile(snapshot: &serde_json::Value) -> serde_json::Value {
+    // 提取快照内容
+    let inner = snapshot.get("snapshot").unwrap_or(snapshot);
+
+    // 转换 entries
+    let entries: Vec<serde_json::Value> = inner
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|entry| convert_entry_to_mobile(entry))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 转换 phase
+    let phase = inner
+        .get("phase")
+        .and_then(|p| {
+            if p.is_string() {
+                Some(p.as_str().unwrap_or("idle").to_string())
+            } else if let Some(obj) = p.as_object() {
+                // Ended(reason) 格式
+                if obj.contains_key("Ended") {
+                    Some("ended".to_string())
+                } else {
+                    Some("idle".to_string())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "idle".to_string());
+
+    // 转换 pending_permission → approval
+    let approval = inner.get("pending_permission").and_then(|perm| {
+        if perm.is_null() {
+            return None;
+        }
+        Some(serde_json::json!({
+            "key": perm.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "prompt": perm.get("question").and_then(|v| v.as_str()).unwrap_or("Permission required"),
+            "options": perm.get("options").and_then(|opts| opts.as_array()).map(|arr| {
+                arr.iter().map(|opt| {
+                    serde_json::json!({
+                        "key": opt.get("option_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "label": opt.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "kind": match opt.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+                            "AllowOnce" | "AllowAlways" => "approve",
+                            "RejectOnce" | "RejectAlways" => "deny",
+                            _ => "custom",
+                        },
+                    })
+                }).collect::<Vec<_>>()
+            }).unwrap_or_default(),
+            "allowsTextInput": false,
+        }))
+    });
+
+    serde_json::json!({
+        "type": "snapshot",
+        "phase": phase,
+        "entries": entries,
+        "approval": approval,
+        "statusLine": inner.get("status_line"),
+        "usage": inner.get("usage"),
+    })
+}
+
+/// 将 AcpEntry 转换为移动端格式
+fn convert_entry_to_mobile(entry: &serde_json::Value) -> serde_json::Value {
+    // AcpEntry 是枚举，可能是 {"User": "text"} 或 {"Assistant": {...}} 等
+    if let Some(text) = entry.get("User").and_then(|v| v.as_str()) {
+        return serde_json::json!({
+            "type": "entry",
+            "entry": {"User": {"text": text}}
+        });
+    }
+
+    if let Some(assistant) = entry.get("Assistant") {
+        return serde_json::json!({
+            "type": "entry",
+            "entry": {
+                "Assistant": {
+                    "text": assistant.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                    "thought": assistant.get("thought").and_then(|v| v.as_bool()).unwrap_or(false),
+                }
+            }
+        });
+    }
+
+    if let Some(tool_call) = entry.get("ToolCall") {
+        let status = tool_call
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("pending");
+        let mobile_status = match status {
+            "in_progress" => "Running",
+            "completed" => "Completed",
+            "failed" => "Failed",
+            _ => "Running",
+        };
+
+        let kind = tool_call
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("other");
+        let mobile_kind = match kind {
+            "read" => "Read",
+            "edit" | "delete" | "move" => "Edit",
+            "execute" => "Bash",
+            _ => "Other",
+        };
+
+        // 转换 output
+        let output: Vec<String> = tool_call
+            .get("output")
+            .and_then(|o| o.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|part| {
+                        if let Some(text) = part.get("Text").and_then(|v| v.as_str()) {
+                            Some(text.to_string())
+                        } else if let Some(diff) = part.get("Diff") {
+                            let path = diff.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                            Some(format!("[diff] {}", path))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        return serde_json::json!({
+            "type": "entry",
+            "entry": {
+                "ToolCall": {
+                    "id": tool_call.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "title": tool_call.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                    "kind": mobile_kind,
+                    "status": mobile_status,
+                    "output": output,
+                }
+            }
+        });
+    }
+
+    if let Some(divider) = entry.get("Divider").and_then(|v| v.as_str()) {
+        return serde_json::json!({
+            "type": "entry",
+            "entry": {"Divider": divider}
+        });
+    }
+
+    // 未知类型，原样返回
+    serde_json::json!({"type": "entry", "entry": entry})
 }
 
 /// 列出所有 ACP 会话（阻塞版本）
@@ -1439,21 +1670,6 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
         }
     }
     Some(summaries)
-}
-
-/// 连接到 smeltd 的 acp_watch
-fn connect_acp_watch(session_id: &str) -> Result<(UnixStream, std::sync::mpsc::Receiver<String>), String> {
-    let mut stream = UnixStream::connect(sock_path())
-        .map_err(|e| format!("connect failed: {}", e))?;
-
-    let req = serde_json::json!({
-        "op": "acp_watch",
-        "id": session_id,
-    });
-    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    Ok((stream, rx))
 }
 
 /// 发送 ACP 消息（通过 acp_open 连接）
