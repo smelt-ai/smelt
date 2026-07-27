@@ -47,9 +47,9 @@ pub struct AcpLaunch {
     /// GUI 侧会话 id，约定 `acp-` 前缀——DaemonStates 全局 map 里靠这个前缀
     /// 与 smeltd 会话共存（见 main.rs 状态转发循环的 retain）。
     pub sid: String,
-    /// 上一次连接的 agent 侧 session id：有就先尝试 `session/load` 真正续接
-    /// （agent 记得之前聊了什么），adapter 不支持该能力或 load 失败则自动
-    /// 退回 `session/new`（全新会话，见 AcpEvent::Ready 的 resumed 字段）。
+    /// 上一次连接的 agent 侧 session id：有就先尝试 `session/resume`，仅在协议
+    /// 明确表示旧会话不存在或不支持恢复时才退回 `session/new`（全新会话，见
+    /// `AcpEvent::Ready` 的 kind/fallback_reason 字段）。
     pub resume_session_id: Option<SessionId>,
     /// 只有 Claude Code 才该为 true：它的 ACP 会话 id 就是自己的 transcript
     /// 文件名，本地文件不存在时续接必然失败，值得靠这个提前跳过白等（见
@@ -97,6 +97,8 @@ pub enum AcpEvent {
     Ready {
         session_id: SessionId,
         kind: ReadyKind,
+        /// 恢复明确失败后新建会话的原因；正常新建和所有续接路径都是 None。
+        fallback_reason: Option<String>,
         /// agent 是否收图（`promptCapabilities.image`）。Grok 是 false——UI 据此
         /// 拦下粘贴，别让图片进了 prompt 被静默丢弃。
         supports_image: bool,
@@ -582,9 +584,9 @@ fn classify_resume_failure(
         agent_client_protocol::ErrorCode::MethodNotFound if load_supported => {
             RestoreDecision::TryLoad
         }
-        agent_client_protocol::ErrorCode::MethodNotFound => RestoreDecision::StartFresh(
-            "agent 不支持恢复会话，已创建新对话".into(),
-        ),
+        agent_client_protocol::ErrorCode::MethodNotFound => {
+            RestoreDecision::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        }
         _ => RestoreDecision::Retryable,
     }
 }
@@ -594,9 +596,9 @@ fn classify_load_failure(error: &agent_client_protocol::Error) -> RestoreDecisio
         agent_client_protocol::ErrorCode::ResourceNotFound => {
             RestoreDecision::StartFresh("旧会话不存在，已创建新对话".into())
         }
-        agent_client_protocol::ErrorCode::MethodNotFound => RestoreDecision::StartFresh(
-            "agent 不支持恢复会话，已创建新对话".into(),
-        ),
+        agent_client_protocol::ErrorCode::MethodNotFound => {
+            RestoreDecision::StartFresh("agent 不支持恢复会话，已创建新对话".into())
+        }
         _ => RestoreDecision::Retryable,
     }
 }
@@ -717,12 +719,12 @@ async fn run_connection(
             // 收图能力：三条恢复路径共用（bool 是 Copy，多次读没问题）。
             let supports_image = init.agent_capabilities.prompt_capabilities.image;
 
-            // 恢复链：resume → load → new。
+            // 恢复链：resume →（仅 MethodNotFound 且支持 load 时）load → new。
             //
             // - `session/resume` **不重放历史**（实测 0 条通知）：我们本地已经存着
             //   完整消息流，让 agent 再吐一遍纯属浪费，还得处理去重。协议能力位里
-            //   没声明它（claude-agent-acp 只报 loadSession），但实测可用，所以按
-            //   「试了不亏」处理——失败就落到 load。
+            //   没声明它（claude-agent-acp 只报 loadSession），但实测可用，所以先
+            //   尝试；只有明确可降级的错误才继续 load/new，临时错误保留旧会话。
             // - 前置检查 transcript 在不在：只对 Claude Code 成立（它的 ACP 会话 id
             //   就是自己的 transcript 文件名，文件不存在时续接必然「Resource not
             //   found」，实测白等约 2 秒，值得靠这个跳过）。别家 agent 各自管自己
@@ -734,65 +736,36 @@ async fn run_connection(
             //
             // 速度上 resume/load 都要十几秒——那是 agent 自身启动的成本，换哪条路
             // 都躲不掉（Claude 实测 new 10.4s / load 15.7s / resume 17.6s）。
-            let resumable = launch.resume_session_id.as_ref().is_some_and(|sid| {
-                if !launch.resume_needs_transcript_check {
-                    return true;
-                }
-                launch.cwd.as_deref().is_some_and(|c| {
-                    // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace
-                    // profile），transcript 得去它指向的目录找，不能只看进程
-                    // 全局环境变量——那只反映"默认" workspace 那一份。
-                    let override_dir = crate::workspace_override::env_override_from_launch(
-                        &launch.launch,
-                        "CLAUDE_CONFIG_DIR",
-                    );
-                    crate::claude_paths::transcript_path(
-                        c,
-                        &sid.to_string(),
-                        override_dir.as_deref(),
-                    )
-                    .exists()
-                })
-            });
-            if let Some(sid) = launch.resume_session_id.clone().filter(|_| resumable) {
-                // 先试不重放的 resume
-                let mut resume_req = ResumeSessionRequest::new(sid.clone(), cwd.clone());
-                if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
-                    resume_req = resume_req.meta(meta);
-                }
-                if let Ok(resumed) = connection.send_request(resume_req).block_task().await {
-                    let model_cfg = resumed
-                        .config_options
-                        .as_deref()
-                        .and_then(model_from_config)
-                        .map(|(id, state)| {
-                            let _ = event_tx.try_send(AcpEvent::Model(state));
-                            id
-                        });
-                    let resp = NewSessionResponse::new(sid.clone())
-                        .modes(resumed.modes)
-                        .config_options(resumed.config_options)
-                        .meta(resumed.meta);
-                    let session = connection.attach_session(resp, Default::default())?;
-                    // resume 不重放：本地历史原样留着，也别插「新会话」分割线。
-                    return drive_session(
-                        session,
-                        cmd_rx,
-                        event_tx,
-                        ReadyKind::ResumedKeepHistory,
-                        supports_image,
-                        model_cfg,
-                    )
-                    .await;
-                }
-                if init.agent_capabilities.load_session {
-                    match connection
-                        .send_request(LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                        .block_task()
-                        .await
-                    {
-                        Ok(loaded) => {
-                            let model_cfg = loaded
+            let mut fallback_reason = None;
+            if let Some(sid) = launch.resume_session_id.clone() {
+                let transcript_confirmed_missing = launch.resume_needs_transcript_check
+                    && launch.cwd.as_deref().is_some_and(|c| {
+                        // 启动命令可能带 `CLAUDE_CONFIG_DIR=...` 前缀（多 workspace
+                        // profile），transcript 得去它指向的目录找，不能只看进程
+                        // 全局环境变量——那只反映"默认" workspace 那一份。
+                        let override_dir = crate::workspace_override::env_override_from_launch(
+                            &launch.launch,
+                            "CLAUDE_CONFIG_DIR",
+                        );
+                        crate::claude_paths::transcript_path(
+                            c,
+                            &sid.to_string(),
+                            override_dir.as_deref(),
+                        )
+                        .exists()
+                    });
+
+                if transcript_confirmed_missing {
+                    fallback_reason = Some("旧会话记录已不存在，已创建新对话".into());
+                } else {
+                    // cwd 缺失时无法做 Claude transcript 预检；仍必须交给协议恢复。
+                    let mut resume_req = ResumeSessionRequest::new(sid.clone(), cwd.clone());
+                    if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
+                        resume_req = resume_req.meta(meta);
+                    }
+                    match connection.send_request(resume_req).block_task().await {
+                        Ok(resumed) => {
+                            let model_cfg = resumed
                                 .config_options
                                 .as_deref()
                                 .and_then(model_from_config)
@@ -800,27 +773,92 @@ async fn run_connection(
                                     let _ = event_tx.try_send(AcpEvent::Model(state));
                                     id
                                 });
-                            let resp = NewSessionResponse::new(sid)
-                                .modes(loaded.modes)
-                                .config_options(loaded.config_options)
-                                .meta(loaded.meta);
+                            let resp = NewSessionResponse::new(sid.clone())
+                                .modes(resumed.modes)
+                                .config_options(resumed.config_options)
+                                .meta(resumed.meta);
                             let session = connection.attach_session(resp, Default::default())?;
+                            // resume 不重放：本地历史原样留着，也别插「新会话」分割线。
                             return drive_session(
                                 session,
                                 cmd_rx,
                                 event_tx,
-                                ReadyKind::ResumedWithReplay,
+                                ReadyKind::ResumedKeepHistory,
+                                None,
                                 supports_image,
                                 model_cfg,
                             )
                             .await;
                         }
-                        Err(e) => {
-                            // 旧会话可能已被清理/损坏——不是致命错误，退回全新会话，
-                            // 只告知用户「这不是真续接」。
-                            let _ = event_tx.try_send(AcpEvent::Status(format!(
-                                "旧会话恢复失败，已开新对话（{e}）"
-                            )));
+                        Err(error) => {
+                            match classify_resume_failure(
+                                &error,
+                                init.agent_capabilities.load_session,
+                            ) {
+                                RestoreDecision::TryLoad => {
+                                    match connection
+                                        .send_request(LoadSessionRequest::new(
+                                            sid.clone(),
+                                            cwd.clone(),
+                                        ))
+                                        .block_task()
+                                        .await
+                                    {
+                                        Ok(loaded) => {
+                                            let model_cfg = loaded
+                                                .config_options
+                                                .as_deref()
+                                                .and_then(model_from_config)
+                                                .map(|(id, state)| {
+                                                    let _ =
+                                                        event_tx.try_send(AcpEvent::Model(state));
+                                                    id
+                                                });
+                                            let resp = NewSessionResponse::new(sid)
+                                                .modes(loaded.modes)
+                                                .config_options(loaded.config_options)
+                                                .meta(loaded.meta);
+                                            let session = connection
+                                                .attach_session(resp, Default::default())?;
+                                            return drive_session(
+                                                session,
+                                                cmd_rx,
+                                                event_tx,
+                                                ReadyKind::ResumedWithReplay,
+                                                None,
+                                                supports_image,
+                                                model_cfg,
+                                            )
+                                            .await;
+                                        }
+                                        Err(error) => match classify_load_failure(&error) {
+                                            RestoreDecision::StartFresh(reason) => {
+                                                fallback_reason = Some(reason);
+                                            }
+                                            RestoreDecision::Retryable => {
+                                                let _ = event_tx.try_send(AcpEvent::Fatal(
+                                                    format!("恢复失败，可重试：{error}"),
+                                                ));
+                                                return Ok(());
+                                            }
+                                            RestoreDecision::TryLoad => {
+                                                unreachable!(
+                                                    "load failure cannot request another load"
+                                                );
+                                            }
+                                        },
+                                    }
+                                }
+                                RestoreDecision::StartFresh(reason) => {
+                                    fallback_reason = Some(reason);
+                                }
+                                RestoreDecision::Retryable => {
+                                    let _ = event_tx.try_send(AcpEvent::Fatal(format!(
+                                        "恢复失败，可重试：{error}"
+                                    )));
+                                    return Ok(());
+                                }
+                            }
                         }
                     }
                 }
@@ -848,6 +886,7 @@ async fn run_connection(
                 cmd_rx,
                 event_tx,
                 ReadyKind::Fresh,
+                fallback_reason,
                 supports_image,
                 model_cfg,
             )
@@ -1005,6 +1044,7 @@ async fn run_resumed_connection(
                 cmd_rx,
                 event_tx,
                 ReadyKind::ResumedKeepHistory,
+                None,
                 supports_image,
                 None,
             )
@@ -1014,12 +1054,13 @@ async fn run_resumed_connection(
 }
 
 /// 驱动一个已建立的会话：发 Ready → 双源 loop（UI 指令 / agent 更新流）。
-/// `session/load`（attach_session）与 `session/new`（run_until）两条路径共用。
+/// `session/resume` / `session/load` / `session/new` 与继承 fd 的路径共用。
 async fn drive_session<'r>(
     mut session: ActiveSession<'r, Agent>,
     cmd_rx: smol::channel::Receiver<AcpCommand>,
     event_tx: smol::channel::Sender<AcpEvent>,
     ready_kind: ReadyKind,
+    fallback_reason: Option<String>,
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
     // 模型配置项的 id（agent 报了才有）——切模型时按它下发 set_config_option。
@@ -1028,6 +1069,7 @@ async fn drive_session<'r>(
     let _ = event_tx.try_send(AcpEvent::Ready {
         session_id: session.session_id().clone(),
         kind: ready_kind,
+        fallback_reason,
         supports_image,
     });
     loop {
@@ -1767,7 +1809,7 @@ mod runtime_tests {
 
 #[cfg(test)]
 mod restore_failure_tests {
-    use super::{classify_load_failure, classify_resume_failure, RestoreDecision};
+    use super::{RestoreDecision, classify_load_failure, classify_resume_failure};
     use agent_client_protocol::Error;
 
     #[test]
