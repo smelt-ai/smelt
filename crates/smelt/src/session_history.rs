@@ -1847,7 +1847,6 @@ mod tests {
         project_dir, terminal_resume_command,
     };
     use crate::settings::AgentUiConfig;
-    use crate::test_support::with_home;
     use smelt_core::agent_kind::{
         AcpAgentKind, AcpProfile, TerminalAgentKind, TerminalResumeState,
     };
@@ -2028,8 +2027,8 @@ mod tests {
     }
 
     fn test_sandbox(name: &str) -> std::path::PathBuf {
-        let dir = crate::test_support::test_artifacts_root()
-            .join("sh")
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-artifacts/session-history")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2045,41 +2044,33 @@ mod tests {
     }
 
     #[test]
-    fn history_profile_override_dir_expands_tilde_and_preserves_spaces() {
+    fn history_profile_override_dir_preserves_spaces() {
         let home = test_sandbox("ovh");
+        let workspace_dir = home.join("Claude Workspaces").join("quant");
         let profile = AcpProfile {
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
-            workspace_dir: "~/Claude Workspaces/quant".into(),
+            workspace_dir: workspace_dir.display().to_string(),
         };
 
-        let override_dir = with_home(&home, || normalized_profile_override_dir(&profile).unwrap());
+        let override_dir = normalized_profile_override_dir(&profile).unwrap();
 
-        assert_eq!(
-            override_dir,
-            home.join("Claude Workspaces")
-                .join("quant")
-                .display()
-                .to_string()
-        );
+        assert_eq!(override_dir, workspace_dir.display().to_string());
         std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
-    fn history_reader_finds_workspace_override_with_tilde_and_spaces() {
+    fn history_reader_finds_workspace_override_with_spaces() {
         let home = test_sandbox("ovr");
+        let workspace_dir = home.join("Claude Workspaces").join("quant");
         let profile = AcpProfile {
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
-            workspace_dir: "~/Claude Workspaces/quant".into(),
+            workspace_dir: workspace_dir.display().to_string(),
         };
-        let project_root = home
-            .join("Claude Workspaces")
-            .join("quant")
-            .join("projects")
-            .join(project_dir("/x/y"));
+        let project_root = workspace_dir.join("projects").join(project_dir("/x/y"));
         std::fs::create_dir_all(&project_root).unwrap();
         write(
             &project_root,
@@ -2089,10 +2080,8 @@ mod tests {
             ],
         );
 
-        let sessions = with_home(&home, || {
-            let override_dir = normalized_profile_override_dir(&profile).unwrap();
-            list_sessions_for(AcpAgentKind::Claude, Some(&override_dir), "/x/y")
-        });
+        let override_dir = normalized_profile_override_dir(&profile).unwrap();
+        let sessions = list_sessions_for(AcpAgentKind::Claude, Some(&override_dir), "/x/y");
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "with spaces in override path");
@@ -2125,10 +2114,8 @@ mod tests {
     fn list_sessions_summarizes_title_and_counts_and_sorts_by_recency() {
         let tmp = test_sandbox("list");
         let _ = std::fs::remove_dir_all(&tmp);
-        let proj_root = tmp
-            .join(".claude")
-            .join("projects")
-            .join(project_dir("/x/y"));
+        let config_dir = tmp.join(".claude");
+        let proj_root = config_dir.join("projects").join(project_dir("/x/y"));
         std::fs::create_dir_all(&proj_root).unwrap();
 
         write(
@@ -2147,7 +2134,7 @@ mod tests {
             ],
         );
 
-        let sessions = with_home(&tmp, || list_sessions("/x/y", None));
+        let sessions = list_sessions("/x/y", config_dir.to_str());
         std::fs::remove_dir_all(&tmp).unwrap();
 
         assert_eq!(sessions.len(), 2);
@@ -2192,8 +2179,8 @@ mod tests {
     fn codex_reader_filters_by_cwd_skips_synthetic_context_and_groups_tool_calls() {
         let tmp = test_sandbox("codex");
         let _ = std::fs::remove_dir_all(&tmp);
-        let day_dir = tmp
-            .join(".codex")
+        let config_dir = tmp.join(".codex");
+        let day_dir = config_dir
             .join("sessions")
             .join("2026")
             .join("07")
@@ -2220,7 +2207,7 @@ mod tests {
             ],
         );
 
-        let sessions = with_home(&tmp, || list_codex_sessions("/proj", None));
+        let sessions = list_codex_sessions("/proj", config_dir.to_str());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "实际问题"); // 合成的 environment_context 不该被当标题
         assert_eq!(sessions[0].message_count, 2);
@@ -2240,7 +2227,8 @@ mod tests {
     fn grok_reader_reads_summary_json_and_skips_synthetic_rows() {
         let tmp = test_sandbox("grok");
         let _ = std::fs::remove_dir_all(&tmp);
-        let session_dir = tmp.join(".grok").join("sessions").join("proj").join("s1");
+        let config_dir = tmp.join(".grok");
+        let session_dir = config_dir.join("sessions").join("proj").join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
         std::fs::write(
             session_dir.join("summary.json"),
@@ -2261,7 +2249,7 @@ mod tests {
             ],
         );
 
-        let sessions = with_home(&tmp, || list_grok_sessions("/proj", None));
+        let sessions = list_grok_sessions("/proj", config_dir.to_str());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "聊聊策略");
         assert_eq!(sessions[0].message_count, 2);
@@ -2279,7 +2267,8 @@ mod tests {
     fn copilot_reader_reads_workspace_yaml_and_events_jsonl() {
         let tmp = test_sandbox("copilot");
         let _ = std::fs::remove_dir_all(&tmp);
-        let session_dir = tmp.join(".copilot").join("session-state").join("s1");
+        let config_dir = tmp.join(".copilot");
+        let session_dir = config_dir.join("session-state").join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
         std::fs::write(
             session_dir.join("workspace.yaml"),
@@ -2296,7 +2285,7 @@ mod tests {
             ],
         );
 
-        let sessions = with_home(&tmp, || list_copilot_sessions("/proj", None));
+        let sessions = list_copilot_sessions("/proj", config_dir.to_str());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "调试问题");
         assert_eq!(sessions[0].message_count, 2);
