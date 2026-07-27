@@ -1,0 +1,14 @@
+# flutter_rust_bridge 配置
+rust_input: crate::api
+rust_root: ../crates/smelt-mobile/
+dart_output: lib/src/rust/
+
+# 输出模式
+full_dep: true
+
+# 禁用 freezed（避免依赖冲突）
+dart3: true
+
+# LLVM 路径（用于 ffigen）
+llvm_path:
+  - /opt/homebrew/opt/llvm/lib

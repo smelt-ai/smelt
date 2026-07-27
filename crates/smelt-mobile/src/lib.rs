@@ -8,6 +8,8 @@
 //!
 //! 与桌面端共享 `smelt-core` 的协议定义和解析逻辑。
 
+mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. */
+
 pub mod api;
 pub mod crypto;
 pub mod session;

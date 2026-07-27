@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 # Flutter Rust Bridge
-flutter_rust_bridge = "=2.9.0"
+flutter_rust_bridge = "=2.12.0"
 
 # 复用 smelt-core
 smelt-core = { path = "../smelt-core" }
@@ -41,4 +41,4 @@ thiserror = "1"
 log = "0.4"
 
 [build-dependencies]
-flutter_rust_bridge_codegen = "=2.9.0"
+# flutter_rust_bridge_codegen = "2.12"  # Use CLI instead

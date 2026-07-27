@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /// 主机配置（配对后存储）
-#[frb(dart_metadata=("freezed"))]
+#[frb]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostConfig {
     pub id: String,
@@ -20,7 +20,7 @@ pub struct HostConfig {
 }
 
 /// 会话摘要（列表展示用）
-#[frb(dart_metadata=("freezed"))]
+#[frb]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
@@ -60,7 +60,7 @@ pub enum AgentKind {
 }
 
 /// ACP 消息条目
-#[frb(dart_metadata=("freezed"))]
+#[frb]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AcpEntry {
     /// 用户消息
@@ -98,7 +98,7 @@ pub enum ToolStatus {
 }
 
 /// 审批菜单
-#[frb(dart_metadata=("freezed"))]
+#[frb]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalMenu {
     pub key: String,
@@ -108,7 +108,7 @@ pub struct ApprovalMenu {
 }
 
 /// 审批选项
-#[frb(dart_metadata=("freezed"))]
+#[frb]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalOption {
     pub key: String,
@@ -235,7 +235,7 @@ pub fn generate_keypair() -> KeyPair {
 }
 
 /// 密钥对
-#[frb(dart_metadata=("freezed"))]
+#[frb]
 #[derive(Clone, Debug)]
 pub struct KeyPair {
     pub public_key_b64: String,
