@@ -402,12 +402,29 @@ const CODEX_HOOK_EVENTS: &[&str] = &[
 ];
 
 const COPILOT_HOOK_EVENTS: &[&str] = &[
+    "sessionStart",
+    "sessionEnd",
+    "userPromptSubmitted",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+    "subagentStart",
+    "subagentStop",
+    "preCompact",
+    "agentStop",
+    "errorOccurred",
+    "permissionRequest",
+    "notification",
+];
+
+const COPILOT_LEGACY_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
+    "SubagentStart",
     "subagentStart",
     "SubagentStop",
     "PreCompact",
@@ -433,14 +450,36 @@ fn provider_hook_command(provider: &str, event: &str) -> String {
 }
 
 fn command_uses_smelt_notify(command: &str) -> bool {
-    command.contains("smelt-notify")
+    let Ok(words) = shell_words::split(command) else {
+        return false;
+    };
+    words
+        .iter()
+        .find(|word| {
+            let Some((name, _)) = word.split_once('=') else {
+                return true;
+            };
+            name.is_empty()
+                || !name
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        })
+        .and_then(|word| std::path::Path::new(word).file_name())
+        .is_some_and(|name| name == "smelt-notify")
 }
 
 fn command_uses_current_smelt_hook(command: &str, event: &str) -> bool {
     command_uses_smelt_notify(command) && command.contains(&format!("SMELT_HOOK_EVENT={event}"))
 }
 
+fn smelt_notify_available() -> bool {
+    smelt_notify_path().is_file()
+}
+
 fn hook_file_installed(path: Option<std::path::PathBuf>, events: &[&str]) -> bool {
+    if !smelt_notify_available() {
+        return false;
+    }
     let Some(path) = path else { return false };
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
@@ -471,6 +510,40 @@ fn hook_file_installed(path: Option<std::path::PathBuf>, events: &[&str]) -> boo
                         })
                 })
             })
+    })
+}
+
+fn write_json_atomic(path: &std::path::Path, root: &serde_json::Value) -> Result<(), String> {
+    let target = if std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        std::fs::canonicalize(path).map_err(|e| e.to_string())?
+    } else {
+        path.to_path_buf()
+    };
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("{} 没有父目录", target.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let staged = parent.join(format!(
+        ".{}.smelt-{}-{nonce}.tmp",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("hooks"),
+        std::process::id()
+    ));
+    let out = serde_json::to_string_pretty(root).map_err(|e| e.to_string())? + "\n";
+    std::fs::write(&staged, out).map_err(|e| e.to_string())?;
+    if let Ok(metadata) = std::fs::metadata(&target) {
+        std::fs::set_permissions(&staged, metadata.permissions()).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&staged, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&staged);
+        e.to_string()
     })
 }
 
@@ -545,8 +618,7 @@ fn install_hook_file(
         };
         groups.push(serde_json::json!({ "matcher": "", "hooks": [handler] }));
     }
-    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+    write_json_atomic(&path, &root)
 }
 
 fn uninstall_hook_file(path: Option<std::path::PathBuf>, events: &[&str]) -> Result<(), String> {
@@ -581,11 +653,13 @@ fn uninstall_hook_file(path: Option<std::path::PathBuf>, events: &[&str]) -> Res
             hooks.remove(*event);
         }
     }
-    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+    write_json_atomic(&path, &root)
 }
 
 pub fn copilot_hooks_installed() -> bool {
+    if !smelt_notify_available() {
+        return false;
+    }
     let Some(path) = copilot_hooks_path() else {
         return false;
     };
@@ -650,14 +724,29 @@ pub fn install_copilot_hooks() -> Result<(), String> {
     } else {
         serde_json::json!({})
     };
-    root["version"] = serde_json::json!(1);
-    let hooks = root
+    let root_obj = root
         .as_object_mut()
-        .ok_or_else(|| "hooks 文件根不是对象".to_string())?
+        .ok_or_else(|| "hooks 文件根不是对象".to_string())?;
+    root_obj.insert("version".into(), serde_json::json!(1));
+    let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| "hooks 不是对象".to_string())?;
+    for event in COPILOT_LEGACY_HOOK_EVENTS {
+        let Some(handlers) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        handlers.retain(|handler| {
+            !handler
+                .get("bash")
+                .and_then(|v| v.as_str())
+                .is_some_and(command_uses_smelt_notify)
+        });
+        if handlers.is_empty() {
+            hooks.remove(*event);
+        }
+    }
     for event in COPILOT_HOOK_EVENTS {
         let command = provider_hook_command("copilot", event);
         let handlers = hooks
@@ -673,8 +762,7 @@ pub fn install_copilot_hooks() -> Result<(), String> {
         });
         handlers.push(serde_json::json!({ "type": "command", "bash": command, "timeoutSec": 3 }));
     }
-    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+    write_json_atomic(&path, &root)
 }
 
 pub fn install_codex_hooks() -> Result<(), String> {
@@ -716,7 +804,7 @@ pub fn uninstall_copilot_hooks() -> Result<(), String> {
     let Some(hooks) = root.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
         return Ok(());
     };
-    for event in COPILOT_HOOK_EVENTS {
+    for event in COPILOT_HOOK_EVENTS.iter().chain(COPILOT_LEGACY_HOOK_EVENTS) {
         let Some(handlers) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) else {
             continue;
         };
@@ -730,8 +818,7 @@ pub fn uninstall_copilot_hooks() -> Result<(), String> {
             hooks.remove(*event);
         }
     }
-    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+    write_json_atomic(&path, &root)
 }
 
 pub fn uninstall_codex_hooks() -> Result<(), String> {
@@ -740,142 +827,55 @@ pub fn uninstall_codex_hooks() -> Result<(), String> {
 
 /// Claude hooks 是否已完整装上 smelt-notify。
 pub fn claude_hooks_installed() -> bool {
-    let Some(path) = claude_settings_path() else {
-        return false;
-    };
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    let Some(hooks) = v.get("hooks").and_then(|h| h.as_object()) else {
-        return false;
-    };
-    SMELT_HOOK_EVENTS.iter().all(|event| {
-        hooks
-            .get(*event)
-            .and_then(|v| v.as_array())
-            .is_some_and(|groups| {
-                groups.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|handlers| {
-                            handlers.iter().any(|handler| {
-                                handler
-                                    .get("command")
-                                    .and_then(|v| v.as_str())
-                                    .is_some_and(command_uses_smelt_notify)
-                            })
-                        })
-                })
-            })
-    })
+    hook_file_installed(claude_settings_path(), SMELT_HOOK_EVENTS)
 }
 
 /// 把 smelt-notify 写入 ~/.claude/settings.json（幂等）；成功返回 Ok。
 pub fn install_claude_hooks() -> Result<(), String> {
-    let notify = smelt_notify_path();
-    if !notify.is_file() {
-        return Err(format!(
-            "找不到 {}，请先编译安装 smelt-notify",
-            notify.display()
-        ));
-    }
     let path = claude_settings_path().ok_or_else(|| "无 home 目录".to_string())?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut root: serde_json::Value = if path.is_file() {
-        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    let hooks = root
-        .as_object_mut()
-        .ok_or_else(|| "settings.json 根不是对象".to_string())?
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or_else(|| "hooks 不是对象".to_string())?;
-    let cmd = notify.to_string_lossy().to_string();
-    let entry = serde_json::json!({
-        "type": "command",
-        "command": cmd,
-    });
-    for ev in SMELT_HOOK_EVENTS {
-        let arr = hooks_obj
-            .entry(*ev)
-            .or_insert_with(|| serde_json::json!([]));
-        let list = arr
-            .as_array_mut()
-            .ok_or_else(|| format!("hooks.{ev} 不是数组"))?;
-        // 已有 smelt-notify 则跳过
-        let mut found = false;
-        for m in list.iter_mut() {
-            if let Some(hs) = m.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                if hs.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.ends_with("smelt-notify"))
-                }) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if !found {
-            list.push(serde_json::json!({
-                "matcher": "",
-                "hooks": [entry.clone()],
-            }));
-        }
-    }
-    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, out + "\n").map_err(|e| e.to_string())?;
-    Ok(())
+    install_hook_file(path, SMELT_HOOK_EVENTS, "claude", false)
 }
 
 /// 从 Claude settings 移除 smelt-notify hooks（其它 hook 保留）。
 pub fn uninstall_claude_hooks() -> Result<(), String> {
-    let path = claude_settings_path().ok_or_else(|| "无 home 目录".to_string())?;
-    if !path.is_file() {
-        return Ok(());
+    uninstall_hook_file(claude_settings_path(), SMELT_HOOK_EVENTS)
+}
+
+fn run_all_hook_operations(
+    operations: &[(&str, fn() -> Result<(), String>)],
+) -> Result<(), String> {
+    let errors = operations
+        .iter()
+        .filter_map(|(provider, operation)| {
+            operation()
+                .err()
+                .map(|error| format!("{provider}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("；"))
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut root: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return Ok(());
-    };
-    for ev in SMELT_HOOK_EVENTS {
-        let Some(arr) = hooks.get_mut(*ev).and_then(|x| x.as_array_mut()) else {
-            continue;
-        };
-        arr.retain_mut(|m| {
-            let Some(hs) = m.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
-                return true;
-            };
-            hs.retain(|h| {
-                !h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| c.ends_with("smelt-notify"))
-            });
-            // 空 matcher 且 hooks 空则整段删
-            !(hs.is_empty()
-                && m.get("matcher")
-                    .and_then(|x| x.as_str())
-                    .is_some_and(|s| s.is_empty()))
-        });
-        if arr.is_empty() {
-            hooks.remove(*ev);
-        }
+}
+
+pub fn install_agent_hooks() -> Result<(), String> {
+    if !smelt_notify_available() {
+        sync_bundled_smelt_notify().map_err(|error| format!("准备 smelt-notify 失败：{error}"))?;
     }
-    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, out + "\n").map_err(|e| e.to_string())?;
-    Ok(())
+    run_all_hook_operations(&[
+        ("Claude", install_claude_hooks),
+        ("Copilot", install_copilot_hooks),
+        ("Codex", install_codex_hooks),
+    ])
+}
+
+pub fn uninstall_agent_hooks() -> Result<(), String> {
+    run_all_hook_operations(&[
+        ("Claude", uninstall_claude_hooks),
+        ("Copilot", uninstall_copilot_hooks),
+        ("Codex", uninstall_codex_hooks),
+    ])
 }
 
 // ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
@@ -3417,17 +3417,22 @@ impl Workspace {
                                         } else {
                                             "安装 hooks"
                                         })
-                                        .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
-                                            let result = install_claude_hooks()
-                                                .and_then(|_| install_copilot_hooks())
-                                                .and_then(|_| install_codex_hooks());
+                                        .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
+                                            let result = install_agent_hooks();
                                             match result {
                                                 Ok(()) => {
-                                                    // 触发设置页重绘
+                                                    window.push_notification(
+                                                        Notification::success("Agent hooks 已安装"),
+                                                        cx,
+                                                    );
                                                     cx.refresh_windows();
                                                 }
                                                 Err(e) => {
                                                     eprintln!("[workspace] 安装 hooks 失败：{e}");
+                                                    window.push_notification(
+                                                        Notification::error(format!("安装失败：{e}")),
+                                                        cx,
+                                                    );
                                                     cx.refresh_windows();
                                                 }
                                             }
@@ -3445,15 +3450,23 @@ impl Workspace {
                                         .text_sm()
                                         .text_color(fg)
                                         .hover(|s| s.bg(border))
-                                        .child("还原 hooks")
-                                        .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
-                                            let result = uninstall_claude_hooks()
-                                                .and_then(|_| uninstall_copilot_hooks())
-                                                .and_then(|_| uninstall_codex_hooks());
+                                        .child("移除 Smelt hooks")
+                                        .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
+                                            let result = uninstall_agent_hooks();
                                             match result {
-                                                Ok(()) => cx.refresh_windows(),
+                                                Ok(()) => {
+                                                    window.push_notification(
+                                                        Notification::success("Smelt hooks 已移除"),
+                                                        cx,
+                                                    );
+                                                    cx.refresh_windows();
+                                                }
                                                 Err(e) => {
-                                                    eprintln!("[workspace] 还原 hooks 失败：{e}");
+                                                    eprintln!("[workspace] 移除 hooks 失败：{e}");
+                                                    window.push_notification(
+                                                        Notification::error(format!("移除失败：{e}")),
+                                                        cx,
+                                                    );
                                                     cx.refresh_windows();
                                                 }
                                             }
@@ -4132,7 +4145,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{acp_cmd_setting_value, daemon_info_line, fmt_uptime};
+    use super::{acp_cmd_setting_value, command_uses_smelt_notify, daemon_info_line, fmt_uptime};
     use crate::terminal::DaemonInfo;
     use smelt_core::agent_kind::AcpAgentKind;
 
@@ -4199,5 +4212,83 @@ mod daemon_info_tests {
             ..Default::default()
         };
         assert!(daemon_info_line(&info).contains("已运行 0 秒"));
+    }
+
+    #[test]
+    fn hook_ownership_requires_smelt_notify_as_the_executable() {
+        assert!(command_uses_smelt_notify(
+            "SMELT_HOOK_PROVIDER=copilot /Users/test/.smelt/bin/smelt-notify"
+        ));
+        assert!(command_uses_smelt_notify(
+            "'/Applications/Smelt App/smelt-notify'"
+        ));
+        assert!(!command_uses_smelt_notify("echo smelt-notify"));
+        assert!(!command_uses_smelt_notify(
+            "if test -x /tmp/smelt-notify; then /tmp/other-hook; fi"
+        ));
+    }
+
+    #[test]
+    fn removing_smelt_hook_preserves_third_party_handlers() {
+        let dir = std::env::temp_dir().join(format!(
+            "smelt-hook-remove-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [
+                            {"type":"command","command":"/tmp/smelt-notify"},
+                            {"type":"command","command":"/tmp/orca-hook"}
+                        ]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        super::uninstall_hook_file(Some(path.clone()), &["PreToolUse"]).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let handlers = value["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0]["command"], "/tmp/orca-hook");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_json_write_keeps_dotfile_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "smelt-hook-symlink-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("managed-settings.json");
+        let link = dir.join("settings.json");
+        std::fs::write(&target, "{}").unwrap();
+        symlink(&target, &link).unwrap();
+
+        super::write_json_atomic(&link, &serde_json::json!({"hooks":{"Stop":[]}})).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(value["hooks"]["Stop"], serde_json::json!([]));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
