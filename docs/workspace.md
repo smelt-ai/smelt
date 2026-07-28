@@ -116,8 +116,8 @@ UI 线程每 30ms 对网格做快照并重绘。
 > 对话通道支持四家 agent（`settings::AcpAgentKind`，会话列表头「+Agent」下拉 /
 > 项目行「+」里选）：**Claude Code**（`@agentclientprotocol/claude-agent-acp`，
 > 自动使用本机 `claude` CLI）、**GitHub Copilot**（CLI 自带 `copilot --acp`）、
-> **Codex**（Codex CLI 自身没有 ACP 入口，走 ACP 官方的
-> `@agentclientprotocol/codex-acp`，自动使用本机 `codex` CLI，通过 Codex App Server 登录）、**Grok**（CLI 自带 `grok agent stdio`，凭据
+> **Codex**（直接连接本机 Codex CLI 的 `codex app-server` 原生协议，由 smelt
+> 转成统一会话事件）、**Grok**（CLI 自带 `grok agent stdio`，凭据
 > `~/.grok/auth.json`）。四条启动命令各自可在设置 →「Agent 集成」页改；四家
 > 实测都握手成功且 `loadSession: true`，「重新开始」是协议级续接而非摆样子的
 > 新对话。

@@ -337,6 +337,308 @@ const SMELT_HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
+const CODEX_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PreToolUse",
+    "PostToolUse",
+    "PermissionRequest",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "SessionEnd",
+];
+
+const COPILOT_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "subagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "Stop",
+    "ErrorOccurred",
+    "PermissionRequest",
+    "Notification",
+];
+
+fn copilot_hooks_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".copilot").join("hooks").join("smelt.json"))
+}
+
+fn codex_hooks_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".codex").join("hooks.json"))
+}
+
+fn provider_hook_command(provider: &str) -> String {
+    format!(
+        "SMELT_HOOK_PROVIDER={provider} {}",
+        shell_words::quote(&smelt_notify_path().to_string_lossy())
+    )
+}
+
+fn command_uses_smelt_notify(command: &str) -> bool {
+    command.contains("smelt-notify")
+}
+
+fn hook_file_installed(path: Option<std::path::PathBuf>, events: &[&str]) -> bool {
+    let Some(path) = path else { return false };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(hooks) = root.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    events.iter().all(|event| {
+        hooks
+            .get(*event)
+            .and_then(|v| v.as_array())
+            .is_some_and(|groups| {
+                groups.iter().any(|group| {
+                    group
+                        .get("hooks")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|handlers| {
+                            handlers.iter().any(|handler| {
+                                ["command", "bash"].iter().any(|key| {
+                                    handler
+                                        .get(*key)
+                                        .and_then(|v| v.as_str())
+                                        .is_some_and(command_uses_smelt_notify)
+                                })
+                            })
+                        })
+                })
+            })
+    })
+}
+
+fn install_hook_file(
+    path: std::path::PathBuf,
+    events: &[&str],
+    provider: &str,
+    copilot_format: bool,
+) -> Result<(), String> {
+    let notify = smelt_notify_path();
+    if !notify.is_file() {
+        return Err(format!(
+            "找不到 {}，请先编译安装 smelt-notify",
+            notify.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut root = if path.is_file() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| format!("{} 不是有效 JSON：{e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    if copilot_format {
+        root["version"] = serde_json::json!(1);
+    }
+    let hooks = root
+        .as_object_mut()
+        .ok_or_else(|| format!("{} 根不是对象", path.display()))?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| "hooks 不是对象".to_string())?;
+    let command = provider_hook_command(provider);
+    for event in events {
+        let groups = hooks
+            .entry(*event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("hooks.{event} 不是数组"))?;
+        for group in groups.iter_mut() {
+            if let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+                handlers.retain(|handler| {
+                    !["command", "bash"].iter().any(|key| {
+                        handler
+                            .get(*key)
+                            .and_then(|v| v.as_str())
+                            .is_some_and(command_uses_smelt_notify)
+                    })
+                });
+            }
+        }
+        let handler = if copilot_format {
+            serde_json::json!({ "type": "command", "bash": command, "timeoutSec": 3 })
+        } else {
+            serde_json::json!({ "type": "command", "command": command, "timeout": 3 })
+        };
+        groups.push(serde_json::json!({ "matcher": "", "hooks": [handler] }));
+    }
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+}
+
+fn uninstall_hook_file(path: Option<std::path::PathBuf>, events: &[&str]) -> Result<(), String> {
+    let Some(path) = path else { return Ok(()) };
+    if !path.is_file() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut root: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let Some(hooks) = root.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
+        return Ok(());
+    };
+    for event in events {
+        let Some(groups) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        groups.retain_mut(|group| {
+            let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
+                return true;
+            };
+            handlers.retain(|handler| {
+                !["command", "bash"].iter().any(|key| {
+                    handler
+                        .get(*key)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(command_uses_smelt_notify)
+                })
+            });
+            !handlers.is_empty()
+        });
+        if groups.is_empty() {
+            hooks.remove(*event);
+        }
+    }
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+}
+
+pub fn copilot_hooks_installed() -> bool {
+    let Some(path) = copilot_hooks_path() else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(hooks) = root.get("hooks").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    COPILOT_HOOK_EVENTS.iter().all(|event| {
+        hooks
+            .get(*event)
+            .and_then(|v| v.as_array())
+            .is_some_and(|handlers| {
+                handlers.iter().any(|handler| {
+                    handler
+                        .get("bash")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(command_uses_smelt_notify)
+                })
+            })
+    })
+}
+
+pub fn codex_hooks_installed() -> bool {
+    hook_file_installed(codex_hooks_path(), CODEX_HOOK_EVENTS)
+}
+
+pub fn install_copilot_hooks() -> Result<(), String> {
+    let path = copilot_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    let notify = smelt_notify_path();
+    if !notify.is_file() {
+        return Err(format!(
+            "找不到 {}，请先编译安装 smelt-notify",
+            notify.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut root = if path.is_file() {
+        serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("{} 不是有效 JSON：{e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    root["version"] = serde_json::json!(1);
+    let hooks = root
+        .as_object_mut()
+        .ok_or_else(|| "hooks 文件根不是对象".to_string())?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "hooks 不是对象".to_string())?;
+    let command = provider_hook_command("copilot");
+    for event in COPILOT_HOOK_EVENTS {
+        let handlers = hooks
+            .entry(*event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("hooks.{event} 不是数组"))?;
+        handlers.retain(|handler| {
+            !handler
+                .get("bash")
+                .and_then(|v| v.as_str())
+                .is_some_and(command_uses_smelt_notify)
+        });
+        handlers.push(serde_json::json!({ "type": "command", "bash": command, "timeoutSec": 3 }));
+    }
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+}
+
+pub fn install_codex_hooks() -> Result<(), String> {
+    install_hook_file(
+        codex_hooks_path().ok_or_else(|| "无 home 目录".to_string())?,
+        CODEX_HOOK_EVENTS,
+        "codex",
+        false,
+    )
+}
+
+pub fn uninstall_copilot_hooks() -> Result<(), String> {
+    let Some(path) = copilot_hooks_path() else {
+        return Ok(());
+    };
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let Some(hooks) = root.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
+        return Ok(());
+    };
+    for event in COPILOT_HOOK_EVENTS {
+        let Some(handlers) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        handlers.retain(|handler| {
+            !handler
+                .get("bash")
+                .and_then(|v| v.as_str())
+                .is_some_and(command_uses_smelt_notify)
+        });
+        if handlers.is_empty() {
+            hooks.remove(*event);
+        }
+    }
+    let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(path, out + "\n").map_err(|e| e.to_string())
+}
+
+pub fn uninstall_codex_hooks() -> Result<(), String> {
+    uninstall_hook_file(codex_hooks_path(), CODEX_HOOK_EVENTS)
+}
+
 /// Claude hooks 是否已装上 smelt-notify（任一事件含该 command 即视为已装）。
 pub fn claude_hooks_installed() -> bool {
     let Some(path) = claude_settings_path() else {
@@ -1408,43 +1710,6 @@ pub fn retry_remote_setup(cx: &mut App) {
     }
     if c.webrtc_enabled {
         spawn_webrtc_start(cx);
-    }
-}
-
-/// Copilot CLI 自己的配置文件路径（不是 smelt 的配置——这是 Copilot 全局设置，
-/// 改了会影响你在任何地方用 copilot，不只是 smelt 里）。
-fn copilot_settings_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".copilot").join("settings.json"))
-}
-
-/// 读 Copilot 的 `beep`（响铃提醒）开关；默认关闭，跟 Copilot 自己的默认值一致。
-/// 每次都现读盘（不缓存）：这份文件可能被 Copilot CLI 自己或用户在别处改动。
-fn read_copilot_beep() -> bool {
-    copilot_settings_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("beep").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
-}
-
-/// 写 Copilot 的 `beep` 开关：只改这一个键，其余键（比如已有的 footer 配置）原样保留。
-fn set_copilot_beep(enabled: bool) {
-    let Some(path) = copilot_settings_path() else {
-        return;
-    };
-    let mut value: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !value.is_object() {
-        value = serde_json::json!({});
-    }
-    value["beep"] = serde_json::Value::Bool(enabled);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&value) {
-        let _ = std::fs::write(path, json);
     }
 }
 
@@ -2542,21 +2807,6 @@ impl Workspace {
                         })
                     })
                     .keywords(["快捷启动", "launch", "命令", "claude", "codex", "copilot"]),
-                )
-                .item(
-                    SettingItem::new(
-                        "Copilot 响铃通知",
-                        SettingField::switch(
-                            |_cx: &App| read_copilot_beep(),
-                            |v: bool, _cx: &mut App| set_copilot_beep(v),
-                        ),
-                    )
-                    .description(
-                        "开启 Copilot CLI 自己的 beep 设置（默认关闭）：需要你确认或跑完一轮时\
-                         发终端响铃，smelt 能借此点亮侧栏状态点/toast/角标——不开这个 Copilot \
-                         不会主动发任何信号。改的是 ~/.copilot/settings.json，会影响你所有场景下\
-                         用 Copilot，不止 smelt 里。",
-                    ),
                 ),
         );
 
@@ -2820,23 +3070,68 @@ impl Workspace {
             SettingGroup::new()
                 .item(
                     SettingItem::new(
-                        "审批时弹出通知",
+                        "等待批准通知",
                         SettingField::switch(
                             |cx: &App| {
                                 cx.try_global::<AgentUiConfig>()
-                                    .map(|c| c.notify_awaiting)
+                                    .map(|c| c.notify_approval)
                                     .unwrap_or(true)
                             },
                             |v: bool, cx: &mut App| {
-                                apply_agent_ui(|c| c.notify_awaiting = v, cx);
+                                apply_agent_ui(|c| c.notify_approval = v, cx);
                             },
                         ),
                     )
-                    .description(
-                        "状态通道进入「等你批准 / 等你输入」时，用应用内 Notification 弹出提示\
-                         （不依赖系统横幅）。",
-                    )
+                    .description("Agent 明确进入等待审批状态时提醒。")
                     .keywords(["通知", "notification", "审批"]),
+                )
+                .item(
+                    SettingItem::new(
+                        "等待输入通知",
+                        SettingField::switch(
+                            |cx: &App| {
+                                cx.try_global::<AgentUiConfig>()
+                                    .map(|c| c.notify_input)
+                                    .unwrap_or(true)
+                            },
+                            |v: bool, cx: &mut App| {
+                                apply_agent_ui(|c| c.notify_input = v, cx);
+                            },
+                        ),
+                    )
+                    .description("Agent 提问或等待你继续时提醒。"),
+                )
+                .item(
+                    SettingItem::new(
+                        "任务完成通知",
+                        SettingField::switch(
+                            |cx: &App| {
+                                cx.try_global::<AgentUiConfig>()
+                                    .map(|c| c.notify_success)
+                                    .unwrap_or(true)
+                            },
+                            |v: bool, cx: &mut App| {
+                                apply_agent_ui(|c| c.notify_success = v, cx);
+                            },
+                        ),
+                    )
+                    .description("Agent 当前回合正常完成时提醒。"),
+                )
+                .item(
+                    SettingItem::new(
+                        "任务失败通知",
+                        SettingField::switch(
+                            |cx: &App| {
+                                cx.try_global::<AgentUiConfig>()
+                                    .map(|c| c.notify_failure)
+                                    .unwrap_or(true)
+                            },
+                            |v: bool, cx: &mut App| {
+                                apply_agent_ui(|c| c.notify_failure = v, cx);
+                            },
+                        ),
+                    )
+                    .description("Agent 因错误中断时提醒。"),
                 )
                 .item(acp_cmd_setting_item(AcpAgentKind::Claude))
                 .item(acp_cmd_setting_item(AcpAgentKind::Copilot))
@@ -3012,16 +3307,20 @@ impl Workspace {
                     .keywords(["workspace", "claude-quant", "config dir", "多工作区", "agent"]),
                 )
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
-                    let installed = claude_hooks_installed();
+                    let claude_installed = claude_hooks_installed();
+                    let copilot_installed = copilot_hooks_installed();
+                    let codex_installed = codex_hooks_installed();
+                    let installed = claude_installed && copilot_installed && codex_installed;
                     let (fg, muted, border) = {
                         let t = cx.theme();
                         (t.foreground, t.muted_foreground, t.border)
                     };
-                    let status = if installed {
-                        "已安装 smelt-notify → Claude hooks"
-                    } else {
-                        "未安装（结构面板只能靠标题猜测，hook 事实不会上报）"
-                    };
+                    let status = format!(
+                        "Claude {}  ·  Copilot {}  ·  Codex {}",
+                        if claude_installed { "已接入" } else { "未接入" },
+                        if copilot_installed { "已接入" } else { "未接入" },
+                        if codex_installed { "已接入" } else { "未接入" },
+                    );
                     let status_color: Hsla = if installed {
                         rgb(crate::ui_theme::green()).into()
                     } else {
@@ -3049,7 +3348,7 @@ impl Workspace {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .id("install-claude-hooks")
+                                        .id("install-agent-hooks")
                                         .px_3()
                                         .py(px(6.))
                                         .rounded_md()
@@ -3066,7 +3365,10 @@ impl Workspace {
                                             "安装 hooks"
                                         })
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
-                                            match install_claude_hooks() {
+                                            let result = install_claude_hooks()
+                                                .and_then(|_| install_copilot_hooks())
+                                                .and_then(|_| install_codex_hooks());
+                                            match result {
                                                 Ok(()) => {
                                                     // 触发设置页重绘
                                                     cx.refresh_windows();
@@ -3080,7 +3382,7 @@ impl Workspace {
                                 )
                                 .child(
                                     div()
-                                        .id("uninstall-claude-hooks")
+                                        .id("uninstall-agent-hooks")
                                         .px_3()
                                         .py(px(6.))
                                         .rounded_md()
@@ -3092,7 +3394,10 @@ impl Workspace {
                                         .hover(|s| s.bg(border))
                                         .child("还原 hooks")
                                         .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
-                                            match uninstall_claude_hooks() {
+                                            let result = uninstall_claude_hooks()
+                                                .and_then(|_| uninstall_copilot_hooks())
+                                                .and_then(|_| uninstall_codex_hooks());
+                                            match result {
                                                 Ok(()) => cx.refresh_windows(),
                                                 Err(e) => {
                                                     eprintln!("[workspace] 还原 hooks 失败：{e}");
@@ -3107,8 +3412,8 @@ impl Workspace {
                                 .text_xs()
                                 .text_color(muted)
                                 .child(
-                                    "写入 ~/.claude/settings.json（仅增删 smelt-notify 条目，其它 hook 保留）。\
-                                     还原 = 移除这些条目。改完后新开 Claude 会话生效。",
+                                    "分别写入 Claude 设置、~/.copilot/hooks/smelt.json 和 ~/.codex/hooks.json；\
+                                     只增删 Smelt 条目。Codex 首次使用需在 /hooks 中信任，重开会话后生效。",
                                 ),
                         )
                         .into_any_element()

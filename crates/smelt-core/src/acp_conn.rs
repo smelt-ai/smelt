@@ -23,8 +23,8 @@ use agent_client_protocol::schema::v1::{
     CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities,
     ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
     ElicitationPropertySchema, ElicitationSchema, ImageContent, InitializeRequest,
-    LoadSessionRequest, MultiSelectItems, NewSessionRequest, NewSessionResponse, PermissionOption,
-    Plan, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    LoadSessionRequest, MultiSelectItems, NewSessionRequest, NewSessionResponse, Plan,
+    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigId,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
@@ -110,6 +110,21 @@ pub enum AcpEvent {
     },
     ToolCall(ToolCall),
     ToolCallUpdate(ToolCallUpdate),
+    /// Provider-neutral tool lifecycle used by native drivers such as Codex app-server.
+    ToolStarted {
+        id: String,
+        title: String,
+        kind: crate::acp_chat::ToolKind,
+    },
+    ToolOutputDelta {
+        id: String,
+        delta: String,
+    },
+    ToolFinished {
+        id: String,
+        status: crate::acp_chat::ToolCallStatus,
+        output: Vec<crate::acp_chat::ToolOutputPart>,
+    },
     /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
     /// UI 渲染成消息流上方的可折叠 PLAN 条。
     Plan(Plan),
@@ -127,8 +142,9 @@ pub enum AcpEvent {
         /// 关联的工具调用 id：UI 靠它把审批按钮内嵌进对应工具卡片，
         /// 消息流里找不到该卡片时退回独立卡片渲染。
         tool_call_id: ToolCallId,
-        pub_options: Vec<PermissionOption>,
+        pub_options: Vec<crate::acp_session::PermissionOptionView>,
         responder: PermissionResponder,
+        details: crate::acp_session::ApprovalDetailsView,
         /// 这条请求的原始 JSON-RPC 行文本（`with_debug` 的 `Stdout` 方向捕获的
         /// 最近一行）。smeltd 无缝升级时若这条会话正卡着这张审批卡，会把这行
         /// 原文一起交接过去——新进程接手继承来的 fd 后，先把这行「回放」一遍
@@ -203,25 +219,48 @@ pub struct SessionConfigState {
 
 /// 权限回执守卫：UI 点按钮时消费；**被 drop（视图关闭、卡片被弃置）自动回
 /// Cancelled**，保证 agent 侧永远等得到答案、不会挂起。
-pub struct PermissionResponder(Option<agent_client_protocol::Responder<RequestPermissionResponse>>);
+enum PermissionResponderInner {
+    Acp(agent_client_protocol::Responder<RequestPermissionResponse>),
+    External(Box<dyn FnOnce(String) + Send>),
+}
+
+pub struct PermissionResponder(Option<PermissionResponderInner>);
 
 impl PermissionResponder {
+    fn acp(responder: agent_client_protocol::Responder<RequestPermissionResponse>) -> Self {
+        Self(Some(PermissionResponderInner::Acp(responder)))
+    }
+
+    pub fn external(respond: impl FnOnce(String) + Send + 'static) -> Self {
+        Self(Some(PermissionResponderInner::External(Box::new(respond))))
+    }
+
     /// 选中某个选项（allow / reject 都是「选中」，语义在 option.kind 里）。
-    pub fn select(mut self, option_id: agent_client_protocol::schema::v1::PermissionOptionId) {
-        if let Some(r) = self.0.take() {
-            let _ = r.respond(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-            ));
+    pub fn select(mut self, option_id: String) {
+        match self.0.take() {
+            Some(PermissionResponderInner::Acp(r)) => {
+                let _ = r.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                        agent_client_protocol::schema::v1::PermissionOptionId::new(option_id),
+                    )),
+                ));
+            }
+            Some(PermissionResponderInner::External(respond)) => respond(option_id),
+            None => {}
         }
     }
 }
 
 impl Drop for PermissionResponder {
     fn drop(&mut self) {
-        if let Some(r) = self.0.take() {
-            let _ = r.respond(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
+        match self.0.take() {
+            Some(PermissionResponderInner::Acp(r)) => {
+                let _ = r.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+            }
+            Some(PermissionResponderInner::External(respond)) => respond("cancel".into()),
+            None => {}
         }
     }
 }
@@ -239,6 +278,10 @@ pub enum ElicitFieldKind {
     Select(Vec<ElicitOption>),
     /// 多选：可切换多个再提交。
     MultiSelect(Vec<ElicitOption>),
+    /// 自由文本。secret 只影响客户端显示，协议回填仍是字符串。
+    Text { secret: bool },
+    /// 需要用户在浏览器完成的外部步骤。
+    ExternalUrl(String),
 }
 
 pub struct ElicitOption {
@@ -247,24 +290,41 @@ pub struct ElicitOption {
 }
 
 /// 表单回执守卫：accept/decline 消费；**被 drop 自动回 Cancel**，agent 不会挂起。
-pub struct ElicitationResponder(
-    Option<agent_client_protocol::Responder<CreateElicitationResponse>>,
-);
+enum ElicitationResponderInner {
+    Acp(agent_client_protocol::Responder<CreateElicitationResponse>),
+    External(Box<dyn FnOnce(Option<BTreeMap<String, ElicitationContentValue>>) + Send>),
+}
+
+pub struct ElicitationResponder(Option<ElicitationResponderInner>);
 
 impl ElicitationResponder {
     pub fn accept(mut self, content: BTreeMap<String, ElicitationContentValue>) {
-        if let Some(r) = self.0.take() {
-            let _ = r.respond(CreateElicitationResponse::new(ElicitationAction::Accept(
-                ElicitationAcceptAction::new().content(content),
-            )));
+        match self.0.take() {
+            Some(ElicitationResponderInner::Acp(r)) => {
+                let _ = r.respond(CreateElicitationResponse::new(ElicitationAction::Accept(
+                    ElicitationAcceptAction::new().content(content),
+                )));
+            }
+            Some(ElicitationResponderInner::External(respond)) => respond(Some(content)),
+            None => {}
         }
+    }
+
+    pub fn external(
+        respond: impl FnOnce(Option<BTreeMap<String, ElicitationContentValue>>) + Send + 'static,
+    ) -> Self {
+        Self(Some(ElicitationResponderInner::External(Box::new(respond))))
     }
 }
 
 impl Drop for ElicitationResponder {
     fn drop(&mut self) {
-        if let Some(r) = self.0.take() {
-            let _ = r.respond(CreateElicitationResponse::new(ElicitationAction::Cancel));
+        match self.0.take() {
+            Some(ElicitationResponderInner::Acp(r)) => {
+                let _ = r.respond(CreateElicitationResponse::new(ElicitationAction::Cancel));
+            }
+            Some(ElicitationResponderInner::External(respond)) => respond(None),
+            None => {}
         }
     }
 }
@@ -298,12 +358,16 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                         })
                         .collect()
                 } else {
-                    Vec::new() // 自由文本：按钮化不了
+                    Vec::new()
                 };
-                (!options.is_empty()).then(|| ElicitField {
+                Some(ElicitField {
                     key: key.clone(),
                     title: s.title.clone().unwrap_or_else(|| key.clone()),
-                    kind: ElicitFieldKind::Select(options),
+                    kind: if options.is_empty() {
+                        ElicitFieldKind::Text { secret: false }
+                    } else {
+                        ElicitFieldKind::Select(options)
+                    },
                 })
             }
             ElicitationPropertySchema::Boolean(b) => Some(ElicitField {
@@ -722,8 +786,19 @@ async fn run_connection(
                     let _ = perm_tx.try_send(AcpEvent::Permission {
                         question,
                         tool_call_id: request.tool_call.tool_call_id.clone(),
-                        pub_options: request.options,
-                        responder: PermissionResponder(Some(responder)),
+                        pub_options: request
+                            .options
+                            .into_iter()
+                            .map(|option| crate::acp_session::PermissionOptionView {
+                                option_id: option.option_id.to_string(),
+                                name: option.name,
+                                kind: crate::acp_session::PermissionOptionKindView::from_acp(
+                                    option.kind,
+                                ),
+                            })
+                            .collect(),
+                        responder: PermissionResponder::acp(responder),
+                        details: crate::acp_session::ApprovalDetailsView::Generic,
                         raw_request_line,
                     });
                     Ok(())
@@ -747,7 +822,9 @@ async fn run_connection(
                             let _ = elicit_tx.try_send(AcpEvent::Elicitation {
                                 message: request.message,
                                 fields,
-                                responder: ElicitationResponder(Some(responder)),
+                                responder: ElicitationResponder(Some(
+                                    ElicitationResponderInner::Acp(responder),
+                                )),
                                 raw_request_line,
                             });
                             Ok(())
@@ -1012,8 +1089,19 @@ async fn run_resumed_connection(
                     let _ = perm_tx.try_send(AcpEvent::Permission {
                         question,
                         tool_call_id: request.tool_call.tool_call_id.clone(),
-                        pub_options: request.options,
-                        responder: PermissionResponder(Some(responder)),
+                        pub_options: request
+                            .options
+                            .into_iter()
+                            .map(|option| crate::acp_session::PermissionOptionView {
+                                option_id: option.option_id.to_string(),
+                                name: option.name,
+                                kind: crate::acp_session::PermissionOptionKindView::from_acp(
+                                    option.kind,
+                                ),
+                            })
+                            .collect(),
+                        responder: PermissionResponder::acp(responder),
+                        details: crate::acp_session::ApprovalDetailsView::Generic,
                         raw_request_line,
                     });
                     Ok(())
@@ -1035,7 +1123,9 @@ async fn run_resumed_connection(
                             let _ = elicit_tx.try_send(AcpEvent::Elicitation {
                                 message: request.message,
                                 fields,
-                                responder: ElicitationResponder(Some(responder)),
+                                responder: ElicitationResponder(Some(
+                                    ElicitationResponderInner::Acp(responder),
+                                )),
                                 raw_request_line,
                             });
                             Ok(())
@@ -1742,8 +1832,7 @@ mod elicit_parse_tests {
     use super::*;
 
     /// claude-agent-acp 对 AskUserQuestion 的真实 wire 形状：单选 `oneOf`+`const`，
-    /// 每题附带一个**可选**自由文本 "Other" 字段。曾因 Other 字段整表返回 None →
-    /// Decline，agent 收到「用户未作答」——选择卡片永远弹不出来（回归守护）。
+    /// 每题附带一个**可选**自由文本 "Other" 字段；现在两者都应进入统一表单。
     #[test]
     fn ask_user_question_shape_with_optional_custom_field_parses() {
         let schema: ElicitationSchema = serde_json::from_value(serde_json::json!({
@@ -1765,8 +1854,8 @@ mod elicit_parse_tests {
             }
         }))
         .expect("schema 反序列化");
-        let fields = parse_elicit_fields(&schema).expect("可选自由文本字段应被跳过而非整表放弃");
-        assert_eq!(fields.len(), 1);
+        let fields = parse_elicit_fields(&schema).expect("单选和自由文本都应解析");
+        assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].key, "question_0");
         let ElicitFieldKind::Select(options) = &fields[0].kind else {
             panic!("单选题应解析为 Select");
@@ -1774,11 +1863,16 @@ mod elicit_parse_tests {
         assert_eq!(options.len(), 2);
         assert_eq!(options[0].label, "苹果");
         assert!(matches!(&options[0].value, ElicitationContentValue::String(s) if s == "苹果"));
+        assert!(
+            fields
+                .iter()
+                .any(|field| matches!(field.kind, ElicitFieldKind::Text { .. }))
+        );
     }
 
-    /// 必填的自由文本字段没法按钮化 → 必须整表 None（Decline），不能提交缺必填的表单。
+    /// 必填自由文本由通用输入框承接，不再迫使 agent 回退纯文本追问。
     #[test]
-    fn required_free_text_field_declines_whole_form() {
+    fn required_free_text_field_maps_to_text_input() {
         let schema: ElicitationSchema = serde_json::from_value(serde_json::json!({
             "type": "object",
             "properties": {
@@ -1787,7 +1881,11 @@ mod elicit_parse_tests {
             "required": ["name"]
         }))
         .expect("schema 反序列化");
-        assert!(parse_elicit_fields(&schema).is_none());
+        let fields = parse_elicit_fields(&schema).expect("自由文本应可显示");
+        assert!(matches!(
+            fields[0].kind,
+            ElicitFieldKind::Text { secret: false }
+        ));
     }
 
     /// 多选题：`type: "array"` + `items.anyOf`（titled 枚举）。
@@ -2416,6 +2514,7 @@ mod resume_incoming_lines_tests {
                 question: "Allow?".to_string(),
                 tool_call_id: "tool-1".to_string(),
                 options: Vec::new(),
+                details: crate::acp_session::ApprovalDetailsView::Generic,
                 responder: None,
                 raw_request_line: last_stdout_line.lock().unwrap().clone(),
             });

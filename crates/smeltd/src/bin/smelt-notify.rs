@@ -1,4 +1,5 @@
-//! Claude Code hook 脚本调用的小工具：把 hook 事件翻译成 smeltd 的 `state` op。
+//! Agent hook 调用的小工具：把 Claude、Copilot、Codex 的结构化事件翻译成
+//! smeltd 的 `state` op。
 //! 见 docs/state-channel-plan.md「hook 链路」一节。
 //!
 //! stdin: Claude Code 传来的 hook JSON（`hook_event_name` / `tool_name` /
@@ -7,15 +8,18 @@
 //!        `SMELT_SOCK`（smeltd.sock 路径，同样是 spawn 时注入）
 //! 出参:  连 `$SMELT_SOCK` 发一行 `{"op":"state","id":"..","phase":"..","question":".."}`
 //!
-//! **必须 exit 0、不打印任何 stdout**：Claude Code 把 hook 的 stdout 当成决策 JSON
-//! 解析，非 0 退出码（尤其是 2）会阻塞工具执行——这个工具只负责上报状态，绝不能
-//! 意外干扰 agent 的正常运行。任何失败（socket 连不上、JSON 解析不出来、字段
-//! 缺失、env 没设置）都静默退出，不 panic、不报错、不阻塞。
+//! **必须 exit 0，并先打印空决策 JSON**：Claude、Copilot 和 Codex 都可能解析 hook
+//! stdout，`{}` 对三者都是无副作用的有效响应。非 0 退出码（尤其是 2）可能阻塞工具
+//! 执行——这个工具只负责上报状态，绝不能意外干扰 agent 的正常运行。任何失败
+//! （socket 连不上、JSON 解析不出来、字段缺失、env 没设置）都静默退出。
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
 fn main() {
+    // 用户级 hooks 在 Smelt 外也会运行；即使下方因缺少 SMELT_* 环境变量而退出，
+    // 仍要给 agent 一个合法、无副作用的 hook 响应。
+    println!("{{}}");
     let _ = run();
 }
 
@@ -29,7 +33,8 @@ fn run() -> Option<()> {
     std::io::stdin().read_to_string(&mut input).ok()?;
     let hook: serde_json::Value = serde_json::from_str(&input).ok()?;
 
-    let (phase, question) = map_hook_event(&hook)?;
+    let provider = std::env::var("SMELT_HOOK_PROVIDER").unwrap_or_else(|_| "claude".into());
+    let (phase, question) = map_hook_event_for_provider(&hook, &provider)?;
 
     let mut s = UnixStream::connect(&sock).ok()?;
     let payload = serde_json::json!({
@@ -51,6 +56,13 @@ fn run() -> Option<()> {
 /// "snake_case")]` 对应（thinking / executing_tool / awaiting_approval /
 /// waiting_for_user / idle / dead），两边不同源、靠字符串约定对齐。
 fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<String>)> {
+    map_hook_event_for_provider(hook, "claude")
+}
+
+fn map_hook_event_for_provider(
+    hook: &serde_json::Value,
+    provider: &str,
+) -> Option<(&'static str, Option<String>)> {
     let event = hook["hook_event_name"].as_str()?;
     match event {
         // 会话刚起、hooks 链路第一次有机会发声——不上报的话，Idle 态和「hooks
@@ -59,6 +71,14 @@ fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<Stri
         "SessionStart" => Some(("idle", None)),
         "UserPromptSubmit" => Some(("thinking", None)),
         "PreToolUse" => {
+            if hook["tool_name"].as_str().is_some_and(|tool| {
+                matches!(
+                    tool.to_ascii_lowercase().as_str(),
+                    "askuser" | "ask_user" | "askuserquestion"
+                )
+            }) {
+                return Some(("waiting_for_user", describe_tool_call(hook)));
+            }
             // question 槽位复用为「当前工具」展示（结构面板 / 总览）。
             Some(("executing_tool", describe_tool_call(hook)))
         }
@@ -76,11 +96,14 @@ fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<Stri
             Some(("thinking", Some(q)))
         }
         // 独立的权限请求事件（比 Notification 更明确），见官方 hooks 文档。
-        "PermissionRequest" => {
+        "PermissionRequest" if provider != "copilot" => {
             let tool = hook["tool_name"].as_str().unwrap_or("");
             let q = format!("请求执行 {tool}");
             Some(("awaiting_approval", Some(q)))
         }
+        // Copilot 在自身权限引擎作出 allow/deny/ask 决定前就发送此事件；只有后续
+        // Notification(permission_prompt) 才证明用户真的看到了审批框。
+        "PermissionRequest" => None,
         "Notification" => {
             // Notification 不都是"等审批"——notification_type 区分子类型，
             // 认不出来的子类型不改 phase（比如 auth_success 这种跟"要不要
@@ -88,14 +111,14 @@ fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<Stri
             let message = hook["message"].as_str().map(String::from);
             match hook["notification_type"].as_str() {
                 Some("permission_prompt") => Some(("awaiting_approval", message)),
-                Some("idle_prompt") => Some(("waiting_for_user", message)),
+                Some("idle_prompt" | "elicitation_dialog") => Some(("waiting_for_user", message)),
                 _ => None,
             }
         }
         // agent 起了个子任务（比如 Task 工具）：这段时间之前完全是黑箱，只显示
         // 笼统的 executing_tool；agent_type 是官方 hooks 字段（"Explore" /
         // "security-reviewer" 这类），带上就知道具体在跑哪个子任务。
-        "SubagentStart" => {
+        "SubagentStart" | "subagentStart" => {
             let name = hook["agent_type"].as_str();
             let q = match name {
                 Some(n) => format!("子任务：{n}"),
@@ -105,7 +128,7 @@ fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<Stri
         }
         // 子任务做完，主 agent 回去汇总/继续思考。
         "SubagentStop" => Some(("thinking", None)),
-        "Stop" => Some(("waiting_for_user", None)),
+        "Stop" => Some(("succeeded", None)),
         // 回合因 API 错误中断，跟正常「说完了等你」（Stop）语义不同——同样落
         // waiting_for_user（协议里没有更细的档位，见 status_color 只到五色），
         // 但 question 标出「出错」，detail_line 上能看出差别，不会跟正常收尾混淆。
@@ -115,7 +138,17 @@ fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<Stri
                 Some(r) => format!("⚠ 因错误中断：{r}"),
                 None => "⚠ 因错误中断".to_string(),
             };
-            Some(("waiting_for_user", Some(q)))
+            Some(("failed", Some(q)))
+        }
+        "ErrorOccurred" => {
+            let reason = first_present_str(hook, &["message", "error", "reason"]);
+            Some((
+                "failed",
+                Some(match reason {
+                    Some(reason) => format!("⚠ 因错误中断：{}", truncate_chars(reason, 60)),
+                    None => "⚠ 因错误中断".to_string(),
+                }),
+            ))
         }
         "SessionEnd" => Some(("dead", None)),
         _ => None,
@@ -236,6 +269,30 @@ mod tests {
     }
 
     #[test]
+    fn copilot_permission_request_is_not_yet_user_visible() {
+        let hook = json!({ "hook_event_name": "PermissionRequest", "tool_name": "Bash" });
+        assert_eq!(map_hook_event_for_provider(&hook, "copilot"), None);
+    }
+
+    #[test]
+    fn codex_permission_request_is_user_visible() {
+        let hook = json!({ "hook_event_name": "PermissionRequest", "tool_name": "Bash" });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "codex"),
+            Some(("awaiting_approval", Some("请求执行 Bash".to_string())))
+        );
+    }
+
+    #[test]
+    fn ask_user_tool_waits_for_input() {
+        let hook = json!({ "hook_event_name": "PreToolUse", "tool_name": "ask_user" });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "copilot"),
+            Some(("waiting_for_user", Some("ask_user".to_string())))
+        );
+    }
+
+    #[test]
     fn notification_permission_prompt_maps_to_awaiting_approval() {
         let hook = json!({
             "hook_event_name": "Notification",
@@ -264,6 +321,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn copilot_elicitation_dialog_maps_to_waiting_for_user() {
+        let hook = json!({
+            "hook_event_name": "Notification",
+            "notification_type": "elicitation_dialog",
+            "message": "请选择部署环境",
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "copilot"),
+            Some(("waiting_for_user", Some("请选择部署环境".to_string())))
+        );
+    }
+
     /// 认不出的 notification_type（比如 auth_success）不该反过来乱猜 phase。
     #[test]
     fn notification_unknown_subtype_is_ignored() {
@@ -276,9 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn stop_maps_to_waiting_for_user() {
+    fn stop_maps_to_succeeded() {
         let hook = json!({ "hook_event_name": "Stop" });
-        assert_eq!(map_hook_event(&hook), Some(("waiting_for_user", None)));
+        assert_eq!(map_hook_event(&hook), Some(("succeeded", None)));
     }
 
     #[test]
@@ -310,6 +380,24 @@ mod tests {
         assert_eq!(
             map_hook_event(&hook),
             Some(("executing_tool", Some("子任务：Explore".to_string())))
+        );
+    }
+
+    #[test]
+    fn copilot_camel_case_subagent_start_is_supported() {
+        let hook = json!({ "hook_event_name": "subagentStart", "agent_type": "Explore" });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "copilot"),
+            Some(("executing_tool", Some("子任务：Explore".to_string())))
+        );
+    }
+
+    #[test]
+    fn copilot_error_event_is_distinct_from_success() {
+        let hook = json!({ "hook_event_name": "ErrorOccurred", "message": "rate limited" });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "copilot"),
+            Some(("failed", Some("⚠ 因错误中断：rate limited".to_string())))
         );
     }
 
@@ -367,10 +455,9 @@ mod tests {
     fn stop_failure_differs_from_plain_stop() {
         let hook = json!({ "hook_event_name": "StopFailure", "error_type": "rate_limit" });
         let (phase, q) = map_hook_event(&hook).unwrap();
-        assert_eq!(phase, "waiting_for_user");
+        assert_eq!(phase, "failed");
         assert_eq!(q.as_deref(), Some("⚠ 因错误中断：rate_limit"));
-        // 跟正常 Stop 同一个 phase，但 question 不同——detail_line 上能看出区别，
-        // 不会跟「说完了等你」混淆。
+        // 失败与正常 Stop 必须是不同 phase，不能只靠文案区分。
         assert_ne!(
             map_hook_event(&hook),
             map_hook_event(&json!({ "hook_event_name": "Stop" }))

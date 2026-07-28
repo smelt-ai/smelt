@@ -38,6 +38,10 @@ pub struct DaemonSessionState {
     /// unix 秒，进入当前 phase 的时刻。
     #[serde(default)]
     pub phase_since: u64,
+    /// 该 pane 是否已经收到 hook/ACP 结构化事件。为 true 后，终端 OSC 通知不再
+    /// 作为 agent 兼容信号消费，避免同一事件双通知。
+    #[serde(default)]
+    pub structured_events: bool,
 }
 
 impl DaemonSessionState {
@@ -48,6 +52,8 @@ impl DaemonSessionState {
             DaemonPhase::ExecutingTool => "执行工具",
             DaemonPhase::AwaitingApproval => "等你批准",
             DaemonPhase::WaitingForUser => "等你输入",
+            DaemonPhase::Succeeded => "已完成",
+            DaemonPhase::Failed => "失败",
             DaemonPhase::Idle => "空闲",
             DaemonPhase::Dead => "已结束",
         }
@@ -88,6 +94,8 @@ pub enum DaemonPhase {
     ExecutingTool,
     AwaitingApproval,
     WaitingForUser,
+    Succeeded,
+    Failed,
     #[default]
     Idle,
     Dead,
