@@ -155,7 +155,6 @@ pub fn build_router(token: String, write_enabled: bool) -> Router {
         .route("/s/{id}/action", axum::routing::post(action_handler))
         .route("/s/{id}/input", axum::routing::post(input_handler))
         .route("/s/{id}/resize", axum::routing::post(resize_handler))
-        .route("/s/{id}/menu", get(menu_handler))
         // ACP 路由（移动端用）
         .route("/acp/sessions", get(acp_sessions_handler))
         .route("/acp/ws", get(acp_ws_handler));

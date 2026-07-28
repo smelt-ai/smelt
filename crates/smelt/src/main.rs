@@ -878,10 +878,10 @@ struct AcpSaved {
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
-    resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    history_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
     /// → None，恢复时退化成生成一个新 id——意味着即便 smeltd 里那个会话还
-    /// 活着，GUI 重开后也接不上、只能按 resume_session_id 重新 spawn 一次
+    /// 活着，GUI 重开后也接不上、只能按 history_session_id 重新 spawn 一次
     /// （旧版反正每次都是重新 spawn，行为不会比以前差，只是错过了"廉价
     /// attach"这个新能力）。有这个字段才能真正让 GUI 重开秒接上 smeltd 里
     /// 还在跑的会话，见 `acp_view::AcpView::placeholder` 的 `saved_sid` 参数。
@@ -908,8 +908,8 @@ struct AcpSavedWire {
     /// 进入 `AcpSaved`，更不会在下一次保存时写回。
     #[serde(default, rename = "entries")]
     _legacy_entries: Option<serde::de::IgnoredAny>,
-    #[serde(default)]
-    resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
+    #[serde(default, alias = "resume_session_id")]
+    history_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     #[serde(default)]
     sid: Option<String>,
     #[serde(default)]
@@ -933,7 +933,7 @@ impl<'de> serde::Deserialize<'de> for AcpSaved {
             launch,
             profile_id: wire.profile_id,
             agent: wire.agent,
-            resume_session_id: wire.resume_session_id,
+            history_session_id: wire.history_session_id,
             sid: wire.sid,
             refresh_launch_from_settings,
         })
@@ -2153,7 +2153,7 @@ impl Workspace {
                                 saved.cwd,
                                 reason.to_string(),
                                 Vec::new(),
-                                saved.resume_session_id,
+                                saved.history_session_id,
                                 saved.sid,
                             )
                         });
@@ -2595,14 +2595,14 @@ impl Workspace {
                 let v = view.read(cx);
                 v.agent_kind() == agent
                     && v.cwd().as_deref() == Some(cwd)
-                    && v.resume_session_id_for_save().as_ref() == Some(target_id)
+                    && v.history_session_id_for_save().as_ref() == Some(target_id)
             }
             _ => false,
         })
     }
 
     /// 历史会话页「继续」：同一条 agent session 已经开着就直接跳过去，否则建
-    /// 一个空的运行时投影并带上 `resume_session_id`。激活后由 `session/load` 让
+    /// 一个空的运行时投影并带上 `history_session_id`。激活后由 `session/load` 让
     /// agent 重放历史，Smelt 不再从各家私有 transcript 预填第二份消息快照。
     pub fn resume_acp_session(
         &mut self,
@@ -2836,7 +2836,7 @@ impl Workspace {
                             launch: v.launch_spec(),
                             profile_id: v.profile_id().map(str::to_string),
                             agent: Some(v.agent_kind().id().to_string()),
-                            resume_session_id: v.resume_session_id_for_save(),
+                            history_session_id: v.history_session_id_for_save(),
                             sid: Some(v.session_id().to_string()),
                             refresh_launch_from_settings: v.refresh_launch_from_settings(),
                         }),
@@ -6629,7 +6629,7 @@ mod project_tests {
                 launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude --acp"),
                 profile_id: None,
                 agent: None,
-                resume_session_id: None,
+                history_session_id: None,
                 sid: None,
                 refresh_launch_from_settings: false,
             }),
@@ -6916,7 +6916,7 @@ mod workspace_state_tests {
                     launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude"),
                     profile_id: None,
                     agent: Some("claude".into()),
-                    resume_session_id: None,
+                    history_session_id: None,
                     sid: Some(format!("sid-{name}")),
                     refresh_launch_from_settings: false,
                 }),
@@ -7063,7 +7063,9 @@ mod acp_agent_tests {
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             profile_id: Some("quant".into()),
             agent: Some("claude".into()),
-            resume_session_id: None,
+            history_session_id: Some(agent_client_protocol::schema::v1::SessionId::new(
+                "canonical-history",
+            )),
             sid: Some("acp-1".into()),
             refresh_launch_from_settings: false,
         };
@@ -7074,9 +7076,15 @@ mod acp_agent_tests {
             value.get("entries").is_none(),
             "agent transcript 是历史唯一来源，新存档不该再写 ACP entries"
         );
+        assert_eq!(value["history_session_id"], "canonical-history");
+        assert!(value.get("resume_session_id").is_none());
         let restored: AcpSaved = serde_json::from_value(value).unwrap();
 
         assert_eq!(restored.profile_id.as_deref(), Some("quant"));
+        assert_eq!(
+            restored.history_session_id.as_deref(),
+            Some("canonical-history")
+        );
         assert_eq!(
             restored
                 .launch
@@ -7085,6 +7093,25 @@ mod acp_agent_tests {
                 .map(String::as_str),
             Some("~/Claude Workspaces/quant")
         );
+    }
+
+    #[test]
+    fn legacy_resume_session_id_migrates_to_history_session_id() {
+        let restored: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "launch": { "command": "claude", "env": {} },
+            "agent": "claude",
+            "resume_session_id": "legacy-canonical"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            restored.history_session_id.as_deref(),
+            Some("legacy-canonical")
+        );
+        let migrated = serde_json::to_value(restored).unwrap();
+        assert_eq!(migrated["history_session_id"], "legacy-canonical");
+        assert!(migrated.get("resume_session_id").is_none());
     }
 
     #[test]

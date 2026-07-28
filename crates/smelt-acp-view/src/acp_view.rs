@@ -119,11 +119,11 @@ pub struct AcpView {
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
     /// 会明显卡手，所以一次会话只列一次。
     file_cache: Option<std::rc::Rc<Vec<String>>>,
-    /// agent 侧真实的 session id：握手成功后写入（从 smeltd 的快照里镜像过来），
-    /// `restart()` 拿它去尝试真续接；也存盘（main.rs AcpSaved），GUI 重开后
-    /// 同样能续。「等自己刚发那条 prompt 的回声」这类归约细节已经完全下沉到
-    /// smeltd（见 smelt_core::acp_session），这里不用再操心。
+    /// 当前 ACP 连接使用的运行时 session id，仅用于展示连接状态。
     acp_session_id: Option<SessionId>,
+    /// agent 历史存储中的 canonical id。持久化和 `session/load` 只使用它；
+    /// runtime 连接重新建立后返回的新 id 不能覆盖它。
+    history_session_id: Option<SessionId>,
     /// 会话当前可用的斜杠命令 (名字, 说明)；空 = agent 没发过这个更新。
     /// 胶囊点开列出来、点一条填进输入框——只显示数量没有任何用处。
     available_commands: Vec<(String, String)>,
@@ -268,7 +268,8 @@ impl AcpView {
             paste_hint: None,
             completion: None,
             file_cache: None,
-            acp_session_id: resume_session_id,
+            acp_session_id: None,
+            history_session_id: resume_session_id,
             available_commands: Vec::new(),
             usage: None,
             starting_since: None,
@@ -322,7 +323,7 @@ impl AcpView {
             cwd: self.cwd.clone(),
             launch: self.launch.clone(),
             agent_id: self.agent.id().to_string(),
-            resume_id: self.acp_session_id.as_ref().map(|s| s.to_string()),
+            resume_id: self.history_session_id.as_ref().map(|s| s.to_string()),
         });
         self.attach_handle(handle, cx);
         cx.notify();
@@ -434,10 +435,10 @@ impl AcpView {
         &self.sid
     }
 
-    /// 存档快照：写进 AcpSaved.resume_session_id，GUI 重开后「重新开始」
+    /// 存档快照：写进 AcpSaved.history_session_id，GUI 重开后「重新开始」
     /// 才有旧 session id 可用来尝试真续接。
-    pub fn resume_session_id_for_save(&self) -> Option<SessionId> {
-        self.acp_session_id.clone()
+    pub fn history_session_id_for_save(&self) -> Option<SessionId> {
+        self.history_session_id.clone()
     }
 
     /// 停止当前 turn（session/cancel）。agent 会以 Cancelled 收尾，相位随 TurnEnded 回 Idle。
@@ -766,7 +767,14 @@ impl AcpView {
             self.elicitation_inputs.clear();
         }
         self.status_line = snap.status_line;
-        self.acp_session_id = snap.acp_session_id.map(SessionId::new);
+        let runtime_session_id = snap.acp_session_id.map(SessionId::new);
+        self.acp_session_id = runtime_session_id.clone();
+        if let Some(history_session_id) = snap.history_session_id {
+            self.history_session_id = Some(SessionId::new(history_session_id));
+        } else if self.history_session_id.is_none() {
+            // 兼容尚未携带 history_session_id 的旧 daemon 快照。
+            self.history_session_id = runtime_session_id;
+        }
         self.supports_image = snap.supports_image;
         self.available_commands = snap.available_commands;
         self.usage = snap.usage;
@@ -1196,7 +1204,7 @@ impl Render for AcpView {
                             .starting_since
                             .map(|t| t.elapsed().as_secs())
                             .unwrap_or(0);
-                        let what = if self.acp_session_id.is_some() {
+                        let what = if self.history_session_id.is_some() {
                             "正在续接上次的会话".to_string()
                         } else {
                             format!("正在启动 {}", self.agent.label())
