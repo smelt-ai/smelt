@@ -214,9 +214,9 @@ impl AcpView {
         this
     }
 
-    /// 冷启动恢复用的占位：首次显示时自动启动。`entries` 是上次落盘的历史消息
-    /// （`Vec::new()` = 首次创建，还没有历史）；`resume_session_id` 是上次握手
-    /// 成功后 agent 分配的 session id，有它时优先真续接。
+    /// 冷启动恢复用的占位：首次显示时自动启动。`entries` 只用于读取旧版存档的
+    /// 迁移兼容；当前版本以 agent 的 `session/load` 重放作为历史唯一来源。
+    /// `resume_session_id` 是上次握手成功后 agent 分配的 session id。
     ///
     /// `saved_sid`：**这是让 GUI 重开后能真正"接上还活着的 smeltd 会话"而不是
     /// 每次都当新会话重新 spawn 子进程的关键**——smeltd 用 id 判断"这是不是同
@@ -430,11 +430,6 @@ impl AcpView {
     /// 里还活着的同一个会话，而不是每次都当新会话处理。
     pub fn session_id(&self) -> &str {
         &self.sid
-    }
-
-    /// 存档快照：main.rs 的 save_state 拿它写进 AcpSaved.entries。
-    pub fn entries_for_save(&self) -> Vec<AcpEntry> {
-        self.entries.clone()
     }
 
     /// 存档快照：写进 AcpSaved.resume_session_id，GUI 重开后「重新开始」

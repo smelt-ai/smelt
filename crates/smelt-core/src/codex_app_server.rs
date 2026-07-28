@@ -185,7 +185,6 @@ fn run(
         } else {
             ReadyKind::Fresh
         },
-        fallback_reason: None,
         supports_image: true,
     });
     publish_models(
@@ -1274,7 +1273,7 @@ while read line; do :; done
             smol::block_on(smol::future::race(
                 async { handle.event_rx.recv().await.ok() },
                 async {
-                    smol::Timer::after(Duration::from_secs(3)).await;
+                    smol::Timer::after(Duration::from_secs(10)).await;
                     None
                 },
             ))
