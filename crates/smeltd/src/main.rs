@@ -6031,6 +6031,56 @@ mod acp_tests {
     }
 
     #[test]
+    fn reopening_live_session_returns_full_history_without_relaunch() {
+        let mut reduced = AcpSessionState::default();
+        reduced.entries.push(AcpEntry::User("old question".into()));
+        reduced.entries.push(AcpEntry::Assistant {
+            text: "old answer".into(),
+            thought: false,
+        });
+        reduced.phase = AcpPhase::Idle;
+
+        let acp_sessions = new_acp_sessions();
+        let (slot, _) =
+            acp_sessions.reserve_with("acp-live", || make_acp_session_value("acp-live", reduced));
+        let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::AcpHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(Mutex::new(None)),
+        });
+
+        let (server, client) = UnixStream::pair().unwrap();
+        let reader = BufReader::new(server.try_clone().unwrap());
+        let sessions_for_open = Arc::clone(&acp_sessions);
+        let worker = thread::spawn(move || {
+            handle_acp_open(
+                server,
+                reader,
+                &serde_json::json!({
+                    "id": "acp-live",
+                    "cmd": "/must/not/be/launched"
+                }),
+                sessions_for_open,
+                Arc::new(Mutex::new(Vec::new())),
+            );
+        });
+
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["snapshot"]["entries_offset"], 0);
+        assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
+        assert!(slot.value.handle.lock().unwrap().is_some());
+
+        drop(reader);
+        drop(client);
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn one_shot_action_keeps_existing_control_client_attached() {
         let acp_sessions = new_acp_sessions();
         let (slot, _) = acp_sessions.reserve_with("acp-action", || {

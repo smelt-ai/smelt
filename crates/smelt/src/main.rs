@@ -2595,7 +2595,14 @@ impl Workspace {
         // 之前只按 agent+cwd 找，点哪条「继续」都会跳到"第一个凑巧匹配的"那条。
         let target_id = agent_client_protocol::schema::v1::SessionId::new(resume_id.clone());
         if let Some(ix) = self.find_open_acp_session(agent, &cwd, &target_id, cx) {
+            let view = match &self.sessions[ix].kind {
+                SessionKind::Acp(view) => view.clone(),
+                _ => unreachable!("find_open_acp_session only returns ACP sessions"),
+            };
             self.activate(ix, window, cx);
+            // “继续”是一次显式恢复请求，不能只激活可能已经断线、内容为空的旧
+            // View。重新 attach 会让 smeltd 发送 offset=0 的完整权威快照。
+            view.update(cx, |view, cx| view.reattach_to_daemon(window, cx));
             return;
         }
 
