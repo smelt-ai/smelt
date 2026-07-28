@@ -87,6 +87,9 @@ pub enum AcpCommand {
 pub enum AcpEvent {
     /// 启动阶段的进度文案（下载运行时 / 拉取适配器等），Starting 横幅显示。
     Status(String),
+    /// 冷恢复即将由 agent 重放完整历史。必须先清空 daemon 中的旧投影；Ready
+    /// 到达时历史可能已经同步回放完，不能再在那里清空。
+    HistoryReplayStarted,
     /// 握手完成，可以发 prompt 了。`kind` 说明这是怎么接上的——布尔的
     /// 「resumed 与否」表达不了三种情况，会让「续接成功」被渲染成「新会话」。
     Ready {
@@ -179,8 +182,9 @@ pub enum AcpEvent {
 pub enum ReadyKind {
     /// 全新会话。本地若有旧历史，UI 插一条分割线标明「以下是新对话」。
     Fresh,
-    /// `session/load` 续接：agent 随后会把完整历史重放一遍，本地快照要清空，
-    /// 否则重放内容叠在旧内容上变成两份。
+    /// `session/load` 续接：agent 会重放完整历史。不同连接实现可能在 Ready
+    /// 前后投递回放通知；投影由 `HistoryReplayStarted` 提前清空，Ready 本身
+    /// 不得再修改消息。
     ResumedWithReplay,
     /// smeltd 无缝升级继承 agent stdio fd：连接和完整内存快照都还在，不重放
     /// 历史。普通冷恢复不走这条，只能通过 `session/load` 重建投影。
@@ -823,6 +827,10 @@ async fn run_connection(
                     // modes/config are published from the real load response below.
                     let session = connection
                         .attach_session(NewSessionResponse::new(sid.clone()), Default::default())?;
+                    // Claude 等 ACP agent 会在 session/load 响应返回前同步推送历史，
+                    // SDK 会先缓冲这些通知，drive_session 再于 Ready 后逐条读出。
+                    // 因而清空事件必须排在请求之前，不能等到 Ready 再清。
+                    let _ = event_tx.try_send(AcpEvent::HistoryReplayStarted);
                     let mut load_request = LoadSessionRequest::new(sid.clone(), cwd.clone());
                     if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
                         load_request = load_request.meta(meta);

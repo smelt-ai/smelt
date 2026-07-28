@@ -211,6 +211,7 @@ impl AcpView {
             launch: this.launch.clone(),
             agent_id: agent.id().to_string(),
             resume_id: None, // 第一次开，没有旧会话可续
+            retained_entries_len: this.entries.len(),
         });
         this.attach_handle(handle, cx);
         this
@@ -324,9 +325,16 @@ impl AcpView {
             launch: self.launch.clone(),
             agent_id: self.agent.id().to_string(),
             resume_id: self.history_session_id.as_ref().map(|s| s.to_string()),
+            retained_entries_len: self.entries.len(),
         });
         self.attach_handle(handle, cx);
         cx.notify();
+    }
+
+    /// 历史页再次点“继续”时主动重新连接 smeltd。若 daemon 会话仍在，这只是
+    /// attach 并立即返回完整快照；若 GUI 之前断线留下了旧 View，也能由此修复。
+    pub fn reattach_to_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restart(window, cx);
     }
 
     /// 舞台头状态胶囊用的相位文案 + 颜色。

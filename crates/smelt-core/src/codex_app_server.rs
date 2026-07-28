@@ -357,6 +357,9 @@ fn run(
         );
         wait_response(&line_rx, next_id)?
     };
+    if resumed {
+        replay_codex_thread(&thread_result, &event_tx);
+    }
     let thread_id = thread_result
         .pointer("/result/thread/id")
         .and_then(|v| v.as_str())
@@ -396,7 +399,7 @@ fn run(
     let _ = event_tx.try_send(AcpEvent::Ready {
         session_id: SessionId::new(thread_id.clone()),
         kind: if resumed {
-            ReadyKind::ResumedKeepHistory
+            ReadyKind::ResumedWithReplay
         } else {
             ReadyKind::Fresh
         },
@@ -1719,6 +1722,79 @@ fn tool_started(item: &serde_json::Value) -> Option<(String, String, ToolKind)> 
     }
 }
 
+/// `thread/resume` 不会逐条重发历史通知；完整的持久化 turns 直接放在响应里。
+/// 把它翻译成与 ACP `session/load` 相同的事件流，让 daemon 只维护一种投影。
+fn replay_codex_thread(response: &serde_json::Value, event_tx: &smol::channel::Sender<AcpEvent>) {
+    let _ = event_tx.try_send(AcpEvent::HistoryReplayStarted);
+    let items = response
+        .pointer("/result/thread/turns")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|turn| turn.get("items").and_then(|value| value.as_array()))
+        .flatten();
+
+    for item in items {
+        match item.get("type").and_then(|value| value.as_str()) {
+            Some("userMessage") => {
+                let text = item
+                    .get("content")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| {
+                        part.get("type").and_then(|value| value.as_str()) == Some("text")
+                    })
+                    .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    let _ = event_tx.try_send(AcpEvent::UserChunk(text));
+                }
+            }
+            Some("agentMessage") => {
+                if let Some(text) = item
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .filter(|text| !text.is_empty())
+                {
+                    let _ = event_tx.try_send(AcpEvent::AgentChunk {
+                        thought: false,
+                        text: text.to_string(),
+                    });
+                }
+            }
+            Some("reasoning") => {
+                let parts = item
+                    .get("summary")
+                    .and_then(|value| value.as_array())
+                    .filter(|parts| !parts.is_empty())
+                    .or_else(|| item.get("content").and_then(|value| value.as_array()));
+                let text = parts
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    let _ = event_tx.try_send(AcpEvent::AgentChunk {
+                        thought: true,
+                        text,
+                    });
+                }
+            }
+            _ => {
+                if let Some((id, title, kind)) = tool_started(item) {
+                    let _ = event_tx.try_send(AcpEvent::ToolStarted { id, title, kind });
+                }
+                if let Some((id, status, output)) = tool_finished(item, None) {
+                    let _ = event_tx.try_send(AcpEvent::ToolFinished { id, status, output });
+                }
+            }
+        }
+    }
+}
+
 fn tool_finished(
     item: &serde_json::Value,
     streamed_output: Option<String>,
@@ -2090,6 +2166,41 @@ mod tests {
             output.as_slice(),
             [ToolOutputPart::Text(text)] if text == "done"
         ));
+    }
+
+    #[test]
+    fn resumed_thread_is_replayed_in_protocol_order() {
+        let (tx, rx) = smol::channel::unbounded();
+        let response = serde_json::json!({"result":{"thread":{"turns":[{"items":[
+            {"id":"user-1","type":"userMessage","content":[{"type":"text","text":"question"}]},
+            {"id":"reason-1","type":"reasoning","summary":["thinking"]},
+            {"id":"agent-1","type":"agentMessage","text":"answer"},
+            {"id":"tool-1","type":"commandExecution","command":"pwd","status":"completed","aggregatedOutput":"/repo"}
+        ]}]}}});
+
+        replay_codex_thread(&response, &tx);
+        drop(tx);
+        let events = smol::block_on(async {
+            let mut events = Vec::new();
+            while let Ok(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+
+        assert!(matches!(events[0], AcpEvent::HistoryReplayStarted));
+        assert!(matches!(&events[1], AcpEvent::UserChunk(text) if text == "question"));
+        assert!(matches!(
+            &events[2],
+            AcpEvent::AgentChunk { thought: true, text } if text == "thinking"
+        ));
+        assert!(matches!(
+            &events[3],
+            AcpEvent::AgentChunk { thought: false, text } if text == "answer"
+        ));
+        assert!(matches!(&events[4], AcpEvent::ToolStarted { id, .. } if id == "tool-1"));
+        assert!(matches!(&events[5], AcpEvent::ToolFinished { id, .. } if id == "tool-1"));
+        assert_eq!(events.len(), 6);
     }
 
     #[test]

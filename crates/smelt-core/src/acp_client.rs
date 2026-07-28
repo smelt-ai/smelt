@@ -28,6 +28,9 @@ pub struct AcpClientLaunch {
     /// agent 侧真实的 session id，这个字段只在“smeltd 也不认识这个 id”时
     /// （比如它刚重启过）才会被用上。
     pub resume_id: Option<String>,
+    /// 建连前 GUI 已持有的消息数。若第一份 daemon 快照到达前连接失败，终态
+    /// 快照用它作为 offset，避免把仍可展示的历史误清空。
+    pub retained_entries_len: usize,
 }
 
 fn legacy_cmd_fallback(launch: &AcpLaunchSpec) -> Option<String> {
@@ -95,9 +98,11 @@ impl Drop for AcpClientHandle {
     }
 }
 
-fn fallback_snapshot(reason: &str) -> AcpSnapshot {
+fn fallback_snapshot(reason: &str, entries_offset: usize) -> AcpSnapshot {
     AcpSnapshot {
-        entries_offset: 0,
+        // 断线只是 GUI 与 smeltd 的传输终止，不代表 daemon 中的会话历史消失。
+        // 用已接收长度作为增量偏移，AcpView 会保留现有 entries，只更新终态。
+        entries_offset,
         entries: Vec::new(),
         phase: AcpPhase::Ended(reason.to_string()),
         pending_permissions: Vec::new(),
@@ -134,20 +139,31 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            let mut known_entries_len = launch.retained_entries_len;
             let sock_path = crate::daemon_state::smeltd_sock_path();
             let conn = match UnixStream::connect(&sock_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = snapshot_tx.try_send(fallback_snapshot(&format!("连不上 smeltd：{e}")));
+                    let _ = snapshot_tx.try_send(fallback_snapshot(
+                        &format!("连不上 smeltd：{e}"),
+                        known_entries_len,
+                    ));
                     return;
                 }
             };
             let Ok(mut writer) = conn.try_clone() else {
+                let _ = snapshot_tx.try_send(fallback_snapshot(
+                    "无法建立 smeltd 双向连接",
+                    known_entries_len,
+                ));
                 return;
             };
             let req = acp_open_request(&launch);
             if writeln!(writer, "{req}").is_err() {
-                let _ = snapshot_tx.try_send(fallback_snapshot("向 smeltd 发起会话失败"));
+                let _ = snapshot_tx.try_send(fallback_snapshot(
+                    "向 smeltd 发起会话失败",
+                    known_entries_len,
+                ));
                 return;
             }
             // 握手请求已经发出去才把 conn 交给 Drop 兜底——期间若 handle 已经
@@ -191,11 +207,15 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
                 let Ok(snap) = serde_json::from_value::<AcpSnapshot>(snap_v.clone()) else {
                     continue;
                 };
+                known_entries_len = snap.entries_offset.saturating_add(snap.entries.len());
                 if snapshot_tx.try_send(snap).is_err() {
                     return; // 接收端（GUI 视图）没了
                 }
             }
-            let _ = snapshot_tx.try_send(fallback_snapshot("与 smeltd 的连接已断开"));
+            let _ = snapshot_tx.try_send(fallback_snapshot(
+                "与 smeltd 的连接已断开",
+                known_entries_len,
+            ));
         })
         .expect("spawn acp client thread");
 
@@ -225,7 +245,7 @@ pub fn kill_acp_session(id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AcpClientLaunch, acp_open_request};
+    use super::{AcpClientLaunch, acp_open_request, fallback_snapshot};
     use crate::agent_kind::AcpLaunchSpec;
 
     #[test]
@@ -237,6 +257,7 @@ mod tests {
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             agent_id: "claude".into(),
             resume_id: Some("resume-1".into()),
+            retained_entries_len: 0,
         });
 
         assert_eq!(req["op"], "acp_open");
@@ -256,9 +277,22 @@ mod tests {
             launch: AcpLaunchSpec::from_command("claude --print"),
             agent_id: "claude".into(),
             resume_id: None,
+            retained_entries_len: 0,
         });
 
         assert_eq!(req["launch"]["command"], "claude --print");
         assert_eq!(req["cmd"], "claude --print");
+    }
+
+    #[test]
+    fn disconnect_snapshot_preserves_known_history() {
+        let snapshot = fallback_snapshot("disconnected", 37);
+
+        assert_eq!(snapshot.entries_offset, 37);
+        assert!(snapshot.entries.is_empty());
+        assert!(matches!(
+            snapshot.phase,
+            crate::acp_session::AcpPhase::Ended(_)
+        ));
     }
 }

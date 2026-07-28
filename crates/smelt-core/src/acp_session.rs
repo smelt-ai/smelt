@@ -458,6 +458,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::Status(msg) => {
             state.status_line = Some(msg);
         }
+        AcpEvent::HistoryReplayStarted => {
+            state.entries.clear();
+        }
         AcpEvent::UserChunk(text) => {
             if state.awaiting_user_echo {
                 // 自己刚发那条的回声——本地已经在 apply_user_action(Prompt) 时显示过了。
@@ -479,7 +482,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             }
             state.supports_image = supports_image;
             match kind {
-                ReadyKind::ResumedWithReplay => state.entries.clear(),
+                ReadyKind::ResumedWithReplay => {}
                 ReadyKind::ResumedKeepHistory => {}
                 ReadyKind::Fresh if !state.entries.is_empty() => {
                     state.entries.push(AcpEntry::Divider(format!(
@@ -997,10 +1000,12 @@ mod tests {
     }
 
     #[test]
-    fn ready_resumed_with_replay_clears_local_entries() {
+    fn ready_does_not_erase_replay_started_before_buffered_updates() {
         let mut s = fresh_state();
         s.entries.push(AcpEntry::User("old".into()));
         s.history_session_id = Some("canonical-history".into());
+        apply_event(&mut s, AcpEvent::HistoryReplayStarted);
+        assert!(s.entries.is_empty());
         apply_event(
             &mut s,
             AcpEvent::Ready {
@@ -1009,7 +1014,11 @@ mod tests {
                 supports_image: true,
             },
         );
-        assert!(s.entries.is_empty());
+        apply_event(&mut s, AcpEvent::UserChunk("replayed question".into()));
+        assert!(matches!(
+            &s.entries[..],
+            [AcpEntry::User(text)] if text == "replayed question"
+        ));
         assert_eq!(s.acp_session_id.as_deref(), Some("runtime-session"));
         assert_eq!(s.history_session_id.as_deref(), Some("canonical-history"));
     }
@@ -1023,20 +1032,21 @@ mod tests {
             thought: false,
         });
 
-        apply_event(
-            &mut s,
-            AcpEvent::Ready {
-                session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
-                kind: ReadyKind::ResumedWithReplay,
-                supports_image: true,
-            },
-        );
+        apply_event(&mut s, AcpEvent::HistoryReplayStarted);
         apply_event(&mut s, AcpEvent::UserChunk("old question".into()));
         apply_event(
             &mut s,
             AcpEvent::AgentChunk {
                 text: "old answer".into(),
                 thought: false,
+            },
+        );
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+                kind: ReadyKind::ResumedWithReplay,
+                supports_image: true,
             },
         );
 
