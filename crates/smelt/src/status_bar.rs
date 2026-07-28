@@ -4,7 +4,7 @@
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::*;
-use gpui_component::StyledExt;
+use gpui_component::{Icon, IconName};
 
 use crate::{AgentStatus, Workspace, ui_theme};
 
@@ -112,10 +112,8 @@ impl Workspace {
                         div()
                             .id("help-entry")
                             .cursor_pointer()
-                            .text_sm()
-                            .font_semibold()
                             .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                            .child("?")
+                            .child(Icon::new(IconName::BookOpen).size(px(14.)))
                             .tooltip(|window, cx| {
                                 gpui_component::tooltip::Tooltip::new("帮助文档").build(window, cx)
                             })
