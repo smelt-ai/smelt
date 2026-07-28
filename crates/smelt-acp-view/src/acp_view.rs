@@ -18,7 +18,9 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable, StyledExt, h_flex, v_flex,
+};
 
 use agent_client_protocol::schema::v1::SessionId;
 
@@ -2022,8 +2024,37 @@ impl Render for AcpView {
         });
 
         let input_row = self.input.as_ref().map(|input| {
+            let quick_actions_enabled = matches!(self.phase, AcpPhase::Idle);
+            let quick_actions: Vec<gpui::AnyElement> = if matches!(self.agent, AcpAgentKind::Codex)
+            {
+                [
+                    ("compact", "压缩", "/compact"),
+                    ("review", "审查", "/review"),
+                    ("plan", "计划", "/plan"),
+                ]
+                .into_iter()
+                .map(|(id, label, command)| {
+                    let this = cx.entity();
+                    Button::new(format!("acp-quick-{id}"))
+                        .ghost()
+                        .xsmall()
+                        .label(label)
+                        .disabled(!quick_actions_enabled)
+                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .on_click(move |_ev, _window, cx| {
+                            this.update(cx, |view, cx| {
+                                view.send_prompt(command.to_string(), cx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect()
+            } else {
+                Vec::new()
+            };
             let usage_pill = self.usage.map(|(used, size)| {
-                let pct = ((used as f64 / size as f64) * 100.0).round() as u32;
+                // 协议异常或旧 daemon 的累计口径也不能把布局撑成几千个百分点。
+                let pct = (((used as f64 / size as f64) * 100.0).round() as u32).min(100);
                 let color = if pct >= 90 {
                     ui_theme::red()
                 } else if pct >= 75 {
@@ -2234,6 +2265,7 @@ impl Render for AcpView {
                                 .gap_2()
                                 .items_center()
                                 .flex_wrap()
+                                .children(quick_actions)
                                 .children(usage_pill)
                                 .child(model_pill)
                                 .children(config_pills),

@@ -3418,6 +3418,12 @@ impl Workspace {
                                             "安装 hooks"
                                         })
                                         .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
+                                            // 先记用户意图：即使某个 provider 本次安装失败，
+                                            // 下次启动也会继续校正，而不是悄悄退回关闭。
+                                            apply_agent_ui(|c| {
+                                                c.agent_hooks_enabled = true;
+                                                c.agent_hooks_preference_legacy = false;
+                                            }, cx);
                                             let result = install_agent_hooks();
                                             match result {
                                                 Ok(()) => {
@@ -3452,6 +3458,11 @@ impl Workspace {
                                         .hover(|s| s.bg(border))
                                         .child("移除 Smelt hooks")
                                         .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
+                                            // 先关闭自动安装，避免部分移除失败后重启又被装回。
+                                            apply_agent_ui(|c| {
+                                                c.agent_hooks_enabled = false;
+                                                c.agent_hooks_preference_legacy = false;
+                                            }, cx);
                                             let result = uninstall_agent_hooks();
                                             match result {
                                                 Ok(()) => {

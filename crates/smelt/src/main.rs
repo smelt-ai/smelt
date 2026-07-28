@@ -251,7 +251,7 @@ pub(crate) use smelt_core::agent_status::AgentStatus;
 // crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
 // 的裸名字。
 pub(crate) use smelt_ui::daemon_states_global::{
-    AgentNotificationKind, DaemonStates, PendingAgentNotifs,
+    AgentNotificationKind, DaemonStates, PendingAgentNotification, PendingAgentNotifs,
 };
 
 /// 取某个 pane 对应的守护状态；没有全局单例（比如极早期尚未走到注册那一步）或
@@ -271,6 +271,11 @@ fn awaiting_notification_for_transition(
     previous_phase: Option<terminal::DaemonPhase>,
     state: &terminal::DaemonSessionState,
 ) -> Option<(String, String, AgentNotificationKind)> {
+    // 未启用结构化事件时，终端视图仍直接消费 OSC 9/99/777。这里再入队会让
+    // daemon 状态通知和原 OSC 通知各弹一次。
+    if !state.structured_events {
+        return None;
+    }
     let entered_notifiable = matches!(
         state.phase,
         terminal::DaemonPhase::AwaitingApproval
@@ -295,6 +300,18 @@ fn awaiting_notification_for_transition(
         _ => return None,
     };
     Some((title, message, kind))
+}
+
+fn pending_agent_notification(
+    state: &terminal::DaemonSessionState,
+    transition: (String, String, AgentNotificationKind),
+) -> PendingAgentNotification {
+    PendingAgentNotification {
+        session_id: state.id.clone(),
+        title: transition.0,
+        message: transition.1,
+        kind: transition.2,
+    }
 }
 
 fn agent_notification_enabled(
@@ -1645,6 +1662,8 @@ struct Workspace {
     session_list_inflight: HashSet<String>,
     /// 当前选中查看的历史会话（路径 + 解析出的对话内容）；None 表示未选。
     session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
+    /// 历史会话右侧消息详情的可变高度虚拟列表状态。
+    history_detail_list_state: gpui::ListState,
     /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
     session_detail_gen: u64,
     /// 历史会话页当前显示的是「会话」还是「记忆」（同一套左列表 + 右详情布局）。
@@ -1933,6 +1952,7 @@ impl Workspace {
             session_list: HashMap::new(),
             session_list_inflight: HashSet::new(),
             session_detail: None,
+            history_detail_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(800.)),
             session_detail_gen: 0,
             history_pane: HistoryPane::Sessions,
             history_agent: settings::AcpAgentKind::Claude,
@@ -4941,6 +4961,7 @@ impl Workspace {
                     cwd,
                     list_state,
                     &self.session_detail,
+                    self.history_detail_list_state.clone(),
                     memories,
                     self.memory_selected,
                     cx,
@@ -5082,13 +5103,43 @@ impl Render for Workspace {
         // 状态通道：等批准 / 等输入 → gpui-component Notification
         if let Some(pending) = cx.try_global::<PendingAgentNotifs>() {
             let batch = std::mem::take(&mut *pending.0.lock().unwrap());
-            for (title, message, kind) in batch {
-                // 等批准类改由右上角阻塞 toast 展示（派生态，见 toast.rs），
-                // 这里不再重复弹组件通知，避免同屏双弹。
-                if kind == AgentNotificationKind::Approval {
-                    continue;
+            for notification in batch {
+                // 铃铛面板：跟 OSC 路径共用同一个 TerminalView.notification 字段，
+                // 结构化事件才有机会进这个列表（之前只有 OSC/响铃能写它）。顺带
+                // 判断这条通知对应的 pane 是不是正在看——跟 OSC 路径同一口径：
+                // 正在看就不弹 toast（你自己看得见），只有真没在看才弹。找不到对应
+                // pane（比如会话还没落地成 leaf）就只走 toast/系统通知。
+                let mut is_current_view = false;
+                for (ix, sess) in self.sessions.iter().enumerate() {
+                    let anchor = sess.anchor_id();
+                    for leaf in sess.term_leaves() {
+                        if leaf.read(cx).session_id() == notification.session_id {
+                            if ix == active && leaf.entity_id() == anchor {
+                                is_current_view = true;
+                            }
+                            leaf.update(cx, |t, cx| {
+                                t.note_structured_notification(notification.message.clone(), cx);
+                            });
+                        }
+                    }
                 }
-                window.push_notification(Notification::info(message).title(title), cx);
+                // 等批准类的前台展示已经由右上角阻塞卡片负责（派生态，见
+                // toast.rs），前台不再重复弹组件通知；但卡片只在 App 前台可见，
+                // 切到后台时必须走系统通知，不能像之前那样整条跳过。
+                if window.is_window_active() {
+                    if notification.kind != AgentNotificationKind::Approval && !is_current_view {
+                        window.push_notification(
+                            Notification::info(notification.message).title(notification.title),
+                            cx,
+                        );
+                    }
+                } else {
+                    status_item::deliver_notification(
+                        &notification.session_id,
+                        &notification.title,
+                        &notification.message,
+                    );
+                }
             }
         }
 
@@ -6061,16 +6112,29 @@ fn main() {
         let daemon_states = DaemonStates::default();
         cx.set_global(daemon_states.clone());
         cx.set_global(PendingAgentNotifs::default());
-        cx.set_global(settings::load_agent_ui_config());
+        let agent_ui_config = settings::load_agent_ui_config();
+        let agent_hooks_enabled = agent_ui_config.agent_hooks_enabled;
+        let legacy_agent_hooks_preference = agent_ui_config.agent_hooks_preference_legacy;
+        cx.set_global(agent_ui_config);
         // hook 配置和 helper 必须作为一个版本单元升级：先把 App 内最新版同步到稳定
         // managed 路径，再改写各 provider 的 hook 命令。失败时保留旧 helper，不阻塞 GUI。
         if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
-        // 旧 Copilot hook 缺少事件名注入，升级后结构化 Running/Done 才能生效。
-        settings::upgrade_owned_copilot_hooks();
-        // Codex app-server 握手包含阻塞 IO，已有 Smelt hook 的升级与信任放后台执行。
-        thread::spawn(settings::upgrade_owned_codex_hooks_and_trust);
+        // 新安装默认开启托管 hooks；已有配置缺少开关时保持关闭。安装含 Codex
+        // app-server 信任握手和文件 IO，全部放后台，不能阻塞首帧。
+        if agent_hooks_enabled {
+            thread::spawn(|| {
+                if let Err(error) = settings::install_agent_hooks() {
+                    eprintln!("[workspace] 自动安装 Agent hooks 失败：{error}");
+                }
+            });
+        } else if legacy_agent_hooks_preference {
+            // 升级自旧版本、尚无开关的用户维持原行为：只修复 Smelt 已拥有的
+            // hooks，不给从未启用过集成的人新增配置。
+            settings::upgrade_owned_copilot_hooks();
+            thread::spawn(settings::upgrade_owned_codex_hooks_and_trust);
+        }
         let (daemon_state_tx, daemon_state_rx) =
             smol::channel::unbounded::<terminal::DaemonStateEvent>();
         thread::spawn(move || {
@@ -6099,7 +6163,9 @@ fn main() {
                                             s,
                                         ) {
                                             if agent_notification_enabled(&notify_config, entry.2) {
-                                                q.lock().unwrap().push(entry);
+                                                q.lock()
+                                                    .unwrap()
+                                                    .push(pending_agent_notification(s, entry));
                                             }
                                         }
                                     }
@@ -6118,7 +6184,9 @@ fn main() {
                                         &s,
                                     ) {
                                         if agent_notification_enabled(&notify_config, entry.2) {
-                                            q.lock().unwrap().push(entry);
+                                            q.lock()
+                                                .unwrap()
+                                                .push(pending_agent_notification(&s, entry));
                                         }
                                     }
                                 }
@@ -6646,6 +6714,17 @@ mod daemon_state_notification_tests {
                 "会话 session-".into(),
                 AgentNotificationKind::Success
             ))
+        );
+    }
+
+    #[test]
+    fn unstructured_osc_completion_stays_on_terminal_notification_path() {
+        let mut state = daemon_state("session-12345678", DaemonPhase::Succeeded);
+        state.structured_events = false;
+
+        assert_eq!(
+            awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state),
+            None
         );
     }
 

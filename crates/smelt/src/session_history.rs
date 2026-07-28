@@ -951,6 +951,7 @@ pub fn history_view(
     cwd: Option<String>,
     list: HistoryListState,
     detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
+    detail_list_state: gpui::ListState,
     memories: Option<Rc<Vec<MemoryEntry>>>,
     memory_selected: Option<usize>,
     cx: &mut Context<Workspace>,
@@ -1226,94 +1227,42 @@ pub fn history_view(
         Some((_, d)) if d.turns.is_empty() => {
             placeholder_view("这份会话没有可展示的对话内容", muted).into_any_element()
         }
-        Some((_, d)) => div()
-            .id("session-detail")
+        Some((_, d)) => {
+            let detail = d.clone();
+            let workspace = cx.entity();
+            let agent_label = agent.short_label();
+            gpui::list(detail_list_state, move |i, _window, app| {
+                workspace.update(app, |_, _cx| {
+                    let turn = &detail.turns[i];
+                    div()
+                        .w_full()
+                        .px_3()
+                        .pb_3()
+                        .child(history_turn(
+                            turn,
+                            i,
+                            agent_label,
+                            muted,
+                            fg,
+                            accent,
+                            secondary,
+                        ))
+                        .into_any_element()
+                })
+            })
+            .w_full()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_3()
-            .children(d.turns.iter().enumerate().map(|(i, t)| {
-                let role = if t.is_user { "用户" } else { "Claude" };
-                let role_color = if t.is_user { accent } else { fg };
-                let bubble_bg = if t.is_user {
-                    accent.opacity(0.12)
-                } else {
-                    secondary
-                };
-                // 工具名按出现顺序去重计数，多次调用同一工具合并成一行摘要
-                // （比如连续 3 次 Bash 就显示"Bash ×3"），不然长会话里全是重复胶囊。
-                let tool_summary = (!t.tools.is_empty()).then(|| {
-                    let mut order: Vec<&String> = Vec::new();
-                    let mut counts: HashMap<&String, usize> = HashMap::new();
-                    for tool in &t.tools {
-                        counts
-                            .entry(tool)
-                            .and_modify(|c| *c += 1)
-                            .or_insert_with(|| {
-                                order.push(tool);
-                                1
-                            });
-                    }
-                    order
-                        .into_iter()
-                        .map(|name| {
-                            let c = counts[name];
-                            if c > 1 {
-                                format!("{name} ×{c}")
-                            } else {
-                                name.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                });
-                v_flex()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(8.))
-                    .bg(bubble_bg)
-                    .when(t.is_user, |el| el.max_w(px(560.)))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_baseline()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .text_sm()
-                                    .text_color(role_color)
-                                    .child(role),
-                            )
-                            .children(t.timestamp.map(|ts| {
-                                div().text_xs().text_color(muted).child(
-                                    ts.with_timezone(&chrono::Local)
-                                        .format("%m-%d %H:%M")
-                                        .to_string(),
-                                )
-                            })),
-                    )
-                    // 必须逐气泡给唯一 id：便捷函数 text::markdown() 拿调用处代码位置
-                    // 当 id，循环里所有气泡会共享同一份 TextView 状态（文本互踩、高度
-                    // 测量错乱，气泡整个叠在一起）。
-                    .child(div().text_sm().text_color(fg).child(
-                        crate::markdown_mermaid::markdown_view(("turn-md", i), t.text.clone()),
-                    ))
-                    .children(
-                        tool_summary
-                            .map(|s| div().text_xs().text_color(muted).child(format!("🔧 {s}"))),
-                    )
-                    .into_any_element()
-            }))
-            .into_any_element(),
+            .min_w_0()
+            .pt_3()
+            .into_any_element()
+        }
     };
 
     let detail_body = v_flex()
         .flex_1()
         .min_h_0()
+        .min_w_0()
         .children(detail_header)
         .child(turns_body);
 
@@ -1326,10 +1275,12 @@ pub fn history_view(
             div()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .flex()
                 .child(
                     div()
                         .w(px(280.))
+                        .flex_none()
                         .flex()
                         .flex_col()
                         .min_h_0()
@@ -1339,6 +1290,86 @@ pub fn history_view(
                 )
                 .child(detail_body),
         )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_turn(
+    turn: &Turn,
+    index: usize,
+    agent_label: &'static str,
+    muted: Hsla,
+    fg: Hsla,
+    accent: Hsla,
+    secondary: Hsla,
+) -> AnyElement {
+    let role = if turn.is_user { "用户" } else { agent_label };
+    let role_color = if turn.is_user { accent } else { fg };
+    let bubble_bg = if turn.is_user {
+        accent.opacity(0.12)
+    } else {
+        secondary
+    };
+    let tool_summary = (!turn.tools.is_empty()).then(|| {
+        let mut order: Vec<&String> = Vec::new();
+        let mut counts: HashMap<&String, usize> = HashMap::new();
+        for tool in &turn.tools {
+            counts
+                .entry(tool)
+                .and_modify(|count| *count += 1)
+                .or_insert_with(|| {
+                    order.push(tool);
+                    1
+                });
+        }
+        order
+            .into_iter()
+            .map(|name| match counts[name] {
+                count if count > 1 => format!("{name} ×{count}"),
+                _ => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    });
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .rounded(px(8.))
+        .bg(bubble_bg)
+        .when(turn.is_user, |element| element.max_w(px(560.)))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_baseline()
+                .child(
+                    div()
+                        .font_semibold()
+                        .text_sm()
+                        .text_color(role_color)
+                        .child(role),
+                )
+                .children(turn.timestamp.map(|timestamp| {
+                    div().text_xs().text_color(muted).child(
+                        timestamp
+                            .with_timezone(&chrono::Local)
+                            .format("%m-%d %H:%M")
+                            .to_string(),
+                    )
+                })),
+        )
+        .child(div().w_full().min_w_0().text_sm().text_color(fg).child(
+            crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone()),
+        ))
+        .children(tool_summary.map(|summary| {
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(format!("🔧 {summary}"))
+        }))
+        .into_any_element()
 }
 
 /// 会话来源 tab 上的一个按钮，选中态用 accent 底色标出来（跟 `pane_button` 同款
@@ -1639,6 +1670,7 @@ impl Workspace {
         self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
         let r#gen = self.session_detail_gen;
         self.session_detail = None;
+        self.history_detail_list_state.reset(0);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1652,6 +1684,7 @@ impl Workspace {
                     return;
                 }
                 if let Some(detail) = detail {
+                    this.history_detail_list_state.reset(detail.turns.len());
                     this.session_detail = Some((path, Rc::new(detail)));
                 }
                 cx.notify();
