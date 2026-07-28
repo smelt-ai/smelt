@@ -41,12 +41,14 @@ custom commands are never used to infer a kind. A migrated launch
 configuration is written back immediately.
 
 Older workspace leaves receive the same conservative agent-kind inference from
-their saved launch command. Existing leaves do not have a reliably recoverable
-agent session ID, so migration leaves `resume_state` empty rather than guessing
-the newest history file for a project. If their daemon PTY is still alive they
-continue to attach normally. If it is later lost, restoration shows the
-explicit missing-ID error. Closing and relaunching the agent once under the
-migrated launch configuration creates a fully bound, resumable leaf.
+their saved launch command. Migration runs against the raw JSON and only
+backfills leaves where the `agent_kind` key is absent; an explicit `null`
+remains an ordinary-terminal choice. Existing leaves do not have a reliably
+recoverable agent session ID, so migration leaves `resume_state` empty rather
+than guessing the newest history file for a project. If their daemon PTY is
+still alive they continue to attach normally. If it is later lost, restoration
+shows the explicit missing-ID error. Closing and relaunching the agent once
+under the migrated launch configuration creates a fully bound, resumable leaf.
 
 ## Session identity binding
 
