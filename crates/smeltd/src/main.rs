@@ -3860,8 +3860,8 @@ fn compute_acp_daemon_phase(reduced: &smelt_core::acp_session::AcpSessionState) 
 
 fn acp_pending_question(reduced: &smelt_core::acp_session::AcpSessionState) -> Option<String> {
     reduced
-        .permission
-        .as_ref()
+        .permissions
+        .first()
         .map(|p| p.question.clone())
         .or_else(|| reduced.elicitation.as_ref().map(|e| e.message.clone()))
 }
@@ -4044,14 +4044,24 @@ fn apply_acp_user_action(
                 let _ = h.cmd_tx.try_send(AcpCommand::Cancel);
             }
         }
-        AcpUserAction::SetModel(model_id) => {
+        AcpUserAction::SetConfigOption {
+            config_id,
+            value_id,
+        } => {
             if let Some(h) = sess.handle.lock().unwrap().as_ref() {
-                let _ = h.cmd_tx.try_send(AcpCommand::SetModel(model_id));
+                let _ = h.cmd_tx.try_send(AcpCommand::SetConfigOption {
+                    config_id,
+                    value_id,
+                });
             }
         }
-        AcpUserAction::PermissionSelect { option_id } => {
+        AcpUserAction::PermissionSelect {
+            tool_call_id,
+            option_id,
+        } => {
             smelt_core::acp_session::select_permission(
                 &mut sess.reduced.lock().unwrap(),
+                &tool_call_id,
                 &option_id,
             );
             push_acp_snapshot(sess, false);
@@ -6312,7 +6322,7 @@ mod acp_tests {
         let mut s = AcpSessionState::default();
         assert_eq!(acp_pending_question(&s), None);
 
-        s.permission = Some(LivePermission {
+        s.permissions.push(LivePermission {
             question: "要不要覆盖这个文件？".into(),
             tool_call_id: "t1".into(),
             options: Vec::new(),

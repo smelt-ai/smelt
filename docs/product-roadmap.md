@@ -34,7 +34,7 @@ flowchart TB
 | Provider | ACP 形态 | smelt 怎么交付 | 启动（出厂默认） |
 |----------|----------|----------------|------------------|
 | **Claude** | **适配器**（`claude-agent-acp`） | **受管 bun 自动拉包** | `bunx @agentclientprotocol/claude-agent-acp@<锁版本>` |
-| **Codex** | **适配器**（`codex-acp`） | **受管 bun 自动拉包** | `bunx @agentclientprotocol/codex-acp@<锁版本>` |
+| **Codex** | **适配器**（`codex-acp`） | **受管 bun 自动拉包** | `bunx --bun @agentclientprotocol/codex-acp@1.1.7` |
 | **Copilot** | **原生**（CLI 内置 ACP server） | 用户本机已装 `copilot`；smelt 不代装 CLI | `copilot --acp --stdio` |
 | **Grok** | **原生**（Grok Build 官方 ACP） | 用户本机已装 / 官方入口；smelt 不代装 CLI | 以官方 `agent stdio` 为准 |
 

@@ -113,6 +113,8 @@ impl AcpAgentKind {
 pub fn default_acp_cmd() -> String {
     // bunx 由 smelt 解析到受管 bun（~/.smelt/runtime，首次自动下载，见 acp_conn.rs）；
     // 适配器锁版本——方言适配与回归测试都对着这个版本做，升级是主动行为。
+    // 启动层会优先将本机 `claude` 注入 CLAUDE_CODE_EXECUTABLE；没装才使用 SDK
+    // 携带的原生二进制，避免本机 CLI 与适配器运行时版本脱节。
     //
     // --bun：强制 bunx 用 bun 自己的运行时执行，不 fallback 到系统 Node——实测
     // 发现这个适配器声明了 `engines.node >= 22`，bunx 默认会尊重这个声明主动
@@ -137,11 +139,10 @@ pub fn default_acp_copilot_cmd() -> String {
 }
 
 pub fn default_acp_codex_cmd() -> String {
-    // Codex CLI 自己**没有** ACP 入口（`codex --help` 只有 mcp / mcp-server），
-    // 走 Zed 维护的适配器包；它按平台分发原生二进制（optionalDependencies），
-    // bunx 会自动取对应架构那份。同样锁版本，理由见 default_acp_cmd。
-    // 登录态复用 codex CLI 的 `~/.codex`。
-    "bunx --bun @zed-industries/codex-acp@0.16.0".to_string()
+    // Codex CLI 自己没有 ACP 入口，走 ACP 官方维护的适配器。启动层会自动探测
+    // 本机 `codex` 并作为 CODEX_PATH 传给适配器；没装才回退 npm 包携带的版本。
+    // 同样锁适配器版本，避免上游更新后在未验证的情况下改变协议方言。
+    "bunx --bun @agentclientprotocol/codex-acp@1.1.7".to_string()
 }
 
 pub fn default_acp_grok_cmd() -> String {
