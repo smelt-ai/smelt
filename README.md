@@ -142,7 +142,8 @@ cargo test
 
 `smeltd` 由 GUI 按需自动拉起并托管（独立进程组，GUI 退出不波及），**不需要手动运行**。
 它以字节流 + 重放 + 尺寸协商的方式为每个终端会话保活，重开 GUI 时按会话 id reattach。
-守护常驻 `~/.smelt/bin/smeltd`——不住在 App 包里，换包 / 在线更新才不会连带杀掉会话。
+守护常驻 `~/.smelt/bin/smeltd`；App 启动时也会把随 DMG 分发的 `smelt-notify` 同步到
+`~/.smelt/bin/smelt-notify`，保证 hooks 在 GUI 关闭时仍使用当前版本。
 
 手机端 H5（`remote-web/`，Preact + Tailwind + xterm）在编译期由 `rust-embed` 打进
 `smeltd` / `gateway`，所以只拷二进制也能跑；改前端后需重新 `npm run build` 再 `cargo build`。

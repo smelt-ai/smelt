@@ -6,8 +6,8 @@
 //!
 //! 分组标题行：caret（折叠）+ 项目色点 + 项目名 + 会话数 + 聚合状态点 + `+`
 //! 下拉（按通道分组：终端 / 对话）；worktree 分组右键补「删除 Worktree」。
-//! 会话行：类型标识（agent 紫圆 / 终端绿方）+ 名称 + 状态点 + 副标题 + 关闭，
-//! 支持右键（新建任务 / 重命名）、拖拽排序、分屏子行。
+//! 会话行：名称 + 状态点 + 副标题 + 关闭，支持右键（新建任务 / 重命名）、
+//! 拖拽排序、分屏子行。颜色只表达状态，避免左右圆点使用两套颜色语义。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
@@ -421,10 +421,15 @@ impl Workspace {
                         .when(collapsed && agg != AgentStatus::Idle, |d| {
                             d.child(
                                 div()
+                                    .id(("proj-status-dot", pix))
                                     .flex_shrink_0()
                                     .size(px(6.))
                                     .rounded_full()
-                                    .bg(ui_theme::session_dot_color(agg)),
+                                    .bg(ui_theme::session_dot_color(agg))
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(status_text(agg))
+                                            .build(window, cx)
+                                    }),
                             )
                         })
                         .child(
@@ -718,9 +723,7 @@ impl Workspace {
                 let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
                 let is_active = ix == active;
                 let entity_id = entity_ids[ix];
-                let is_acp = matches!(self.sessions[ix].kind, SessionKind::Acp(_));
                 // 单行行高：副标题只保留「有增量信息」的部分——分屏数。
-                // agent 名（claude-agent-acp）已由紫色类型点表达，状态由状态点表达。
                 let subtitle = match &self.sessions[ix].kind {
                     SessionKind::Acp(_) => None,
                     SessionKind::Term { .. } => {
@@ -747,19 +750,6 @@ impl Workspace {
                 // 分屏组（无父行）要复用「拖拽排序」，但标题会被下面父行的 on_drag
                 // 吃掉所有权，先给分屏分支留一份克隆。
                 let drag_title_grp = drag_title.clone();
-
-                // 类型标识：agent 紫圆点 / 终端绿方块。
-                // 会话标记一律圆点（项目是方块），颜色区分类型：紫 = agent
-                // 消息流、绿 = 终端。形状管层级、颜色管类型，各司其职。
-                let type_dot: AnyElement = div()
-                    .size(px(7.))
-                    .rounded_full()
-                    .bg(rgb(if is_acp {
-                        ui_theme::purple()
-                    } else {
-                        ui_theme::green()
-                    }))
-                    .into_any_element();
 
                 let dragging = cx.has_active_drag();
                 let make_hint = |before: bool, e_hint: Entity<Workspace>| {
@@ -838,7 +828,20 @@ impl Workspace {
                                 .bg(rgb(ui_theme::text_bright())),
                         )
                     })
-                    .child(div().flex_shrink_0().child(type_dot))
+                    // 状态点放在会话名之前，扫视列表时先读状态、再读会话；悬停显示
+                    // 完整状态名，颜色不再需要靠记忆猜。
+                    .child(
+                        div()
+                            .id(("sess-status-dot", ix))
+                            .flex_shrink_0()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(ui_theme::session_dot_color(status))
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(status_text(status))
+                                    .build(window, cx)
+                            }),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -890,10 +893,9 @@ impl Workspace {
                     // 状态文字只在「要人管」时才出（空闲/运行中靠状态点表达就够，
                     // 每行都写一遍「空闲」等于用一整行高度说一句废话）。
                     //
-                    // 它和下面的状态点在 hover 时一起淡出：右端要交给 absolute 操作条
-                    // 浮层，不淡出的话浮层的背景会盖掉半个标签，「需要处理」只剩「需要」，
-                    // 看着像文字坏了。用 opacity 淡出而不是不渲染——位置留着，标题宽度
-                    // 不变，才不会真的抖。
+                    // 它在 hover 时淡出：右端要交给 absolute 操作条浮层，不淡出的话
+                    // 浮层的背景会盖掉半个标签，「需要处理」只剩「需要」。用 opacity
+                    // 淡出而不是不渲染，标题宽度不变，才不会真的抖。
                     .children(attention_label.map(|label| {
                         div()
                             .flex_shrink_0()
@@ -903,18 +905,9 @@ impl Workspace {
                             .child(label)
                     }))
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(ui_theme::session_dot_color(status))
-                            .group_hover(SESS_ROW_GROUP, |s| s.opacity(0.0)),
-                    )
-                    .child(
                         // 右端操作条：拖拽手柄 + 关闭。absolute 浮在行右端，平时不占位
-                        //（status dot 因此贴到最右、无留白），hover 那行才淡入、盖在
-                        // status dot 上（VSCode 行内 action 同款）。背景取行当前底色
-                        //（选中 bg_selected / 否则 bg_row_hover）才能把下面盖干净。
+                        // hover 那行才淡入（VSCode 行内 action 同款）。背景取行当前底色
+                        //（选中 bg_selected / 否则 bg_row_hover）才能把标签盖干净。
                         div()
                             .absolute()
                             .top(px(1.))
@@ -1112,10 +1105,17 @@ impl Workspace {
                                 })
                                 .child(
                                     div()
+                                        .id(("pane-status-dot", ix * 100 + lix))
                                         .flex_shrink_0()
                                         .size(px(6.))
                                         .rounded_full()
-                                        .bg(ui_theme::session_dot_color(p_status)),
+                                        .bg(ui_theme::session_dot_color(p_status))
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(status_text(
+                                                p_status,
+                                            ))
+                                            .build(window, cx)
+                                        }),
                                 )
                                 .child(
                                     div()

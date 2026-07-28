@@ -18,6 +18,15 @@ const PREVIOUS_CODEX_ACP_CMD: &str = "bunx --bun @agentclientprotocol/codex-acp@
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentUiConfig {
+    /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。这里故意使用普通
+    /// `#[serde(default)]`：已有配置文件缺少该字段时保持关闭；全新安装通过
+    /// `Default` 得到开启，避免升级时未经同意改写老用户的 agent 配置。
+    #[serde(default)]
+    pub agent_hooks_enabled: bool,
+    /// 旧配置文件没有 hooks 开关：运行时保留旧行为（只升级已经属于 Smelt 的
+    /// hooks），但不替用户安装新的。纯迁移信息，不写回配置文件。
+    #[serde(skip)]
+    pub agent_hooks_preference_legacy: bool,
     #[serde(default = "default_true", alias = "notify_awaiting")]
     pub notify_approval: bool,
     #[serde(default = "default_true")]
@@ -26,6 +35,8 @@ pub struct AgentUiConfig {
     pub notify_success: bool,
     #[serde(default = "default_true")]
     pub notify_failure: bool,
+    #[serde(default = "default_true")]
+    pub notify_terminal_bell: bool,
     /// Claude ACP 会话的 agent 启动命令（空白分词）。默认 Claude 官方适配器；权限门
     /// 保留——结构化审批正是这条通道的卖点，别在这里加 bypass 类参数。
     ///
@@ -84,10 +95,13 @@ impl AgentUiConfig {
 impl Default for AgentUiConfig {
     fn default() -> Self {
         Self {
+            agent_hooks_enabled: true,
+            agent_hooks_preference_legacy: false,
             notify_approval: true,
             notify_input: true,
             notify_success: true,
             notify_failure: true,
+            notify_terminal_bell: true,
             acp_cmd: default_acp_cmd(),
             acp_copilot_cmd: default_acp_copilot_cmd(),
             acp_codex_cmd: default_acp_codex_cmd(),
@@ -110,6 +124,9 @@ pub fn load_agent_ui_config() -> AgentUiConfig {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let mut config: AgentUiConfig = smelt_core::json_store::load_json(path);
+    config.agent_hooks_preference_legacy = legacy_value
+        .as_ref()
+        .is_some_and(|value| value.get("agent_hooks_enabled").is_none());
     let mut migrated = legacy_value
         .as_ref()
         .is_some_and(|value| migrate_legacy_notification_setting(&mut config, value));
@@ -197,6 +214,21 @@ mod tests {
         assert!(!config.notify_input);
         assert!(config.notify_success);
         assert!(config.notify_failure);
+    }
+
+    #[test]
+    fn new_install_enables_hooks_but_legacy_config_does_not() {
+        assert!(AgentUiConfig::default().agent_hooks_enabled);
+        assert!(!AgentUiConfig::default().agent_hooks_preference_legacy);
+
+        let legacy: AgentUiConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!legacy.agent_hooks_enabled);
+
+        let explicit: AgentUiConfig = serde_json::from_value(serde_json::json!({
+            "agent_hooks_enabled": true
+        }))
+        .unwrap();
+        assert!(explicit.agent_hooks_enabled);
     }
 
     #[test]

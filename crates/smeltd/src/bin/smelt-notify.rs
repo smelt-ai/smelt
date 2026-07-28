@@ -55,6 +55,7 @@ fn run() -> Option<()> {
 /// phase 字符串必须跟 smeltd.rs 里 `Phase` 枚举的 `#[serde(rename_all =
 /// "snake_case")]` 对应（thinking / executing_tool / awaiting_approval /
 /// waiting_for_user / idle / dead），两边不同源、靠字符串约定对齐。
+#[cfg(test)]
 fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<String>)> {
     map_hook_event_for_provider(hook, "claude")
 }
@@ -63,14 +64,22 @@ fn map_hook_event_for_provider(
     hook: &serde_json::Value,
     provider: &str,
 ) -> Option<(&'static str, Option<String>)> {
-    let event = hook["hook_event_name"].as_str()?;
+    // 兼容不带 hook_event_name 的 Copilot 版本：安装器按配置项把事件名注入环境变量。
+    // 有协议原生字段时始终优先使用它。
+    let event_from_env;
+    let event = if let Some(event) = hook["hook_event_name"].as_str() {
+        event
+    } else {
+        event_from_env = std::env::var("SMELT_HOOK_EVENT").ok()?;
+        event_from_env.as_str()
+    };
     match event {
         // 会话刚起、hooks 链路第一次有机会发声——不上报的话，Idle 态和「hooks
         // 根本没装/装的是旧配置/socket 连不上」在 UI 上长得一模一样；有这一条，
         // DaemonStates 里出现记录本身就是「链路确认通了」的信号。
-        "SessionStart" => Some(("idle", None)),
-        "UserPromptSubmit" => Some(("thinking", None)),
-        "PreToolUse" => {
+        "SessionStart" | "sessionStart" => Some(("idle", None)),
+        "UserPromptSubmit" | "userPromptSubmitted" => Some(("thinking", None)),
+        "PreToolUse" | "preToolUse" => {
             if hook["tool_name"].as_str().is_some_and(|tool| {
                 matches!(
                     tool.to_ascii_lowercase().as_str(),
@@ -82,11 +91,11 @@ fn map_hook_event_for_provider(
             // question 槽位复用为「当前工具」展示（结构面板 / 总览）。
             Some(("executing_tool", describe_tool_call(hook)))
         }
-        "PostToolUse" => Some(("thinking", None)),
+        "PostToolUse" | "postToolUse" => Some(("thinking", None)),
         // 工具跑挂了：跟 PostToolUse 一样回到 thinking（agent 马上会看着错误决定
         // 下一步），但 question 带上失败标记——不然「刚才那个工具是不是炸了」在
         // UI 上完全看不出来，跟正常跑完长得一样。
-        "PostToolUseFailure" => {
+        "PostToolUseFailure" | "postToolUseFailure" => {
             let tool = hook["tool_name"].as_str().unwrap_or("工具");
             let err = first_present_str(hook, &["error", "error_message", "tool_error", "reason"]);
             let q = match err {
@@ -96,15 +105,15 @@ fn map_hook_event_for_provider(
             Some(("thinking", Some(q)))
         }
         // 独立的权限请求事件（比 Notification 更明确），见官方 hooks 文档。
-        "PermissionRequest" if provider != "copilot" => {
+        "PermissionRequest" | "permissionRequest" if provider != "copilot" => {
             let tool = hook["tool_name"].as_str().unwrap_or("");
             let q = format!("请求执行 {tool}");
             Some(("awaiting_approval", Some(q)))
         }
         // Copilot 在自身权限引擎作出 allow/deny/ask 决定前就发送此事件；只有后续
         // Notification(permission_prompt) 才证明用户真的看到了审批框。
-        "PermissionRequest" => None,
-        "Notification" => {
+        "PermissionRequest" | "permissionRequest" => None,
+        "Notification" | "notification" => {
             // Notification 不都是"等审批"——notification_type 区分子类型，
             // 认不出来的子类型不改 phase（比如 auth_success 这种跟"要不要
             // 批准/输入"无关的通知）。
@@ -127,8 +136,8 @@ fn map_hook_event_for_provider(
             Some(("executing_tool", Some(q)))
         }
         // 子任务做完，主 agent 回去汇总/继续思考。
-        "SubagentStop" => Some(("thinking", None)),
-        "Stop" => Some(("succeeded", None)),
+        "SubagentStop" | "subagentStop" => Some(("thinking", None)),
+        "Stop" | "agentStop" => Some(("succeeded", None)),
         // 回合因 API 错误中断，跟正常「说完了等你」（Stop）语义不同——同样落
         // waiting_for_user（协议里没有更细的档位，见 status_color 只到五色），
         // 但 question 标出「出错」，detail_line 上能看出差别，不会跟正常收尾混淆。
@@ -140,7 +149,7 @@ fn map_hook_event_for_provider(
             };
             Some(("failed", Some(q)))
         }
-        "ErrorOccurred" => {
+        "ErrorOccurred" | "errorOccurred" => {
             let reason = first_present_str(hook, &["message", "error", "reason"]);
             Some((
                 "failed",
@@ -150,7 +159,7 @@ fn map_hook_event_for_provider(
                 }),
             ))
         }
-        "SessionEnd" => Some(("dead", None)),
+        "SessionEnd" | "sessionEnd" => Some(("dead", None)),
         _ => None,
     }
 }
@@ -349,6 +358,25 @@ mod tests {
     fn stop_maps_to_succeeded() {
         let hook = json!({ "hook_event_name": "Stop" });
         assert_eq!(map_hook_event(&hook), Some(("succeeded", None)));
+    }
+
+    #[test]
+    fn copilot_config_event_aliases_map_to_the_same_phases() {
+        assert_eq!(
+            map_hook_event_for_provider(
+                &json!({ "hook_event_name": "userPromptSubmitted" }),
+                "copilot"
+            ),
+            Some(("thinking", None))
+        );
+        assert_eq!(
+            map_hook_event_for_provider(&json!({ "hook_event_name": "agentStop" }), "copilot"),
+            Some(("succeeded", None))
+        );
+        assert_eq!(
+            map_hook_event_for_provider(&json!({ "hook_event_name": "sessionEnd" }), "copilot"),
+            Some(("dead", None))
+        );
     }
 
     #[test]

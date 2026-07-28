@@ -130,6 +130,8 @@ jobs:
           # 嵌入的不是占位页：二进制里应有 vite 资源路径痕迹
           strings dist/Smelt.app/Contents/MacOS/smeltd | grep -q 'assets/index-' \
             || { echo "✗ smeltd 未嵌入 remote-web SPA（可能 cargo 时 dist 为空）"; exit 1; }
+          test -x dist/Smelt.app/Contents/MacOS/smelt-notify \
+            || { echo "✗ App 缺少可执行的 smelt-notify"; exit 1; }
           echo "✅ remote-web 已打入 Resources 且嵌入 smeltd"
 
       - name: Clean up codesign keychain

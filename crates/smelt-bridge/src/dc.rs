@@ -250,32 +250,6 @@ pub async fn handle_frame(
                 }
             }
         }
-        "menu" => {
-            let Some(id) = f.id else {
-                send_json(
-                    &dc,
-                    &serde_json::json!({ "t": "err", "msg": "menu needs id" }),
-                )
-                .await;
-                return Ok(());
-            };
-            match gateway::fetch_menu(&cfg, &id).await {
-                Ok(menu) => {
-                    send_json(
-                        &dc,
-                        &serde_json::json!({ "t": "menu_ok", "id": id, "menu": menu }),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    send_json(
-                        &dc,
-                        &serde_json::json!({ "t": "err", "msg": format!("menu: {e}") }),
-                    )
-                    .await;
-                }
-            }
-        }
         "input" => {
             if !sess.lock().await.write {
                 send_json(

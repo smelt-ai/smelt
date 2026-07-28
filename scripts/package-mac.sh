@@ -24,6 +24,7 @@ RES="$APP/Contents/Resources"
 BIN="$ROOT/target/release/$BIN_NAME"
 DAEMON_BIN="$ROOT/target/release/smeltd"   # 终端持久化守护（GUI 按同目录寻址拉起）
 BRIDGE_BIN="$ROOT/target/release/smelt-bridge"  # 跨网 WebRTC 桥（设置页「跨网」拉起）
+NOTIFY_BIN="$ROOT/target/release/smelt-notify" # Agent hooks → smeltd 状态通道
 
 # dmgbuild 1.6.7 要求 Python >= 3.10；Command Line Tools 自带的
 # /usr/bin/python3 在新 macOS 上仍可能是 3.9，必须在耗时编译前报清楚。
@@ -43,7 +44,7 @@ fi
 
 if [[ "${1:-}" == "--build" ]]; then
   echo "▶ 编译 release …"
-  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-bridge
+  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-bridge --bin smelt-notify
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -56,6 +57,10 @@ if [[ ! -f "$DAEMON_BIN" ]]; then
 fi
 if [[ ! -f "$BRIDGE_BIN" ]]; then
   echo "✗ 找不到 ${BRIDGE_BIN}（跨网 bridge），先：cargo build --release --bin smelt-bridge" >&2
+  exit 1
+fi
+if [[ ! -f "$NOTIFY_BIN" ]]; then
+  echo "✗ 找不到 ${NOTIFY_BIN}（Agent hook helper），先：cargo build --release --bin smelt-notify" >&2
   exit 1
 fi
 
@@ -93,6 +98,10 @@ chmod +x "$MACOS/smeltd"
 # 跨网 bridge 与 GUI 同目录（设置页 resolve_smelt_bridge 按 current_exe 旁路找）
 cp "$BRIDGE_BIN" "$MACOS/smelt-bridge"
 chmod +x "$MACOS/smelt-bridge"
+# hooks 在 GUI 关闭时也要工作，因此启动后会把这份分发物原子同步到
+# ~/.smelt/bin/smelt-notify；不能让 hook 直接引用可能被 DMG 覆盖的 App 内路径。
+cp "$NOTIFY_BIN" "$MACOS/smelt-notify"
+chmod +x "$MACOS/smelt-notify"
 
 # 图标（可选）：存在 assets/AppIcon.icns 就带上
 ICON_LINE=""
