@@ -76,6 +76,9 @@ pub struct AcpView {
     cwd: Option<String>,
     entries: Vec<AcpEntry>,
     permissions: Vec<PendingPermission>,
+    /// 已发出回执、等待 smeltd 快照确认的队首审批。期间按钮替换成处理中状态，
+    /// 防止网络往返时重复点击；队首变化后清空。
+    permission_submitting: Option<(String, String)>,
     elicitation: Option<PendingElicitation>,
     phase: AcpPhase,
     /// 回合结束且用户还没回应过 → Session 状态给绿点「有结果可看」。
@@ -241,6 +244,7 @@ impl AcpView {
             cwd,
             entries,
             permissions: Vec::new(),
+            permission_submitting: None,
             elicitation: None,
             status_line: None,
             phase: AcpPhase::Ended(reason),
@@ -290,6 +294,7 @@ impl AcpView {
             );
         }
         self.permissions.clear();
+        self.permission_submitting = None;
         self.elicitation = None;
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
         self.model = None; // 模型等新会话握手后重新上报
@@ -718,9 +723,20 @@ impl AcpView {
     ///    外面的集中状态订阅维护，这里不再自己判相位跳变。
     fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
         let should_persist = snap.should_persist;
+        let previous_permission = self
+            .permissions
+            .first()
+            .map(|card| (card.tool_call_id.clone(), card.question.clone()));
         self.entries = snap.entries;
         self.phase = snap.phase;
         self.permissions = snap.pending_permissions;
+        let current_permission = self
+            .permissions
+            .first()
+            .map(|card| (card.tool_call_id.clone(), card.question.clone()));
+        if previous_permission != current_permission {
+            self.permission_submitting = None;
+        }
         self.elicitation = snap.pending_elicitation;
         self.status_line = snap.status_line;
         self.acp_session_id = snap.acp_session_id.map(SessionId::new);
@@ -1059,14 +1075,27 @@ impl AcpView {
 
     /// 审批按钮：把选中项发给 smeltd（真正消费 responder 回 RPC 是服务端的
     /// 事），卡片收起、相位回 Running 等下一份快照即可，不用本地抢跑。
-    fn pick_permission(&mut self, tool_call_id: &str, option_id: &str, _cx: &mut Context<Self>) {
+    fn pick_permission(&mut self, tool_call_id: &str, option_id: &str, cx: &mut Context<Self>) {
+        // ACP agent 可能一次发来多条请求，但实际执行仍按队列推进。只允许回应
+        // 队首，避免上一帧残留的按钮或其它入口越过当前审批。
+        if self.permission_submitting.is_some()
+            || !is_active_permission_selection(&self.permissions, tool_call_id, option_id)
+        {
+            return;
+        }
         let tool_call_id = tool_call_id.to_string();
         let option_id = option_id.to_string();
         if let Some(h) = &self.handle {
-            let _ = h.action_tx.try_send(AcpUserAction::PermissionSelect {
-                tool_call_id,
-                option_id,
-            });
+            if h.action_tx
+                .try_send(AcpUserAction::PermissionSelect {
+                    tool_call_id: tool_call_id.clone(),
+                    option_id: option_id.clone(),
+                })
+                .is_ok()
+            {
+                self.permission_submitting = Some((tool_call_id, option_id));
+                cx.notify();
+            }
         }
     }
 }
@@ -1144,14 +1173,23 @@ impl Render for AcpView {
             _ => None,
         };
 
-        // 每一条权限请求都有独立 responder，必须独立渲染和回执；不能再用单个
-        // `Option`/`take()`，否则同时到达的请求会互相覆盖。
-        let permission_tool_ids: std::collections::HashSet<String> = self
-            .permissions
-            .iter()
-            .map(|card| card.tool_call_id.clone())
-            .collect();
+        // 底层保留全部 responder，但交互按队列串行：只显示并允许处理队首，
+        // 回执后的下一份快照移除它，下一张卡才会出现（与 Codex App 一致）。
+        let active_permission = self.permissions.first();
+        let active_permission_tool_id = active_permission.map(|card| card.tool_call_id.as_str());
+        let permission_is_submitting = self.permission_submitting.is_some();
         let permission_buttons = |card: &PendingPermission| {
+            if permission_is_submitting {
+                return h_flex()
+                    .h(px(36.))
+                    .gap_2()
+                    .items_center()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(Spinner::new().xsmall().color(muted))
+                    .child("处理中…")
+                    .into_any_element();
+            }
             let tool_call_id = card.tool_call_id.clone();
             let primary_ix = card.options.iter().position(|o| {
                 matches!(
@@ -1302,7 +1340,7 @@ impl Render for AcpView {
                     let (total_added, total_removed) = diff_totals
                         .iter()
                         .fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
-                    let has_pending_permission = permission_tool_ids.contains(id);
+                    let has_pending_permission = active_permission_tool_id == Some(id.as_str());
                     let card_expanded =
                         self.tool_card_is_expanded(id, *status, has_pending_permission);
 
@@ -1491,34 +1529,6 @@ impl Render for AcpView {
                             );
                         }
                     }
-                    // 一条工具调用可能同时挂多张权限卡；逐张内嵌，不能 take 掉别张。
-                    if has_pending_permission {
-                        for pending in self
-                            .permissions
-                            .iter()
-                            .filter(|pending| pending.tool_call_id == *id)
-                        {
-                            card = card.child(
-                                v_flex()
-                                    .px_4()
-                                    .py_2p5()
-                                    .gap_2()
-                                    .border_t_1()
-                                    .border_color(t.border)
-                                    .child(
-                                        v_flex()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(pending.question.clone()),
-                                            )
-                                            .child(permission_buttons(pending)),
-                                    ),
-                            );
-                        }
-                    }
                     card.into_any_element()
                 }
                 AcpEntry::Divider(label) => h_flex()
@@ -1555,40 +1565,61 @@ impl Render for AcpView {
             );
         }
 
-        // 消息流中没有对应工具卡的请求独立渲染；每张都保留，不能只显示第一张。
-        let permissions: Vec<gpui::AnyElement> = self
-            .permissions
-            .iter()
-            .filter(|pending| {
-                !self.entries.iter().any(
-                    |entry| matches!(entry, AcpEntry::ToolCall { id, .. } if id == &pending.tool_call_id),
+        // 审批是输入动作，不散落进历史工具卡；统一固定在 composer 上方，
+        // 队首切换时卡片位置不动，用户也能看见还有多少项等待处理。
+        let permission = active_permission.map(|pending| {
+            let remaining = self.permissions.len();
+            v_flex()
+                .w_full()
+                .items_center()
+                .px_4()
+                .pt_3()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(920.))
+                        .p_4()
+                        .gap_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(gpui::rgb(ui_theme::yellow()))
+                        .bg(ui_theme::tint(ui_theme::yellow(), 0x0c))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .size_2()
+                                        .rounded_full()
+                                        .bg(gpui::rgb(ui_theme::yellow())),
+                                )
+                                .child(div().text_sm().font_semibold().child("需要批准"))
+                                .child(div().flex_1())
+                                .when(remaining > 1, |row| {
+                                    row.child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(ui_theme::overlay(0x18))
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format!("{remaining} 项待处理")),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_family("monospace")
+                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .child(pending.question.clone()),
+                        )
+                        .child(permission_buttons(pending)),
                 )
-            })
-            .map(|pending| {
-                v_flex()
-                    .mx_4()
-                    .mb_3()
-                    .p_4()
-                    .gap_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(t.border)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_sm().font_semibold().child("等你批准"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child(pending.question.clone()),
-                            ),
-                    )
-                    .child(permission_buttons(pending))
-                    .into_any_element()
-            })
-            .collect();
+                .into_any_element()
+        });
 
         // 选择题卡片：message + 逐字段按钮组；单字段单选点击即提交，
         // 其余选齐后亮「提交」；「跳过」丢卡（responder Drop 回 Cancel）。
@@ -2048,6 +2079,10 @@ impl Render for AcpView {
                 );
 
             v_flex()
+                // 外层必须先有确定的宽度：`composer` 自己既是 `w_full` 又有
+                // `max_w`，若父节点按内容收缩，IME 组合文本触发重测量时会让
+                // `w_full` 在不同帧解析成不同宽度，导致输入框从居中跳到左侧。
+                .w_full()
                 .border_t_1()
                 .border_color(t.border)
                 .bg(ui_theme::overlay(0x08))
@@ -2145,7 +2180,7 @@ impl Render for AcpView {
             .children(banner)
             .children(plan_bar)
             .child(list)
-            .children(permissions)
+            .children(permission)
             .children(elicitation)
             .children(completion_bar)
             .children(self.paste_hint.as_ref().map(|msg| {
@@ -2211,6 +2246,21 @@ const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 /// 用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards` 覆盖这个默认值。
 fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bool) -> bool {
     has_pending_permission || !matches!(status, ToolCallStatus::Completed)
+}
+
+/// 审批请求按收到顺序串行展示和处理，不能越过队首回应后续 responder。
+fn is_active_permission_selection(
+    permissions: &[PendingPermission],
+    tool_call_id: &str,
+    option_id: &str,
+) -> bool {
+    permissions.first().is_some_and(|card| {
+        card.tool_call_id == tool_call_id
+            && card
+                .options
+                .iter()
+                .any(|option| option.option_id == option_id)
+    })
 }
 
 /// 工具标题里去掉与 kind 标签重复的前缀：adapter 常把标题写成
@@ -2307,8 +2357,13 @@ fn render_diff_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_restart_launch, tool_card_default_expanded};
+    use super::{
+        is_active_permission_selection, resolve_restart_launch, tool_card_default_expanded,
+    };
     use smelt_core::acp_chat::ToolCallStatus;
+    use smelt_core::acp_session::{
+        PendingPermission, PermissionOptionKindView, PermissionOptionView,
+    };
     use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
     use smelt_ui::agent_ui_config::AgentUiConfig;
 
@@ -2402,5 +2457,38 @@ mod tests {
             false
         ));
         assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
+    }
+
+    #[test]
+    fn permission_selection_only_accepts_the_queue_head() {
+        let permission = |tool_call_id: &str, option_id: &str| PendingPermission {
+            question: tool_call_id.into(),
+            tool_call_id: tool_call_id.into(),
+            options: vec![PermissionOptionView {
+                option_id: option_id.into(),
+                name: "Allow once".into(),
+                kind: PermissionOptionKindView::AllowOnce,
+            }],
+        };
+        let permissions = vec![
+            permission("tool-1", "allow-1"),
+            permission("tool-2", "allow-2"),
+        ];
+
+        assert!(is_active_permission_selection(
+            &permissions,
+            "tool-1",
+            "allow-1"
+        ));
+        assert!(!is_active_permission_selection(
+            &permissions,
+            "tool-2",
+            "allow-2"
+        ));
+        assert!(!is_active_permission_selection(
+            &permissions,
+            "tool-1",
+            "unknown"
+        ));
     }
 }
