@@ -104,6 +104,7 @@ fn fallback_snapshot(reason: &str) -> AcpSnapshot {
         pending_elicitation: None,
         status_line: None,
         acp_session_id: None,
+        history_session_id: None,
         supports_image: true,
         available_commands: Vec::new(),
         usage: None,

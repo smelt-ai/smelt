@@ -187,7 +187,11 @@ pub struct AcpSnapshot {
     pub pending_permissions: Vec<PendingPermission>,
     pub pending_elicitation: Option<PendingElicitation>,
     pub status_line: Option<String>,
+    /// 当前 ACP 连接使用的运行时 session id。
     pub acp_session_id: Option<String>,
+    /// 跨进程恢复时传给 `session/load` 的 canonical history id。
+    #[serde(default)]
+    pub history_session_id: Option<String>,
     pub supports_image: bool,
     pub available_commands: Vec<(String, String)>,
     pub usage: Option<(u64, u64)>,
@@ -243,7 +247,10 @@ pub struct AcpSessionState {
     pub elicitation: Option<LiveElicitation>,
     pub completed_unread: bool,
     pub status_line: Option<String>,
+    /// 当前 ACP 连接使用的运行时 session id。
     pub acp_session_id: Option<String>,
+    /// 已确认的历史会话 id。恢复成功建立新 runtime 连接时也不能覆盖它。
+    pub history_session_id: Option<String>,
     pub supports_image: bool,
     /// 「等自己刚发那条 prompt 的回声」，见旧版字段同名注释——语义原样保留。
     pub awaiting_user_echo: bool,
@@ -264,6 +271,7 @@ impl Default for AcpSessionState {
             completed_unread: false,
             status_line: None,
             acp_session_id: None,
+            history_session_id: None,
             supports_image: true,
             awaiting_user_echo: false,
             available_commands: Vec::new(),
@@ -286,7 +294,8 @@ impl AcpSessionState {
         Self {
             entries,
             phase: AcpPhase::Ended(reason),
-            acp_session_id: resume_session_id,
+            acp_session_id: None,
+            history_session_id: resume_session_id,
             ..Self::default()
         }
     }
@@ -307,6 +316,7 @@ impl AcpSessionState {
             completed_unread: snap.completed_unread,
             status_line: snap.status_line,
             acp_session_id: snap.acp_session_id,
+            history_session_id: snap.history_session_id,
             supports_image: snap.supports_image,
             awaiting_user_echo: false,
             available_commands: snap.available_commands,
@@ -364,6 +374,7 @@ impl AcpSessionState {
             }),
             status_line: self.status_line.clone(),
             acp_session_id: self.acp_session_id.clone(),
+            history_session_id: self.history_session_id.clone(),
             supports_image: self.supports_image,
             available_commands: self.available_commands.clone(),
             usage: self.usage,
@@ -463,6 +474,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             supports_image,
         } => {
             state.acp_session_id = Some(session_id.to_string());
+            if state.history_session_id.is_none() {
+                state.history_session_id = Some(session_id.to_string());
+            }
             state.supports_image = supports_image;
             match kind {
                 ReadyKind::ResumedWithReplay => state.entries.clear(),
@@ -886,7 +900,7 @@ pub fn dismiss_elicitation(state: &mut AcpSessionState) {
 /// 一份 turn 结束/连接终止后要不要自动续接（冷恢复占位第一次被访问时）：
 /// 有旧 session id 才值得——没有 id 只能开全新会话，交给用户手动决定。
 pub fn should_auto_resume(state: &AcpSessionState) -> bool {
-    matches!(state.phase, AcpPhase::Ended(_)) && state.acp_session_id.is_some()
+    matches!(state.phase, AcpPhase::Ended(_)) && state.history_session_id.is_some()
 }
 
 /// GUI → smeltd 的用户动作，走 `acp_open` 连接的 JSON 行。prompt/取消/切模型
@@ -986,16 +1000,18 @@ mod tests {
     fn ready_resumed_with_replay_clears_local_entries() {
         let mut s = fresh_state();
         s.entries.push(AcpEntry::User("old".into()));
+        s.history_session_id = Some("canonical-history".into());
         apply_event(
             &mut s,
             AcpEvent::Ready {
-                session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+                session_id: agent_client_protocol::schema::v1::SessionId::new("runtime-session"),
                 kind: ReadyKind::ResumedWithReplay,
                 supports_image: true,
             },
         );
         assert!(s.entries.is_empty());
-        assert_eq!(s.acp_session_id.as_deref(), Some("sid-1"));
+        assert_eq!(s.acp_session_id.as_deref(), Some("runtime-session"));
+        assert_eq!(s.history_session_id.as_deref(), Some("canonical-history"));
     }
 
     #[test]
@@ -1064,10 +1080,29 @@ mod tests {
             },
         );
         assert_eq!(s.acp_session_id.as_deref(), Some("new-sid"));
+        assert_eq!(s.history_session_id.as_deref(), Some("new-sid"));
         assert!(s.status_line.is_none());
         assert_eq!(s.entries.len(), 2);
         assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
         assert!(matches!(s.entries[1], AcpEntry::Divider(_)));
+    }
+
+    #[test]
+    fn ready_fresh_does_not_replace_preseeded_history_id() {
+        let mut s = fresh_state();
+        s.history_session_id = Some("canonical-history".into());
+
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("new-runtime"),
+                kind: ReadyKind::Fresh,
+                supports_image: true,
+            },
+        );
+
+        assert_eq!(s.acp_session_id.as_deref(), Some("new-runtime"));
+        assert_eq!(s.history_session_id.as_deref(), Some("canonical-history"));
     }
 
     #[test]
@@ -1319,7 +1354,7 @@ mod tests {
         let mut s = fresh_state();
         s.phase = AcpPhase::Ended("gone".into());
         assert!(!should_auto_resume(&s)); // 没有旧 session id
-        s.acp_session_id = Some("sid-1".into());
+        s.history_session_id = Some("sid-1".into());
         assert!(should_auto_resume(&s));
         s.phase = AcpPhase::Idle;
         assert!(!should_auto_resume(&s)); // 还活着，用不上「自动续接」

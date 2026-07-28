@@ -2148,12 +2148,13 @@ mod resume_handoff_tests {
     }
 
     fn sample_snapshot(acp_session_id: &str) -> smelt_core::acp_session::AcpSnapshot {
-        smelt_core::acp_session::AcpSessionState::placeholder(
+        let mut state = smelt_core::acp_session::AcpSessionState::placeholder(
             vec![smelt_core::acp_chat::AcpEntry::User("hi".into())],
             Some(acp_session_id.to_string()),
             String::new(),
-        )
-        .to_snapshot(false)
+        );
+        state.acp_session_id = Some(acp_session_id.to_string());
+        state.to_snapshot(false)
     }
 
     #[test]
@@ -2328,6 +2329,7 @@ mod resume_handoff_tests {
         let reduced = sess.reduced.lock().unwrap();
         assert_eq!(reduced.entries.len(), 1);
         assert_eq!(reduced.acp_session_id.as_deref(), Some("sid-1"));
+        assert_eq!(reduced.history_session_id.as_deref(), Some("sid-1"));
     }
 
     /// 没有 agent 侧 session id 就没法 attach_session——理论上不该发生，但
@@ -3896,8 +3898,10 @@ fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
     })
 }
 
-fn select_resume_id(known: Option<String>, requested: Option<String>) -> Option<String> {
-    known.or(requested)
+fn select_resume_id(requested: Option<String>, known_history: Option<String>) -> Option<String> {
+    // relaunch 时 GUI 持久化的 canonical id 必须优先；daemon 里的 runtime id
+    // 可能来自一次空恢复，不能反过来覆盖真正的 transcript id。
+    requested.or(known_history)
 }
 
 fn acp_open_needs_relaunch(created: bool, alive: bool, has_launch_command: bool) -> bool {
@@ -4039,7 +4043,11 @@ fn acp_relaunch(
     subscribers: &Subscribers,
 ) {
     let sess = &slot.value;
-    smelt_core::acp_session::reset_for_restart(&mut sess.reduced.lock().unwrap());
+    {
+        let mut reduced = sess.reduced.lock().unwrap();
+        smelt_core::acp_session::reset_for_restart(&mut reduced);
+        reduced.history_session_id = resume_id.clone();
+    }
     let needs_check = sess.agent_needs_transcript_check;
     let app_launch = smelt_core::acp_conn::AcpLaunch {
         launch: launch.clone(),
@@ -4294,14 +4302,20 @@ fn handle_acp_open(
         let alive = sess.handle.lock().unwrap().is_some();
         if acp_open_needs_relaunch(created, alive, !launch.command.is_empty()) {
             // 已经 Ended（或还没真正连接过）：这次 open 等于「重新开始」。
-            // 优先用已知的旧 agent session id 真续接，没有才退回请求带的
-            // （比如历史会话页第一次点「继续」，本地还没有 acp_session_id）。
-            let known = sess.reduced.lock().unwrap().acp_session_id.clone();
+            // GUI 请求携带的是持久化的 canonical history id，必须优先于 daemon
+            // 中可能由空恢复产生的 runtime id。只有请求缺失时才回退服务端历史 id。
+            let known_history = {
+                let reduced = sess.reduced.lock().unwrap();
+                reduced
+                    .history_session_id
+                    .clone()
+                    .or_else(|| reduced.acp_session_id.clone())
+            };
             acp_relaunch(
                 &slot,
                 &id,
                 launch.clone(),
-                select_resume_id(known, req_resume_id.clone()),
+                select_resume_id(req_resume_id.clone(), known_history),
                 acp_sessions.spawn_gate(),
                 &subscribers,
             );
@@ -6637,17 +6651,17 @@ mod acp_tests {
     }
 
     #[test]
-    fn daemon_known_resume_id_wins_after_gui_reconnect() {
+    fn requested_history_id_wins_when_dead_session_is_relaunched() {
         assert_eq!(
             select_resume_id(
-                Some("daemon-session".to_string()),
-                Some("saved-session".to_string())
+                Some("saved-history".to_string()),
+                Some("daemon-runtime".to_string())
             ),
-            Some("daemon-session".to_string())
+            Some("saved-history".to_string())
         );
         assert_eq!(
-            select_resume_id(None, Some("saved-session".to_string())),
-            Some("saved-session".to_string())
+            select_resume_id(None, Some("known-history".to_string())),
+            Some("known-history".to_string())
         );
     }
 }
