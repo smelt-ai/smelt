@@ -28,7 +28,6 @@ mod git_panel;
 mod hotspot;
 mod inspector;
 mod mem_usage;
-use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
 use smelt_core::osc;
 // 权限菜单解析：唯一真源，与 smeltd 共用 smelt-core 里的同一份（smeltd 解析后随
 // SessionState 下发给手机端）。曾经 Rust/TS 各一份并已实测漂移，别再在别处另写一版。
@@ -268,7 +267,9 @@ enum OverviewFilter {
 // 通道待弹出的应用内 Notification）：ACP 视图独立成 smelt-acp-view 后要跨
 // crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
 // 的裸名字。
-pub(crate) use smelt_ui::daemon_states_global::{DaemonStates, PendingAgentNotifs};
+pub(crate) use smelt_ui::daemon_states_global::{
+    AgentNotificationKind, DaemonStates, PendingAgentNotifs,
+};
 
 /// 取某个 pane 对应的守护状态；没有全局单例（比如极早期尚未走到注册那一步）或
 /// 那个 session id 还没有数据都返回 None。
@@ -282,16 +283,19 @@ fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::D
         .cloned()
 }
 
-/// 守护状态刚进入「等你批准 / 等你输入」时，是否需要入队一条应用内通知。
+/// 守护状态刚进入需要用户关注或回合结束的 phase 时，入队一条应用内通知。
 fn awaiting_notification_for_transition(
     previous_phase: Option<terminal::DaemonPhase>,
     state: &terminal::DaemonSessionState,
-) -> Option<(String, String, bool)> {
-    let entered_awaiting = matches!(
+) -> Option<(String, String, AgentNotificationKind)> {
+    let entered_notifiable = matches!(
         state.phase,
-        terminal::DaemonPhase::AwaitingApproval | terminal::DaemonPhase::WaitingForUser
+        terminal::DaemonPhase::AwaitingApproval
+            | terminal::DaemonPhase::WaitingForUser
+            | terminal::DaemonPhase::Succeeded
+            | terminal::DaemonPhase::Failed
     ) && previous_phase != Some(state.phase);
-    if !entered_awaiting {
+    if !entered_notifiable {
         return None;
     }
 
@@ -300,8 +304,26 @@ fn awaiting_notification_for_transition(
         .detail_line()
         .or_else(|| state.title.clone())
         .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
-    let is_approval = state.phase == terminal::DaemonPhase::AwaitingApproval;
-    Some((title, message, is_approval))
+    let kind = match state.phase {
+        terminal::DaemonPhase::AwaitingApproval => AgentNotificationKind::Approval,
+        terminal::DaemonPhase::WaitingForUser => AgentNotificationKind::Input,
+        terminal::DaemonPhase::Succeeded => AgentNotificationKind::Success,
+        terminal::DaemonPhase::Failed => AgentNotificationKind::Failure,
+        _ => return None,
+    };
+    Some((title, message, kind))
+}
+
+fn agent_notification_enabled(
+    config: &settings::AgentUiConfig,
+    kind: AgentNotificationKind,
+) -> bool {
+    match kind {
+        AgentNotificationKind::Approval => config.notify_approval,
+        AgentNotificationKind::Input => config.notify_input,
+        AgentNotificationKind::Success => config.notify_success,
+        AgentNotificationKind::Failure => config.notify_failure,
+    }
 }
 
 /// 主区终端分屏布局树：叶子是一个终端，内部 Split 把区域按某轴切成多块。
@@ -522,22 +544,45 @@ impl Session {
         }
     }
 
-    /// 会话内任一 pane 的待处理通知消息（供总览卡片显示「等你确认 xxx」）。
+    /// 会话内结构化待处理消息（供总览卡片展示）。普通 OSC 通知不参与状态正文。
     fn notification_msg(&self, cx: &App) -> Option<String> {
         let v = self.term_leaves();
-        // 优先：网格解析出的权限摘要 → OSC 审批文案 → 任意通知
+        for t in &v {
+            if let Some(state) = daemon_state_for(t, cx) {
+                if matches!(
+                    state.phase,
+                    terminal::DaemonPhase::AwaitingApproval
+                        | terminal::DaemonPhase::WaitingForUser
+                        | terminal::DaemonPhase::Failed
+                ) {
+                    if let Some(detail) = state.detail_line() {
+                        return Some(detail);
+                    }
+                }
+            }
+        }
         if let Some(p) = self.permission_prompt(cx) {
-            if let Some(s) = p.summary {
-                return Some(s);
-            }
+            return p.summary;
         }
-        if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
-            if let Some(s) = t.read(cx).notification() {
-                return Some(s.to_string());
-            }
+        None
+    }
+
+    /// 阻塞审批卡的正文必须来自产生审批事实的同一个 pane，不能拿会话里任意一条
+    /// 普通完成通知来拼接，否则多分屏或旧 OSC 消息会出现“Blocked + 已完成”。
+    fn approval_msg(&self, cx: &App) -> Option<String> {
+        match &self.kind {
+            SessionKind::Acp(_) => None,
+            SessionKind::Term { .. } => self.term_leaves().iter().find_map(|t| {
+                if let Some(state) = daemon_state_for(t, cx) {
+                    if state.phase == terminal::DaemonPhase::AwaitingApproval {
+                        return state
+                            .detail_line()
+                            .or_else(|| t.read(cx).permission_prompt().and_then(|p| p.summary));
+                    }
+                }
+                t.read(cx).permission_prompt().and_then(|p| p.summary)
+            }),
         }
-        v.iter()
-            .find_map(|t| t.read(cx).notification().map(|s| s.to_string()))
     }
 
     /// 会话内扫到的权限菜单（优先含审批/菜单的 pane）。
@@ -551,14 +596,21 @@ impl Session {
         v.iter().find_map(|t| t.read(cx).permission_prompt())
     }
 
-    /// 需要用户处理的 pane：优先等审批 / 权限菜单，其次任意「需要注意」。
+    /// 需要用户处理的 pane：只认结构化等待/失败或当前网格审批菜单。
     fn attention_pane(&self, cx: &App) -> Option<Entity<TerminalView>> {
         let v = self.term_leaves();
         if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
             return Some(t.clone());
         }
         v.iter()
-            .find(|t| t.read(cx).attention_kind().is_some())
+            .find(|t| {
+                daemon_state_for(t, cx).is_some_and(|state| {
+                    matches!(
+                        state.phase,
+                        terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed
+                    )
+                })
+            })
             .cloned()
     }
 
@@ -601,39 +653,43 @@ impl Session {
             }
         };
         let v = self.term_leaves();
-        // 等审批（红）压过一般注意（橙）：
-        // 1) daemon 状态通道事实  2) OSC 文案  3) 网格权限菜单
-        let mut attention = None;
+        let mut needs_attention = false;
+        let mut running = false;
+        let mut done = false;
         for t in &v {
             if let Some(state) = daemon_state_for(t, cx) {
-                if state.phase == terminal::DaemonPhase::AwaitingApproval {
-                    return AgentStatus::WaitingApproval;
+                match state.phase {
+                    terminal::DaemonPhase::AwaitingApproval => {
+                        return AgentStatus::WaitingApproval;
+                    }
+                    terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
+                        needs_attention = true;
+                    }
+                    terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool => {
+                        running = true;
+                    }
+                    terminal::DaemonPhase::Succeeded => done = true,
+                    terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead => {}
                 }
             }
             let tv = t.read(cx);
             if tv.is_awaiting_approval() {
                 return AgentStatus::WaitingApproval;
             }
-            if matches!(
-                tv.attention_kind(),
-                Some(terminal_view::AttentionKind::Attention)
-            ) {
-                attention = Some(AgentStatus::NeedsAttention);
-            }
         }
-        if let Some(s) = attention {
-            return s;
+        if needs_attention {
+            return AgentStatus::NeedsAttention;
         }
-        // 活动终端：daemon 说在跑（Thinking/ExecutingTool）比标题 spinner 猜测更可信；
-        // 没有 daemon 数据（老版本守护/还没收到第一条上报）才退化到猜。
-        if let Some(state) = daemon_state_for(active, cx) {
-            if matches!(
-                state.phase,
-                terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool
-            ) {
-                return AgentStatus::Running;
-            }
-        } else if let Some(raw) = active.read(cx).agent_title() {
+        if running {
+            return AgentStatus::Running;
+        }
+        if done {
+            return AgentStatus::Done;
+        }
+        // 没有结构化运行事实时才退化到标题 spinner。
+        if daemon_state_for(active, cx).is_none()
+            && let Some(raw) = active.read(cx).agent_title()
+        {
             if crate::osc::title_starts_with_spinner(raw.trim_start()) {
                 return AgentStatus::Running;
             }
@@ -701,24 +757,25 @@ fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
 fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
     let daemon_state = daemon_state_for(view, cx);
     if let Some(state) = &daemon_state {
-        if state.phase == terminal::DaemonPhase::AwaitingApproval {
-            return AgentStatus::WaitingApproval;
+        match state.phase {
+            terminal::DaemonPhase::AwaitingApproval => return AgentStatus::WaitingApproval,
+            terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
+                return AgentStatus::NeedsAttention;
+            }
+            terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool => {
+                return AgentStatus::Running;
+            }
+            terminal::DaemonPhase::Succeeded => return AgentStatus::Done,
+            terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead => {}
         }
     }
     let t = view.read(cx);
-    match t.attention_kind() {
-        Some(terminal_view::AttentionKind::Approval) => return AgentStatus::WaitingApproval,
-        Some(terminal_view::AttentionKind::Attention) => return AgentStatus::NeedsAttention,
-        None => {}
+    if t.is_awaiting_approval() {
+        return AgentStatus::WaitingApproval;
     }
-    if let Some(state) = &daemon_state {
-        if matches!(
-            state.phase,
-            terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool
-        ) {
-            return AgentStatus::Running;
-        }
-    } else if let Some(raw) = t.agent_title() {
+    if daemon_state.is_none()
+        && let Some(raw) = t.agent_title()
+    {
         if crate::osc::title_starts_with_spinner(raw.trim_start()) {
             return AgentStatus::Running;
         }
@@ -918,10 +975,9 @@ struct SessionState {
     acp: Option<AcpSaved>,
 }
 
-/// ACP 会话的存档元数据：cwd/launch 给「重新开始」按钮原样重启用；entries 是完整
-/// 消息历史——GUI 重开后占位视图直接显示它，不是「已结束」四个字干瞪眼；
-/// resume_session_id 是 agent 侧的会话 id，「重新开始」靠它尝试 session/load
-/// 真续接（agent 记得之前聊了什么），而不只是摆样子的新对话。
+/// ACP 会话的存档元数据。agent session store 是消息历史的唯一持久化来源；Smelt
+/// 只保存重新 load 所需的身份和启动信息。`entries` 仅用于读取旧版 workspace.json，
+/// 新存档不再写出，避免和 agent transcript 形成两个数据源。
 #[derive(Clone, serde::Serialize)]
 struct AcpSaved {
     cwd: Option<String>,
@@ -932,8 +988,6 @@ struct AcpSaved {
     /// 按 launch 里的命令反推，反推不出就当 Claude（多 agent 之前只可能是它）。
     #[serde(default)]
     agent: Option<String>,
-    #[serde(default)]
-    entries: Vec<acp_view::AcpEntry>,
     #[serde(default)]
     resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
@@ -961,8 +1015,10 @@ struct AcpSavedWire {
     profile_id: Option<String>,
     #[serde(default)]
     agent: Option<String>,
-    #[serde(default)]
-    entries: Vec<acp_view::AcpEntry>,
+    /// 旧版曾把完整消息历史写进 workspace.json。只消费字段保证迁移可读，值不再
+    /// 进入 `AcpSaved`，更不会在下一次保存时写回。
+    #[serde(default, rename = "entries")]
+    _legacy_entries: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     #[serde(default)]
@@ -988,7 +1044,6 @@ impl<'de> serde::Deserialize<'de> for AcpSaved {
             launch,
             profile_id: wire.profile_id,
             agent: wire.agent,
-            entries: wire.entries,
             resume_session_id: wire.resume_session_id,
             sid: wire.sid,
             refresh_launch_from_settings,
@@ -1021,10 +1076,6 @@ enum PaneState {
         /// 旧存档没有 → None，只开裸 shell。
         #[serde(default)]
         launch_cmd: Option<String>,
-        #[serde(default)]
-        agent_kind: Option<TerminalAgentKind>,
-        #[serde(default)]
-        resume_state: Option<TerminalResumeState>,
     },
     Split {
         axis: SplitAxis,
@@ -1321,8 +1372,6 @@ fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
                 custom_title: t.custom_title().map(str::to_string),
                 launch_label: t.launch_label().map(str::to_string),
                 launch_cmd: t.launch_cmd().map(str::to_string),
-                agent_kind: t.agent_kind(),
-                resume_state: t.resume_state().cloned(),
             }
         }
         Pane::Split {
@@ -1352,105 +1401,6 @@ struct SpawnedLeaf {
     launch: Option<String>,
     label: Option<String>,
     custom_title: Option<String>,
-    agent_kind: Option<TerminalAgentKind>,
-    resume_state: Option<TerminalResumeState>,
-}
-
-struct PreparedTerminalLaunch {
-    original_command: Option<String>,
-    spawn_command: Option<String>,
-    label: Option<String>,
-    agent_kind: Option<TerminalAgentKind>,
-    resume_state: Option<TerminalResumeState>,
-    codex_baseline: Option<HashSet<String>>,
-    workspace_dir: Option<String>,
-}
-
-fn prepare_terminal_launch(
-    entry: &settings::LaunchEntry,
-    cwd: Option<&str>,
-) -> Result<PreparedTerminalLaunch, String> {
-    let Some(agent_kind) = entry.agent_kind else {
-        return Ok(PreparedTerminalLaunch {
-            original_command: Some(entry.command.clone()),
-            spawn_command: Some(entry.command.clone()),
-            label: Some(entry.label.clone()),
-            agent_kind: None,
-            resume_state: None,
-            codex_baseline: None,
-            workspace_dir: None,
-        });
-    };
-    let generated_id = uuid::Uuid::new_v4().to_string();
-    match session_history::prepare_terminal_agent_launch(agent_kind, &entry.command, &generated_id)?
-    {
-        session_history::PreparedTerminalAgentLaunch::Known { command, state } => {
-            Ok(PreparedTerminalLaunch {
-                original_command: Some(entry.command.clone()),
-                spawn_command: Some(command),
-                label: Some(entry.label.clone()),
-                agent_kind: Some(agent_kind),
-                resume_state: Some(state.clone()),
-                codex_baseline: None,
-                workspace_dir: state.workspace_dir,
-            })
-        }
-        session_history::PreparedTerminalAgentLaunch::Discover {
-            command,
-            workspace_dir,
-        } => {
-            let cwd = cwd.ok_or_else(|| "Codex 会话绑定需要项目工作目录".to_string())?;
-            let baseline =
-                session_history::terminal_session_ids(agent_kind, cwd, workspace_dir.as_deref());
-            Ok(PreparedTerminalLaunch {
-                original_command: Some(entry.command.clone()),
-                spawn_command: Some(command),
-                label: Some(entry.label.clone()),
-                agent_kind: Some(agent_kind),
-                resume_state: None,
-                codex_baseline: Some(baseline),
-                workspace_dir,
-            })
-        }
-    }
-}
-
-fn terminal_restore_action(
-    agent_kind: Option<TerminalAgentKind>,
-    original_launch: Option<&str>,
-    resume_state: Option<&TerminalResumeState>,
-    cwd: Option<&str>,
-    history_exists: bool,
-) -> terminal::MissingSessionAction {
-    let Some(agent_kind) = agent_kind else {
-        return original_launch
-            .map(|command| terminal::MissingSessionAction::Launch(command.to_string()))
-            .unwrap_or(terminal::MissingSessionAction::Shell);
-    };
-    let Some(state) = resume_state else {
-        return terminal::MissingSessionAction::Reject(
-            "无法恢复：没有记录这个 agent 的历史会话 ID".into(),
-        );
-    };
-    if state.agent != agent_kind {
-        return terminal::MissingSessionAction::Reject(
-            "无法恢复：记录的 agent 类型与启动项不一致".into(),
-        );
-    }
-    let Some(command) = original_launch else {
-        return terminal::MissingSessionAction::Reject("无法恢复：缺少原始启动命令".into());
-    };
-    if cwd.is_none() {
-        return terminal::MissingSessionAction::Reject("无法恢复：缺少工作目录".into());
-    }
-    if !history_exists {
-        return terminal::MissingSessionAction::Reject("无法恢复：历史会话已不存在".into());
-    }
-    session_history::terminal_resume_command(agent_kind, command, &state.session_id)
-        .map(terminal::MissingSessionAction::Launch)
-        .unwrap_or_else(|error| {
-            terminal::MissingSessionAction::Reject(format!("无法恢复：{error}"))
-        })
 }
 
 /// 阻塞：按 DFS 顺序 spawn 一棵布局树的全部叶子（**只**在后台线程调用）。
@@ -1468,27 +1418,13 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
             custom_title,
             launch_label,
             launch_cmd,
-            agent_kind,
-            resume_state,
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
-            let history_exists = resume_state
-                .as_ref()
-                .zip(cwd.as_deref())
-                .is_some_and(|(state, cwd)| session_history::terminal_session_exists(state, cwd));
-            let action = terminal_restore_action(
-                *agent_kind,
-                launch_cmd.as_deref(),
-                resume_state.as_ref(),
-                cwd.as_deref(),
-                history_exists,
-            );
             let terminal =
-                terminal::Terminal::spawn_with_action(24, 80, cwd.as_deref(), &sid, &action)
-                    .map_err(|e| {
-                        eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
-                        e.to_string()
-                    })?;
+                terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None).map_err(|e| {
+                    eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
+                    e.to_string()
+                })?;
             out.push(SpawnedLeaf {
                 terminal,
                 sid,
@@ -1496,8 +1432,6 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
                 launch: launch_cmd.clone(),
                 label: launch_label.clone(),
                 custom_title: custom_title.clone(),
-                agent_kind: *agent_kind,
-                resume_state: resume_state.clone(),
             });
             Ok(())
         }
@@ -1521,15 +1455,13 @@ fn rebuild_pane_ready(
         PaneState::Leaf { .. } => {
             let leaf = leaves.next()?;
             let v = cx.new(|cx| {
-                let mut view = TerminalView::from_terminal_with_resume(
+                let mut view = TerminalView::from_terminal(
                     cx,
                     leaf.terminal,
                     leaf.cwd,
                     leaf.sid,
                     leaf.launch.as_deref(),
                     leaf.label.as_deref(),
-                    leaf.agent_kind,
-                    leaf.resume_state,
                 );
                 view.set_custom_title(leaf.custom_title);
                 view
@@ -1592,8 +1524,6 @@ fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
                 custom_title: None,
                 launch_label: None,
                 launch_cmd: None,
-                agent_kind: None,
-                resume_state: None,
             },
             active: 0,
             custom_title: None,
@@ -1618,78 +1548,9 @@ fn ws_state_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".smelt").join("workspace.json"))
 }
 
-/// 只迁移真正缺少 `agent_kind` 键的旧叶子。显式 `null` 表示用户选择普通终端，
-/// 反序列化成 `Option` 后会和缺字段混在一起，所以必须在 JSON 层完成判定。
-fn migrate_legacy_pane_agent_kind(pane: &mut serde_json::Value) -> bool {
-    let Some(pane) = pane.as_object_mut() else {
-        return false;
-    };
-
-    if let Some(leaf) = pane
-        .get_mut("Leaf")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        if leaf.contains_key("agent_kind") {
-            return false;
-        }
-        let Some(kind) = leaf
-            .get("launch_cmd")
-            .and_then(serde_json::Value::as_str)
-            .and_then(session_history::infer_terminal_agent_kind)
-        else {
-            return false;
-        };
-        leaf.insert(
-            "agent_kind".into(),
-            serde_json::Value::String(kind.id().into()),
-        );
-        return true;
-    }
-
-    pane.get_mut("Split")
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|split| split.get_mut("children"))
-        .and_then(serde_json::Value::as_array_mut)
-        .is_some_and(|children| {
-            children.iter_mut().fold(false, |changed, child| {
-                migrate_legacy_pane_agent_kind(child) || changed
-            })
-        })
-}
-
-fn migrate_legacy_workspace_agent_kinds(root: &mut serde_json::Value) -> bool {
-    let Some(root) = root.as_object_mut() else {
-        return false;
-    };
-    let mut changed = root
-        .get_mut("sessions")
-        .and_then(serde_json::Value::as_array_mut)
-        .is_some_and(|sessions| {
-            sessions.iter_mut().fold(false, |changed, session| {
-                let migrated = session
-                    .as_object_mut()
-                    .and_then(|session| session.get_mut("layout"))
-                    .is_some_and(migrate_legacy_pane_agent_kind);
-                migrated || changed
-            })
-        });
-    if let Some(layout) = root.get_mut("layout")
-        && !layout.is_null()
-    {
-        changed = migrate_legacy_pane_agent_kind(layout) || changed;
-    }
-    changed
-}
-
 fn load_ws_state_from_path(path: &std::path::Path) -> Option<WsState> {
     let data = std::fs::read_to_string(path).ok()?;
-    let mut raw: serde_json::Value = serde_json::from_str(&data).ok()?;
-    let changed = migrate_legacy_workspace_agent_kinds(&mut raw);
-    let state: WsState = serde_json::from_value(raw).ok()?;
-    if changed {
-        crate::json_store::save_json(Some(path.to_path_buf()), &state);
-    }
-    Some(state)
+    serde_json::from_str(&data).ok()
 }
 
 /// 读取存档；文件不存在/损坏都返回 None，交由调用方回退默认。
@@ -1918,13 +1779,6 @@ struct Workspace {
     session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
     /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
     session_detail_gen: u64,
-    /// 「继续」正在后台加载的目标（`"{agent_id}:{cwd}:{resume_id}"`），挡连点
-    /// 同一条历史记录重复发起、开出好几个重复标签页。
-    resume_inflight: HashSet<String>,
-    /// 「继续」操作的自增序号：只有发起时最新的那次操作，加载完成后才会真的抢
-    /// 激活态——连点两条不同历史记录时，防止加载慢的那条后完成反而把已经激活
-    /// 的那条顶掉（会话本身照样建，只是不抢焦点）。
-    resume_gen: u64,
     /// 历史会话页当前显示的是「会话」还是「记忆」（同一套左列表 + 右详情布局）。
     history_pane: HistoryPane,
     /// 历史会话页「会话」子页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
@@ -2060,42 +1914,6 @@ struct Workspace {
     /// 冷启动的会话恢复流程是否已经跑完（没有待恢复会话时启动即为 true）。
     /// save_state 的抹盘安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
     sessions_restored: bool,
-}
-
-/// 历史会话页「继续」把已读出的 `Turn` 列表转成 `AcpEntry`，好塞进新建的占位
-/// 会话当本地快照（见 `Workspace::resume_acp_session`）。`Turn` 是给只读浏览
-/// 用的压扁视图（工具调用只留名字，没有 id/参数/输出），转回来必然有损——
-/// `id` 现造一个本会话内唯一的、`kind` 统一归 `Other`、`status` 记
-/// `Completed`（历史记录里的调用理应都跑完了）、`output` 留空。这不是"完整
-/// 还原"，只求「切换到这条历史会话时本地能看到个大概，而不是一片空白」；
-/// 真续接成功后（`ReadyKind::ResumedWithReplay`）这份快照会被 agent 重放的
-/// 内容整个替换掉，这里的近似值不会长期存在。
-fn turns_to_acp_entries(turns: &[session_history::Turn]) -> Vec<acp_view::AcpEntry> {
-    let mut out = Vec::new();
-    for (i, t) in turns.iter().enumerate() {
-        if t.is_user {
-            if !t.text.trim().is_empty() {
-                out.push(acp_view::AcpEntry::User(t.text.clone()));
-            }
-            continue;
-        }
-        if !t.text.trim().is_empty() {
-            out.push(acp_view::AcpEntry::Assistant {
-                text: t.text.clone(),
-                thought: false,
-            });
-        }
-        for (j, tool) in t.tools.iter().enumerate() {
-            out.push(acp_view::AcpEntry::ToolCall {
-                id: format!("history-{i}-{j}"),
-                title: tool.clone(),
-                kind: acp_view::ToolKind::Other,
-                status: acp_view::ToolCallStatus::Completed,
-                output: Vec::new(),
-            });
-        }
-    }
-    out
 }
 
 impl Workspace {
@@ -2250,8 +2068,6 @@ impl Workspace {
             session_list_inflight: HashSet::new(),
             session_detail: None,
             session_detail_gen: 0,
-            resume_inflight: HashSet::new(),
-            resume_gen: 0,
             history_pane: HistoryPane::Sessions,
             history_agent: settings::AcpAgentKind::Claude,
             history_profile: None,
@@ -2450,7 +2266,7 @@ impl Workspace {
                                 saved.profile_id,
                                 saved.cwd,
                                 reason.to_string(),
-                                saved.entries,
+                                Vec::new(),
                                 saved.resume_session_id,
                                 saved.sid,
                             )
@@ -2899,16 +2715,9 @@ impl Workspace {
         })
     }
 
-    /// 历史会话页「继续」：同一个 agent + 项目已经开着一个会话就直接跳过去
-    /// （不重复开），没有就新建一个「已结束」占位、带上 `resume_session_id`，
-    /// 靠 `activate()` 里已有的 `maybe_auto_resume` 触发真续接——跟"重开 GUI 后
-    /// 切到旧会话自动续接"走的是完全同一套机制，这里不重新发明一遍。
-    ///
-    /// 历史内容要后台读、转换才能塞进新会话当本地快照（见下），这段异步窗口期
-    /// 里得防两件事：连点同一条历史记录开出好几个重复标签页（`resume_inflight`
-    /// 挡重复发起）；连点两条不同的历史记录时，文件更大/加载更慢那条后完成，
-    /// 反而把已经激活的那条顶掉（`resume_gen` 保证只有"最新一次点击"才能真的
-    /// 抢激活态，但该建的会话还是照建，不会凭空消失）。
+    /// 历史会话页「继续」：同一条 agent session 已经开着就直接跳过去，否则建
+    /// 一个空的运行时投影并带上 `resume_session_id`。激活后由 `session/load` 让
+    /// agent 重放历史，Smelt 不再从各家私有 transcript 预填第二份消息快照。
     pub fn resume_acp_session(
         &mut self,
         agent: settings::AcpAgentKind,
@@ -2916,7 +2725,6 @@ impl Workspace {
         profile_id: Option<String>,
         cwd: String,
         resume_id: String,
-        path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2929,78 +2737,35 @@ impl Workspace {
             return;
         }
 
-        let inflight_key = format!("{}:{cwd}:{resume_id}", agent.id());
-        if !self.resume_inflight.insert(inflight_key.clone()) {
-            return; // 这一条已经在后台加载了，连点不重复发起
-        }
-        self.resume_gen = self.resume_gen.wrapping_add(1);
-        let my_gen = self.resume_gen;
-
         let launch = launch_override.unwrap_or_else(|| {
             smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
         });
-        // 先把历史内容读出来转成本地快照——`session/resume`（不重放历史，见 acp.rs
-        // 里 apply_event 对 ReadyKind::ResumedKeepHistory 的注释）信任的就是这份本地
-        // 快照，给个空的会话开出来就是一片空白（真实教训：第一版就是这么写的，
-        // 点「继续」开出来的对话完全看不到历史）。放后台线程读，跟 open_session_detail
-        // 同款套路，避免大会话文件卡住 UI 线程。
-        cx.spawn_in(window, async move |this, cx| {
-            let p = path.clone();
-            let entries = cx
-                .background_executor()
-                .spawn(async move {
-                    session_history::load_session_detail_for(agent, &p)
-                        .map(|d| turns_to_acp_entries(&d.turns))
-                        .unwrap_or_default()
-                })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.resume_inflight.remove(&inflight_key);
-                // 完成时再查一遍：万一这段等待期里这条会话已经从别处冒出来了
-                // （比如 inflight 生效前就已经在飞的另一次请求刚落地），别再建
-                // 重复的一份，跳过去就行。
-                if let Some(ix) = this.find_open_acp_session(agent, &cwd, &target_id, cx) {
-                    if this.resume_gen == my_gen {
-                        this.activate(ix, window, cx);
-                    }
-                    return;
-                }
-
-                let view = cx.new(|cx| {
-                    acp_view::AcpView::placeholder(
-                        cx,
-                        agent,
-                        launch,
-                        profile_id.is_none(),
-                        profile_id,
-                        Some(cwd),
-                        "正在续接历史会话…".to_string(),
-                        entries,
-                        Some(agent_client_protocol::schema::v1::SessionId::new(resume_id)),
-                        // 新起一条 smeltd 托管连接（靠 resume_id 对 agent 自己的
-                        // 持久化做 session/load），不是接上 smeltd 里已经在跑的
-                        // 某个会话，没有旧 id 可沿用，生成一个新的。
-                        None,
-                    )
-                });
-                let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
-                this.sessions.push(Session {
-                    kind: SessionKind::Acp(view),
-                    custom_title: None,
-                    _acp_persist_sub,
-                });
-                this.session_list_revision = this.session_list_revision.wrapping_add(1);
-                let ix = this.sessions.len() - 1;
-                // 只有还是"最新一次点击"才抢激活态——连点两条不同历史记录时，
-                // 加载慢的那条完成得晚也不该把已经激活的那条顶掉，但会话本身
-                // 还是要建，不然用户点了却像什么都没发生，得自己翻标签页找。
-                if this.resume_gen == my_gen {
-                    this.activate(ix, window, cx);
-                }
-                this.save_state(cx);
-            });
-        })
-        .detach();
+        let view = cx.new(|cx| {
+            acp_view::AcpView::placeholder(
+                cx,
+                agent,
+                launch,
+                profile_id.is_none(),
+                profile_id,
+                Some(cwd),
+                "正在加载历史会话…".to_string(),
+                Vec::new(),
+                Some(target_id),
+                // 新起 smeltd 托管连接，靠 agent session id 做 session/load；
+                // 它不是已存在的守护会话，因此不能沿用 smeltd id。
+                None,
+            )
+        });
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
+        self.sessions.push(Session {
+            kind: SessionKind::Acp(view),
+            custom_title: None,
+            _acp_persist_sub,
+        });
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
+        let ix = self.sessions.len() - 1;
+        self.activate(ix, window, cx);
+        self.save_state(cx);
     }
 
     /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
@@ -3018,38 +2783,12 @@ impl Workspace {
         self.remember_session_project(cwd.as_deref());
         // spawn 在后台；先把项目落盘，即使进程启动失败也不能让用户刚选中的项目消失。
         self.save_state(cx);
-        let prepared = match entry.as_ref() {
-            Some(entry) => match prepare_terminal_launch(entry, cwd.as_deref()) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.background_error = Some(format!("无法启动 agent：{error}"));
-                    cx.notify();
-                    return;
-                }
-            },
-            None => PreparedTerminalLaunch {
-                original_command: None,
-                spawn_command: None,
-                label: None,
-                agent_kind: None,
-                resume_state: None,
-                codex_baseline: None,
-                workspace_dir: None,
-            },
-        };
         let sid = new_sid();
         let cwd_bg = cwd.clone();
-        let launch_owned = prepared.original_command;
-        let label_owned = prepared.label;
-        let agent_kind = prepared.agent_kind;
-        let resume_state = prepared.resume_state;
-        let codex_baseline = prepared.codex_baseline;
-        let workspace_dir = prepared.workspace_dir;
+        let launch_owned = entry.as_ref().map(|entry| entry.command.clone());
+        let label_owned = entry.as_ref().map(|entry| entry.label.clone());
         let sid_bg = sid.clone();
-        let action = prepared
-            .spawn_command
-            .map(terminal::MissingSessionAction::Launch)
-            .unwrap_or(terminal::MissingSessionAction::Shell);
+        let launch_bg = launch_owned.clone();
         // 立刻给反馈，避免「点了像没点」。
         self.stage_override = None;
         eprintln!("[workspace] 新建会话 cwd={cwd:?} launch={launch_owned:?} sid={sid}");
@@ -3059,12 +2798,12 @@ impl Workspace {
         std::thread::Builder::new()
             .name("smelt-spawn-session".into())
             .spawn(move || {
-                let r = terminal::Terminal::spawn_with_action(
+                let r = terminal::Terminal::spawn(
                     24,
                     80,
                     cwd_bg.as_deref(),
                     &sid_bg,
-                    &action,
+                    launch_bg.as_deref(),
                 );
                 let _ = tx.send_blocking(r);
             })
@@ -3095,15 +2834,13 @@ impl Workspace {
             };
             let _ = this.update(cx, |this, cx| {
                 let view = cx.new(|cx| {
-                    TerminalView::from_terminal_with_resume(
+                    TerminalView::from_terminal(
                         cx,
                         terminal,
                         cwd.clone(),
                         sid,
                         launch_owned.as_deref(),
                         label_owned.as_deref(),
-                        agent_kind,
-                        resume_state,
                     )
                 });
                 this.sessions.push(Session::single(view.clone()));
@@ -3111,103 +2848,12 @@ impl Workspace {
                 this.active_session = this.sessions.len() - 1;
                 this.stage_override = None;
                 this.save_state(cx);
-                if let (Some(baseline), Some(cwd)) = (codex_baseline, cwd.clone()) {
-                    this.start_codex_binding(view, cwd, baseline, workspace_dir, cx);
-                }
                 eprintln!(
                     "[workspace] 新建会话成功，当前共 {} 个",
                     this.sessions.len()
                 );
                 cx.notify();
             });
-        })
-        .detach();
-    }
-
-    fn start_codex_binding(
-        &self,
-        view: Entity<TerminalView>,
-        cwd: String,
-        baseline: HashSet<String>,
-        workspace_dir: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            for _ in 0..20 {
-                smol::Timer::after(Duration::from_millis(500)).await;
-                let current = session_history::terminal_session_ids(
-                    TerminalAgentKind::Codex,
-                    &cwd,
-                    workspace_dir.as_deref(),
-                );
-                let claimed = this
-                    .update(cx, |workspace, cx| {
-                        workspace
-                            .sessions
-                            .iter()
-                            .flat_map(Session::term_leaves)
-                            .filter_map(|leaf| {
-                                leaf.read(cx)
-                                    .resume_state()
-                                    .filter(|state| state.agent == TerminalAgentKind::Codex)
-                                    .map(|state| state.session_id.clone())
-                            })
-                            .collect::<HashSet<_>>()
-                    })
-                    .unwrap_or_default();
-                match session_history::discover_unclaimed_session_id(&baseline, &current, &claimed)
-                {
-                    Ok(Some(session_id)) => {
-                        let bound = this
-                            .update(cx, |workspace, cx| {
-                                let still_open = workspace.sessions.iter().any(|session| {
-                                    session
-                                        .term_leaves()
-                                        .iter()
-                                        .any(|leaf| leaf.entity_id() == view.entity_id())
-                                });
-                                if !still_open {
-                                    return false;
-                                }
-                                let already_claimed = workspace
-                                    .sessions
-                                    .iter()
-                                    .flat_map(Session::term_leaves)
-                                    .any(|leaf| {
-                                        leaf.read(cx).resume_state().is_some_and(|state| {
-                                            state.agent == TerminalAgentKind::Codex
-                                                && state.session_id == session_id
-                                        })
-                                    });
-                                if already_claimed {
-                                    return false;
-                                }
-                                view.update(cx, |view, _| {
-                                    view.set_resume_state(Some(TerminalResumeState {
-                                        agent: TerminalAgentKind::Codex,
-                                        session_id,
-                                        workspace_dir: workspace_dir.clone(),
-                                    }));
-                                });
-                                workspace.save_state(cx);
-                                cx.notify();
-                                true
-                            })
-                            .unwrap_or(false);
-                        if bound {
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let _ = this.update(cx, |workspace, cx| {
-                            workspace.background_error = Some(error);
-                            cx.notify();
-                        });
-                        return;
-                    }
-                }
-            }
         })
         .detach();
     }
@@ -3296,8 +2942,6 @@ impl Workspace {
                             custom_title: None,
                             launch_label: None,
                             launch_cmd: None,
-                            agent_kind: None,
-                            resume_state: None,
                         },
                         active: 0,
                         custom_title: s.custom_title.clone(),
@@ -3306,7 +2950,6 @@ impl Workspace {
                             launch: v.launch_spec(),
                             profile_id: v.profile_id().map(str::to_string),
                             agent: Some(v.agent_kind().id().to_string()),
-                            entries: v.entries_for_save(),
                             resume_session_id: v.resume_session_id_for_save(),
                             sid: Some(v.session_id().to_string()),
                             refresh_launch_from_settings: v.refresh_launch_from_settings(),
@@ -4466,22 +4109,15 @@ impl Workspace {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;
         // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）。
-        // launch_cmd 必须带上：硬重启会清掉守护里的会话，同 id 走新建分支，
-        // 不带 launch 就只剩裸 shell，agent 会话等于全丢。
-        let mut jobs: Vec<(
-            Entity<TerminalView>,
-            Option<String>,
-            String,
-            terminal::MissingSessionAction,
-        )> = Vec::new();
+        // 硬重启会清掉守护里的会话。终端 agent 不做语义恢复，缺失会话统一重开 shell。
+        let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
         for sess in &self.sessions {
             let leaves = sess.term_leaves();
             for leaf in leaves {
                 let view = leaf.read(cx);
                 let cwd = view.cwd();
                 let sid = view.session_id().to_string();
-                let action = view.missing_session_action();
-                jobs.push((leaf, cwd, sid, action));
+                jobs.push((leaf, cwd, sid));
             }
         }
         cx.notify();
@@ -4501,14 +4137,8 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
-                    for (entity, cwd, sid, action) in jobs {
-                        let term = terminal::Terminal::spawn_with_action(
-                            24,
-                            80,
-                            cwd.as_deref(),
-                            &sid,
-                            &action,
-                        );
+                    for (entity, cwd, sid) in jobs {
+                        let term = terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None);
                         out.push((entity, term));
                     }
                     out
@@ -6251,10 +5881,10 @@ impl Render for Workspace {
         // 状态通道：等批准 / 等输入 → gpui-component Notification
         if let Some(pending) = cx.try_global::<PendingAgentNotifs>() {
             let batch = std::mem::take(&mut *pending.0.lock().unwrap());
-            for (title, message, is_approval) in batch {
+            for (title, message, kind) in batch {
                 // 等批准类改由右上角阻塞 toast 展示（派生态，见 toast.rs），
                 // 这里不再重复弹组件通知，避免同屏双弹。
-                if is_approval {
+                if kind == AgentNotificationKind::Approval {
                     continue;
                 }
                 window.push_notification(Notification::info(message).title(title), cx);
@@ -6404,28 +6034,8 @@ impl Render for Workspace {
             )
         };
 
-        // 会话标题（取活动终端的 cwd 末段）
-        let titles: Vec<(usize, String)> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(ix, s)| (ix, s.title(cx)))
-            .collect();
         // 待处理通知总数（标题栏铃铛用）。
         let notif_count = self.collect_notifications(cx).len();
-        // 标题栏分支胶囊：当前项目的分支名（repo_info 缓存，拿不到不显示）。
-        let title_branch = self
-            .cur()
-            .and_then(|s| s.cwd(cx))
-            .and_then(|c| self.repo_info.get(c.as_str()).cloned())
-            .and_then(|(_, i)| i)
-            .map(|i| i.branch);
-        // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
-        let active_title = titles
-            .iter()
-            .find(|(ix, _)| *ix == active)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
 
         // 会话列表：单列按项目上下分组（替代旧 gpui-component Sidebar 两级菜单；
         // 设计稿的「rail + 列表」左右两列实测割裂，见 session_list.rs 文件头）。
@@ -6757,49 +6367,9 @@ impl Render for Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .justify_end()
                         .w_full()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    img(Arc::new(Image::from_bytes(
-                                        ImageFormat::Png,
-                                        include_bytes!("../../../assets/icon-1024.png").to_vec(),
-                                    )))
-                                    .w(px(16.))
-                                    .h(px(16.))
-                                    .rounded(px(4.)),
-                                )
-                                .child(div().text_sm().font_bold().child("smelt"))
-                                .child(div().text_sm().text_color(c_muted).child(active_title))
-                                .children(title_branch.map(|b| {
-                                    // 分支胶囊：绿点 + 当前项目分支（repo_info 缓存）。
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .px_2()
-                                        .py(px(2.))
-                                        .rounded(px(6.))
-                                        .bg(rgb(ui_theme::bg_hover()))
-                                        .border_1()
-                                        .border_color(rgb(ui_theme::border_mid()))
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .text_color(rgb(ui_theme::text_muted()))
-                                        .child(
-                                            div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .bg(rgb(ui_theme::green())),
-                                        )
-                                        .child(b)
-                                })),
-                        )
-                        // 右侧：用量、通知、设置与帮助。stop_propagation 避免触发拖拽。
+                        // 右侧：用量、通知与设置。stop_propagation 避免触发拖拽。
                         .child(
                             h_flex()
                                 .items_center()
@@ -6907,33 +6477,7 @@ impl Render for Workspace {
                                                 this.open_settings_window(cx);
                                             }),
                                         )
-                                })
-                                .child(
-                                    div()
-                                        .id("help-entry")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child("?")
-                                        .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("帮助文档")
-                                                .build(window, cx)
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|_this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                cx.open_url("https://smelt.onoo.io/");
-                                            }),
-                                        ),
-                                ),
+                                }),
                         ),
                 ),
             )
@@ -7329,24 +6873,22 @@ fn main() {
             while let Ok(event) = daemon_state_rx.recv().await {
                 let _ = cx.update(|cx| {
                     let states = cx.global::<DaemonStates>().0.clone();
-                    let notify_on = cx
+                    let notify_config = cx
                         .try_global::<settings::AgentUiConfig>()
-                        .map(|c| c.notify_awaiting)
-                        .unwrap_or(true);
+                        .cloned()
+                        .unwrap_or_default();
                     let pending = cx.try_global::<PendingAgentNotifs>().map(|p| p.0.clone());
                     {
                         let mut map = states.lock().unwrap();
                         match event {
                             terminal::DaemonStateEvent::Snapshot(list) => {
-                                if notify_on {
-                                    if let Some(q) = &pending {
-                                        for s in &list {
-                                            if let Some(entry) =
-                                                awaiting_notification_for_transition(
-                                                    map.get(&s.id).map(|p| p.phase),
-                                                    s,
-                                                )
-                                            {
+                                if let Some(q) = &pending {
+                                    for s in &list {
+                                        if let Some(entry) = awaiting_notification_for_transition(
+                                            map.get(&s.id).map(|p| p.phase),
+                                            s,
+                                        ) {
+                                            if agent_notification_enabled(&notify_config, entry.2) {
                                                 q.lock().unwrap().push(entry);
                                             }
                                         }
@@ -7360,12 +6902,12 @@ fn main() {
                                 }
                             }
                             terminal::DaemonStateEvent::Update(s) => {
-                                if notify_on {
-                                    if let Some(q) = &pending {
-                                        if let Some(entry) = awaiting_notification_for_transition(
-                                            map.get(&s.id).map(|p| p.phase),
-                                            &s,
-                                        ) {
+                                if let Some(q) = &pending {
+                                    if let Some(entry) = awaiting_notification_for_transition(
+                                        map.get(&s.id).map(|p| p.phase),
+                                        &s,
+                                    ) {
+                                        if agent_notification_enabled(&notify_config, entry.2) {
                                             q.lock().unwrap().push(entry);
                                         }
                                     }
@@ -7701,8 +7243,6 @@ mod project_tests {
             custom_title: None,
             launch_label: None,
             launch_cmd: None,
-            agent_kind: None,
-            resume_state: None,
         }
     }
 
@@ -7798,7 +7338,6 @@ mod project_tests {
                 launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude --acp"),
                 profile_id: None,
                 agent: None,
-                entries: Vec::new(),
                 resume_session_id: None,
                 sid: None,
                 refresh_launch_from_settings: false,
@@ -7810,7 +7349,9 @@ mod project_tests {
 
 #[cfg(test)]
 mod daemon_state_notification_tests {
-    use super::awaiting_notification_for_transition;
+    use super::{
+        AgentNotificationKind, agent_notification_enabled, awaiting_notification_for_transition,
+    };
     use crate::terminal::{DaemonPhase, DaemonSessionState};
 
     fn daemon_state(id: &str, phase: DaemonPhase) -> DaemonSessionState {
@@ -7822,6 +7363,7 @@ mod daemon_state_notification_tests {
             launch: None,
             cwd: None,
             phase_since: 0,
+            structured_events: true,
         }
     }
 
@@ -7834,7 +7376,11 @@ mod daemon_state_notification_tests {
 
         assert_eq!(
             notif,
-            Some(("等你输入".into(), "💬 Pick one".into(), false))
+            Some((
+                "等你输入".into(),
+                "💬 Pick one".into(),
+                AgentNotificationKind::Input
+            ))
         );
     }
 
@@ -7855,18 +7401,74 @@ mod daemon_state_notification_tests {
 
         let notif = awaiting_notification_for_transition(Some(DaemonPhase::ExecutingTool), &state);
 
-        assert_eq!(notif, Some(("等你批准".into(), "Need review".into(), true)));
+        assert_eq!(
+            notif,
+            Some((
+                "等你批准".into(),
+                "Need review".into(),
+                AgentNotificationKind::Approval
+            ))
+        );
+    }
+
+    #[test]
+    fn daemon_stop_produces_completion_notification_not_input_notification() {
+        let state = daemon_state("session-12345678", DaemonPhase::Succeeded);
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
+
+        assert_eq!(
+            notif,
+            Some((
+                "已完成".into(),
+                "会话 session-".into(),
+                AgentNotificationKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn daemon_error_produces_failure_notification() {
+        let mut state = daemon_state("session-12345678", DaemonPhase::Failed);
+        state.pending_question = Some("rate limited".into());
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
+
+        assert_eq!(
+            notif,
+            Some((
+                "失败".into(),
+                "rate limited".into(),
+                AgentNotificationKind::Failure
+            ))
+        );
+    }
+
+    #[test]
+    fn notification_switches_are_independent() {
+        let mut config = crate::settings::AgentUiConfig::default();
+        config.notify_success = false;
+
+        assert!(!agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Success
+        ));
+        assert!(agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Approval
+        ));
+        assert!(agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Input
+        ));
+        assert!(agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Failure
+        ));
     }
 }
 
 #[cfg(test)]
 mod pane_state_tests {
-    use super::{
-        PaneState, migrate_legacy_pane_agent_kind, prepare_terminal_launch, terminal_restore_action,
-    };
-    use crate::settings::LaunchEntry;
-    use crate::terminal::MissingSessionAction;
-    use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
+    use super::PaneState;
 
     /// pane 自定义名必须能跟着 Leaf 存下来、读回来（否则重开 GUI 就丢名字）。
     #[test]
@@ -7877,12 +7479,6 @@ mod pane_state_tests {
             custom_title: Some("跑测试的终端".into()),
             launch_label: Some("Claude Code".into()),
             launch_cmd: Some("claude --dangerously-skip-permissions".into()),
-            agent_kind: Some(TerminalAgentKind::Claude),
-            resume_state: Some(TerminalResumeState {
-                agent: TerminalAgentKind::Claude,
-                session_id: "agent-session-1".into(),
-                workspace_dir: Some("/tmp/claude-alt".into()),
-            }),
         };
         let json = serde_json::to_string(&leaf).unwrap();
         let back: PaneState = serde_json::from_str(&json).unwrap();
@@ -7893,8 +7489,6 @@ mod pane_state_tests {
                 launch_cmd,
                 id,
                 cwd,
-                agent_kind,
-                resume_state,
             } => {
                 assert_eq!(custom_title.as_deref(), Some("跑测试的终端"));
                 assert_eq!(launch_label.as_deref(), Some("Claude Code"));
@@ -7904,163 +7498,11 @@ mod pane_state_tests {
                 );
                 assert_eq!(id.as_deref(), Some("sid-1"));
                 assert_eq!(cwd.as_deref(), Some("/tmp/x"));
-                assert_eq!(agent_kind, Some(TerminalAgentKind::Claude));
-                assert_eq!(
-                    resume_state.unwrap().workspace_dir.as_deref(),
-                    Some("/tmp/claude-alt")
-                );
             }
             _ => panic!("应当反序列化成 Leaf"),
         }
     }
 
-    #[test]
-    fn terminal_restore_action_resumes_only_known_history() {
-        let state = TerminalResumeState {
-            agent: TerminalAgentKind::Claude,
-            session_id: "sid-1".into(),
-            workspace_dir: None,
-        };
-        assert!(matches!(
-            terminal_restore_action(
-                Some(TerminalAgentKind::Claude),
-                Some("claude --dangerously-skip-permissions"),
-                Some(&state),
-                Some("/tmp/x"),
-                true,
-            ),
-            MissingSessionAction::Launch(command) if command.ends_with("--resume sid-1")
-        ));
-        assert!(matches!(
-            terminal_restore_action(
-                Some(TerminalAgentKind::Claude),
-                Some("claude"),
-                Some(&state),
-                Some("/tmp/x"),
-                false,
-            ),
-            MissingSessionAction::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn terminal_restore_action_rejects_agent_without_identity() {
-        assert!(matches!(
-            terminal_restore_action(
-                Some(TerminalAgentKind::Claude),
-                Some("claude"),
-                None,
-                Some("/tmp/x"),
-                false,
-            ),
-            MissingSessionAction::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn known_id_agent_launch_keeps_original_and_persists_identity() {
-        let entry = LaunchEntry {
-            label: "Claude Code".into(),
-            command: "CLAUDE_CONFIG_DIR=~/.claude-alt claude".into(),
-            agent_kind: Some(TerminalAgentKind::Claude),
-        };
-        let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
-        assert_eq!(
-            prepared.original_command.as_deref(),
-            Some(entry.command.as_str())
-        );
-        assert!(
-            prepared
-                .spawn_command
-                .as_deref()
-                .unwrap()
-                .contains("--session-id")
-        );
-        assert!(prepared.resume_state.is_some());
-        assert!(prepared.codex_baseline.is_none());
-    }
-
-    #[test]
-    fn codex_launch_records_baseline_for_discovery() {
-        let entry = LaunchEntry {
-            label: "Codex".into(),
-            command: "CODEX_HOME=~/.codex-alt codex".into(),
-            agent_kind: Some(TerminalAgentKind::Codex),
-        };
-        let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
-        assert_eq!(
-            prepared.spawn_command.as_deref(),
-            Some(entry.command.as_str())
-        );
-        assert!(prepared.resume_state.is_none());
-        assert!(prepared.codex_baseline.is_some());
-        assert!(prepared.workspace_dir.unwrap().ends_with("/.codex-alt"));
-    }
-
-    #[test]
-    fn legacy_agent_leaf_gains_kind_but_not_resume_identity() {
-        let mut raw = serde_json::json!({
-            "Leaf": {
-                "cwd": "/tmp/x",
-                "id": "terminal-sid",
-                "launch_label": "Copilot",
-                "launch_cmd": "COPILOT_HOME='~/Copilot Data' copilot --allow-all"
-            }
-        });
-
-        assert!(migrate_legacy_pane_agent_kind(&mut raw));
-        let pane: PaneState = serde_json::from_value(raw).unwrap();
-        match pane {
-            PaneState::Leaf {
-                agent_kind,
-                resume_state,
-                ..
-            } => {
-                assert_eq!(agent_kind, Some(TerminalAgentKind::Copilot));
-                assert!(resume_state.is_none());
-            }
-            PaneState::Split { .. } => panic!("expected leaf"),
-        }
-    }
-
-    #[test]
-    fn legacy_migration_preserves_explicit_null_and_custom_aliases() {
-        let mut explicit_terminal = serde_json::json!({
-            "Leaf": {
-                "launch_cmd": "claude",
-                "agent_kind": null
-            }
-        });
-        let mut custom_alias = serde_json::json!({
-            "Leaf": {
-                "launch_cmd": "claude-quant --dangerously-skip-permissions"
-            }
-        });
-
-        assert!(!migrate_legacy_pane_agent_kind(&mut explicit_terminal));
-        assert!(explicit_terminal["Leaf"]["agent_kind"].is_null());
-        assert!(!migrate_legacy_pane_agent_kind(&mut custom_alias));
-        assert!(custom_alias["Leaf"].get("agent_kind").is_none());
-    }
-
-    #[test]
-    fn legacy_agent_migration_walks_split_children() {
-        let mut raw = serde_json::json!({
-            "Split": {
-                "axis": "H",
-                "children": [
-                    {"Leaf": {"cwd": "/tmp/a", "launch_cmd": "claude"}},
-                    {"Leaf": {"cwd": "/tmp/b", "launch_cmd": "grok"}}
-                ]
-            }
-        });
-
-        assert!(migrate_legacy_pane_agent_kind(&mut raw));
-        assert_eq!(raw["Split"]["children"][0]["Leaf"]["agent_kind"], "claude");
-        assert_eq!(raw["Split"]["children"][1]["Leaf"]["agent_kind"], "grok");
-    }
-
-    /// 旧存档没有 custom_title / launch_label / launch_cmd 字段，必须读成 None 而不是解析失败。
     #[test]
     fn old_archive_without_custom_title_still_loads() {
         let old = r#"{"Leaf":{"cwd":"/tmp/x","id":"sid-1"}}"#;
@@ -8071,15 +7513,11 @@ mod pane_state_tests {
                 launch_label,
                 launch_cmd,
                 id,
-                agent_kind,
-                resume_state,
                 ..
             } => {
                 assert!(custom_title.is_none(), "旧存档不该凭空冒出自定义名");
                 assert!(launch_label.is_none(), "旧存档不该凭空冒出启动项名");
                 assert!(launch_cmd.is_none(), "旧存档不该凭空冒出启动命令");
-                assert!(agent_kind.is_none(), "旧存档不该凭空冒出 agent 类型");
-                assert!(resume_state.is_none(), "旧存档不该凭空冒出恢复身份");
                 assert_eq!(id.as_deref(), Some("sid-1"));
             }
             _ => panic!("应当反序列化成 Leaf"),
@@ -8089,61 +7527,7 @@ mod pane_state_tests {
 
 #[cfg(test)]
 mod workspace_state_tests {
-    use super::{PaneState, SidebarGrouping, WsState, load_ws_state_from_path};
-
-    #[test]
-    fn load_workspace_migrates_legacy_panes_and_persists_once() {
-        let sandbox = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/test-artifacts/workspace-state/legacy-agent-kind");
-        let _ = std::fs::remove_dir_all(&sandbox);
-        std::fs::create_dir_all(&sandbox).unwrap();
-        let path = sandbox.join("workspace.json");
-        std::fs::write(
-            &path,
-            r#"{
-  "sessions": [{
-    "layout": {"Leaf": {
-      "cwd": "/tmp/x",
-      "launch_cmd": "copilot --allow-all"
-    }},
-    "active": 0
-  }]
-}"#,
-        )
-        .unwrap();
-
-        let state = load_ws_state_from_path(&path).unwrap();
-        match &state.sessions[0].layout {
-            PaneState::Leaf {
-                agent_kind,
-                resume_state,
-                ..
-            } => {
-                assert_eq!(
-                    *agent_kind,
-                    Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
-                );
-                assert!(resume_state.is_none());
-            }
-            PaneState::Split { .. } => panic!("expected leaf"),
-        }
-
-        let saved = std::fs::read_to_string(&path).unwrap();
-        let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(
-            saved_json["sessions"][0]["layout"]["Leaf"]["agent_kind"],
-            "copilot"
-        );
-        assert!(saved_json["sessions"][0]["layout"]["Leaf"]["resume_state"].is_null());
-
-        load_ws_state_from_path(&path).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            saved,
-            "a migrated workspace must not be rewritten on the next load"
-        );
-        std::fs::remove_dir_all(&sandbox).unwrap();
-    }
+    use super::{SidebarGrouping, WsState};
 
     #[test]
     fn collapsed_projects_roundtrip() {
@@ -8222,8 +7606,6 @@ mod workspace_state_tests {
                     custom_title: None,
                     launch_label: None,
                     launch_cmd: None,
-                    agent_kind: None,
-                    resume_state: None,
                 },
                 active: 0,
                 custom_title: Some(name.into()),
@@ -8232,7 +7614,6 @@ mod workspace_state_tests {
                     launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude"),
                     profile_id: None,
                     agent: Some("claude".into()),
-                    entries: Vec::new(),
                     resume_session_id: None,
                     sid: Some(format!("sid-{name}")),
                     refresh_launch_from_settings: false,
@@ -8380,7 +7761,6 @@ mod acp_agent_tests {
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             profile_id: Some("quant".into()),
             agent: Some("claude".into()),
-            entries: Vec::new(),
             resume_session_id: None,
             sid: Some("acp-1".into()),
             refresh_launch_from_settings: false,
@@ -8388,6 +7768,10 @@ mod acp_agent_tests {
 
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value.get("cmd").is_none(), "新存档不该再写旧 cmd 字段");
+        assert!(
+            value.get("entries").is_none(),
+            "agent transcript 是历史唯一来源，新存档不该再写 ACP entries"
+        );
         let restored: AcpSaved = serde_json::from_value(value).unwrap();
 
         assert_eq!(restored.profile_id.as_deref(), Some("quant"));
@@ -8398,6 +7782,26 @@ mod acp_agent_tests {
                 .get("CLAUDE_CONFIG_DIR")
                 .map(String::as_str),
             Some("~/Claude Workspaces/quant")
+        );
+    }
+
+    #[test]
+    fn legacy_entries_are_readable_but_not_written_back() {
+        let legacy: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "launch": { "command": "claude", "env": {} },
+            "agent": "claude",
+            "entries": [
+                { "User": "old question" },
+                { "Assistant": { "text": "old answer", "thought": false } }
+            ]
+        }))
+        .expect("旧 entries 字段不能让整个 ACP 会话存档解析失败");
+
+        let migrated = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            migrated.get("entries").is_none(),
+            "读取旧存档后必须停止写回本地历史副本"
         );
     }
 

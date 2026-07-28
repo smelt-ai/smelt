@@ -1,4 +1,4 @@
-//! 阻塞 toast：右上角浮层（322px），会话进入「等你批准 / 需要处理」时弹出。
+//! 阻塞 toast：右上角浮层（322px），会话进入「等你批准」时弹出。
 //! 派生态而非事件流——render 每帧从 `Session::status` 重算，不存在丢事件；
 //! ✕ / Snooze 记在 `toast_dismissed` / `toast_snoozed`，状态解除自动清除，
 //! 同一会话再次阻塞会重新弹。
@@ -15,6 +15,13 @@ use crate::{AgentStatus, Workspace, ui_theme};
 /// Snooze 时长：10 分钟。
 const SNOOZE: Duration = Duration::from_secs(600);
 
+/// 只有协议状态、明确的审批通知或权限菜单确认的审批态，才有资格显示阻塞卡。
+/// `NeedsAttention` 包含普通 OSC/响铃（例如“tag 已推送”），它们已有轻量通知链路，
+/// 不能再被包装成审批卡。
+fn should_show_blocked_toast(status: AgentStatus) -> bool {
+    status == AgentStatus::WaitingApproval
+}
+
 impl Workspace {
     /// 右上角阻塞 toast 浮层；没有需要展示的就返回 None。
     pub(crate) fn render_blocked_toasts(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -27,26 +34,20 @@ impl Workspace {
             .iter()
             .enumerate()
             .filter(|(ix, _)| {
-                matches!(
-                    statuses.get(*ix),
-                    Some(AgentStatus::WaitingApproval | AgentStatus::NeedsAttention)
-                )
+                statuses
+                    .get(*ix)
+                    .copied()
+                    .is_some_and(should_show_blocked_toast)
             })
             .map(|(_, s)| s.anchor_id())
             .collect();
         self.toast_dismissed.retain(|id| blocked_ids.contains(id));
         self.toast_snoozed.retain(|id, _| blocked_ids.contains(id));
 
-        // 终端通道的具体通知文案（有就用，没有回退到状态短语）。
-        let notif_msgs = self.collect_notifications(cx);
-
         let mut items: Vec<(usize, EntityId, String, String)> = Vec::new();
         for (ix, s) in self.sessions.iter().enumerate() {
             let st = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
-            if !matches!(
-                st,
-                AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-            ) {
+            if !should_show_blocked_toast(st) {
                 continue;
             }
             let id = s.anchor_id();
@@ -56,16 +57,9 @@ impl Workspace {
             if self.toast_snoozed.get(&id).is_some_and(|t| now < *t) {
                 continue;
             }
-            let msg = notif_msgs
-                .iter()
-                .find(|(si, _, _)| *si == ix)
-                .map(|(_, _, m)| m.clone())
-                .unwrap_or_else(|| match st {
-                    AgentStatus::WaitingApproval => {
-                        "Agent 暂停中——需要你批准才能继续。".to_string()
-                    }
-                    _ => "Agent 在等你处理。".to_string(),
-                });
+            let msg = s
+                .approval_msg(cx)
+                .unwrap_or_else(|| "Agent 暂停中——需要你批准才能继续。".to_string());
             items.push((ix, id, s.title(cx), msg));
         }
         if items.is_empty() {
@@ -123,7 +117,7 @@ impl Workspace {
                                     .font_semibold()
                                     .text_color(rgb(ui_theme::yellow()))
                                     .truncate()
-                                    .child(format!("Blocked · {name}")),
+                                    .child(format!("等你批准 · {name}")),
                             )
                             .child(
                                 div()
@@ -202,5 +196,18 @@ impl Workspace {
             );
         }
         Some(stack.into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_show_blocked_toast;
+    use crate::AgentStatus;
+
+    #[test]
+    fn ordinary_attention_does_not_render_as_blocked() {
+        assert!(!should_show_blocked_toast(AgentStatus::NeedsAttention));
+        assert!(!should_show_blocked_toast(AgentStatus::Done));
+        assert!(should_show_blocked_toast(AgentStatus::WaitingApproval));
     }
 }

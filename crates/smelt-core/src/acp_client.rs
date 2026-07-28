@@ -17,8 +17,8 @@ use crate::acp_session::{AcpPhase, AcpSnapshot, AcpUserAction};
 use crate::agent_kind::AcpLaunchSpec;
 
 /// 一次 `acp_open` 的启动参数。`agent_id` 是 `AcpAgentKind::id()` 那串小写
-/// 标识（"claude"/"codex"/"copilot"/"grok"），smeltd 只靠它判断
-/// `resume_needs_transcript_check`（只有 claude 该为 true），不需要知道更多。
+/// 标识（"claude"/"codex"/"copilot"/"grok"）；仍随请求发送以兼容旧 smeltd
+/// 的 handoff 数据，恢复历史本身只依赖 agent 的 `session/load`。
 pub struct AcpClientLaunch {
     pub id: String,
     pub cwd: Option<String>,
@@ -97,6 +97,7 @@ impl Drop for AcpClientHandle {
 
 fn fallback_snapshot(reason: &str) -> AcpSnapshot {
     AcpSnapshot {
+        entries_offset: 0,
         entries: Vec::new(),
         phase: AcpPhase::Ended(reason.to_string()),
         pending_permissions: Vec::new(),

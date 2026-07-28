@@ -254,8 +254,7 @@ impl Dimensions for TermSize {
     }
 }
 
-/// 通知消息的共享槽：EventProxy（响铃 Bell）与 reader 线程（OSC 9/99/777）都往这写，
-/// UI 侧轮询 take_notification 取走，用作「agent 需要注意」提示。
+/// OSC 9/99/777 普通通知槽；UI 侧轮询后用于横幅/通知记录，不参与 Agent 状态。
 type NotifySlot = Arc<Mutex<Option<String>>>;
 
 /// 网格行列 + 单元格像素尺寸，给 OSC/CSI 查询（TextAreaSizeRequest）和 PTY resize 用。
@@ -268,12 +267,12 @@ struct TermMetrics {
     cell_h: u16,
 }
 
-/// 事件代理：alacritty 的 EventListener。终端响铃 Event::Bell → 写入一条默认通知；
-/// PtyWrite / ColorRequest / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；
+/// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态；PtyWrite /
+/// ColorRequest / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
-    notify: NotifySlot,
+    bell_notify: NotifySlot,
     /// 终端标题（OSC 0/2）——Claude Code 用它实时报告「在干嘛」（任务名 + 状态符号）。
     title: Arc<Mutex<Option<String>>>,
     /// 守护连接写端，跟 [`Terminal`] 自己发键盘输入共用同一把锁——两边都是往同一个
@@ -317,8 +316,8 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::Bell => {
-                if let Ok(mut g) = self.notify.lock() {
-                    *g = Some("🔔 响铃".to_string());
+                if let Ok(mut bell) = self.bell_notify.lock() {
+                    *bell = Some("🔔 响铃".to_string());
                 }
             }
             Event::Title(t) => {
@@ -1562,8 +1561,10 @@ pub struct Terminal {
     size: TermSize,
     /// 与 EventProxy 共享的行列/单元格像素（resize 与 TextAreaSizeRequest 共用）。
     metrics: Arc<Mutex<TermMetrics>>,
-    /// 通知消息槽（响铃 / OSC 9 写入，UI 轮询 take_notification 取走）。
+    /// 普通 OSC 9/99/777 通知槽（UI 轮询 take_notification 取走）。
     notify: NotifySlot,
+    /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
+    bell_notify: NotifySlot,
     /// 终端标题（agent 实时状态；UI 读 current_title 用于通知 / 总览）。
     title: Arc<Mutex<Option<String>>>,
     /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
@@ -1593,41 +1594,20 @@ const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// 恢复会话时主线程卡死，强杀重开又 abort）。取值对齐 probe_daemon 的 5s。
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MissingSessionAction {
-    Shell,
-    Launch(String),
-    Reject(String),
-}
-
 fn open_request(
     rows: usize,
     cols: usize,
     cwd: Option<&str>,
     id: &str,
-    action: &MissingSessionAction,
+    launch: Option<&str>,
 ) -> serde_json::Value {
-    let missing = match action {
-        MissingSessionAction::Shell => serde_json::json!({"kind": "shell"}),
-        MissingSessionAction::Launch(command) => {
-            serde_json::json!({"kind": "launch", "command": command})
-        }
-        MissingSessionAction::Reject(reason) => {
-            serde_json::json!({"kind": "reject", "reason": reason})
-        }
-    };
-    let legacy_launch = match action {
-        MissingSessionAction::Launch(command) => Some(command.as_str()),
-        _ => None,
-    };
     serde_json::json!({
         "op": "open",
         "id": id,
         "cwd": cwd,
         "cols": cols,
         "rows": rows,
-        "launch": legacy_launch,
-        "missing": missing,
+        "initial_launch": launch,
     })
 }
 
@@ -1660,19 +1640,6 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
-        let action = launch
-            .map(|command| MissingSessionAction::Launch(command.to_string()))
-            .unwrap_or(MissingSessionAction::Shell);
-        Self::spawn_with_action(rows, cols, cwd, id, &action)
-    }
-
-    pub fn spawn_with_action(
-        rows: usize,
-        cols: usize,
-        cwd: Option<&str>,
-        id: &str,
-        action: &MissingSessionAction,
-    ) -> anyhow::Result<Self> {
         // 1) 连守护（不在则自动拉起）并声明要打开的会话，握手失败带几次短重试。
         //
         // 守护无缝升级 exec 交接期间，恰好在这一瞬间新开的 pane 可能撞上这个连接
@@ -1694,7 +1661,7 @@ impl Terminal {
                 // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
                 // upgrade 交接的百毫秒抖动，重连一次就好。
                 let writer = connect_daemon()?;
-                match Self::handshake_on(writer, rows, cols, cwd, id, action) {
+                match Self::handshake_on(writer, rows, cols, cwd, id, launch) {
                     Ok(x) => {
                         result = Some(x);
                         break;
@@ -1709,9 +1676,10 @@ impl Terminal {
         };
         let writer = buffered.get_ref().try_clone()?;
 
-        // 2) alacritty 终端状态机（EventProxy 把响铃 / 标题写入共享槽，把 PTY 自动
+        // 2) alacritty 终端状态机（EventProxy 维护标题，把 PTY 自动
         //    应答写回下面这个共享写端）
         let notify: NotifySlot = Arc::new(Mutex::new(None));
+        let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
         let title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let writer = Arc::new(Mutex::new(writer));
         let metrics = Arc::new(Mutex::new(TermMetrics {
@@ -1724,7 +1692,7 @@ impl Terminal {
             term_config(),
             &size,
             EventProxy {
-                notify: notify.clone(),
+                bell_notify: bell_notify.clone(),
                 title: title.clone(),
                 writer: writer.clone(),
                 metrics: metrics.clone(),
@@ -1812,6 +1780,7 @@ impl Terminal {
             size,
             metrics,
             notify,
+            bell_notify,
             title,
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
@@ -1836,12 +1805,12 @@ impl Terminal {
         cols: usize,
         cwd: Option<&str>,
         id: &str,
-        action: &MissingSessionAction,
+        launch: Option<&str>,
     ) -> anyhow::Result<(BufReader<UnixStream>, TermSize, usize)> {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
-        writeln!(writer, "{}", open_request(rows, cols, cwd, id, action))?;
+        writeln!(writer, "{}", open_request(rows, cols, cwd, id, launch))?;
         let mut buffered = BufReader::new(writer);
         let mut line = String::new();
         buffered.read_line(&mut line)?;
@@ -1858,9 +1827,14 @@ impl Terminal {
         Ok((buffered, size, replay_len))
     }
 
-    /// 取走最新通知消息（读并清）：响铃或 OSC 9/99/777 上报的「需要注意」文本。
+    /// 取走最新普通通知消息（读并清）：OSC 9/99/777 上报的文本。
     pub fn take_notification(&self) -> Option<String> {
         self.notify.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// 取走一次普通终端 BEL 提醒；它不携带 Agent 状态语义。
+    pub fn take_bell_notification(&self) -> Option<String> {
+        self.bell_notify.lock().ok()?.take()
     }
 
     /// 当前终端标题（agent 报告的任务名 + 状态符号）；未设置返回 None。
@@ -2777,21 +2751,15 @@ mod damage_gate_tests {
 /// 写回去，不用起真实 shell/PTY——直接喂原始转义序列给 alacritty 的 Processor，
 /// 用 UnixStream::pair() 在另一头当"假守护"读回应帧即可，快且不 flaky。
 #[cfg(test)]
-mod missing_session_action_tests {
-    use super::{MissingSessionAction, open_request};
+mod open_request_tests {
+    use super::open_request;
 
     #[test]
-    fn open_request_serializes_missing_session_action() {
-        let value = open_request(
-            24,
-            80,
-            Some("/tmp/project"),
-            "sid-1",
-            &MissingSessionAction::Launch("claude --resume old".into()),
-        );
-        assert_eq!(value["missing"]["kind"], "launch");
-        assert_eq!(value["missing"]["command"], "claude --resume old");
-        assert_eq!(value["launch"], "claude --resume old");
+    fn open_request_serializes_initial_launch() {
+        let value = open_request(24, 80, Some("/tmp/project"), "sid-1", Some("claude"));
+        assert_eq!(value["initial_launch"], "claude");
+        assert!(value.get("launch").is_none());
+        assert!(value.get("missing").is_none());
     }
 }
 
@@ -2809,14 +2777,7 @@ mod handshake_timeout_tests {
         let (ours, theirs) = UnixStream::pair().expect("pair 失败");
         let (tx, rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            let r = Terminal::handshake_on(
-                ours,
-                24,
-                80,
-                None,
-                "mute-daemon-test",
-                &MissingSessionAction::Shell,
-            );
+            let r = Terminal::handshake_on(ours, 24, 80, None, "mute-daemon-test", None);
             let _ = tx.send(r.is_err());
         });
         match rx.recv_timeout(HANDSHAKE_READ_TIMEOUT + Duration::from_secs(2)) {
@@ -2867,7 +2828,7 @@ mod event_proxy_answers_tests {
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
         let proxy = EventProxy {
-            notify: Arc::new(Mutex::new(None)),
+            bell_notify: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(None)),
             writer: Arc::new(Mutex::new(sock)),
             metrics: Arc::new(Mutex::new(TermMetrics {
@@ -2990,6 +2951,35 @@ mod event_proxy_answers_tests {
 }
 
 #[cfg(test)]
+mod bell_notification_tests {
+    use super::*;
+
+    #[test]
+    fn bell_uses_its_own_notification_slot() {
+        let (sock, _peer) = UnixStream::pair().expect("创建 socket pair");
+        let bell_notify = Arc::new(Mutex::new(None));
+        let proxy = EventProxy {
+            bell_notify: Arc::clone(&bell_notify),
+            title: Arc::new(Mutex::new(None)),
+            writer: Arc::new(Mutex::new(sock)),
+            metrics: Arc::new(Mutex::new(TermMetrics {
+                rows: 24,
+                cols: 80,
+                cell_w: 8,
+                cell_h: 16,
+            })),
+        };
+
+        proxy.send_event(Event::Bell);
+
+        assert_eq!(
+            bell_notify.lock().unwrap().take().as_deref(),
+            Some("🔔 响铃")
+        );
+    }
+}
+
+#[cfg(test)]
 mod paste_encode_tests {
     use super::encode_paste;
 
@@ -3020,7 +3010,7 @@ mod search_resync_tests {
             cell_h: 16,
         }));
         let proxy = EventProxy {
-            notify: Arc::new(Mutex::new(None)),
+            bell_notify: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(None)),
             writer: Arc::new(Mutex::new(sock.try_clone().expect("clone 失败"))),
             metrics: metrics.clone(),
@@ -3032,6 +3022,7 @@ mod search_resync_tests {
             size: TermSize { rows, cols },
             metrics,
             notify: Arc::new(Mutex::new(None)),
+            bell_notify: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(None)),
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),

@@ -14,12 +14,18 @@ fn default_true() -> bool {
 }
 
 const LEGACY_CODEX_ACP_CMD: &str = "bunx --bun @zed-industries/codex-acp@0.16.0";
+const PREVIOUS_CODEX_ACP_CMD: &str = "bunx --bun @agentclientprotocol/codex-acp@1.1.7";
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentUiConfig {
-    /// 状态通道进入「等你批准 / 等你输入」时用 Notification 组件弹出。
+    #[serde(default = "default_true", alias = "notify_awaiting")]
+    pub notify_approval: bool,
     #[serde(default = "default_true")]
-    pub notify_awaiting: bool,
+    pub notify_input: bool,
+    #[serde(default = "default_true")]
+    pub notify_success: bool,
+    #[serde(default = "default_true")]
+    pub notify_failure: bool,
     /// Claude ACP 会话的 agent 启动命令（空白分词）。默认 Claude 官方适配器；权限门
     /// 保留——结构化审批正是这条通道的卖点，别在这里加 bypass 类参数。
     ///
@@ -30,7 +36,7 @@ pub struct AgentUiConfig {
     /// GitHub Copilot ACP 会话的启动命令。
     #[serde(default = "default_acp_copilot_cmd")]
     pub acp_copilot_cmd: String,
-    /// Codex ACP 会话的启动命令。
+    /// Codex 原生 app-server 的启动命令。字段名为兼容旧配置保留。
     #[serde(default = "default_acp_codex_cmd")]
     pub acp_codex_cmd: String,
     /// Grok ACP 会话的启动命令。
@@ -78,7 +84,10 @@ impl AgentUiConfig {
 impl Default for AgentUiConfig {
     fn default() -> Self {
         Self {
-            notify_awaiting: true,
+            notify_approval: true,
+            notify_input: true,
+            notify_success: true,
+            notify_failure: true,
             acp_cmd: default_acp_cmd(),
             acp_copilot_cmd: default_acp_copilot_cmd(),
             acp_codex_cmd: default_acp_codex_cmd(),
@@ -95,16 +104,41 @@ fn agent_ui_path() -> Option<std::path::PathBuf> {
 }
 
 pub fn load_agent_ui_config() -> AgentUiConfig {
-    let mut config: AgentUiConfig = smelt_core::json_store::load_json(agent_ui_path());
-    // 只迁移之前随应用发出的默认值；用户自己选过 Zed 适配器或其他命令时不动。
+    let path = agent_ui_path();
+    let legacy_value = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let mut config: AgentUiConfig = smelt_core::json_store::load_json(path);
+    let mut migrated = legacy_value
+        .as_ref()
+        .is_some_and(|value| migrate_legacy_notification_setting(&mut config, value));
+    // 只迁移之前随应用发出的默认值；用户自定义命令不动。
     if migrate_legacy_codex_adapter(&mut config) {
+        migrated = true;
+    }
+    if migrated {
         save_agent_ui_config(&config);
     }
     config
 }
 
+fn migrate_legacy_notification_setting(
+    config: &mut AgentUiConfig,
+    value: &serde_json::Value,
+) -> bool {
+    let Some(enabled) = value.get("notify_awaiting").and_then(|v| v.as_bool()) else {
+        return false;
+    };
+    config.notify_approval = enabled;
+    config.notify_input = enabled;
+    true
+}
+
 fn migrate_legacy_codex_adapter(config: &mut AgentUiConfig) -> bool {
-    if config.acp_codex_cmd != LEGACY_CODEX_ACP_CMD {
+    if config.acp_codex_cmd != LEGACY_CODEX_ACP_CMD
+        && config.acp_codex_cmd != PREVIOUS_CODEX_ACP_CMD
+    {
         return false;
     }
     config.acp_codex_cmd = default_acp_codex_cmd();
@@ -137,12 +171,32 @@ mod tests {
     }
 
     #[test]
+    fn previous_official_codex_adapter_is_replaced_by_app_server() {
+        let mut config = AgentUiConfig::default();
+        config.acp_codex_cmd = PREVIOUS_CODEX_ACP_CMD.into();
+        assert!(migrate_legacy_codex_adapter(&mut config));
+        assert_eq!(config.acp_codex_cmd, "codex app-server");
+    }
+
+    #[test]
     fn custom_codex_adapter_is_not_migrated() {
         let mut config = AgentUiConfig::default();
         config.acp_codex_cmd = "codex-acp --custom".into();
 
         assert!(!migrate_legacy_codex_adapter(&mut config));
         assert_eq!(config.acp_codex_cmd, "codex-acp --custom");
+    }
+
+    #[test]
+    fn legacy_disabled_awaiting_setting_disables_both_wait_notifications() {
+        let mut config = AgentUiConfig::default();
+        let old = serde_json::json!({ "notify_awaiting": false });
+
+        assert!(migrate_legacy_notification_setting(&mut config, &old));
+        assert!(!config.notify_approval);
+        assert!(!config.notify_input);
+        assert!(config.notify_success);
+        assert!(config.notify_failure);
     }
 
     #[test]
