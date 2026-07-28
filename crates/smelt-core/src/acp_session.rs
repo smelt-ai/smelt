@@ -50,7 +50,7 @@ pub enum PermissionOptionKindView {
 }
 
 impl PermissionOptionKindView {
-    fn from_acp(k: PermissionOptionKind) -> Self {
+    pub(crate) fn from_acp(k: PermissionOptionKind) -> Self {
         match k {
             PermissionOptionKind::AllowOnce => Self::AllowOnce,
             PermissionOptionKind::AllowAlways => Self::AllowAlways,
@@ -74,6 +74,27 @@ pub struct PendingPermission {
     pub question: String,
     pub tool_call_id: String,
     pub options: Vec<PermissionOptionView>,
+    #[serde(default)]
+    pub details: ApprovalDetailsView,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApprovalDetailsView {
+    Command {
+        command: String,
+        cwd: Option<String>,
+        reason: Option<String>,
+    },
+    FileChange {
+        reason: Option<String>,
+        grant_root: Option<String>,
+    },
+    Permissions {
+        summary: String,
+    },
+    #[default]
+    Generic,
 }
 
 /// 选择题字段的展示形态——**不带** `ElicitationContentValue`：客户端只按
@@ -89,6 +110,8 @@ pub struct ElicitOptionView {
 pub enum ElicitFieldKindView {
     Select(Vec<ElicitOptionView>),
     MultiSelect(Vec<ElicitOptionView>),
+    Text { secret: bool },
+    ExternalUrl(String),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -105,6 +128,8 @@ pub struct PendingElicitation {
     /// 已选中的 (字段下标 → 选项下标列表)，跟旧版 `ElicitCard.chosen` 同一份
     /// 语义——GUI 要能画出「已经点了哪些」，不能重连一次就清空選択态。
     pub chosen: BTreeMap<usize, Vec<usize>>,
+    #[serde(default)]
+    pub text_values: BTreeMap<usize, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -153,6 +178,9 @@ fn plan_view_from_acp(p: &Plan) -> PlanView {
 /// 消息流几十条 + 几个标量字段，序列化成本远低于维护增量协议的复杂度）。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AcpSnapshot {
+    /// `entries` 应替换本地历史的起始下标。0 表示完整快照；大于 0 表示增量尾片。
+    #[serde(default)]
+    pub entries_offset: usize,
     pub entries: Vec<AcpEntry>,
     pub phase: AcpPhase,
     #[serde(default)]
@@ -185,6 +213,7 @@ pub struct LivePermission {
     pub question: String,
     pub tool_call_id: String,
     pub options: Vec<PermissionOptionView>,
+    pub details: ApprovalDetailsView,
     pub responder: Option<PermissionResponder>,
     /// 这张卡对应请求的原始 JSON-RPC 行，smeltd 无缝升级时用来重放（见
     /// `AcpEvent::Permission` 同名字段）。
@@ -197,6 +226,7 @@ pub struct LiveElicitation {
     pub message: String,
     pub raw_fields: Vec<ElicitField>,
     pub chosen: BTreeMap<usize, Vec<usize>>,
+    pub text_values: BTreeMap<usize, String>,
     pub responder: Option<ElicitationResponder>,
     /// 同 `LivePermission::raw_request_line`。
     pub raw_request_line: Option<String>,
@@ -307,8 +337,14 @@ impl AcpSessionState {
     /// 这个上下文信息，调用方（smeltd 的事件循环）从 `apply_event` 的返回值
     /// 里拿，这里只负责原样塞进快照，见该字段注释。
     pub fn to_snapshot(&self, should_persist: bool) -> AcpSnapshot {
+        self.to_snapshot_since(should_persist, 0)
+    }
+
+    pub fn to_snapshot_since(&self, should_persist: bool, entries_offset: usize) -> AcpSnapshot {
+        let entries_offset = entries_offset.min(self.entries.len());
         AcpSnapshot {
-            entries: self.entries.clone(),
+            entries_offset,
+            entries: self.entries[entries_offset..].to_vec(),
             phase: self.phase.clone(),
             pending_permissions: self
                 .permissions
@@ -317,12 +353,14 @@ impl AcpSessionState {
                     question: p.question.clone(),
                     tool_call_id: p.tool_call_id.clone(),
                     options: p.options.clone(),
+                    details: p.details.clone(),
                 })
                 .collect(),
             pending_elicitation: self.elicitation.as_ref().map(|e| PendingElicitation {
                 message: e.message.clone(),
                 fields: e.raw_fields.iter().map(elicit_field_view).collect(),
                 chosen: e.chosen.clone(),
+                text_values: e.text_values.clone(),
             }),
             status_line: self.status_line.clone(),
             acp_session_id: self.acp_session_id.clone(),
@@ -357,6 +395,8 @@ fn elicit_field_view(f: &ElicitField) -> ElicitFieldView {
                     })
                     .collect(),
             ),
+            ElicitFieldKind::Text { secret } => ElicitFieldKindView::Text { secret: *secret },
+            ElicitFieldKind::ExternalUrl(url) => ElicitFieldKindView::ExternalUrl(url.clone()),
         },
     }
 }
@@ -369,7 +409,7 @@ pub struct ApplyOutcome {
     /// 值得持久化（entries 有实质变化，排除逐块流式增量）。
     pub should_persist: bool,
     /// 相位刚变成需要人处理 → (标题, 正文, is_approval)，调用方决定要不要弹
-    /// 通知（GUI 按 `AgentUiConfig.notify_awaiting` 开关；这个决定权不下放到
+    /// 通知（GUI 按各类 Agent 通知开关决定；这个决定权不下放到
     /// smeltd，因为那是纯 GUI 展示偏好，smeltd 不该知道）。
     pub notify: Option<(String, String, bool)>,
 }
@@ -489,6 +529,38 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 }
             }
         }
+        AcpEvent::ToolStarted { id, title, kind } => {
+            state.entries.push(AcpEntry::ToolCall {
+                id,
+                title,
+                kind,
+                status: crate::acp_chat::ToolCallStatus::InProgress,
+                output: Vec::new(),
+            });
+            state.phase = AcpPhase::Running;
+        }
+        AcpEvent::ToolOutputDelta { id, delta } => {
+            if let Some(AcpEntry::ToolCall { output, .. }) = state.entries.iter_mut().rev().find(
+                |entry| matches!(entry, AcpEntry::ToolCall { id: entry_id, .. } if entry_id == &id),
+            ) {
+                match output.last_mut() {
+                    Some(crate::acp_chat::ToolOutputPart::Text(text)) => text.push_str(&delta),
+                    _ => output.push(crate::acp_chat::ToolOutputPart::Text(delta)),
+                }
+            }
+        }
+        AcpEvent::ToolFinished { id, status, output } => {
+            if let Some(AcpEntry::ToolCall {
+                status: current,
+                output: current_output,
+                ..
+            }) = state.entries.iter_mut().rev().find(
+                |entry| matches!(entry, AcpEntry::ToolCall { id: entry_id, .. } if entry_id == &id),
+            ) {
+                *current = status;
+                *current_output = output;
+            }
+        }
         AcpEvent::Model(m) => {
             state.model = Some(m);
         }
@@ -504,20 +576,14 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             tool_call_id,
             pub_options,
             responder,
+            details,
             raw_request_line,
         } => {
-            let options: Vec<PermissionOptionView> = pub_options
-                .iter()
-                .map(|o| PermissionOptionView {
-                    option_id: o.option_id.to_string(),
-                    name: o.name.clone(),
-                    kind: PermissionOptionKindView::from_acp(o.kind),
-                })
-                .collect();
             state.permissions.push(LivePermission {
                 question: question.clone(),
                 tool_call_id: tool_call_id.to_string(),
-                options,
+                options: pub_options,
+                details,
                 responder: Some(responder),
                 raw_request_line,
             });
@@ -534,6 +600,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 message: message.clone(),
                 raw_fields: fields,
                 chosen: Default::default(),
+                text_values: Default::default(),
                 responder: Some(responder),
                 raw_request_line,
             });
@@ -590,9 +657,7 @@ pub fn select_permission(state: &mut AcpSessionState, tool_call_id: &str, option
     };
     let mut card = state.permissions.remove(ix);
     if let Some(responder) = card.responder.take() {
-        responder.select(agent_client_protocol::schema::v1::PermissionOptionId::new(
-            option_id.to_string(),
-        ));
+        responder.select(option_id.to_string());
     }
     state.phase = if state.permissions.is_empty() {
         AcpPhase::Running
@@ -623,8 +688,23 @@ pub fn choose_elicitation(state: &mut AcpSessionState, field_ix: usize, opt_ix: 
                 sel.push(opt_ix);
             }
         }
+        ElicitFieldKind::Text { .. } => return false,
+        ElicitFieldKind::ExternalUrl(_) => return false,
     }
     card.raw_fields.len() == 1 && matches!(card.raw_fields[0].kind, ElicitFieldKind::Select(_))
+}
+
+pub fn set_elicitation_text(state: &mut AcpSessionState, field_ix: usize, value: String) {
+    let Some(card) = &mut state.elicitation else {
+        return;
+    };
+    if card
+        .raw_fields
+        .get(field_ix)
+        .is_some_and(|field| matches!(field.kind, ElicitFieldKind::Text { .. }))
+    {
+        card.text_values.insert(field_ix, value);
+    }
 }
 
 /// 提交选择题：把 `chosen` 翻译回 `ElicitationContentValue` 传给 responder。
@@ -639,16 +719,21 @@ pub fn submit_elicitation(state: &mut AcpSessionState) {
     };
     let mut content = BTreeMap::new();
     for (ix, field) in card.raw_fields.iter().enumerate() {
-        let Some(sel) = card.chosen.get(&ix) else {
-            continue;
-        };
         match &field.kind {
             ElicitFieldKind::Select(options) => {
-                if let Some(opt) = sel.first().and_then(|&i| options.get(i)) {
+                if let Some(opt) = card
+                    .chosen
+                    .get(&ix)
+                    .and_then(|sel| sel.first())
+                    .and_then(|&i| options.get(i))
+                {
                     content.insert(field.key.clone(), opt.value.clone());
                 }
             }
             ElicitFieldKind::MultiSelect(options) => {
+                let Some(sel) = card.chosen.get(&ix) else {
+                    continue;
+                };
                 let values: Vec<String> = sel
                     .iter()
                     .filter_map(|&i| options.get(i))
@@ -662,6 +747,15 @@ pub fn submit_elicitation(state: &mut AcpSessionState) {
                     ElicitationContentValue::StringArray(values),
                 );
             }
+            ElicitFieldKind::Text { .. } => {
+                if let Some(value) = card.text_values.get(&ix).filter(|value| !value.is_empty()) {
+                    content.insert(
+                        field.key.clone(),
+                        ElicitationContentValue::String(value.clone()),
+                    );
+                }
+            }
+            ElicitFieldKind::ExternalUrl(_) => {}
         }
     }
     responder.accept(content);
@@ -709,6 +803,10 @@ pub enum AcpUserAction {
     ElicitationChoose {
         field_ix: usize,
         opt_ix: usize,
+    },
+    ElicitationText {
+        field_ix: usize,
+        value: String,
     },
     ElicitationSubmit,
     ElicitationDismiss,
@@ -848,6 +946,7 @@ mod tests {
                     name: "Allow".into(),
                     kind: PermissionOptionKindView::AllowOnce,
                 }],
+                details: ApprovalDetailsView::Generic,
                 responder: None,
                 raw_request_line: None,
             },
@@ -859,6 +958,7 @@ mod tests {
                     name: "Allow".into(),
                     kind: PermissionOptionKindView::AllowOnce,
                 }],
+                details: ApprovalDetailsView::Generic,
                 responder: None,
                 raw_request_line: None,
             },
@@ -884,6 +984,7 @@ mod tests {
                     name: "Allow".into(),
                     kind: PermissionOptionKindView::AllowOnce,
                 }],
+                details: ApprovalDetailsView::Generic,
                 responder: None,
                 raw_request_line: None,
             });
@@ -926,6 +1027,20 @@ mod tests {
     }
 
     #[test]
+    fn incremental_snapshot_contains_only_requested_tail() {
+        let mut state = fresh_state();
+        state.entries = vec![
+            AcpEntry::User("one".into()),
+            AcpEntry::User("two".into()),
+            AcpEntry::User("three".into()),
+        ];
+        let snapshot = state.to_snapshot_since(false, 2);
+        assert_eq!(snapshot.entries_offset, 2);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert!(matches!(&snapshot.entries[0], AcpEntry::User(text) if text == "three"));
+    }
+
+    #[test]
     fn choose_elicitation_single_select_signals_auto_submit() {
         use agent_client_protocol::schema::v1::ElicitationContentValue as V;
         let mut s = fresh_state();
@@ -946,6 +1061,7 @@ mod tests {
                 ]),
             }],
             chosen: Default::default(),
+            text_values: Default::default(),
             responder: None,
             raw_request_line: None,
         });
@@ -978,6 +1094,7 @@ mod tests {
                 ]),
             }],
             chosen: Default::default(),
+            text_values: Default::default(),
             responder: None,
             raw_request_line: None,
         });

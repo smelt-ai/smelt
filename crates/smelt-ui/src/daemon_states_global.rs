@@ -17,9 +17,17 @@ pub struct DaemonStates(pub Arc<Mutex<HashMap<String, DaemonSessionState>>>);
 
 impl Global for DaemonStates {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentNotificationKind {
+    Approval,
+    Input,
+    Success,
+    Failure,
+}
+
 /// 状态通道待弹出的应用内 Notification（subscribe 线程没有 Window，render 时
-/// drain）。(title, message, is_approval)。
+/// drain）。
 #[derive(Clone, Default)]
-pub struct PendingAgentNotifs(pub Arc<Mutex<Vec<(String, String, bool)>>>);
+pub struct PendingAgentNotifs(pub Arc<Mutex<Vec<(String, String, AgentNotificationKind)>>>);
 
 impl Global for PendingAgentNotifs {}

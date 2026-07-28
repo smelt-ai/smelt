@@ -170,8 +170,7 @@ pub struct TerminalView {
     hover_url: Option<(usize, usize, usize)>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
-    /// 「需要注意」通知消息：响铃 / OSC 9 上报且尚未被查看（供侧栏蓝点 / pane 蓝环 /
-    /// 通知面板）；None = 无待处理通知。
+    /// OSC 9/99/777 普通通知正文；仅供横幅、通知记录和宠物播报，不参与 Agent 状态。
     notification: Option<String>,
     /// 最近收到通知的时刻（总览页显示「N 分钟前」）。
     notified_at: Option<Instant>,
@@ -226,27 +225,6 @@ fn appearance_changed(a: &crate::Appearance, b: &crate::Appearance) -> bool {
         || a.blur != b.blur
 }
 
-/// 「需要注意」的细分：等审批（红，最高优先）> 其他需要处理（等输入 / 响铃等，橙）。
-/// 借鉴 codex 的 ThreadActiveFlag 设计——审批和一般等待是不同等级的行动召唤。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum AttentionKind {
-    /// Claude 等你批准某个操作（文本含 permission / approv / 权限 / 批准）。
-    Approval,
-    /// 其他需要处理（等输入、响铃、自定义通知）。
-    Attention,
-}
-
-/// 从通知文本推断注意力等级。
-fn classify_attention(msg: &str) -> AttentionKind {
-    let m = msg.to_lowercase();
-    if m.contains("permission") || m.contains("approv") || m.contains("权限") || m.contains("批准")
-    {
-        AttentionKind::Approval
-    } else {
-        AttentionKind::Attention
-    }
-}
-
 // 权限菜单解析已抽到 smelt_core::permission_menu（唯一真源，GUI 与 smeltd 共用）。
 // 这里只 use 自己要用的；消费者（main.rs 等）直接从 permission_menu 取类型，不经这里
 // 转发——转发一层就等于多一个「看起来像定义处」的地方。
@@ -258,6 +236,12 @@ const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
 /// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
 fn title_is_running(title: Option<String>) -> bool {
     title.is_some_and(|t| crate::osc::title_starts_with_spinner(&t))
+}
+
+fn structured_agent_events_active(session_id: &str, cx: &App) -> bool {
+    cx.try_global::<smelt_ui::daemon_states_global::DaemonStates>()
+        .and_then(|states| states.0.lock().ok()?.get(session_id).cloned())
+        .is_some_and(|state| state.structured_events)
 }
 
 /// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。
@@ -317,7 +301,17 @@ impl TerminalView {
             loop {
                 Timer::after(REFRESH).await;
                 let r = this.update(cx, |this, cx| {
-                    if let Some(msg) = this.terminal.take_notification() {
+                    let bell = this.terminal.take_bell_notification();
+                    // Warp 同类策略：结构化插件一旦在当前 pane 激活，丢弃旧 OSC
+                    // agent fallback，避免 hook + OSC 对同一完成/审批重复提醒。BEL 是
+                    // 独立的普通终端提醒，不受此门控影响。
+                    let msg = bell.or_else(|| {
+                        let osc = this.terminal.take_notification();
+                        (!structured_agent_events_active(&this.session_id, cx))
+                            .then_some(osc)
+                            .flatten()
+                    });
+                    if let Some(msg) = msg {
                         let task = this.terminal.current_title();
                         // 焦点感知（借鉴 codex）：app 在前台时不弹系统通知——你自己看得见
                         // 蓝点/徽章，弹了是打扰；切走了才提醒。cx.active_window() 在 app
@@ -479,21 +473,16 @@ impl TerminalView {
         self.launch_cmd.as_deref()
     }
 
-    /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。
-    pub fn attention_kind(&self) -> Option<AttentionKind> {
-        self.notification.as_deref().map(classify_attention)
-    }
-
     /// 从终端末尾网格解析权限菜单；无菜单时 `None`。
     pub fn permission_prompt(&self) -> Option<PermissionPrompt> {
         let lines = self.last_lines(28);
         parse_permission_prompt(&lines)
     }
 
-    /// 是否像「等审批」：OSC 文案分类 **或** 网格里扫到权限菜单。
+    /// 是否确实「等审批」：当前终端网格里扫到权限菜单。
+    /// daemon/ACP 的协议状态由上层 `Session::status` 单独判断。
     pub fn is_awaiting_approval(&self) -> bool {
-        matches!(self.attention_kind(), Some(AttentionKind::Approval))
-            || self.permission_prompt().is_some()
+        self.permission_prompt().is_some()
     }
 
     /// 是否「任务完成未读」（Running→Idle 后用户还没回应过）。

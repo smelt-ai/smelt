@@ -422,15 +422,10 @@ pub fn agent_status_rgb8(status: AgentStatus) -> (u8, u8, u8) {
     ((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
-/// 设计稿三态点（项目 rail / 会话行）：跑着 = 绿、阻塞 = 黄、空闲 = 灰。
-/// 与五态 `agent_status_color` 是两套语义，别硬凑：这里「Running/Done」都算
-/// 「活着且正常」（绿），两种等待都算「阻塞」（黄）。
+/// 左侧会话 / pane 圆点使用完整五态颜色，避免仅靠圆点时无法区分运行与完成、
+/// 审批与一般待处理。
 pub fn session_dot_color(status: AgentStatus) -> Rgba {
-    match status {
-        AgentStatus::WaitingApproval | AgentStatus::NeedsAttention => rgb(yellow()),
-        AgentStatus::Running | AgentStatus::Done => rgb(green()),
-        AgentStatus::Idle => rgb(text_faint()),
-    }
+    agent_status_color(status)
 }
 
 /// 项目名 → 稳定颜色：hash 到 6 色环，跟会话顺序无关。
