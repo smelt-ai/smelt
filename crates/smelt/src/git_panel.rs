@@ -265,7 +265,12 @@ pub fn build_git_tree(
         for p in parts {
             cur = cur.dirs.entry(p.to_string()).or_default();
         }
-        cur.files.push((fname.to_string(), st.clone()));
+        // git status 默认可能把未跟踪目录汇总成 `dir/`。正常查询会用
+        // --untracked-files=all 展开文件；这里仍防御旧缓存或异常输入，避免尾斜杠
+        // 被拆成一个文件名为空的可点击行。
+        if !fname.is_empty() {
+            cur.files.push((fname.to_string(), st.clone()));
+        }
     }
 
     /// 目录在前、文件在后地铺平；prefix 是当前节点的完整路径。
@@ -2564,7 +2569,12 @@ impl Workspace {
                     // .git/index.lock——之前吃过这个亏（见 smeltd/GUI 并发跑 git 命令时的
                     // index.lock 争用问题）；顺带也防止我们自己的 status 调用触发上面那个
                     // 文件监听自扰。
-                    let out = run_git(&r, &["status", "--porcelain=v1", "-b"]);
+                    // 展开未跟踪目录，否则 porcelain 会返回 `?? new-dir/`，目录树把
+                    // 尾斜杠后的空段当成文件名，面板里就会出现没有名称的文件行。
+                    let out = run_git(
+                        &r,
+                        &["status", "--porcelain=v1", "--untracked-files=all", "-b"],
+                    );
                     let mut d = GitStatusData::default();
                     if let Ok(o) = out {
                         if o.status.success() {
@@ -3968,6 +3978,15 @@ mod tests {
             vec!["a", "top.rs"],
             "折叠后不该露出子树，实际 {names:?}"
         );
+    }
+
+    /// 旧缓存或外部调用可能仍提供 git 的未跟踪目录汇总项 `dir/`；不能渲染空文件名。
+    #[test]
+    fn tree_does_not_create_blank_file_for_trailing_slash() {
+        let rows = build_git_tree(&files(&["new-dir/"]), &Default::default());
+        assert_eq!(rows.len(), 1, "尾斜杠不应额外生成空文件行：{rows:?}");
+        assert_eq!(rows[0].name, "new-dir");
+        assert!(rows[0].status.is_none());
     }
 
     /// 在临时目录里造一个仓库：写 `content`、提交，再覆写成 `modified`（不提交）。
