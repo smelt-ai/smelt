@@ -10,6 +10,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKind};
 use smol::Timer;
 
 use crate::NewTask;
@@ -170,10 +171,6 @@ pub struct TerminalView {
     hover_url: Option<(usize, usize, usize)>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
-    /// OSC 9/99/777 普通通知正文；仅供横幅、通知记录和宠物播报，不参与 Agent 状态。
-    notification: Option<String>,
-    /// 最近收到通知的时刻（总览页显示「N 分钟前」）。
-    notified_at: Option<Instant>,
     /// 上一帧该终端是否在「运行中」（标题以 braille spinner 开头）；用于检测完成边沿。
     was_running: bool,
     /// 结构化状态上一帧是否已经是 Succeeded；hook 激活后完成边沿以此为准，
@@ -188,16 +185,6 @@ pub struct TerminalView {
     stuck_notified: bool,
     /// 守护里的会话 id（持久化到 workspace.json；重开 GUI 按它 reattach）。
     session_id: String,
-    /// 「任务完成未读」：Running→Idle 边沿置位，用户输入回应后清。
-    /// 与 notification 分开：完成 ≠ 需要处理，只是提示「有结果可以看了」。
-    completed_unread: bool,
-    /// 最近一次系统通知的 (文本, 时刻)：同文本 60s 内不重发（Claude Code 会反复
-    /// 上报 waiting for input，不去重就是通知轰炸）。
-    last_notified: Option<(String, Instant)>,
-    /// app 前台但用户没在看这个 pane 时的 toast 待发消息（组件 Notification）；
-    /// Workspace::render 每帧来取，取走即清空。跟 last_notified 共用同一条
-    /// 60s 同文本去重（见轮询循环），系统通知 / toast 二选一，不会重复弹。
-    pending_toast: Option<String>,
     /// 刚收到但尚未展示的 BEL。仅用于没有结构化状态通道的普通终端/agent fallback；
     /// hook 一旦激活，BEL 永久让位给明确的 phase，不再展示泛化“响铃”。
     pending_bell_at: Option<Instant>,
@@ -235,14 +222,29 @@ fn appearance_changed(a: &crate::Appearance, b: &crate::Appearance) -> bool {
 }
 
 /// 同一终端同文本的系统通知最小间隔。
-const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
-
 /// BEL 常和 agent 的完成信号出现在同一批输出中。稍等一帧窗口，让更准确的
 /// Succeeded/Failed/Waiting 通知优先，避免通知中心同时出现“响铃”和“已完成”。
 const BELL_NOTIFICATION_GRACE: Duration = Duration::from_millis(250);
 
 fn bell_notification_due(pending_at: Option<Instant>, now: Instant) -> bool {
     pending_at.is_some_and(|at| now.duration_since(at) >= BELL_NOTIFICATION_GRACE)
+}
+
+fn fallback_attention(
+    bell_due: bool,
+    osc: Option<String>,
+    codex_osc_stop: bool,
+) -> Option<(AttentionKind, &'static str, String)> {
+    if bell_due {
+        return Some((AttentionKind::Bell, "响铃", "🔔 响铃".to_string()));
+    }
+    osc.map(|message| {
+        if codex_osc_stop {
+            (AttentionKind::Success, "已完成", message)
+        } else {
+            (AttentionKind::Notice, "终端通知", message)
+        }
+    })
 }
 
 /// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
@@ -347,41 +349,29 @@ impl TerminalView {
                     if codex_osc_stop {
                         this.pending_bell_at = None;
                     }
-                    let bell = this
+                    let bell_due = this
                         .pending_bell_at
-                        .filter(|_| bell_notification_due(this.pending_bell_at, now))
-                        .map(|_| "🔔 响铃".to_string());
-                    if bell.is_some() {
+                        .is_some_and(|_| bell_notification_due(this.pending_bell_at, now));
+                    let attention = fallback_attention(
+                        bell_due,
+                        (!structured_events).then_some(osc).flatten(),
+                        codex_osc_stop,
+                    );
+                    if attention
+                        .as_ref()
+                        .is_some_and(|(kind, _, _)| *kind == AttentionKind::Bell)
+                    {
                         this.pending_bell_at = None;
                     }
-                    let msg = bell.or_else(|| (!structured_events).then_some(osc).flatten());
-                    if let Some(msg) = msg {
+                    if let Some((kind, title, msg)) = attention {
                         let task = this.terminal.current_title();
-                        // 焦点感知（借鉴 codex）：app 在前台时不弹系统通知——你自己看得见
-                        // 蓝点/徽章，弹了是打扰；切走了才提醒。cx.active_window() 在 app
-                        // 失活时为 None（宠物窗是 NonactivatingPanel，不参与）。
-                        // 同文本 60s 去重：Claude Code 会反复上报同一条 waiting。
-                        let dup = this.last_notified.as_ref().is_some_and(|(m, t)| {
-                            *m == msg && now.duration_since(*t) < NOTIFY_DEDUP
-                        });
-                        if !dup {
-                            if cx.active_window().is_none() {
-                                system_notify(&this.session_id, &this.title, task.as_deref(), &msg);
-                            } else {
-                                // app 在前台：系统通知不弹，改交给 Workspace::render 判断——
-                                // 只有「没在看这个 pane」才真弹 toast，正在看的直接吃掉。
-                                this.pending_toast = Some(msg.clone());
-                            }
-                            this.last_notified = Some((msg.clone(), now));
-                        }
+                        this.publish_attention(kind, title, msg.clone(), cx);
                         // 宠物播报照常（应用内的轻提示，不算系统级打扰；宠物自己有气泡节流）。
                         let line = match task.as_deref() {
                             Some(t) if !t.is_empty() => format!("「{t}」{msg}"),
                             _ => msg.clone(),
                         };
                         crate::pet::push_pet_message(cx, line);
-                        this.notification = Some(msg);
-                        this.notified_at = Some(Instant::now());
                     }
 
                     // hook 一旦激活，运行/完成都以结构化 phase 为准；否则才回退标题
@@ -401,7 +391,7 @@ impl TerminalView {
                         })
                     } else {
                         !codex_osc_stop
-                            && !this.completed_unread
+                            && !this.completed_unread(cx)
                             && title_is_running(this.terminal.current_title())
                     };
                     let completion_edge = if structured_events {
@@ -411,8 +401,16 @@ impl TerminalView {
                     };
                     let name = this.title.clone();
                     if completion_edge {
-                        // agent 明确完成 → 标「完成未读」（总览绿标）。
-                        this.completed_unread = true;
+                        // fallback 标题由运行转为空闲时也产生统一完成事件；结构化完成和
+                        // Codex OSC Stop 已由各自的明确事件发布，不能重复入队。
+                        if !structured_events && !codex_osc_stop {
+                            this.publish_attention(
+                                AttentionKind::Success,
+                                "已完成",
+                                "已完成".to_string(),
+                                cx,
+                            );
+                        }
                         // 绑了本 session 的任务 → Done；若确实收尾了任务，挂旗让 Workspace
                         // 同项目自动 claim 下一条待办（见 `on_session_task_idle`）。
                         let sid = this.session_id.clone();
@@ -509,17 +507,12 @@ impl TerminalView {
             grid_size: Rc::new(StdCell::new((0.0, 0.0))),
             hover_url: None,
             cursor: None,
-            notification: None,
-            notified_at: None,
             was_running: false,
             was_structured_succeeded: false,
             last_structured_phase: None,
             running_frames: 0,
             stuck_notified: false,
             session_id,
-            completed_unread: false,
-            last_notified: None,
-            pending_toast: None,
             pending_bell_at: None,
             pending_task_continue_cwd: None,
             last_appearance: None,
@@ -547,8 +540,15 @@ impl TerminalView {
     }
 
     /// 是否「任务完成未读」（Running→Idle 后用户还没回应过）。
-    pub fn completed_unread(&self) -> bool {
-        self.completed_unread
+    pub fn completed_unread(&self, cx: &App) -> bool {
+        cx.try_global::<AttentionGlobal>().is_some_and(|store| {
+            store
+                .0
+                .lock()
+                .unwrap()
+                .unread(&self.session_id)
+                .is_some_and(|item| item.kind == AttentionKind::Success)
+        })
     }
 
     /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
@@ -591,15 +591,12 @@ impl TerminalView {
         // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
         // 自行退出；这里给新连接挂一个新的重绘任务。
         Self::drive_redraws(self.terminal.redraw_channel(), cx);
-        self.notification = None;
-        self.notified_at = None;
+        self.clear_attention(cx);
         self.was_running = false;
         self.was_structured_succeeded = false;
         self.last_structured_phase = None;
         self.running_frames = 0;
         self.stuck_notified = false;
-        self.completed_unread = false;
-        self.last_notified = None;
         // 新 Terminal 自带空选区，只需重置本视图的拖选 / 应用鼠标交互态。
         self.selecting = false;
         self.app_mouse = false;
@@ -610,32 +607,28 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 通知消息文本（供通知面板显示）。
-    pub fn notification(&self) -> Option<&str> {
-        self.notification.as_deref()
+    fn publish_attention(&self, kind: AttentionKind, title: &str, message: String, cx: &mut App) {
+        if let Some(store) = cx.try_global::<AttentionGlobal>() {
+            store.0.lock().unwrap().publish(
+                AttentionItem {
+                    session_id: self.session_id.clone(),
+                    title: title.to_string(),
+                    message,
+                    kind,
+                },
+                Instant::now(),
+            );
+        }
     }
 
-    /// 结构化 hook/ACP 事件（等输入/已完成/失败/等批准）也写进铃铛面板同一个字段，
-    /// 跟 OSC/响铃路径共用展示与已读清除逻辑（mark_read / send_text 等）。
-    pub fn note_structured_notification(&mut self, message: String, cx: &mut Context<Self>) {
-        self.notification = Some(message);
-        self.notified_at = Some(Instant::now());
-        cx.notify();
+    fn clear_attention(&self, cx: &mut App) {
+        if let Some(store) = cx.try_global::<AttentionGlobal>() {
+            store.0.lock().unwrap().mark_read(&self.session_id);
+        }
     }
 
-    /// 当前 pane 已被用户看到：清掉一次性通知和“完成未读”标记。
-    ///
-    /// 这里只清展示层未读，不改 daemon 的结构化 phase；仍在等批准/等输入的会话会继续
-    /// 保持对应状态灯，只是不再把同一条消息塞回右上角铃铛。
-    pub fn mark_read(&mut self) {
-        self.notification = None;
-        self.completed_unread = false;
-        self.pending_toast = None;
-    }
-
-    /// 取走待发的 toast 消息（见 pending_toast）；Workspace::render 每帧调用一次。
-    pub fn take_pending_toast(&mut self) -> Option<String> {
-        self.pending_toast.take()
+    pub fn mark_read(&mut self, cx: &mut Context<Self>) {
+        self.clear_attention(cx);
     }
 
     /// 取走「任务完成 → 自动续跑」挂旗（完成项目 cwd）；Workspace::render 每帧调用。
@@ -673,8 +666,7 @@ impl TerminalView {
     /// 需要回车执行时用 [`Self::send_text_and_submit`]。
     pub fn send_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.terminal.paste(text);
-        self.notification = None;
-        self.completed_unread = false;
+        self.clear_attention(cx);
         cx.notify();
     }
 
@@ -684,16 +676,14 @@ impl TerminalView {
         if !body.is_empty() {
             self.terminal.send_input(body.as_bytes());
         }
-        self.notification = None;
-        self.completed_unread = false;
+        self.clear_attention(cx);
         cx.notify();
     }
 
     /// 发送一次 Enter（裸 `\r`）。
     pub fn send_enter(&mut self, cx: &mut Context<Self>) {
         self.terminal.send_input(b"\r");
-        self.notification = None;
-        self.completed_unread = false;
+        self.clear_attention(cx);
         cx.notify();
     }
 
@@ -952,8 +942,7 @@ impl EntityInputHandler for TerminalView {
         self.marked_text = None;
         if !text.is_empty() {
             self.terminal.send_input(text.as_bytes());
-            self.notification = None; // 用户回应了该会话 → 视为已处理，清「需要注意」
-            self.completed_unread = false;
+            self.clear_attention(cx);
         }
         cx.notify();
     }
@@ -1153,15 +1142,13 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
                 this.terminal.send_input(b"\t");
                 this.terminal.scroll_to_bottom();
-                this.notification = None;
-                this.completed_unread = false;
+                this.clear_attention(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TerminalBackTab, _window, cx| {
                 this.terminal.send_input(b"\x1b[Z"); // xterm 反向 Tab（back-tab）序列
                 this.terminal.scroll_to_bottom();
-                this.notification = None;
-                this.completed_unread = false;
+                this.clear_attention(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TerminalFind, window, cx| {
@@ -1214,8 +1201,7 @@ impl Render for TerminalView {
                 if m.platform && ks.key == "v" {
                     if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
                         this.terminal.paste(&text);
-                        this.notification = None; // 粘贴回应 → 清「需要注意」
-                        this.completed_unread = false;
+                        this.clear_attention(cx);
                         cx.notify();
                     }
                     return;
@@ -1238,8 +1224,7 @@ impl Render for TerminalView {
                 ) {
                     this.terminal.send_input(&bytes);
                     this.terminal.scroll_to_bottom(); // 敲键盘即回到最新输出，跟真实终端一致
-                    this.notification = None; // 用户按键回应 → 清「需要注意」
-                    this.completed_unread = false;
+                    this.clear_attention(cx);
                     cx.notify();
                 }
             }))
@@ -1401,8 +1386,7 @@ impl Render for TerminalView {
                     }
                     if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
                         this.terminal.paste(&text);
-                        this.notification = None;
-                        this.completed_unread = false;
+                        this.clear_attention(cx);
                         cx.notify();
                     }
                 }),
@@ -2143,19 +2127,6 @@ fn text_batches(
     out
 }
 
-/// 弹一条 macOS 系统通知（osascript，无额外依赖）。title 固定 smelt、
-/// 副标题为「会话名 · agent 任务名」、正文为通知消息（对齐 cmux 的信息量）。
-/// 失败静默忽略（未签名 / 无权限时可能不显示）。
-fn system_notify(session_id: &str, session: &str, task: Option<&str>, body: &str) {
-    let subtitle = match task {
-        Some(t) if !t.trim().is_empty() => format!("{session} · {t}"),
-        _ => session.to_string(),
-    };
-    // 只走原生通知：打包成 smelt.app（有 bundle id）时用 smelt 名字 + 图标显示；
-    // 开发版（cargo run 无 bundle）自动静默不打扰，不再回落 osascript。
-    crate::status_item::deliver_notification(session_id, &subtitle, body);
-}
-
 /// 在一行里找出所有 URL，返回 (起列, 止列含, url)。
 fn find_urls(row: &[terminal::Cell]) -> Vec<(usize, usize, String)> {
     let n = row.len();
@@ -2475,11 +2446,12 @@ mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
         BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
-        bg_spans, cells_to_token, classify_launch, keystroke_to_bytes, link_at, scrollbar_thumb,
-        text_batches, visible_end,
+        bg_spans, cells_to_token, classify_launch, fallback_attention, keystroke_to_bytes, link_at,
+        scrollbar_thumb, text_batches, visible_end,
     };
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
+    use smelt_core::attention::AttentionKind;
     use std::time::{Duration, Instant};
 
     /// 默认样式：bg = None 表示「终端默认底色」（不画底色矩形）。
@@ -2519,6 +2491,21 @@ mod tests {
             received_at + BELL_NOTIFICATION_GRACE
         ));
         assert!(!bell_notification_due(None, received_at));
+    }
+
+    #[test]
+    fn fallback_events_map_to_typed_attention() {
+        let bell = fallback_attention(true, Some("ignored".into()), false).unwrap();
+        assert_eq!(bell.0, AttentionKind::Bell);
+        assert_eq!(bell.2, "🔔 响铃");
+
+        let done = fallback_attention(false, Some("turn complete".into()), true).unwrap();
+        assert_eq!(done.0, AttentionKind::Success);
+        assert_eq!(done.1, "已完成");
+
+        let notice = fallback_attention(false, Some("needs input".into()), false).unwrap();
+        assert_eq!(notice.0, AttentionKind::Notice);
+        assert!(fallback_attention(false, None, false).is_none());
     }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。

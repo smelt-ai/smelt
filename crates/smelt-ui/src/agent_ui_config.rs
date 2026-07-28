@@ -18,15 +18,10 @@ const PREVIOUS_CODEX_ACP_CMD: &str = "bunx --bun @agentclientprotocol/codex-acp@
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentUiConfig {
-    /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。这里故意使用普通
-    /// `#[serde(default)]`：已有配置文件缺少该字段时保持关闭；全新安装通过
-    /// `Default` 得到开启，避免升级时未经同意改写老用户的 agent 配置。
+    /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。旧配置缺少此字段时，加载
+    /// 迁移会将其开启并写回；用户明确保存 false 后，后续升级不会重新开启。
     #[serde(default)]
     pub agent_hooks_enabled: bool,
-    /// 旧配置文件没有 hooks 开关：运行时保留旧行为（只升级已经属于 Smelt 的
-    /// hooks），但不替用户安装新的。纯迁移信息，不写回配置文件。
-    #[serde(skip)]
-    pub agent_hooks_preference_legacy: bool,
     #[serde(default = "default_true", alias = "notify_awaiting")]
     pub notify_approval: bool,
     #[serde(default = "default_true")]
@@ -96,7 +91,6 @@ impl Default for AgentUiConfig {
     fn default() -> Self {
         Self {
             agent_hooks_enabled: true,
-            agent_hooks_preference_legacy: false,
             notify_approval: true,
             notify_input: true,
             notify_success: true,
@@ -124,12 +118,11 @@ pub fn load_agent_ui_config() -> AgentUiConfig {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let mut config: AgentUiConfig = smelt_core::json_store::load_json(path);
-    config.agent_hooks_preference_legacy = legacy_value
-        .as_ref()
-        .is_some_and(|value| value.get("agent_hooks_enabled").is_none());
-    let mut migrated = legacy_value
-        .as_ref()
-        .is_some_and(|value| migrate_legacy_notification_setting(&mut config, value));
+    let mut migrated = legacy_value.as_ref().is_some_and(|value| {
+        let hooks = migrate_legacy_hooks_setting(&mut config, value);
+        let notifications = migrate_legacy_notification_setting(&mut config, value);
+        hooks || notifications
+    });
     // 只迁移之前随应用发出的默认值；用户自定义命令不动。
     if migrate_legacy_codex_adapter(&mut config) {
         migrated = true;
@@ -138,6 +131,14 @@ pub fn load_agent_ui_config() -> AgentUiConfig {
         save_agent_ui_config(&config);
     }
     config
+}
+
+fn migrate_legacy_hooks_setting(config: &mut AgentUiConfig, value: &serde_json::Value) -> bool {
+    if value.get("agent_hooks_enabled").is_some() {
+        return false;
+    }
+    config.agent_hooks_enabled = true;
+    true
 }
 
 fn migrate_legacy_notification_setting(
@@ -217,18 +218,28 @@ mod tests {
     }
 
     #[test]
-    fn new_install_enables_hooks_but_legacy_config_does_not() {
+    fn new_install_and_legacy_upgrade_enable_hooks() {
         assert!(AgentUiConfig::default().agent_hooks_enabled);
-        assert!(!AgentUiConfig::default().agent_hooks_preference_legacy);
 
-        let legacy: AgentUiConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        let legacy_value = serde_json::json!({});
+        let mut legacy: AgentUiConfig = serde_json::from_value(legacy_value.clone()).unwrap();
         assert!(!legacy.agent_hooks_enabled);
+        assert!(migrate_legacy_hooks_setting(&mut legacy, &legacy_value));
+        assert!(legacy.agent_hooks_enabled);
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["agent_hooks_enabled"],
+            serde_json::json!(true)
+        );
+    }
 
-        let explicit: AgentUiConfig = serde_json::from_value(serde_json::json!({
-            "agent_hooks_enabled": true
-        }))
-        .unwrap();
-        assert!(explicit.agent_hooks_enabled);
+    #[test]
+    fn explicit_hook_preference_is_never_overridden() {
+        for enabled in [false, true] {
+            let value = serde_json::json!({ "agent_hooks_enabled": enabled });
+            let mut config: AgentUiConfig = serde_json::from_value(value.clone()).unwrap();
+            assert!(!migrate_legacy_hooks_setting(&mut config, &value));
+            assert_eq!(config.agent_hooks_enabled, enabled);
+        }
     }
 
     #[test]

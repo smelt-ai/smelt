@@ -37,6 +37,8 @@
 //!   {"op":"tunnel_status"}                                   → 回 {"running":bool,"url":"..","write":bool} 后关闭
 //!   {"op":"state","id":"..","phase":"..","question":".."}    → 回 {"ok":true} 后关闭，hook 直写（见下
 //!                                                              「状态通道」），question 可省
+//!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，v1 归一化
+//!                                                              hook 事件；`state` 保留兼容旧 helper
 //!   {"op":"action","id":"..","kind":"approve|deny|reply","text":".."}
 //!                                                            → 回 {"ok":true}/{"ok":false,"err":".."} 后关闭，
 //!                                                              见下「远程操控」（text 仅 reply 需要）
@@ -144,6 +146,7 @@
 mod acp_registry;
 
 use acp_registry::{AcpRegistry, AcpSlot};
+use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent, AgentEventKind};
 use smelt_core::osc::{OscNotification, OscNotificationKind, OscScan};
 use smelt_core::remote_gateway;
 use smelt_core::title_spinner;
@@ -331,8 +334,8 @@ fn started_at() -> u64 {
     *STARTED_AT.get_or_init(now_unix)
 }
 
-/// 会话状态通道（见 docs/state-channel-plan.md）。三个信源按可信度覆盖：
-/// hook 直写（`state` op，协议事实，最高）> OSC 9/777（终端协议，中）>
+/// 会话状态通道（见 docs/notification-architecture.md）。三个信源按可信度覆盖：
+/// hook 事件归约（`agent_event` op，协议事实，最高）> OSC 9/777（终端协议，中）>
 /// OSC 0/2 标题的 spinner 猜测（最低，纯猜）。schema 定死，字段不够用再加，
 /// 不删不改类型——远程端/GUI 都按这份 schema 解码。
 #[derive(Clone, Default, serde::Serialize)]
@@ -357,6 +360,18 @@ struct SessionState {
     updated_at: u64,
     /// 已收到 smelt-notify 的结构化 hook 事件。
     structured_events: bool,
+    /// 最近收到的归一化 hook 协议版本；None 表示旧 `state` op 或纯 fallback。
+    agent_event_version: Option<u32>,
+    /// 等待状态的来源身份，仅供 reducer 防止无关子任务/工具完成误清等待。
+    #[serde(skip)]
+    active_blocker: Option<AgentBlocker>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AgentBlocker {
+    tool_use_id: Option<String>,
+    agent_id: Option<String>,
+    tool_name: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -371,6 +386,219 @@ enum Phase {
     #[default]
     Idle,
     Dead,
+}
+
+fn event_matches_blocker(blocker: &AgentBlocker, event: &AgentEvent) -> bool {
+    if let Some(expected) = blocker.tool_use_id.as_deref() {
+        return event.tool_use_id.as_deref() == Some(expected);
+    }
+    if let Some(expected) = blocker.agent_id.as_deref() {
+        return event.agent_id.as_deref() == Some(expected);
+    }
+    if let Some(expected) = blocker.tool_name.as_deref() {
+        return event.tool_name.as_deref() == Some(expected);
+    }
+    true
+}
+
+/// 将 provider 适配器产出的统一事件归约进会话。等待状态是粘性的：只有对应的
+/// tool/agent 后续事件、用户新 prompt 或明确的回合终态才能清除，子任务噪声不能覆盖。
+fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) -> bool {
+    if event.version != AGENT_EVENT_VERSION {
+        return false;
+    }
+
+    let previous_phase = state.phase;
+    let waiting = matches!(state.phase, Phase::AwaitingApproval | Phase::WaitingForUser);
+    let matching_blocker = state
+        .active_blocker
+        .as_ref()
+        .is_none_or(|blocker| event_matches_blocker(blocker, event));
+
+    match event.kind {
+        AgentEventKind::SessionStarted => {
+            state.phase = Phase::Idle;
+            state.pending_question = None;
+            state.active_blocker = None;
+        }
+        AgentEventKind::PromptSubmitted => {
+            state.phase = Phase::Thinking;
+            state.pending_question = None;
+            state.active_blocker = None;
+        }
+        AgentEventKind::ToolStarted => {
+            if !waiting || matching_blocker {
+                state.phase = Phase::ExecutingTool;
+                state.pending_question = event.message.clone();
+                state.active_blocker = None;
+            }
+        }
+        AgentEventKind::ToolFinished => {
+            if !waiting || matching_blocker {
+                state.phase = Phase::Thinking;
+                state.pending_question = None;
+                state.active_blocker = None;
+            }
+        }
+        AgentEventKind::ToolFailed => {
+            if !waiting || matching_blocker {
+                state.phase = Phase::Thinking;
+                state.pending_question = event.message.clone();
+                state.active_blocker = None;
+            }
+        }
+        AgentEventKind::ApprovalRequested | AgentEventKind::InputRequested => {
+            state.phase = if event.kind == AgentEventKind::ApprovalRequested {
+                Phase::AwaitingApproval
+            } else {
+                Phase::WaitingForUser
+            };
+            state.pending_question = event.message.clone().or_else(|| event.tool_name.clone());
+            state.active_blocker = Some(AgentBlocker {
+                tool_use_id: event.tool_use_id.clone(),
+                agent_id: event.agent_id.clone(),
+                tool_name: event.tool_name.clone(),
+            });
+        }
+        AgentEventKind::SubagentStarted => {
+            if !waiting {
+                state.phase = Phase::ExecutingTool;
+                state.pending_question = event.message.clone();
+            }
+        }
+        AgentEventKind::SubagentStopped => {
+            if !waiting {
+                state.phase = Phase::Thinking;
+                state.pending_question = None;
+            }
+        }
+        AgentEventKind::TurnSucceeded => {
+            state.phase = Phase::Succeeded;
+            state.pending_question = event.message.clone();
+            state.active_blocker = None;
+        }
+        AgentEventKind::TurnFailed => {
+            state.phase = Phase::Failed;
+            state.pending_question = event.message.clone();
+            state.active_blocker = None;
+        }
+        AgentEventKind::SessionEnded => {
+            state.phase = Phase::Dead;
+            state.pending_question = None;
+            state.active_blocker = None;
+        }
+    }
+
+    state.structured_events = true;
+    state.agent_event_version = Some(event.version);
+    if state.phase != previous_phase {
+        state.phase_since = now_unix();
+    }
+    state.updated_at = now_unix();
+    true
+}
+
+#[cfg(test)]
+mod agent_event_reducer_tests {
+    use super::*;
+
+    fn event(kind: AgentEventKind) -> AgentEvent {
+        AgentEvent::new("codex", kind)
+    }
+
+    #[test]
+    fn normalized_lifecycle_reaches_waiting_then_success() {
+        let mut state = SessionState::default();
+        assert!(apply_agent_event(
+            &mut state,
+            &event(AgentEventKind::PromptSubmitted)
+        ));
+        assert_eq!(state.phase, Phase::Thinking);
+
+        let mut waiting = event(AgentEventKind::InputRequested);
+        waiting.tool_use_id = Some("question-1".into());
+        waiting.message = Some("选一个".into());
+        apply_agent_event(&mut state, &waiting);
+        assert_eq!(state.phase, Phase::WaitingForUser);
+        assert_eq!(state.pending_question.as_deref(), Some("选一个"));
+
+        let mut answered = event(AgentEventKind::ToolFinished);
+        answered.tool_use_id = Some("question-1".into());
+        apply_agent_event(&mut state, &answered);
+        assert_eq!(state.phase, Phase::Thinking);
+
+        apply_agent_event(&mut state, &event(AgentEventKind::TurnSucceeded));
+        assert_eq!(state.phase, Phase::Succeeded);
+    }
+
+    #[test]
+    fn unrelated_child_events_do_not_clear_a_sticky_wait() {
+        let mut state = SessionState::default();
+        let mut waiting = event(AgentEventKind::ApprovalRequested);
+        waiting.tool_use_id = Some("approval-1".into());
+        waiting.agent_id = Some("lead".into());
+        apply_agent_event(&mut state, &waiting);
+
+        let mut child_finished = event(AgentEventKind::ToolFinished);
+        child_finished.tool_use_id = Some("child-tool".into());
+        child_finished.agent_id = Some("child".into());
+        apply_agent_event(&mut state, &child_finished);
+        assert_eq!(state.phase, Phase::AwaitingApproval);
+
+        let mut child_stopped = event(AgentEventKind::SubagentStopped);
+        child_stopped.agent_id = Some("child".into());
+        apply_agent_event(&mut state, &child_stopped);
+        assert_eq!(state.phase, Phase::AwaitingApproval);
+    }
+
+    #[test]
+    fn tool_name_keeps_wait_sticky_when_provider_has_no_call_id() {
+        let mut state = SessionState::default();
+        let mut waiting = event(AgentEventKind::InputRequested);
+        waiting.tool_name = Some("request_user_input".into());
+        apply_agent_event(&mut state, &waiting);
+
+        let mut unrelated = event(AgentEventKind::ToolFinished);
+        unrelated.tool_name = Some("shell".into());
+        apply_agent_event(&mut state, &unrelated);
+        assert_eq!(state.phase, Phase::WaitingForUser);
+
+        let mut answered = event(AgentEventKind::ToolFinished);
+        answered.tool_name = Some("request_user_input".into());
+        apply_agent_event(&mut state, &answered);
+        assert_eq!(state.phase, Phase::Thinking);
+    }
+
+    #[test]
+    fn prompt_and_terminal_events_always_clear_a_wait() {
+        for kind in [
+            AgentEventKind::PromptSubmitted,
+            AgentEventKind::TurnSucceeded,
+            AgentEventKind::TurnFailed,
+            AgentEventKind::SessionEnded,
+        ] {
+            let mut state = SessionState::default();
+            let mut waiting = event(AgentEventKind::InputRequested);
+            waiting.tool_use_id = Some("question-1".into());
+            apply_agent_event(&mut state, &waiting);
+            apply_agent_event(&mut state, &event(kind));
+            assert!(!matches!(
+                state.phase,
+                Phase::AwaitingApproval | Phase::WaitingForUser
+            ));
+            assert!(state.active_blocker.is_none());
+        }
+    }
+
+    #[test]
+    fn unsupported_event_version_is_ignored() {
+        let mut state = SessionState::default();
+        let mut future = event(AgentEventKind::TurnFailed);
+        future.version = AGENT_EVENT_VERSION + 1;
+        assert!(!apply_agent_event(&mut state, &future));
+        assert_eq!(state.phase, Phase::Idle);
+        assert!(!state.structured_events);
+    }
 }
 
 /// `subscribe` 连接的全局池——状态订阅是「一条连接看全部会话」，不像 `watch`
@@ -3316,6 +3544,24 @@ fn handle_conn(
             };
             let _ = writeln!(c, "{}", body);
         }
+        Some("agent_event") => {
+            let id = v["id"].as_str().unwrap_or_default();
+            let event = serde_json::from_value::<AgentEvent>(v["event"].clone()).ok();
+            let sess = sessions.lock().unwrap().get(id).cloned();
+            let mut accepted = false;
+            if let (Some(sess), Some(event)) = (sess, event) {
+                let snapshot = {
+                    let mut st = sess.state.lock().unwrap();
+                    apply_agent_event(&mut st, &event).then(|| st.clone())
+                };
+                if let Some(snapshot) = snapshot {
+                    accepted = true;
+                    broadcast_state(&subscribers, &snapshot);
+                }
+            }
+            let mut c = conn;
+            let _ = writeln!(c, "{}", serde_json::json!({ "ok": accepted }));
+        }
         Some("state") => {
             // hook 直写，协议事实——三个信源里可信度最高，无条件覆盖 StateListener
             // 猜出来的值（见 SessionState 定义处注释）。会话不存在（hook 跑得比
@@ -3337,6 +3583,8 @@ fn handle_conn(
                         let mut st = sess.state.lock().unwrap();
                         st.phase = phase;
                         st.structured_events = true;
+                        st.agent_event_version = None;
+                        st.active_blocker = None;
                         st.phase_since = now_unix();
                         st.pending_question = v["question"].as_str().map(String::from);
                         st.updated_at = now_unix();
@@ -4085,6 +4333,8 @@ fn make_acp_session(
             dirty_files: Vec::new(),
             updated_at: 0,
             structured_events: true,
+            agent_event_version: None,
+            active_blocker: None,
         })),
         out: Mutex::new(AcpOut {
             client: None,
