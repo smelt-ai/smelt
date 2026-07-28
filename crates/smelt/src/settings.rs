@@ -1908,8 +1908,8 @@ pub struct SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 设置内容 +（可选）重启守护确认层：弹层必须画在本窗，不能只改 Workspace 上的
-        // flag 却在主窗口 render——用户点的是设置里的按钮，确认框却跑到主界面。
+        // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
+        // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
         self.workspace.update(cx, |ws, cx| {
             div()
                 .relative()
@@ -1918,6 +1918,10 @@ impl Render for SettingsWindow {
                 .children(
                     ws.show_daemon_restart_confirm
                         .then(|| ws.render_daemon_restart_confirm(cx)),
+                )
+                .children(
+                    ws.session_manager_open
+                        .then(|| ws.render_session_manager(cx)),
                 )
         })
     }
