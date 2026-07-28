@@ -13,10 +13,32 @@ pub struct OscScan {
     buf: Vec<u8>,
 }
 
+/// OSC 通知协议种类。状态归约必须保留这个区别：Codex 的兼容完成信号仅是
+/// OSC 9，Kitty OSC 99 和结构化 OSC 777 不能被当成同一语义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OscNotificationKind {
+    Osc9,
+    Osc99,
+    Osc777,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OscNotification {
+    pub kind: OscNotificationKind,
+    pub text: String,
+}
+
 impl OscScan {
     /// 喂一个字节；扫到一条完整的 OSC 9/99/777 通知就返回 `Some(消息文本)`，
     /// 调用方自己决定拿这条消息去做什么（GUI 弹通知 / 守护写进 SessionState）。
     pub fn feed(&mut self, b: u8) -> Option<String> {
+        self.feed_notification(b)
+            .map(|notification| notification.text)
+    }
+
+    /// 与 [`Self::feed`] 相同，但保留 OSC 协议种类，供状态归约器区分兼容完成
+    /// 信号和普通桌面通知。
+    pub fn feed_notification(&mut self, b: u8) -> Option<OscNotification> {
         if self.in_osc {
             if b == 0x07 {
                 return self.finish(); // BEL 结束
@@ -40,13 +62,19 @@ impl OscScan {
         None
     }
 
-    fn finish(&mut self) -> Option<String> {
-        let msg = std::str::from_utf8(&self.buf).ok().and_then(|s| {
+    fn finish(&mut self) -> Option<OscNotification> {
+        let notification = std::str::from_utf8(&self.buf).ok().and_then(|s| {
             let (ps, pt) = s.split_once(';')?;
-            notify_text_from_osc(ps, pt)
+            let kind = match ps {
+                "9" => OscNotificationKind::Osc9,
+                "99" => OscNotificationKind::Osc99,
+                "777" => OscNotificationKind::Osc777,
+                _ => return None,
+            };
+            notify_text_from_osc(ps, pt).map(|text| OscNotification { kind, text })
         });
         self.reset();
-        msg
+        notification
     }
 
     fn reset(&mut self) {
@@ -196,6 +224,28 @@ mod tests {
     fn ignores_osc9_progress_control_commands() {
         assert_eq!(scan_all(b"\x1b]9;4;3;0\x1b\\"), None);
         assert_eq!(notify_text_from_osc("9", "4;3;0"), None);
+    }
+
+    #[test]
+    fn typed_scan_preserves_notification_protocol() {
+        let mut scan = OscScan::default();
+        let mut notifications = Vec::new();
+        for &byte in b"\x1b]9;done\x07\x1b]99;plain note\x1b\\\x1b]777;notify;t;b\x07" {
+            if let Some(notification) = scan.feed_notification(byte) {
+                notifications.push(notification);
+            }
+        }
+        assert_eq!(
+            notifications
+                .iter()
+                .map(|notification| notification.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                OscNotificationKind::Osc9,
+                OscNotificationKind::Osc99,
+                OscNotificationKind::Osc777,
+            ]
+        );
     }
 
     #[test]

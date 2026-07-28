@@ -615,6 +615,14 @@ impl TerminalView {
         self.notification.as_deref()
     }
 
+    /// 结构化 hook/ACP 事件（等输入/已完成/失败/等批准）也写进铃铛面板同一个字段，
+    /// 跟 OSC/响铃路径共用展示与已读清除逻辑（mark_read / send_text 等）。
+    pub fn note_structured_notification(&mut self, message: String, cx: &mut Context<Self>) {
+        self.notification = Some(message);
+        self.notified_at = Some(Instant::now());
+        cx.notify();
+    }
+
     /// 当前 pane 已被用户看到：清掉一次性通知和“完成未读”标记。
     ///
     /// 这里只清展示层未读，不改 daemon 的结构化 phase；仍在等批准/等输入的会话会继续
