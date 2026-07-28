@@ -3752,8 +3752,8 @@ impl Workspace {
     }
 
     /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是孤儿（没有任何
-    /// 侧栏在追踪），逐个/批量清理。跟 render_quit_confirm 同款视觉。
-    fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
+    /// 侧栏在追踪），逐个/批量清理。入口和弹层都在设置窗口里。
+    pub(crate) fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground, t.border)
@@ -5832,11 +5832,6 @@ impl Render for Workspace {
             .children(palette_overlay)
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
-            // 会话管理弹窗（设置页「更新」tab 点开）
-            .children(
-                self.session_manager_open
-                    .then(|| self.render_session_manager(cx)),
-            )
             // 会话重命名拦截弹层
             .children(
                 self.rename_target

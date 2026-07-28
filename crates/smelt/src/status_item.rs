@@ -214,9 +214,9 @@ mod imp {
             let image: *mut Object = msg_send![class!(NSImage), alloc];
             let image: *mut Object = msg_send![image, initWithData: data];
             if !image.is_null() {
-                // 母图是 1024×1024，菜单栏图标按 18pt 显示（跟系统自带图标的观感尺寸
+                // 母图是 1024×1024，菜单栏图标按 20pt 显示（跟系统自带图标的观感尺寸
                 // 对齐），NSImage 自己插值缩小，不用额外裁剪/预生成小图。
-                let _: () = msg_send![image, setSize: NSSize { width: 18.0, height: 18.0 }];
+                let _: () = msg_send![image, setSize: NSSize { width: 20.0, height: 20.0 }];
                 let _: () = msg_send![button, setImage: image];
                 let _: () = msg_send![button, setImagePosition: 2u64]; // NSImageLeft：图标靠左，角标数字（若有）跟在右边
             } else {
