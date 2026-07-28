@@ -1,6 +1,4 @@
-/// WebSocket 服务
-/// 
-/// 连接 gateway 的 /acp/ws 端点，处理双向通信。
+// WebSocket client for the gateway /acp/ws endpoint.
 
 import 'dart:async';
 import 'dart:convert';
@@ -38,42 +36,46 @@ class SessionSummary {
 }
 
 /// WebSocket 连接状态
-enum WsState {
-  disconnected,
-  connecting,
-  connected,
-  reconnecting,
-}
+enum WsState { disconnected, connecting, connected, reconnecting }
 
 /// Gateway WebSocket 服务
 class GatewayService {
   WebSocketChannel? _channel;
+  StreamSubscription<dynamic>? _channelSubscription;
+  Timer? _reconnectTimer;
   WsState _state = WsState.disconnected;
   String? _endpoint;
   String? _token;
-  
+  bool _manuallyDisconnected = true;
+  int _connectionGeneration = 0;
+  bool _writeEnabled = false;
+
   final _stateController = StreamController<WsState>.broadcast();
-  final _sessionsController = StreamController<List<SessionSummary>>.broadcast();
+  final _sessionsController =
+      StreamController<List<SessionSummary>>.broadcast();
   final _snapshotController = StreamController<AcpSnapshot>.broadcast();
   final _errorController = StreamController<String>.broadcast();
-  
+
   String? _subscribedSessionId;
 
   /// 连接状态流
   Stream<WsState> get stateStream => _stateController.stream;
-  
+
   /// 会话列表流
   Stream<List<SessionSummary>> get sessionsStream => _sessionsController.stream;
-  
+
   /// 当前订阅会话的快照流
   Stream<AcpSnapshot> get snapshotStream => _snapshotController.stream;
-  
+
   /// 错误流
   Stream<String> get errorStream => _errorController.stream;
-  
+
   /// 当前状态
   WsState get state => _state;
-  
+
+  /// Whether the desktop gateway allows prompts and approval responses.
+  bool get writeEnabled => _writeEnabled;
+
   /// 当前订阅的会话 ID
   String? get subscribedSessionId => _subscribedSessionId;
 
@@ -82,32 +84,62 @@ class GatewayService {
     if (_state == WsState.connected || _state == WsState.connecting) {
       return;
     }
-    
-    _endpoint = endpoint;
+
+    _endpoint = endpoint.trim();
     _token = token;
+    _manuallyDisconnected = false;
+    _reconnectTimer?.cancel();
     _setState(WsState.connecting);
-    
+
+    final generation = ++_connectionGeneration;
     try {
-      final uri = Uri.parse('$endpoint/acp/ws?token=$token');
-      _channel = WebSocketChannel.connect(uri);
-      
-      _channel!.stream.listen(
-        _onMessage,
-        onError: _onError,
-        onDone: _onDone,
+      final channel = WebSocketChannel.connect(_gatewayUri(_endpoint!, token));
+      _channel = channel;
+      _channelSubscription = channel.stream.listen(
+        (data) {
+          if (generation == _connectionGeneration) _onMessage(data);
+        },
+        onError: (error) {
+          if (generation == _connectionGeneration) _onError(error);
+        },
+        onDone: () {
+          if (generation == _connectionGeneration) _onDone();
+        },
       );
-      
-      // 等待连接确认
-      // 服务端会发送 {"type": "connected", ...}
+      await channel.ready;
     } catch (e) {
-      _setState(WsState.disconnected);
+      if (generation != _connectionGeneration) return;
       _errorController.add('连接失败: $e');
+      _scheduleReconnect();
     }
+  }
+
+  Uri _gatewayUri(String endpoint, String token) {
+    final parsed = Uri.parse(endpoint);
+    final scheme = switch (parsed.scheme) {
+      'http' => 'ws',
+      'https' => 'wss',
+      _ => parsed.scheme,
+    };
+    final basePath = parsed.path.replaceFirst(RegExp(r'/+$'), '');
+    final path = basePath.endsWith('/acp/ws') ? basePath : '$basePath/acp/ws';
+    return parsed.replace(
+      scheme: scheme,
+      path: path,
+      queryParameters: {...parsed.queryParameters, 'token': token},
+    );
   }
 
   /// 断开连接
   void disconnect() {
+    _manuallyDisconnected = true;
+    _connectionGeneration++;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _subscribedSessionId = null;
+    _writeEnabled = false;
+    _channelSubscription?.cancel();
+    _channelSubscription = null;
     _channel?.sink.close();
     _channel = null;
     _setState(WsState.disconnected);
@@ -142,22 +174,61 @@ class GatewayService {
   void sendMessage(String sessionId, String content) {
     _send({
       'method': 'sendMessage',
-      'params': {
-        'sessionId': sessionId,
-        'content': content,
-      },
+      'params': {'sessionId': sessionId, 'content': content},
     });
   }
 
   /// 响应权限请求
-  void respondApproval(String sessionId, String optionKey, {String? customText}) {
+  void respondApproval(
+    String sessionId,
+    String toolCallId,
+    String optionKey, {
+    String? customText,
+  }) {
     _send({
       'method': 'respondApproval',
       'params': {
         'sessionId': sessionId,
+        'toolCallId': toolCallId,
         'optionKey': optionKey,
-        if (customText != null) 'customText': customText,
+        'customText': ?customText,
       },
+    });
+  }
+
+  void chooseElicitation(String sessionId, int fieldIndex, int optionIndex) {
+    _send({
+      'method': 'chooseElicitation',
+      'params': {
+        'sessionId': sessionId,
+        'fieldIndex': fieldIndex,
+        'optionIndex': optionIndex,
+      },
+    });
+  }
+
+  void updateElicitationText(String sessionId, int fieldIndex, String value) {
+    _send({
+      'method': 'updateElicitationText',
+      'params': {
+        'sessionId': sessionId,
+        'fieldIndex': fieldIndex,
+        'value': value,
+      },
+    });
+  }
+
+  void submitElicitation(String sessionId) {
+    _send({
+      'method': 'submitElicitation',
+      'params': {'sessionId': sessionId},
+    });
+  }
+
+  void dismissElicitation(String sessionId) {
+    _send({
+      'method': 'dismissElicitation',
+      'params': {'sessionId': sessionId},
     });
   }
 
@@ -176,31 +247,40 @@ class GatewayService {
     try {
       final json = jsonDecode(data as String) as Map<String, dynamic>;
       final type = json['type'] as String?;
-      
+
       switch (type) {
         case 'connected':
+          _writeEnabled = json['writeEnabled'] as bool? ?? false;
           _setState(WsState.connected);
-          // 自动请求会话列表
           listSessions();
-          
+          final sessionId = _subscribedSessionId;
+          if (sessionId != null) subscribe(sessionId);
+
         case 'sessions':
-          final sessions = (json['sessions'] as List<dynamic>?)
-              ?.map((s) => SessionSummary.fromJson(s as Map<String, dynamic>))
-              .toList() ?? [];
+          final sessions =
+              (json['sessions'] as List<dynamic>?)
+                  ?.map(
+                    (s) => SessionSummary.fromJson(s as Map<String, dynamic>),
+                  )
+                  .toList() ??
+              [];
           _sessionsController.add(sessions);
-          
+
         case 'subscribed':
           // 订阅确认
           break;
-          
+
         case 'unsubscribed':
           _subscribedSessionId = null;
-          
+
         case 'snapshot':
           // 旧格式兼容
           final snapshot = AcpSnapshot.fromJson(json);
           _snapshotController.add(snapshot);
-          
+
+        case 'error':
+          _errorController.add(json['error'] as String? ?? 'Gateway 请求失败');
+
         default:
           // 可能是原始 smeltd 格式: {"snapshot": {...}}
           if (json.containsKey('snapshot')) {
@@ -215,19 +295,21 @@ class GatewayService {
 
   void _onError(dynamic error) {
     _errorController.add('WebSocket 错误: $error');
-    _reconnect();
+    _scheduleReconnect();
   }
 
   void _onDone() {
-    if (_state == WsState.connected) {
-      _reconnect();
-    }
+    _scheduleReconnect();
   }
 
-  void _reconnect() {
-    if (_endpoint != null && _token != null) {
+  void _scheduleReconnect() {
+    if (!_manuallyDisconnected && _endpoint != null && _token != null) {
+      _channelSubscription?.cancel();
+      _channelSubscription = null;
+      _channel = null;
       _setState(WsState.reconnecting);
-      Future.delayed(const Duration(seconds: 2), () {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = Timer(const Duration(seconds: 2), () {
         if (_state == WsState.reconnecting) {
           connect(_endpoint!, _token!);
         }

@@ -475,7 +475,13 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 }
                 ReadyKind::Fresh => {}
             }
-            state.phase = AcpPhase::Idle;
+            state.phase = if !state.permissions.is_empty() {
+                AcpPhase::AwaitingApproval
+            } else if state.elicitation.is_some() {
+                AcpPhase::AwaitingChoice
+            } else {
+                AcpPhase::Idle
+            };
             state.status_line = None;
         }
         AcpEvent::AgentChunk { thought, text } => {
@@ -491,6 +497,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.phase = AcpPhase::Running;
         }
         AcpEvent::ToolCall(tc) => {
+            let replayed_elicitation = recovered_elicitation(&tc.title, tc.raw_input.as_ref());
             state.entries.push(AcpEntry::ToolCall {
                 id: tc.tool_call_id.to_string(),
                 title: tc.title,
@@ -498,10 +505,26 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 status: crate::acp_conn::tool_status_from_acp(tc.status),
                 output: crate::acp_conn::tool_content_parts(&tc.content),
             });
-            state.phase = AcpPhase::Running;
+            if let Some(elicitation) = replayed_elicitation {
+                state.elicitation = Some(elicitation);
+                state.phase = AcpPhase::AwaitingChoice;
+            } else {
+                state.phase = AcpPhase::Running;
+            }
         }
         AcpEvent::ToolCallUpdate(u) => {
             let update_id = u.tool_call_id.to_string();
+            let replayed_elicitation = u.fields.raw_input.as_ref().and_then(|raw_input| {
+                let title = u.fields.title.as_deref().or_else(|| {
+                    state.entries.iter().rev().find_map(|entry| match entry {
+                        AcpEntry::ToolCall { id, title, .. } if id == &update_id => {
+                            Some(title.as_str())
+                        }
+                        _ => None,
+                    })
+                })?;
+                recovered_elicitation(title, Some(raw_input))
+            });
             if let Some(AcpEntry::ToolCall {
                 title,
                 kind,
@@ -526,6 +549,10 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 if let Some(c) = u.fields.content {
                     *output = crate::acp_conn::tool_content_parts(&c);
                 }
+            }
+            if let Some(elicitation) = replayed_elicitation {
+                state.elicitation = Some(elicitation);
+                state.phase = AcpPhase::AwaitingChoice;
             }
         }
         AcpEvent::ToolStarted { id, title, kind } => {
@@ -622,6 +649,86 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
 
     outcome.should_persist = !skip_persist;
     outcome
+}
+
+/// Some agents replay an unfinished AskUserQuestion as a pending tool call but do not recreate
+/// the ACP elicitation responder. The raw tool input still contains the questions and choices, so
+/// keep them actionable through a prompt-backed elicitation (`responder: None`).
+fn recovered_elicitation(
+    title: &str,
+    raw_input: Option<&serde_json::Value>,
+) -> Option<LiveElicitation> {
+    let questions = raw_input?.get("questions")?.as_array()?;
+    let mut fields = Vec::new();
+    for (ix, question) in questions.iter().enumerate() {
+        let prompt = question.get("question")?.as_str()?.trim();
+        let options = question.get("options")?.as_array()?;
+        let options: Vec<crate::acp_conn::ElicitOption> = options
+            .iter()
+            .filter_map(|option| option.get("label")?.as_str())
+            .map(|label| crate::acp_conn::ElicitOption {
+                value: agent_client_protocol::schema::v1::ElicitationContentValue::String(
+                    label.to_string(),
+                ),
+                label: label.to_string(),
+            })
+            .collect();
+        if options.is_empty() {
+            return None;
+        }
+        let kind = if question
+            .get("multiSelect")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            crate::acp_conn::ElicitFieldKind::MultiSelect(options)
+        } else {
+            crate::acp_conn::ElicitFieldKind::Select(options)
+        };
+        fields.push(crate::acp_conn::ElicitField {
+            key: format!("question_{ix}"),
+            title: prompt.to_string(),
+            kind,
+        });
+    }
+    (!fields.is_empty()).then(|| LiveElicitation {
+        message: title.to_string(),
+        raw_fields: fields,
+        chosen: Default::default(),
+        text_values: Default::default(),
+        responder: None,
+        raw_request_line: None,
+    })
+}
+
+/// Build the plain-text reply used by a recovered elicitation whose original responder no longer
+/// exists. Live elicitations return `None` and continue through the protocol responder.
+pub fn recovered_elicitation_answer(state: &AcpSessionState) -> Option<String> {
+    let card = state.elicitation.as_ref()?;
+    if card.responder.is_some() {
+        return None;
+    }
+    let mut answers = Vec::new();
+    for (ix, field) in card.raw_fields.iter().enumerate() {
+        let selected = card.chosen.get(&ix)?;
+        let labels: Vec<&str> = match &field.kind {
+            ElicitFieldKind::Select(options) | ElicitFieldKind::MultiSelect(options) => selected
+                .iter()
+                .filter_map(|&option_ix| options.get(option_ix))
+                .map(|option| option.label.as_str())
+                .collect(),
+            _ => return None,
+        };
+        if labels.is_empty() {
+            return None;
+        }
+        answers.push(if card.raw_fields.len() == 1 {
+            labels.join("、")
+        } else {
+            format!("{}：{}", field.title, labels.join("、"))
+        });
+    }
+    Some(answers.join("\n"))
 }
 
 /// 「重新开始」/新建时的相位重置：跟旧版 `AcpView::restart` 里那几行对应（cmd/
@@ -764,8 +871,16 @@ pub fn submit_elicitation(state: &mut AcpSessionState) {
 /// 「跳过」：丢卡片，responder Drop 自动回 Cancel（见 `ElicitationResponder`
 /// 的 Drop 实现）。
 pub fn dismiss_elicitation(state: &mut AcpSessionState) {
+    let recovered = state
+        .elicitation
+        .as_ref()
+        .is_some_and(|card| card.responder.is_none());
     state.elicitation = None;
-    state.phase = AcpPhase::Running;
+    state.phase = if recovered {
+        AcpPhase::Idle
+    } else {
+        AcpPhase::Running
+    };
 }
 
 /// 一份 turn 结束/连接终止后要不要自动续接（冷恢复占位第一次被访问时）：
@@ -1139,6 +1254,64 @@ mod tests {
             s.elicitation.as_ref().unwrap().chosen.get(&0),
             Some(&vec![])
         );
+    }
+
+    #[test]
+    fn unfinished_ask_user_question_rebuilds_a_prompt_backed_elicitation() {
+        let raw_input = serde_json::json!({
+            "questions": [{
+                "question": "提醒走哪个渠道？",
+                "multiSelect": false,
+                "options": [
+                    {"label": "Gitea Issue", "description": "仓库待办"},
+                    {"label": "Bark", "description": "手机推送"}
+                ]
+            }]
+        });
+
+        let card = recovered_elicitation("提醒走哪个渠道？", Some(&raw_input))
+            .expect("replayed AskUserQuestion should remain actionable");
+        assert!(card.responder.is_none());
+        assert_eq!(card.raw_fields.len(), 1);
+        let ElicitFieldKind::Select(options) = &card.raw_fields[0].kind else {
+            panic!("single-select question should remain a select");
+        };
+        assert_eq!(options[1].label, "Bark");
+
+        let mut state = fresh_state();
+        state.elicitation = Some(card);
+        assert!(choose_elicitation(&mut state, 0, 1));
+        assert_eq!(
+            recovered_elicitation_answer(&state).as_deref(),
+            Some("Bark")
+        );
+
+        dismiss_elicitation(&mut state);
+        assert!(matches!(state.phase, AcpPhase::Idle));
+    }
+
+    #[test]
+    fn ready_does_not_overwrite_a_recovered_choice_phase() {
+        let raw_input = serde_json::json!({
+            "questions": [{
+                "question": "Choose",
+                "options": [{"label": "A"}]
+            }]
+        });
+        let mut state = fresh_state();
+        state.elicitation = recovered_elicitation("Choose", Some(&raw_input));
+
+        apply_event(
+            &mut state,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("session"),
+                kind: ReadyKind::ResumedKeepHistory,
+                supports_image: true,
+            },
+        );
+
+        assert!(matches!(state.phase, AcpPhase::AwaitingChoice));
+        assert!(state.elicitation.is_some());
     }
 
     #[test]

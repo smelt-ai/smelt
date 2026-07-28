@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'services/gateway_service.dart';
 import 'models/acp_snapshot.dart';
 
@@ -36,26 +39,32 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   WsState _connectionState = WsState.disconnected;
   List<SessionSummary> _sessions = [];
-  String? _errorMessage;
-  
+  late final StreamSubscription<WsState> _stateSubscription;
+  late final StreamSubscription<List<SessionSummary>> _sessionsSubscription;
+  late final StreamSubscription<String> _errorSubscription;
+
   // 临时配对信息（后续改为 QR 扫描）
-  final _endpointController = TextEditingController(text: 'ws://192.168.1.100:9877');
+  final _endpointController = TextEditingController(
+    text: 'ws://192.168.1.100:9877',
+  );
   final _tokenController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    gatewayService.stateStream.listen((state) {
+    _stateSubscription = gatewayService.stateStream.listen((state) {
+      if (!mounted) return;
       setState(() => _connectionState = state);
     });
-    gatewayService.sessionsStream.listen((sessions) {
+    _sessionsSubscription = gatewayService.sessionsStream.listen((sessions) {
+      if (!mounted) return;
       setState(() => _sessions = sessions);
     });
-    gatewayService.errorStream.listen((error) {
-      setState(() => _errorMessage = error);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
-      );
+    _errorSubscription = gatewayService.errorStream.listen((error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
     });
   }
 
@@ -111,7 +120,7 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 16),
           const Text('Not connected', textAlign: TextAlign.center),
           const SizedBox(height: 24),
-          
+
           // 临时手动连接 UI（后续改为 QR）
           TextField(
             controller: _endpointController,
@@ -136,11 +145,11 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.link),
             label: const Text('Connect'),
           ),
-          
+
           const SizedBox(height: 24),
           const Divider(),
           const SizedBox(height: 24),
-          
+
           ElevatedButton.icon(
             onPressed: _scanQrCode,
             icon: const Icon(Icons.qr_code_scanner),
@@ -153,24 +162,58 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildSessionList() {
     if (_sessions.isEmpty) {
-      return const Center(
-        child: Text('No active sessions'),
-      );
+      return const Center(child: Text('No active sessions'));
     }
 
-    return ListView.builder(
-      itemCount: _sessions.length,
-      itemBuilder: (context, index) {
-        final session = _sessions[index];
-        return ListTile(
-          leading: _getAgentIcon(session.agent),
-          title: Text(session.title.isNotEmpty ? session.title : session.id),
-          subtitle: Text(session.cwd ?? session.phase),
-          trailing: _getPhaseChip(session.phase),
-          onTap: () => _openSession(session),
+    final projects = <String, List<SessionSummary>>{};
+    for (final session in _sessions) {
+      final project = _projectName(session);
+      projects.putIfAbsent(project, () => []).add(session);
+    }
+
+    return ListView(
+      children: projects.entries.map((entry) {
+        final sessions = entry.value;
+        return ExpansionTile(
+          leading: const Icon(Icons.folder_outlined),
+          title: Text(entry.key),
+          subtitle: Text(
+            '${sessions.length} agent${sessions.length == 1 ? '' : 's'}',
+          ),
+          children: sessions.map((session) {
+            final sessionTitle = session.title.trim();
+            final showTitle =
+                sessionTitle.isNotEmpty && sessionTitle != entry.key;
+            return ListTile(
+              contentPadding: const EdgeInsets.only(left: 32, right: 16),
+              leading: _getAgentIcon(session.agent),
+              title: Text(_agentLabel(session.agent)),
+              subtitle: Text(showTitle ? sessionTitle : session.phase),
+              trailing: _getPhaseChip(session.phase),
+              onTap: () => _openSession(session),
+            );
+          }).toList(),
         );
-      },
+      }).toList(),
     );
+  }
+
+  String _projectName(SessionSummary session) {
+    final cwd = session.cwd?.replaceAll(RegExp(r'/+$'), '');
+    if (cwd != null && cwd.isNotEmpty) {
+      return cwd.split('/').last;
+    }
+    return session.title.isNotEmpty ? session.title : 'Other';
+  }
+
+  String _agentLabel(String agent) {
+    return switch (agent.toLowerCase()) {
+      'claude' => 'Claude',
+      'codex' => 'Codex',
+      'copilot' => 'Copilot',
+      'grok' => 'Grok',
+      _ => 'Agent',
+    };
   }
 
   Widget _buildReconnectingView() {
@@ -194,10 +237,7 @@ class _HomePageState extends State<HomePage> {
       'grok' => (Colors.purple, 'G'),
       _ => (Colors.grey, '?'),
     };
-    return CircleAvatar(
-      backgroundColor: color,
-      child: Text(letter),
-    );
+    return CircleAvatar(backgroundColor: color, child: Text(letter));
   }
 
   Widget _getPhaseChip(String phase) {
@@ -236,14 +276,15 @@ class _HomePageState extends State<HomePage> {
   void _openSession(SessionSummary session) {
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (context) => SessionPage(session: session),
-      ),
+      MaterialPageRoute(builder: (context) => SessionPage(session: session)),
     );
   }
-  
+
   @override
   void dispose() {
+    _stateSubscription.cancel();
+    _sessionsSubscription.cancel();
+    _errorSubscription.cancel();
     _endpointController.dispose();
     _tokenController.dispose();
     super.dispose();
@@ -264,6 +305,8 @@ class _SessionPageState extends State<SessionPage> {
   final ScrollController _scrollController = ScrollController();
   AcpSnapshot? _snapshot;
   bool _loading = true;
+  final Map<int, String> _elicitationTextValues = {};
+  late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
 
   @override
   void initState() {
@@ -272,26 +315,41 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   void _subscribeSession() {
-    gatewayService.snapshotStream.listen((snapshot) {
-      if (snapshot.acpSessionId == widget.session.id) {
-        setState(() {
-          _snapshot = snapshot;
-          _loading = false;
-        });
-        _scrollToBottom();
+    _snapshotSubscription = gatewayService.snapshotStream.listen((snapshot) {
+      if (!mounted || gatewayService.subscribedSessionId != widget.session.id) {
+        return;
       }
+      final initialLoad = _snapshot == null;
+      setState(() {
+        _snapshot = _snapshot?.merge(snapshot) ?? snapshot;
+        final elicitation = _snapshot?.pendingElicitation;
+        if (elicitation == null) {
+          _elicitationTextValues.clear();
+        } else {
+          for (final entry in elicitation.textValues.entries) {
+            _elicitationTextValues.putIfAbsent(entry.key, () => entry.value);
+          }
+        }
+        _loading = false;
+      });
+      _scrollToBottom(animate: !initialLoad);
     });
     gatewayService.subscribe(widget.session.id);
   }
 
-  void _scrollToBottom() {
+  void _scrollToBottom({bool animate = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
+        final bottom = _scrollController.position.minScrollExtent;
+        if (animate) {
+          _scrollController.animateTo(
+            bottom,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        } else {
+          _scrollController.jumpTo(bottom);
+        }
       }
     });
   }
@@ -300,9 +358,11 @@ class _SessionPageState extends State<SessionPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.session.title.isNotEmpty 
-            ? widget.session.title 
-            : widget.session.id),
+        title: Text(
+          widget.session.title.isNotEmpty
+              ? widget.session.title
+              : widget.session.id,
+        ),
         actions: [
           if (_snapshot != null)
             Padding(
@@ -314,9 +374,11 @@ class _SessionPageState extends State<SessionPage> {
       body: Column(
         children: [
           // 权限请求横幅
-          if (_snapshot?.pendingPermission != null)
-            _buildPermissionBanner(_snapshot!.pendingPermission!),
-          
+          if (_snapshot?.pendingPermissions.isNotEmpty == true)
+            ..._snapshot!.pendingPermissions.map(_buildPermissionBanner),
+          if (_snapshot?.pendingElicitation case final elicitation?)
+            _buildElicitationCard(elicitation),
+
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -333,19 +395,27 @@ class _SessionPageState extends State<SessionPage> {
     return switch (phase) {
       AcpPhaseIdle() => const Icon(Icons.pause_circle, color: Colors.grey),
       AcpPhaseStarting() => const SizedBox(
-          width: 20, height: 20,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
       AcpPhaseRunning() => const SizedBox(
-          width: 20, height: 20,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      AcpPhaseAwaitingApproval() => const Icon(Icons.warning_amber, color: Colors.orange),
-      AcpPhaseAwaitingChoice() => const Icon(Icons.help_outline, color: Colors.blue),
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+      AcpPhaseAwaitingApproval() => const Icon(
+        Icons.warning_amber,
+        color: Colors.orange,
+      ),
+      AcpPhaseAwaitingChoice() => const Icon(
+        Icons.help_outline,
+        color: Colors.blue,
+      ),
       AcpPhaseEnded(reason: final r) => Tooltip(
-          message: r,
-          child: const Icon(Icons.stop_circle, color: Colors.red),
-        ),
+        message: r,
+        child: const Icon(Icons.stop_circle, color: Colors.red),
+      ),
     };
   }
 
@@ -361,14 +431,14 @@ class _SessionPageState extends State<SessionPage> {
             'Permission Required',
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
-          if (permission.question.isNotEmpty)
-            Text(permission.question),
+          if (permission.question.isNotEmpty) Text(permission.question),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
             children: permission.options.map((opt) {
               return ElevatedButton(
-                onPressed: () => _respondApproval(opt.optionId),
+                onPressed: () =>
+                    _respondApproval(permission.toolCallId, opt.optionId),
                 style: opt.isAllow
                     ? ElevatedButton.styleFrom(backgroundColor: Colors.green)
                     : null,
@@ -381,17 +451,159 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
+  Widget _buildElicitationCard(PendingElicitation elicitation) {
+    final ready = elicitation.fields.asMap().entries.every((entry) {
+      return switch (entry.value.kind) {
+        ElicitationSelect() || ElicitationMultiSelect() =>
+          elicitation.chosen[entry.key]?.isNotEmpty == true,
+        ElicitationText() =>
+          _elicitationTextValues[entry.key]?.trim().isNotEmpty == true,
+        ElicitationExternalUrl() => true,
+      };
+    });
+    final singleSelect =
+        elicitation.fields.length == 1 &&
+        elicitation.fields.first.kind is ElicitationSelect;
+
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(maxHeight: 360),
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.amber.withAlpha(20),
+        border: Border.all(color: Colors.amber.shade700),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.help_outline, color: Colors.amber, size: 20),
+                const SizedBox(width: 8),
+                const Text(
+                  'Your input is needed',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            if (elicitation.message.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(elicitation.message),
+            ],
+            const SizedBox(height: 10),
+            ...elicitation.fields.asMap().entries.map(
+              (entry) =>
+                  _buildElicitationField(elicitation, entry.key, entry.value),
+            ),
+            if (!singleSelect)
+              Row(
+                children: [
+                  FilledButton(
+                    onPressed: ready ? _submitElicitation : null,
+                    child: const Text('Submit'),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: () =>
+                        gatewayService.dismissElicitation(widget.session.id),
+                    child: const Text('Answer in text instead'),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildElicitationField(
+    PendingElicitation elicitation,
+    int fieldIndex,
+    ElicitationField field,
+  ) {
+    final title = Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(field.title, style: const TextStyle(fontSize: 13)),
+    );
+    final input = switch (field.kind) {
+      ElicitationSelect(options: final options) ||
+      ElicitationMultiSelect(options: final options) => Wrap(
+        spacing: 8,
+        runSpacing: 6,
+        children: options.asMap().entries.map((entry) {
+          final selected =
+              elicitation.chosen[fieldIndex]?.contains(entry.key) == true;
+          return ChoiceChip(
+            label: Text(entry.value.label),
+            selected: selected,
+            onSelected: (_) => gatewayService.chooseElicitation(
+              widget.session.id,
+              fieldIndex,
+              entry.key,
+            ),
+          );
+        }).toList(),
+      ),
+      ElicitationText(secret: final secret) => TextFormField(
+        initialValue:
+            _elicitationTextValues[fieldIndex] ??
+            elicitation.textValues[fieldIndex] ??
+            '',
+        obscureText: secret,
+        decoration: const InputDecoration(border: OutlineInputBorder()),
+        onChanged: (value) => _elicitationTextValues[fieldIndex] = value,
+      ),
+      ElicitationExternalUrl(url: final url) => Row(
+        children: [
+          Expanded(child: SelectableText(url)),
+          IconButton(
+            tooltip: 'Copy link',
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: url));
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('Link copied')));
+            },
+            icon: const Icon(Icons.copy),
+          ),
+        ],
+      ),
+    };
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [title, input],
+      ),
+    );
+  }
+
+  void _submitElicitation() {
+    for (final entry in _elicitationTextValues.entries) {
+      gatewayService.updateElicitationText(
+        widget.session.id,
+        entry.key,
+        entry.value,
+      );
+    }
+    gatewayService.submitElicitation(widget.session.id);
+  }
+
   Widget _buildEntryList() {
     final entries = _snapshot?.entries ?? [];
     if (entries.isEmpty) {
       return const Center(child: Text('No messages yet'));
     }
-    
+
     return ListView.builder(
       controller: _scrollController,
+      reverse: true,
       itemCount: entries.length,
       itemBuilder: (context, index) {
-        return _buildEntry(entries[index]);
+        return _buildEntry(entries[entries.length - 1 - index]);
       },
     );
   }
@@ -399,11 +611,16 @@ class _SessionPageState extends State<SessionPage> {
   Widget _buildEntry(AcpEntry entry) {
     return switch (entry) {
       AcpEntryUser(text: final text) => _buildUserMessage(text),
-      AcpEntryAssistant(text: final text, thought: final thought) => 
-          _buildAssistantMessage(text, thought),
-      AcpEntryToolCall(id: _, title: final title, kind: final kind, 
-          status: final status, output: final output) =>
-          _buildToolCall(title, kind, status, output),
+      AcpEntryAssistant(text: final text, thought: final thought) =>
+        _buildAssistantMessage(text, thought),
+      AcpEntryToolCall(
+        id: _,
+        title: final title,
+        kind: final kind,
+        status: final status,
+        output: final output,
+      ) =>
+        _buildToolCall(title, kind, status, output),
       AcpEntryDivider(label: final label) => _buildDivider(label),
       AcpEntryUnknown() => const SizedBox.shrink(),
     };
@@ -429,7 +646,7 @@ class _SessionPageState extends State<SessionPage> {
 
   Widget _buildAssistantMessage(String text, bool thought) {
     if (text.isEmpty) return const SizedBox.shrink();
-    
+
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
@@ -461,12 +678,20 @@ class _SessionPageState extends State<SessionPage> {
   ) {
     final statusIcon = switch (status) {
       ToolCallStatus.pending || ToolCallStatus.inProgress => const SizedBox(
-          width: 16, height: 16,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      ToolCallStatus.completed => const Icon(Icons.check_circle, 
-          color: Colors.green, size: 16),
-      ToolCallStatus.failed => const Icon(Icons.error, color: Colors.red, size: 16),
+        width: 16,
+        height: 16,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+      ToolCallStatus.completed => const Icon(
+        Icons.check_circle,
+        color: Colors.green,
+        size: 16,
+      ),
+      ToolCallStatus.failed => const Icon(
+        Icons.error,
+        color: Colors.red,
+        size: 16,
+      ),
     };
 
     final kindIcon = switch (kind) {
@@ -490,12 +715,19 @@ class _SessionPageState extends State<SessionPage> {
                   padding: const EdgeInsets.all(8),
                   color: Colors.black26,
                   child: Text(
-                    output.map((p) => switch (p) {
-                      ToolOutputText(text: final t) => t,
-                      ToolOutputDiff(path: final path, hunks: _) => '[Diff: $path]',
-                      ToolOutputImage() => '[Image]',
-                    }).join('\n'),
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                    output
+                        .map(
+                          (p) => switch (p) {
+                            ToolOutputText(text: final t) => t,
+                            ToolOutputDiff(path: final path) => '[Diff: $path]',
+                            ToolOutputImage() => '[Image]',
+                          },
+                        )
+                        .join('\n'),
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
                   ),
                 ),
               ],
@@ -511,7 +743,10 @@ class _SessionPageState extends State<SessionPage> {
           const Expanded(child: Divider()),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Text(label, style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+            child: Text(
+              label,
+              style: TextStyle(color: Colors.grey[500], fontSize: 12),
+            ),
           ),
           const Expanded(child: Divider()),
         ],
@@ -520,32 +755,39 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildInputBar() {
+    final hasSnapshot = _snapshot != null;
     final isIdle = _snapshot?.phase is AcpPhaseIdle;
-    
+    final canCompose = gatewayService.writeEnabled;
+    final canSend = hasSnapshot && isIdle && gatewayService.writeEnabled;
+
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        border: Border(
-          top: BorderSide(color: Colors.grey[800]!),
-        ),
+        border: Border(top: BorderSide(color: Colors.grey[800]!)),
       ),
       child: Row(
         children: [
           Expanded(
             child: TextField(
               controller: _messageController,
-              enabled: isIdle,
+              enabled: canCompose,
               decoration: InputDecoration(
-                hintText: isIdle ? 'Send a message...' : 'Waiting for response...',
+                hintText: !gatewayService.writeEnabled
+                    ? 'Desktop connection is read-only'
+                    : !hasSnapshot
+                    ? 'Loading session...'
+                    : isIdle
+                    ? 'Send a message...'
+                    : 'Agent is running - draft message...',
                 border: const OutlineInputBorder(),
               ),
-              onSubmitted: (_) => _sendMessage(),
+              onSubmitted: canSend ? (_) => _sendMessage() : null,
             ),
           ),
           const SizedBox(width: 8),
           IconButton(
-            onPressed: isIdle ? _sendMessage : null,
+            onPressed: canSend ? _sendMessage : null,
             icon: const Icon(Icons.send),
           ),
         ],
@@ -561,13 +803,16 @@ class _SessionPageState extends State<SessionPage> {
     gatewayService.sendMessage(widget.session.id, text);
   }
 
-  void _respondApproval(String optionKey) {
-    gatewayService.respondApproval(widget.session.id, optionKey);
+  void _respondApproval(String toolCallId, String optionKey) {
+    gatewayService.respondApproval(widget.session.id, toolCallId, optionKey);
   }
 
   @override
   void dispose() {
-    gatewayService.unsubscribe();
+    _snapshotSubscription.cancel();
+    if (gatewayService.subscribedSessionId == widget.session.id) {
+      gatewayService.unsubscribe();
+    }
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
