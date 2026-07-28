@@ -41,7 +41,6 @@ mod status_item;
 mod tasks;
 mod terminal;
 mod terminal_view;
-mod toast;
 
 mod updater;
 mod usage_stats;
@@ -516,6 +515,11 @@ impl Session {
             .unwrap_or_else(|| match &self.kind {
                 SessionKind::Term { active, .. } => pane_auto_title(active, cx),
                 SessionKind::Acp(view) => {
+                    if view.read(cx).agent_kind() == settings::AcpAgentKind::Codex
+                        && let Some(title) = view.read(cx).auto_title()
+                    {
+                        return title;
+                    }
                     let dir = view
                         .read(cx)
                         .cwd()
@@ -542,28 +546,6 @@ impl Session {
         match &self.kind {
             SessionKind::Term { .. } => self.term_leaves().len(),
             SessionKind::Acp(_) => 1,
-        }
-    }
-
-    /// 阻塞审批卡的正文必须来自产生审批事实的同一个 pane，不能拿会话里任意一条
-    /// 普通完成通知来拼接，否则多分屏或旧 OSC 消息会出现“Blocked + 已完成”。
-    fn approval_msg(&self, cx: &App) -> Option<String> {
-        match &self.kind {
-            SessionKind::Acp(_) => None,
-            SessionKind::Term { .. } => {
-                for t in self.term_leaves() {
-                    let daemon_state = daemon_state_for(&t, cx);
-                    if let Some(state) = daemon_state.as_ref()
-                        && state.structured_events
-                    {
-                        if state.phase == terminal::DaemonPhase::AwaitingApproval {
-                            return state.detail_line();
-                        }
-                        continue;
-                    }
-                }
-                None
-            }
         }
     }
 
@@ -1460,10 +1442,6 @@ struct Workspace {
     inspector_tab: inspector::InspectorTab,
     /// inspector 面板是否展开（Cmd+B / 图标条再点收合）。
     inspector_open: bool,
-    /// 阻塞 toast 的 ✕ / 稍后 记录（键 = 会话 anchor_id）；会话状态解除时自动
-    /// 清除，同一会话再次阻塞会重新弹。见 toast.rs。
-    toast_dismissed: HashSet<EntityId>,
-    toast_snoozed: HashMap<EntityId, Instant>,
     /// 文件树里已展开的文件夹绝对路径。
     expanded: HashSet<String>,
     /// 目录列表缓存（绝对路径 → 已排序过滤的直接子项 (名, 是否目录)）。后台读盘填充，
@@ -1859,8 +1837,6 @@ impl Workspace {
             stage_override: None,
             inspector_tab: inspector::InspectorTab::Files,
             inspector_open: true,
-            toast_dismissed: HashSet::new(),
-            toast_snoozed: HashMap::new(),
             expanded: HashSet::new(),
             dir_cache: HashMap::new(),
             dir_inflight: HashSet::new(),
@@ -4022,20 +3998,45 @@ impl Workspace {
         .detach();
     }
 
-    /// 收集所有待处理通知：(会话索引, pane 终端, 消息文本)。
+    /// 收集所有待处理通知：(会话索引, 可选 pane 终端, 消息文本)。
     /// 排除「正在看的那个活动 pane」——用户已在看，不算待处理。
-    fn collect_notifications(&self, cx: &App) -> Vec<(usize, Entity<TerminalView>, String)> {
+    fn collect_notifications(
+        &self,
+        cx: &App,
+    ) -> Vec<(usize, Option<Entity<TerminalView>>, String)> {
         let mut out = Vec::new();
         for (si, s) in self.sessions.iter().enumerate() {
             let viewing = (si == self.active_session).then(|| s.anchor_id());
-            let leaves = s.term_leaves();
-            for t in leaves {
-                if Some(t.entity_id()) == viewing {
-                    continue;
+            match &s.kind {
+                SessionKind::Term { .. } => {
+                    for t in s.term_leaves() {
+                        if Some(t.entity_id()) == viewing {
+                            continue;
+                        }
+                        if let Some(msg) = t.read(cx).notification() {
+                            out.push((si, Some(t.clone()), msg.to_string()));
+                        }
+                    }
                 }
-                if let Some(msg) = t.read(cx).notification() {
-                    out.push((si, t.clone(), msg.to_string()));
+                SessionKind::Acp(view) if viewing.is_none() => {
+                    let v = view.read(cx);
+                    let state = cx
+                        .try_global::<DaemonStates>()
+                        .and_then(|states| states.0.lock().unwrap().get(v.session_id()).cloned());
+                    let message = state.as_ref().and_then(|state| match state.phase {
+                        terminal::DaemonPhase::AwaitingApproval
+                        | terminal::DaemonPhase::WaitingForUser => state
+                            .detail_line()
+                            .or_else(|| Some(state.phase_label().to_string())),
+                        _ => None,
+                    });
+                    if let Some(message) =
+                        message.or_else(|| v.completed_unread().then(|| "已完成".to_string()))
+                    {
+                        out.push((si, None, message));
+                    }
                 }
+                SessionKind::Acp(_) => {}
             }
         }
         out
@@ -4045,12 +4046,14 @@ impl Workspace {
     fn goto_notification(
         &mut self,
         session_ix: usize,
-        pane: &Entity<TerminalView>,
+        pane: Option<&Entity<TerminalView>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.activate(session_ix, window, cx);
-        self.activate_pane(pane, window, cx);
+        if let Some(pane) = pane {
+            self.activate_pane(pane, window, cx);
+        }
         self.notifications_open = false;
         cx.notify();
     }
@@ -4065,14 +4068,15 @@ impl Workspace {
 
         let list: Vec<_> = items
             .into_iter()
-            .map(|(si, pane, msg)| {
+            .enumerate()
+            .map(|(item_ix, (si, pane, msg))| {
                 let name = self
                     .sessions
                     .get(si)
                     .map(|s| s.title(cx))
                     .unwrap_or_default();
                 div()
-                    .id(("notif", pane.entity_id()))
+                    .id(("notif", item_ix))
                     .p_2()
                     .rounded_md()
                     .cursor_pointer()
@@ -4092,7 +4096,7 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _ev, window, cx| {
-                            this.goto_notification(si, &pane, window, cx)
+                            this.goto_notification(si, pane.as_ref(), window, cx)
                         }),
                     )
             })
@@ -5110,10 +5114,21 @@ impl Render for Workspace {
                 // 正在看就不弹 toast（你自己看得见），只有真没在看才弹。找不到对应
                 // pane（比如会话还没落地成 leaf）就只走 toast/系统通知。
                 let mut is_current_view = false;
+                let mut session_title = None;
                 for (ix, sess) in self.sessions.iter().enumerate() {
                     let anchor = sess.anchor_id();
+                    let matches_acp = matches!(
+                        &sess.kind,
+                        SessionKind::Acp(view)
+                            if view.read(cx).session_id() == notification.session_id
+                    );
+                    if matches_acp {
+                        is_current_view = ix == active;
+                        session_title = Some(sess.title(cx));
+                    }
                     for leaf in sess.term_leaves() {
                         if leaf.read(cx).session_id() == notification.session_id {
+                            session_title = Some(sess.title(cx));
                             if ix == active && leaf.entity_id() == anchor {
                                 is_current_view = true;
                             }
@@ -5123,21 +5138,23 @@ impl Render for Workspace {
                         }
                     }
                 }
-                // 等批准类的前台展示已经由右上角阻塞卡片负责（派生态，见
-                // toast.rs），前台不再重复弹组件通知；但卡片只在 App 前台可见，
-                // 切到后台时必须走系统通知，不能像之前那样整条跳过。
+                let message = session_title.unwrap_or(notification.message);
                 if window.is_window_active() {
-                    if notification.kind != AgentNotificationKind::Approval && !is_current_view {
-                        window.push_notification(
-                            Notification::info(notification.message).title(notification.title),
-                            cx,
-                        );
+                    if !is_current_view {
+                        let toast = match notification.kind {
+                            AgentNotificationKind::Approval => Notification::warning(message),
+                            AgentNotificationKind::Input => Notification::info(message),
+                            AgentNotificationKind::Success => Notification::success(message),
+                            AgentNotificationKind::Failure => Notification::error(message),
+                        }
+                        .title(notification.title);
+                        window.push_notification(toast, cx);
                     }
                 } else {
                     status_item::deliver_notification(
                         &notification.session_id,
                         &notification.title,
-                        &notification.message,
+                        &message,
                     );
                 }
             }
@@ -5297,9 +5314,8 @@ impl Render for Workspace {
         // 提升到舞台的那个 tab 不再停靠一份（见 inspector_panel_promoted）。
         let inspector_panel_el = (self.inspector_open && !self.inspector_panel_promoted())
             .then(|| self.render_inspector_panel(window, cx));
-        // 底部状态栏 + 右上阻塞 toast。
+        // 底部状态栏。
         let status_bar_el = self.render_status_bar(cx);
-        let toast_el = self.render_blocked_toasts(cx);
 
         // ACP 冷恢复会话「上屏即续接」：挂在这里而不是只挂 activate()——冷启动
         // 后停在哪个会话上，那个会话压根不会收到 activate 调用，只挂那边的话
@@ -5768,8 +5784,6 @@ impl Render for Workspace {
             )
             // 底部状态栏
             .child(status_bar_el)
-            // 右上阻塞 toast（浮层，命令面板之下）
-            .children(toast_el)
             // 命令面板（最上层）
             .children(palette_overlay)
             // 退出确认拦截弹层
