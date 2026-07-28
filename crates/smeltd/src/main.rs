@@ -3728,7 +3728,7 @@ struct AcpSession {
     reduced: Mutex<smelt_core::acp_session::AcpSessionState>,
     handle: Mutex<Option<smelt_core::acp_conn::AcpHandle>>,
     cwd: Option<String>,
-    /// 只有 Claude 才该为 true，见 `AcpLaunch::resume_needs_transcript_check`。
+    /// 旧 handoff 格式兼容字段；当前恢复路径不再读取 agent 私有 transcript。
     agent_needs_transcript_check: bool,
     /// 四色状态，跟终端会话共用同一个类型/同一套广播机制。
     state: Arc<Mutex<SessionState>>,
@@ -3776,6 +3776,10 @@ fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
 
 fn select_resume_id(known: Option<String>, requested: Option<String>) -> Option<String> {
     known.or(requested)
+}
+
+fn acp_open_needs_relaunch(created: bool, alive: bool, has_launch_command: bool) -> bool {
+    created || (!alive && has_launch_command)
 }
 
 /// ACP 相位 → 四色 Phase。`Running` 还要看 entries 里有没有进行中的工具调用，
@@ -4094,7 +4098,7 @@ fn handle_acp_open(
 
         let sess = &slot.value;
         let alive = sess.handle.lock().unwrap().is_some();
-        if created || (!alive && !launch.command.is_empty()) {
+        if acp_open_needs_relaunch(created, alive, !launch.command.is_empty()) {
             // 已经 Ended（或还没真正连接过）：这次 open 等于「重新开始」。
             // 优先用已知的旧 agent session id 真续接，没有才退回请求带的
             // （比如历史会话页第一次点「继续」，本地还没有 acp_session_id）。
@@ -5790,6 +5794,14 @@ mod acp_tests {
 
     fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
         Arc::new(make_acp_session_value(id, reduced))
+    }
+
+    #[test]
+    fn hot_attach_never_relaunches_or_replays_agent_history() {
+        assert!(!acp_open_needs_relaunch(false, true, true));
+        assert!(!acp_open_needs_relaunch(false, true, false));
+        assert!(acp_open_needs_relaunch(true, false, true));
+        assert!(acp_open_needs_relaunch(false, false, true));
     }
 
     #[test]
