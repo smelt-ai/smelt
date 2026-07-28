@@ -6723,7 +6723,7 @@ impl Render for Workspace {
                         .items_center()
                         .justify_end()
                         .w_full()
-                        // 右侧：用量、通知、设置与帮助。stop_propagation 避免触发拖拽。
+                        // 右侧：用量、通知与设置。stop_propagation 避免触发拖拽。
                         .child(
                             h_flex()
                                 .items_center()
@@ -6831,33 +6831,7 @@ impl Render for Workspace {
                                                 this.open_settings_window(cx);
                                             }),
                                         )
-                                })
-                                .child(
-                                    div()
-                                        .id("help-entry")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child("?")
-                                        .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("帮助文档")
-                                                .build(window, cx)
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|_this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                cx.open_url("https://smelt.onoo.io/");
-                                            }),
-                                        ),
-                                ),
+                                }),
                         ),
                 ),
             )
