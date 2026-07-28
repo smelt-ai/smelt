@@ -29,15 +29,17 @@ pub(crate) enum PreparedTerminalAgentLaunch {
     },
 }
 
-fn has_unquoted_shell_operator(command: &str) -> bool {
+fn has_unquoted_shell_control(command: &str) -> bool {
     let mut quote = None;
     let mut escaped = false;
+    let mut word_started = false;
     for ch in command.chars() {
         if matches!(ch, '\n' | '\r') {
             return true;
         }
         if escaped {
             escaped = false;
+            word_started = true;
             continue;
         }
         match quote {
@@ -53,10 +55,15 @@ fn has_unquoted_shell_operator(command: &str) -> bool {
             },
             Some(_) => unreachable!(),
             None => match ch {
-                '\'' | '"' => quote = Some(ch),
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    word_started = true;
+                }
                 '\\' => escaped = true,
                 ';' | '|' | '&' | '<' | '>' => return true,
-                _ => {}
+                '#' if !word_started => return true,
+                ' ' | '\t' => word_started = false,
+                _ => word_started = true,
             },
         }
     }
@@ -67,8 +74,8 @@ fn safe_agent_command(
     kind: TerminalAgentKind,
     command: &str,
 ) -> Result<(Vec<String>, usize), String> {
-    if has_unquoted_shell_operator(command) {
-        return Err("自动恢复不支持 shell 管道、重定向或控制符".into());
+    if has_unquoted_shell_control(command) {
+        return Err("自动恢复不支持 shell 注释、管道、重定向或控制符".into());
     }
     let words =
         shell_words::split(command).map_err(|error| format!("启动命令解析失败：{error}"))?;
@@ -133,6 +140,7 @@ fn is_codex_resume_override(args: &[String], index: usize) -> bool {
 struct ManagedInitialLaunchGrammar {
     incompatible_subcommands: &'static [&'static str],
     incompatible_modes: &'static [&'static str],
+    identity_breaking_options: &'static [&'static str],
     value_options: &'static [&'static str],
     variadic_value_options: &'static [&'static str],
     accepts_positional_prompt: bool,
@@ -179,6 +187,7 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "--output-format",
                 "--replay-user-messages",
             ],
+            identity_breaking_options: &["-w", "--worktree"],
             value_options: &[
                 "--agent",
                 "--agents",
@@ -201,8 +210,6 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "--settings",
                 "--system-prompt",
                 "--tmux",
-                "-w",
-                "--worktree",
             ],
             variadic_value_options: &[
                 "--add-dir",
@@ -247,13 +254,13 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "--share",
                 "--share-gist",
             ],
+            identity_breaking_options: &["-C"],
             value_options: &[
                 "--add-dir",
                 "--add-github-mcp-tool",
                 "--add-github-mcp-toolset",
                 "--additional-mcp-config",
                 "--agent",
-                "-C",
                 "--context",
                 "--disable-mcp-server",
                 "--effort",
@@ -313,11 +320,11 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "--output-format",
                 "--json-schema",
             ],
+            identity_breaking_options: &["--cwd", "-w", "--worktree"],
             value_options: &[
                 "--agent",
                 "--agents",
                 "--allow",
-                "--cwd",
                 "--debug-file",
                 "--deny",
                 "--disallowed-tools",
@@ -333,8 +340,6 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "--system-prompt-override",
                 "--system-prompt",
                 "--tools",
-                "-w",
-                "--worktree",
                 "--worktree-ref",
                 "--ref",
             ],
@@ -375,12 +380,12 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "generate-ts",
             ],
             incompatible_modes: &["-h", "--help", "-V", "--version"],
+            identity_breaking_options: &["--remote", "-C", "--cd"],
             value_options: &[
                 "-c",
                 "--config",
                 "--enable",
                 "--disable",
-                "--remote",
                 "--remote-auth-token-env",
                 "-m",
                 "--model",
@@ -389,8 +394,6 @@ fn managed_initial_launch_grammar(kind: TerminalAgentKind) -> ManagedInitialLaun
                 "--profile",
                 "-s",
                 "--sandbox",
-                "-C",
-                "--cd",
                 "--add-dir",
                 "-a",
                 "--ask-for-approval",
@@ -493,6 +496,14 @@ fn validate_managed_initial_launch(kind: TerminalAgentKind, args: &[String]) -> 
     }
 
     let grammar = managed_initial_launch_grammar(kind);
+    if let Some(option) = args
+        .iter()
+        .find(|arg| value_option_match(arg, grammar.identity_breaking_options).is_some())
+    {
+        return Err(format!(
+            "启动命令的 {option} 参数会改变会话项目或历史来源，无法可靠托管"
+        ));
+    }
     if let Some(mode) = args.iter().find(|arg| {
         grammar
             .incompatible_modes
@@ -2859,6 +2870,124 @@ mod tests {
     }
 
     #[test]
+    fn unquoted_shell_comments_are_rejected_but_hash_literals_remain_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &["claude # note", "claude\t# note"],
+        );
+
+        for command in [
+            "claude '# literal'",
+            "claude \"literal # argument\"",
+            r"claude escaped\#hash",
+            "claude embedded#hash",
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                Some(TerminalAgentKind::Claude),
+                "{command} contains a literal hash argument"
+            );
+            assert!(
+                prepare_terminal_agent_launch(
+                    TerminalAgentKind::Claude,
+                    command,
+                    "11111111-1111-4111-8111-111111111111",
+                )
+                .is_ok(),
+                "{command} must accept managed initial launch preparation"
+            );
+        }
+    }
+
+    #[test]
+    fn project_changing_flags_are_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Claude,
+            &[
+                "claude --worktree",
+                "claude --worktree feature",
+                "claude --worktree=feature",
+                "claude -w",
+                "claude -w feature",
+                "claude -w=feature",
+                "claude -wfeature",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Copilot,
+            &[
+                "copilot -C ../repo",
+                "copilot -C=../repo",
+                "copilot -C../repo",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Grok,
+            &[
+                "grok --cwd ../repo",
+                "grok --cwd=../repo",
+                "grok --worktree",
+                "grok --worktree feature",
+                "grok --worktree=feature",
+                "grok -w",
+                "grok -w feature",
+                "grok -w=feature",
+                "grok -wfeature",
+            ],
+        );
+        assert_not_managed(
+            TerminalAgentKind::Codex,
+            &[
+                "codex -C ../repo",
+                "codex -C=../repo",
+                "codex -C../repo",
+                "codex --cd ../repo",
+                "codex --cd=../repo",
+            ],
+        );
+    }
+
+    #[test]
+    fn codex_remote_launches_are_not_managed() {
+        assert_not_managed(
+            TerminalAgentKind::Codex,
+            &[
+                "codex --remote",
+                "codex --remote ssh://host",
+                "codex --remote=ssh://host",
+            ],
+        );
+    }
+
+    #[test]
+    fn project_and_remote_adjacent_config_flags_remain_managed() {
+        for (kind, command) in [
+            (
+                TerminalAgentKind::Claude,
+                "claude --settings ./settings.json",
+            ),
+            (TerminalAgentKind::Copilot, "copilot --log-dir ./logs"),
+            (TerminalAgentKind::Grok, "grok --worktree-ref main"),
+            (TerminalAgentKind::Grok, "grok --ref main"),
+            (
+                TerminalAgentKind::Codex,
+                "codex --remote-auth-token-env CODEX_REMOTE_TOKEN",
+            ),
+            (TerminalAgentKind::Codex, "codex -c model='gpt-5'"),
+        ] {
+            assert_eq!(
+                infer_terminal_agent_kind(command),
+                Some(kind),
+                "{command} must not be mistaken for an identity-breaking launch"
+            );
+            assert!(
+                prepare_terminal_agent_launch(kind, command, "new").is_ok(),
+                "{command} must accept managed initial launch preparation"
+            );
+        }
+    }
+
+    #[test]
     fn interactive_flags_with_split_values_remain_managed() {
         for (kind, command) in [
             (
@@ -2881,7 +3010,7 @@ mod tests {
             (TerminalAgentKind::Copilot, "copilot --model resume"),
             (
                 TerminalAgentKind::Grok,
-                "grok --model grok-code-fast-1 --cwd ../repo",
+                "grok --model grok-code-fast-1 --sandbox workspace-write",
             ),
             (
                 TerminalAgentKind::Grok,
@@ -2890,7 +3019,7 @@ mod tests {
             (TerminalAgentKind::Grok, "grok --model resume"),
             (
                 TerminalAgentKind::Codex,
-                "codex --model gpt-5.4 --cd ../repo",
+                "codex --model gpt-5.4 --profile dev",
             ),
             (
                 TerminalAgentKind::Codex,

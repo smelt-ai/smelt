@@ -520,6 +520,40 @@ mod tests {
         );
         fs::remove_dir_all(&sandbox).unwrap();
     }
+
+    #[test]
+    fn load_launch_config_leaves_identity_breaking_forms_absent_without_writeback() {
+        let sandbox = test_sandbox("identity-breaking-forms");
+        let path = sandbox.join("launch.json");
+        let raw = r#"{
+  "entries": [
+    {"label": "Commented Claude", "command": "claude # note"},
+    {"label": "Claude worktree", "command": "claude -wfeature"},
+    {"label": "Copilot cwd", "command": "copilot -C ../repo"},
+    {"label": "Grok cwd", "command": "grok --cwd=../repo"},
+    {"label": "Grok worktree", "command": "grok --worktree feature"},
+    {"label": "Codex cwd", "command": "codex -C../repo"},
+    {"label": "Remote Codex", "command": "codex --remote=ssh://host"}
+  ]
+}"#;
+        fs::write(&path, raw).unwrap();
+
+        let config = super::load_launch_config_from_path(&path);
+
+        assert!(
+            config
+                .entries
+                .iter()
+                .all(|entry| entry.agent_kind.is_none()),
+            "identity-breaking entries with absent metadata must remain ordinary terminals"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            raw,
+            "identity-breaking absent metadata must not trigger migration writeback"
+        );
+        fs::remove_dir_all(&sandbox).unwrap();
+    }
 }
 
 /// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
