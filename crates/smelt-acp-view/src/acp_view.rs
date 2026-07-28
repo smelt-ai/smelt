@@ -10,22 +10,23 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, px,
+    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode,
+    InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, div, list as virtual_list, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::spinner::Spinner;
-use gpui_component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable, StyledExt, h_flex, v_flex};
 
 use agent_client_protocol::schema::v1::SessionId;
 
 use smelt_core::acp_client::{AcpClientHandle, AcpClientLaunch, spawn_acp_client};
 use smelt_core::acp_conn::{ModelState, PromptImage, SessionConfigState};
 use smelt_core::acp_session::{
-    AcpPhase, AcpSnapshot, AcpUserAction, ElicitFieldKindView, PendingElicitation,
-    PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView,
+    AcpPhase, AcpSnapshot, AcpUserAction, ApprovalDetailsView, ElicitFieldKindView,
+    PendingElicitation, PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView,
 };
 use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec};
 use smelt_ui::ui_theme;
@@ -76,7 +77,12 @@ pub struct AcpView {
     cwd: Option<String>,
     entries: Vec<AcpEntry>,
     permissions: Vec<PendingPermission>,
+    /// 已发出回执、等待 smeltd 快照确认的队首审批。期间按钮替换成处理中状态，
+    /// 防止网络往返时重复点击；队首变化后清空。
+    permission_submitting: Option<(String, String)>,
     elicitation: Option<PendingElicitation>,
+    /// 自由文本 elicitation 的本地编辑器；协议状态只保存字符串，不持有 GPUI 实体。
+    elicitation_inputs: std::collections::HashMap<usize, Entity<InputState>>,
     phase: AcpPhase,
     /// 回合结束且用户还没回应过 → Session 状态给绿点「有结果可看」。
     completed_unread: bool,
@@ -143,11 +149,12 @@ pub struct AcpView {
     /// 覆盖默认值。只属于本地浏览状态，不落盘。
     expanded_tool_cards: std::collections::HashSet<String>,
     collapsed_tool_cards: std::collections::HashSet<String>,
+    /// 可变高度消息虚拟列表：只测量和构建视口附近的 Markdown/工具卡。
+    list_state: ListState,
     /// 冷恢复占位待自动启动：GUI 重启后第一次切到这个会话时自动 restart，
     /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
     /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
     auto_resume_pending: bool,
-    scroll: gpui::ScrollHandle,
     focus_handle: FocusHandle,
     _input_sub: Option<gpui::Subscription>,
 }
@@ -207,9 +214,9 @@ impl AcpView {
         this
     }
 
-    /// 冷启动恢复用的占位：首次显示时自动启动。`entries` 是上次落盘的历史消息
-    /// （`Vec::new()` = 首次创建，还没有历史）；`resume_session_id` 是上次握手
-    /// 成功后 agent 分配的 session id，有它时优先真续接。
+    /// 冷启动恢复用的占位：首次显示时自动启动。`entries` 只用于读取旧版存档的
+    /// 迁移兼容；当前版本以 agent 的 `session/load` 重放作为历史唯一来源。
+    /// `resume_session_id` 是上次握手成功后 agent 分配的 session id。
     ///
     /// `saved_sid`：**这是让 GUI 重开后能真正"接上还活着的 smeltd 会话"而不是
     /// 每次都当新会话重新 spawn 子进程的关键**——smeltd 用 id 判断"这是不是同
@@ -235,13 +242,16 @@ impl AcpView {
         // 冷恢复会话首次显示就直接进入可用的对话页：有旧 session id 时续接，
         // 没有时启动新一轮。历史仍先留在本地，守护端若能 attach 会用其快照覆盖。
         let auto_resume_pending = true;
+        let initial_entry_count = entries.len();
         Self {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
             entries,
             permissions: Vec::new(),
+            permission_submitting: None,
             elicitation: None,
+            elicitation_inputs: Default::default(),
             status_line: None,
             phase: AcpPhase::Ended(reason),
             completed_unread: false,
@@ -267,7 +277,11 @@ impl AcpView {
             expanded_tools: std::collections::HashSet::new(),
             expanded_tool_cards: std::collections::HashSet::new(),
             collapsed_tool_cards: std::collections::HashSet::new(),
-            scroll: gpui::ScrollHandle::new(),
+            list_state: {
+                let state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
+                state.set_follow_mode(FollowMode::Tail);
+                state
+            },
             focus_handle: cx.focus_handle(),
             _input_sub: None,
         }
@@ -290,7 +304,9 @@ impl AcpView {
             );
         }
         self.permissions.clear();
+        self.permission_submitting = None;
         self.elicitation = None;
+        self.elicitation_inputs.clear();
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
@@ -414,11 +430,6 @@ impl AcpView {
     /// 里还活着的同一个会话，而不是每次都当新会话处理。
     pub fn session_id(&self) -> &str {
         &self.sid
-    }
-
-    /// 存档快照：main.rs 的 save_state 拿它写进 AcpSaved.entries。
-    pub fn entries_for_save(&self) -> Vec<AcpEntry> {
-        self.entries.clone()
     }
 
     /// 存档快照：写进 AcpSaved.resume_session_id，GUI 重开后「重新开始」
@@ -718,10 +729,40 @@ impl AcpView {
     ///    外面的集中状态订阅维护，这里不再自己判相位跳变。
     fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
         let should_persist = snap.should_persist;
-        self.entries = snap.entries;
+        let old_entries_len = self.entries.len();
+        let previous_permission = self
+            .permissions
+            .first()
+            .map(|card| (card.tool_call_id.clone(), card.question.clone()));
+        if snap.entries_offset <= self.entries.len() {
+            self.entries.truncate(snap.entries_offset);
+            self.entries.extend(snap.entries);
+        } else {
+            // 不应发生：Unix stream 有序且写失败会断开。保守清空，避免显示错位历史。
+            self.entries = snap.entries;
+        }
+        let new_entries_len = self.entries.len();
+        if snap.entries_offset <= old_entries_len {
+            self.list_state.splice(
+                snap.entries_offset..old_entries_len,
+                new_entries_len - snap.entries_offset,
+            );
+        } else {
+            self.list_state.reset(new_entries_len);
+        }
         self.phase = snap.phase;
         self.permissions = snap.pending_permissions;
+        let current_permission = self
+            .permissions
+            .first()
+            .map(|card| (card.tool_call_id.clone(), card.question.clone()));
+        if previous_permission != current_permission {
+            self.permission_submitting = None;
+        }
         self.elicitation = snap.pending_elicitation;
+        if self.elicitation.is_none() {
+            self.elicitation_inputs.clear();
+        }
         self.status_line = snap.status_line;
         self.acp_session_id = snap.acp_session_id.map(SessionId::new);
         self.supports_image = snap.supports_image;
@@ -737,7 +778,6 @@ impl AcpView {
             self.handle = None;
         }
 
-        self.scroll.scroll_to_bottom(); // 消息流跟随最新内容
         if should_persist {
             cx.emit(AcpViewEvent::Changed);
         }
@@ -811,17 +851,30 @@ impl AcpView {
     }
 
     /// 每个字段都有选择后才可提交（渲染侧按这个亮按钮）。
-    fn elicit_ready(&self) -> bool {
+    fn elicit_ready(&self, cx: &App) -> bool {
         self.elicitation.as_ref().is_some_and(|card| {
             card.fields
                 .iter()
                 .enumerate()
-                .all(|(ix, _)| card.chosen.get(&ix).is_some_and(|sel| !sel.is_empty()))
+                .all(|(ix, field)| match field.kind {
+                    ElicitFieldKindView::Text { .. } => self
+                        .elicitation_inputs
+                        .get(&ix)
+                        .is_some_and(|input| !input.read(cx).value().trim().is_empty()),
+                    ElicitFieldKindView::ExternalUrl(_) => true,
+                    _ => card.chosen.get(&ix).is_some_and(|sel| !sel.is_empty()),
+                })
         })
     }
 
-    fn submit_elicitation(&mut self, _cx: &mut Context<Self>) {
+    fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
         if let Some(h) = &self.handle {
+            for (&field_ix, input) in &self.elicitation_inputs {
+                let _ = h.action_tx.try_send(AcpUserAction::ElicitationText {
+                    field_ix,
+                    value: input.read(cx).value().to_string(),
+                });
+            }
             let _ = h.action_tx.try_send(AcpUserAction::ElicitationSubmit);
         }
     }
@@ -1059,14 +1112,27 @@ impl AcpView {
 
     /// 审批按钮：把选中项发给 smeltd（真正消费 responder 回 RPC 是服务端的
     /// 事），卡片收起、相位回 Running 等下一份快照即可，不用本地抢跑。
-    fn pick_permission(&mut self, tool_call_id: &str, option_id: &str, _cx: &mut Context<Self>) {
+    fn pick_permission(&mut self, tool_call_id: &str, option_id: &str, cx: &mut Context<Self>) {
+        // ACP agent 可能一次发来多条请求，但实际执行仍按队列推进。只允许回应
+        // 队首，避免上一帧残留的按钮或其它入口越过当前审批。
+        if self.permission_submitting.is_some()
+            || !is_active_permission_selection(&self.permissions, tool_call_id, option_id)
+        {
+            return;
+        }
         let tool_call_id = tool_call_id.to_string();
         let option_id = option_id.to_string();
         if let Some(h) = &self.handle {
-            let _ = h.action_tx.try_send(AcpUserAction::PermissionSelect {
-                tool_call_id,
-                option_id,
-            });
+            if h.action_tx
+                .try_send(AcpUserAction::PermissionSelect {
+                    tool_call_id: tool_call_id.clone(),
+                    option_id: option_id.clone(),
+                })
+                .is_ok()
+            {
+                self.permission_submitting = Some((tool_call_id, option_id));
+                cx.notify();
+            }
         }
     }
 }
@@ -1078,7 +1144,38 @@ impl Focusable for AcpView {
 }
 
 impl Render for AcpView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(card) = &self.elicitation {
+            let text_fields: Vec<(usize, bool, String, String)> = card
+                .fields
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, field)| match field.kind {
+                    ElicitFieldKindView::Text { secret } => Some((
+                        ix,
+                        secret,
+                        field.title.clone(),
+                        card.text_values.get(&ix).cloned().unwrap_or_default(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            self.elicitation_inputs
+                .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
+            for (ix, secret, title, value) in text_fields {
+                self.elicitation_inputs.entry(ix).or_insert_with(|| {
+                    cx.new(|cx| {
+                        let mut state = InputState::new(window, cx)
+                            .placeholder(&title)
+                            .default_value(value);
+                        if secret {
+                            state = state.masked(true);
+                        }
+                        state
+                    })
+                });
+            }
+        }
         let t = cx.theme();
         let muted = t.muted_foreground;
 
@@ -1144,14 +1241,22 @@ impl Render for AcpView {
             _ => None,
         };
 
-        // 每一条权限请求都有独立 responder，必须独立渲染和回执；不能再用单个
-        // `Option`/`take()`，否则同时到达的请求会互相覆盖。
-        let permission_tool_ids: std::collections::HashSet<String> = self
-            .permissions
-            .iter()
-            .map(|card| card.tool_call_id.clone())
-            .collect();
+        // 底层保留全部 responder，但交互按队列串行：只显示并允许处理队首，
+        // 回执后的下一份快照移除它，下一张卡才会出现（与 Codex App 一致）。
+        let active_permission = self.permissions.first();
+        let permission_is_submitting = self.permission_submitting.is_some();
         let permission_buttons = |card: &PendingPermission| {
+            if permission_is_submitting {
+                return h_flex()
+                    .h(px(36.))
+                    .gap_2()
+                    .items_center()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(Spinner::new().xsmall().color(muted))
+                    .child("处理中…")
+                    .into_any_element();
+            }
             let tool_call_id = card.tool_call_id.clone();
             let primary_ix = card.options.iter().position(|o| {
                 matches!(
@@ -1213,239 +1318,255 @@ impl Render for AcpView {
             buttons.into_any_element()
         };
 
-        // 消息流。
-        let mut list = v_flex()
-            .id("acp-entries")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .p_4()
-            .gap_4();
-        for (i, entry) in self.entries.iter().enumerate() {
-            let el: gpui::AnyElement = match entry {
-                // agent 回显的「中断」标记不是用户说的话，别套成气泡——
-                // 那会读成「用户发了一条叫 [Request interrupted...] 的消息」。
-                AcpEntry::User(text) if is_interrupt_marker(text) => h_flex()
-                    .items_center()
-                    .gap_2()
-                    .my_1()
-                    .child(div().flex_1().h(px(1.)).bg(t.border))
-                    .child(div().text_xs().text_color(muted).child("已中断"))
-                    .child(div().flex_1().h(px(1.)).bg(t.border))
-                    .into_any_element(),
-                // 用户气泡右对齐限宽（对齐设计稿）：整行铺满时跟 agent 正文
-                // 混成一片，看不出谁在说话。
-                AcpEntry::User(text) => h_flex()
-                    .w_full()
-                    .justify_end()
-                    .child(
-                        div()
-                            .max_w(gpui::relative(0.72))
-                            .px_4()
-                            .py_2p5()
-                            .rounded_lg()
-                            .bg(t.muted)
-                            .text_sm()
-                            .child(smelt_ui::markdown_mermaid::markdown_view(
-                                ("acp-user-md", i),
-                                text.clone(),
-                            )),
-                    )
-                    .into_any_element(),
-                AcpEntry::Assistant { text, thought } => h_flex()
-                    .items_start()
-                    .gap_3()
-                    .child(assistant_avatar())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .pt(px(2.)) // 跟头像文字视觉基线对齐
-                            .text_sm()
-                            .when(*thought, |d| d.text_color(muted).italic())
-                            .child(smelt_ui::markdown_mermaid::markdown_view(
-                                ("acp-md", i),
-                                text.clone(),
-                            )),
-                    )
-                    .into_any_element(),
-                AcpEntry::ToolCall {
-                    id,
-                    title,
-                    kind,
-                    status,
-                    output,
-                } => {
-                    let accent = tool_accent_color(kind);
-                    let (status_dot, status_label): (gpui::Hsla, &str) = match status {
-                        ToolCallStatus::Pending => (t.muted_foreground, "待执行"),
-                        ToolCallStatus::InProgress => {
-                            (gpui::rgb(ui_theme::blue()).into(), "执行中")
-                        }
-                        ToolCallStatus::Completed => (gpui::rgb(ui_theme::green()).into(), "完成"),
-                        ToolCallStatus::Failed => (gpui::rgb(ui_theme::red()).into(), "失败"),
-                    };
-
-                    // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
-                    // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
-                    let diff_totals: Vec<(usize, usize)> = output
-                        .iter()
-                        .filter_map(|p| match p {
-                            ToolOutputPart::Diff {
-                                old_text, new_text, ..
-                            } => Some(diff_line_stats(old_text.as_deref().unwrap_or(""), new_text)),
-                            _ => None,
-                        })
-                        .collect();
-                    let has_diff = !diff_totals.is_empty();
-                    let (total_added, total_removed) = diff_totals
-                        .iter()
-                        .fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
-                    let has_pending_permission = permission_tool_ids.contains(id);
-                    let card_expanded =
-                        self.tool_card_is_expanded(id, *status, has_pending_permission);
-
-                    let header_right: gpui::AnyElement = if has_diff {
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .font_family("monospace")
-                            .child(
-                                div()
-                                    .text_color(gpui::rgb(ui_theme::green()))
-                                    .child(format!("+{total_added}")),
-                            )
-                            .child(
-                                div()
-                                    .text_color(gpui::rgb(ui_theme::red()))
-                                    .child(format!("-{total_removed}")),
-                            )
-                            .into_any_element()
-                    } else {
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().size_2().rounded_full().bg(status_dot))
-                            .child(div().text_xs().text_color(muted).child(status_label))
-                            .into_any_element()
-                    };
-
-                    let id_for_toggle = id.clone();
-                    let status_for_toggle = *status;
-                    let mut card = v_flex()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(t.border)
+        // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
+        // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
+        let view = cx.entity();
+        let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
+            view.update(app, |this, cx| {
+                let t = cx.theme();
+                let muted = t.muted_foreground;
+                let active_permission_tool_id = this
+                    .permissions
+                    .first()
+                    .map(|card| card.tool_call_id.as_str());
+                let entry = &this.entries[i];
+                let el: gpui::AnyElement = match entry {
+                    // agent 回显的「中断」标记不是用户说的话，别套成气泡——
+                    // 那会读成「用户发了一条叫 [Request interrupted...] 的消息」。
+                    AcpEntry::User(text) if is_interrupt_marker(text) => h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .my_1()
+                        .child(div().flex_1().h(px(1.)).bg(t.border))
+                        .child(div().text_xs().text_color(muted).child("已中断"))
+                        .child(div().flex_1().h(px(1.)).bg(t.border))
+                        .into_any_element(),
+                    // 用户气泡右对齐限宽（对齐设计稿）：整行铺满时跟 agent 正文
+                    // 混成一片，看不出谁在说话。
+                    AcpEntry::User(text) => h_flex()
+                        .w_full()
+                        .justify_end()
                         .child(
-                            h_flex()
-                                .id(("acp-tool-card-toggle", i))
+                            div()
+                                .max_w(gpui::relative(0.72))
                                 .px_4()
                                 .py_2p5()
+                                .rounded_lg()
+                                .bg(t.muted)
+                                .text_sm()
+                                .child(smelt_ui::markdown_mermaid::markdown_view(
+                                    ("acp-user-md", i),
+                                    text.clone(),
+                                )),
+                        )
+                        .into_any_element(),
+                    AcpEntry::Assistant { text, thought } => h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap_3()
+                        .child(assistant_avatar())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .pt(px(2.)) // 跟头像文字视觉基线对齐
+                                .text_sm()
+                                .when(*thought, |d| d.text_color(muted).italic())
+                                .child(smelt_ui::markdown_mermaid::markdown_view(
+                                    ("acp-md", i),
+                                    text.clone(),
+                                )),
+                        )
+                        .into_any_element(),
+                    AcpEntry::ToolCall {
+                        id,
+                        title,
+                        kind,
+                        status,
+                        output,
+                    } => {
+                        let accent = tool_accent_color(kind);
+                        let (status_dot, status_label): (gpui::Hsla, &str) = match status {
+                            ToolCallStatus::Pending => (t.muted_foreground, "待执行"),
+                            ToolCallStatus::InProgress => {
+                                (gpui::rgb(ui_theme::blue()).into(), "执行中")
+                            }
+                            ToolCallStatus::Completed => {
+                                (gpui::rgb(ui_theme::green()).into(), "完成")
+                            }
+                            ToolCallStatus::Failed => (gpui::rgb(ui_theme::red()).into(), "失败"),
+                        };
+
+                        // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
+                        // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
+                        let diff_totals: Vec<(usize, usize)> = output
+                            .iter()
+                            .filter_map(|p| match p {
+                                ToolOutputPart::Diff {
+                                    old_text, new_text, ..
+                                } => Some(diff_line_stats(
+                                    old_text.as_deref().unwrap_or(""),
+                                    new_text,
+                                )),
+                                _ => None,
+                            })
+                            .collect();
+                        let has_diff = !diff_totals.is_empty();
+                        let (total_added, total_removed) = diff_totals
+                            .iter()
+                            .fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
+                        let has_pending_permission = active_permission_tool_id == Some(id.as_str());
+                        let card_expanded =
+                            this.tool_card_is_expanded(id, *status, has_pending_permission);
+
+                        let header_right: gpui::AnyElement = if has_diff {
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .font_family("monospace")
+                                .child(
+                                    div()
+                                        .text_color(gpui::rgb(ui_theme::green()))
+                                        .child(format!("+{total_added}")),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(gpui::rgb(ui_theme::red()))
+                                        .child(format!("-{total_removed}")),
+                                )
+                                .into_any_element()
+                        } else {
+                            h_flex()
                                 .gap_2()
                                 .items_center()
-                                .cursor_pointer()
-                                .hover(|d| d.bg(ui_theme::overlay(0x10)))
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(move |this, _ev, _window, cx| {
-                                        this.toggle_tool_card(
-                                            id_for_toggle.clone(),
-                                            status_for_toggle,
-                                            has_pending_permission,
-                                            cx,
-                                        );
-                                        cx.stop_propagation();
-                                    }),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(10.))
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(if card_expanded { "▾" } else { "▸" }),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .text_color(accent)
-                                        .child(tool_kind_label(kind)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_sm()
-                                        .font_family("monospace")
-                                        .text_color(muted)
-                                        .truncate()
-                                        .child(strip_kind_prefix(title, kind).to_string()),
-                                )
-                                .child(header_right),
-                        );
-                    if card_expanded {
-                        let mut rendered_output_part = false;
-                        for (part_ix, part) in output.iter().enumerate() {
-                            card = match part {
-                                ToolOutputPart::Diff {
-                                    path,
-                                    old_text,
-                                    new_text,
-                                } => {
-                                    rendered_output_part = true;
-                                    card.child(
-                                        v_flex()
-                                            .px_4()
-                                            .pb_3()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(path.clone()),
-                                            )
-                                            .child(render_diff_lines(
-                                                old_text.as_deref().unwrap_or(""),
-                                                new_text,
-                                                (i, part_ix),
-                                                t.border,
-                                                t.muted_foreground,
-                                            )),
+                                .child(div().size_2().rounded_full().bg(status_dot))
+                                .child(div().text_xs().text_color(muted).child(status_label))
+                                .into_any_element()
+                        };
+
+                        let id_for_toggle = id.clone();
+                        let status_for_toggle = *status;
+                        let mut card = v_flex()
+                            .w_full()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(t.border)
+                            .child(
+                                h_flex()
+                                    .id(("acp-tool-card-toggle", i))
+                                    .px_4()
+                                    .py_2p5()
+                                    .gap_2()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(ui_theme::overlay(0x10)))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(move |this, _ev, _window, cx| {
+                                            this.toggle_tool_card(
+                                                id_for_toggle.clone(),
+                                                status_for_toggle,
+                                                has_pending_permission,
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
+                                        }),
                                     )
-                                }
-                                ToolOutputPart::Text(text) if !text.trim().is_empty() => {
-                                    rendered_output_part = true;
-                                    // adapter 把工具输出包在 markdown 围栏里（```console…```），
-                                    // 当纯文本渲染会把 ``` 直接显示出来。剥掉再展示。
-                                    let body = strip_code_fence(text);
-                                    let lines: Vec<&str> = body.lines().collect();
-                                    let total = lines.len();
-                                    let key = id.to_string();
-                                    let expanded = self.expanded_tools.contains(&key);
-                                    // 默认只出前 8 行：以前是 max_h + overflow_hidden，
-                                    // 内容被硬切掉且没有任何展开入口，等于看不到全部。
-                                    let shown = if expanded || total <= TOOL_OUTPUT_PREVIEW_LINES {
-                                        body.to_string()
-                                    } else {
-                                        lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
-                                    };
-                                    let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
-                                    card.child(
-                                        v_flex()
-                                            .px_4()
-                                            .pb_3()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .font_family("monospace")
-                                                    .child(shown),
-                                            )
-                                            .when(need_toggle, |d| {
-                                                let key = key.clone();
-                                                d.child(
+                                    .child(
+                                        div()
+                                            .w(px(10.))
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(if card_expanded { "▾" } else { "▸" }),
+                                    )
+                                    .child(
+                                        Icon::new(tool_kind_icon(kind))
+                                            .size(px(13.))
+                                            .text_color(accent),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .text_color(accent)
+                                            .child(tool_kind_label(kind)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .font_family("monospace")
+                                            .text_color(muted)
+                                            .truncate()
+                                            .child(strip_kind_prefix(title, kind).to_string()),
+                                    )
+                                    .child(header_right),
+                            );
+                        if card_expanded {
+                            let mut rendered_output_part = false;
+                            for (part_ix, part) in output.iter().enumerate() {
+                                card = match part {
+                                    ToolOutputPart::Diff {
+                                        path,
+                                        old_text,
+                                        new_text,
+                                    } => {
+                                        rendered_output_part = true;
+                                        card.child(
+                                            v_flex()
+                                                .px_4()
+                                                .pb_3()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child(path.clone()),
+                                                )
+                                                .child(render_diff_lines(
+                                                    old_text.as_deref().unwrap_or(""),
+                                                    new_text,
+                                                    (i, part_ix),
+                                                    t.border,
+                                                    t.muted_foreground,
+                                                )),
+                                        )
+                                    }
+                                    ToolOutputPart::Text(text) if !text.trim().is_empty() => {
+                                        rendered_output_part = true;
+                                        // adapter 把工具输出包在 markdown 围栏里（```console…```），
+                                        // 当纯文本渲染会把 ``` 直接显示出来。剥掉再展示。
+                                        let body = strip_code_fence(text);
+                                        let lines: Vec<&str> = body.lines().collect();
+                                        let total = lines.len();
+                                        let key = id.to_string();
+                                        let expanded = this.expanded_tools.contains(&key);
+                                        // 默认只出前 8 行：以前是 max_h + overflow_hidden，
+                                        // 内容被硬切掉且没有任何展开入口，等于看不到全部。
+                                        let shown =
+                                            if expanded || total <= TOOL_OUTPUT_PREVIEW_LINES {
+                                                body.to_string()
+                                            } else {
+                                                lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
+                                            };
+                                        let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
+                                        card.child(
+                                            v_flex()
+                                                .px_4()
+                                                .pb_3()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .font_family("monospace")
+                                                        .child(shown),
+                                                )
+                                                .when(need_toggle, |d| {
+                                                    let key = key.clone();
+                                                    d.child(
                                                     div()
                                                         .id(("acp-tool-toggle", i * 100 + part_ix))
                                                         .text_xs()
@@ -1474,75 +1595,57 @@ impl Render for AcpView {
                                                             ),
                                                         ),
                                                 )
-                                            }),
-                                    )
-                                }
-                                ToolOutputPart::Text(_) => card,
-                            };
+                                                }),
+                                        )
+                                    }
+                                    ToolOutputPart::Text(_) => card,
+                                };
+                            }
+                            if !rendered_output_part {
+                                card = card.child(
+                                    div()
+                                        .px_4()
+                                        .pb_3()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child("无可展示输出"),
+                                );
+                            }
                         }
-                        if !rendered_output_part {
-                            card = card.child(
-                                div()
-                                    .px_4()
-                                    .pb_3()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child("无可展示输出"),
-                            );
-                        }
+                        card.into_any_element()
                     }
-                    // 一条工具调用可能同时挂多张权限卡；逐张内嵌，不能 take 掉别张。
-                    if has_pending_permission {
-                        for pending in self
-                            .permissions
-                            .iter()
-                            .filter(|pending| pending.tool_call_id == *id)
-                        {
-                            card = card.child(
-                                v_flex()
-                                    .px_4()
-                                    .py_2p5()
-                                    .gap_2()
-                                    .border_t_1()
-                                    .border_color(t.border)
-                                    .child(
-                                        v_flex()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .child(pending.question.clone()),
-                                            )
-                                            .child(permission_buttons(pending)),
-                                    ),
-                            );
-                        }
-                    }
-                    card.into_any_element()
-                }
-                AcpEntry::Divider(label) => h_flex()
-                    .items_center()
-                    .gap_2()
-                    .my_1()
-                    .child(div().flex_1().h(px(1.)).bg(t.border))
-                    .child(div().text_xs().text_color(muted).child(label.clone()))
-                    .child(div().flex_1().h(px(1.)).bg(t.border))
-                    .into_any_element(),
-            };
-            list = list.child(el);
-        }
+                    AcpEntry::Divider(label) => h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .my_1()
+                        .child(div().flex_1().h(px(1.)).bg(t.border))
+                        .child(div().text_xs().text_color(muted).child(label.clone()))
+                        .child(div().flex_1().h(px(1.)).bg(t.border))
+                        .into_any_element(),
+                };
+                // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
+                // 虚拟项本身，否则测得的高度不包含消息间的留白。
+                div().w_full().px_4().pb_4().child(el).into_any_element()
+            })
+        })
+        .w_full()
+        .flex_1()
+        .min_h_0()
+        .pt_4();
 
         // 「正在思考」占位：回合在跑、但 agent 还没吐出正文（最后一条不是
         // assistant 气泡）时，消息流末尾必须有活的东西。否则从按下发送到首字
         // 落地之间是一整屏纯黑——Copilot 这类首字延迟长的 agent 上看着像卡死。
         // 用 Spinner 而不是「已 N 秒」：GPUI 没有定时重绘，秒数会僵在原地，
         // 反而更像死了；spinner 自带动画帧，转着就说明进程还在。
-        if matches!(self.phase, AcpPhase::Running)
+        let thinking = if matches!(self.phase, AcpPhase::Running)
             && !matches!(self.entries.last(), Some(AcpEntry::Assistant { .. }))
         {
-            list = list.child(
+            Some(
                 h_flex()
+                    .px_4()
+                    .pb_4()
                     .items_center()
                     .gap_2()
                     .child(Spinner::new().xsmall().color(muted))
@@ -1551,49 +1654,128 @@ impl Render for AcpView {
                             .text_sm()
                             .text_color(muted)
                             .child(format!("{} 正在思考…", self.agent.short_label())),
-                    ),
-            );
-        }
-
-        // 消息流中没有对应工具卡的请求独立渲染；每张都保留，不能只显示第一张。
-        let permissions: Vec<gpui::AnyElement> = self
-            .permissions
-            .iter()
-            .filter(|pending| {
-                !self.entries.iter().any(
-                    |entry| matches!(entry, AcpEntry::ToolCall { id, .. } if id == &pending.tool_call_id),
-                )
-            })
-            .map(|pending| {
-                v_flex()
-                    .mx_4()
-                    .mb_3()
-                    .p_4()
-                    .gap_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(t.border)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_sm().font_semibold().child("等你批准"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child(pending.question.clone()),
-                            ),
                     )
-                    .child(permission_buttons(pending))
-                    .into_any_element()
-            })
-            .collect();
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        // 审批是输入动作，不散落进历史工具卡；统一固定在 composer 上方，
+        // 队首切换时卡片位置不动，用户也能看见还有多少项等待处理。
+        let permission = active_permission.map(|pending| {
+            let remaining = self.permissions.len();
+            let details = match &pending.details {
+                ApprovalDetailsView::Command {
+                    command,
+                    cwd,
+                    reason,
+                } => v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_normal()
+                            .text_sm()
+                            .font_family("monospace")
+                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .child(command.clone()),
+                    )
+                    .children(
+                        reason
+                            .as_ref()
+                            .map(|reason| div().text_xs().text_color(muted).child(reason.clone())),
+                    )
+                    .children(cwd.as_ref().map(|cwd| {
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(muted)
+                            .child(format!("工作目录：{cwd}"))
+                    }))
+                    .into_any_element(),
+                ApprovalDetailsView::FileChange { reason, grant_root } => v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .child(reason.clone().unwrap_or_else(|| pending.question.clone())),
+                    )
+                    .children(grant_root.as_ref().map(|root| {
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(muted)
+                            .child(format!("授权目录：{root}"))
+                    }))
+                    .into_any_element(),
+                ApprovalDetailsView::Permissions { summary } => div()
+                    .text_sm()
+                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .child(summary.clone())
+                    .into_any_element(),
+                ApprovalDetailsView::Generic => div()
+                    .text_sm()
+                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .child(pending.question.clone())
+                    .into_any_element(),
+            };
+            v_flex()
+                .w_full()
+                .items_center()
+                .px_4()
+                .pt_3()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .max_w(px(920.))
+                        .p_4()
+                        .gap_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(gpui::rgb(ui_theme::yellow()))
+                        .bg(ui_theme::tint(ui_theme::yellow(), 0x0c))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .size_2()
+                                        .rounded_full()
+                                        .bg(gpui::rgb(ui_theme::yellow())),
+                                )
+                                .child(div().text_sm().font_semibold().child("需要批准"))
+                                .child(div().flex_1())
+                                .when(remaining > 1, |row| {
+                                    row.child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(ui_theme::overlay(0x18))
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format!("{remaining} 项待处理")),
+                                    )
+                                }),
+                        )
+                        .child(details)
+                        .child(permission_buttons(pending)),
+                )
+                .into_any_element()
+        });
 
         // 选择题卡片：message + 逐字段按钮组；单字段单选点击即提交，
         // 其余选齐后亮「提交」；「跳过」丢卡（responder Drop 回 Cancel）。
         let elicitation = self.elicitation.as_ref().map(|card| {
-            let ready = self.elicit_ready();
+            let ready = self.elicit_ready(cx);
             let mut body = v_flex()
                 .mx_4()
                 .mb_3()
@@ -1618,11 +1800,61 @@ impl Render for AcpView {
                 || card
                     .fields
                     .first()
-                    .is_some_and(|f| matches!(f.kind, ElicitFieldKindView::MultiSelect(_)));
+                    .is_some_and(|f| !matches!(f.kind, ElicitFieldKindView::Select(_)));
+            let show_footer = multi_field
+                && !matches!(
+                    card.fields.as_slice(),
+                    [smelt_core::acp_session::ElicitFieldView {
+                        kind: ElicitFieldKindView::ExternalUrl(_),
+                        ..
+                    }]
+                );
             for (fix, field) in card.fields.iter().enumerate() {
+                if let ElicitFieldKindView::ExternalUrl(url) = &field.kind {
+                    let url = url.clone();
+                    body = body.child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_xs().text_color(muted).child(field.title.clone()))
+                            .child(
+                                div()
+                                    .id(("acp-elicit-url", fix))
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .bg(gpui::rgb(ui_theme::blue()))
+                                    .text_color(gpui::white())
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.85))
+                                    .child("打开并继续")
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        cx.open_url(&url);
+                                        this.submit_elicitation(cx);
+                                    })),
+                            ),
+                    );
+                    continue;
+                }
+                if let ElicitFieldKindView::Text { secret } = &field.kind {
+                    let input = self.elicitation_inputs.get(&fix).cloned();
+                    body = body.child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_xs().text_color(muted).child(format!(
+                                "{}{}",
+                                field.title,
+                                if *secret { "（保密）" } else { "" }
+                            )))
+                            .children(input.map(|input| Input::new(&input).w_full())),
+                    );
+                    continue;
+                }
                 let (options, is_multi) = match &field.kind {
                     ElicitFieldKindView::Select(o) => (o, false),
                     ElicitFieldKindView::MultiSelect(o) => (o, true),
+                    ElicitFieldKindView::Text { .. } => unreachable!(),
+                    ElicitFieldKindView::ExternalUrl(_) => unreachable!(),
                 };
                 let chosen = card.chosen.get(&fix).cloned().unwrap_or_default();
                 let mut row = h_flex().gap_2().flex_wrap();
@@ -1663,7 +1895,7 @@ impl Render for AcpView {
                         .child(row),
                 );
             }
-            if multi_field {
+            if show_footer {
                 body = body.child(
                     h_flex()
                         .gap_2()
@@ -1685,7 +1917,7 @@ impl Render for AcpView {
                                 })
                                 .child("提交")
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    if this.elicit_ready() {
+                                    if this.elicit_ready(cx) {
                                         this.submit_elicitation(cx);
                                     }
                                 })),
@@ -2048,6 +2280,10 @@ impl Render for AcpView {
                 );
 
             v_flex()
+                // 外层必须先有确定的宽度：`composer` 自己既是 `w_full` 又有
+                // `max_w`，若父节点按内容收缩，IME 组合文本触发重测量时会让
+                // `w_full` 在不同帧解析成不同宽度，导致输入框从居中跳到左侧。
+                .w_full()
                 .border_t_1()
                 .border_color(t.border)
                 .bg(ui_theme::overlay(0x08))
@@ -2145,7 +2381,8 @@ impl Render for AcpView {
             .children(banner)
             .children(plan_bar)
             .child(list)
-            .children(permissions)
+            .children(thinking)
+            .children(permission)
             .children(elicitation)
             .children(completion_bar)
             .children(self.paste_hint.as_ref().map(|msg| {
@@ -2213,6 +2450,21 @@ fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bo
     has_pending_permission || !matches!(status, ToolCallStatus::Completed)
 }
 
+/// 审批请求按收到顺序串行展示和处理，不能越过队首回应后续 responder。
+fn is_active_permission_selection(
+    permissions: &[PendingPermission],
+    tool_call_id: &str,
+    option_id: &str,
+) -> bool {
+    permissions.first().is_some_and(|card| {
+        card.tool_call_id == tool_call_id
+            && card
+                .options
+                .iter()
+                .any(|option| option.option_id == option_id)
+    })
+}
+
 /// 工具标题里去掉与 kind 标签重复的前缀：adapter 常把标题写成
 /// `Read crates/foo.rs`，而卡片左边已经有一个 `Read` 标签了。
 fn strip_kind_prefix<'a>(title: &'a str, kind: &ToolKind) -> &'a str {
@@ -2230,6 +2482,10 @@ fn tool_accent_color(kind: &ToolKind) -> gpui::Rgba {
         ToolKind::Read | ToolKind::Search | ToolKind::Fetch => gpui::rgb(ui_theme::blue()),
         ToolKind::Edit | ToolKind::Delete | ToolKind::Move => gpui::rgb(ui_theme::accent()),
         ToolKind::Execute => gpui::rgb(ui_theme::green()),
+        ToolKind::Collaborate => gpui::rgb(ui_theme::blue()),
+        ToolKind::Review => gpui::rgb(ui_theme::yellow()),
+        ToolKind::Image => gpui::rgb(ui_theme::accent()),
+        ToolKind::Compact | ToolKind::Wait => gpui::rgb(ui_theme::text_muted()),
         _ => gpui::rgb(ui_theme::text_muted()),
     }
 }
@@ -2246,7 +2502,27 @@ fn tool_kind_label(kind: &ToolKind) -> &'static str {
         ToolKind::Fetch => "Fetch",
         ToolKind::Think => "Think",
         ToolKind::SwitchMode => "Mode",
+        ToolKind::Collaborate => "Agent",
+        ToolKind::Review => "Review",
+        ToolKind::Image => "Image",
+        ToolKind::Compact => "Compact",
+        ToolKind::Wait => "Wait",
         _ => "Tool",
+    }
+}
+
+fn tool_kind_icon(kind: &ToolKind) -> IconName {
+    match kind {
+        ToolKind::Execute => IconName::SquareTerminal,
+        ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move | ToolKind::Image => {
+            IconName::File
+        }
+        ToolKind::Search | ToolKind::Fetch => IconName::Search,
+        ToolKind::Collaborate => IconName::Bot,
+        ToolKind::Review | ToolKind::Compact | ToolKind::Think | ToolKind::SwitchMode => {
+            IconName::Asterisk
+        }
+        ToolKind::Wait | ToolKind::Other => IconName::Asterisk,
     }
 }
 
@@ -2307,8 +2583,13 @@ fn render_diff_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_restart_launch, tool_card_default_expanded};
+    use super::{
+        is_active_permission_selection, resolve_restart_launch, tool_card_default_expanded,
+    };
     use smelt_core::acp_chat::ToolCallStatus;
+    use smelt_core::acp_session::{
+        ApprovalDetailsView, PendingPermission, PermissionOptionKindView, PermissionOptionView,
+    };
     use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
     use smelt_ui::agent_ui_config::AgentUiConfig;
 
@@ -2402,5 +2683,39 @@ mod tests {
             false
         ));
         assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
+    }
+
+    #[test]
+    fn permission_selection_only_accepts_the_queue_head() {
+        let permission = |tool_call_id: &str, option_id: &str| PendingPermission {
+            question: tool_call_id.into(),
+            tool_call_id: tool_call_id.into(),
+            options: vec![PermissionOptionView {
+                option_id: option_id.into(),
+                name: "Allow once".into(),
+                kind: PermissionOptionKindView::AllowOnce,
+            }],
+            details: ApprovalDetailsView::Generic,
+        };
+        let permissions = vec![
+            permission("tool-1", "allow-1"),
+            permission("tool-2", "allow-2"),
+        ];
+
+        assert!(is_active_permission_selection(
+            &permissions,
+            "tool-1",
+            "allow-1"
+        ));
+        assert!(!is_active_permission_selection(
+            &permissions,
+            "tool-2",
+            "allow-2"
+        ));
+        assert!(!is_active_permission_selection(
+            &permissions,
+            "tool-1",
+            "unknown"
+        ));
     }
 }

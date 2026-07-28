@@ -358,6 +358,8 @@ struct SessionState {
     branch: Option<String>,
     dirty_files: Vec<String>,
     updated_at: u64,
+    /// 已收到 smelt-notify 的结构化 hook 事件。
+    structured_events: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -367,6 +369,8 @@ enum Phase {
     ExecutingTool,
     AwaitingApproval,
     WaitingForUser,
+    Succeeded,
+    Failed,
     #[default]
     Idle,
     Dead,
@@ -408,7 +412,10 @@ impl EventListener for StateListener {
             match event {
                 Event::Title(t) => {
                     if title_spinner::title_starts_with_spinner(t.trim_start())
-                        && matches!(st.phase, Phase::Idle | Phase::Thinking)
+                        && matches!(
+                            st.phase,
+                            Phase::Idle | Phase::Thinking | Phase::Succeeded | Phase::Failed
+                        )
                     {
                         // 只在「进入」Thinking 那一刻记起点。agent 思考时 spinner 每秒
                         // 换一帧（⠋→⠙→⠹…），帧帧都是一次 Title 事件；已经在 Thinking
@@ -3211,6 +3218,7 @@ fn handle_conn(
                     let snapshot = {
                         let mut st = sess.state.lock().unwrap();
                         st.phase = phase;
+                        st.structured_events = true;
                         st.phase_since = now_unix();
                         st.pending_question = v["question"].as_str().map(String::from);
                         st.updated_at = now_unix();
@@ -3351,64 +3359,14 @@ fn handle_conn(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MissingSessionAction {
-    Shell,
-    Launch(String),
-    Reject(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MissingSessionDecision {
-    Attach,
-    Spawn(Option<String>),
-    Reject(String),
-}
-
-fn parse_missing_session_action(v: &serde_json::Value) -> MissingSessionAction {
-    if let Some(missing) = v.get("missing") {
-        return match missing["kind"].as_str() {
-            Some("launch") => missing["command"]
-                .as_str()
-                .map(|command| MissingSessionAction::Launch(command.to_string()))
-                .unwrap_or_else(|| MissingSessionAction::Reject("无法恢复：缺少启动命令".into())),
-            Some("reject") => MissingSessionAction::Reject(
-                missing["reason"]
-                    .as_str()
-                    .unwrap_or("无法恢复：客户端拒绝重新创建会话")
-                    .to_string(),
-            ),
-            _ => MissingSessionAction::Shell,
-        };
-    }
-    v["launch"]
-        .as_str()
-        .map(|command| MissingSessionAction::Launch(command.to_string()))
-        .unwrap_or(MissingSessionAction::Shell)
-}
-
-fn select_missing_session_command(
-    exists: bool,
-    action: MissingSessionAction,
-) -> MissingSessionDecision {
-    if exists {
-        return MissingSessionDecision::Attach;
-    }
-    match action {
-        MissingSessionAction::Shell => MissingSessionDecision::Spawn(None),
-        MissingSessionAction::Launch(command) => MissingSessionDecision::Spawn(Some(command)),
-        MissingSessionAction::Reject(reason) => MissingSessionDecision::Reject(reason),
-    }
-}
-
-fn rejected_terminal_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
+fn terminal_error_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
     let reason: String = reason
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     let header = serde_json::json!({
         "ok": false,
-        "rejected": reason,
+        "err": reason,
         "rows": rows,
         "cols": cols,
         "replay_len": 0,
@@ -3416,8 +3374,8 @@ fn rejected_terminal_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
     format!("{header}\n\r\n\x1b[31m{reason}\x1b[0m\r\n").into_bytes()
 }
 
-fn write_rejected_terminal(mut conn: &UnixStream, reason: &str, rows: u16, cols: u16) {
-    let _ = conn.write_all(&rejected_terminal_reply(reason, rows, cols));
+fn write_terminal_error(mut conn: &UnixStream, reason: &str, rows: u16, cols: u16) {
+    let _ = conn.write_all(&terminal_error_reply(reason, rows, cols));
 }
 
 fn handle_open(
@@ -3434,12 +3392,11 @@ fn handle_open(
     let cols = v["cols"].as_u64().unwrap_or(80) as u16;
     let rows = v["rows"].as_u64().unwrap_or(24) as u16;
     let cwd = v["cwd"].as_str().map(String::from);
-    let missing_action = parse_missing_session_action(v);
+    let launch = v["initial_launch"].as_str().map(String::from);
 
     // 取既有会话（reattach）或新建。
     let existing = sessions.lock().unwrap().get(&id).cloned();
     let reattach = existing.is_some();
-    let decision = select_missing_session_command(reattach, missing_action);
     let sess = match existing {
         Some(s) => {
             // reattach：等客户端首帧 resize（含真实 cell 像素）再 jolt，避免在错误
@@ -3448,14 +3405,6 @@ fn handle_open(
             s
         }
         None => {
-            let launch = match decision {
-                MissingSessionDecision::Spawn(launch) => launch,
-                MissingSessionDecision::Reject(reason) => {
-                    write_rejected_terminal(&conn, &reason, rows, cols);
-                    return;
-                }
-                MissingSessionDecision::Attach => unreachable!(),
-            };
             let result = spawn_session(
                 &id,
                 rows,
@@ -3467,7 +3416,7 @@ fn handle_open(
             let (sess, pty_reader) = match result {
                 Ok(result) => result,
                 Err(error) => {
-                    write_rejected_terminal(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
+                    write_terminal_error(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
                     return;
                 }
             };
@@ -3779,7 +3728,7 @@ struct AcpSession {
     reduced: Mutex<smelt_core::acp_session::AcpSessionState>,
     handle: Mutex<Option<smelt_core::acp_conn::AcpHandle>>,
     cwd: Option<String>,
-    /// 只有 Claude 才该为 true，见 `AcpLaunch::resume_needs_transcript_check`。
+    /// 旧 handoff 格式兼容字段；当前恢复路径不再读取 agent 私有 transcript。
     agent_needs_transcript_check: bool,
     /// 四色状态，跟终端会话共用同一个类型/同一套广播机制。
     state: Arc<Mutex<SessionState>>,
@@ -3827,6 +3776,10 @@ fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
 
 fn select_resume_id(known: Option<String>, requested: Option<String>) -> Option<String> {
     known.or(requested)
+}
+
+fn acp_open_needs_relaunch(created: bool, alive: bool, has_launch_command: bool) -> bool {
+    created || (!alive && has_launch_command)
 }
 
 /// ACP 相位 → 四色 Phase。`Running` 还要看 entries 里有没有进行中的工具调用，
@@ -3900,7 +3853,12 @@ fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
 /// false——跟旧版行为一致，用户主动发起的变化不单独触发落盘，等下一次
 /// 协议事件（通常是 TurnEnded）时一并存。
 fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
-    let snap = sess.reduced.lock().unwrap().to_snapshot(should_persist);
+    let snap = {
+        let reduced = sess.reduced.lock().unwrap();
+        // 最后一项可能正在接收流式增量；连同它一起覆盖即可，不再复制整段历史。
+        let offset = reduced.entries.len().saturating_sub(1);
+        reduced.to_snapshot_since(should_persist, offset)
+    };
     let payload = serde_json::json!({ "snapshot": snap }).to_string();
     let mut out = sess.out.lock().unwrap();
     if let Some(c) = &mut out.client {
@@ -3961,16 +3919,22 @@ fn acp_relaunch(
     let sess = &slot.value;
     smelt_core::acp_session::reset_for_restart(&mut sess.reduced.lock().unwrap());
     let needs_check = sess.agent_needs_transcript_check;
-    let handle = smelt_core::acp_conn::spawn_acp(
-        smelt_core::acp_conn::AcpLaunch {
-            launch: launch.clone(),
-            cwd: sess.cwd.clone(),
-            sid: id.to_string(),
-            resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
-            resume_needs_transcript_check: needs_check,
-        },
-        Some(spawn_gate),
-    );
+    let app_launch = smelt_core::acp_conn::AcpLaunch {
+        launch: launch.clone(),
+        cwd: sess.cwd.clone(),
+        sid: id.to_string(),
+        resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
+        resume_needs_transcript_check: needs_check,
+    };
+    let is_codex_app_server = launch
+        .command
+        .split_whitespace()
+        .any(|part| part == "app-server");
+    let handle = if is_codex_app_server {
+        smelt_core::codex_app_server::spawn_codex_app_server(app_launch, Some(spawn_gate))
+    } else {
+        smelt_core::acp_conn::spawn_acp(app_launch, Some(spawn_gate))
+    };
     let event_rx = handle.event_rx.clone();
     *sess.handle.lock().unwrap() = Some(handle);
     sess.state.lock().unwrap().launch = Some(launch.command.clone());
@@ -4001,6 +3965,7 @@ fn make_acp_session(
             branch: None,
             dirty_files: Vec::new(),
             updated_at: 0,
+            structured_events: true,
         })),
         out: Mutex::new(AcpOut {
             client: None,
@@ -4079,6 +4044,15 @@ fn apply_acp_user_action(
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
+        AcpUserAction::ElicitationText { field_ix, value } => {
+            smelt_core::acp_session::set_elicitation_text(
+                &mut sess.reduced.lock().unwrap(),
+                field_ix,
+                value,
+            );
+            push_acp_snapshot(sess, false);
+            update_acp_daemon_state(sess, subscribers);
+        }
         AcpUserAction::ElicitationSubmit => {
             smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
             push_acp_snapshot(sess, false);
@@ -4124,7 +4098,7 @@ fn handle_acp_open(
 
         let sess = &slot.value;
         let alive = sess.handle.lock().unwrap().is_some();
-        if created || (!alive && !launch.command.is_empty()) {
+        if acp_open_needs_relaunch(created, alive, !launch.command.is_empty()) {
             // 已经 Ended（或还没真正连接过）：这次 open 等于「重新开始」。
             // 优先用已知的旧 agent session id 真续接，没有才退回请求带的
             // （比如历史会话页第一次点「继续」，本地还没有 acp_session_id）。
@@ -5504,49 +5478,6 @@ mod snapshot_tests {
     }
 }
 
-/// Phase 0：`watch` 只读旁观必须能跟 `open` 独占连接并存，且互不干扰。
-#[cfg(test)]
-mod missing_session_action_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_open_request_preserves_launch_behavior() {
-        assert_eq!(
-            parse_missing_session_action(&serde_json::json!({"launch":"claude"})),
-            MissingSessionAction::Launch("claude".into())
-        );
-    }
-
-    #[test]
-    fn reject_action_never_produces_a_spawn_command() {
-        assert_eq!(
-            parse_missing_session_action(&serde_json::json!({
-                "missing":{"kind":"reject","reason":"无法恢复"}
-            })),
-            MissingSessionAction::Reject("无法恢复".into())
-        );
-    }
-
-    #[test]
-    fn existing_session_ignores_reject_action() {
-        assert_eq!(
-            select_missing_session_command(
-                true,
-                MissingSessionAction::Reject("must not run".into())
-            ),
-            MissingSessionDecision::Attach
-        );
-    }
-
-    #[test]
-    fn rejected_terminal_reply_contains_actionable_reason() {
-        let reply = rejected_terminal_reply("无法恢复：历史不存在", 24, 80);
-        let text = String::from_utf8_lossy(&reply);
-        assert!(text.contains(r#""rejected":"无法恢复：历史不存在""#));
-        assert!(text.contains("\u{1b}[31m无法恢复：历史不存在\u{1b}[0m"));
-    }
-}
-
 #[cfg(test)]
 mod watch_tests {
     use super::*;
@@ -5752,7 +5683,10 @@ mod watch_tests {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let sess = make_dummy_session(24, 80);
         sess.state.lock().unwrap().id = "dl".to_string();
-        sessions.lock().unwrap().insert("dl".to_string(), sess);
+        sessions
+            .lock()
+            .unwrap()
+            .insert("dl".to_string(), Arc::clone(&sess));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
 
         const ROUNDS: usize = 300;
@@ -5824,6 +5758,10 @@ mod watch_tests {
                 );
             }
         }
+        assert!(
+            sess.state.lock().unwrap().structured_events,
+            "收到 state hook 后必须锁定结构化事件链路"
+        );
     }
 }
 
@@ -5856,6 +5794,14 @@ mod acp_tests {
 
     fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
         Arc::new(make_acp_session_value(id, reduced))
+    }
+
+    #[test]
+    fn hot_attach_never_relaunches_or_replays_agent_history() {
+        assert!(!acp_open_needs_relaunch(false, true, true));
+        assert!(!acp_open_needs_relaunch(false, true, false));
+        assert!(acp_open_needs_relaunch(true, false, true));
+        assert!(acp_open_needs_relaunch(false, false, true));
     }
 
     #[test]
@@ -6344,6 +6290,7 @@ mod acp_tests {
             question: "要不要覆盖这个文件？".into(),
             tool_call_id: "t1".into(),
             options: Vec::new(),
+            details: smelt_core::acp_session::ApprovalDetailsView::Generic,
             responder: None,
             raw_request_line: None,
         });

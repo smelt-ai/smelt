@@ -170,8 +170,7 @@ pub struct TerminalView {
     hover_url: Option<(usize, usize, usize)>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
-    /// 「需要注意」通知消息：响铃 / OSC 9 上报且尚未被查看（供侧栏蓝点 / pane 蓝环 /
-    /// 通知面板）；None = 无待处理通知。
+    /// OSC 9/99/777 普通通知正文；仅供横幅、通知记录和宠物播报，不参与 Agent 状态。
     notification: Option<String>,
     /// 最近收到通知的时刻（总览页显示「N 分钟前」）。
     notified_at: Option<Instant>,
@@ -209,11 +208,9 @@ pub struct TerminalView {
     /// 快捷启动项的显示名（设置里配的 label）。侧栏标题在 agent 还没上报任务名时
     /// 回退到它，而不是 cwd 末段——否则「+ → Claude Code」建出来却显示项目名。
     launch_label: Option<String>,
-    /// 快捷启动实际命令行（硬重启守护 / 冷启动 id 不存在时用来重跑 agent）。
-    /// 与 launch_label 分离：label 给人看，cmd 给 shell 跑。
+    /// 快捷启动实际命令行。仅用于标识这个 pane 最初的启动方式；daemon 中会话
+    /// 丢失后不会重跑该命令。
     launch_cmd: Option<String>,
-    agent_kind: Option<TerminalAgentKind>,
-    resume_state: Option<TerminalResumeState>,
     /// 首帧布局后强制发一次 PTY resize（含真实 cell 像素）。reattach 后守护 jolt
     /// 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺像素」的 TUI 排版。
     pty_kick_pending: bool,
@@ -228,32 +225,10 @@ fn appearance_changed(a: &crate::Appearance, b: &crate::Appearance) -> bool {
         || a.blur != b.blur
 }
 
-/// 「需要注意」的细分：等审批（红，最高优先）> 其他需要处理（等输入 / 响铃等，橙）。
-/// 借鉴 codex 的 ThreadActiveFlag 设计——审批和一般等待是不同等级的行动召唤。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum AttentionKind {
-    /// Claude 等你批准某个操作（文本含 permission / approv / 权限 / 批准）。
-    Approval,
-    /// 其他需要处理（等输入、响铃、自定义通知）。
-    Attention,
-}
-
-/// 从通知文本推断注意力等级。
-fn classify_attention(msg: &str) -> AttentionKind {
-    let m = msg.to_lowercase();
-    if m.contains("permission") || m.contains("approv") || m.contains("权限") || m.contains("批准")
-    {
-        AttentionKind::Approval
-    } else {
-        AttentionKind::Attention
-    }
-}
-
 // 权限菜单解析已抽到 smelt_core::permission_menu（唯一真源，GUI 与 smeltd 共用）。
 // 这里只 use 自己要用的；消费者（main.rs 等）直接从 permission_menu 取类型，不经这里
 // 转发——转发一层就等于多一个「看起来像定义处」的地方。
 use crate::permission_menu::{PermissionPrompt, parse_permission_prompt};
-use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
 
 /// 同一终端同文本的系统通知最小间隔。
 const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
@@ -261,6 +236,12 @@ const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
 /// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
 fn title_is_running(title: Option<String>) -> bool {
     title.is_some_and(|t| crate::osc::title_starts_with_spinner(&t))
+}
+
+fn structured_agent_events_active(session_id: &str, cx: &App) -> bool {
+    cx.try_global::<smelt_ui::daemon_states_global::DaemonStates>()
+        .and_then(|states| states.0.lock().ok()?.get(session_id).cloned())
+        .is_some_and(|state| state.structured_events)
 }
 
 /// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。
@@ -302,28 +283,6 @@ impl TerminalView {
         launch: Option<&str>,
         launch_label: Option<&str>,
     ) -> Self {
-        Self::from_terminal_with_resume(
-            cx,
-            terminal,
-            cwd,
-            session_id,
-            launch,
-            launch_label,
-            None,
-            None,
-        )
-    }
-
-    pub fn from_terminal_with_resume(
-        cx: &mut Context<Self>,
-        terminal: Terminal,
-        cwd: Option<String>,
-        session_id: String,
-        launch: Option<&str>,
-        launch_label: Option<&str>,
-        agent_kind: Option<TerminalAgentKind>,
-        resume_state: Option<TerminalResumeState>,
-    ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
         Self::drive_redraws(terminal.redraw_channel(), cx);
         let launch_kind = classify_launch(launch);
@@ -342,7 +301,17 @@ impl TerminalView {
             loop {
                 Timer::after(REFRESH).await;
                 let r = this.update(cx, |this, cx| {
-                    if let Some(msg) = this.terminal.take_notification() {
+                    let bell = this.terminal.take_bell_notification();
+                    // Warp 同类策略：结构化插件一旦在当前 pane 激活，丢弃旧 OSC
+                    // agent fallback，避免 hook + OSC 对同一完成/审批重复提醒。BEL 是
+                    // 独立的普通终端提醒，不受此门控影响。
+                    let msg = bell.or_else(|| {
+                        let osc = this.terminal.take_notification();
+                        (!structured_agent_events_active(&this.session_id, cx))
+                            .then_some(osc)
+                            .flatten()
+                    });
+                    if let Some(msg) = msg {
                         let task = this.terminal.current_title();
                         // 焦点感知（借鉴 codex）：app 在前台时不弹系统通知——你自己看得见
                         // 蓝点/徽章，弹了是打扰；切走了才提醒。cx.active_window() 在 app
@@ -485,8 +454,6 @@ impl TerminalView {
             launch_kind,
             launch_label,
             launch_cmd,
-            agent_kind,
-            resume_state,
             pty_kick_pending: true,
         }
     }
@@ -501,43 +468,9 @@ impl TerminalView {
         self.launch_label.as_deref()
     }
 
-    /// 快捷启动实际命令行（硬重启守护时重跑 agent 用）；裸终端为 None。
+    /// 快捷启动实际命令行；裸终端为 None。
     pub fn launch_cmd(&self) -> Option<&str> {
         self.launch_cmd.as_deref()
-    }
-
-    pub fn agent_kind(&self) -> Option<TerminalAgentKind> {
-        self.agent_kind
-    }
-
-    pub fn resume_state(&self) -> Option<&TerminalResumeState> {
-        self.resume_state.as_ref()
-    }
-
-    pub fn set_resume_state(&mut self, state: Option<TerminalResumeState>) {
-        self.resume_state = state;
-    }
-
-    pub fn missing_session_action(&self) -> crate::terminal::MissingSessionAction {
-        let history_exists = self
-            .resume_state
-            .as_ref()
-            .zip(self.cwd.as_deref())
-            .is_some_and(|(state, cwd)| {
-                crate::session_history::terminal_session_exists(state, cwd)
-            });
-        crate::terminal_restore_action(
-            self.agent_kind,
-            self.launch_cmd.as_deref(),
-            self.resume_state.as_ref(),
-            self.cwd.as_deref(),
-            history_exists,
-        )
-    }
-
-    /// 当前注意力等级：有待处理通知时按文本分类（等审批 > 一般注意）。
-    pub fn attention_kind(&self) -> Option<AttentionKind> {
-        self.notification.as_deref().map(classify_attention)
     }
 
     /// 从终端末尾网格解析权限菜单；无菜单时 `None`。
@@ -546,10 +479,10 @@ impl TerminalView {
         parse_permission_prompt(&lines)
     }
 
-    /// 是否像「等审批」：OSC 文案分类 **或** 网格里扫到权限菜单。
+    /// 是否确实「等审批」：当前终端网格里扫到权限菜单。
+    /// daemon/ACP 的协议状态由上层 `Session::status` 单独判断。
     pub fn is_awaiting_approval(&self) -> bool {
-        matches!(self.attention_kind(), Some(AttentionKind::Approval))
-            || self.permission_prompt().is_some()
+        self.permission_prompt().is_some()
     }
 
     /// 是否「任务完成未读」（Running→Idle 后用户还没回应过）。
@@ -584,10 +517,7 @@ impl TerminalView {
     /// **注意**：`Terminal::spawn` 内部会 sleep 重试，禁止在 UI 线程对多 pane 连环调用；
     /// 硬重启请走 [`Self::adopt_terminal`]（后台建好再塞进来）。
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        // 带 launch_cmd：硬重启后守护里 id 已不存在，新建会话时要重跑 agent。
-        let action = self.missing_session_action();
-        let Ok(terminal) =
-            Terminal::spawn_with_action(24, 80, self.cwd.as_deref(), &self.session_id, &action)
+        let Ok(terminal) = Terminal::spawn(24, 80, self.cwd.as_deref(), &self.session_id, None)
         else {
             return;
         };

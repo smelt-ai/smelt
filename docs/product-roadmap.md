@@ -27,20 +27,22 @@ flowchart TB
 
 ---
 
-## 1 · ACP 对接
+## 1 · Agent 协议对接
 
-**不是四家都「CLI 本体原生讲 ACP」。** smelt 只做 ACP **客户端**；对端是「能在 stdio 上说 ACP 的进程」——要么 agent 自带 ACP server，要么中间插一层适配器。
+**不是四家都「CLI 本体原生讲 ACP」。** smelt 对 Claude、Copilot、Grok 做 ACP
+客户端；Codex 则直接连接 CLI 内置的 app-server，再归一化到同一套会话事件。
 
-| Provider | ACP 形态 | smelt 怎么交付 | 启动（出厂默认） |
+| Provider | 协议形态 | smelt 怎么交付 | 启动（出厂默认） |
 |----------|----------|----------------|------------------|
 | **Claude** | **适配器**（`claude-agent-acp`） | **受管 bun 自动拉包** | `bunx @agentclientprotocol/claude-agent-acp@<锁版本>` |
-| **Codex** | **适配器**（`codex-acp`） | **受管 bun 自动拉包** | `bunx --bun @agentclientprotocol/codex-acp@1.1.7` |
+| **Codex** | **原生**（CLI 内置 app-server） | 用户本机已装 `codex`；smelt 不代装 CLI | `codex app-server` |
 | **Copilot** | **原生**（CLI 内置 ACP server） | 用户本机已装 `copilot`；smelt 不代装 CLI | `copilot --acp --stdio` |
 | **Grok** | **原生**（Grok Build 官方 ACP） | 用户本机已装 / 官方入口；smelt 不代装 CLI | 以官方 `agent stdio` 为准 |
 
 ```text
 原生   = agent 进程自己实现 ACP
-适配器 = 另起进程，把 Claude/Codex 私有协议翻译成 ACP
+适配器 = 另起进程，把 Claude 私有协议翻译成 ACP
+app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 ```
 
 ### 适配器：统一走受管 bun（帮用户下载安装）
@@ -55,13 +57,13 @@ flowchart TB
 
 **仍须用户自备的（smelt 不代装）：**  
 - Claude 适配器背后的 **Claude Code / 登录**  
-- Codex 适配器背后的 **Codex CLI / 登录**  
+- Codex 的 **Codex CLI / 登录**
 - Copilot / Grok 的 **本机 CLI + 鉴权**（原生，无适配器可代下）
 
 能力与权限语义（尤其 `request_permission`）**逐家实测**，不假设「接了 ACP = 会弹权限门」。
 
 - [ ] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂四家 + 用户可增 custom，每项含名称/启动命令
-- [ ] Claude + Codex 出厂命令统一 `bunx …@锁版本`；启动前 `ensure_bun` + 拉适配器
+- [ ] Claude 适配器锁定版本并由 `ensure_bun` 拉取；Codex 直接启动本机 app-server
 - [ ] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」
 - [ ] 逐家实测矩阵：`session/load` · `request_permission` · elicitation
 - [ ] 启动命令支持引号；下载/拉包错误可读；adapter 版本可锁可升
@@ -72,11 +74,10 @@ flowchart LR
   subgraph managed["适配器 · smelt 受管"]
     Bun["ensure_bun"]
     CL["bunx claude-agent-acp"]
-    CD["bunx codex-acp"]
     Bun --> CL
-    Bun --> CD
   end
   subgraph native["原生 · 用户本机 CLI"]
+    CD["codex app-server"]
     CP["copilot --acp"]
     GK["grok agent stdio"]
   end
