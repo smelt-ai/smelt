@@ -267,7 +267,9 @@ enum OverviewFilter {
 // 通道待弹出的应用内 Notification）：ACP 视图独立成 smelt-acp-view 后要跨
 // crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
 // 的裸名字。
-pub(crate) use smelt_ui::daemon_states_global::{DaemonStates, PendingAgentNotifs};
+pub(crate) use smelt_ui::daemon_states_global::{
+    AgentNotificationKind, DaemonStates, PendingAgentNotifs,
+};
 
 /// 取某个 pane 对应的守护状态；没有全局单例（比如极早期尚未走到注册那一步）或
 /// 那个 session id 还没有数据都返回 None。
@@ -281,16 +283,19 @@ fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::D
         .cloned()
 }
 
-/// 守护状态刚进入「等你批准 / 等你输入」时，是否需要入队一条应用内通知。
+/// 守护状态刚进入需要用户关注或回合结束的 phase 时，入队一条应用内通知。
 fn awaiting_notification_for_transition(
     previous_phase: Option<terminal::DaemonPhase>,
     state: &terminal::DaemonSessionState,
-) -> Option<(String, String, bool)> {
-    let entered_awaiting = matches!(
+) -> Option<(String, String, AgentNotificationKind)> {
+    let entered_notifiable = matches!(
         state.phase,
-        terminal::DaemonPhase::AwaitingApproval | terminal::DaemonPhase::WaitingForUser
+        terminal::DaemonPhase::AwaitingApproval
+            | terminal::DaemonPhase::WaitingForUser
+            | terminal::DaemonPhase::Succeeded
+            | terminal::DaemonPhase::Failed
     ) && previous_phase != Some(state.phase);
-    if !entered_awaiting {
+    if !entered_notifiable {
         return None;
     }
 
@@ -299,8 +304,26 @@ fn awaiting_notification_for_transition(
         .detail_line()
         .or_else(|| state.title.clone())
         .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
-    let is_approval = state.phase == terminal::DaemonPhase::AwaitingApproval;
-    Some((title, message, is_approval))
+    let kind = match state.phase {
+        terminal::DaemonPhase::AwaitingApproval => AgentNotificationKind::Approval,
+        terminal::DaemonPhase::WaitingForUser => AgentNotificationKind::Input,
+        terminal::DaemonPhase::Succeeded => AgentNotificationKind::Success,
+        terminal::DaemonPhase::Failed => AgentNotificationKind::Failure,
+        _ => return None,
+    };
+    Some((title, message, kind))
+}
+
+fn agent_notification_enabled(
+    config: &settings::AgentUiConfig,
+    kind: AgentNotificationKind,
+) -> bool {
+    match kind {
+        AgentNotificationKind::Approval => config.notify_approval,
+        AgentNotificationKind::Input => config.notify_input,
+        AgentNotificationKind::Success => config.notify_success,
+        AgentNotificationKind::Failure => config.notify_failure,
+    }
 }
 
 /// 主区终端分屏布局树：叶子是一个终端，内部 Split 把区域按某轴切成多块。
@@ -521,22 +544,45 @@ impl Session {
         }
     }
 
-    /// 会话内任一 pane 的待处理通知消息（供总览卡片显示「等你确认 xxx」）。
+    /// 会话内结构化待处理消息（供总览卡片展示）。普通 OSC 通知不参与状态正文。
     fn notification_msg(&self, cx: &App) -> Option<String> {
         let v = self.term_leaves();
-        // 优先：网格解析出的权限摘要 → OSC 审批文案 → 任意通知
+        for t in &v {
+            if let Some(state) = daemon_state_for(t, cx) {
+                if matches!(
+                    state.phase,
+                    terminal::DaemonPhase::AwaitingApproval
+                        | terminal::DaemonPhase::WaitingForUser
+                        | terminal::DaemonPhase::Failed
+                ) {
+                    if let Some(detail) = state.detail_line() {
+                        return Some(detail);
+                    }
+                }
+            }
+        }
         if let Some(p) = self.permission_prompt(cx) {
-            if let Some(s) = p.summary {
-                return Some(s);
-            }
+            return p.summary;
         }
-        if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
-            if let Some(s) = t.read(cx).notification() {
-                return Some(s.to_string());
-            }
+        None
+    }
+
+    /// 阻塞审批卡的正文必须来自产生审批事实的同一个 pane，不能拿会话里任意一条
+    /// 普通完成通知来拼接，否则多分屏或旧 OSC 消息会出现“Blocked + 已完成”。
+    fn approval_msg(&self, cx: &App) -> Option<String> {
+        match &self.kind {
+            SessionKind::Acp(_) => None,
+            SessionKind::Term { .. } => self.term_leaves().iter().find_map(|t| {
+                if let Some(state) = daemon_state_for(t, cx) {
+                    if state.phase == terminal::DaemonPhase::AwaitingApproval {
+                        return state
+                            .detail_line()
+                            .or_else(|| t.read(cx).permission_prompt().and_then(|p| p.summary));
+                    }
+                }
+                t.read(cx).permission_prompt().and_then(|p| p.summary)
+            }),
         }
-        v.iter()
-            .find_map(|t| t.read(cx).notification().map(|s| s.to_string()))
     }
 
     /// 会话内扫到的权限菜单（优先含审批/菜单的 pane）。
@@ -550,14 +596,21 @@ impl Session {
         v.iter().find_map(|t| t.read(cx).permission_prompt())
     }
 
-    /// 需要用户处理的 pane：优先等审批 / 权限菜单，其次任意「需要注意」。
+    /// 需要用户处理的 pane：只认结构化等待/失败或当前网格审批菜单。
     fn attention_pane(&self, cx: &App) -> Option<Entity<TerminalView>> {
         let v = self.term_leaves();
         if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
             return Some(t.clone());
         }
         v.iter()
-            .find(|t| t.read(cx).attention_kind().is_some())
+            .find(|t| {
+                daemon_state_for(t, cx).is_some_and(|state| {
+                    matches!(
+                        state.phase,
+                        terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed
+                    )
+                })
+            })
             .cloned()
     }
 
@@ -600,39 +653,43 @@ impl Session {
             }
         };
         let v = self.term_leaves();
-        // 等审批（红）压过一般注意（橙）：
-        // 1) daemon 状态通道事实  2) OSC 文案  3) 网格权限菜单
-        let mut attention = None;
+        let mut needs_attention = false;
+        let mut running = false;
+        let mut done = false;
         for t in &v {
             if let Some(state) = daemon_state_for(t, cx) {
-                if state.phase == terminal::DaemonPhase::AwaitingApproval {
-                    return AgentStatus::WaitingApproval;
+                match state.phase {
+                    terminal::DaemonPhase::AwaitingApproval => {
+                        return AgentStatus::WaitingApproval;
+                    }
+                    terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
+                        needs_attention = true;
+                    }
+                    terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool => {
+                        running = true;
+                    }
+                    terminal::DaemonPhase::Succeeded => done = true,
+                    terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead => {}
                 }
             }
             let tv = t.read(cx);
             if tv.is_awaiting_approval() {
                 return AgentStatus::WaitingApproval;
             }
-            if matches!(
-                tv.attention_kind(),
-                Some(terminal_view::AttentionKind::Attention)
-            ) {
-                attention = Some(AgentStatus::NeedsAttention);
-            }
         }
-        if let Some(s) = attention {
-            return s;
+        if needs_attention {
+            return AgentStatus::NeedsAttention;
         }
-        // 活动终端：daemon 说在跑（Thinking/ExecutingTool）比标题 spinner 猜测更可信；
-        // 没有 daemon 数据（老版本守护/还没收到第一条上报）才退化到猜。
-        if let Some(state) = daemon_state_for(active, cx) {
-            if matches!(
-                state.phase,
-                terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool
-            ) {
-                return AgentStatus::Running;
-            }
-        } else if let Some(raw) = active.read(cx).agent_title() {
+        if running {
+            return AgentStatus::Running;
+        }
+        if done {
+            return AgentStatus::Done;
+        }
+        // 没有结构化运行事实时才退化到标题 spinner。
+        if daemon_state_for(active, cx).is_none()
+            && let Some(raw) = active.read(cx).agent_title()
+        {
             if crate::osc::title_starts_with_spinner(raw.trim_start()) {
                 return AgentStatus::Running;
             }
@@ -700,24 +757,25 @@ fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
 fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
     let daemon_state = daemon_state_for(view, cx);
     if let Some(state) = &daemon_state {
-        if state.phase == terminal::DaemonPhase::AwaitingApproval {
-            return AgentStatus::WaitingApproval;
+        match state.phase {
+            terminal::DaemonPhase::AwaitingApproval => return AgentStatus::WaitingApproval,
+            terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
+                return AgentStatus::NeedsAttention;
+            }
+            terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool => {
+                return AgentStatus::Running;
+            }
+            terminal::DaemonPhase::Succeeded => return AgentStatus::Done,
+            terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead => {}
         }
     }
     let t = view.read(cx);
-    match t.attention_kind() {
-        Some(terminal_view::AttentionKind::Approval) => return AgentStatus::WaitingApproval,
-        Some(terminal_view::AttentionKind::Attention) => return AgentStatus::NeedsAttention,
-        None => {}
+    if t.is_awaiting_approval() {
+        return AgentStatus::WaitingApproval;
     }
-    if let Some(state) = &daemon_state {
-        if matches!(
-            state.phase,
-            terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool
-        ) {
-            return AgentStatus::Running;
-        }
-    } else if let Some(raw) = t.agent_title() {
+    if daemon_state.is_none()
+        && let Some(raw) = t.agent_title()
+    {
         if crate::osc::title_starts_with_spinner(raw.trim_start()) {
             return AgentStatus::Running;
         }
@@ -5922,10 +5980,10 @@ impl Render for Workspace {
         // 状态通道：等批准 / 等输入 → gpui-component Notification
         if let Some(pending) = cx.try_global::<PendingAgentNotifs>() {
             let batch = std::mem::take(&mut *pending.0.lock().unwrap());
-            for (title, message, is_approval) in batch {
+            for (title, message, kind) in batch {
                 // 等批准类改由右上角阻塞 toast 展示（派生态，见 toast.rs），
                 // 这里不再重复弹组件通知，避免同屏双弹。
-                if is_approval {
+                if kind == AgentNotificationKind::Approval {
                     continue;
                 }
                 window.push_notification(Notification::info(message).title(title), cx);
@@ -6075,28 +6133,8 @@ impl Render for Workspace {
             )
         };
 
-        // 会话标题（取活动终端的 cwd 末段）
-        let titles: Vec<(usize, String)> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(ix, s)| (ix, s.title(cx)))
-            .collect();
         // 待处理通知总数（标题栏铃铛用）。
         let notif_count = self.collect_notifications(cx).len();
-        // 标题栏分支胶囊：当前项目的分支名（repo_info 缓存，拿不到不显示）。
-        let title_branch = self
-            .cur()
-            .and_then(|s| s.cwd(cx))
-            .and_then(|c| self.repo_info.get(c.as_str()).cloned())
-            .and_then(|(_, i)| i)
-            .map(|i| i.branch);
-        // 当前活动会话的标题：放到标题栏右侧作为上下文提示。
-        let active_title = titles
-            .iter()
-            .find(|(ix, _)| *ix == active)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
 
         // 会话列表：单列按项目上下分组（替代旧 gpui-component Sidebar 两级菜单；
         // 设计稿的「rail + 列表」左右两列实测割裂，见 session_list.rs 文件头）。
@@ -6428,49 +6466,9 @@ impl Render for Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .justify_end()
                         .w_full()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    img(Arc::new(Image::from_bytes(
-                                        ImageFormat::Png,
-                                        include_bytes!("../../../assets/icon-1024.png").to_vec(),
-                                    )))
-                                    .w(px(16.))
-                                    .h(px(16.))
-                                    .rounded(px(4.)),
-                                )
-                                .child(div().text_sm().font_bold().child("smelt"))
-                                .child(div().text_sm().text_color(c_muted).child(active_title))
-                                .children(title_branch.map(|b| {
-                                    // 分支胶囊：绿点 + 当前项目分支（repo_info 缓存）。
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .px_2()
-                                        .py(px(2.))
-                                        .rounded(px(6.))
-                                        .bg(rgb(ui_theme::bg_hover()))
-                                        .border_1()
-                                        .border_color(rgb(ui_theme::border_mid()))
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .text_color(rgb(ui_theme::text_muted()))
-                                        .child(
-                                            div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .bg(rgb(ui_theme::green())),
-                                        )
-                                        .child(b)
-                                })),
-                        )
-                        // 右侧：用量、通知、设置与帮助。stop_propagation 避免触发拖拽。
+                        // 右侧：用量、通知与设置。stop_propagation 避免触发拖拽。
                         .child(
                             h_flex()
                                 .items_center()
@@ -6578,33 +6576,7 @@ impl Render for Workspace {
                                                 this.open_settings_window(cx);
                                             }),
                                         )
-                                })
-                                .child(
-                                    div()
-                                        .id("help-entry")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child("?")
-                                        .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("帮助文档")
-                                                .build(window, cx)
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|_this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                cx.open_url("https://smelt.onoo.io/");
-                                            }),
-                                        ),
-                                ),
+                                }),
                         ),
                 ),
             )
@@ -7000,24 +6972,22 @@ fn main() {
             while let Ok(event) = daemon_state_rx.recv().await {
                 let _ = cx.update(|cx| {
                     let states = cx.global::<DaemonStates>().0.clone();
-                    let notify_on = cx
+                    let notify_config = cx
                         .try_global::<settings::AgentUiConfig>()
-                        .map(|c| c.notify_awaiting)
-                        .unwrap_or(true);
+                        .cloned()
+                        .unwrap_or_default();
                     let pending = cx.try_global::<PendingAgentNotifs>().map(|p| p.0.clone());
                     {
                         let mut map = states.lock().unwrap();
                         match event {
                             terminal::DaemonStateEvent::Snapshot(list) => {
-                                if notify_on {
-                                    if let Some(q) = &pending {
-                                        for s in &list {
-                                            if let Some(entry) =
-                                                awaiting_notification_for_transition(
-                                                    map.get(&s.id).map(|p| p.phase),
-                                                    s,
-                                                )
-                                            {
+                                if let Some(q) = &pending {
+                                    for s in &list {
+                                        if let Some(entry) = awaiting_notification_for_transition(
+                                            map.get(&s.id).map(|p| p.phase),
+                                            s,
+                                        ) {
+                                            if agent_notification_enabled(&notify_config, entry.2) {
                                                 q.lock().unwrap().push(entry);
                                             }
                                         }
@@ -7031,12 +7001,12 @@ fn main() {
                                 }
                             }
                             terminal::DaemonStateEvent::Update(s) => {
-                                if notify_on {
-                                    if let Some(q) = &pending {
-                                        if let Some(entry) = awaiting_notification_for_transition(
-                                            map.get(&s.id).map(|p| p.phase),
-                                            &s,
-                                        ) {
+                                if let Some(q) = &pending {
+                                    if let Some(entry) = awaiting_notification_for_transition(
+                                        map.get(&s.id).map(|p| p.phase),
+                                        &s,
+                                    ) {
+                                        if agent_notification_enabled(&notify_config, entry.2) {
                                             q.lock().unwrap().push(entry);
                                         }
                                     }
@@ -7479,7 +7449,9 @@ mod project_tests {
 
 #[cfg(test)]
 mod daemon_state_notification_tests {
-    use super::awaiting_notification_for_transition;
+    use super::{
+        AgentNotificationKind, agent_notification_enabled, awaiting_notification_for_transition,
+    };
     use crate::terminal::{DaemonPhase, DaemonSessionState};
 
     fn daemon_state(id: &str, phase: DaemonPhase) -> DaemonSessionState {
@@ -7491,6 +7463,7 @@ mod daemon_state_notification_tests {
             launch: None,
             cwd: None,
             phase_since: 0,
+            structured_events: true,
         }
     }
 
@@ -7503,7 +7476,11 @@ mod daemon_state_notification_tests {
 
         assert_eq!(
             notif,
-            Some(("等你输入".into(), "💬 Pick one".into(), false))
+            Some((
+                "等你输入".into(),
+                "💬 Pick one".into(),
+                AgentNotificationKind::Input
+            ))
         );
     }
 
@@ -7524,7 +7501,68 @@ mod daemon_state_notification_tests {
 
         let notif = awaiting_notification_for_transition(Some(DaemonPhase::ExecutingTool), &state);
 
-        assert_eq!(notif, Some(("等你批准".into(), "Need review".into(), true)));
+        assert_eq!(
+            notif,
+            Some((
+                "等你批准".into(),
+                "Need review".into(),
+                AgentNotificationKind::Approval
+            ))
+        );
+    }
+
+    #[test]
+    fn daemon_stop_produces_completion_notification_not_input_notification() {
+        let state = daemon_state("session-12345678", DaemonPhase::Succeeded);
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
+
+        assert_eq!(
+            notif,
+            Some((
+                "已完成".into(),
+                "会话 session-".into(),
+                AgentNotificationKind::Success
+            ))
+        );
+    }
+
+    #[test]
+    fn daemon_error_produces_failure_notification() {
+        let mut state = daemon_state("session-12345678", DaemonPhase::Failed);
+        state.pending_question = Some("rate limited".into());
+        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
+
+        assert_eq!(
+            notif,
+            Some((
+                "失败".into(),
+                "rate limited".into(),
+                AgentNotificationKind::Failure
+            ))
+        );
+    }
+
+    #[test]
+    fn notification_switches_are_independent() {
+        let mut config = crate::settings::AgentUiConfig::default();
+        config.notify_success = false;
+
+        assert!(!agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Success
+        ));
+        assert!(agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Approval
+        ));
+        assert!(agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Input
+        ));
+        assert!(agent_notification_enabled(
+            &config,
+            AgentNotificationKind::Failure
+        ));
     }
 }
 

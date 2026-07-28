@@ -1,9 +1,10 @@
 //! 底部状态栏（26px，mono）：⎇ 分支 · agent 状态 · 项目/阻塞计数
-//! · 右侧版本号（带更新红点，点击跳 GitHub）。
+//! · 右侧帮助入口与版本号（带更新红点，点击跳 GitHub）。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::*;
+use gpui_component::StyledExt;
 
 use crate::{AgentStatus, Workspace, ui_theme};
 
@@ -104,17 +105,38 @@ impl Workspace {
             .child(div().flex_1())
             .child(
                 div()
-                    .id("status-version")
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                    .child(version)
-                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-                        cx.open_url(if has_update {
-                            "https://github.com/smelt-ai/smelt/releases"
-                        } else {
-                            "https://github.com/smelt-ai/smelt"
-                        });
-                    }),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("help-entry")
+                            .cursor_pointer()
+                            .text_sm()
+                            .font_semibold()
+                            .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
+                            .child("?")
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("帮助文档").build(window, cx)
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                cx.open_url("https://smelt.onoo.io/");
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("status-version")
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
+                            .child(version)
+                            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                cx.open_url(if has_update {
+                                    "https://github.com/smelt-ai/smelt/releases"
+                                } else {
+                                    "https://github.com/smelt-ai/smelt"
+                                });
+                            }),
+                    ),
             )
     }
 }

@@ -64,6 +64,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rusty-mermaid = { version = "=0.2.0", features = ["svg"] }
 # mermaid 渲染缓存文件名用内容 hash 命名，避免重复渲染同一张图。
 sha2 = "0.10"
+# 生成 agent hook 命令时按 shell 规则引用 smelt-notify 路径。
+shell-words = "1"
 
 # macOS：桌面宠物浮窗需要绕过 GPUI（它在 mac 上只会建 Titled 窗口，必带圆角边框+
 # 阴影），直接操作底层 NSWindow 改成 Borderless/无阴影/透明。版本对齐 gpui 依赖树。

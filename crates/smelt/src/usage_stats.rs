@@ -1,5 +1,5 @@
-//! Claude Code 用量统计：读本地会话 transcript（`~/.claude/projects/**/*.jsonl`，
-//! Claude Code 自己写的完整历史），按 assistant 消息聚合 token 用量 + 工具调用次数，
+//! Claude Code / Codex 用量统计：读两者本地会话 transcript，按消息聚合 token
+//! 用量 + 工具调用次数，
 //! 供「用量」页画按工具 / 按模型 / 按项目拆分 + 今日走势 + 活动热力图。
 //! 只读本地已有文件，不需要额外 hook；只看 token 数量，不折算价格（单价表会过时）。
 
@@ -73,7 +73,12 @@ pub fn projects_root() -> PathBuf {
 /// 扫描 `~/.claude/projects/` 下所有会话 transcript，聚合成用量 + 工具调用事件。
 /// 只读，视本地历史量可能要几十到几百毫秒——调用方应放后台线程跑，不要在 render 里同步调。
 pub fn scan() -> UsageData {
-    scan_root(&projects_root())
+    let mut data = scan_root(&projects_root());
+    if let Some(home) = dirs::home_dir() {
+        scan_codex_root(&home.join(".codex").join("sessions"), &mut data);
+        scan_codex_root(&home.join(".codex").join("archived_sessions"), &mut data);
+    }
+    data
 }
 
 fn scan_root(root: &Path) -> UsageData {
@@ -173,6 +178,117 @@ fn parse_transcript(
                     tokens,
                 });
             }
+        }
+    }
+}
+
+/// 递归扫描 Codex rollout。`sessions` 按年月日分层，`archived_sessions` 可能是
+/// 平铺目录，因此统一递归，且只读取 jsonl。
+fn scan_codex_root(root: &Path, out: &mut UsageData) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_codex_root(&path, out);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            parse_codex_transcript(&path, out);
+        }
+    }
+}
+
+fn json_u64(value: &serde_json::Value, snake: &str, camel: &str) -> Option<u64> {
+    value
+        .get(snake)
+        .or_else(|| value.get(camel))
+        .and_then(|value| value.as_u64())
+}
+
+fn codex_tool_label(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "exec" | "exec_command" | "shell" | "local_shell"
+    ) {
+        "Bash".into()
+    } else if lower.contains("apply_patch") || lower.contains("edit") || lower.contains("write") {
+        "Edit".into()
+    } else if lower.contains("read") || lower.contains("view") {
+        "Read".into()
+    } else if lower.contains("search") || lower.contains("find") || lower == "grep" {
+        "Search".into()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Codex 的 `total_token_usage` 是会话累计值，重复相加会严重膨胀；这里只累加每条
+/// token_count 的 `last_token_usage.total_tokens`。cwd/model 取该事件之前最近一次
+/// session_meta 或 turn_context，和 Codex 自身执行该次模型调用时的上下文一致。
+fn parse_codex_transcript(path: &Path, out: &mut UsageData) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut cwd = String::from("Codex");
+    let mut model = String::from("Codex");
+    for line in text.lines() {
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(payload) = raw.get("payload") else {
+            continue;
+        };
+        match raw.get("type").and_then(|value| value.as_str()) {
+            Some("session_meta") => {
+                if let Some(value) = payload.get("cwd").and_then(|value| value.as_str()) {
+                    cwd = value.to_string();
+                }
+            }
+            Some("turn_context") => {
+                if let Some(value) = payload.get("cwd").and_then(|value| value.as_str()) {
+                    cwd = value.to_string();
+                }
+                if let Some(value) = payload.get("model").and_then(|value| value.as_str()) {
+                    model = value.to_string();
+                }
+            }
+            Some("event_msg")
+                if payload.get("type").and_then(|value| value.as_str()) == Some("token_count") =>
+            {
+                let Some(last) = payload.pointer("/info/last_token_usage") else {
+                    continue;
+                };
+                let tokens = json_u64(last, "total_tokens", "totalTokens").unwrap_or(0);
+                let Some(ts) = raw
+                    .get("timestamp")
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                else {
+                    continue;
+                };
+                if tokens > 0 {
+                    out.events.push(UsageEvent {
+                        ts,
+                        project_label: cwd.clone(),
+                        model: model.clone(),
+                        tokens,
+                    });
+                }
+            }
+            Some("response_item") => {
+                let item_type = payload.get("type").and_then(|value| value.as_str());
+                if matches!(item_type, Some("custom_tool_call" | "function_call"))
+                    && let Some(name) = payload.get("name").and_then(|value| value.as_str())
+                {
+                    out.tools.push(ToolEvent {
+                        project_label: cwd.clone(),
+                        tool: codex_tool_label(name),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -347,9 +463,9 @@ fn bar_section(
     )
 }
 
-/// 用量页：本地 Claude Code 会话用量统计——今日走势 + 活动热力图（全局口径），
+/// 用量页：本地 Claude Code / Codex 会话用量统计——活动热力图（全局口径），
 /// 加当前项目 / 全局汇总各自的按模型、按工具拆分（全局汇总另加按项目拆分）。
-/// 数据来自 usage_stats::scan（后台扫描 `~/.claude/projects/**/*.jsonl` 缓存的结果）。
+/// 数据来自 usage_stats::scan（后台扫描两家本地 transcript 缓存的结果）。
 pub fn usage_view(
     cur_project: Option<String>,
     data: Option<Rc<UsageData>>,
@@ -364,10 +480,7 @@ pub fn usage_view(
         return placeholder_view("统计中…", muted);
     };
     if data.events.is_empty() {
-        return placeholder_view(
-            "没有找到本地 Claude Code 会话记录（~/.claude/projects）",
-            muted,
-        );
+        return placeholder_view("没有找到本地 Claude Code 或 Codex 会话记录", muted);
     }
 
     // 活动热力图：近 12 周，按周对齐成「列=周，行=周一到周日」的日历格（全局口径）。
@@ -574,7 +687,10 @@ mod tests {
     // 不用 `use super::*;`：本文件后面会加入 gpui/gpui_component 的 glob 导入，
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期会撞
     // rustc 的递归限制甚至直接崩溃——只导入测试真正用到的几个名字就够了。
-    use super::{UsageEvent, by_model, by_project, by_tool, daily_heatmap, scan_root};
+    use super::{
+        UsageData, UsageEvent, by_model, by_project, by_tool, daily_heatmap, scan_codex_root,
+        scan_root,
+    };
     use chrono::{Local, Utc};
     use std::path::Path;
 
@@ -713,6 +829,35 @@ mod tests {
         let data = scan_root(&tmp);
         std::fs::remove_dir_all(&tmp).unwrap();
         assert_eq!(data.events.len(), 1);
+    }
+
+    #[test]
+    fn codex_scan_uses_last_usage_and_tracks_project_model_and_tools() {
+        let tmp = std::env::temp_dir().join("smelt-usage-stats-test-codex");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let day = tmp.join("2026/07/28");
+        std::fs::create_dir_all(&day).unwrap();
+        write_transcript(
+            &day,
+            "rollout.jsonl",
+            &[
+                r#"{"timestamp":"2026-07-28T01:00:00Z","type":"session_meta","payload":{"cwd":"/work/old"}}"#,
+                r#"{"timestamp":"2026-07-28T01:00:01Z","type":"turn_context","payload":{"cwd":"/work/smelt","model":"gpt-5.6-sol"}}"#,
+                r#"{"timestamp":"2026-07-28T01:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec"}}"#,
+                r#"{"timestamp":"2026-07-28T01:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1000},"last_token_usage":{"total_tokens":15}}}}"#,
+                r#"{"timestamp":"2026-07-28T01:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","name":"exec"}}"#,
+            ],
+        );
+        let mut data = UsageData::default();
+        scan_codex_root(&tmp, &mut data);
+        std::fs::remove_dir_all(&tmp).unwrap();
+
+        assert_eq!(data.events.len(), 1);
+        assert_eq!(data.events[0].tokens, 15);
+        assert_eq!(data.events[0].model, "gpt-5.6-sol");
+        assert_eq!(data.events[0].project_label, "/work/smelt");
+        assert_eq!(data.tools.len(), 1);
+        assert_eq!(data.tools[0].tool, "Bash");
     }
 
     #[test]
