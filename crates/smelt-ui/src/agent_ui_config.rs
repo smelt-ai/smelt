@@ -26,6 +26,8 @@ pub struct AgentUiConfig {
     pub notify_success: bool,
     #[serde(default = "default_true")]
     pub notify_failure: bool,
+    #[serde(default = "default_true")]
+    pub notify_terminal_bell: bool,
     /// Claude ACP 会话的 agent 启动命令（空白分词）。默认 Claude 官方适配器；权限门
     /// 保留——结构化审批正是这条通道的卖点，别在这里加 bypass 类参数。
     ///
@@ -88,6 +90,7 @@ impl Default for AgentUiConfig {
             notify_input: true,
             notify_success: true,
             notify_failure: true,
+            notify_terminal_bell: true,
             acp_cmd: default_acp_cmd(),
             acp_copilot_cmd: default_acp_copilot_cmd(),
             acp_codex_cmd: default_acp_codex_cmd(),

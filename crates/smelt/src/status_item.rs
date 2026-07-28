@@ -14,6 +14,7 @@
 pub enum StatusItemEvent {
     ActivateMain,
     JumpToSession(usize),
+    JumpToDaemonSession(String),
 }
 
 /// 下拉菜单里一个会话条目的渲染数据：GPUI 主循环每帧把最新会话快照喂给
@@ -91,6 +92,39 @@ mod imp {
         }
     }
 
+    extern "C" fn on_notification_activated(
+        _this: &Object,
+        _cmd: Sel,
+        center: *mut Object,
+        notification: *mut Object,
+    ) {
+        unsafe {
+            let activation: i64 = msg_send![notification, activationType];
+            if activation == 0 {
+                return;
+            }
+            // macOS 不保证点击后立即从通知中心移除；显式删除，避免跳回会话后
+            // 同一条提醒仍留在列表里，看起来像没有处理成功。
+            let _: () = msg_send![center, removeDeliveredNotification: notification];
+            let info: *mut Object = msg_send![notification, userInfo];
+            let value: *mut Object = msg_send![info, objectForKey: nsstring("smeltSessionId")];
+            if value.is_null() {
+                return;
+            }
+            let utf8: *const std::os::raw::c_char = msg_send![value, UTF8String];
+            if utf8.is_null() {
+                return;
+            }
+            let session_id = std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned();
+            if let Some(tx) = CLICK_TX.get() {
+                let _ = tx.try_send(StatusItemEvent::JumpToDaemonSession(session_id));
+            }
+            activate_app();
+        }
+    }
+
     /// 注册（仅一次）并返回点击靶子类：一个只有两个方法的 `NSObject` 子类。
     fn target_class() -> &'static Class {
         static CLASS: OnceLock<&'static Class> = OnceLock::new();
@@ -105,6 +139,11 @@ mod imp {
                 decl.add_method(
                     sel!(smeltStatusItemJump:),
                     on_jump as extern "C" fn(&Object, Sel, *mut Object),
+                );
+                decl.add_method(
+                    sel!(userNotificationCenter:didActivateNotification:),
+                    on_notification_activated
+                        as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
                 );
             }
             decl.register()
@@ -181,6 +220,11 @@ mod imp {
 
             let target: *mut Object = msg_send![target_class(), new]; // +1，永不 release
             let _ = TARGET_PTR.set(target as usize);
+            let center: *mut Object = msg_send![
+                class!(NSUserNotificationCenter),
+                defaultUserNotificationCenter
+            ];
+            let _: () = msg_send![center, setDelegate: target];
 
             let menu: *mut Object = msg_send![class!(NSMenu), new]; // +1，永不 release
             let _ = MENU_PTR.set(menu as usize);
@@ -256,6 +300,40 @@ mod imp {
             let _: () = msg_send![app, activateIgnoringOtherApps: objc::runtime::YES];
         }
     }
+
+    /// 投递可定位的系统通知。session_id 放进 userInfo，点击后由上面的 AppKit
+    /// delegate 转成 JumpToDaemonSession 事件。
+    pub fn deliver_notification(session_id: &str, subtitle: &str, body: &str) {
+        let Some(&target_ptr) = TARGET_PTR.get() else {
+            return;
+        };
+        unsafe {
+            let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
+            if bundle.is_null() {
+                return;
+            }
+            let bundle_id: *mut Object = msg_send![bundle, bundleIdentifier];
+            if bundle_id.is_null() {
+                return;
+            }
+            let center: *mut Object = msg_send![
+                class!(NSUserNotificationCenter),
+                defaultUserNotificationCenter
+            ];
+            let target = target_ptr as *mut Object;
+            let _: () = msg_send![center, setDelegate: target];
+            let info: *mut Object = msg_send![class!(NSDictionary),
+                dictionaryWithObject: nsstring(session_id)
+                forKey: nsstring("smeltSessionId")];
+            let notification: *mut Object = msg_send![class!(NSUserNotification), new];
+            let _: () = msg_send![notification, setTitle: nsstring("smelt")];
+            let _: () = msg_send![notification, setSubtitle: nsstring(subtitle)];
+            let _: () = msg_send![notification, setInformativeText: nsstring(body)];
+            let _: () = msg_send![notification, setUserInfo: info];
+            let _: () = msg_send![center, deliverNotification: notification];
+            let _: () = msg_send![notification, release];
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -264,8 +342,9 @@ mod imp {
 
     pub fn setup(_tx: smol::channel::Sender<StatusItemEvent>) {}
     pub fn activate_app() {}
+    pub fn deliver_notification(_session_id: &str, _subtitle: &str, _body: &str) {}
     pub fn set_badge(_count: usize) {}
     pub fn update_menu(_entries: &[SessionEntry]) {}
 }
 
-pub use imp::{activate_app, set_badge, setup, update_menu};
+pub use imp::{activate_app, deliver_notification, set_badge, setup, update_menu};

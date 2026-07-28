@@ -45,8 +45,6 @@ pub struct SessionSummary {
     /// 本份会话消耗的 token 总量（input+output+两种 cache 相加，算法跟 usage_stats
     /// 一致），供总览卡片展示「当前会话」口径的用量——跟用量页的整项目累计口径不同。
     pub total_tokens: u64,
-    /// 最近一次工具调用名（按文件行序，最后一个 tool_use 块），供总览卡片展示。
-    pub last_tool: Option<String>,
 }
 
 /// 一轮对话：用户发言 / Claude 回复（含它这轮调用了哪些工具）。
@@ -142,7 +140,6 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
     let mut last_active_at: Option<DateTime<Utc>> = None;
     let mut message_count = 0usize;
     let mut total_tokens = 0u64;
-    let mut last_tool: Option<String> = None;
     let mut seen_uuids: HashSet<String> = HashSet::new();
 
     for line in text.lines() {
@@ -202,15 +199,6 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
             if has_text {
                 message_count += 1;
             }
-            if let Some(blocks) = blocks {
-                for b in blocks {
-                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
-                            last_tool = Some(name.to_string());
-                        }
-                    }
-                }
-            }
             if !dup {
                 if let Some(usage) = row.get("message").and_then(|m| m.get("usage")) {
                     let field = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -234,7 +222,6 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
         last_active_at,
         message_count,
         total_tokens,
-        last_tool,
     })
 }
 
@@ -409,7 +396,6 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
         .and_then(parse_rfc3339);
     let mut last_active_at = started_at;
     let mut message_count = 0usize;
-    let mut last_tool: Option<String> = None;
 
     for line in lines {
         let line = line.trim();
@@ -456,11 +442,7 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
                     title = Some(truncate(msg_text.trim(), 80));
                 }
             }
-            Some("function_call") => {
-                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                    last_tool = Some(name.to_string());
-                }
-            }
+            Some("function_call") => {}
             _ => {}
         }
     }
@@ -475,7 +457,6 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
         // Codex 的 event_msg.token_count 是「速率限制用量占比」，不是这一份会话的
         // token 总数，跟 Claude 那份口径对不上，宁可不接也不接一个会误导人的数字。
         total_tokens: 0,
-        last_tool,
     })
 }
 
@@ -636,7 +617,6 @@ fn summarize_grok_session(session_dir: &Path, want_cwd: &str) -> Option<SessionS
             .unwrap_or(0) as usize,
         // summary.json 没有 token 统计字段（实测），跟 Codex 一样宁可留空。
         total_tokens: 0,
-        last_tool: None, // 要扫 chat_history.jsonl 才能拿到，摘要行不为这一列多付这个成本
     })
 }
 
@@ -813,9 +793,8 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
         .map(|s| truncate(s, 80))
         .unwrap_or_else(|| session_id.clone());
 
-    // workspace.yaml 没存消息数/最近工具名，要拿这两项就得扫一遍 events.jsonl——
-    // 跟 Claude/Codex 列表页同样的代价，不算特殊。
-    let (mut message_count, mut last_tool) = (0usize, None);
+    // workspace.yaml 没存消息数，要拿到它就得扫一遍 events.jsonl。
+    let mut message_count = 0usize;
     if let Ok(text) = std::fs::read_to_string(session_dir.join("events.jsonl")) {
         for line in text.lines() {
             let Ok(row) = serde_json::from_str::<Value>(line.trim()) else {
@@ -823,15 +802,6 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
             };
             match row.get("type").and_then(|v| v.as_str()) {
                 Some("user.message") | Some("assistant.message") => message_count += 1,
-                Some("tool.execution_start") => {
-                    if let Some(name) = row
-                        .get("data")
-                        .and_then(|d| d.get("toolName"))
-                        .and_then(|v| v.as_str())
-                    {
-                        last_tool = Some(name.to_string());
-                    }
-                }
                 _ => {}
             }
         }
@@ -845,7 +815,6 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
         last_active_at: fields.get("updated_at").and_then(|v| parse_rfc3339(v)),
         message_count,
         total_tokens: 0, // events.jsonl 没有可靠的整会话 token 汇总字段（实测）
-        last_tool,
     })
 }
 
@@ -1932,7 +1901,6 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "实际问题"); // 合成的 environment_context 不该被当标题
         assert_eq!(sessions[0].message_count, 2);
-        assert_eq!(sessions[0].last_tool.as_deref(), Some("exec_command"));
 
         let detail = load_codex_session_detail(&sessions[0].path).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -2010,7 +1978,6 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "调试问题");
         assert_eq!(sessions[0].message_count, 2);
-        assert_eq!(sessions[0].last_tool.as_deref(), Some("bash"));
 
         let detail = load_copilot_session_detail(&sessions[0].path).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();

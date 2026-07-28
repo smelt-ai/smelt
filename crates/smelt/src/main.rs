@@ -29,11 +29,6 @@ mod hotspot;
 mod inspector;
 mod mem_usage;
 use smelt_core::osc;
-// 权限菜单解析：唯一真源，与 smeltd 共用 smelt-core 里的同一份（smeltd 解析后随
-// SessionState 下发给手机端）。曾经 Rust/TS 各一份并已实测漂移，别再在别处另写一版。
-use smelt_core::permission_menu;
-// 网格 → 文本行：同样与 smeltd 共用，避免两端各写一遍逐格拼行的宽字符/零宽处理。
-use smelt_core::term_text;
 mod pet;
 mod rate_limits;
 mod session_history;
@@ -82,7 +77,6 @@ use git_panel::{BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoIn
 use hotspot::hotspot_view;
 use session_history::{HistoryListState, HistoryPane, history_view};
 use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
-use usage_stats::format_count;
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
 gpui::actions!(
@@ -217,13 +211,12 @@ impl ListDelegate for CmdDelegate {
     }
 }
 
-/// 舞台覆盖页（stage_override 的取值）：会话总览 / 任务总览 / 文件树 / Git /
+/// 舞台覆盖页（stage_override 的取值）：任务总览 / 文件树 / Git /
 /// 热力图 / 历史。曾是主区 TabBar 的互斥视图（含 Terminal 变体）；改版后终端
 /// 舞台 = `stage_override == None`，这里只剩「盖在舞台上的全屏页」。
 #[derive(Clone, Copy, PartialEq)]
 enum MainView {
-    Overview,
-    /// 任务总览（卡片网格，对齐会话总览交互，内容只含任务）。
+    /// 任务总览（卡片网格，内容只含任务）。
     Tasks,
     /// 「文件树 + 内容」双栏全宽（inspector FILES 面板 ⤢ 提升上来；此时面板收起）。
     Files,
@@ -252,16 +245,6 @@ enum GitTab {
 // ui_theme 共用同一份判断，见 agent_status.rs），这里重导出成原来的裸名字，
 // 全库既有的 `AgentStatus::x` 写法不用逐处改。
 pub(crate) use smelt_core::agent_status::AgentStatus;
-
-/// 总览页筛选：基于 AgentStatus / 状态通道，不猜 TUI。
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum OverviewFilter {
-    #[default]
-    All,
-    /// 等批准 + 需要处理
-    NeedsMe,
-    Running,
-}
 
 // DaemonStates（守护上报的会话状态镜像，全局单例）/ PendingAgentNotifs（状态
 // 通道待弹出的应用内 Notification）：ACP 视图独立成 smelt-acp-view 后要跨
@@ -500,6 +483,7 @@ impl Session {
                 terminal_view::LaunchKind::Claude => IconName::Asterisk,
                 terminal_view::LaunchKind::Codex => IconName::Bot,
                 terminal_view::LaunchKind::Copilot => IconName::Github,
+                terminal_view::LaunchKind::Grok => IconName::Bot,
                 terminal_view::LaunchKind::Terminal => IconName::SquareTerminal,
             },
             SessionKind::Acp(_) => IconName::Bot,
@@ -544,90 +528,26 @@ impl Session {
         }
     }
 
-    /// 会话内结构化待处理消息（供总览卡片展示）。普通 OSC 通知不参与状态正文。
-    fn notification_msg(&self, cx: &App) -> Option<String> {
-        let v = self.term_leaves();
-        for t in &v {
-            if let Some(state) = daemon_state_for(t, cx) {
-                if matches!(
-                    state.phase,
-                    terminal::DaemonPhase::AwaitingApproval
-                        | terminal::DaemonPhase::WaitingForUser
-                        | terminal::DaemonPhase::Failed
-                ) {
-                    if let Some(detail) = state.detail_line() {
-                        return Some(detail);
-                    }
-                }
-            }
-        }
-        if let Some(p) = self.permission_prompt(cx) {
-            return p.summary;
-        }
-        None
-    }
-
     /// 阻塞审批卡的正文必须来自产生审批事实的同一个 pane，不能拿会话里任意一条
     /// 普通完成通知来拼接，否则多分屏或旧 OSC 消息会出现“Blocked + 已完成”。
     fn approval_msg(&self, cx: &App) -> Option<String> {
         match &self.kind {
             SessionKind::Acp(_) => None,
-            SessionKind::Term { .. } => self.term_leaves().iter().find_map(|t| {
-                if let Some(state) = daemon_state_for(t, cx) {
-                    if state.phase == terminal::DaemonPhase::AwaitingApproval {
-                        return state
-                            .detail_line()
-                            .or_else(|| t.read(cx).permission_prompt().and_then(|p| p.summary));
+            SessionKind::Term { .. } => {
+                for t in self.term_leaves() {
+                    let daemon_state = daemon_state_for(&t, cx);
+                    if let Some(state) = daemon_state.as_ref()
+                        && state.structured_events
+                    {
+                        if state.phase == terminal::DaemonPhase::AwaitingApproval {
+                            return state.detail_line();
+                        }
+                        continue;
                     }
                 }
-                t.read(cx).permission_prompt().and_then(|p| p.summary)
-            }),
-        }
-    }
-
-    /// 会话内扫到的权限菜单（优先含审批/菜单的 pane）。
-    fn permission_prompt(&self, cx: &App) -> Option<permission_menu::PermissionPrompt> {
-        let v = self.term_leaves();
-        if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
-            if let Some(p) = t.read(cx).permission_prompt() {
-                return Some(p);
+                None
             }
         }
-        v.iter().find_map(|t| t.read(cx).permission_prompt())
-    }
-
-    /// 需要用户处理的 pane：只认结构化等待/失败或当前网格审批菜单。
-    fn attention_pane(&self, cx: &App) -> Option<Entity<TerminalView>> {
-        let v = self.term_leaves();
-        if let Some(t) = v.iter().find(|t| t.read(cx).is_awaiting_approval()) {
-            return Some(t.clone());
-        }
-        v.iter()
-            .find(|t| {
-                daemon_state_for(t, cx).is_some_and(|state| {
-                    matches!(
-                        state.phase,
-                        terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed
-                    )
-                })
-            })
-            .cloned()
-    }
-
-    /// 活动 pane 末尾 n 行文本（总览卡片迷你预览）。
-    fn preview(&self, cx: &App, n: usize) -> Vec<String> {
-        match &self.kind {
-            SessionKind::Term { active, .. } => active.read(cx).last_lines(n),
-            SessionKind::Acp(view) => view.read(cx).last_lines(n),
-        }
-    }
-
-    /// 会话内最近一次通知时刻（总览「N 分钟前」）。
-    fn notified_at(&self, cx: &App) -> Option<Instant> {
-        self.term_leaves()
-            .iter()
-            .filter_map(|t| t.read(cx).notified_at())
-            .max()
     }
 
     /// 会话状态：等审批 > 需要处理 > 运行中 > 刚完成未读 > 空闲（遍历全部 pane 取最高）。
@@ -657,24 +577,23 @@ impl Session {
         let mut running = false;
         let mut done = false;
         for t in &v {
-            if let Some(state) = daemon_state_for(t, cx) {
-                match state.phase {
-                    terminal::DaemonPhase::AwaitingApproval => {
+            let daemon_state = daemon_state_for(t, cx);
+            if let Some(state) = daemon_state.as_ref() {
+                match state.structured_events.then_some(state.phase) {
+                    Some(terminal::DaemonPhase::AwaitingApproval) => {
                         return AgentStatus::WaitingApproval;
                     }
-                    terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
+                    Some(terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed) => {
                         needs_attention = true;
                     }
-                    terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool => {
+                    Some(
+                        terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool,
+                    ) => {
                         running = true;
                     }
-                    terminal::DaemonPhase::Succeeded => done = true,
-                    terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead => {}
+                    Some(terminal::DaemonPhase::Succeeded) => done = true,
+                    Some(terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead) | None => {}
                 }
-            }
-            let tv = t.read(cx);
-            if tv.is_awaiting_approval() {
-                return AgentStatus::WaitingApproval;
             }
         }
         if needs_attention {
@@ -686,17 +605,17 @@ impl Session {
         if done {
             return AgentStatus::Done;
         }
+        // Codex OSC 9 fallback 的 Stop 必须压过可能长期不复位的 spinner 标题。
+        if v.iter().any(|t| t.read(cx).completed_unread()) {
+            return AgentStatus::Done;
+        }
         // 没有结构化运行事实时才退化到标题 spinner。
-        if daemon_state_for(active, cx).is_none()
+        if !daemon_state_for(active, cx).is_some_and(|state| state.structured_events)
             && let Some(raw) = active.read(cx).agent_title()
         {
             if crate::osc::title_starts_with_spinner(raw.trim_start()) {
                 return AgentStatus::Running;
             }
-        }
-        // 有 pane 刚跑完还没被回应 → 提示「有结果可看」。
-        if v.iter().any(|t| t.read(cx).completed_unread()) {
-            return AgentStatus::Done;
         }
         AgentStatus::Idle
     }
@@ -756,7 +675,9 @@ fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
 /// （Session::status 是取会话内所有 pane 的最高态）。
 fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
     let daemon_state = daemon_state_for(view, cx);
-    if let Some(state) = &daemon_state {
+    if let Some(state) = &daemon_state
+        && state.structured_events
+    {
         match state.phase {
             terminal::DaemonPhase::AwaitingApproval => return AgentStatus::WaitingApproval,
             terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
@@ -770,66 +691,17 @@ fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
         }
     }
     let t = view.read(cx);
-    if t.is_awaiting_approval() {
-        return AgentStatus::WaitingApproval;
+    if t.completed_unread() {
+        return AgentStatus::Done;
     }
-    if daemon_state.is_none()
+    if !daemon_state.is_some_and(|state| state.structured_events)
         && let Some(raw) = t.agent_title()
     {
         if crate::osc::title_starts_with_spinner(raw.trim_start()) {
             return AgentStatus::Running;
         }
     }
-    if t.completed_unread() {
-        return AgentStatus::Done;
-    }
     AgentStatus::Idle
-}
-
-/// 总览卡片事实块是否值得展示（过滤终端预览/说明文案误入）。
-fn overview_fact_is_usable(m: &str) -> bool {
-    let t = m.trim();
-    if t.is_empty() || t.len() < 2 {
-        return false;
-    }
-    // 终端状态行 / 快捷键提示
-    if t.contains("Shift+") || t.contains("Ctrl+") || t.contains("manual mode") {
-        return false;
-    }
-    // 开发说明、UI 文案泄漏
-    const BAD: &[&str] = &[
-        "空筛选",
-        "打开终端",
-        "卡片信息",
-        "完全退出",
-        "重开 Smelt",
-        "进 总览",
-        "hook 事实",
-        "待我处理",
-        "权限菜单",
-    ];
-    if BAD.iter().any(|b| t.contains(b)) {
-        return false;
-    }
-    // 纯状态栏碎片
-    if t.starts_with("current ") || t.starts_with("weekly ") {
-        return false;
-    }
-    true
-}
-
-/// 相对时间：「刚刚 / N 秒前 / N 分钟前 / N 小时前」。
-fn ago(t: Instant) -> String {
-    let s = t.elapsed().as_secs();
-    if s < 10 {
-        "刚刚".to_string()
-    } else if s < 60 {
-        format!("{s} 秒前")
-    } else if s < 3600 {
-        format!("{} 分钟前", s / 60)
-    } else {
-        format!("{} 小时前", s / 3600)
-    }
 }
 
 /// 去掉 agent 标题开头的状态符号（✳ / Braille spinner ⠂⠐ 等）+ 空白，保留任务名。
@@ -1575,8 +1447,6 @@ struct Workspace {
     /// 清除，同一会话再次阻塞会重新弹。见 toast.rs。
     toast_dismissed: HashSet<EntityId>,
     toast_snoozed: HashMap<EntityId, Instant>,
-    /// 总览页筛选（全部 / 待我处理 / 运行中）。
-    overview_filter: OverviewFilter,
     /// 文件树里已展开的文件夹绝对路径。
     expanded: HashSet<String>,
     /// 目录列表缓存（绝对路径 → 已排序过滤的直接子项 (名, 是否目录)）。后台读盘填充，
@@ -1720,8 +1590,6 @@ struct Workspace {
     /// 文件树列 resize 事件订阅（拖动完写回存档）；随视图存活。
     _file_tree_resize_sub: Subscription,
     _git_left_resize_sub: Subscription,
-    /// git 信息缓存（cwd → (分支, 改动数)），总览页后台刷新、渲染读缓存。
-    git_cache: HashMap<String, (String, usize)>,
     /// 宠物大脑（LLM）配置的输入框；首次打开设置面板时懒创建（需要 window）。
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
@@ -1974,7 +1842,6 @@ impl Workspace {
             inspector_open: true,
             toast_dismissed: HashSet::new(),
             toast_snoozed: HashMap::new(),
-            overview_filter: OverviewFilter::All,
             expanded: HashSet::new(),
             dir_cache: HashMap::new(),
             dir_inflight: HashSet::new(),
@@ -2054,7 +1921,6 @@ impl Workspace {
             git_left_resize,
             git_left_w,
             _git_left_resize_sub,
-            git_cache: HashMap::new(),
             git_status: HashMap::new(),
             git_status_inflight: HashSet::new(),
             branches: HashMap::new(),
@@ -3398,7 +3264,7 @@ impl Workspace {
         if let Some(sess) = self.sessions.get_mut(self.active_session) {
             sess.set_active_term(e.clone());
         }
-        // 只聚焦、不清「需要注意」——查看≠处理，等用户实际输入回应了才清（见 TerminalView）。
+        e.update(cx, |terminal, _cx| terminal.mark_read());
         let h = e.read(cx).focus_handle();
         window.focus(&h, cx);
         self.save_state(cx);
@@ -3456,48 +3322,6 @@ impl Workspace {
         self.activate_pane(&pane, window, cx);
     }
 
-    /// 总览：打开会话，并尽量聚焦到「需要处理」的那个 pane。
-    fn overview_open_session(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.sessions.len() {
-            return;
-        }
-        let attention = self.sessions[ix].attention_pane(cx);
-        self.activate(ix, window, cx);
-        if let Some(pane) = attention {
-            self.activate_pane(&pane, window, cx);
-        }
-    }
-
-    /// 总览审批：向权限菜单所在 pane 注入选项键（来自网格解析的 `key`，如 `1`/`3`）。
-    /// 留在总览，方便连批；不强制切终端页。
-    fn overview_select_permission(
-        &mut self,
-        ix: usize,
-        key: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if ix >= self.sessions.len() || key.is_empty() {
-            return;
-        }
-        let Some(pane) = self.sessions[ix]
-            .attention_pane(cx)
-            .or_else(|| self.sessions[ix].active_term().cloned())
-        else {
-            return; // ACP 会话的审批走视图内按钮，不注 key
-        };
-        if let Some(sess) = self.sessions.get_mut(ix) {
-            sess.set_active_term(pane.clone());
-        }
-        self.active_session = ix;
-        let key = key.to_string();
-        pane.update(cx, |tv, cx| {
-            tv.type_text(&key, cx);
-            tv.send_enter(cx);
-        });
-        cx.notify();
-    }
-
     /// 切换到第 ix 个会话并聚焦。
     /// 按侧栏「分组展平后的视觉顺序」切上/下一个会话（delta=-1/1），到头循环。
     /// 快捷键 cmd-up / cmd-down；顺序跟眼睛看到的一致（跨项目一路顺下去），
@@ -3545,8 +3369,7 @@ impl Workspace {
             // 新布局没有常驻 TabBar，这里不收的话覆盖页会一直盖着舞台，
             // 「点了会话却还满屏 Git」看起来就像回不到终端。
             self.stage_override = None;
-            // 切过去只是查看，不清「需要注意」——等用户实际输入回应了才清。
-            // ACP 会话例外：绿点「有结果可看」查看即清（消息流全文可见，看到=处理）。
+            // 切到会话即视为看过一次性通知；结构化等待状态仍由 daemon phase 保留。
             if let SessionKind::Acp(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
                     // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
@@ -3557,6 +3380,9 @@ impl Workspace {
                     v.focus_input(window, cx);
                 });
             } else {
+                if let Some(view) = self.sessions[ix].active_term().cloned() {
+                    view.update(cx, |terminal, _cx| terminal.mark_read());
+                }
                 self.focus_active(window, cx);
             }
             self.save_state(cx);
@@ -4293,635 +4119,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 总览页：会话态势监控（任务在左侧栏，不在此页）。
-    fn render_overview(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let (fg, muted, border) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground, t.border)
-        };
-
-        let need_attn = self
-            .sessions
-            .iter()
-            .filter(|s| {
-                matches!(
-                    s.status(cx),
-                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-                )
-            })
-            .count();
-
-        let header = div()
-            .px_5()
-            .pt_4()
-            .pb_2()
-            .border_b_1()
-            .border_color(border)
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(div().text_xl().font_bold().text_color(fg).child("总览"))
-            .child(div().text_xs().text_color(muted).child(if need_attn > 0 {
-                format!("会话监控 · {need_attn} 需关注 · hook 事实 + 终端权限菜单")
-            } else {
-                format!("会话监控 · {} · 点卡片进入终端", self.sessions.len())
-            }));
-
-        let body = self.render_overview_sessions(cx);
-
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(
-                div()
-                    .id("overview-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_5()
-                    .child(body),
-            )
-    }
-
-    /// 会话监控网格。
-    fn render_overview_sessions(&mut self, cx: &mut Context<Self>) -> Div {
-        let (fg, muted) = {
-            let t = cx.theme();
-            (t.foreground, t.muted_foreground)
-        };
-        let card_bg = rgb(ui_theme::bg_card());
-        let card_border = ui_theme::overlay(0x12);
-        let soft_bg: Hsla = ui_theme::overlay(0x0d).into();
-        let c_red: Hsla = rgb(ui_theme::red()).into();
-        let c_blue: Hsla = rgb(ui_theme::blue()).into();
-        let c_green: Hsla = rgb(ui_theme::green()).into();
-        let c_amber: Hsla = rgb(ui_theme::yellow()).into();
-        let red_tint: Hsla = ui_theme::tint(ui_theme::red(), 0x22).into();
-        let blue_tint: Hsla = ui_theme::tint(ui_theme::blue(), 0x22).into();
-        let green_tint: Hsla = ui_theme::tint(ui_theme::green(), 0x22).into();
-        let amber_tint: Hsla = ui_theme::tint(ui_theme::yellow(), 0x22).into();
-        let c_muted_dot: Hsla = ui_theme::tint(ui_theme::text_muted(), 0xaa).into();
-
-        let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
-        let need = statuses
-            .iter()
-            .filter(|s| {
-                matches!(
-                    s,
-                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-                )
-            })
-            .count();
-        let running = statuses
-            .iter()
-            .filter(|s| matches!(s, AgentStatus::Running))
-            .count();
-        let done = statuses
-            .iter()
-            .filter(|s| matches!(s, AgentStatus::Done))
-            .count();
-        let filter = self.overview_filter;
-        // 筛选：要一眼像「分段按钮」，未选中也有底/边/hover，别和装饰 pill 混。
-        let filter_chip =
-            |id: &'static str, label: String, f: OverviewFilter, color: Hsla, tint: Hsla| {
-                let on = filter == f;
-                let idle_bg: Hsla = ui_theme::overlay(0x14).into();
-                let idle_border: Hsla = ui_theme::overlay(0x28).into();
-                div()
-                    .id(id)
-                    .px(px(12.))
-                    .py(px(6.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(if on { tint } else { idle_bg })
-                    .border_1()
-                    .border_color(if on { color } else { idle_border })
-                    .text_sm()
-                    .font_weight(if on {
-                        gpui::FontWeight::SEMIBOLD
-                    } else {
-                        gpui::FontWeight::NORMAL
-                    })
-                    .text_color(if on { color } else { fg })
-                    .hover(|d| {
-                        d.bg(if on {
-                            tint
-                        } else {
-                            ui_theme::overlay(0x22).into()
-                        })
-                        .border_color(color)
-                    })
-                    .child(label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.overview_filter = f;
-                            cx.notify();
-                        }),
-                    )
-            };
-
-        let summary = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .flex_wrap()
-            .mb_4()
-            .child(filter_chip(
-                "ov-f-all",
-                format!("全部 {}", self.sessions.len()),
-                OverviewFilter::All,
-                fg,
-                soft_bg,
-            ))
-            .child(filter_chip(
-                "ov-f-need",
-                format!("待我处理 {need}"),
-                OverviewFilter::NeedsMe,
-                c_red,
-                red_tint,
-            ))
-            .child(filter_chip(
-                "ov-f-run",
-                format!("运行中 {running}"),
-                OverviewFilter::Running,
-                c_blue,
-                blue_tint,
-            ))
-            .children((done > 0).then(|| {
-                // 纯统计，不可点——灰一点与上面筛选按钮区分
-                div()
-                    .px(px(12.))
-                    .py(px(6.))
-                    .rounded_md()
-                    .bg(soft_bg)
-                    .text_sm()
-                    .text_color(muted)
-                    .child(format!("{done} 已完成"))
-            }));
-
-        if self.sessions.is_empty() {
-            return div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .py_16()
-                .child(div().text_sm().text_color(muted).child("还没有会话"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("侧栏打开项目或「新建终端」后，状态会出现在这里"),
-                );
-        }
-
-        let mut order: Vec<usize> = (0..self.sessions.len())
-            .filter(|&ix| match filter {
-                OverviewFilter::All => true,
-                OverviewFilter::NeedsMe => matches!(
-                    statuses[ix],
-                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-                ),
-                OverviewFilter::Running => matches!(statuses[ix], AgentStatus::Running),
-            })
-            .collect();
-        order.sort_by_key(|&ix| match statuses[ix] {
-            AgentStatus::WaitingApproval => 0,
-            AgentStatus::NeedsAttention => 1,
-            AgentStatus::Running => 2,
-            AgentStatus::Done => 3,
-            AgentStatus::Idle => 4,
-        });
-
-        if order.is_empty() {
-            let empty_hint = match filter {
-                OverviewFilter::NeedsMe => "当前没有需要你处理的会话",
-                OverviewFilter::Running => "当前没有运行中的会话",
-                OverviewFilter::All => "没有会话",
-            };
-            return div().child(summary).child(
-                div()
-                    .py_12()
-                    .flex()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(empty_hint),
-            );
-        }
-
-        let cards: Vec<_> = order
-            .into_iter()
-            .map(|ix| {
-                let cwd_opt = self.sessions[ix].cwd(cx);
-                if let Some(c) = cwd_opt.clone() {
-                    self.ensure_session_list(settings::AcpAgentKind::Claude, None, c, cx);
-                }
-                let live = cwd_opt
-                    .as_deref()
-                    .and_then(|c| {
-                        self.session_list.get(&session_history::session_list_key(
-                            settings::AcpAgentKind::Claude,
-                            None,
-                            c,
-                        ))
-                    })
-                    .and_then(|(_, list)| list.first());
-                // 状态通道（hook 事实）优先；jsonl 作补充。
-                let daemon_detail = self.sessions[ix]
-                    .term_leaves()
-                    .iter()
-                    .find_map(|t| daemon_state_for(t, cx));
-                let phase_label = daemon_detail.as_ref().map(|d| d.phase_label().to_string());
-                let phase_detail = daemon_detail.as_ref().and_then(|d| d.detail_line());
-                let phase_age = daemon_detail.as_ref().and_then(|d| d.phase_age_secs());
-                let mut meta_parts: Vec<String> = Vec::new();
-                if let Some((a, b)) = live.and_then(|s| s.started_at.zip(s.last_active_at)) {
-                    let mins = (b - a).num_minutes().max(0);
-                    if mins > 0 {
-                        meta_parts.push(format!("⏱ {mins} 分钟"));
-                    }
-                }
-                if let Some(tokens) = live.map(|s| s.total_tokens).filter(|t| *t > 0) {
-                    meta_parts.push(format!("🔢 {}", format_count(tokens)));
-                }
-                if phase_detail.is_none() {
-                    if let Some(tool) = live.and_then(|s| s.last_tool.clone()) {
-                        meta_parts.push(format!("🔧 最近 {tool}"));
-                    }
-                }
-                let meta_line = (!meta_parts.is_empty()).then(|| meta_parts.join(" · "));
-
-                let s = &self.sessions[ix];
-                let name = s.title(cx);
-                let cwd = cwd_opt
-                    .clone()
-                    .unwrap_or_default()
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                let status = statuses[ix];
-                let (dot, label, tint) = match status {
-                    AgentStatus::WaitingApproval => (c_red, "等你批准", red_tint),
-                    AgentStatus::NeedsAttention => (c_amber, "需要处理", amber_tint),
-                    AgentStatus::Running => (c_blue, "运行中", blue_tint),
-                    AgentStatus::Done => (c_green, "已完成", green_tint),
-                    AgentStatus::Idle => (c_muted_dot, "空闲", soft_bg),
-                };
-                let needs_user = matches!(
-                    status,
-                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-                );
-                let is_approval = status == AgentStatus::WaitingApproval;
-                let perm = s.permission_prompt(cx);
-                let panes = s.pane_count();
-                let notif = s.notification_msg(cx);
-                let when = s.notified_at(cx).map(ago);
-                let preview = s.preview(cx, 3);
-                let git = cwd_opt
-                    .as_ref()
-                    .and_then(|c| self.git_cache.get(c).cloned());
-                // 等审批时描红边，方便在网格里扫到
-                let card_edge: Hsla = if is_approval {
-                    c_red.into()
-                } else if status == AgentStatus::NeedsAttention {
-                    c_amber.into()
-                } else {
-                    card_border.into()
-                };
-                // 审批/工具事实：hook 优先；过滤掉终端预览误扫、说明文案等垃圾。
-                let fact_question = phase_detail
-                    .clone()
-                    .or_else(|| {
-                        // 仅审批/需关注时用 OSC 通知垫底，避免空闲会话把预览塞进红块
-                        if matches!(
-                            statuses[ix],
-                            AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-                        ) {
-                            notif.clone()
-                        } else {
-                            None
-                        }
-                    })
-                    .filter(|m| overview_fact_is_usable(m));
-                let age_str = phase_age.map(|a| {
-                    if a < 60 {
-                        format!("已等 {a} 秒")
-                    } else {
-                        format!("已等 {} 分钟", a / 60)
-                    }
-                });
-
-                div()
-                    .id(("ov-card", ix))
-                    .w(px(300.))
-                    .p_4()
-                    .rounded(px(18.))
-                    .border_1()
-                    .border_color(card_edge)
-                    .when(is_approval, |d| d.border_2().border_color(c_red))
-                    // 等审批的卡片底压一层薄红，跟普通卡片一眼分开
-                    .bg(if is_approval {
-                        ui_theme::tint(ui_theme::red(), 0x1a)
-                    } else {
-                        card_bg
-                    })
-                    .shadow_sm()
-                    .cursor_pointer()
-                    .hover(|d| {
-                        d.border_color(dot)
-                            .shadow_lg()
-                            .bg(rgb(ui_theme::bg_hover()))
-                    })
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev, window, cx| {
-                            this.overview_open_session(ix, window, cx);
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .min_w_0()
-                            .child(div().size(px(9.)).rounded_full().bg(dot).flex_shrink_0())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_semibold()
-                                    .text_color(fg)
-                                    .child(name),
-                            )
-                            .children(age_str.clone().or(when).map(|w| {
-                                div()
-                                    .text_xs()
-                                    .text_color(if is_approval { c_red } else { muted })
-                                    .flex_shrink_0()
-                                    .child(w)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .px(px(8.))
-                                    .py(px(2.))
-                                    .rounded_full()
-                                    .bg(tint)
-                                    .text_color(dot)
-                                    .child(
-                                        phase_label.clone().unwrap_or_else(|| label.to_string()),
-                                    ),
-                            )
-                            .child(div().text_color(muted).child(cwd))
-                            .child(div().text_color(muted).child(format!("· {panes} 窗格"))),
-                    )
-                    // hook 事实块：工具 / 审批问句（审批时更醒目）
-                    .children(fact_question.as_ref().map(|q| {
-                        let (bg, tc) = if is_approval {
-                            (ui_theme::tint(ui_theme::red(), 0x33), c_red)
-                        } else if matches!(status, AgentStatus::Running) {
-                            (ui_theme::tint(ui_theme::blue(), 0x22), c_blue)
-                        } else if matches!(status, AgentStatus::NeedsAttention) {
-                            (ui_theme::tint(ui_theme::yellow(), 0x22), c_amber)
-                        } else {
-                            (ui_theme::overlay(0x0d), muted)
-                        };
-                        div()
-                            .px(px(10.))
-                            .py(px(8.))
-                            .rounded_lg()
-                            .bg(bg)
-                            .text_sm()
-                            .text_color(tc)
-                            .line_clamp(4)
-                            .child(q.clone())
-                    }))
-                    .children(git.map(|(branch, changed)| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("⎇ {branch}"))
-                            .children((changed > 0).then(|| {
-                                div().text_color(c_amber).child(format!("● {changed} 改动"))
-                            }))
-                    }))
-                    .children(
-                        meta_line
-                            .map(|line| div().text_xs().text_color(muted).truncate().child(line)),
-                    )
-                    // OSC 通知且与 hook 问句不同时再显示
-                    .children(
-                        notif
-                            .filter(|m| {
-                                fact_question
-                                    .as_ref()
-                                    .is_none_or(|q| !q.contains(m.as_str()) && m != q)
-                            })
-                            .map(|m| {
-                                let (bg, tc) = if is_approval {
-                                    (ui_theme::tint(ui_theme::red(), 0x22), c_red)
-                                } else {
-                                    (ui_theme::tint(ui_theme::yellow(), 0x22), c_amber)
-                                };
-                                div()
-                                    .px(px(8.))
-                                    .py(px(4.))
-                                    .rounded_lg()
-                                    .bg(bg)
-                                    .text_xs()
-                                    .text_color(tc)
-                                    .line_clamp(2)
-                                    .child(m)
-                            }),
-                    )
-                    .children((!preview.is_empty()).then(|| {
-                        div()
-                            .p_2()
-                            .rounded_lg()
-                            .bg(rgb(ui_theme::bg_status()))
-                            .font_family(terminal_view::font_family())
-                            .text_xs()
-                            .text_color(muted)
-                            .flex()
-                            .flex_col()
-                            .children(preview.into_iter().map(|line| {
-                                div()
-                                    .truncate()
-                                    .whitespace_nowrap()
-                                    .child(if line.is_empty() {
-                                        " ".to_string()
-                                    } else {
-                                        line
-                                    })
-                            }))
-                    }))
-                    // 需要用户时：实心/描边按钮，和侧栏「新建终端」一样有底有边
-                    .when(needs_user, |card| {
-                        let ix_open = ix;
-                        let opts = perm.as_ref().map(|p| p.options.clone()).unwrap_or_default();
-                        let has_opts = !opts.is_empty();
-                        let btn_idle: Hsla = ui_theme::overlay(0x18).into();
-                        let btn_border: Hsla = ui_theme::overlay(0x30).into();
-                        card.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .pt_1()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .children(opts.into_iter().enumerate().map(|(oi, opt)| {
-                                    let ix_sel = ix;
-                                    let key = opt.key.clone();
-                                    let label = opt.button_label();
-                                    let primary = opt.is_primary();
-                                    div()
-                                        .id(SharedString::from(format!("ov-perm-{ix_sel}-{oi}")))
-                                        .px(px(12.))
-                                        .py(px(6.))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(if primary { c_green } else { btn_border })
-                                        .bg(if primary { green_tint } else { btn_idle })
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(if primary { c_green } else { fg })
-                                        .hover(|d| d.opacity(0.88).border_color(fg))
-                                        .child(label)
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.overview_select_permission(
-                                                    ix_sel, &key, window, cx,
-                                                );
-                                            }),
-                                        )
-                                }))
-                                // 网格没扫到菜单时的兜底：固定 1/3
-                                .when(is_approval && !has_opts, |row| {
-                                    let ix_a = ix;
-                                    let ix_d = ix;
-                                    row.child(
-                                        div()
-                                            .id(("ov-allow", ix_a))
-                                            .px(px(12.))
-                                            .py(px(6.))
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(c_green)
-                                            .bg(green_tint)
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(c_green)
-                                            .hover(|d| d.opacity(0.88))
-                                            .child("允许")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, window, cx| {
-                                                    this.overview_select_permission(
-                                                        ix_a, "1", window, cx,
-                                                    );
-                                                }),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(("ov-deny", ix_d))
-                                            .px(px(12.))
-                                            .py(px(6.))
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(c_red)
-                                            .bg(red_tint)
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(c_red)
-                                            .hover(|d| d.opacity(0.88))
-                                            .child("拒绝")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, window, cx| {
-                                                    this.overview_select_permission(
-                                                        ix_d, "3", window, cx,
-                                                    );
-                                                }),
-                                            ),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .id(("ov-open", ix_open))
-                                        .px(px(12.))
-                                        .py(px(6.))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(if is_approval || has_opts {
-                                            btn_border
-                                        } else {
-                                            c_blue
-                                        })
-                                        .bg(if is_approval || has_opts {
-                                            btn_idle
-                                        } else {
-                                            blue_tint
-                                        })
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(if is_approval || has_opts {
-                                            fg
-                                        } else {
-                                            c_blue
-                                        })
-                                        .hover(|d| d.opacity(0.88).border_color(c_blue))
-                                        .child(if is_approval {
-                                            "打开终端"
-                                        } else {
-                                            "打开"
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.overview_open_session(ix_open, window, cx);
-                                            }),
-                                        ),
-                                ),
-                        )
-                    })
-            })
-            .collect();
-
-        div()
-            .flex()
-            .flex_col()
-            .child(summary)
-            .child(div().flex().flex_wrap().gap_4().children(cards))
-    }
-
     /// 弹窗遮罩 + 居中卡片壳：宽度 `width`，颜色取当前主题。`content` 是调用方已经
     /// 拼好的标题/正文/按钮行（`v_flex().child(...)...`），这里只负责外层半透明遮罩
     /// 和卡片本身的边框/圆角/阴影/内边距——是所有确认弹窗共享的视觉容器。
@@ -5420,7 +4617,6 @@ impl Workspace {
         };
         let _ = (c_border, c_muted, c_fg);
         match v {
-            MainView::Overview => self.render_overview(window, cx).into_any_element(),
             // 只出详情：对应的列表/树在右侧停靠面板里常驻，舞台不再摆第二份
             MainView::FileDetail => div()
                 .flex_1()
@@ -5846,7 +5042,13 @@ impl Render for Workspace {
             let leaves = sess.term_leaves();
             let active_pane_id = sess.anchor_id();
             for leaf in &leaves {
+                let is_current_view = ix == active && leaf.entity_id() == active_pane_id;
                 let (toast, cont_cwd) = leaf.update(cx, |t, _cx| {
+                    if is_current_view {
+                        // 不能只在 collect_notifications 里临时过滤当前 pane：那会让消息
+                        // 切走后复活。当前 pane 每帧都真实标已读，覆盖“查看期间刚到”的通知。
+                        t.mark_read();
+                    }
                     (t.take_pending_toast(), t.take_pending_task_continue())
                 });
                 if let Some(cwd) = cont_cwd {
@@ -5854,7 +5056,6 @@ impl Render for Workspace {
                     task_continues.push((sid, cwd));
                 }
                 let Some(msg) = toast else { continue };
-                let is_current_view = ix == active && leaf.entity_id() == active_pane_id;
                 if window_active && !is_current_view {
                     window.push_notification(Notification::info(msg), cx);
                 }
@@ -6861,6 +6062,15 @@ fn main() {
         cx.set_global(daemon_states.clone());
         cx.set_global(PendingAgentNotifs::default());
         cx.set_global(settings::load_agent_ui_config());
+        // hook 配置和 helper 必须作为一个版本单元升级：先把 App 内最新版同步到稳定
+        // managed 路径，再改写各 provider 的 hook 命令。失败时保留旧 helper，不阻塞 GUI。
+        if let Err(error) = settings::sync_bundled_smelt_notify() {
+            eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
+        }
+        // 旧 Copilot hook 缺少事件名注入，升级后结构化 Running/Done 才能生效。
+        settings::upgrade_owned_copilot_hooks();
+        // Codex app-server 握手包含阻塞 IO，已有 Smelt hook 的升级与信任放后台执行。
+        thread::spawn(settings::upgrade_owned_codex_hooks_and_trust);
         let (daemon_state_tx, daemon_state_rx) =
             smol::channel::unbounded::<terminal::DaemonStateEvent>();
         thread::spawn(move || {
@@ -7127,20 +6337,33 @@ fn main() {
                     .as_ref()
                     .is_some_and(|w| w.upgrade().is_some());
                 if alive {
-                    if let status_item::StatusItemEvent::JumpToSession(ix) = event {
-                        let ws = current_ws_status.borrow().clone();
-                        if let Some(ws) = ws {
-                            let _ = ws.update(cx, |ws, cx| {
-                                if ix < ws.sessions.len() {
-                                    ws.active_session = ix;
-                                    if ws.stage_override == Some(MainView::Overview) {
-                                        ws.stage_override = None;
-                                    }
-                                    ws.save_state(cx);
-                                    cx.notify();
+                    let ws = current_ws_status.borrow().clone();
+                    if let Some(ws) = ws {
+                        let _ = ws.update(cx, |ws, cx| {
+                            let target = match &event {
+                                status_item::StatusItemEvent::JumpToSession(ix) => {
+                                    (*ix < ws.sessions.len()).then_some((*ix, None))
                                 }
-                            });
-                        }
+                                status_item::StatusItemEvent::JumpToDaemonSession(id) => {
+                                    ws.sessions.iter().enumerate().find_map(|(ix, session)| {
+                                        session.term_leaves().into_iter().find_map(|pane| {
+                                            (pane.read(cx).session_id() == id)
+                                                .then_some((ix, Some(pane)))
+                                        })
+                                    })
+                                }
+                                status_item::StatusItemEvent::ActivateMain => None,
+                            };
+                            if let Some((ix, pane)) = target {
+                                ws.active_session = ix;
+                                if let Some(pane) = pane {
+                                    ws.sessions[ix].set_active_term(pane);
+                                }
+                                ws.stage_override = None;
+                                ws.save_state(cx);
+                                cx.notify();
+                            }
+                        });
                     }
                     status_item::activate_app();
                 } else {

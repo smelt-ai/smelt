@@ -5,13 +5,12 @@
 import { connectRtc, parseRtcQuery, type RtcSession } from "./rtc-peer";
 import type { RtcConnPhase } from "./types";
 import { decodeFrame, encodeFrame, b64ToBytes, type DcFrame } from "./frames";
-import type { PermissionMenu, SessionInfo } from "../api";
+import type { SessionInfo } from "../api";
 
 export type RtcBackend = {
   phase: () => RtcConnPhase;
   waitReady: () => Promise<void>;
   fetchSessions: () => Promise<SessionInfo[]>;
-  fetchMenu: (id: string) => Promise<PermissionMenu | null>;
   openPty: (id: string, onBytes: (data: Uint8Array) => void) => () => void;
   /** 成功送达并收到 bridge ack 才 resolve ok */
   postInput: (id: string, data: string) => Promise<{ ok: boolean; err?: string }>;
@@ -69,7 +68,6 @@ export async function startRtcBackend(
   let lastPhase: RtcConnPhase = "idle";
 
   const pendingSessions: Pending[] = [];
-  const pendingMenus = new Map<string, Pending>();
   const pendingAcks: AckPending[] = [];
   const ptyHandlers = new Map<string, (data: Uint8Array) => void>();
   const stateHandlers = new Map<
@@ -92,10 +90,6 @@ export async function startRtcBackend(
     for (const p of pendingSessions.splice(0)) {
       p.reject(new Error(reason));
     }
-    for (const [, p] of pendingMenus) {
-      p.reject(new Error(reason));
-    }
-    pendingMenus.clear();
     for (const a of pendingAcks.splice(0)) {
       window.clearTimeout(a.timer);
       a.resolve({ ok: false, err: reason });
@@ -172,14 +166,6 @@ export async function startRtcBackend(
         }
         break;
       }
-      case "menu_ok": {
-        const p = pendingMenus.get(frame.id);
-        if (p) {
-          pendingMenus.delete(frame.id);
-          p.resolve(frame.menu);
-        }
-        break;
-      }
       case "ack": {
         const a = pendingAcks.shift();
         if (a) {
@@ -191,14 +177,6 @@ export async function startRtcBackend(
       case "err": {
         const p = pendingSessions.shift();
         p?.reject(new Error(frame.msg));
-        // 失败的 menu
-        if (pendingMenus.size) {
-          const first = pendingMenus.keys().next().value;
-          if (first) {
-            pendingMenus.get(first)?.reject(new Error(frame.msg));
-            pendingMenus.delete(first);
-          }
-        }
         if (frame.code === "auth") {
           reportPhase("failed", frame.msg);
           stopped = true;
@@ -349,26 +327,6 @@ export async function startRtcBackend(
             pendingSessions.splice(idx, 1)[0]?.reject(new Error("sessions timeout"));
           }
         }, 12_000);
-      }),
-    fetchMenu: (id) =>
-      new Promise<PermissionMenu | null>((resolve, reject) => {
-        if (!trySend({ t: "menu", id })) {
-          resolve(null);
-          return;
-        }
-        pendingMenus.set(id, {
-          resolve: (v) => {
-            if (v == null) resolve(null);
-            else resolve(v as PermissionMenu);
-          },
-          reject,
-        });
-        window.setTimeout(() => {
-          if (pendingMenus.has(id)) {
-            pendingMenus.delete(id);
-            resolve(null);
-          }
-        }, 8_000);
       }),
     openPty(id, onBytes) {
       ptyHandlers.set(id, onBytes);

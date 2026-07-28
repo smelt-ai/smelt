@@ -2018,17 +2018,6 @@ impl Terminal {
         }
     }
 
-    /// 末尾 n 行（先丢掉尾部空行）。**不走 snapshot**：那会把整个网格连同颜色、属性、
-    /// 链接一起 clone 一遍，而这里只要字符。逐格拼行与裁剪的实现在 smelt_core::term_text，
-    /// 与 smeltd 共用：GUI 扫权限菜单和 smeltd 的 `menu` op 必须看到完全一样的
-    /// 文本，否则两边判断会不一致。
-    pub fn last_lines(&self, n: usize) -> Vec<String> {
-        let Ok(term) = self.term.lock() else {
-            return Vec::new();
-        };
-        crate::term_text::last_lines(&term, n)
-    }
-
     /// 焦点变化上报（DEC 1004，`CSI ?1004h` 打开）：应用开了这个模式时，终端在获得 / 失去
     /// 焦点时要发 `ESC[I` / `ESC[O`。vim、部分 TUI 靠它决定要不要暂停动画、要不要重绘成
     /// 「未聚焦」的样子。没开这个模式的应用绝不能收到这两个序列——否则会被当成普通输入。

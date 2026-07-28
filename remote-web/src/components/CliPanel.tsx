@@ -1,13 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
-import {
-  fetchMenu,
-  postAction,
-  postInput,
-  SessionState,
-  wsUrl,
-  type PermissionMenu,
-} from "../api";
-import { ChoiceSheet } from "./ChoiceSheet";
+import { useCallback, useEffect, useState } from "preact/hooks";
+import { postAction, postInput, SessionState, wsUrl } from "../api";
 import { Composer } from "./Composer";
 import { StatusBadge } from "./StatusBadge";
 import { XtermSurface } from "./XtermSurface";
@@ -21,16 +13,11 @@ type Props = {
   onBack: () => void;
 };
 
-/**
- * 会话 CLI 面板。
- * 选择菜单：从终端缓冲解析后用底部弹层自渲染（大按钮），不依赖 TUI 里的小光标。
- */
+/** 会话 CLI 面板。 */
 export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Props) {
   const [state, setState] = useState<SessionState>({ phase: "idle" });
   const [status, setStatus] = useState<{ text: string; kind?: "ok" | "err" } | null>(null);
   const [pending, setPending] = useState(false);
-  const [bufferText, setBufferText] = useState("");
-  const [sheetDismissed, setSheetDismissed] = useState(false);
   const transport = useTransport();
   const canWrite =
     transport.mode === "rtc" && transport.rtc
@@ -78,46 +65,6 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
     };
   }, [sessionId, transport.mode, transport.rtc]);
 
-  // 菜单：HTTP 走 gateway；RTC 走 DC menu 帧（勿 fetch 到 signal 域名 SPA）
-  const [menu, setMenu] = useState<PermissionMenu | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const timer = window.setTimeout(() => {
-      const p =
-        transport.mode === "rtc" && transport.rtc
-          ? transport.rtc.fetchMenu(sessionId)
-          : fetchMenu(sessionId);
-      void p.then((m) => {
-        if (alive) setMenu(m);
-      });
-    }, 250);
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-    };
-  }, [sessionId, bufferText, state.phase, transport.mode, transport.rtc]);
-
-  // 菜单身份：标题+选项标签，变了才自动再弹出
-  const menuKey = useMemo(() => {
-    if (!menu) return "";
-    return `${menu.summary || ""}|${menu.options.map((o) => o.label).join(";")}`;
-  }, [menu]);
-
-  useEffect(() => {
-    if (menuKey) setSheetDismissed(false);
-  }, [menuKey]);
-
-  const showChoiceSheet =
-    canWrite &&
-    !sheetDismissed &&
-    !!menu &&
-    menu.options.length >= 2 &&
-    // 思考中一般不是选菜单；等用户时更可信；终端已画出菜单也可弹
-    // menu 非空即代表守护此刻在屏幕上真扫到了菜单，本身就是最强证据
-    (state.phase === "waiting_for_user" ||
-      state.phase === "awaiting_approval" ||
-      state.phase === "idle");
-
   const sendRaw = useCallback(
     async (data: string, okMsg: string) => {
       setPending(true);
@@ -127,7 +74,6 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
           const r = await transport.rtc.postInput(sessionId, data);
           if (r.ok) {
             setStatus({ text: okMsg, kind: "ok" });
-            setSheetDismissed(true);
           } else {
             setStatus({ text: r.err || "未送达", kind: "err" });
           }
@@ -135,7 +81,6 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
           const r = await postInput(sessionId, data);
           if (r.ok) {
             setStatus({ text: okMsg, kind: "ok" });
-            setSheetDismissed(true);
           } else {
             setStatus({ text: r.err || "失败", kind: "err" });
           }
@@ -168,19 +113,8 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
     [sessionId, transport.mode, transport.rtc],
   );
 
-  const onPick = useCallback(
-    async (key: string) => {
-      // 直接打选项自带的数字键 + Enter，与桌面端同一种选中方式。
-      // 旧实现是「↑ 顶到头 ×8 再 ↓ n-1 次」模拟导航——那依赖「多按几次总能顶到头」
-      // 的假设，菜单一旦有滚动或分页就会错位，且与桌面端行为不一致。
-      await sendRaw(`${key}\r`, `已选 ${key}`);
-    },
-    [sendRaw],
-  );
-
   const actionable =
     canWrite &&
-    !showChoiceSheet &&
     (state.phase === "awaiting_approval" || state.phase === "waiting_for_user");
   const question = (state.pending_question || "").trim();
 
@@ -211,8 +145,7 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
         </div>
       )}
 
-      {/* 有选择弹层时，问题改在弹层里展示，避免占高度 */}
-      {question && !showChoiceSheet ? (
+      {question ? (
         <div class="mx-2 mt-1.5 shrink-0 rounded-lg border border-border bg-card px-2.5 py-2">
           <div class="mb-0.5 text-[10px] text-muted">正在问你</div>
           <p class="max-h-20 overflow-y-auto whitespace-pre-wrap text-xs leading-snug">
@@ -270,16 +203,6 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
         </div>
       ) : null}
 
-      {menu && canWrite && sheetDismissed ? (
-        <button
-          type="button"
-          class="mx-2 mt-1.5 shrink-0 rounded-lg border border-accent/40 bg-accent/10 py-2 text-sm font-medium text-accent"
-          onClick={() => setSheetDismissed(false)}
-        >
-          打开选择面板（{menu.options.length} 项）
-        </button>
-      ) : null}
-
       {status ? (
         <p
           class={`mx-2.5 mt-1 shrink-0 text-[11px] ${
@@ -299,7 +222,6 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
           sessionId={sessionId}
           writeEnabled={canWrite}
           onUserData={canWrite ? onTermData : undefined}
-          onBufferText={setBufferText}
           class="h-full"
         />
       </div>
@@ -307,25 +229,15 @@ export function CliPanel({ sessionId, name, subtitle, writeEnabled, onBack }: Pr
       {canWrite ? (
         <div class="mx-1.5 mb-[max(0.35rem,env(safe-area-inset-bottom))] shrink-0 overflow-hidden rounded-b-xl border border-border">
           <Composer
-            disabled={showChoiceSheet}
+            disabled={false}
             pending={pending}
             onSend={sendText}
-            placeholder={showChoiceSheet ? "请在上方弹层中选择…" : "输入命令或回复…"}
+            placeholder="输入命令或回复…"
           />
         </div>
       ) : (
         <div class="mx-1.5 mb-2 h-1.5 shrink-0 rounded-b-xl border border-t-0 border-border bg-panel" />
       )}
-
-      {showChoiceSheet && menu ? (
-        <ChoiceSheet
-          menu={menu}
-          busy={pending}
-          onSelect={onPick}
-          onCancel={() => setSheetDismissed(true)}
-          onCustom={(text) => void sendText(text)}
-        />
-      ) : null}
     </div>
   );
 }
