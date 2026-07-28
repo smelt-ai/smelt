@@ -221,7 +221,6 @@ session_id + turn_id + notification_kind + request_id
 |---|---:|---|
 | ACP permission / elicitation / completion | 是 | 协议事实，最高可信度 |
 | agent 官方 hook | 是 | 结构化生命周期事实 |
-| 明确解析出的权限菜单 | 仅可保守进入审批 | 非 ACP 终端模式的兼容证据 |
 | 进程退出 | 可进入完成/失败 | 必须结合退出码和当前 turn |
 | OSC 标题 spinner | 仅可保守推断 `Running` | 无 hook 时的低可信度降级 |
 | OSC 9/99/777 | 否 | `Informational` 通知 |
@@ -270,7 +269,6 @@ Copilot 应使用 `~/.copilot/hooks/*.json` 的结构化 hooks，不以 `beep` �
 
 - ACP/app-server 模式直接映射 permission、user input、turn completion 和 error 事件。
 - 普通终端模式优先使用官方结构化事件；没有时，OSC 只产生 `Informational`。
-- 可视区明确出现权限菜单时，可保守进入 `WaitingForApproval`。
 - 不再把 Codex OSC 9 自由文本一律当作成功或审批事实。
 
 ### 4.4 Grok
@@ -347,7 +345,7 @@ WaitingApproval / NeedsAttention / Running / Done / Idle
 
 - 普通完成正文即使包含 `approval` 或 `permission`，也不会显示审批卡。
 - BEL、OSC 9/99/777 不会改变 agent phase。
-- 只有结构化审批事件或真实权限菜单能进入 `WaitingForApproval`。
+- 只有结构化审批事件能进入 `WaitingForApproval`。
 - `WaitingForUser` 与 `WaitingForApproval` 使用不同文案、按钮和通知类型。
 - 同一 phase transition 即使由多个来源上报，也只通知一次。
 - 完成、失败、等待输入、等待审批在 Claude、Codex、Copilot、Grok 和 ACP 中映射一致。

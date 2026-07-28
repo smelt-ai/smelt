@@ -46,26 +46,6 @@ pub async fn fetch_sessions(cfg: &Config) -> Result<Value> {
     Ok(resp.json().await?)
 }
 
-pub async fn fetch_menu(cfg: &Config, id: &str) -> Result<Value> {
-    let url = format!(
-        "{}/s/{}/menu?token={}",
-        cfg.gateway_base,
-        id,
-        urlencoding_token(&cfg.gateway_token)
-    );
-    let resp = client()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    if !resp.status().is_success() {
-        bail!("menu HTTP {}", resp.status());
-    }
-    let body: Value = resp.json().await?;
-    // gateway 返回 { menu: ... | null }
-    Ok(body.get("menu").cloned().unwrap_or(Value::Null))
-}
-
 pub async fn post_json(cfg: &Config, path: &str, body: Value) -> Result<Value> {
     let url = format!(
         "{}{}{}token={}",

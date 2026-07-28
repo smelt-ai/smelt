@@ -147,9 +147,6 @@ use acp_registry::{AcpRegistry, AcpSlot};
 use smelt_core::remote_gateway;
 // 只需要 spinner 判定；OSC 扫描整包留给 workspace（smelt-core 的 osc 模块）。
 use smelt_core::title_spinner;
-// 权限菜单解析与网格取文本：与 GUI 共用 smelt-core 里的同一份。手机端不再自己解析——
-// 它拉 `menu` op 拿这里的结果。两份实现（Rust/TS）曾实测漂移过，别再走回头路。
-use smelt_core::{permission_menu, term_text};
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1927,7 +1924,7 @@ mod resume_handoff_tests {
 
     fn term_text_of(sess: &Arc<Session>) -> String {
         let term = sess.term.lock().unwrap();
-        term_text::text_lines(&term).join("\n")
+        smelt_core::term_text::text_lines(&term).join("\n")
     }
 
     /// **永不 feed ring**——本文件头号不变量，此前只有注释在守。
@@ -3038,23 +3035,6 @@ fn handle_conn(
         Some("acp_open") => handle_acp_open(conn, reader, &v, acp_sessions, subscribers),
         Some("acp_watch") => handle_acp_watch(conn, reader, &v, acp_sessions),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
-        // 扫当前可视区里的权限菜单，解析结果原样回给调用方（网关 → 手机端）。
-        // 只读、无副作用，所以不要写权限：看得见菜单 ≠ 能点它，点是走 input/action。
-        //
-        // 为什么是「拉」而不是随 state 广播：state 广播由 hook 驱动（phase 变化），
-        // 没接 hook 的 agent 永远不广播，菜单就永远到不了手机。而画面变化只有客户端
-        // 最清楚——它在渲染 xterm，debounce 之后拉一次即可，服务端不必在 PTY 泵那条
-        // 每字节都过的热路径上挂解析。
-        Some("menu") => {
-            let id = v["id"].as_str().unwrap_or_default();
-            let sess = sessions.lock().unwrap().get(id).cloned();
-            let menu = sess.and_then(|s| {
-                let term = s.term.lock().ok()?;
-                permission_menu::parse_permission_prompt(&term_text::last_lines(&term, 28))
-            });
-            let mut c = conn;
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true, "menu": menu }));
-        }
         Some("list") => {
             let (mut ids, mut states): (Vec<String>, Vec<SessionState>) = sessions
                 .lock()

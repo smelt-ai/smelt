@@ -15,7 +15,7 @@ use crate::{AgentStatus, Workspace, ui_theme};
 /// Snooze 时长：10 分钟。
 const SNOOZE: Duration = Duration::from_secs(600);
 
-/// 只有协议状态、明确的审批通知或权限菜单确认的审批态，才有资格显示阻塞卡。
+/// 只有协议状态或明确的结构化审批通知，才有资格显示阻塞卡。
 /// `NeedsAttention` 包含普通 OSC/响铃（例如“tag 已推送”），它们已有轻量通知链路，
 /// 不能再被包装成审批卡。
 fn should_show_blocked_toast(status: AgentStatus) -> bool {
@@ -44,7 +44,7 @@ impl Workspace {
         self.toast_dismissed.retain(|id| blocked_ids.contains(id));
         self.toast_snoozed.retain(|id, _| blocked_ids.contains(id));
 
-        let mut items: Vec<(usize, EntityId, String, String)> = Vec::new();
+        let mut items: Vec<(usize, EntityId, String, Option<String>)> = Vec::new();
         for (ix, s) in self.sessions.iter().enumerate() {
             let st = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
             if !should_show_blocked_toast(st) {
@@ -57,9 +57,7 @@ impl Workspace {
             if self.toast_snoozed.get(&id).is_some_and(|t| now < *t) {
                 continue;
             }
-            let msg = s
-                .approval_msg(cx)
-                .unwrap_or_else(|| "Agent 暂停中——需要你批准才能继续。".to_string());
+            let msg = s.approval_msg(cx);
             items.push((ix, id, s.title(cx), msg));
         }
         if items.is_empty() {
@@ -82,118 +80,119 @@ impl Workspace {
             let e_review = this.clone();
             let e_snooze = this.clone();
             let e_dismiss = this.clone();
-            stack = stack.child(
+            let mut card = div()
+                .id(("toast-card", id))
+                // 浮层卡片必须 occlude：不然除按钮外的区域鼠标会穿透到
+                // 下层（inspector/文件树跟着 hover、点击直接落进去）。
+                .occlude()
+                .rounded(px(10.))
+                .bg(rgb(ui_theme::bg_hover()))
+                .border_1()
+                .border_color(rgb(ui_theme::border_focus()))
+                .border_l_2()
+                .shadow_lg()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(rgb(ui_theme::yellow())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(rgb(ui_theme::yellow()))
+                                .truncate()
+                                .child(format!("等你批准 · {name}")),
+                        )
+                        .child(
+                            div()
+                                .id(("toast-dismiss", id))
+                                .text_xs()
+                                .text_color(rgb(ui_theme::text_faint()))
+                                .cursor_pointer()
+                                .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
+                                .child("✕")
+                                .on_click(move |_ev, _window, cx| {
+                                    e_dismiss.update(cx, |ws, cx| {
+                                        ws.toast_dismissed.insert(id);
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                );
+            if let Some(msg) = msg {
+                card = card.child(
+                    div()
+                        .text_xs()
+                        .line_height(px(18.))
+                        .text_color(rgb(ui_theme::text()))
+                        .child(msg),
+                );
+            }
+            card = card.child(
                 div()
-                    .id(("toast-card", id))
-                    // 浮层卡片必须 occlude：不然除按钮外的区域鼠标会穿透到
-                    // 下层（inspector/文件树跟着 hover、点击直接落进去）。
-                    .occlude()
-                    .rounded(px(10.))
-                    .bg(rgb(ui_theme::bg_hover()))
-                    .border_1()
-                    .border_color(rgb(ui_theme::border_focus()))
-                    .border_l_2()
-                    .shadow_lg()
-                    .p_3()
                     .flex()
-                    .flex_col()
                     .gap_2()
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .size(px(8.))
-                                    .rounded_full()
-                                    .bg(rgb(ui_theme::yellow())),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(rgb(ui_theme::yellow()))
-                                    .truncate()
-                                    .child(format!("等你批准 · {name}")),
-                            )
-                            .child(
-                                div()
-                                    .id(("toast-dismiss", id))
-                                    .text_xs()
-                                    .text_color(rgb(ui_theme::text_faint()))
-                                    .cursor_pointer()
-                                    .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                                    .child("✕")
-                                    .on_click(move |_ev, _window, cx| {
-                                        e_dismiss.update(cx, |ws, cx| {
-                                            ws.toast_dismissed.insert(id);
-                                            cx.notify();
-                                        });
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
+                            .id(("toast-review", id))
+                            .px_3()
+                            .py_1()
+                            .rounded(px(6.))
+                            .bg(rgb(ui_theme::yellow()))
                             .text_xs()
-                            .line_height(px(18.))
-                            .text_color(rgb(ui_theme::text()))
-                            .child(msg),
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::on_accent()))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.9))
+                            .child("查看")
+                            .on_click(move |_ev, window, cx| {
+                                e_review.update(cx, |ws, cx| {
+                                    // 点「查看」= 已知晓，跳转的同时把这条
+                                    // 关掉。少了这句：跳过去了但 status 还挂
+                                    // 在等待态，派生态 toast 下一帧又渲染回来
+                                    // ——表现为「点了不消失 / 反复弹」。
+                                    // status 真正解除时 retain 会把 id 从
+                                    // dismissed 清掉，之后再阻塞照常重弹。
+                                    ws.toast_dismissed.insert(id);
+                                    ws.activate(ix, window, cx);
+                                });
+                            }),
                     )
                     .child(
                         div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id(("toast-review", id))
-                                    .px_3()
-                                    .py_1()
-                                    .rounded(px(6.))
-                                    .bg(rgb(ui_theme::yellow()))
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(rgb(ui_theme::on_accent()))
-                                    .cursor_pointer()
-                                    .hover(|d| d.opacity(0.9))
-                                    .child("查看")
-                                    .on_click(move |_ev, window, cx| {
-                                        e_review.update(cx, |ws, cx| {
-                                            // 点「查看」= 已知晓，跳转的同时把这条
-                                            // 关掉。少了这句：跳过去了但 status 还挂
-                                            // 在等待态，派生态 toast 下一帧又渲染回来
-                                            // ——表现为「点了不消失 / 反复弹」。
-                                            // status 真正解除时 retain 会把 id 从
-                                            // dismissed 清掉，之后再阻塞照常重弹。
-                                            ws.toast_dismissed.insert(id);
-                                            ws.activate(ix, window, cx);
-                                        });
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id(("toast-snooze", id))
-                                    .px_3()
-                                    .py_1()
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    .border_color(rgb(ui_theme::border_focus()))
-                                    .text_xs()
-                                    .text_color(rgb(ui_theme::text_mid()))
-                                    .cursor_pointer()
-                                    .hover(|d| d.opacity(0.85))
-                                    .child("稍后")
-                                    .on_click(move |_ev, _window, cx| {
-                                        e_snooze.update(cx, |ws, cx| {
-                                            ws.toast_snoozed.insert(id, Instant::now() + SNOOZE);
-                                            cx.notify();
-                                        });
-                                    }),
-                            ),
+                            .id(("toast-snooze", id))
+                            .px_3()
+                            .py_1()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgb(ui_theme::border_focus()))
+                            .text_xs()
+                            .text_color(rgb(ui_theme::text_mid()))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.85))
+                            .child("稍后")
+                            .on_click(move |_ev, _window, cx| {
+                                e_snooze.update(cx, |ws, cx| {
+                                    ws.toast_snoozed.insert(id, Instant::now() + SNOOZE);
+                                    cx.notify();
+                                });
+                            }),
                     ),
             );
+            stack = stack.child(card);
         }
         Some(stack.into_any_element())
     }

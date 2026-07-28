@@ -55,6 +55,7 @@ fn run() -> Option<()> {
 /// phase 字符串必须跟 smeltd.rs 里 `Phase` 枚举的 `#[serde(rename_all =
 /// "snake_case")]` 对应（thinking / executing_tool / awaiting_approval /
 /// waiting_for_user / idle / dead），两边不同源、靠字符串约定对齐。
+#[cfg(test)]
 fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<String>)> {
     map_hook_event_for_provider(hook, "claude")
 }
@@ -63,7 +64,15 @@ fn map_hook_event_for_provider(
     hook: &serde_json::Value,
     provider: &str,
 ) -> Option<(&'static str, Option<String>)> {
-    let event = hook["hook_event_name"].as_str()?;
+    // Copilot 的 hook stdin 不带 hook_event_name；安装器按 hook 配置项把事件名
+    // 注入环境变量。Claude/Codex 仍优先使用协议原生字段。
+    let event_from_env;
+    let event = if let Some(event) = hook["hook_event_name"].as_str() {
+        event
+    } else {
+        event_from_env = std::env::var("SMELT_HOOK_EVENT").ok()?;
+        event_from_env.as_str()
+    };
     match event {
         // 会话刚起、hooks 链路第一次有机会发声——不上报的话，Idle 态和「hooks
         // 根本没装/装的是旧配置/socket 连不上」在 UI 上长得一模一样；有这一条，

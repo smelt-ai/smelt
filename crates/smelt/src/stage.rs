@@ -26,7 +26,6 @@ impl Workspace {
         // Files/Git 是「面板提升上来的全宽双栏」，收回叫 minimize（回停靠）；
         // 其余是盖在舞台上的独立页，收回叫「返回会话」。
         let (label, back) = match v {
-            MainView::Overview => ("会话总览", "‹ 返回会话"),
             MainView::Tasks => ("任务总览", "‹ 返回会话"),
             MainView::Files => ("文件树 + 内容", "⤡ 收回停靠"),
             MainView::FileDetail => ("文件", "‹ 返回会话"),

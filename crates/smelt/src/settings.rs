@@ -188,6 +188,8 @@ pub fn icon_for_launch_command(command: &str) -> IconName {
         IconName::Bot
     } else if cmd.starts_with("copilot") {
         IconName::Github
+    } else if cmd.starts_with("grok") {
+        IconName::Bot
     } else {
         IconName::SquareTerminal
     }
@@ -333,6 +335,41 @@ pub fn smelt_notify_path() -> std::path::PathBuf {
         .join("smelt-notify")
 }
 
+/// 把 App / cargo 产物旁的 `smelt-notify` 原子同步到 hooks 使用的稳定路径。
+///
+/// hooks 会在 GUI 关闭时运行，不能直接指向可能被 DMG 覆盖的 App 包。每次启动都覆盖
+/// managed 副本，避免“hook JSON 已升级、helper 仍是旧版”的半升级状态。rename 替换
+/// 不影响已经启动的旧 helper：它仍持有旧 inode，下一次 hook 自动使用新文件。
+pub fn sync_bundled_smelt_notify() -> std::io::Result<()> {
+    let bundled = std::env::current_exe()?.with_file_name("smelt-notify");
+    if !bundled.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("App 包内缺少 {}", bundled.display()),
+        ));
+    }
+
+    let managed = smelt_notify_path();
+    let dir = managed.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("无效的 smelt-notify 路径：{}", managed.display()),
+        )
+    })?;
+    std::fs::create_dir_all(dir)?;
+    let staged = dir.join("smelt-notify.next");
+    let _ = std::fs::remove_file(&staged);
+    std::fs::copy(&bundled, &staged)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&staged)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&staged, permissions)?;
+    }
+    std::fs::rename(staged, managed)
+}
+
 fn claude_settings_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
@@ -388,15 +425,19 @@ fn codex_hooks_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".codex").join("hooks.json"))
 }
 
-fn provider_hook_command(provider: &str) -> String {
+fn provider_hook_command(provider: &str, event: &str) -> String {
     format!(
-        "SMELT_HOOK_PROVIDER={provider} {}",
+        "SMELT_HOOK_PROVIDER={provider} SMELT_HOOK_EVENT={event} {}",
         shell_words::quote(&smelt_notify_path().to_string_lossy())
     )
 }
 
 fn command_uses_smelt_notify(command: &str) -> bool {
     command.contains("smelt-notify")
+}
+
+fn command_uses_current_smelt_hook(command: &str, event: &str) -> bool {
+    command_uses_smelt_notify(command) && command.contains(&format!("SMELT_HOOK_EVENT={event}"))
 }
 
 fn hook_file_installed(path: Option<std::path::PathBuf>, events: &[&str]) -> bool {
@@ -422,10 +463,9 @@ fn hook_file_installed(path: Option<std::path::PathBuf>, events: &[&str]) -> boo
                         .is_some_and(|handlers| {
                             handlers.iter().any(|handler| {
                                 ["command", "bash"].iter().any(|key| {
-                                    handler
-                                        .get(*key)
-                                        .and_then(|v| v.as_str())
-                                        .is_some_and(command_uses_smelt_notify)
+                                    handler.get(*key).and_then(|v| v.as_str()).is_some_and(
+                                        |command| command_uses_current_smelt_hook(command, event),
+                                    )
                                 })
                             })
                         })
@@ -467,15 +507,26 @@ fn install_hook_file(
     let hooks = hooks
         .as_object_mut()
         .ok_or_else(|| "hooks 不是对象".to_string())?;
-    let command = provider_hook_command(provider);
     for event in events {
+        let command = provider_hook_command(provider, event);
         let groups = hooks
             .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
             .ok_or_else(|| format!("hooks.{event} 不是数组"))?;
-        for group in groups.iter_mut() {
-            if let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+        groups.retain_mut(|group| {
+            let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
+                return true;
+            };
+            let contained_smelt = handlers.iter().any(|handler| {
+                ["command", "bash"].iter().any(|key| {
+                    handler
+                        .get(*key)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(command_uses_smelt_notify)
+                })
+            });
+            if contained_smelt {
                 handlers.retain(|handler| {
                     !["command", "bash"].iter().any(|key| {
                         handler
@@ -485,7 +536,8 @@ fn install_hook_file(
                     })
                 });
             }
-        }
+            !contained_smelt || !handlers.is_empty()
+        });
         let handler = if copilot_format {
             serde_json::json!({ "type": "command", "bash": command, "timeoutSec": 3 })
         } else {
@@ -555,10 +607,25 @@ pub fn copilot_hooks_installed() -> bool {
                     handler
                         .get("bash")
                         .and_then(|v| v.as_str())
-                        .is_some_and(command_uses_smelt_notify)
+                        .is_some_and(|command| command_uses_current_smelt_hook(command, event))
                 })
             })
     })
+}
+
+/// 升级 Smelt 自己安装过的旧 Copilot hook。旧版命令没有注入事件名，而 Copilot
+/// stdin 也不带 hook_event_name，导致所有结构化状态静默丢失。只在文件里已经存在
+/// smelt-notify 时改写，不会替用户擅自开启原本没启用的集成。
+pub fn upgrade_owned_copilot_hooks() {
+    let Some(path) = copilot_hooks_path() else {
+        return;
+    };
+    let owned = std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|raw| raw.contains("smelt-notify"));
+    if owned && !copilot_hooks_installed() {
+        let _ = install_copilot_hooks();
+    }
 }
 
 pub fn codex_hooks_installed() -> bool {
@@ -591,8 +658,8 @@ pub fn install_copilot_hooks() -> Result<(), String> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| "hooks 不是对象".to_string())?;
-    let command = provider_hook_command("copilot");
     for event in COPILOT_HOOK_EVENTS {
+        let command = provider_hook_command("copilot", event);
         let handlers = hooks
             .entry(*event)
             .or_insert_with(|| serde_json::json!([]))
@@ -611,12 +678,29 @@ pub fn install_copilot_hooks() -> Result<(), String> {
 }
 
 pub fn install_codex_hooks() -> Result<(), String> {
-    install_hook_file(
-        codex_hooks_path().ok_or_else(|| "无 home 目录".to_string())?,
-        CODEX_HOOK_EVENTS,
-        "codex",
-        false,
-    )
+    let path = codex_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
+    install_hook_file(path.clone(), CODEX_HOOK_EVENTS, "codex", false)?;
+    let commands = CODEX_HOOK_EVENTS
+        .iter()
+        .map(|event| provider_hook_command("codex", event))
+        .collect::<Vec<_>>();
+    let cwd = std::env::current_dir().map_err(|error| format!("读取当前目录失败：{error}"))?;
+    smelt_core::codex_app_server::grant_codex_hook_trust(&path, &cwd, &commands)
+        .map(|_| ())
+        .map_err(|error| format!("Codex hooks 已安装，但自动信任失败：{error}"))
+}
+
+/// 只升级用户已经通过 Smelt 安装过的 Codex hooks，不替未启用的用户开启集成。
+pub fn upgrade_owned_codex_hooks_and_trust() {
+    let Some(path) = codex_hooks_path() else {
+        return;
+    };
+    let owned = std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|raw| raw.contains("smelt-notify"));
+    if owned {
+        let _ = install_codex_hooks();
+    }
 }
 
 pub fn uninstall_copilot_hooks() -> Result<(), String> {
@@ -654,7 +738,7 @@ pub fn uninstall_codex_hooks() -> Result<(), String> {
     uninstall_hook_file(codex_hooks_path(), CODEX_HOOK_EVENTS)
 }
 
-/// Claude hooks 是否已装上 smelt-notify（任一事件含该 command 即视为已装）。
+/// Claude hooks 是否已完整装上 smelt-notify。
 pub fn claude_hooks_installed() -> bool {
     let Some(path) = claude_settings_path() else {
         return false;
@@ -665,30 +749,29 @@ pub fn claude_hooks_installed() -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return false;
     };
-    let notify = smelt_notify_path();
-    let notify_s = notify.to_string_lossy();
     let Some(hooks) = v.get("hooks").and_then(|h| h.as_object()) else {
         return false;
     };
-    for ev in SMELT_HOOK_EVENTS {
-        let Some(arr) = hooks.get(*ev).and_then(|x| x.as_array()) else {
-            continue;
-        };
-        for m in arr {
-            let Some(hs) = m.get("hooks").and_then(|x| x.as_array()) else {
-                continue;
-            };
-            for h in hs {
-                if h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| c == notify_s || c.ends_with("/smelt-notify"))
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    SMELT_HOOK_EVENTS.iter().all(|event| {
+        hooks
+            .get(*event)
+            .and_then(|v| v.as_array())
+            .is_some_and(|groups| {
+                groups.iter().any(|group| {
+                    group
+                        .get("hooks")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|handlers| {
+                            handlers.iter().any(|handler| {
+                                handler
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(command_uses_smelt_notify)
+                            })
+                        })
+                })
+            })
+    })
 }
 
 /// 把 smelt-notify 写入 ~/.claude/settings.json（幂等）；成功返回 Ok。
@@ -3081,6 +3164,23 @@ impl Workspace {
                     )
                     .description("Agent 因错误中断时提醒。"),
                 )
+                .item(
+                    SettingItem::new(
+                        "终端响铃通知",
+                        SettingField::switch(
+                            |cx: &App| {
+                                cx.try_global::<AgentUiConfig>()
+                                    .map(|c| c.notify_terminal_bell)
+                                    .unwrap_or(true)
+                            },
+                            |v: bool, cx: &mut App| {
+                                apply_agent_ui(|c| c.notify_terminal_bell = v, cx);
+                            },
+                        ),
+                    )
+                    .description("终端输出 BEL 控制字符时显示普通信息提醒。")
+                    .keywords(["通知", "notification", "响铃", "bell"]),
+                )
                 .item(acp_cmd_setting_item(AcpAgentKind::Claude))
                 .item(acp_cmd_setting_item(AcpAgentKind::Copilot))
                 .item(acp_cmd_setting_item(AcpAgentKind::Codex))
@@ -3264,10 +3364,15 @@ impl Workspace {
                         (t.foreground, t.muted_foreground, t.border)
                     };
                     let status = format!(
-                        "Claude {}  ·  Copilot {}  ·  Codex {}",
+                        "Claude {}  ·  Copilot {}  ·  Codex {}  ·  Grok {}",
                         if claude_installed { "已接入" } else { "未接入" },
                         if copilot_installed { "已接入" } else { "未接入" },
                         if codex_installed { "已接入" } else { "未接入" },
+                        if claude_installed {
+                            "已接入"
+                        } else {
+                            "未接入"
+                        },
                     );
                     let status_color: Hsla = if installed {
                         rgb(crate::ui_theme::green()).into()
@@ -3361,7 +3466,7 @@ impl Workspace {
                                 .text_color(muted)
                                 .child(
                                     "分别写入 Claude 设置、~/.copilot/hooks/smelt.json 和 ~/.codex/hooks.json；\
-                                     只增删 Smelt 条目。Codex 首次使用需在 /hooks 中信任，重开会话后生效。",
+                                     Grok 会读取 Claude-compatible hooks。只增删 Smelt 条目；Codex 信任由 app-server 精确授权并复核，重开会话后生效。",
                                 ),
                         )
                         .into_any_element()

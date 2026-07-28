@@ -1398,7 +1398,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 主区任务总览：会话总览同款气质，任务专属信息层级。
+    /// 主区任务总览：任务专属信息层级。
     pub fn render_tasks_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border) = {
             let t = cx.theme();
@@ -1712,7 +1712,7 @@ impl Workspace {
             });
 
         // 不画「选中描边」：task_selected 会让某张卡永久亮一圈边，像坏了一样。
-        // 与会话总览一致，只靠 hover 反馈。
+        // 卡片只靠 hover 反馈。
         div()
             .id(SharedString::from(format!("task-card-{id}")))
             .w(px(300.))
@@ -1730,7 +1730,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_3()
-            // 标题：状态点 + 名（对齐会话总览）
+            // 标题：状态点 + 名
             .child(
                 div()
                     .flex()

@@ -65,7 +65,13 @@ pub fn notify_text_from_osc(ps: &str, pt: &str) -> Option<String> {
     match ps {
         "9" => {
             let msg = pt.trim();
-            if msg.is_empty() {
+            // ConEmu/Copilot 等也复用 OSC 9 做任务栏进度，例如
+            // `OSC 9;4;3;0 ST`。首段为数字且后面还有参数时是控制命令，不能把
+            // `4;3;0` 当成人类通知正文。
+            let is_control_command = msg
+                .split_once(';')
+                .is_some_and(|(command, _)| command.bytes().all(|b| b.is_ascii_digit()));
+            if msg.is_empty() || is_control_command {
                 None
             } else {
                 Some(msg.to_string())
@@ -184,6 +190,12 @@ mod tests {
             scan_all(b"\x1b]9;hello world\x07").as_deref(),
             Some("hello world")
         );
+    }
+
+    #[test]
+    fn ignores_osc9_progress_control_commands() {
+        assert_eq!(scan_all(b"\x1b]9;4;3;0\x1b\\"), None);
+        assert_eq!(notify_text_from_osc("9", "4;3;0"), None);
     }
 
     #[test]
