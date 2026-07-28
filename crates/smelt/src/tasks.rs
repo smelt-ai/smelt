@@ -32,6 +32,8 @@ pub enum TaskColumn {
     Ready,
     Running,
     Waiting,
+    Review,
+    Failed,
     Done,
 }
 
@@ -41,6 +43,8 @@ impl TaskColumn {
         match self {
             Self::Backlog | Self::Ready => "待办",
             Self::Running | Self::Waiting => "执行中",
+            Self::Review => "待审查",
+            Self::Failed => "失败",
             Self::Done => "完成",
         }
     }
@@ -49,6 +53,8 @@ impl TaskColumn {
         match self {
             Self::Running | Self::Waiting => crate::ui_theme::blue(),
             Self::Backlog | Self::Ready => crate::ui_theme::text_muted(),
+            Self::Review => crate::ui_theme::yellow(),
+            Self::Failed => crate::ui_theme::red(),
             Self::Done => crate::ui_theme::green(),
         }
     }
@@ -57,8 +63,9 @@ impl TaskColumn {
     pub fn sidebar_rank(self) -> u8 {
         match self {
             Self::Running | Self::Waiting => 0,
-            Self::Backlog | Self::Ready => 1,
-            Self::Done => 2,
+            Self::Review | Self::Failed => 1,
+            Self::Backlog | Self::Ready => 2,
+            Self::Done => 3,
         }
     }
 
@@ -73,9 +80,63 @@ impl TaskColumn {
     }
 
     /// 状态下拉可选的三态（写入 store 用规范化值）。
-    pub fn ui_choices() -> [TaskColumn; 3] {
-        [Self::Backlog, Self::Running, Self::Done]
+    pub fn ui_choices() -> [TaskColumn; 4] {
+        [Self::Backlog, Self::Running, Self::Review, Self::Done]
     }
+}
+
+/// 一次具体执行；Task 保存用户目标，TaskRun 保存每次尝试的现场与结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskChannel {
+    Pty,
+    Acp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRunStatus {
+    Starting,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl TaskRunStatus {
+    fn is_active(self) -> bool {
+        matches!(self, Self::Starting | Self::Running)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "启动中",
+            Self::Running => "执行中",
+            Self::Completed => "已交付",
+            Self::Failed => "失败",
+            Self::Cancelled => "已取消",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskRun {
+    pub id: String,
+    pub task_id: String,
+    pub attempt: u32,
+    /// 第一阶段只接 PTY；枚举先保留 ACP 形态。
+    pub channel: TaskChannel,
+    pub launch: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub status: TaskRunStatus,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub created_at: u64,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
 }
 
 /// 任务类型：普通（手动运行）/ 单次定时（到点自动 `run_task`）。
@@ -123,6 +184,9 @@ pub struct Task {
     /// 已开终端的 smeltd session id。
     #[serde(default)]
     pub session_id: Option<String>,
+    /// 当前/最近一次执行。旧 tasks.json 缺少该字段时自动为空。
+    #[serde(default)]
+    pub current_run_id: Option<String>,
     /// 快捷启动 base 命令（如 `claude --dangerously-skip-permissions`）。
     #[serde(default)]
     pub launch: Option<String>,
@@ -156,6 +220,7 @@ impl Task {
             column: TaskColumn::Backlog,
             project_cwd,
             session_id: None,
+            current_run_id: None,
             launch,
             kind: TaskKind::Once,
             run_at: None,
@@ -178,6 +243,8 @@ impl Task {
 pub struct TaskFile {
     #[serde(default)]
     pub tasks: Vec<Task>,
+    #[serde(default)]
+    pub runs: Vec<TaskRun>,
 }
 
 fn now_secs() -> u64 {
@@ -337,6 +404,7 @@ impl TaskStore {
     pub fn remove(id: &str) {
         let mut file = Self::load();
         file.tasks.retain(|t| t.id != id);
+        file.runs.retain(|run| run.task_id != id);
         Self::save(&file);
     }
 
@@ -354,7 +422,114 @@ impl TaskStore {
         Some(out)
     }
 
-    /// 终端 agent 停转（完成一轮）时：把绑了该 session 且仍在执行/等待的任务标 Done。
+    /// 为任务创建一次 PTY 执行尝试。若上一次仍显示活跃，先以“被新执行替代”收尾，
+    /// 避免一个 Task 悬挂多个权威 Run。
+    pub fn begin_pty_run(task_id: &str, launch: &str) -> Option<TaskRun> {
+        let mut file = Self::load();
+        let now = now_secs();
+        let attempt = file
+            .runs
+            .iter()
+            .filter(|run| run.task_id == task_id)
+            .map(|run| run.attempt)
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        for run in file
+            .runs
+            .iter_mut()
+            .filter(|run| run.task_id == task_id && run.status.is_active())
+        {
+            run.status = TaskRunStatus::Failed;
+            run.error = Some("被新的执行尝试替代".into());
+            run.finished_at = Some(now);
+        }
+
+        let run = TaskRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            attempt,
+            channel: TaskChannel::Pty,
+            launch: launch.to_string(),
+            session_id: None,
+            status: TaskRunStatus::Starting,
+            error: None,
+            created_at: now,
+            started_at: None,
+            finished_at: None,
+        };
+        let task = file.tasks.iter_mut().find(|task| task.id == task_id)?;
+        task.column = TaskColumn::Running;
+        task.current_run_id = Some(run.id.clone());
+        task.updated_at = now;
+        file.runs.push(run.clone());
+        Self::save(&file);
+        Some(run)
+    }
+
+    /// PTY 成功创建后，把 Run 与稳定 session id 绑定。
+    pub fn mark_run_started(task_id: &str, run_id: &str, session_id: &str) -> bool {
+        let mut file = Self::load();
+        let now = now_secs();
+        let Some(run) = file
+            .runs
+            .iter_mut()
+            .find(|run| run.id == run_id && run.task_id == task_id)
+        else {
+            return false;
+        };
+        run.status = TaskRunStatus::Running;
+        run.session_id = Some(session_id.to_string());
+        run.started_at = Some(now);
+        let Some(task) = file.tasks.iter_mut().find(|task| task.id == task_id) else {
+            return false;
+        };
+        task.session_id = Some(session_id.to_string());
+        task.current_run_id = Some(run_id.to_string());
+        task.column = TaskColumn::Running;
+        task.updated_at = now;
+        Self::save(&file);
+        true
+    }
+
+    /// 执行现场启动失败：保留失败 Run，并让 Task 回到待办以便重试。
+    pub fn mark_run_failed(task_id: &str, run_id: &str, error: impl Into<String>) -> bool {
+        let mut file = Self::load();
+        let now = now_secs();
+        let Some(run) = file
+            .runs
+            .iter_mut()
+            .find(|run| run.id == run_id && run.task_id == task_id)
+        else {
+            return false;
+        };
+        run.status = TaskRunStatus::Failed;
+        run.error = Some(error.into());
+        run.finished_at = Some(now);
+        let Some(task) = file.tasks.iter_mut().find(|task| task.id == task_id) else {
+            return false;
+        };
+        if task.current_run_id.as_deref() == Some(run_id) {
+            task.column = TaskColumn::Backlog;
+            task.session_id = None;
+            task.updated_at = now;
+        }
+        Self::save(&file);
+        true
+    }
+
+    pub fn runs_for_task(task_id: &str) -> Vec<TaskRun> {
+        let mut runs: Vec<_> = Self::load()
+            .runs
+            .into_iter()
+            .filter(|run| run.task_id == task_id)
+            .collect();
+        runs.sort_by_key(|run| std::cmp::Reverse(run.attempt));
+        runs
+    }
+
+    /// 终端 agent 停转（完成一轮）时：把当前 Run 标 Completed，Task 进入待审查。
     /// 返回 `Some(project_cwd)` 表示确实收尾了至少一条任务（用于触发自动续跑）。
     pub fn mark_session_done(session_id: &str) -> Option<String> {
         let mut file = Self::load();
@@ -365,8 +540,18 @@ impl TaskStore {
                 continue;
             }
             if matches!(t.column, TaskColumn::Running | TaskColumn::Waiting) {
-                t.column = TaskColumn::Done;
+                t.column = TaskColumn::Review;
                 t.updated_at = now;
+                if let Some(run_id) = t.current_run_id.as_deref()
+                    && let Some(run) = file.runs.iter_mut().find(|run| {
+                        run.id == run_id
+                            && run.session_id.as_deref() == Some(session_id)
+                            && run.status.is_active()
+                    })
+                {
+                    run.status = TaskRunStatus::Completed;
+                    run.finished_at = Some(now);
+                }
                 if done_cwd.is_none() {
                     done_cwd = Some(t.project_cwd.clone());
                 }
@@ -399,7 +584,8 @@ impl TaskStore {
         }
     }
 
-    /// 原子领取下一条**可自动执行**的待办：标 Running 后返回 id。
+    /// 选择下一条**可自动执行**的待办。真正的 Running 状态由 begin_pty_run
+    /// 与执行记录一起写入，避免领取后启动失败留下幽灵 Running。
     ///
     /// - 只取 `prefer_cwd` 同项目（串行续跑）
     /// - 仅 `auto_run == true` 且可跑
@@ -410,7 +596,7 @@ impl TaskStore {
         if prefer.is_empty() {
             return None;
         }
-        let mut file = Self::load();
+        let file = Self::load();
         let now = now_secs();
         if file
             .tasks
@@ -429,12 +615,7 @@ impl TaskStore {
             .map(|(i, _)| i)
             .collect();
         idxs.sort_by_key(|&i| file.tasks[i].created_at);
-        let idx = *idxs.first()?;
-        file.tasks[idx].column = TaskColumn::Running;
-        file.tasks[idx].updated_at = now;
-        let id = file.tasks[idx].id.clone();
-        Self::save(&file);
-        Some(id)
+        idxs.first().map(|&idx| file.tasks[idx].id.clone())
     }
 
     /// 已到期、可自动执行的单次定时任务 id（按 `run_at` 升序）。
@@ -1237,6 +1418,8 @@ impl Workspace {
             all.retain(|t| match f {
                 TaskColumn::Running | TaskColumn::Waiting => t.column.is_active(),
                 TaskColumn::Backlog | TaskColumn::Ready => t.column.is_todo(),
+                TaskColumn::Review => t.column == TaskColumn::Review,
+                TaskColumn::Failed => t.column == TaskColumn::Failed,
                 TaskColumn::Done => t.column == TaskColumn::Done,
             });
         }
@@ -1466,6 +1649,8 @@ impl Workspace {
         let has_session = task.session_id.is_some();
         let primary: Option<&'static str> = if col.is_todo() {
             Some("运行")
+        } else if col == TaskColumn::Failed {
+            Some("重试")
         } else if has_session {
             Some("打开")
         } else if col.is_active() {
@@ -1494,6 +1679,14 @@ impl Workspace {
         } else {
             None
         };
+        let runs = TaskStore::runs_for_task(&task.id);
+        let run_label = runs.first().map(|run| {
+            if runs.len() == 1 {
+                format!("第 1 次 · {}", run.status.label())
+            } else {
+                format!("第 {} 次 · {}", run.attempt, run.status.label())
+            }
+        });
         let e_status = cx.entity().clone();
         let id_status = id_col.clone();
 
@@ -1623,6 +1816,14 @@ impl Workspace {
                             }),
                     ),
             )
+            .when(run_label.is_some(), |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(run_label.unwrap_or_default()),
+                )
+            })
             // 指令摘要（与会话预览同款深底）
             .when(!body_prev.is_empty(), |d| {
                 d.child(
@@ -1709,15 +1910,26 @@ impl Workspace {
         };
 
         let cwd = leaf.read(cx).cwd();
+        let run = if inject {
+            let Some(run) =
+                TaskStore::begin_pty_run(id, task.launch.as_deref().unwrap_or("existing-session"))
+            else {
+                return;
+            };
+            Some(run)
+        } else {
+            None
+        };
         TaskStore::update(id, |t| {
-            t.session_id = Some(sid.to_string());
             if let Some(c) = cwd {
                 t.project_cwd = c;
             }
-            if inject {
-                t.column = TaskColumn::Running;
-            }
         });
+        if let Some(run) = run {
+            TaskStore::mark_run_started(id, &run.id, sid);
+        } else if !inject {
+            TaskStore::update(id, |t| t.session_id = Some(sid.to_string()));
+        }
 
         self.active_session = ix;
         self.sessions[ix].set_active_term(leaf.clone());
@@ -1761,7 +1973,7 @@ impl Workspace {
         let Some(task) = TaskStore::get(id) else {
             return;
         };
-        if task.column.is_todo() {
+        if task.column.is_todo() || task.column == TaskColumn::Failed {
             self.run_task(id, window, cx);
             return;
         }
@@ -1788,7 +2000,7 @@ impl Workspace {
                 return;
             }
         }
-        if task.column.is_todo() || task.column.is_active() {
+        if task.column.is_todo() || task.column.is_active() || task.column == TaskColumn::Failed {
             self.run_task(id, window, cx);
             return;
         }
@@ -1874,6 +2086,9 @@ impl Workspace {
 
         eprintln!("[tasks] run launch={launch_cmd}");
 
+        let Some(run) = TaskStore::begin_pty_run(id, &base_launch) else {
+            return;
+        };
         let sid = new_sid();
         // 同 add_session_with_launch：FFI 回调栈上 panic = abort 整个 app，
         // spawn 失败就不起任务终端，留日志。
@@ -1887,6 +2102,7 @@ impl Workspace {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[tasks] 任务终端启动失败（{cwd:?}）：{e:#}");
+                TaskStore::mark_run_failed(id, &run.id, format!("{e:#}"));
                 return;
             }
         };
@@ -1909,12 +2125,11 @@ impl Workspace {
             self.start_codex_binding(view, cwd, baseline, prepared.workspace_dir, cx);
         }
 
-        // 存 base（不含 prompt 拼接），再跑时重新拼首包。
+        // 存 base（不含 prompt 拼接），再跑时重新拼首包；执行现场归 TaskRun。
         TaskStore::update(id, |t| {
-            t.session_id = Some(sid);
-            t.column = TaskColumn::Running;
             t.launch = Some(base_launch);
         });
+        TaskStore::mark_run_started(id, &run.id, &sid);
 
         self.save_state(cx);
         self.focus_active(window, cx);
@@ -1927,8 +2142,8 @@ impl Workspace {
 #[cfg(test)]
 mod task_model_tests {
     use super::{
-        Task, TaskColumn, TaskFile, TaskKind, TaskStore, build_launch_with_prompt,
-        parse_local_datetime, shell_single_quote,
+        Task, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRun, TaskRunStatus, TaskStore,
+        build_launch_with_prompt, parse_local_datetime, shell_single_quote,
     };
     use std::path::Path;
 
@@ -1965,12 +2180,32 @@ mod task_model_tests {
         t.column = TaskColumn::Running;
         t.kind = TaskKind::Scheduled;
         t.run_at = Some(1_700_000_000);
-        let file = TaskFile { tasks: vec![t] };
+        let run = TaskRun {
+            id: "run-1".into(),
+            task_id: t.id.clone(),
+            attempt: 1,
+            channel: TaskChannel::Pty,
+            launch: "claude".into(),
+            session_id: Some("sid-1".into()),
+            status: TaskRunStatus::Completed,
+            error: None,
+            created_at: 1,
+            started_at: Some(2),
+            finished_at: Some(3),
+        };
+        t.current_run_id = Some(run.id.clone());
+        let file = TaskFile {
+            tasks: vec![t],
+            runs: vec![run],
+        };
         let json = serde_json::to_string_pretty(&file).unwrap();
         let back: TaskFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tasks[0].title, "t1");
         assert_eq!(back.tasks[0].kind, TaskKind::Scheduled);
         assert_eq!(back.tasks[0].run_at, Some(1_700_000_000));
+        assert_eq!(back.tasks[0].current_run_id.as_deref(), Some("run-1"));
+        assert_eq!(back.runs[0].status, TaskRunStatus::Completed);
+        assert_eq!(back.runs[0].attempt, 1);
         assert_eq!(TaskColumn::Ready.label(), "待办");
         assert_eq!(TaskColumn::Waiting.label(), "执行中");
     }
@@ -1981,6 +2216,8 @@ mod task_model_tests {
         let back: TaskFile = serde_json::from_str(json).unwrap();
         assert_eq!(back.tasks[0].kind, TaskKind::Once);
         assert!(back.tasks[0].run_at.is_none());
+        assert!(back.tasks[0].current_run_id.is_none());
+        assert!(back.runs.is_empty());
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub(crate) use smelt_acp_view::acp_view;
 pub(crate) use smelt_core::json_store;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
+
 mod agent;
 mod claude_memory;
 mod dock;
@@ -1617,10 +1618,83 @@ fn ws_state_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".smelt").join("workspace.json"))
 }
 
+/// 只迁移真正缺少 `agent_kind` 键的旧叶子。显式 `null` 表示用户选择普通终端，
+/// 反序列化成 `Option` 后会和缺字段混在一起，所以必须在 JSON 层完成判定。
+fn migrate_legacy_pane_agent_kind(pane: &mut serde_json::Value) -> bool {
+    let Some(pane) = pane.as_object_mut() else {
+        return false;
+    };
+
+    if let Some(leaf) = pane
+        .get_mut("Leaf")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if leaf.contains_key("agent_kind") {
+            return false;
+        }
+        let Some(kind) = leaf
+            .get("launch_cmd")
+            .and_then(serde_json::Value::as_str)
+            .and_then(session_history::infer_terminal_agent_kind)
+        else {
+            return false;
+        };
+        leaf.insert(
+            "agent_kind".into(),
+            serde_json::Value::String(kind.id().into()),
+        );
+        return true;
+    }
+
+    pane.get_mut("Split")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|split| split.get_mut("children"))
+        .and_then(serde_json::Value::as_array_mut)
+        .is_some_and(|children| {
+            children.iter_mut().fold(false, |changed, child| {
+                migrate_legacy_pane_agent_kind(child) || changed
+            })
+        })
+}
+
+fn migrate_legacy_workspace_agent_kinds(root: &mut serde_json::Value) -> bool {
+    let Some(root) = root.as_object_mut() else {
+        return false;
+    };
+    let mut changed = root
+        .get_mut("sessions")
+        .and_then(serde_json::Value::as_array_mut)
+        .is_some_and(|sessions| {
+            sessions.iter_mut().fold(false, |changed, session| {
+                let migrated = session
+                    .as_object_mut()
+                    .and_then(|session| session.get_mut("layout"))
+                    .is_some_and(migrate_legacy_pane_agent_kind);
+                migrated || changed
+            })
+        });
+    if let Some(layout) = root.get_mut("layout")
+        && !layout.is_null()
+    {
+        changed = migrate_legacy_pane_agent_kind(layout) || changed;
+    }
+    changed
+}
+
+fn load_ws_state_from_path(path: &std::path::Path) -> Option<WsState> {
+    let data = std::fs::read_to_string(path).ok()?;
+    let mut raw: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let changed = migrate_legacy_workspace_agent_kinds(&mut raw);
+    let state: WsState = serde_json::from_value(raw).ok()?;
+    if changed {
+        crate::json_store::save_json(Some(path.to_path_buf()), &state);
+    }
+    Some(state)
+}
+
 /// 读取存档；文件不存在/损坏都返回 None，交由调用方回退默认。
 fn load_ws_state() -> Option<WsState> {
-    let data = std::fs::read_to_string(ws_state_path()?).ok()?;
-    serde_json::from_str(&data).ok()
+    load_ws_state_from_path(&ws_state_path()?)
 }
 
 /// 工作台根视图：多标签终端管理器。
@@ -2025,7 +2099,7 @@ fn turns_to_acp_entries(turns: &[session_history::Turn]) -> Vec<acp_view::AcpEnt
 }
 
 impl Workspace {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let saved = load_ws_state();
@@ -2249,7 +2323,7 @@ impl Workspace {
                 "[workspace] 后台恢复 {} 个会话（不堵 UI）…",
                 pending_sessions.len()
             );
-            ws.schedule_session_restore(pending_sessions, active_session, cx);
+            ws.schedule_session_restore(pending_sessions, active_session, window, cx);
         } else {
             ws.check_daemon_outdated(cx);
         }
@@ -2289,6 +2363,7 @@ impl Workspace {
         &mut self,
         pending: Vec<SessionState>,
         active_session: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let restore_revision = self.session_list_revision;
@@ -2337,7 +2412,7 @@ impl Workspace {
             })
             .expect("spawn smelt-restore-sessions 线程");
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let mut restored = 0usize;
             let mut restored_order = Vec::new();
             let mut restore_order_intact = true;
@@ -2348,7 +2423,7 @@ impl Workspace {
                 return;
             }
             if this
-                .update(cx, |this, cx| {
+                .update_in(cx, |this, _window, cx| {
                     for (original_index, ss) in acp_saved {
                         if restore_path_is_cancelled(
                             session_state_cwd(&ss).as_deref(),
@@ -2359,11 +2434,7 @@ impl Workspace {
                             continue;
                         }
                         let Some(saved) = ss.acp else { continue };
-                        let reason = if saved.resume_session_id.is_some() {
-                            "正在恢复上次的对话…"
-                        } else {
-                            "上次的对话已结束（历史消息已保留，点击重新开始继续）"
-                        };
+                        let reason = "正在恢复上次的对话…";
                         let agent = saved
                             .agent
                             .as_deref()
@@ -2428,7 +2499,7 @@ impl Workspace {
 
             // 收一个渲染一个。后台线程跑完会 drop sender，recv 报错即代表全部处理完。
             while let Ok((original_index, ss, result)) = rx.recv().await {
-                let outcome = this.update(cx, |this, cx| {
+                let outcome = this.update_in(cx, |this, _window, cx| {
                     if restore_path_is_cancelled(
                         session_state_cwd(&ss).as_deref(),
                         &this.cancelled_restore_paths,
@@ -2502,7 +2573,7 @@ impl Workspace {
                 }
             }
 
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.sessions_restored = true;
                 if should_restore_saved_active(
                     restore_order_intact,
@@ -2512,6 +2583,13 @@ impl Workspace {
                     restore_active_revision,
                 ) {
                     this.active_session = restored_active_position(&restored_order, active_session);
+                }
+                if let Some(Session {
+                    kind: SessionKind::Acp(view),
+                    ..
+                }) = this.sessions.get(this.active_session)
+                {
+                    view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
                 }
                 this.save_state(cx);
                 if !this.restore_orphans.is_empty() {
@@ -3828,7 +3906,7 @@ impl Workspace {
             // ACP 会话例外：绿点「有结果可看」查看即清（消息流全文可见，看到=处理）。
             if let SessionKind::Acp(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| {
-                    // 冷恢复占位第一次被切到 → 自动续接（免手点「重新开始」）。
+                    // 冷恢复占位第一次被切到 → 自动启动（免手点「重新开始」）。
                     if should_auto_resume_active_acp(self.sessions_restored) {
                         v.maybe_auto_resume(window, cx);
                     }
@@ -7113,7 +7191,7 @@ fn open_workspace_window(
         // 逐个改 .text_xs()/.text_sm()。终端内容本身的字号另由 terminal_view.rs
         // 的 FONT_PX 控制，不受这个影响。
         window.set_rem_size(px(19.));
-        let view = cx.new(|cx| Workspace::new(cx));
+        let view = cx.new(|cx| Workspace::new(window, cx));
         workspace = Some(view.clone());
         // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
         cx.new(|cx| Root::new(view, window, cx))
@@ -7783,7 +7861,9 @@ mod daemon_state_notification_tests {
 
 #[cfg(test)]
 mod pane_state_tests {
-    use super::{PaneState, prepare_terminal_launch, terminal_restore_action};
+    use super::{
+        PaneState, migrate_legacy_pane_agent_kind, prepare_terminal_launch, terminal_restore_action,
+    };
     use crate::settings::LaunchEntry;
     use crate::terminal::MissingSessionAction;
     use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
@@ -7917,6 +7997,69 @@ mod pane_state_tests {
         assert!(prepared.workspace_dir.unwrap().ends_with("/.codex-alt"));
     }
 
+    #[test]
+    fn legacy_agent_leaf_gains_kind_but_not_resume_identity() {
+        let mut raw = serde_json::json!({
+            "Leaf": {
+                "cwd": "/tmp/x",
+                "id": "terminal-sid",
+                "launch_label": "Copilot",
+                "launch_cmd": "COPILOT_HOME='~/Copilot Data' copilot --allow-all"
+            }
+        });
+
+        assert!(migrate_legacy_pane_agent_kind(&mut raw));
+        let pane: PaneState = serde_json::from_value(raw).unwrap();
+        match pane {
+            PaneState::Leaf {
+                agent_kind,
+                resume_state,
+                ..
+            } => {
+                assert_eq!(agent_kind, Some(TerminalAgentKind::Copilot));
+                assert!(resume_state.is_none());
+            }
+            PaneState::Split { .. } => panic!("expected leaf"),
+        }
+    }
+
+    #[test]
+    fn legacy_migration_preserves_explicit_null_and_custom_aliases() {
+        let mut explicit_terminal = serde_json::json!({
+            "Leaf": {
+                "launch_cmd": "claude",
+                "agent_kind": null
+            }
+        });
+        let mut custom_alias = serde_json::json!({
+            "Leaf": {
+                "launch_cmd": "claude-quant --dangerously-skip-permissions"
+            }
+        });
+
+        assert!(!migrate_legacy_pane_agent_kind(&mut explicit_terminal));
+        assert!(explicit_terminal["Leaf"]["agent_kind"].is_null());
+        assert!(!migrate_legacy_pane_agent_kind(&mut custom_alias));
+        assert!(custom_alias["Leaf"].get("agent_kind").is_none());
+    }
+
+    #[test]
+    fn legacy_agent_migration_walks_split_children() {
+        let mut raw = serde_json::json!({
+            "Split": {
+                "axis": "H",
+                "children": [
+                    {"Leaf": {"cwd": "/tmp/a", "launch_cmd": "claude"}},
+                    {"Leaf": {"cwd": "/tmp/b", "launch_cmd": "grok"}}
+                ]
+            }
+        });
+
+        assert!(migrate_legacy_pane_agent_kind(&mut raw));
+        assert_eq!(raw["Split"]["children"][0]["Leaf"]["agent_kind"], "claude");
+        assert_eq!(raw["Split"]["children"][1]["Leaf"]["agent_kind"], "grok");
+    }
+
     /// 旧存档没有 custom_title / launch_label / launch_cmd 字段，必须读成 None 而不是解析失败。
     #[test]
     fn old_archive_without_custom_title_still_loads() {
@@ -7946,7 +8089,61 @@ mod pane_state_tests {
 
 #[cfg(test)]
 mod workspace_state_tests {
-    use super::{SidebarGrouping, WsState};
+    use super::{PaneState, SidebarGrouping, WsState, load_ws_state_from_path};
+
+    #[test]
+    fn load_workspace_migrates_legacy_panes_and_persists_once() {
+        let sandbox = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-artifacts/workspace-state/legacy-agent-kind");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let path = sandbox.join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "sessions": [{
+    "layout": {"Leaf": {
+      "cwd": "/tmp/x",
+      "launch_cmd": "copilot --allow-all"
+    }},
+    "active": 0
+  }]
+}"#,
+        )
+        .unwrap();
+
+        let state = load_ws_state_from_path(&path).unwrap();
+        match &state.sessions[0].layout {
+            PaneState::Leaf {
+                agent_kind,
+                resume_state,
+                ..
+            } => {
+                assert_eq!(
+                    *agent_kind,
+                    Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
+                );
+                assert!(resume_state.is_none());
+            }
+            PaneState::Split { .. } => panic!("expected leaf"),
+        }
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            saved_json["sessions"][0]["layout"]["Leaf"]["agent_kind"],
+            "copilot"
+        );
+        assert!(saved_json["sessions"][0]["layout"]["Leaf"]["resume_state"].is_null());
+
+        load_ws_state_from_path(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            saved,
+            "a migrated workspace must not be rewritten on the next load"
+        );
+        std::fs::remove_dir_all(&sandbox).unwrap();
+    }
 
     #[test]
     fn collapsed_projects_roundtrip() {
@@ -8271,6 +8468,10 @@ mod acp_agent_tests {
         assert_eq!(acp_agent_from_cmd("copilot --acp"), AcpAgentKind::Copilot);
         assert_eq!(
             acp_agent_from_cmd("bunx --bun @zed-industries/codex-acp"),
+            AcpAgentKind::Codex
+        );
+        assert_eq!(
+            acp_agent_from_cmd("bunx --bun @agentclientprotocol/codex-acp"),
             AcpAgentKind::Codex
         );
         assert_eq!(acp_agent_from_cmd("some-other-agent"), AcpAgentKind::Claude);
