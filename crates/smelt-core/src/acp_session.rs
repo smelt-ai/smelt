@@ -460,7 +460,6 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::Ready {
             session_id,
             kind,
-            fallback_reason,
             supports_image,
         } => {
             state.acp_session_id = Some(session_id.to_string());
@@ -477,7 +476,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 ReadyKind::Fresh => {}
             }
             state.phase = AcpPhase::Idle;
-            state.status_line = fallback_reason;
+            state.status_line = None;
         }
         AcpEvent::AgentChunk { thought, text } => {
             match state.entries.last_mut() {
@@ -878,11 +877,44 @@ mod tests {
                 session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
                 kind: ReadyKind::ResumedWithReplay,
                 supports_image: true,
-                fallback_reason: None,
             },
         );
         assert!(s.entries.is_empty());
         assert_eq!(s.acp_session_id.as_deref(), Some("sid-1"));
+    }
+
+    #[test]
+    fn load_replay_rebuilds_legacy_projection_without_duplicates() {
+        let mut s = fresh_state();
+        s.entries.push(AcpEntry::User("old question".into()));
+        s.entries.push(AcpEntry::Assistant {
+            text: "old answer".into(),
+            thought: false,
+        });
+
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+                kind: ReadyKind::ResumedWithReplay,
+                supports_image: true,
+            },
+        );
+        apply_event(&mut s, AcpEvent::UserChunk("old question".into()));
+        apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                text: "old answer".into(),
+                thought: false,
+            },
+        );
+
+        assert_eq!(s.entries.len(), 2);
+        assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old question"));
+        assert!(matches!(
+            &s.entries[1],
+            AcpEntry::Assistant { text, thought: false } if text == "old answer"
+        ));
     }
 
     #[test]
@@ -895,14 +927,13 @@ mod tests {
                 session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
                 kind: ReadyKind::ResumedKeepHistory,
                 supports_image: true,
-                fallback_reason: None,
             },
         );
         assert_eq!(s.entries.len(), 1);
     }
 
     #[test]
-    fn ready_fresh_with_fallback_replaces_id_and_preserves_history_with_divider() {
+    fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
         let mut s = fresh_state();
         s.entries.push(AcpEntry::User("old".into()));
         s.acp_session_id = Some("old-sid".into());
@@ -915,11 +946,10 @@ mod tests {
                 session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
                 kind: ReadyKind::Fresh,
                 supports_image: true,
-                fallback_reason: Some("旧会话不存在，已创建新对话".into()),
             },
         );
         assert_eq!(s.acp_session_id.as_deref(), Some("new-sid"));
-        assert_eq!(s.status_line.as_deref(), Some("旧会话不存在，已创建新对话"));
+        assert!(s.status_line.is_none());
         assert_eq!(s.entries.len(), 2);
         assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
         assert!(matches!(s.entries[1], AcpEntry::Divider(_)));

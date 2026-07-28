@@ -975,10 +975,9 @@ struct SessionState {
     acp: Option<AcpSaved>,
 }
 
-/// ACP 会话的存档元数据：cwd/launch 给「重新开始」按钮原样重启用；entries 是完整
-/// 消息历史——GUI 重开后占位视图直接显示它，不是「已结束」四个字干瞪眼；
-/// resume_session_id 是 agent 侧的会话 id，「重新开始」靠它尝试 session/load
-/// 真续接（agent 记得之前聊了什么），而不只是摆样子的新对话。
+/// ACP 会话的存档元数据。agent session store 是消息历史的唯一持久化来源；Smelt
+/// 只保存重新 load 所需的身份和启动信息。`entries` 仅用于读取旧版 workspace.json，
+/// 新存档不再写出，避免和 agent transcript 形成两个数据源。
 #[derive(Clone, serde::Serialize)]
 struct AcpSaved {
     cwd: Option<String>,
@@ -989,8 +988,6 @@ struct AcpSaved {
     /// 按 launch 里的命令反推，反推不出就当 Claude（多 agent 之前只可能是它）。
     #[serde(default)]
     agent: Option<String>,
-    #[serde(default)]
-    entries: Vec<acp_view::AcpEntry>,
     #[serde(default)]
     resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     /// smeltd 托管用的会话 id（`AcpView::session_id()`）。旧存档没有这个字段
@@ -1018,8 +1015,10 @@ struct AcpSavedWire {
     profile_id: Option<String>,
     #[serde(default)]
     agent: Option<String>,
-    #[serde(default)]
-    entries: Vec<acp_view::AcpEntry>,
+    /// 旧版曾把完整消息历史写进 workspace.json。只消费字段保证迁移可读，值不再
+    /// 进入 `AcpSaved`，更不会在下一次保存时写回。
+    #[serde(default, rename = "entries")]
+    _legacy_entries: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     resume_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     #[serde(default)]
@@ -1045,7 +1044,6 @@ impl<'de> serde::Deserialize<'de> for AcpSaved {
             launch,
             profile_id: wire.profile_id,
             agent: wire.agent,
-            entries: wire.entries,
             resume_session_id: wire.resume_session_id,
             sid: wire.sid,
             refresh_launch_from_settings,
@@ -1781,13 +1779,6 @@ struct Workspace {
     session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
     /// 加载会话详情的自增序号：后台解析完成时用它判断结果是否已过期（切了别的会话）。
     session_detail_gen: u64,
-    /// 「继续」正在后台加载的目标（`"{agent_id}:{cwd}:{resume_id}"`），挡连点
-    /// 同一条历史记录重复发起、开出好几个重复标签页。
-    resume_inflight: HashSet<String>,
-    /// 「继续」操作的自增序号：只有发起时最新的那次操作，加载完成后才会真的抢
-    /// 激活态——连点两条不同历史记录时，防止加载慢的那条后完成反而把已经激活
-    /// 的那条顶掉（会话本身照样建，只是不抢焦点）。
-    resume_gen: u64,
     /// 历史会话页当前显示的是「会话」还是「记忆」（同一套左列表 + 右详情布局）。
     history_pane: HistoryPane,
     /// 历史会话页「会话」子页当前选中查看哪家 agent 的历史（Claude/Copilot/Codex/
@@ -1923,42 +1914,6 @@ struct Workspace {
     /// 冷启动的会话恢复流程是否已经跑完（没有待恢复会话时启动即为 true）。
     /// save_state 的抹盘安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
     sessions_restored: bool,
-}
-
-/// 历史会话页「继续」把已读出的 `Turn` 列表转成 `AcpEntry`，好塞进新建的占位
-/// 会话当本地快照（见 `Workspace::resume_acp_session`）。`Turn` 是给只读浏览
-/// 用的压扁视图（工具调用只留名字，没有 id/参数/输出），转回来必然有损——
-/// `id` 现造一个本会话内唯一的、`kind` 统一归 `Other`、`status` 记
-/// `Completed`（历史记录里的调用理应都跑完了）、`output` 留空。这不是"完整
-/// 还原"，只求「切换到这条历史会话时本地能看到个大概，而不是一片空白」；
-/// 真续接成功后（`ReadyKind::ResumedWithReplay`）这份快照会被 agent 重放的
-/// 内容整个替换掉，这里的近似值不会长期存在。
-fn turns_to_acp_entries(turns: &[session_history::Turn]) -> Vec<acp_view::AcpEntry> {
-    let mut out = Vec::new();
-    for (i, t) in turns.iter().enumerate() {
-        if t.is_user {
-            if !t.text.trim().is_empty() {
-                out.push(acp_view::AcpEntry::User(t.text.clone()));
-            }
-            continue;
-        }
-        if !t.text.trim().is_empty() {
-            out.push(acp_view::AcpEntry::Assistant {
-                text: t.text.clone(),
-                thought: false,
-            });
-        }
-        for (j, tool) in t.tools.iter().enumerate() {
-            out.push(acp_view::AcpEntry::ToolCall {
-                id: format!("history-{i}-{j}"),
-                title: tool.clone(),
-                kind: acp_view::ToolKind::Other,
-                status: acp_view::ToolCallStatus::Completed,
-                output: Vec::new(),
-            });
-        }
-    }
-    out
 }
 
 impl Workspace {
@@ -2113,8 +2068,6 @@ impl Workspace {
             session_list_inflight: HashSet::new(),
             session_detail: None,
             session_detail_gen: 0,
-            resume_inflight: HashSet::new(),
-            resume_gen: 0,
             history_pane: HistoryPane::Sessions,
             history_agent: settings::AcpAgentKind::Claude,
             history_profile: None,
@@ -2313,7 +2266,7 @@ impl Workspace {
                                 saved.profile_id,
                                 saved.cwd,
                                 reason.to_string(),
-                                saved.entries,
+                                Vec::new(),
                                 saved.resume_session_id,
                                 saved.sid,
                             )
@@ -2762,16 +2715,9 @@ impl Workspace {
         })
     }
 
-    /// 历史会话页「继续」：同一个 agent + 项目已经开着一个会话就直接跳过去
-    /// （不重复开），没有就新建一个「已结束」占位、带上 `resume_session_id`，
-    /// 靠 `activate()` 里已有的 `maybe_auto_resume` 触发真续接——跟"重开 GUI 后
-    /// 切到旧会话自动续接"走的是完全同一套机制，这里不重新发明一遍。
-    ///
-    /// 历史内容要后台读、转换才能塞进新会话当本地快照（见下），这段异步窗口期
-    /// 里得防两件事：连点同一条历史记录开出好几个重复标签页（`resume_inflight`
-    /// 挡重复发起）；连点两条不同的历史记录时，文件更大/加载更慢那条后完成，
-    /// 反而把已经激活的那条顶掉（`resume_gen` 保证只有"最新一次点击"才能真的
-    /// 抢激活态，但该建的会话还是照建，不会凭空消失）。
+    /// 历史会话页「继续」：同一条 agent session 已经开着就直接跳过去，否则建
+    /// 一个空的运行时投影并带上 `resume_session_id`。激活后由 `session/load` 让
+    /// agent 重放历史，Smelt 不再从各家私有 transcript 预填第二份消息快照。
     pub fn resume_acp_session(
         &mut self,
         agent: settings::AcpAgentKind,
@@ -2779,7 +2725,6 @@ impl Workspace {
         profile_id: Option<String>,
         cwd: String,
         resume_id: String,
-        path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2792,78 +2737,35 @@ impl Workspace {
             return;
         }
 
-        let inflight_key = format!("{}:{cwd}:{resume_id}", agent.id());
-        if !self.resume_inflight.insert(inflight_key.clone()) {
-            return; // 这一条已经在后台加载了，连点不重复发起
-        }
-        self.resume_gen = self.resume_gen.wrapping_add(1);
-        let my_gen = self.resume_gen;
-
         let launch = launch_override.unwrap_or_else(|| {
             smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
         });
-        // 先把历史内容读出来转成本地快照——`session/resume`（不重放历史，见 acp.rs
-        // 里 apply_event 对 ReadyKind::ResumedKeepHistory 的注释）信任的就是这份本地
-        // 快照，给个空的会话开出来就是一片空白（真实教训：第一版就是这么写的，
-        // 点「继续」开出来的对话完全看不到历史）。放后台线程读，跟 open_session_detail
-        // 同款套路，避免大会话文件卡住 UI 线程。
-        cx.spawn_in(window, async move |this, cx| {
-            let p = path.clone();
-            let entries = cx
-                .background_executor()
-                .spawn(async move {
-                    session_history::load_session_detail_for(agent, &p)
-                        .map(|d| turns_to_acp_entries(&d.turns))
-                        .unwrap_or_default()
-                })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.resume_inflight.remove(&inflight_key);
-                // 完成时再查一遍：万一这段等待期里这条会话已经从别处冒出来了
-                // （比如 inflight 生效前就已经在飞的另一次请求刚落地），别再建
-                // 重复的一份，跳过去就行。
-                if let Some(ix) = this.find_open_acp_session(agent, &cwd, &target_id, cx) {
-                    if this.resume_gen == my_gen {
-                        this.activate(ix, window, cx);
-                    }
-                    return;
-                }
-
-                let view = cx.new(|cx| {
-                    acp_view::AcpView::placeholder(
-                        cx,
-                        agent,
-                        launch,
-                        profile_id.is_none(),
-                        profile_id,
-                        Some(cwd),
-                        "正在续接历史会话…".to_string(),
-                        entries,
-                        Some(agent_client_protocol::schema::v1::SessionId::new(resume_id)),
-                        // 新起一条 smeltd 托管连接（靠 resume_id 对 agent 自己的
-                        // 持久化做 session/load），不是接上 smeltd 里已经在跑的
-                        // 某个会话，没有旧 id 可沿用，生成一个新的。
-                        None,
-                    )
-                });
-                let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
-                this.sessions.push(Session {
-                    kind: SessionKind::Acp(view),
-                    custom_title: None,
-                    _acp_persist_sub,
-                });
-                this.session_list_revision = this.session_list_revision.wrapping_add(1);
-                let ix = this.sessions.len() - 1;
-                // 只有还是"最新一次点击"才抢激活态——连点两条不同历史记录时，
-                // 加载慢的那条完成得晚也不该把已经激活的那条顶掉，但会话本身
-                // 还是要建，不然用户点了却像什么都没发生，得自己翻标签页找。
-                if this.resume_gen == my_gen {
-                    this.activate(ix, window, cx);
-                }
-                this.save_state(cx);
-            });
-        })
-        .detach();
+        let view = cx.new(|cx| {
+            acp_view::AcpView::placeholder(
+                cx,
+                agent,
+                launch,
+                profile_id.is_none(),
+                profile_id,
+                Some(cwd),
+                "正在加载历史会话…".to_string(),
+                Vec::new(),
+                Some(target_id),
+                // 新起 smeltd 托管连接，靠 agent session id 做 session/load；
+                // 它不是已存在的守护会话，因此不能沿用 smeltd id。
+                None,
+            )
+        });
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
+        self.sessions.push(Session {
+            kind: SessionKind::Acp(view),
+            custom_title: None,
+            _acp_persist_sub,
+        });
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
+        let ix = self.sessions.len() - 1;
+        self.activate(ix, window, cx);
+        self.save_state(cx);
     }
 
     /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
@@ -3048,7 +2950,6 @@ impl Workspace {
                             launch: v.launch_spec(),
                             profile_id: v.profile_id().map(str::to_string),
                             agent: Some(v.agent_kind().id().to_string()),
-                            entries: v.entries_for_save(),
                             resume_session_id: v.resume_session_id_for_save(),
                             sid: Some(v.session_id().to_string()),
                             refresh_launch_from_settings: v.refresh_launch_from_settings(),
@@ -7437,7 +7338,6 @@ mod project_tests {
                 launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude --acp"),
                 profile_id: None,
                 agent: None,
-                entries: Vec::new(),
                 resume_session_id: None,
                 sid: None,
                 refresh_launch_from_settings: false,
@@ -7714,7 +7614,6 @@ mod workspace_state_tests {
                     launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude"),
                     profile_id: None,
                     agent: Some("claude".into()),
-                    entries: Vec::new(),
                     resume_session_id: None,
                     sid: Some(format!("sid-{name}")),
                     refresh_launch_from_settings: false,
@@ -7862,7 +7761,6 @@ mod acp_agent_tests {
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             profile_id: Some("quant".into()),
             agent: Some("claude".into()),
-            entries: Vec::new(),
             resume_session_id: None,
             sid: Some("acp-1".into()),
             refresh_launch_from_settings: false,
@@ -7870,6 +7768,10 @@ mod acp_agent_tests {
 
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value.get("cmd").is_none(), "新存档不该再写旧 cmd 字段");
+        assert!(
+            value.get("entries").is_none(),
+            "agent transcript 是历史唯一来源，新存档不该再写 ACP entries"
+        );
         let restored: AcpSaved = serde_json::from_value(value).unwrap();
 
         assert_eq!(restored.profile_id.as_deref(), Some("quant"));
@@ -7880,6 +7782,26 @@ mod acp_agent_tests {
                 .get("CLAUDE_CONFIG_DIR")
                 .map(String::as_str),
             Some("~/Claude Workspaces/quant")
+        );
+    }
+
+    #[test]
+    fn legacy_entries_are_readable_but_not_written_back() {
+        let legacy: AcpSaved = serde_json::from_value(serde_json::json!({
+            "cwd": "/repo",
+            "launch": { "command": "claude", "env": {} },
+            "agent": "claude",
+            "entries": [
+                { "User": "old question" },
+                { "Assistant": { "text": "old answer", "thought": false } }
+            ]
+        }))
+        .expect("旧 entries 字段不能让整个 ACP 会话存档解析失败");
+
+        let migrated = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            migrated.get("entries").is_none(),
+            "读取旧存档后必须停止写回本地历史副本"
         );
     }
 

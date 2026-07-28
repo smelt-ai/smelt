@@ -90,15 +90,40 @@ pub fn list_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummar
 /// `type` 精确区分，不能像之前那样直接把"是不是数组"当判断依据（那样会把
 /// 块数组格式的真实发言也一并当成 tool_result 漏掉，历史页显示的用户消息
 /// 就会全部消失）。
+const CLAUDE_LOCAL_COMMAND_MARKERS: &[(&str, &str)] = &[
+    ("<command-name>", "</command-name>"),
+    ("<command-message>", "</command-message>"),
+    ("<command-args>", "</command-args>"),
+    ("<local-command-stdout>", "</local-command-stdout>"),
+    ("<local-command-stderr>", "</local-command-stderr>"),
+];
+
+/// Match claude-agent-acp's replay filtering: local slash-command bookkeeping
+/// is not a user turn and is deliberately omitted by `session/load`.
+fn strip_claude_local_command_metadata(text: &str) -> Option<String> {
+    let mut text = text.to_string();
+    for (open, close) in CLAUDE_LOCAL_COMMAND_MARKERS {
+        while let Some(start) = text.find(open) {
+            let Some(relative_end) = text[start + open.len()..].find(close) else {
+                break;
+            };
+            let end = start + open.len() + relative_end + close.len();
+            text.replace_range(start..end, "");
+        }
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
+
 fn claude_user_text(content: &Value) -> Option<String> {
     if let Some(s) = content.as_str() {
-        return (!s.trim().is_empty()).then(|| s.to_string());
+        return strip_claude_local_command_metadata(s);
     }
     let blocks = content.as_array()?;
     let text = blocks
         .iter()
         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
         .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .filter_map(strip_claude_local_command_metadata)
         .collect::<Vec<_>>()
         .join("\n");
     (!text.trim().is_empty()).then_some(text)
@@ -128,6 +153,9 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if row.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
         let Some(kind) = row.get("type").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -195,8 +223,11 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
         }
     }
 
+    // Claude ACP omits local-command-only transcripts during session/load. Do
+    // not advertise those files as resumable conversations in the first place.
+    let title = title?;
     Some(SessionSummary {
-        title: title.unwrap_or_else(|| session_id.clone()),
+        title,
         path: path.to_path_buf(),
         resume_id: session_id,
         started_at,
@@ -223,6 +254,9 @@ pub fn load_session_detail(path: &Path) -> Option<SessionDetail> {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if row.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
         if row.get("isSidechain").and_then(|v| v.as_bool()) == Some(true) {
             continue;
         }
@@ -1093,7 +1127,6 @@ pub fn history_view(
                             let is_sel =
                                 selected_path_for_list.as_deref() == Some(s.path.as_path());
                             let path = s.path.clone();
-                            let resume_path = s.path.clone();
                             let resume_id = s.resume_id.clone();
                             let row_cwd = cwd.clone();
                             let ws_for_resume = workspace.clone();
@@ -1127,7 +1160,6 @@ pub fn history_view(
                                             let ws = ws_for_resume.clone();
                                             let resume_id = resume_id.clone();
                                             let row_cwd = row_cwd.clone();
-                                            let resume_path = resume_path.clone();
                                             let row_launch_override = row_launch_override.clone();
                                             let row_profile_id = row_profile_id.clone();
                                             menu = menu.item(PopupMenuItem::new("继续").on_click(
@@ -1136,7 +1168,6 @@ pub fn history_view(
                                                     // 防御性地什么都不做而不是 panic。
                                                     let Some(cwd) = row_cwd.clone() else { return };
                                                     let resume_id = resume_id.clone();
-                                                    let resume_path = resume_path.clone();
                                                     let launch_override =
                                                         row_launch_override.clone();
                                                     let profile_id = row_profile_id.clone();
@@ -1147,7 +1178,6 @@ pub fn history_view(
                                                             profile_id,
                                                             cwd,
                                                             resume_id,
-                                                            resume_path,
                                                             window,
                                                             cx,
                                                         );
@@ -1797,6 +1827,42 @@ mod tests {
         assert_eq!(sessions[0].title, "second session");
         assert_eq!(sessions[1].path.file_stem().unwrap(), "older");
         assert_eq!(sessions[1].message_count, 2);
+    }
+
+    #[test]
+    fn list_sessions_skips_claude_local_command_only_transcripts() {
+        let tmp = test_sandbox("claude-local-command");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config_dir = tmp.join(".claude");
+        let proj_root = config_dir.join("projects").join(project_dir("/x/y"));
+        std::fs::create_dir_all(&proj_root).unwrap();
+
+        write(
+            &proj_root,
+            "login-only.jsonl",
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>internal</local-command-caveat>"}}"#,
+                r#"{"type":"user","message":{"content":"<command-name>/login</command-name><command-message>login</command-message><command-args></command-args>"}}"#,
+                r#"{"type":"user","message":{"content":"<local-command-stdout>Login interrupted</local-command-stdout>"}}"#,
+            ],
+        );
+        write(
+            &proj_root,
+            "real.jsonl",
+            &[
+                r#"{"type":"user","message":{"content":"<command-name>/model</command-name>keep this question"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#,
+            ],
+        );
+
+        let sessions = list_sessions("/x/y", config_dir.to_str());
+        let detail = load_session_detail(&proj_root.join("real.jsonl")).unwrap();
+        std::fs::remove_dir_all(&tmp).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].resume_id, "real");
+        assert_eq!(sessions[0].title, "keep this question");
+        assert_eq!(detail.turns[0].text, "keep this question");
     }
 
     #[test]
