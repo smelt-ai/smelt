@@ -1256,81 +1256,94 @@ pub fn history_view(
         (HistoryListState::Ready(_), Some(list)) => {
             // 只列标题：时间/消息数/tokens 这些细节挪到右边详情页顶部固定展示，
             // 左边专心做"挑一条看"，不用再挤一整张表格。
-            let mut col = v_flex()
-                .id("session-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .p_2()
-                .gap_1();
             // 右键「继续」的回调是个独立触发的普通闭包，不是 cx.listener——不能直接
             // 拿闭包外那个 &mut Context<Workspace> 改状态，得先攥一份 Entity handle，
             // 触发时再 .update() 回去，跟别处「异步回来再 update」是同一个道理。
             let workspace = cx.entity();
-            for (ix, s) in list.iter().enumerate() {
-                let is_sel = selected_path.as_deref() == Some(s.path.as_path());
-                let path = s.path.clone();
-                let resume_path = s.path.clone();
-                let resume_id = s.resume_id.clone();
-                let row_cwd = cwd.clone();
-                let ws_for_resume = workspace.clone();
-                let row_launch_override = launch_override.clone();
-                let row_profile_id = profile_id.clone();
-                col = col.child(
-                    div()
-                        .id(("session-row", ix))
-                        .w_full()
-                        .px_2()
-                        .py_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_sm()
-                        .text_color(fg)
-                        .truncate()
-                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
-                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
-                        .child(s.title.clone())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.open_session_detail(agent, path.clone(), cx);
-                            }),
-                        )
-                        .context_menu(move |mut menu, _window, _cx| {
-                            let ws = ws_for_resume.clone();
-                            let resume_id = resume_id.clone();
-                            let row_cwd = row_cwd.clone();
-                            let resume_path = resume_path.clone();
-                            let row_launch_override = row_launch_override.clone();
-                            let row_profile_id = row_profile_id.clone();
-                            menu = menu.item(PopupMenuItem::new("继续").on_click(
-                                move |_ev, window, cx| {
-                                    // 没选中项目时历史页本来就是空的，理论到不了这里，
-                                    // 防御性地什么都不做而不是 panic。
-                                    let Some(cwd) = row_cwd.clone() else { return };
-                                    let resume_id = resume_id.clone();
-                                    let resume_path = resume_path.clone();
-                                    let launch_override = row_launch_override.clone();
-                                    let profile_id = row_profile_id.clone();
-                                    ws.update(cx, |this, cx| {
-                                        this.resume_acp_session(
-                                            agent,
-                                            launch_override,
-                                            profile_id,
-                                            cwd,
-                                            resume_id,
-                                            resume_path,
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                },
-                            ));
-                            menu
-                        }),
-                );
-            }
-            col.into_any_element()
+            let list = list.clone();
+            let selected_path_for_list = selected_path.clone();
+            let row_count = list.len();
+            uniform_list("session-list", row_count, move |range, _window, app| {
+                workspace.update(app, |_, cx| {
+                    range
+                        .map(|ix| {
+                            let s = &list[ix];
+                            let is_sel =
+                                selected_path_for_list.as_deref() == Some(s.path.as_path());
+                            let path = s.path.clone();
+                            let resume_path = s.path.clone();
+                            let resume_id = s.resume_id.clone();
+                            let row_cwd = cwd.clone();
+                            let ws_for_resume = workspace.clone();
+                            let row_launch_override = launch_override.clone();
+                            let row_profile_id = profile_id.clone();
+                            div()
+                                .w_full()
+                                .px_2()
+                                .pb_1()
+                                .child(
+                                    div()
+                                        .id(("session-row", ix))
+                                        .w_full()
+                                        .px_2()
+                                        .py_2()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_sm()
+                                        .text_color(fg)
+                                        .truncate()
+                                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
+                                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
+                                        .child(s.title.clone())
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.open_session_detail(agent, path.clone(), cx);
+                                            }),
+                                        )
+                                        .context_menu(move |mut menu, _window, _cx| {
+                                            let ws = ws_for_resume.clone();
+                                            let resume_id = resume_id.clone();
+                                            let row_cwd = row_cwd.clone();
+                                            let resume_path = resume_path.clone();
+                                            let row_launch_override = row_launch_override.clone();
+                                            let row_profile_id = row_profile_id.clone();
+                                            menu = menu.item(PopupMenuItem::new("继续").on_click(
+                                                move |_ev, window, cx| {
+                                                    // 没选中项目时历史页本来就是空的，理论到不了这里，
+                                                    // 防御性地什么都不做而不是 panic。
+                                                    let Some(cwd) = row_cwd.clone() else { return };
+                                                    let resume_id = resume_id.clone();
+                                                    let resume_path = resume_path.clone();
+                                                    let launch_override =
+                                                        row_launch_override.clone();
+                                                    let profile_id = row_profile_id.clone();
+                                                    ws.update(cx, |this, cx| {
+                                                        this.resume_acp_session(
+                                                            agent,
+                                                            launch_override,
+                                                            profile_id,
+                                                            cwd,
+                                                            resume_id,
+                                                            resume_path,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                },
+                                            ));
+                                            menu
+                                        }),
+                                )
+                                .into_any_element()
+                        })
+                        .collect()
+                })
+            })
+            .flex_1()
+            .min_h_0()
+            .pt_2()
+            .into_any_element()
         }
     };
 

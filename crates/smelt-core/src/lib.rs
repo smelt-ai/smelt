@@ -12,6 +12,7 @@ pub mod agent_kind;
 pub mod agent_status;
 pub mod block_on;
 pub mod claude_paths;
+pub mod codex_app_server;
 pub mod daemon_state;
 pub mod font_config;
 pub mod json_store;

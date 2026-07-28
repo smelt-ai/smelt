@@ -57,6 +57,11 @@ pub enum ToolKind {
     Think,
     Fetch,
     SwitchMode,
+    Collaborate,
+    Review,
+    Image,
+    Compact,
+    Wait,
     #[default]
     #[serde(other)]
     Other,

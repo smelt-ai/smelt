@@ -358,6 +358,8 @@ struct SessionState {
     branch: Option<String>,
     dirty_files: Vec<String>,
     updated_at: u64,
+    /// 已收到 smelt-notify 的结构化 hook 事件。
+    structured_events: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -367,6 +369,8 @@ enum Phase {
     ExecutingTool,
     AwaitingApproval,
     WaitingForUser,
+    Succeeded,
+    Failed,
     #[default]
     Idle,
     Dead,
@@ -408,7 +412,10 @@ impl EventListener for StateListener {
             match event {
                 Event::Title(t) => {
                     if title_spinner::title_starts_with_spinner(t.trim_start())
-                        && matches!(st.phase, Phase::Idle | Phase::Thinking)
+                        && matches!(
+                            st.phase,
+                            Phase::Idle | Phase::Thinking | Phase::Succeeded | Phase::Failed
+                        )
                     {
                         // 只在「进入」Thinking 那一刻记起点。agent 思考时 spinner 每秒
                         // 换一帧（⠋→⠙→⠹…），帧帧都是一次 Title 事件；已经在 Thinking
@@ -3211,6 +3218,7 @@ fn handle_conn(
                     let snapshot = {
                         let mut st = sess.state.lock().unwrap();
                         st.phase = phase;
+                        st.structured_events = true;
                         st.phase_since = now_unix();
                         st.pending_question = v["question"].as_str().map(String::from);
                         st.updated_at = now_unix();
@@ -3900,7 +3908,12 @@ fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
 /// false——跟旧版行为一致，用户主动发起的变化不单独触发落盘，等下一次
 /// 协议事件（通常是 TurnEnded）时一并存。
 fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
-    let snap = sess.reduced.lock().unwrap().to_snapshot(should_persist);
+    let snap = {
+        let reduced = sess.reduced.lock().unwrap();
+        // 最后一项可能正在接收流式增量；连同它一起覆盖即可，不再复制整段历史。
+        let offset = reduced.entries.len().saturating_sub(1);
+        reduced.to_snapshot_since(should_persist, offset)
+    };
     let payload = serde_json::json!({ "snapshot": snap }).to_string();
     let mut out = sess.out.lock().unwrap();
     if let Some(c) = &mut out.client {
@@ -3961,16 +3974,22 @@ fn acp_relaunch(
     let sess = &slot.value;
     smelt_core::acp_session::reset_for_restart(&mut sess.reduced.lock().unwrap());
     let needs_check = sess.agent_needs_transcript_check;
-    let handle = smelt_core::acp_conn::spawn_acp(
-        smelt_core::acp_conn::AcpLaunch {
-            launch: launch.clone(),
-            cwd: sess.cwd.clone(),
-            sid: id.to_string(),
-            resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
-            resume_needs_transcript_check: needs_check,
-        },
-        Some(spawn_gate),
-    );
+    let app_launch = smelt_core::acp_conn::AcpLaunch {
+        launch: launch.clone(),
+        cwd: sess.cwd.clone(),
+        sid: id.to_string(),
+        resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
+        resume_needs_transcript_check: needs_check,
+    };
+    let is_codex_app_server = launch
+        .command
+        .split_whitespace()
+        .any(|part| part == "app-server");
+    let handle = if is_codex_app_server {
+        smelt_core::codex_app_server::spawn_codex_app_server(app_launch, Some(spawn_gate))
+    } else {
+        smelt_core::acp_conn::spawn_acp(app_launch, Some(spawn_gate))
+    };
     let event_rx = handle.event_rx.clone();
     *sess.handle.lock().unwrap() = Some(handle);
     sess.state.lock().unwrap().launch = Some(launch.command.clone());
@@ -4001,6 +4020,7 @@ fn make_acp_session(
             branch: None,
             dirty_files: Vec::new(),
             updated_at: 0,
+            structured_events: true,
         })),
         out: Mutex::new(AcpOut {
             client: None,
@@ -4076,6 +4096,15 @@ fn apply_acp_user_action(
             if auto_submit {
                 smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
             }
+            push_acp_snapshot(sess, false);
+            update_acp_daemon_state(sess, subscribers);
+        }
+        AcpUserAction::ElicitationText { field_ix, value } => {
+            smelt_core::acp_session::set_elicitation_text(
+                &mut sess.reduced.lock().unwrap(),
+                field_ix,
+                value,
+            );
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
@@ -5734,7 +5763,10 @@ mod watch_tests {
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let sess = make_dummy_session(24, 80);
         sess.state.lock().unwrap().id = "dl".to_string();
-        sessions.lock().unwrap().insert("dl".to_string(), sess);
+        sessions
+            .lock()
+            .unwrap()
+            .insert("dl".to_string(), Arc::clone(&sess));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
 
         const ROUNDS: usize = 300;
@@ -5806,6 +5838,10 @@ mod watch_tests {
                 );
             }
         }
+        assert!(
+            sess.state.lock().unwrap().structured_events,
+            "收到 state hook 后必须锁定结构化事件链路"
+        );
     }
 }
 
@@ -6326,6 +6362,7 @@ mod acp_tests {
             question: "要不要覆盖这个文件？".into(),
             tool_call_id: "t1".into(),
             options: Vec::new(),
+            details: smelt_core::acp_session::ApprovalDetailsView::Generic,
             responder: None,
             raw_request_line: None,
         });
