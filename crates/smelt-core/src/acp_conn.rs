@@ -82,8 +82,8 @@ pub enum AcpCommand {
     },
     /// 取消当前 turn（session/cancel 通知）。
     Cancel,
-    /// 切换模型：值 id 来自 `AcpEvent::Model` 给的候选列表。
-    SetModel(String),
+    /// 更新一项会话配置：配置和值都由 agent 的 `config_options` 上报，不能猜。
+    SetConfigOption { config_id: String, value_id: String },
     /// 关闭会话：退出连接循环，随连接 drop 杀掉子进程。
     Shutdown,
 }
@@ -117,6 +117,9 @@ pub enum AcpEvent {
     /// select；建会话时给一次，切换或 agent 侧改动时通过 ConfigOptionUpdate 再给。
     /// 取不到就一直是 None，UI 不假装知道。
     Model(ModelState),
+    /// 除模型外的可选会话配置（权限模式、协作方式、推理强度、快速模式等）。
+    /// agent 不上报就为空，四个 agent 共用这条 ACP 标准路径。
+    ConfigOptions(Vec<SessionConfigState>),
     /// agent 请求权限：UI 渲染按钮，凭 responder 直接回 RPC。
     Permission {
         /// 请求摘要（tool call 标题，没有就用工具 id）。
@@ -180,9 +183,21 @@ pub enum ReadyKind {
 /// acp_session 的 wire 快照，不用另造一份 View 类型。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelState {
+    /// ACP 配置项 id。写回时必须用它，不能假定各 adapter 都叫 `model`。
+    pub config_id: String,
     /// 当前模型的人类可读名（`Claude Sonnet 4.5`）。
     pub current_name: String,
     /// 可选模型：(值 id, 人类可读名)。空 = agent 没给候选，UI 就只显示不给切。
+    pub options: Vec<(String, String)>,
+}
+
+/// 一项由 ACP agent 声明的可选会话配置。模型单独显示，避免和输入栏的模型入口重复。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionConfigState {
+    pub config_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub current_name: String,
     pub options: Vec<(String, String)>,
 }
 
@@ -791,14 +806,7 @@ async fn run_connection(
                     }
                     match connection.send_request(resume_req).block_task().await {
                         Ok(resumed) => {
-                            let model_cfg = resumed
-                                .config_options
-                                .as_deref()
-                                .and_then(model_from_config)
-                                .map(|(id, state)| {
-                                    let _ = event_tx.try_send(AcpEvent::Model(state));
-                                    id
-                                });
+                            publish_config_options(resumed.config_options.as_deref(), &event_tx);
                             let resp = NewSessionResponse::new(sid.clone())
                                 .modes(resumed.modes)
                                 .config_options(resumed.config_options)
@@ -812,7 +820,6 @@ async fn run_connection(
                                 ReadyKind::ResumedKeepHistory,
                                 None,
                                 supports_image,
-                                model_cfg,
                             )
                             .await;
                         }
@@ -831,15 +838,10 @@ async fn run_connection(
                                         .await
                                     {
                                         Ok(loaded) => {
-                                            let model_cfg = loaded
-                                                .config_options
-                                                .as_deref()
-                                                .and_then(model_from_config)
-                                                .map(|(id, state)| {
-                                                    let _ =
-                                                        event_tx.try_send(AcpEvent::Model(state));
-                                                    id
-                                                });
+                                            publish_config_options(
+                                                loaded.config_options.as_deref(),
+                                                &event_tx,
+                                            );
                                             let resp = NewSessionResponse::new(sid)
                                                 .modes(loaded.modes)
                                                 .config_options(loaded.config_options)
@@ -853,7 +855,6 @@ async fn run_connection(
                                                 ReadyKind::ResumedWithReplay,
                                                 None,
                                                 supports_image,
-                                                model_cfg,
                                             )
                                             .await;
                                         }
@@ -894,14 +895,7 @@ async fn run_connection(
                 .send_request(NewSessionRequest::new(std::path::Path::new(&cwd)))
                 .block_task()
                 .await?;
-            let model_cfg = created
-                .config_options
-                .as_deref()
-                .and_then(model_from_config)
-                .map(|(id, state)| {
-                    let _ = event_tx.try_send(AcpEvent::Model(state));
-                    id
-                });
+            publish_config_options(created.config_options.as_deref(), &event_tx);
             let session = connection.attach_session(created, Default::default())?;
             drive_session(
                 session,
@@ -910,7 +904,6 @@ async fn run_connection(
                 ReadyKind::Fresh,
                 fallback_reason,
                 supports_image,
-                model_cfg,
             )
             .await
         })
@@ -1068,7 +1061,6 @@ async fn run_resumed_connection(
                 ReadyKind::ResumedKeepHistory,
                 None,
                 supports_image,
-                None,
             )
             .await
         })
@@ -1085,8 +1077,6 @@ async fn drive_session<'r>(
     fallback_reason: Option<String>,
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
-    // 模型配置项的 id（agent 报了才有）——切模型时按它下发 set_config_option。
-    mut model_config_id: Option<SessionConfigId>,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = event_tx.try_send(AcpEvent::Ready {
         session_id: session.session_id().clone(),
@@ -1148,27 +1138,23 @@ async fn drive_session<'r>(
                     .connection()
                     .send_notification(CancelNotification::new(session.session_id().clone()))?;
             }
-            Next::Cmd(Some(AcpCommand::SetModel(value_id))) => {
-                // 没拿到模型配置项 id 说明这个 agent 压根没报模型 → 无从切起，
-                // UI 侧本来也不会给出下拉（options 为空）。
-                let Some(cfg_id) = model_config_id.clone() else {
-                    continue;
-                };
+            Next::Cmd(Some(AcpCommand::SetConfigOption {
+                config_id,
+                value_id,
+            })) => {
                 let req = SetSessionConfigOptionRequest::new(
                     session.session_id().clone(),
-                    cfg_id,
+                    SessionConfigId::new(config_id),
                     SessionConfigValueId::new(value_id),
                 );
                 match session.connection().send_request(req).block_task().await {
-                    // 响应带回全量配置项：直接据此刷新当前模型（不猜切没切成）。
+                    // 响应带回全量配置项：直接据此刷新，不猜 agent 是否接受了修改。
                     Ok(resp) => {
-                        if let Some((id, state)) = model_from_config(&resp.config_options) {
-                            model_config_id = Some(id);
-                            let _ = event_tx.try_send(AcpEvent::Model(state));
-                        }
+                        publish_config_options(Some(&resp.config_options), &event_tx);
                     }
                     Err(e) => {
-                        let _ = event_tx.try_send(AcpEvent::Status(format!("切换模型失败：{e}")));
+                        let _ =
+                            event_tx.try_send(AcpEvent::Status(format!("更新会话配置失败：{e}")));
                     }
                 }
             }
@@ -1218,12 +1204,11 @@ async fn translate_update(
                         }),
                         // 计划（步骤清单）：透传给 UI 渲染 PLAN 条。
                         SessionUpdate::Plan(p) => Some(AcpEvent::Plan(p)),
-                        // 会话配置变了（用户在 agent 侧换了模型等）：只关心模型。
+                        // 会话配置变了（用户在 agent 侧换了模型、模式等）：全量刷新。
                         SessionUpdate::ConfigOptionUpdate(u) => {
-                            model_from_config(&u.config_options)
-                                .map(|(_, state)| AcpEvent::Model(state))
+                            publish_config_options(Some(&u.config_options), &event_tx);
+                            None
                         }
-                        // 模式 / 用量等仍不渲染（见方案「已知不做」）。
                         _ => None,
                     };
                     if let Some(ev) = event {
@@ -1294,6 +1279,22 @@ fn build_agent_args(
     for (name, value) in &launch.env {
         user_env.insert(name.clone(), crate::workspace_override::expand_tilde(value));
     }
+    inject_local_adapter_cli_path(
+        &launch.command,
+        "@agentclientprotocol/codex-acp",
+        "CODEX_PATH",
+        "codex",
+        &mut user_env,
+        search_path,
+    );
+    inject_local_adapter_cli_path(
+        &launch.command,
+        "@agentclientprotocol/claude-agent-acp",
+        "CLAUDE_CODE_EXECUTABLE",
+        "claude",
+        &mut user_env,
+        search_path,
+    );
     let resolved: Vec<String> = match prog_token {
         Some(prog) => {
             let prog = if prog.contains('/') {
@@ -1324,6 +1325,28 @@ fn build_agent_args(
     Ok(args)
 }
 
+/// 官方 ACP 适配器有时会携带自己的 agent 运行时；优先使用扩展 PATH 中找到的
+/// 本机 CLI，避免模型、能力或登录态落在另一份过期运行时上。用户通过启动规格或
+/// 环境显式指定时保持原样，找不到本机 CLI 则让适配器自行回退。
+fn inject_local_adapter_cli_path(
+    command: &str,
+    adapter_package: &str,
+    env_var: &str,
+    program: &str,
+    user_env: &mut BTreeMap<String, String>,
+    search_path: &str,
+) {
+    if !command.contains(adapter_package)
+        || user_env.contains_key(env_var)
+        || std::env::var_os(env_var).is_some()
+    {
+        return;
+    }
+    if let Some(path) = resolve_in_path(program, search_path) {
+        user_env.insert(env_var.to_string(), path);
+    }
+}
+
 /// Claude Code 适配器专用 meta：要它把原始 SDK 消息也发过来（里面带 usage /
 /// 缓存 token 等明细，普通 ACP 事件里没有）。非 Claude 的 agent 不认这个键，
 /// 传了也只是被忽略，但没必要发。
@@ -1347,9 +1370,7 @@ fn claude_raw_sdk_meta(cmd: &str) -> Option<serde_json::Map<String, serde_json::
 /// 是值 id，`options` 里同 id 那条的 `name` 才是给人看的名字（如
 /// `Claude Sonnet 4.5`）。找不到对应选项就退回值 id 本身——显示 `sonnet-4.5`
 /// 也比显示适配器包名强。
-pub(crate) fn model_from_config(
-    options: &[SessionConfigOption],
-) -> Option<(SessionConfigId, ModelState)> {
+pub(crate) fn model_from_config(options: &[SessionConfigOption]) -> Option<ModelState> {
     let opt = options
         .iter()
         .find(|o| matches!(o.category, Some(SessionConfigOptionCategory::Model)))?;
@@ -1378,13 +1399,64 @@ pub(crate) fn model_from_config(
         .iter()
         .map(|o| (o.value.to_string(), o.name.clone()))
         .collect();
-    Some((
-        opt.id.clone(),
-        ModelState {
-            current_name: name,
-            options,
-        },
-    ))
+    Some(ModelState {
+        config_id: opt.id.to_string(),
+        current_name: name,
+        options,
+    })
+}
+
+/// 将 agent 声明的全部 select 配置收敛成视图状态。Boolean 尚未在初始化能力中
+/// 声明，因此兼容 ACP 1.3 的 adapter 会回退为 select；未来声明 bool 能力后可在
+/// 这里自然扩展成开关，不会影响已有 agent。
+pub(crate) fn session_configs_from_config(
+    options: &[SessionConfigOption],
+) -> Vec<SessionConfigState> {
+    options
+        .iter()
+        .filter(|opt| !matches!(opt.category, Some(SessionConfigOptionCategory::Model)))
+        .filter_map(|opt| {
+            let SessionConfigKind::Select(sel) = &opt.kind else {
+                return None;
+            };
+            let flat: Vec<&agent_client_protocol::schema::v1::SessionConfigSelectOption> =
+                match &sel.options {
+                    SessionConfigSelectOptions::Ungrouped(v) => v.iter().collect(),
+                    SessionConfigSelectOptions::Grouped(gs) => {
+                        gs.iter().flat_map(|g| g.options.iter()).collect()
+                    }
+                    _ => Vec::new(),
+                };
+            let current_name = flat
+                .iter()
+                .find(|o| o.value == sel.current_value)
+                .map(|o| o.name.clone())
+                .unwrap_or_else(|| sel.current_value.to_string());
+            (!current_name.trim().is_empty()).then(|| SessionConfigState {
+                config_id: opt.id.to_string(),
+                name: opt.name.clone(),
+                description: opt.description.clone(),
+                current_name,
+                options: flat
+                    .iter()
+                    .map(|o| (o.value.to_string(), o.name.clone()))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn publish_config_options(
+    options: Option<&[SessionConfigOption]>,
+    event_tx: &smol::channel::Sender<AcpEvent>,
+) {
+    let Some(options) = options else { return };
+    if let Some(model) = model_from_config(options) {
+        let _ = event_tx.try_send(AcpEvent::Model(model));
+    }
+    let _ = event_tx.try_send(AcpEvent::ConfigOptions(session_configs_from_config(
+        options,
+    )));
 }
 
 /// 权限卡片的问题摘要：tool call 有标题用标题，否则退回工具 id。
@@ -2100,8 +2172,9 @@ mod spawn_gate_tests {
 
 #[cfg(test)]
 mod path_resolve_tests {
-    use super::{build_agent_args, resolve_in_path};
+    use super::{build_agent_args, inject_local_adapter_cli_path, resolve_in_path};
     use crate::agent_kind::AcpLaunchSpec;
+    use std::collections::BTreeMap;
 
     #[test]
     fn absolute_or_slashed_returned_asis() {
@@ -2164,6 +2237,80 @@ mod path_resolve_tests {
         assert!(args[1..3].contains(&structured_xdg));
         assert_eq!(args[3], "/bin/sh");
         assert_eq!(args[4], "--version");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn official_codex_adapter_prefers_local_codex_cli() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("smelt-codex-path-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let codex = dir.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&codex, permissions).unwrap();
+
+        let mut env = BTreeMap::new();
+        inject_local_adapter_cli_path(
+            "bunx --bun @agentclientprotocol/codex-acp@1.1.7",
+            "@agentclientprotocol/codex-acp",
+            "CODEX_PATH",
+            "codex",
+            &mut env,
+            dir.to_str().unwrap(),
+        );
+
+        assert_eq!(
+            env.get("CODEX_PATH"),
+            Some(&codex.to_string_lossy().into_owned())
+        );
+        std::fs::remove_file(codex).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_codex_path_is_not_overridden() {
+        let mut env = BTreeMap::from([("CODEX_PATH".to_string(), "/custom/codex".to_string())]);
+
+        inject_local_adapter_cli_path(
+            "bunx --bun @agentclientprotocol/codex-acp@1.1.7",
+            "@agentclientprotocol/codex-acp",
+            "CODEX_PATH",
+            "codex",
+            &mut env,
+            "/opt/homebrew/bin",
+        );
+
+        assert_eq!(
+            env.get("CODEX_PATH").map(String::as_str),
+            Some("/custom/codex")
+        );
+    }
+
+    #[test]
+    fn official_claude_adapter_prefers_local_claude_cli() {
+        let mut env = BTreeMap::new();
+
+        inject_local_adapter_cli_path(
+            "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0",
+            "@agentclientprotocol/claude-agent-acp",
+            "CLAUDE_CODE_EXECUTABLE",
+            "sh",
+            &mut env,
+            "/bin:/usr/bin",
+        );
+
+        assert_eq!(
+            env.get("CLAUDE_CODE_EXECUTABLE").map(String::as_str),
+            Some("/bin/sh")
+        );
     }
 }
 
@@ -2265,7 +2412,7 @@ mod resume_incoming_lines_tests {
             assert_eq!(last_stdout_line.lock().unwrap().as_deref(), Some(live));
 
             let mut state = AcpSessionState::default();
-            state.permission = Some(LivePermission {
+            state.permissions.push(LivePermission {
                 question: "Allow?".to_string(),
                 tool_call_id: "tool-1".to_string(),
                 options: Vec::new(),
@@ -2331,8 +2478,8 @@ mod model_tests {
                 opt("sonnet-4-5", "Claude Sonnet 4.5"),
             ]),
         )];
-        let (id, state) = super::model_from_config(&opts).expect("应解析出模型项");
-        assert_eq!(id.to_string(), "model");
+        let state = super::model_from_config(&opts).expect("应解析出模型项");
+        assert_eq!(state.config_id, "model");
         assert_eq!(state.current_name, "Claude Sonnet 4.5");
         // 候选要带全，UI 靠它渲染下拉
         assert_eq!(state.options.len(), 2);
@@ -2357,7 +2504,7 @@ mod model_tests {
             "haiku-4-5",
             SessionConfigSelectOptions::Grouped(vec![group]),
         )];
-        let (_, state) = super::model_from_config(&opts).expect("分组里也该翻得出来");
+        let state = super::model_from_config(&opts).expect("分组里也该翻得出来");
         assert_eq!(state.current_name, "Claude Haiku 4.5");
         assert_eq!(state.options.len(), 1);
     }
@@ -2375,5 +2522,27 @@ mod model_tests {
         )
         .category(SessionConfigOptionCategory::Mode);
         assert!(super::model_from_config(&[other]).is_none());
+    }
+
+    #[test]
+    fn exposes_non_model_select_configs_for_all_adapters() {
+        let mode = SessionConfigOption::new(
+            SessionConfigId::new("mode".to_string()),
+            "Mode".to_string(),
+            SessionConfigKind::Select(SessionConfigSelect::new(
+                SessionConfigValueId::new("agent".to_string()),
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    opt("agent", "Agent"),
+                    opt("agent-full-access", "Agent (full access)"),
+                ]),
+            )),
+        )
+        .description("Approval and sandboxing preset".to_string())
+        .category(SessionConfigOptionCategory::Mode);
+        let configs = super::session_configs_from_config(&[mode]);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].config_id, "mode");
+        assert_eq!(configs[0].current_name, "Agent");
+        assert_eq!(configs[0].options.len(), 2);
     }
 }

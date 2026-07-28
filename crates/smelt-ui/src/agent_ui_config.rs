@@ -13,6 +13,8 @@ fn default_true() -> bool {
     true
 }
 
+const LEGACY_CODEX_ACP_CMD: &str = "bunx --bun @zed-industries/codex-acp@0.16.0";
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentUiConfig {
     /// 状态通道进入「等你批准 / 等你输入」时用 Notification 组件弹出。
@@ -93,7 +95,20 @@ fn agent_ui_path() -> Option<std::path::PathBuf> {
 }
 
 pub fn load_agent_ui_config() -> AgentUiConfig {
-    smelt_core::json_store::load_json(agent_ui_path())
+    let mut config: AgentUiConfig = smelt_core::json_store::load_json(agent_ui_path());
+    // 只迁移之前随应用发出的默认值；用户自己选过 Zed 适配器或其他命令时不动。
+    if migrate_legacy_codex_adapter(&mut config) {
+        save_agent_ui_config(&config);
+    }
+    config
+}
+
+fn migrate_legacy_codex_adapter(config: &mut AgentUiConfig) -> bool {
+    if config.acp_codex_cmd != LEGACY_CODEX_ACP_CMD {
+        return false;
+    }
+    config.acp_codex_cmd = default_acp_codex_cmd();
+    true
 }
 
 fn save_agent_ui_config(c: &AgentUiConfig) {
@@ -110,6 +125,25 @@ pub fn apply_agent_ui(f: impl FnOnce(&mut AgentUiConfig), cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_codex_default_is_replaced_by_current_adapter() {
+        let mut config = AgentUiConfig::default();
+        config.acp_codex_cmd = LEGACY_CODEX_ACP_CMD.into();
+
+        assert!(migrate_legacy_codex_adapter(&mut config));
+
+        assert_eq!(config.acp_codex_cmd, default_acp_codex_cmd());
+    }
+
+    #[test]
+    fn custom_codex_adapter_is_not_migrated() {
+        let mut config = AgentUiConfig::default();
+        config.acp_codex_cmd = "codex-acp --custom".into();
+
+        assert!(!migrate_legacy_codex_adapter(&mut config));
+        assert_eq!(config.acp_codex_cmd, "codex-acp --custom");
+    }
 
     #[test]
     fn profile_launch_uses_configured_agent_command_and_workspace_env() {
