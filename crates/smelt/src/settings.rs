@@ -138,8 +138,6 @@ fn save_appearance(a: &Appearance) {
 pub struct LaunchEntry {
     pub label: String,
     pub command: String,
-    #[serde(default)]
-    pub agent_kind: Option<smelt_core::agent_kind::TerminalAgentKind>,
 }
 
 /// 出厂默认启动项：与当前常用配置对齐（各 agent 默认带全权限参数）。
@@ -150,22 +148,18 @@ pub fn default_launch_entries() -> Vec<LaunchEntry> {
         LaunchEntry {
             label: "Claude Code".into(),
             command: "claude --dangerously-skip-permissions".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Claude),
         },
         LaunchEntry {
             label: "Codex".into(),
             command: "codex --dangerously-bypass-approvals-and-sandbox".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Codex),
         },
         LaunchEntry {
             label: "Copilot".into(),
             command: "copilot --allow-all".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Copilot),
         },
         LaunchEntry {
             label: "Grok".into(),
             command: "grok".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Grok),
         },
     ]
 }
@@ -218,10 +212,25 @@ fn launch_config_path() -> Option<std::path::PathBuf> {
 /// 磁盘上的原始形状：兼容旧版「全权限」三开关，也兼容新版 `entries` 列表。
 /// `entries: None` 表示文件里没写这个键（旧格式）→ 迁到出厂默认并回写；
 /// `Some([])` 表示用户清空了列表，照用。
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct LaunchConfigFile {
     #[serde(default)]
-    entries: Option<Vec<LaunchEntry>>,
+    entries: Option<Vec<LaunchEntryFile>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct LaunchEntryFile {
+    label: String,
+    command: String,
+}
+
+impl From<LaunchEntryFile> for LaunchEntry {
+    fn from(entry: LaunchEntryFile) -> Self {
+        Self {
+            label: entry.label,
+            command: entry.command,
+        }
+    }
 }
 
 /// 读取启动配置；缺失/损坏/旧格式（无 `entries`）回退出厂默认并写成新格式。
@@ -229,6 +238,10 @@ pub fn load_launch_config() -> LaunchConfig {
     let Some(path) = launch_config_path() else {
         return LaunchConfig::default();
     };
+    load_launch_config_from_path(&path)
+}
+
+fn load_launch_config_from_path(path: &std::path::Path) -> LaunchConfig {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return LaunchConfig::default();
     };
@@ -236,11 +249,13 @@ pub fn load_launch_config() -> LaunchConfig {
         return LaunchConfig::default();
     };
     match file.entries {
-        Some(entries) => LaunchConfig { entries },
+        Some(entries) => LaunchConfig {
+            entries: entries.into_iter().map(LaunchEntry::from).collect(),
+        },
         None => {
             // 旧版只有全权限开关：直接用出厂默认（已含全权限参数）并回写。
             let c = LaunchConfig::default();
-            save_launch_config(&c);
+            crate::json_store::save_json(Some(path.to_path_buf()), &c);
             c
         }
     }
@@ -266,7 +281,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // crate 之后要跨 crate 共用的数据模型。这里重导出成原来的裸名字，本文件剩下
 // 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
 // 逐处改路径。
-pub use smelt_core::agent_kind::{AcpAgentKind, AcpProfile, TerminalAgentKind};
+pub use smelt_core::agent_kind::{AcpAgentKind, AcpProfile};
 pub use smelt_ui::agent_ui_config::{AgentUiConfig, apply_agent_ui, load_agent_ui_config};
 
 /// 全局配置里某个 agent 的启动命令；配置还没装载就退回出厂值。
@@ -2118,7 +2133,6 @@ impl Workspace {
                 c.entries.push(LaunchEntry {
                     label: "新启动项".into(),
                     command: String::new(),
-                    agent_kind: None,
                 });
             },
             cx,
@@ -2137,23 +2151,6 @@ impl Workspace {
             cx,
         );
         self.reset_launch_inputs();
-        cx.notify();
-    }
-
-    pub fn set_launch_agent_kind(
-        &mut self,
-        index: usize,
-        kind: Option<TerminalAgentKind>,
-        cx: &mut Context<Self>,
-    ) {
-        apply_launch_config(
-            |config| {
-                if let Some(entry) = config.entries.get_mut(index) {
-                    entry.agent_kind = kind;
-                }
-            },
-            cx,
-        );
         cx.notify();
     }
 
@@ -2662,9 +2659,8 @@ impl Workspace {
                             // 名称短（"Claude Code" 这种）、命令长（带一串参数），宽度按
                             // 信息量分：名称够放就行，剩下的全给命令。
                             let name_w = px(140.);
-                            let kind_w = px(112.);
                             let del_w = px(28.);
-                            let cmd_w = field_w - name_w - kind_w - del_w - px(48.);
+                            let cmd_w = field_w - name_w - del_w - px(40.);
                             let mono = terminal_view::font_family();
 
                             let mut list = v_flex()
@@ -2684,16 +2680,13 @@ impl Workspace {
                                         .text_xs()
                                         .text_color(muted)
                                         .child(div().w(name_w).child("名称"))
-                                        .child(div().w(kind_w).child("恢复类型"))
                                         .child(div().w(cmd_w).child("命令"))
                                         // 占位：让表头两列跟下面的行严格对齐（删除按钮那一列）。
                                         .child(div().w(del_w)),
                                 );
                             for (ix, (label, command)) in inputs.rows.iter().enumerate() {
                                 let del_entity = launch_editor_entity.clone();
-                                let kind_entity = launch_editor_entity.clone();
                                 let row_ix = ix;
-                                let kind = cx.global::<LaunchConfig>().entries[ix].agent_kind;
                                 list = list.child(
                                     h_flex()
                                         .id(("launch-row", row_ix))
@@ -2701,51 +2694,6 @@ impl Workspace {
                                         .gap_2()
                                         .items_center()
                                         .child(Input::new(label).w(name_w))
-                                        .child(
-                                            Button::new(("launch-kind", row_ix))
-                                                .ghost()
-                                                .small()
-                                                .w(kind_w)
-                                                .label(
-                                                    kind.map(TerminalAgentKind::label)
-                                                        .unwrap_or("普通终端"),
-                                                )
-                                                .dropdown_menu(move |menu, _window, _cx| {
-                                                    let entity = kind_entity.clone();
-                                                    let mut menu = menu.item(
-                                                        PopupMenuItem::new("普通终端").on_click(
-                                                            move |_ev, _window, cx| {
-                                                                entity.update(cx, |ws, cx| {
-                                                                    ws.set_launch_agent_kind(
-                                                                        row_ix, None, cx,
-                                                                    );
-                                                                });
-                                                            },
-                                                        ),
-                                                    );
-                                                    for kind in TerminalAgentKind::ALL {
-                                                        let entity = kind_entity.clone();
-                                                        menu = menu.item(
-                                                            PopupMenuItem::new(kind.label())
-                                                                .on_click(
-                                                                    move |_ev, _window, cx| {
-                                                                        entity.update(
-                                                                            cx,
-                                                                            |ws, cx| {
-                                                                                ws.set_launch_agent_kind(
-                                                                                    row_ix,
-                                                                                    Some(kind),
-                                                                                    cx,
-                                                                                );
-                                                                            },
-                                                                        );
-                                                                    },
-                                                                ),
-                                                        );
-                                                    }
-                                                    menu
-                                                }),
-                                        )
                                         // 命令是 shell 代码，用终端同款等宽字体——参数里的
                                         // `-`/`_` 对齐后好读，也一眼跟左边的显示名区分开。
                                         .child(
@@ -4079,27 +4027,9 @@ impl Workspace {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{
-        LaunchEntry, acp_cmd_setting_value, daemon_info_line, default_launch_entries, fmt_uptime,
-    };
+    use super::{acp_cmd_setting_value, daemon_info_line, fmt_uptime};
     use crate::terminal::DaemonInfo;
-    use smelt_core::agent_kind::{AcpAgentKind, TerminalAgentKind};
-
-    #[test]
-    fn old_launch_entry_without_agent_kind_stays_plain_terminal() {
-        let entry: LaunchEntry =
-            serde_json::from_str(r#"{"label":"custom","command":"my-agent"}"#).unwrap();
-        assert_eq!(entry.agent_kind, None);
-    }
-
-    #[test]
-    fn default_launch_entries_enable_all_supported_terminal_agents() {
-        let kinds = default_launch_entries()
-            .into_iter()
-            .filter_map(|entry| entry.agent_kind)
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(kinds, TerminalAgentKind::ALL.into_iter().collect());
-    }
+    use smelt_core::agent_kind::AcpAgentKind;
 
     #[test]
     fn builtin_agent_command_is_hidden_in_settings() {

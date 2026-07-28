@@ -17,6 +17,7 @@ pub(crate) use smelt_acp_view::acp_view;
 pub(crate) use smelt_core::json_store;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
+
 mod agent;
 mod claude_memory;
 mod dock;
@@ -27,7 +28,6 @@ mod git_panel;
 mod hotspot;
 mod inspector;
 mod mem_usage;
-use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
 use smelt_core::osc;
 // 权限菜单解析：唯一真源，与 smeltd 共用 smelt-core 里的同一份（smeltd 解析后随
 // SessionState 下发给手机端）。曾经 Rust/TS 各一份并已实测漂移，别再在别处另写一版。
@@ -1078,10 +1078,6 @@ enum PaneState {
         /// 旧存档没有 → None，只开裸 shell。
         #[serde(default)]
         launch_cmd: Option<String>,
-        #[serde(default)]
-        agent_kind: Option<TerminalAgentKind>,
-        #[serde(default)]
-        resume_state: Option<TerminalResumeState>,
     },
     Split {
         axis: SplitAxis,
@@ -1378,8 +1374,6 @@ fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
                 custom_title: t.custom_title().map(str::to_string),
                 launch_label: t.launch_label().map(str::to_string),
                 launch_cmd: t.launch_cmd().map(str::to_string),
-                agent_kind: t.agent_kind(),
-                resume_state: t.resume_state().cloned(),
             }
         }
         Pane::Split {
@@ -1409,105 +1403,6 @@ struct SpawnedLeaf {
     launch: Option<String>,
     label: Option<String>,
     custom_title: Option<String>,
-    agent_kind: Option<TerminalAgentKind>,
-    resume_state: Option<TerminalResumeState>,
-}
-
-struct PreparedTerminalLaunch {
-    original_command: Option<String>,
-    spawn_command: Option<String>,
-    label: Option<String>,
-    agent_kind: Option<TerminalAgentKind>,
-    resume_state: Option<TerminalResumeState>,
-    codex_baseline: Option<HashSet<String>>,
-    workspace_dir: Option<String>,
-}
-
-fn prepare_terminal_launch(
-    entry: &settings::LaunchEntry,
-    cwd: Option<&str>,
-) -> Result<PreparedTerminalLaunch, String> {
-    let Some(agent_kind) = entry.agent_kind else {
-        return Ok(PreparedTerminalLaunch {
-            original_command: Some(entry.command.clone()),
-            spawn_command: Some(entry.command.clone()),
-            label: Some(entry.label.clone()),
-            agent_kind: None,
-            resume_state: None,
-            codex_baseline: None,
-            workspace_dir: None,
-        });
-    };
-    let generated_id = uuid::Uuid::new_v4().to_string();
-    match session_history::prepare_terminal_agent_launch(agent_kind, &entry.command, &generated_id)?
-    {
-        session_history::PreparedTerminalAgentLaunch::Known { command, state } => {
-            Ok(PreparedTerminalLaunch {
-                original_command: Some(entry.command.clone()),
-                spawn_command: Some(command),
-                label: Some(entry.label.clone()),
-                agent_kind: Some(agent_kind),
-                resume_state: Some(state.clone()),
-                codex_baseline: None,
-                workspace_dir: state.workspace_dir,
-            })
-        }
-        session_history::PreparedTerminalAgentLaunch::Discover {
-            command,
-            workspace_dir,
-        } => {
-            let cwd = cwd.ok_or_else(|| "Codex 会话绑定需要项目工作目录".to_string())?;
-            let baseline =
-                session_history::terminal_session_ids(agent_kind, cwd, workspace_dir.as_deref());
-            Ok(PreparedTerminalLaunch {
-                original_command: Some(entry.command.clone()),
-                spawn_command: Some(command),
-                label: Some(entry.label.clone()),
-                agent_kind: Some(agent_kind),
-                resume_state: None,
-                codex_baseline: Some(baseline),
-                workspace_dir,
-            })
-        }
-    }
-}
-
-fn terminal_restore_action(
-    agent_kind: Option<TerminalAgentKind>,
-    original_launch: Option<&str>,
-    resume_state: Option<&TerminalResumeState>,
-    cwd: Option<&str>,
-    history_exists: bool,
-) -> terminal::MissingSessionAction {
-    let Some(agent_kind) = agent_kind else {
-        return original_launch
-            .map(|command| terminal::MissingSessionAction::Launch(command.to_string()))
-            .unwrap_or(terminal::MissingSessionAction::Shell);
-    };
-    let Some(state) = resume_state else {
-        return terminal::MissingSessionAction::Reject(
-            "无法恢复：没有记录这个 agent 的历史会话 ID".into(),
-        );
-    };
-    if state.agent != agent_kind {
-        return terminal::MissingSessionAction::Reject(
-            "无法恢复：记录的 agent 类型与启动项不一致".into(),
-        );
-    }
-    let Some(command) = original_launch else {
-        return terminal::MissingSessionAction::Reject("无法恢复：缺少原始启动命令".into());
-    };
-    if cwd.is_none() {
-        return terminal::MissingSessionAction::Reject("无法恢复：缺少工作目录".into());
-    }
-    if !history_exists {
-        return terminal::MissingSessionAction::Reject("无法恢复：历史会话已不存在".into());
-    }
-    session_history::terminal_resume_command(agent_kind, command, &state.session_id)
-        .map(terminal::MissingSessionAction::Launch)
-        .unwrap_or_else(|error| {
-            terminal::MissingSessionAction::Reject(format!("无法恢复：{error}"))
-        })
 }
 
 /// 阻塞：按 DFS 顺序 spawn 一棵布局树的全部叶子（**只**在后台线程调用）。
@@ -1525,27 +1420,13 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
             custom_title,
             launch_label,
             launch_cmd,
-            agent_kind,
-            resume_state,
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
-            let history_exists = resume_state
-                .as_ref()
-                .zip(cwd.as_deref())
-                .is_some_and(|(state, cwd)| session_history::terminal_session_exists(state, cwd));
-            let action = terminal_restore_action(
-                *agent_kind,
-                launch_cmd.as_deref(),
-                resume_state.as_ref(),
-                cwd.as_deref(),
-                history_exists,
-            );
             let terminal =
-                terminal::Terminal::spawn_with_action(24, 80, cwd.as_deref(), &sid, &action)
-                    .map_err(|e| {
-                        eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
-                        e.to_string()
-                    })?;
+                terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None).map_err(|e| {
+                    eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
+                    e.to_string()
+                })?;
             out.push(SpawnedLeaf {
                 terminal,
                 sid,
@@ -1553,8 +1434,6 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
                 launch: launch_cmd.clone(),
                 label: launch_label.clone(),
                 custom_title: custom_title.clone(),
-                agent_kind: *agent_kind,
-                resume_state: resume_state.clone(),
             });
             Ok(())
         }
@@ -1578,15 +1457,13 @@ fn rebuild_pane_ready(
         PaneState::Leaf { .. } => {
             let leaf = leaves.next()?;
             let v = cx.new(|cx| {
-                let mut view = TerminalView::from_terminal_with_resume(
+                let mut view = TerminalView::from_terminal(
                     cx,
                     leaf.terminal,
                     leaf.cwd,
                     leaf.sid,
                     leaf.launch.as_deref(),
                     leaf.label.as_deref(),
-                    leaf.agent_kind,
-                    leaf.resume_state,
                 );
                 view.set_custom_title(leaf.custom_title);
                 view
@@ -1649,8 +1526,6 @@ fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
                 custom_title: None,
                 launch_label: None,
                 launch_cmd: None,
-                agent_kind: None,
-                resume_state: None,
             },
             active: 0,
             custom_title: None,
@@ -1675,10 +1550,14 @@ fn ws_state_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".smelt").join("workspace.json"))
 }
 
+fn load_ws_state_from_path(path: &std::path::Path) -> Option<WsState> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
 /// 读取存档；文件不存在/损坏都返回 None，交由调用方回退默认。
 fn load_ws_state() -> Option<WsState> {
-    let data = std::fs::read_to_string(ws_state_path()?).ok()?;
-    serde_json::from_str(&data).ok()
+    load_ws_state_from_path(&ws_state_path()?)
 }
 
 /// 工作台根视图：多标签终端管理器。
@@ -3002,38 +2881,12 @@ impl Workspace {
         self.remember_session_project(cwd.as_deref());
         // spawn 在后台；先把项目落盘，即使进程启动失败也不能让用户刚选中的项目消失。
         self.save_state(cx);
-        let prepared = match entry.as_ref() {
-            Some(entry) => match prepare_terminal_launch(entry, cwd.as_deref()) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.background_error = Some(format!("无法启动 agent：{error}"));
-                    cx.notify();
-                    return;
-                }
-            },
-            None => PreparedTerminalLaunch {
-                original_command: None,
-                spawn_command: None,
-                label: None,
-                agent_kind: None,
-                resume_state: None,
-                codex_baseline: None,
-                workspace_dir: None,
-            },
-        };
         let sid = new_sid();
         let cwd_bg = cwd.clone();
-        let launch_owned = prepared.original_command;
-        let label_owned = prepared.label;
-        let agent_kind = prepared.agent_kind;
-        let resume_state = prepared.resume_state;
-        let codex_baseline = prepared.codex_baseline;
-        let workspace_dir = prepared.workspace_dir;
+        let launch_owned = entry.as_ref().map(|entry| entry.command.clone());
+        let label_owned = entry.as_ref().map(|entry| entry.label.clone());
         let sid_bg = sid.clone();
-        let action = prepared
-            .spawn_command
-            .map(terminal::MissingSessionAction::Launch)
-            .unwrap_or(terminal::MissingSessionAction::Shell);
+        let launch_bg = launch_owned.clone();
         // 立刻给反馈，避免「点了像没点」。
         self.stage_override = None;
         eprintln!("[workspace] 新建会话 cwd={cwd:?} launch={launch_owned:?} sid={sid}");
@@ -3043,12 +2896,12 @@ impl Workspace {
         std::thread::Builder::new()
             .name("smelt-spawn-session".into())
             .spawn(move || {
-                let r = terminal::Terminal::spawn_with_action(
+                let r = terminal::Terminal::spawn(
                     24,
                     80,
                     cwd_bg.as_deref(),
                     &sid_bg,
-                    &action,
+                    launch_bg.as_deref(),
                 );
                 let _ = tx.send_blocking(r);
             })
@@ -3079,15 +2932,13 @@ impl Workspace {
             };
             let _ = this.update(cx, |this, cx| {
                 let view = cx.new(|cx| {
-                    TerminalView::from_terminal_with_resume(
+                    TerminalView::from_terminal(
                         cx,
                         terminal,
                         cwd.clone(),
                         sid,
                         launch_owned.as_deref(),
                         label_owned.as_deref(),
-                        agent_kind,
-                        resume_state,
                     )
                 });
                 this.sessions.push(Session::single(view.clone()));
@@ -3095,103 +2946,12 @@ impl Workspace {
                 this.active_session = this.sessions.len() - 1;
                 this.stage_override = None;
                 this.save_state(cx);
-                if let (Some(baseline), Some(cwd)) = (codex_baseline, cwd.clone()) {
-                    this.start_codex_binding(view, cwd, baseline, workspace_dir, cx);
-                }
                 eprintln!(
                     "[workspace] 新建会话成功，当前共 {} 个",
                     this.sessions.len()
                 );
                 cx.notify();
             });
-        })
-        .detach();
-    }
-
-    fn start_codex_binding(
-        &self,
-        view: Entity<TerminalView>,
-        cwd: String,
-        baseline: HashSet<String>,
-        workspace_dir: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            for _ in 0..20 {
-                smol::Timer::after(Duration::from_millis(500)).await;
-                let current = session_history::terminal_session_ids(
-                    TerminalAgentKind::Codex,
-                    &cwd,
-                    workspace_dir.as_deref(),
-                );
-                let claimed = this
-                    .update(cx, |workspace, cx| {
-                        workspace
-                            .sessions
-                            .iter()
-                            .flat_map(Session::term_leaves)
-                            .filter_map(|leaf| {
-                                leaf.read(cx)
-                                    .resume_state()
-                                    .filter(|state| state.agent == TerminalAgentKind::Codex)
-                                    .map(|state| state.session_id.clone())
-                            })
-                            .collect::<HashSet<_>>()
-                    })
-                    .unwrap_or_default();
-                match session_history::discover_unclaimed_session_id(&baseline, &current, &claimed)
-                {
-                    Ok(Some(session_id)) => {
-                        let bound = this
-                            .update(cx, |workspace, cx| {
-                                let still_open = workspace.sessions.iter().any(|session| {
-                                    session
-                                        .term_leaves()
-                                        .iter()
-                                        .any(|leaf| leaf.entity_id() == view.entity_id())
-                                });
-                                if !still_open {
-                                    return false;
-                                }
-                                let already_claimed = workspace
-                                    .sessions
-                                    .iter()
-                                    .flat_map(Session::term_leaves)
-                                    .any(|leaf| {
-                                        leaf.read(cx).resume_state().is_some_and(|state| {
-                                            state.agent == TerminalAgentKind::Codex
-                                                && state.session_id == session_id
-                                        })
-                                    });
-                                if already_claimed {
-                                    return false;
-                                }
-                                view.update(cx, |view, _| {
-                                    view.set_resume_state(Some(TerminalResumeState {
-                                        agent: TerminalAgentKind::Codex,
-                                        session_id,
-                                        workspace_dir: workspace_dir.clone(),
-                                    }));
-                                });
-                                workspace.save_state(cx);
-                                cx.notify();
-                                true
-                            })
-                            .unwrap_or(false);
-                        if bound {
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let _ = this.update(cx, |workspace, cx| {
-                            workspace.background_error = Some(error);
-                            cx.notify();
-                        });
-                        return;
-                    }
-                }
-            }
         })
         .detach();
     }
@@ -3280,8 +3040,6 @@ impl Workspace {
                             custom_title: None,
                             launch_label: None,
                             launch_cmd: None,
-                            agent_kind: None,
-                            resume_state: None,
                         },
                         active: 0,
                         custom_title: s.custom_title.clone(),
@@ -4450,22 +4208,15 @@ impl Workspace {
         self.show_daemon_restart_confirm = false;
         self.daemon_outdated = None;
         // 收集重建参数（Entity 可 Clone；真正 spawn 扔后台）。
-        // launch_cmd 必须带上：硬重启会清掉守护里的会话，同 id 走新建分支，
-        // 不带 launch 就只剩裸 shell，agent 会话等于全丢。
-        let mut jobs: Vec<(
-            Entity<TerminalView>,
-            Option<String>,
-            String,
-            terminal::MissingSessionAction,
-        )> = Vec::new();
+        // 硬重启会清掉守护里的会话。终端 agent 不做语义恢复，缺失会话统一重开 shell。
+        let mut jobs: Vec<(Entity<TerminalView>, Option<String>, String)> = Vec::new();
         for sess in &self.sessions {
             let leaves = sess.term_leaves();
             for leaf in leaves {
                 let view = leaf.read(cx);
                 let cwd = view.cwd();
                 let sid = view.session_id().to_string();
-                let action = view.missing_session_action();
-                jobs.push((leaf, cwd, sid, action));
+                jobs.push((leaf, cwd, sid));
             }
         }
         cx.notify();
@@ -4485,14 +4236,8 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
-                    for (entity, cwd, sid, action) in jobs {
-                        let term = terminal::Terminal::spawn_with_action(
-                            24,
-                            80,
-                            cwd.as_deref(),
-                            &sid,
-                            &action,
-                        );
+                    for (entity, cwd, sid) in jobs {
+                        let term = terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None);
                         out.push((entity, term));
                     }
                     out
@@ -7597,8 +7342,6 @@ mod project_tests {
             custom_title: None,
             launch_label: None,
             launch_cmd: None,
-            agent_kind: None,
-            resume_state: None,
         }
     }
 
@@ -7825,10 +7568,7 @@ mod daemon_state_notification_tests {
 
 #[cfg(test)]
 mod pane_state_tests {
-    use super::{PaneState, prepare_terminal_launch, terminal_restore_action};
-    use crate::settings::LaunchEntry;
-    use crate::terminal::MissingSessionAction;
-    use smelt_core::agent_kind::{TerminalAgentKind, TerminalResumeState};
+    use super::PaneState;
 
     /// pane 自定义名必须能跟着 Leaf 存下来、读回来（否则重开 GUI 就丢名字）。
     #[test]
@@ -7839,12 +7579,6 @@ mod pane_state_tests {
             custom_title: Some("跑测试的终端".into()),
             launch_label: Some("Claude Code".into()),
             launch_cmd: Some("claude --dangerously-skip-permissions".into()),
-            agent_kind: Some(TerminalAgentKind::Claude),
-            resume_state: Some(TerminalResumeState {
-                agent: TerminalAgentKind::Claude,
-                session_id: "agent-session-1".into(),
-                workspace_dir: Some("/tmp/claude-alt".into()),
-            }),
         };
         let json = serde_json::to_string(&leaf).unwrap();
         let back: PaneState = serde_json::from_str(&json).unwrap();
@@ -7855,8 +7589,6 @@ mod pane_state_tests {
                 launch_cmd,
                 id,
                 cwd,
-                agent_kind,
-                resume_state,
             } => {
                 assert_eq!(custom_title.as_deref(), Some("跑测试的终端"));
                 assert_eq!(launch_label.as_deref(), Some("Claude Code"));
@@ -7866,100 +7598,11 @@ mod pane_state_tests {
                 );
                 assert_eq!(id.as_deref(), Some("sid-1"));
                 assert_eq!(cwd.as_deref(), Some("/tmp/x"));
-                assert_eq!(agent_kind, Some(TerminalAgentKind::Claude));
-                assert_eq!(
-                    resume_state.unwrap().workspace_dir.as_deref(),
-                    Some("/tmp/claude-alt")
-                );
             }
             _ => panic!("应当反序列化成 Leaf"),
         }
     }
 
-    #[test]
-    fn terminal_restore_action_resumes_only_known_history() {
-        let state = TerminalResumeState {
-            agent: TerminalAgentKind::Claude,
-            session_id: "sid-1".into(),
-            workspace_dir: None,
-        };
-        assert!(matches!(
-            terminal_restore_action(
-                Some(TerminalAgentKind::Claude),
-                Some("claude --dangerously-skip-permissions"),
-                Some(&state),
-                Some("/tmp/x"),
-                true,
-            ),
-            MissingSessionAction::Launch(command) if command.ends_with("--resume sid-1")
-        ));
-        assert!(matches!(
-            terminal_restore_action(
-                Some(TerminalAgentKind::Claude),
-                Some("claude"),
-                Some(&state),
-                Some("/tmp/x"),
-                false,
-            ),
-            MissingSessionAction::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn terminal_restore_action_rejects_agent_without_identity() {
-        assert!(matches!(
-            terminal_restore_action(
-                Some(TerminalAgentKind::Claude),
-                Some("claude"),
-                None,
-                Some("/tmp/x"),
-                false,
-            ),
-            MissingSessionAction::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn known_id_agent_launch_keeps_original_and_persists_identity() {
-        let entry = LaunchEntry {
-            label: "Claude Code".into(),
-            command: "CLAUDE_CONFIG_DIR=~/.claude-alt claude".into(),
-            agent_kind: Some(TerminalAgentKind::Claude),
-        };
-        let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
-        assert_eq!(
-            prepared.original_command.as_deref(),
-            Some(entry.command.as_str())
-        );
-        assert!(
-            prepared
-                .spawn_command
-                .as_deref()
-                .unwrap()
-                .contains("--session-id")
-        );
-        assert!(prepared.resume_state.is_some());
-        assert!(prepared.codex_baseline.is_none());
-    }
-
-    #[test]
-    fn codex_launch_records_baseline_for_discovery() {
-        let entry = LaunchEntry {
-            label: "Codex".into(),
-            command: "CODEX_HOME=~/.codex-alt codex".into(),
-            agent_kind: Some(TerminalAgentKind::Codex),
-        };
-        let prepared = prepare_terminal_launch(&entry, Some("/tmp/project")).unwrap();
-        assert_eq!(
-            prepared.spawn_command.as_deref(),
-            Some(entry.command.as_str())
-        );
-        assert!(prepared.resume_state.is_none());
-        assert!(prepared.codex_baseline.is_some());
-        assert!(prepared.workspace_dir.unwrap().ends_with("/.codex-alt"));
-    }
-
-    /// 旧存档没有 custom_title / launch_label / launch_cmd 字段，必须读成 None 而不是解析失败。
     #[test]
     fn old_archive_without_custom_title_still_loads() {
         let old = r#"{"Leaf":{"cwd":"/tmp/x","id":"sid-1"}}"#;
@@ -7970,15 +7613,11 @@ mod pane_state_tests {
                 launch_label,
                 launch_cmd,
                 id,
-                agent_kind,
-                resume_state,
                 ..
             } => {
                 assert!(custom_title.is_none(), "旧存档不该凭空冒出自定义名");
                 assert!(launch_label.is_none(), "旧存档不该凭空冒出启动项名");
                 assert!(launch_cmd.is_none(), "旧存档不该凭空冒出启动命令");
-                assert!(agent_kind.is_none(), "旧存档不该凭空冒出 agent 类型");
-                assert!(resume_state.is_none(), "旧存档不该凭空冒出恢复身份");
                 assert_eq!(id.as_deref(), Some("sid-1"));
             }
             _ => panic!("应当反序列化成 Leaf"),
@@ -8067,8 +7706,6 @@ mod workspace_state_tests {
                     custom_title: None,
                     launch_label: None,
                     launch_cmd: None,
-                    agent_kind: None,
-                    resume_state: None,
                 },
                 active: 0,
                 custom_title: Some(name.into()),
