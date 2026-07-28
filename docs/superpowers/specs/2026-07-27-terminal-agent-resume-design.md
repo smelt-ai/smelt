@@ -32,8 +32,23 @@ Each persisted terminal leaf may contain:
 - The agent data/workspace directory override used by that launch.
 - The original launch command.
 
-Older workspace and launch configuration files omit the new fields and retain
-their current behavior.
+Older launch configuration files may already contain an `entries` list while
+omitting `agent_kind`. On load, smelt shell-parses each such command and
+backfills the kind only when the first executable is exactly `claude`, `codex`,
+`copilot`, or `grok`; recognized agent workspace environment prefixes remain
+supported. Labels, command prefixes, aliases such as `claude-quant`, and other
+custom commands are never used to infer a kind. A migrated launch
+configuration is written back immediately.
+
+Older workspace leaves receive the same conservative agent-kind inference from
+their saved launch command. Migration runs against the raw JSON and only
+backfills leaves where the `agent_kind` key is absent; an explicit `null`
+remains an ordinary-terminal choice. Existing leaves do not have a reliably
+recoverable agent session ID, so migration leaves `resume_state` empty rather
+than guessing the newest history file for a project. If their daemon PTY is
+still alive they continue to attach normally. If it is later lost, restoration
+shows the explicit missing-ID error. Closing and relaunching the agent once
+under the migrated launch configuration creates a fully bound, resumable leaf.
 
 ## Session identity binding
 
@@ -131,6 +146,10 @@ Regression coverage will verify:
 - Deterministic IDs for Claude Code, Copilot, and Grok.
 - Unique Codex history-delta binding and ambiguous-delta rejection.
 - Serialization compatibility for old and new launch/workspace files.
+- Exact legacy agent-kind migration, including environment prefixes, and
+  rejection of labels, command prefixes, and custom aliases as inference.
+- Legacy workspace leaves gain only a safely inferred kind and never a guessed
+  history ID.
 - Live daemon sessions attach without running a resume command.
 - Missing daemon sessions resume the persisted agent conversation.
 - Ordinary shell sessions still recreate normally.
