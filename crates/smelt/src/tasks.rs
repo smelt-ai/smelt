@@ -16,9 +16,9 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::*;
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{LaunchEntry, active_launch_entries, icon_for_launch_command};
+use crate::settings::{active_launch_entries, icon_for_launch_command};
 use crate::terminal_view::TerminalView;
-use crate::{Workspace, new_sid, prepare_terminal_launch};
+use crate::{Workspace, new_sid};
 
 // ===================== 模型 =====================
 
@@ -2052,36 +2052,17 @@ impl Workspace {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| entries.first().map(|e| e.command.clone()))
             .unwrap_or_else(|| "claude".into());
-        let launch_entry = entries
-            .into_iter()
-            .find(|entry| entry.command == base_launch)
-            .unwrap_or(LaunchEntry {
-                label: task.title.clone(),
-                command: base_launch.clone(),
-                agent_kind: None,
-            });
-        let prepared = match prepare_terminal_launch(&launch_entry, cwd.as_deref()) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                eprintln!("[tasks] 无法准备 agent 启动：{error}");
-                return;
-            }
-        };
         let label = task.title.clone();
         let prompt = task_prompt(&task);
-        let prepared_command = prepared
-            .spawn_command
-            .clone()
-            .unwrap_or_else(|| base_launch.clone());
 
         // 有首包 → 写文件后拼进 launch；无首包 → 只起空 agent。
         let launch_cmd = if prompt.trim().is_empty() {
-            prepared_command.clone()
+            base_launch.clone()
         } else if let Some(path) = write_prompt_file(&task.id, &prompt) {
-            build_launch_with_prompt(&prepared_command, &path)
+            build_launch_with_prompt(&base_launch, &path)
         } else {
             // 落盘失败：内联单引号（多行可能不完美，但强于静默失败）
-            format!("{prepared_command} {}", shell_single_quote(&prompt))
+            format!("{base_launch} {}", shell_single_quote(&prompt))
         };
 
         eprintln!("[tasks] run launch={launch_cmd}");
@@ -2092,39 +2073,29 @@ impl Workspace {
         let sid = new_sid();
         // 同 add_session_with_launch：FFI 回调栈上 panic = abort 整个 app，
         // spawn 失败就不起任务终端，留日志。
-        let terminal = match crate::terminal::Terminal::spawn_with_action(
-            24,
-            80,
-            cwd.as_deref(),
-            &sid,
-            &crate::terminal::MissingSessionAction::Launch(launch_cmd),
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[tasks] 任务终端启动失败（{cwd:?}）：{e:#}");
-                TaskStore::mark_run_failed(id, &run.id, format!("{e:#}"));
-                return;
-            }
-        };
+        let terminal =
+            match crate::terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, Some(&launch_cmd))
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[tasks] 任务终端启动失败（{cwd:?}）：{e:#}");
+                    TaskStore::mark_run_failed(id, &run.id, format!("{e:#}"));
+                    return;
+                }
+            };
         let view = cx.new(|cx| {
-            TerminalView::from_terminal_with_resume(
+            TerminalView::from_terminal(
                 cx,
                 terminal,
                 cwd.clone(),
                 sid.clone(),
-                prepared.original_command.as_deref(),
+                Some(base_launch.as_str()),
                 Some(label.as_str()),
-                prepared.agent_kind,
-                prepared.resume_state,
             )
         });
         self.sessions.push(crate::Session::single(view.clone()));
         self.active_session = self.sessions.len() - 1;
         self.stage_override = None;
-        if let (Some(baseline), Some(cwd)) = (prepared.codex_baseline, cwd) {
-            self.start_codex_binding(view, cwd, baseline, prepared.workspace_dir, cx);
-        }
-
         // 存 base（不含 prompt 拼接），再跑时重新拼首包；执行现场归 TaskRun。
         TaskStore::update(id, |t| {
             t.launch = Some(base_launch);
