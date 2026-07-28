@@ -16,6 +16,8 @@
 //!   {"op":"open","id":"..","cwd":"..","cols":120,"rows":30}  → 进入流模式（唯一 client，
 //!                                                              同 id 第二次 open 顶掉前一个）
 //!   {"op":"watch","id":".."}                                 → 进入**只读**流模式（旁观，见下）
+//!   {"op":"acp_action","id":"..","action":{...}}            → 对现有 ACP 会话执行一次动作，
+//!                                                              不占用或替换 control client
 //!   {"op":"list"}                                            → 回 {"sessions":[..]} 后关闭
 //!   {"op":"kill","id":".."}                                  → 回 {"ok":true} 后关闭
 //!   {"op":"version"}                                         → 回 {"version":"..","exe_mtime":123} 后关闭
@@ -3172,6 +3174,7 @@ fn handle_conn(
         Some("subscribe") => handle_subscribe(conn, &sessions, &acp_sessions, &subscribers),
         Some("acp_open") => handle_acp_open(conn, reader, &v, acp_sessions, subscribers),
         Some("acp_watch") => handle_acp_watch(conn, reader, &v, acp_sessions),
+        Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &subscribers),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
         Some("list") => {
             let (mut ids, mut states): (Vec<String>, Vec<SessionState>) = sessions
@@ -4097,7 +4100,7 @@ fn apply_acp_user_action(
     sess: &AcpSession,
     action: smelt_core::acp_session::AcpUserAction,
     subscribers: &Subscribers,
-) {
+) -> Result<(), &'static str> {
     use smelt_core::acp_conn::AcpCommand;
     use smelt_core::acp_session::AcpUserAction;
     match action {
@@ -4108,7 +4111,9 @@ fn apply_acp_user_action(
                 .unwrap()
                 .as_ref()
                 .map(|h| h.cmd_tx.clone());
-            let Some(cmd_tx) = cmd_tx else { return };
+            let Some(cmd_tx) = cmd_tx else {
+                return Err("ACP session is not running");
+            };
             let img_count = images.len();
             // 展示文案跟旧版 GUI `send_prompt` 一致：base64 图片体积大，历史里
             // 只留「带了几张图」的标记。
@@ -4121,47 +4126,67 @@ fn apply_acp_user_action(
                 smelt_core::acp_session::note_prompt_sent(&mut sess.reduced.lock().unwrap(), shown);
                 push_acp_snapshot(sess, false);
                 update_acp_daemon_state(sess, subscribers);
+                Ok(())
+            } else {
+                Err("ACP command channel is busy or closed")
             }
         }
         AcpUserAction::Cancel => {
-            if let Some(h) = sess.handle.lock().unwrap().as_ref() {
-                let _ = h.cmd_tx.try_send(AcpCommand::Cancel);
-            }
+            let handle = sess.handle.lock().unwrap();
+            let Some(h) = handle.as_ref() else {
+                return Err("ACP session is not running");
+            };
+            h.cmd_tx
+                .try_send(AcpCommand::Cancel)
+                .map_err(|_| "ACP command channel is busy or closed")
         }
         AcpUserAction::SetConfigOption {
             config_id,
             value_id,
         } => {
-            if let Some(h) = sess.handle.lock().unwrap().as_ref() {
-                let _ = h.cmd_tx.try_send(AcpCommand::SetConfigOption {
+            let handle = sess.handle.lock().unwrap();
+            let Some(h) = handle.as_ref() else {
+                return Err("ACP session is not running");
+            };
+            h.cmd_tx
+                .try_send(AcpCommand::SetConfigOption {
                     config_id,
                     value_id,
-                });
-            }
+                })
+                .map_err(|_| "ACP command channel is busy or closed")
         }
         AcpUserAction::PermissionSelect {
             tool_call_id,
             option_id,
         } => {
-            smelt_core::acp_session::select_permission(
-                &mut sess.reduced.lock().unwrap(),
-                &tool_call_id,
-                &option_id,
-            );
+            let mut reduced = sess.reduced.lock().unwrap();
+            let exists = reduced.permissions.iter().any(|card| {
+                card.tool_call_id == tool_call_id
+                    && card
+                        .options
+                        .iter()
+                        .any(|option| option.option_id == option_id)
+            });
+            if !exists {
+                return Err("permission request or option not found");
+            }
+            smelt_core::acp_session::select_permission(&mut reduced, &tool_call_id, &option_id);
+            drop(reduced);
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
+            Ok(())
         }
         AcpUserAction::ElicitationChoose { field_ix, opt_ix } => {
-            let auto_submit = smelt_core::acp_session::choose_elicitation(
-                &mut sess.reduced.lock().unwrap(),
-                field_ix,
-                opt_ix,
-            );
+            let auto_submit = {
+                let mut reduced = sess.reduced.lock().unwrap();
+                smelt_core::acp_session::choose_elicitation(&mut reduced, field_ix, opt_ix)
+            };
             if auto_submit {
-                smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
+                return submit_acp_elicitation(sess, subscribers);
             }
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
+            Ok(())
         }
         AcpUserAction::ElicitationText { field_ix, value } => {
             smelt_core::acp_session::set_elicitation_text(
@@ -4171,18 +4196,68 @@ fn apply_acp_user_action(
             );
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
+            Ok(())
         }
-        AcpUserAction::ElicitationSubmit => {
-            smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
-            push_acp_snapshot(sess, false);
-            update_acp_daemon_state(sess, subscribers);
-        }
+        AcpUserAction::ElicitationSubmit => submit_acp_elicitation(sess, subscribers),
         AcpUserAction::ElicitationDismiss => {
             smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock().unwrap());
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
+            Ok(())
         }
     }
+}
+
+fn submit_acp_elicitation(
+    sess: &AcpSession,
+    subscribers: &Subscribers,
+) -> Result<(), &'static str> {
+    let recovered_answer = {
+        let reduced = sess.reduced.lock().unwrap();
+        smelt_core::acp_session::recovered_elicitation_answer(&reduced)
+    };
+    if let Some(text) = recovered_answer {
+        smelt_core::acp_session::dismiss_elicitation(&mut sess.reduced.lock().unwrap());
+        return apply_acp_user_action(
+            sess,
+            smelt_core::acp_session::AcpUserAction::Prompt {
+                text,
+                images: Vec::new(),
+            },
+            subscribers,
+        );
+    }
+
+    smelt_core::acp_session::submit_elicitation(&mut sess.reduced.lock().unwrap());
+    push_acp_snapshot(sess, false);
+    update_acp_daemon_state(sess, subscribers);
+    Ok(())
+}
+
+/// Apply one action without attaching a control client. Remote/mobile callers must not use
+/// `acp_open` for one-shot writes because opening the same id intentionally replaces the GUI.
+fn handle_acp_action(
+    mut conn: UnixStream,
+    v: &serde_json::Value,
+    acp_sessions: &AcpSessions,
+    subscribers: &Subscribers,
+) {
+    let id = v["id"].as_str().unwrap_or_default();
+    let result = v
+        .get("action")
+        .cloned()
+        .ok_or("missing ACP action")
+        .and_then(|action| serde_json::from_value(action).map_err(|_| "invalid ACP action"))
+        .and_then(|action| {
+            let slot = acp_sessions.get(id).ok_or("ACP session not found")?;
+            apply_acp_user_action(&slot.value, action, subscribers)
+        });
+
+    let response = match result {
+        Ok(()) => serde_json::json!({"ok": true}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    };
+    let _ = writeln!(conn, "{response}");
 }
 
 fn handle_acp_open(
@@ -4263,7 +4338,7 @@ fn handle_acp_open(
         let Ok(action) = serde_json::from_str(line.trim()) else {
             continue; // 认不出的行跳过，别让一条坏数据掐断整条连接
         };
-        apply_acp_user_action(&sess, action, &subscribers);
+        let _ = apply_acp_user_action(&sess, action, &subscribers);
     }
 
     let mut out = sess.out.lock().unwrap();
@@ -5939,6 +6014,92 @@ mod acp_tests {
         assert!(!acp_open_needs_relaunch(false, true, false));
         assert!(acp_open_needs_relaunch(true, false, true));
         assert!(acp_open_needs_relaunch(false, false, true));
+    }
+
+    #[test]
+    fn one_shot_action_keeps_existing_control_client_attached() {
+        let acp_sessions = new_acp_sessions();
+        let (slot, _) = acp_sessions.reserve_with("acp-action", || {
+            make_acp_session_value("acp-action", AcpSessionState::default())
+        });
+        let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::AcpHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(Mutex::new(None)),
+        });
+
+        let (control_server, _control_client) = UnixStream::pair().unwrap();
+        let control_fd = control_server.as_raw_fd();
+        slot.value.out.lock().unwrap().client = Some(control_server);
+
+        let (action_server, action_client) = UnixStream::pair().unwrap();
+        handle_acp_action(
+            action_server,
+            &serde_json::json!({
+                "id": "acp-action",
+                "action": {"Prompt": {"text": "from mobile", "images": []}},
+            }),
+            &acp_sessions,
+            &Arc::new(Mutex::new(Vec::new())),
+        );
+
+        let mut response = String::new();
+        BufReader::new(action_client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()["ok"],
+            true
+        );
+        assert_eq!(
+            slot.value
+                .out
+                .lock()
+                .unwrap()
+                .client
+                .as_ref()
+                .map(|client| client.as_raw_fd()),
+            Some(control_fd),
+            "one-shot action must not replace the PC control client"
+        );
+        match cmd_rx.try_recv().unwrap() {
+            smelt_core::acp_conn::AcpCommand::Prompt { text, images } => {
+                assert_eq!(text, "from mobile");
+                assert!(images.is_empty());
+            }
+            _ => panic!("expected prompt command"),
+        }
+        assert!(matches!(
+            slot.value.reduced.lock().unwrap().entries.last(),
+            Some(AcpEntry::User(text)) if text == "from mobile"
+        ));
+    }
+
+    #[test]
+    fn one_shot_action_rejects_invalid_prompt_shape() {
+        let acp_sessions = new_acp_sessions();
+        acp_sessions.reserve_with("acp-action", || {
+            make_acp_session_value("acp-action", AcpSessionState::default())
+        });
+        let (server, client) = UnixStream::pair().unwrap();
+
+        handle_acp_action(
+            server,
+            &serde_json::json!({
+                "id": "acp-action",
+                "action": {"Prompt": {"content": "wrong field", "images": []}},
+            }),
+            &acp_sessions,
+            &Arc::new(Mutex::new(Vec::new())),
+        );
+
+        let mut response = String::new();
+        BufReader::new(client).read_line(&mut response).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"], "invalid ACP action");
     }
 
     #[test]

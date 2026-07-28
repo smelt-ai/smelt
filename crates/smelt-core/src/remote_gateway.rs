@@ -436,6 +436,25 @@ fn load_gui_leaf_meta() -> std::collections::HashMap<String, GuiLeafMeta> {
     out
 }
 
+fn load_gui_acp_titles() -> std::collections::HashMap<String, String> {
+    let Ok(raw) = std::fs::read_to_string(workspace_json_path()) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return std::collections::HashMap::new();
+    };
+    value["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|session| {
+            let id = session["acp"]["sid"].as_str()?;
+            let title = session["custom_title"].as_str()?.trim();
+            (!title.is_empty()).then(|| (id.to_string(), title.to_string()))
+        })
+        .collect()
+}
+
 /// 从 OSC 标题里剥掉 spinner / 状态前缀，只留人类可读的短名；剥空了就当没有。
 fn clean_agent_title(raw: &str) -> Option<String> {
     let t = raw.trim();
@@ -1107,7 +1126,11 @@ async fn acp_sessions_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     if q.token != *state.token {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "invalid token"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "invalid token"})),
+        )
+            .into_response();
     }
 
     // 通过 smeltd unix socket 获取会话列表
@@ -1181,6 +1204,14 @@ enum AcpWsRequest {
     SendMessage { params: SendMessageParams },
     #[serde(rename = "respondApproval")]
     RespondApproval { params: ApprovalParams },
+    #[serde(rename = "chooseElicitation")]
+    ChooseElicitation { params: ElicitationChoiceParams },
+    #[serde(rename = "updateElicitationText")]
+    UpdateElicitationText { params: ElicitationTextParams },
+    #[serde(rename = "submitElicitation")]
+    SubmitElicitation { params: SessionActionParams },
+    #[serde(rename = "dismissElicitation")]
+    DismissElicitation { params: SessionActionParams },
     #[serde(rename = "listSessions")]
     ListSessions,
     #[serde(rename = "markRead")]
@@ -1207,10 +1238,37 @@ struct SendMessageParams {
 struct ApprovalParams {
     #[serde(rename = "sessionId")]
     session_id: String,
+    #[serde(rename = "toolCallId")]
+    tool_call_id: String,
     #[serde(rename = "optionKey")]
     option_key: String,
     #[serde(rename = "customText")]
     custom_text: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ElicitationChoiceParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "fieldIndex")]
+    field_index: usize,
+    #[serde(rename = "optionIndex")]
+    option_index: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct ElicitationTextParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "fieldIndex")]
+    field_index: usize,
+    value: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SessionActionParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1245,17 +1303,23 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
         "type": "connected",
         "writeEnabled": write_enabled,
     });
-    if futures::SinkExt::send(&mut ws_tx, Message::Text(welcome.to_string().into())).await.is_err() {
+    if futures::SinkExt::send(&mut ws_tx, Message::Text(welcome.to_string().into()))
+        .await
+        .is_err()
+    {
         return;
     }
 
     // 用于从后台任务接收 smeltd 推送
     let (daemon_tx, mut daemon_rx) = mpsc::channel::<String>(64);
-    // 用于通知后台任务停止
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
-    // 当前订阅的会话 ID 和后台任务句柄
-    let mut current_subscription: Option<(String, tokio::task::JoinHandle<()>)> = None;
+    // 每个 watcher 都有自己的停止信号；watch channel 一旦变成 true 不会自动复位，
+    // 不能跨多次 subscribe 复用。
+    let mut current_subscription: Option<(
+        String,
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    )> = None;
 
     loop {
         tokio::select! {
@@ -1292,7 +1356,7 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                     }
                     AcpWsRequest::Subscribe { params } => {
                         // 停止旧的订阅
-                        if let Some((_, handle)) = current_subscription.take() {
+                        if let Some((_, stop_tx, handle)) = current_subscription.take() {
                             let _ = stop_tx.send(true);
                             handle.abort();
                         }
@@ -1300,13 +1364,14 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                         // 启动新的订阅
                         let session_id = params.session_id.clone();
                         let tx = daemon_tx.clone();
-                        let stop = stop_rx.clone();
+                        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
                         let handle = tokio::task::spawn_blocking(move || {
-                            acp_watch_loop(&session_id, tx, stop);
+                            acp_watch_loop(&session_id, tx, stop_rx);
                         });
 
-                        current_subscription = Some((params.session_id.clone(), handle));
+                        current_subscription =
+                            Some((params.session_id.clone(), stop_tx, handle));
 
                         let resp = serde_json::json!({
                             "type": "subscribed",
@@ -1315,7 +1380,7 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::Unsubscribe => {
-                        if let Some((_, handle)) = current_subscription.take() {
+                        if let Some((_, stop_tx, handle)) = current_subscription.take() {
                             let _ = stop_tx.send(true);
                             handle.abort();
                         }
@@ -1335,10 +1400,13 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                             send_acp_message(&session_id, &content)
                         }).await;
 
-                        let resp = if result.is_ok() && result.unwrap().is_ok() {
-                            serde_json::json!({"type": "messageSent", "ok": true})
-                        } else {
-                            serde_json::json!({"type": "error", "error": "failed to send"})
+                        let resp = match result {
+                            Ok(Ok(())) => serde_json::json!({"type": "messageSent", "ok": true}),
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Err(error) => serde_json::json!({
+                                "type": "error",
+                                "error": format!("failed to dispatch message: {error}"),
+                            }),
                         };
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
@@ -1353,14 +1421,70 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                         let option_key = params.option_key.clone();
                         let custom_text = params.custom_text.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            respond_acp_approval(&session_id, &option_key, custom_text.as_deref())
+                            respond_acp_approval(
+                                &session_id,
+                                &params.tool_call_id,
+                                &option_key,
+                                custom_text.as_deref(),
+                            )
                         }).await;
 
-                        let resp = if result.is_ok() && result.unwrap().is_ok() {
-                            serde_json::json!({"type": "approvalResponded", "ok": true})
-                        } else {
-                            serde_json::json!({"type": "error", "error": "failed to respond"})
+                        let resp = match result {
+                            Ok(Ok(())) => serde_json::json!({"type": "approvalResponded", "ok": true}),
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Err(error) => serde_json::json!({
+                                "type": "error",
+                                "error": format!("failed to dispatch approval: {error}"),
+                            }),
                         };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::ChooseElicitation { params } => {
+                        let action = serde_json::json!({
+                            "ElicitationChoose": {
+                                "field_ix": params.field_index,
+                                "opt_ix": params.option_index,
+                            }
+                        });
+                        let resp = dispatch_mobile_action(
+                            write_enabled,
+                            params.session_id,
+                            action,
+                            "elicitation choice",
+                        ).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::UpdateElicitationText { params } => {
+                        let action = serde_json::json!({
+                            "ElicitationText": {
+                                "field_ix": params.field_index,
+                                "value": params.value,
+                            }
+                        });
+                        let resp = dispatch_mobile_action(
+                            write_enabled,
+                            params.session_id,
+                            action,
+                            "elicitation text",
+                        ).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::SubmitElicitation { params } => {
+                        let resp = dispatch_mobile_action(
+                            write_enabled,
+                            params.session_id,
+                            serde_json::json!("ElicitationSubmit"),
+                            "elicitation submission",
+                        ).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::DismissElicitation { params } => {
+                        let resp = dispatch_mobile_action(
+                            write_enabled,
+                            params.session_id,
+                            serde_json::json!("ElicitationDismiss"),
+                            "elicitation dismissal",
+                        ).await;
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::MarkRead { params: _ } => {
@@ -1378,9 +1502,28 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
     }
 
     // 清理
-    if let Some((_, handle)) = current_subscription.take() {
+    if let Some((_, stop_tx, handle)) = current_subscription.take() {
         let _ = stop_tx.send(true);
         handle.abort();
+    }
+}
+
+async fn dispatch_mobile_action(
+    write_enabled: bool,
+    session_id: String,
+    action: serde_json::Value,
+    description: &'static str,
+) -> serde_json::Value {
+    if !write_enabled {
+        return serde_json::json!({"type": "error", "error": "write not enabled"});
+    }
+    match tokio::task::spawn_blocking(move || send_acp_action(&session_id, action)).await {
+        Ok(Ok(())) => serde_json::json!({"type": "actionCompleted", "ok": true}),
+        Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+        Err(error) => serde_json::json!({
+            "type": "error",
+            "error": format!("failed to dispatch {description}: {error}"),
+        }),
     }
 }
 
@@ -1437,7 +1580,9 @@ fn acp_watch_loop(
 /// 列出所有 ACP 会话（阻塞版本）
 fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
     let mut stream = UnixStream::connect(sock_path()).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
 
     let req = serde_json::json!({"op": "list"});
     writeln!(stream, "{}", req).ok()?;
@@ -1450,6 +1595,7 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
 
     let mut summaries = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+    let gui_titles = load_gui_acp_titles();
 
     // 1. 从 states 中筛选有 launch 字段的会话（终端内启动的 agent）
     if let Some(states) = resp["states"].as_array() {
@@ -1484,10 +1630,15 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
             };
 
             // 优先使用 title，否则用目录名
-            let title = s["title"]
-                .as_str()
-                .filter(|t| !t.is_empty())
-                .map(String::from)
+            let title = gui_titles
+                .get(&id)
+                .cloned()
+                .or_else(|| {
+                    s["title"]
+                        .as_str()
+                        .filter(|t| !t.is_empty())
+                        .map(String::from)
+                })
                 .or_else(|| {
                     cwd.as_ref()
                         .and_then(|p| std::path::Path::new(p).file_name())
@@ -1520,10 +1671,15 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
             let cwd = s["cwd"].as_str().map(String::from);
             let agent = s["agent"].as_str().unwrap_or("claude").to_string();
 
-            let title = s["title"]
-                .as_str()
-                .filter(|t| !t.is_empty())
-                .map(String::from)
+            let title = gui_titles
+                .get(&id)
+                .cloned()
+                .or_else(|| {
+                    s["title"]
+                        .as_str()
+                        .filter(|t| !t.is_empty())
+                        .map(String::from)
+                })
                 .or_else(|| {
                     cwd.as_ref()
                         .and_then(|p| std::path::Path::new(p).file_name())
@@ -1546,61 +1702,65 @@ fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
     Some(summaries)
 }
 
-/// 发送 ACP 消息（通过 acp_open 连接）
-fn send_acp_message(session_id: &str, content: &str) -> Result<(), String> {
-    let mut stream = UnixStream::connect(sock_path())
-        .map_err(|e| format!("connect failed: {}", e))?;
+fn send_acp_action(session_id: &str, action: serde_json::Value) -> Result<(), String> {
+    let mut stream =
+        UnixStream::connect(sock_path()).map_err(|e| format!("connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| format!("set timeout failed: {e}"))?;
 
-    // 先 acp_open 连接到会话
     let req = serde_json::json!({
-        "op": "acp_open",
+        "op": "acp_action",
         "id": session_id,
+        "action": action,
     });
-    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
+    writeln!(stream, "{req}").map_err(|e| format!("write failed: {e}"))?;
 
-    // 等待初始快照
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| format!("read failed: {}", e))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|e| format!("read failed: {e}"))?;
+    let response: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("invalid response: {e}"))?;
+    if response["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(response["error"]
+            .as_str()
+            .unwrap_or("ACP action failed")
+            .to_string())
+    }
+}
 
-    // 发送用户消息
-    let action = serde_json::json!({
-        "Prompt": {
-            "content": content,
-            "images": [],
-        }
-    });
-    writeln!(stream, "{}", action).map_err(|e| format!("write action failed: {}", e))?;
-
-    Ok(())
+/// 发送 ACP 消息，不占用或替换 PC GUI 的 control client。
+fn send_acp_message(session_id: &str, content: &str) -> Result<(), String> {
+    send_acp_action(
+        session_id,
+        serde_json::json!({
+            "Prompt": {
+                "text": content,
+                "images": [],
+            }
+        }),
+    )
 }
 
 /// 响应 ACP 审批请求
-fn respond_acp_approval(session_id: &str, option_key: &str, _custom_text: Option<&str>) -> Result<(), String> {
-    let mut stream = UnixStream::connect(sock_path())
-        .map_err(|e| format!("connect failed: {}", e))?;
-
-    // 先 acp_open 连接到会话
-    let req = serde_json::json!({
-        "op": "acp_open",
-        "id": session_id,
-    });
-    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
-
-    // 等待初始快照
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| format!("read failed: {}", e))?;
-
-    // 发送审批响应
-    let action = serde_json::json!({
-        "PermissionSelect": {
-            "option_id": option_key,
-        }
-    });
-    writeln!(stream, "{}", action).map_err(|e| format!("write action failed: {}", e))?;
-
-    Ok(())
+fn respond_acp_approval(
+    session_id: &str,
+    tool_call_id: &str,
+    option_key: &str,
+    _custom_text: Option<&str>,
+) -> Result<(), String> {
+    send_acp_action(
+        session_id,
+        serde_json::json!({
+            "PermissionSelect": {
+                "tool_call_id": tool_call_id,
+                "option_id": option_key,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]

@@ -1,12 +1,11 @@
-/// ACP 快照数据模型
-/// 
-/// 直接解析 smeltd 返回的原始 JSON 格式，与 PC GUI 保持一致。
+// ACP snapshot models mirroring smeltd's JSON representation.
 
 /// ACP 会话快照
 class AcpSnapshot {
+  final int entriesOffset;
   final List<AcpEntry> entries;
   final AcpPhase phase;
-  final PendingPermission? pendingPermission;
+  final List<PendingPermission> pendingPermissions;
   final PendingElicitation? pendingElicitation;
   final String? statusLine;
   final String? acpSessionId;
@@ -19,9 +18,10 @@ class AcpSnapshot {
   final bool shouldPersist;
 
   AcpSnapshot({
+    this.entriesOffset = 0,
     required this.entries,
     required this.phase,
-    this.pendingPermission,
+    this.pendingPermissions = const [],
     this.pendingElicitation,
     this.statusLine,
     this.acpSessionId,
@@ -37,29 +37,68 @@ class AcpSnapshot {
   factory AcpSnapshot.fromJson(Map<String, dynamic> json) {
     // smeltd 返回格式: {"snapshot": {...}}
     final data = json['snapshot'] as Map<String, dynamic>? ?? json;
-    
+
     return AcpSnapshot(
-      entries: (data['entries'] as List<dynamic>?)
-          ?.map((e) => AcpEntry.fromJson(e))
-          .toList() ?? [],
+      entriesOffset: data['entries_offset'] as int? ?? 0,
+      entries:
+          (data['entries'] as List<dynamic>?)
+              ?.map((e) => AcpEntry.fromJson(e))
+              .toList() ??
+          [],
       phase: AcpPhase.fromJson(data['phase']),
-      pendingPermission: data['pending_permission'] != null
-          ? PendingPermission.fromJson(data['pending_permission'])
-          : null,
+      pendingPermissions:
+          (data['pending_permissions'] as List<dynamic>?)
+              ?.whereType<Map<String, dynamic>>()
+              .map(PendingPermission.fromJson)
+              .toList() ??
+          [
+            if (data['pending_permission']
+                case final Map<String, dynamic> value)
+              PendingPermission.fromJson(value),
+          ],
       pendingElicitation: data['pending_elicitation'] != null
           ? PendingElicitation.fromJson(data['pending_elicitation'])
           : null,
       statusLine: data['status_line'] as String?,
       acpSessionId: data['acp_session_id'] as String?,
       supportsImage: data['supports_image'] as bool? ?? true,
-      availableCommands: (data['available_commands'] as List<dynamic>?)
-          ?.map((cmd) => (cmd as List<dynamic>).map((e) => e.toString()).toList())
-          .toList() ?? [],
+      availableCommands:
+          (data['available_commands'] as List<dynamic>?)
+              ?.map(
+                (cmd) =>
+                    (cmd as List<dynamic>).map((e) => e.toString()).toList(),
+              )
+              .toList() ??
+          [],
       usage: data['usage'] != null ? AcpUsage.fromJson(data['usage']) : null,
       plan: data['plan'] != null ? AcpPlan.fromJson(data['plan']) : null,
       model: data['model'] != null ? AcpModel.fromJson(data['model']) : null,
       completedUnread: data['completed_unread'] as bool? ?? false,
       shouldPersist: data['should_persist'] as bool? ?? false,
+    );
+  }
+
+  /// Apply smeltd's tail snapshot to the previously rendered projection.
+  AcpSnapshot merge(AcpSnapshot next) {
+    if (next.entriesOffset == 0) return next;
+    final mergedEntries = next.entriesOffset <= entries.length
+        ? [...entries.take(next.entriesOffset), ...next.entries]
+        : next.entries;
+    return AcpSnapshot(
+      entriesOffset: 0,
+      entries: mergedEntries,
+      phase: next.phase,
+      pendingPermissions: next.pendingPermissions,
+      pendingElicitation: next.pendingElicitation,
+      statusLine: next.statusLine,
+      acpSessionId: next.acpSessionId,
+      supportsImage: next.supportsImage,
+      availableCommands: next.availableCommands,
+      usage: next.usage,
+      plan: next.plan,
+      model: next.model,
+      completedUnread: next.completedUnread,
+      shouldPersist: next.shouldPersist,
     );
   }
 }
@@ -88,16 +127,32 @@ sealed class AcpPhase {
     return const AcpPhaseIdle();
   }
 
-  bool get isActive => this is AcpPhaseRunning || 
-                        this is AcpPhaseAwaitingApproval || 
-                        this is AcpPhaseAwaitingChoice;
+  bool get isActive =>
+      this is AcpPhaseRunning ||
+      this is AcpPhaseAwaitingApproval ||
+      this is AcpPhaseAwaitingChoice;
 }
 
-class AcpPhaseStarting extends AcpPhase { const AcpPhaseStarting(); }
-class AcpPhaseIdle extends AcpPhase { const AcpPhaseIdle(); }
-class AcpPhaseRunning extends AcpPhase { const AcpPhaseRunning(); }
-class AcpPhaseAwaitingApproval extends AcpPhase { const AcpPhaseAwaitingApproval(); }
-class AcpPhaseAwaitingChoice extends AcpPhase { const AcpPhaseAwaitingChoice(); }
+class AcpPhaseStarting extends AcpPhase {
+  const AcpPhaseStarting();
+}
+
+class AcpPhaseIdle extends AcpPhase {
+  const AcpPhaseIdle();
+}
+
+class AcpPhaseRunning extends AcpPhase {
+  const AcpPhaseRunning();
+}
+
+class AcpPhaseAwaitingApproval extends AcpPhase {
+  const AcpPhaseAwaitingApproval();
+}
+
+class AcpPhaseAwaitingChoice extends AcpPhase {
+  const AcpPhaseAwaitingChoice();
+}
+
 class AcpPhaseEnded extends AcpPhase {
   final String reason;
   const AcpPhaseEnded({required this.reason});
@@ -109,7 +164,7 @@ sealed class AcpEntry {
 
   factory AcpEntry.fromJson(dynamic json) {
     if (json is! Map<String, dynamic>) return const AcpEntryUnknown();
-    
+
     // User 消息: {"User": "text"} 或 {"User": {"content": [...]}}
     if (json.containsKey('User')) {
       final user = json['User'];
@@ -130,7 +185,7 @@ sealed class AcpEntry {
       }
       return AcpEntryUser(text: user.toString());
     }
-    
+
     // Assistant 消息
     if (json.containsKey('Assistant')) {
       final assistant = json['Assistant'];
@@ -142,7 +197,7 @@ sealed class AcpEntry {
       }
       return AcpEntryAssistant(text: assistant.toString(), thought: false);
     }
-    
+
     // 工具调用
     if (json.containsKey('ToolCall')) {
       final tool = json['ToolCall'] as Map<String, dynamic>;
@@ -151,20 +206,24 @@ sealed class AcpEntry {
         title: tool['title'] as String? ?? tool['name'] as String? ?? '',
         kind: ToolKind.fromJson(tool['kind']),
         status: ToolCallStatus.fromJson(tool['status']),
-        output: (tool['output'] as List<dynamic>?)
-            ?.map((o) => ToolOutputPart.fromJson(o))
-            .toList() ?? [],
+        output:
+            (tool['output'] as List<dynamic>?)
+                ?.map((o) => ToolOutputPart.fromJson(o))
+                .toList() ??
+            [],
       );
     }
-    
+
     // 分隔线
     if (json.containsKey('Divider')) {
       final divider = json['Divider'];
       return AcpEntryDivider(
-        label: divider is String ? divider : (divider?['label'] as String? ?? ''),
+        label: divider is String
+            ? divider
+            : (divider?['label'] as String? ?? ''),
       );
     }
-    
+
     return const AcpEntryUnknown();
   }
 }
@@ -186,7 +245,7 @@ class AcpEntryToolCall extends AcpEntry {
   final ToolKind kind;
   final ToolCallStatus status;
   final List<ToolOutputPart> output;
-  
+
   const AcpEntryToolCall({
     required this.id,
     required this.title,
@@ -255,7 +314,7 @@ sealed class ToolOutputPart {
   factory ToolOutputPart.fromJson(dynamic json) {
     if (json is String) return ToolOutputText(text: json);
     if (json is! Map<String, dynamic>) return const ToolOutputText(text: '');
-    
+
     if (json.containsKey('Text')) {
       return ToolOutputText(text: json['Text'] as String? ?? '');
     }
@@ -263,7 +322,8 @@ sealed class ToolOutputPart {
       final diff = json['Diff'] as Map<String, dynamic>;
       return ToolOutputDiff(
         path: diff['path'] as String? ?? '',
-        hunks: (diff['hunks'] as List<dynamic>?)?.cast<String>() ?? [],
+        oldText: diff['old_text'] as String?,
+        newText: diff['new_text'] as String? ?? '',
       );
     }
     if (json.containsKey('Image')) {
@@ -273,7 +333,7 @@ sealed class ToolOutputPart {
         mimeType: img['mime_type'] as String? ?? 'image/png',
       );
     }
-    
+
     return ToolOutputText(text: json.toString());
   }
 }
@@ -285,8 +345,14 @@ class ToolOutputText extends ToolOutputPart {
 
 class ToolOutputDiff extends ToolOutputPart {
   final String path;
-  final List<String> hunks;
-  const ToolOutputDiff({required this.path, this.hunks = const []});
+  final String? oldText;
+  final String newText;
+
+  const ToolOutputDiff({
+    required this.path,
+    this.oldText,
+    required this.newText,
+  });
 }
 
 class ToolOutputImage extends ToolOutputPart {
@@ -311,9 +377,11 @@ class PendingPermission {
     return PendingPermission(
       toolCallId: json['tool_call_id'] as String? ?? '',
       question: json['question'] as String? ?? '',
-      options: (json['options'] as List<dynamic>?)
-          ?.map((o) => PermissionOption.fromJson(o))
-          .toList() ?? [],
+      options:
+          (json['options'] as List<dynamic>?)
+              ?.map((o) => PermissionOption.fromJson(o))
+              .toList() ??
+          [],
     );
   }
 }
@@ -346,33 +414,149 @@ class PermissionOption {
 /// 待处理的询问
 class PendingElicitation {
   final String message;
-  
-  const PendingElicitation({required this.message});
+  final List<ElicitationField> fields;
+  final Map<int, List<int>> chosen;
+  final Map<int, String> textValues;
+
+  const PendingElicitation({
+    required this.message,
+    this.fields = const [],
+    this.chosen = const {},
+    this.textValues = const {},
+  });
 
   factory PendingElicitation.fromJson(Map<String, dynamic> json) {
     return PendingElicitation(
       message: json['message'] as String? ?? '',
+      fields:
+          (json['fields'] as List<dynamic>?)
+              ?.whereType<Map<String, dynamic>>()
+              .map(ElicitationField.fromJson)
+              .toList() ??
+          [],
+      chosen: _parseIndexMap<List<int>>(
+        json['chosen'],
+        (value) => (value as List<dynamic>)
+            .map((index) => (index as num).toInt())
+            .toList(),
+      ),
+      textValues: _parseIndexMap<String>(
+        json['text_values'],
+        (value) => value.toString(),
+      ),
     );
   }
 }
 
-/// 用量统计
-class AcpUsage {
-  final int inputTokens;
-  final int outputTokens;
-  final double? costUsd;
+Map<int, T> _parseIndexMap<T>(
+  dynamic json,
+  T Function(dynamic value) parseValue,
+) {
+  if (json is! Map<String, dynamic>) return {};
+  final parsed = <int, T>{};
+  for (final entry in json.entries) {
+    final index = int.tryParse(entry.key);
+    if (index != null) parsed[index] = parseValue(entry.value);
+  }
+  return parsed;
+}
 
-  const AcpUsage({
-    this.inputTokens = 0,
-    this.outputTokens = 0,
-    this.costUsd,
+class ElicitationField {
+  final String key;
+  final String title;
+  final ElicitationFieldKind kind;
+
+  const ElicitationField({
+    required this.key,
+    required this.title,
+    required this.kind,
   });
 
-  factory AcpUsage.fromJson(Map<String, dynamic> json) {
+  factory ElicitationField.fromJson(Map<String, dynamic> json) {
+    return ElicitationField(
+      key: json['key'] as String? ?? '',
+      title: json['title'] as String? ?? '',
+      kind: ElicitationFieldKind.fromJson(json['kind']),
+    );
+  }
+}
+
+sealed class ElicitationFieldKind {
+  const ElicitationFieldKind();
+
+  factory ElicitationFieldKind.fromJson(dynamic json) {
+    if (json is! Map<String, dynamic>) {
+      return const ElicitationText(secret: false);
+    }
+    if (json['Select'] case final List<dynamic> options) {
+      return ElicitationSelect(_parseElicitationOptions(options));
+    }
+    if (json['MultiSelect'] case final List<dynamic> options) {
+      return ElicitationMultiSelect(_parseElicitationOptions(options));
+    }
+    if (json['Text'] case final Map<String, dynamic> text) {
+      return ElicitationText(secret: text['secret'] as bool? ?? false);
+    }
+    if (json['ExternalUrl'] case final String url) {
+      return ElicitationExternalUrl(url);
+    }
+    return const ElicitationText(secret: false);
+  }
+}
+
+List<ElicitationOption> _parseElicitationOptions(List<dynamic> options) {
+  return options
+      .whereType<Map<String, dynamic>>()
+      .map((option) => ElicitationOption(option['label'] as String? ?? ''))
+      .toList();
+}
+
+class ElicitationSelect extends ElicitationFieldKind {
+  final List<ElicitationOption> options;
+  const ElicitationSelect(this.options);
+}
+
+class ElicitationMultiSelect extends ElicitationFieldKind {
+  final List<ElicitationOption> options;
+  const ElicitationMultiSelect(this.options);
+}
+
+class ElicitationText extends ElicitationFieldKind {
+  final bool secret;
+  const ElicitationText({required this.secret});
+}
+
+class ElicitationExternalUrl extends ElicitationFieldKind {
+  final String url;
+  const ElicitationExternalUrl(this.url);
+}
+
+class ElicitationOption {
+  final String label;
+  const ElicitationOption(this.label);
+}
+
+/// 用量统计
+class AcpUsage {
+  final int usedTokens;
+  final int contextWindow;
+
+  const AcpUsage({this.usedTokens = 0, this.contextWindow = 0});
+
+  factory AcpUsage.fromJson(dynamic json) {
+    if (json is List && json.length >= 2) {
+      return AcpUsage(
+        usedTokens: (json[0] as num?)?.toInt() ?? 0,
+        contextWindow: (json[1] as num?)?.toInt() ?? 0,
+      );
+    }
+    if (json is! Map<String, dynamic>) return const AcpUsage();
     return AcpUsage(
-      inputTokens: json['input_tokens'] as int? ?? 0,
-      outputTokens: json['output_tokens'] as int? ?? 0,
-      costUsd: (json['cost_usd'] as num?)?.toDouble(),
+      usedTokens:
+          (json['used_tokens'] as num?)?.toInt() ??
+          (json['input_tokens'] as num?)?.toInt() ??
+          0,
+      contextWindow: (json['context_window'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -385,9 +569,11 @@ class AcpPlan {
 
   factory AcpPlan.fromJson(Map<String, dynamic> json) {
     return AcpPlan(
-      steps: (json['steps'] as List<dynamic>?)
-          ?.map((s) => AcpPlanStep.fromJson(s))
-          .toList() ?? [],
+      steps:
+          ((json['entries'] ?? json['steps']) as List<dynamic>?)
+              ?.map((s) => AcpPlanStep.fromJson(s))
+              .toList() ??
+          [],
     );
   }
 }
@@ -400,7 +586,7 @@ class AcpPlanStep {
 
   factory AcpPlanStep.fromJson(Map<String, dynamic> json) {
     return AcpPlanStep(
-      title: json['title'] as String? ?? '',
+      title: json['content'] as String? ?? json['title'] as String? ?? '',
       status: json['status'] as String? ?? 'pending',
     );
   }
@@ -416,9 +602,13 @@ class AcpModel {
   factory AcpModel.fromJson(Map<String, dynamic> json) {
     return AcpModel(
       currentName: json['current_name'] as String? ?? '',
-      options: (json['options'] as List<dynamic>?)
-          ?.map((o) => (o as List<dynamic>).map((e) => e.toString()).toList())
-          .toList() ?? [],
+      options:
+          (json['options'] as List<dynamic>?)
+              ?.map(
+                (o) => (o as List<dynamic>).map((e) => e.toString()).toList(),
+              )
+              .toList() ??
+          [],
     );
   }
 }
