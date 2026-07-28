@@ -138,8 +138,6 @@ fn save_appearance(a: &Appearance) {
 pub struct LaunchEntry {
     pub label: String,
     pub command: String,
-    #[serde(default)]
-    pub agent_kind: Option<smelt_core::agent_kind::TerminalAgentKind>,
 }
 
 /// 出厂默认启动项：与当前常用配置对齐（各 agent 默认带全权限参数）。
@@ -150,22 +148,18 @@ pub fn default_launch_entries() -> Vec<LaunchEntry> {
         LaunchEntry {
             label: "Claude Code".into(),
             command: "claude --dangerously-skip-permissions".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Claude),
         },
         LaunchEntry {
             label: "Codex".into(),
             command: "codex --dangerously-bypass-approvals-and-sandbox".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Codex),
         },
         LaunchEntry {
             label: "Copilot".into(),
             command: "copilot --allow-all".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Copilot),
         },
         LaunchEntry {
             label: "Grok".into(),
             command: "grok".into(),
-            agent_kind: Some(smelt_core::agent_kind::TerminalAgentKind::Grok),
         },
     ]
 }
@@ -228,24 +222,6 @@ struct LaunchConfigFile {
 struct LaunchEntryFile {
     label: String,
     command: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present_agent_kind"
-    )]
-    agent_kind: Option<Option<smelt_core::agent_kind::TerminalAgentKind>>,
-}
-
-fn deserialize_present_agent_kind<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<smelt_core::agent_kind::TerminalAgentKind>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    <Option<smelt_core::agent_kind::TerminalAgentKind> as serde::Deserialize>::deserialize(
-        deserializer,
-    )
-    .map(Some)
 }
 
 impl From<LaunchEntryFile> for LaunchEntry {
@@ -253,23 +229,8 @@ impl From<LaunchEntryFile> for LaunchEntry {
         Self {
             label: entry.label,
             command: entry.command,
-            agent_kind: entry.agent_kind.flatten(),
         }
     }
-}
-
-/// 迁移旧版启动项：仅补全没写 agent_kind 键的项；显式 null 是普通终端选择。
-fn migrate_launch_entries(entries: &mut [LaunchEntryFile]) -> bool {
-    let mut changed = false;
-    for entry in entries.iter_mut() {
-        if entry.agent_kind.is_none() {
-            if let Some(kind) = crate::session_history::infer_terminal_agent_kind(&entry.command) {
-                entry.agent_kind = Some(Some(kind));
-                changed = true;
-            }
-        }
-    }
-    changed
 }
 
 /// 读取启动配置；缺失/损坏/旧格式（无 `entries`）回退出厂默认并写成新格式。
@@ -288,20 +249,9 @@ fn load_launch_config_from_path(path: &std::path::Path) -> LaunchConfig {
         return LaunchConfig::default();
     };
     match file.entries {
-        Some(mut entries) => {
-            let changed = migrate_launch_entries(&mut entries);
-            if changed {
-                crate::json_store::save_json(
-                    Some(path.to_path_buf()),
-                    &LaunchConfigFile {
-                        entries: Some(entries.clone()),
-                    },
-                );
-            }
-            LaunchConfig {
-                entries: entries.into_iter().map(LaunchEntry::from).collect(),
-            }
-        }
+        Some(entries) => LaunchConfig {
+            entries: entries.into_iter().map(LaunchEntry::from).collect(),
+        },
         None => {
             // 旧版只有全权限开关：直接用出厂默认（已含全权限参数）并回写。
             let c = LaunchConfig::default();
@@ -314,246 +264,6 @@ fn load_launch_config_from_path(path: &std::path::Path) -> LaunchConfig {
 /// 写回启动配置（失败静默忽略）。
 fn save_launch_config(c: &LaunchConfig) {
     crate::json_store::save_json(launch_config_path(), c)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    fn test_sandbox(name: &str) -> std::path::PathBuf {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/test-artifacts/settings")
-            .join(name);
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    #[test]
-    fn load_launch_config_migrates_only_absent_agent_kinds_and_is_idempotent() {
-        let sandbox = test_sandbox("load-launch-config");
-        let path = sandbox.join("launch.json");
-        fs::write(
-            &path,
-            serde_json::json!({
-                "entries": [
-                    {
-                        "label": "Copilot",
-                        "command": "copilot --allow-all"
-                    },
-                    {
-                        "label": "Ordinary terminal",
-                        "command": "claude --dangerously-skip-permissions",
-                        "agent_kind": null
-                    },
-                    {
-                        "label": "Explicit kind",
-                        "command": "claude --dangerously-skip-permissions",
-                        "agent_kind": "copilot"
-                    },
-                    {
-                        "label": "Alias",
-                        "command": "claude-quant --dangerously-skip-permissions"
-                    }
-                ]
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let config = super::load_launch_config_from_path(&path);
-        assert_eq!(
-            config.entries[0].agent_kind,
-            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
-        );
-        assert_eq!(config.entries[1].agent_kind, None);
-        assert_eq!(
-            config.entries[2].agent_kind,
-            Some(smelt_core::agent_kind::TerminalAgentKind::Copilot)
-        );
-        assert_eq!(config.entries[3].agent_kind, None);
-
-        let saved = fs::read_to_string(&path).unwrap();
-        let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(
-            saved_json["entries"][0]["agent_kind"],
-            serde_json::Value::String("copilot".into())
-        );
-        assert_eq!(
-            saved_json["entries"][1]["agent_kind"],
-            serde_json::Value::Null
-        );
-        assert_eq!(
-            saved_json["entries"][2]["agent_kind"],
-            serde_json::Value::String("copilot".into())
-        );
-        assert!(
-            saved_json["entries"][3].get("agent_kind").is_none(),
-            "an unrecognized legacy alias must stay absent during migration writeback"
-        );
-
-        let loaded_again = super::load_launch_config_from_path(&path);
-        assert_eq!(loaded_again.entries, config.entries);
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            saved,
-            "loading the migrated file again must be idempotent"
-        );
-        fs::remove_dir_all(&sandbox).unwrap();
-    }
-
-    #[test]
-    fn load_launch_config_leaves_legacy_short_session_commands_ordinary_without_writeback() {
-        let sandbox = test_sandbox("legacy-resume-command");
-        let path = sandbox.join("launch.json");
-        let raw = r#"{
-  "entries": [
-    {"label": "Grok session", "command": "grok -sold"},
-    {"label": "Resume Grok", "command": "grok -rold"}
-  ]
-}"#;
-        fs::write(&path, raw).unwrap();
-
-        let config = super::load_launch_config_from_path(&path);
-
-        assert_eq!(config.entries[0].agent_kind, None);
-        assert_eq!(config.entries[1].agent_kind, None);
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            raw,
-            "an ineligible legacy command must not trigger migration writeback"
-        );
-        fs::remove_dir_all(&sandbox).unwrap();
-    }
-
-    #[test]
-    fn load_launch_config_leaves_audited_session_selectors_absent_without_writeback() {
-        let sandbox = test_sandbox("audited-session-selectors");
-        let path = sandbox.join("launch.json");
-        let raw = r#"{
-  "entries": [
-    {"label": "Claude PR", "command": "claude --from-pr=123"},
-    {"label": "Connect Copilot", "command": "copilot --connect"},
-    {"label": "Connect Copilot task", "command": "copilot --connect task-id"},
-    {"label": "Connect Copilot task equals", "command": "copilot --connect=task-id"},
-    {"label": "Resume old Codex", "command": "codex -c experimental_resume=rollout.jsonl"}
-  ]
-}"#;
-        fs::write(&path, raw).unwrap();
-
-        let config = super::load_launch_config_from_path(&path);
-
-        assert!(
-            config
-                .entries
-                .iter()
-                .all(|entry| entry.agent_kind.is_none()),
-            "session-selecting entries with absent metadata must remain ordinary terminals"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            raw,
-            "ineligible absent metadata must not trigger migration writeback"
-        );
-        fs::remove_dir_all(&sandbox).unwrap();
-    }
-
-    #[test]
-    fn load_launch_config_leaves_incompatible_initial_launches_absent_without_writeback() {
-        let sandbox = test_sandbox("incompatible-initial-launches");
-        let path = sandbox.join("launch.json");
-        let raw = r#"{
-  "entries": [
-    {"label": "Resume Claude", "command": "claude -rold"},
-    {"label": "Resume Copilot", "command": "copilot -rold"},
-    {"label": "Claude MCP", "command": "claude mcp"},
-    {"label": "Copilot prompt", "command": "copilot -p hello"},
-    {"label": "Grok dashboard", "command": "grok dashboard"},
-    {"label": "Codex exec", "command": "codex exec hello"}
-  ]
-}"#;
-        fs::write(&path, raw).unwrap();
-
-        let config = super::load_launch_config_from_path(&path);
-
-        assert!(
-            config
-                .entries
-                .iter()
-                .all(|entry| entry.agent_kind.is_none()),
-            "incompatible entries with absent metadata must remain ordinary terminals"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            raw,
-            "incompatible absent metadata must not trigger migration writeback"
-        );
-        fs::remove_dir_all(&sandbox).unwrap();
-    }
-
-    #[test]
-    fn load_launch_config_leaves_final_ineligible_forms_absent_without_writeback() {
-        let sandbox = test_sandbox("final-ineligible-forms");
-        let path = sandbox.join("launch.json");
-        let raw = r#"{
-  "entries": [
-    {"label": "Grok prompt command", "command": "grok sentinel version"},
-    {"label": "Grok single attached", "command": "grok -phello"},
-    {"label": "Redirected Claude", "command": "claude 2>> output.log"}
-  ]
-}"#;
-        fs::write(&path, raw).unwrap();
-
-        let config = super::load_launch_config_from_path(&path);
-
-        assert!(
-            config
-                .entries
-                .iter()
-                .all(|entry| entry.agent_kind.is_none()),
-            "ineligible entries with absent metadata must remain ordinary terminals"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            raw,
-            "ineligible absent metadata must not trigger migration writeback"
-        );
-        fs::remove_dir_all(&sandbox).unwrap();
-    }
-
-    #[test]
-    fn load_launch_config_leaves_identity_breaking_forms_absent_without_writeback() {
-        let sandbox = test_sandbox("identity-breaking-forms");
-        let path = sandbox.join("launch.json");
-        let raw = r#"{
-  "entries": [
-    {"label": "Commented Claude", "command": "claude # note"},
-    {"label": "Claude worktree", "command": "claude -wfeature"},
-    {"label": "Copilot cwd", "command": "copilot -C ../repo"},
-    {"label": "Grok cwd", "command": "grok --cwd=../repo"},
-    {"label": "Grok worktree", "command": "grok --worktree feature"},
-    {"label": "Codex cwd", "command": "codex -C../repo"},
-    {"label": "Remote Codex", "command": "codex --remote=ssh://host"}
-  ]
-}"#;
-        fs::write(&path, raw).unwrap();
-
-        let config = super::load_launch_config_from_path(&path);
-
-        assert!(
-            config
-                .entries
-                .iter()
-                .all(|entry| entry.agent_kind.is_none()),
-            "identity-breaking entries with absent metadata must remain ordinary terminals"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            raw,
-            "identity-breaking absent metadata must not trigger migration writeback"
-        );
-        fs::remove_dir_all(&sandbox).unwrap();
-    }
 }
 
 /// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
@@ -571,7 +281,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // crate 之后要跨 crate 共用的数据模型。这里重导出成原来的裸名字，本文件剩下
 // 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
 // 逐处改路径。
-pub use smelt_core::agent_kind::{AcpAgentKind, AcpProfile, TerminalAgentKind};
+pub use smelt_core::agent_kind::{AcpAgentKind, AcpProfile};
 pub use smelt_ui::agent_ui_config::{AgentUiConfig, apply_agent_ui, load_agent_ui_config};
 
 /// 全局配置里某个 agent 的启动命令；配置还没装载就退回出厂值。
@@ -2158,7 +1868,6 @@ impl Workspace {
                 c.entries.push(LaunchEntry {
                     label: "新启动项".into(),
                     command: String::new(),
-                    agent_kind: None,
                 });
             },
             cx,
@@ -2177,23 +1886,6 @@ impl Workspace {
             cx,
         );
         self.reset_launch_inputs();
-        cx.notify();
-    }
-
-    pub fn set_launch_agent_kind(
-        &mut self,
-        index: usize,
-        kind: Option<TerminalAgentKind>,
-        cx: &mut Context<Self>,
-    ) {
-        apply_launch_config(
-            |config| {
-                if let Some(entry) = config.entries.get_mut(index) {
-                    entry.agent_kind = kind;
-                }
-            },
-            cx,
-        );
         cx.notify();
     }
 
@@ -2702,9 +2394,8 @@ impl Workspace {
                             // 名称短（"Claude Code" 这种）、命令长（带一串参数），宽度按
                             // 信息量分：名称够放就行，剩下的全给命令。
                             let name_w = px(140.);
-                            let kind_w = px(112.);
                             let del_w = px(28.);
-                            let cmd_w = field_w - name_w - kind_w - del_w - px(48.);
+                            let cmd_w = field_w - name_w - del_w - px(40.);
                             let mono = terminal_view::font_family();
 
                             let mut list = v_flex()
@@ -2724,16 +2415,13 @@ impl Workspace {
                                         .text_xs()
                                         .text_color(muted)
                                         .child(div().w(name_w).child("名称"))
-                                        .child(div().w(kind_w).child("恢复类型"))
                                         .child(div().w(cmd_w).child("命令"))
                                         // 占位：让表头两列跟下面的行严格对齐（删除按钮那一列）。
                                         .child(div().w(del_w)),
                                 );
                             for (ix, (label, command)) in inputs.rows.iter().enumerate() {
                                 let del_entity = launch_editor_entity.clone();
-                                let kind_entity = launch_editor_entity.clone();
                                 let row_ix = ix;
-                                let kind = cx.global::<LaunchConfig>().entries[ix].agent_kind;
                                 list = list.child(
                                     h_flex()
                                         .id(("launch-row", row_ix))
@@ -2741,51 +2429,6 @@ impl Workspace {
                                         .gap_2()
                                         .items_center()
                                         .child(Input::new(label).w(name_w))
-                                        .child(
-                                            Button::new(("launch-kind", row_ix))
-                                                .ghost()
-                                                .small()
-                                                .w(kind_w)
-                                                .label(
-                                                    kind.map(TerminalAgentKind::label)
-                                                        .unwrap_or("普通终端"),
-                                                )
-                                                .dropdown_menu(move |menu, _window, _cx| {
-                                                    let entity = kind_entity.clone();
-                                                    let mut menu = menu.item(
-                                                        PopupMenuItem::new("普通终端").on_click(
-                                                            move |_ev, _window, cx| {
-                                                                entity.update(cx, |ws, cx| {
-                                                                    ws.set_launch_agent_kind(
-                                                                        row_ix, None, cx,
-                                                                    );
-                                                                });
-                                                            },
-                                                        ),
-                                                    );
-                                                    for kind in TerminalAgentKind::ALL {
-                                                        let entity = kind_entity.clone();
-                                                        menu = menu.item(
-                                                            PopupMenuItem::new(kind.label())
-                                                                .on_click(
-                                                                    move |_ev, _window, cx| {
-                                                                        entity.update(
-                                                                            cx,
-                                                                            |ws, cx| {
-                                                                                ws.set_launch_agent_kind(
-                                                                                    row_ix,
-                                                                                    Some(kind),
-                                                                                    cx,
-                                                                                );
-                                                                            },
-                                                                        );
-                                                                    },
-                                                                ),
-                                                        );
-                                                    }
-                                                    menu
-                                                }),
-                                        )
                                         // 命令是 shell 代码，用终端同款等宽字体——参数里的
                                         // `-`/`_` 对齐后好读，也一眼跟左边的显示名区分开。
                                         .child(
@@ -4079,27 +3722,9 @@ impl Workspace {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{
-        LaunchEntry, acp_cmd_setting_value, daemon_info_line, default_launch_entries, fmt_uptime,
-    };
+    use super::{acp_cmd_setting_value, daemon_info_line, fmt_uptime};
     use crate::terminal::DaemonInfo;
-    use smelt_core::agent_kind::{AcpAgentKind, TerminalAgentKind};
-
-    #[test]
-    fn old_launch_entry_without_agent_kind_stays_plain_terminal() {
-        let entry: LaunchEntry =
-            serde_json::from_str(r#"{"label":"custom","command":"my-agent"}"#).unwrap();
-        assert_eq!(entry.agent_kind, None);
-    }
-
-    #[test]
-    fn default_launch_entries_enable_all_supported_terminal_agents() {
-        let kinds = default_launch_entries()
-            .into_iter()
-            .filter_map(|entry| entry.agent_kind)
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(kinds, TerminalAgentKind::ALL.into_iter().collect());
-    }
+    use smelt_core::agent_kind::AcpAgentKind;
 
     #[test]
     fn builtin_agent_command_is_hidden_in_settings() {
