@@ -144,12 +144,9 @@
 mod acp_registry;
 
 use acp_registry::{AcpRegistry, AcpSlot};
+use smelt_core::osc::{OscNotification, OscNotificationKind, OscScan};
 use smelt_core::remote_gateway;
-// 只需要 spinner 判定；OSC 扫描整包留给 workspace（smelt-core 的 osc 模块）。
 use smelt_core::title_spinner;
-// 权限菜单解析与网格取文本：与 GUI 共用 smelt-core 里的同一份。手机端不再自己解析——
-// 它拉 `menu` op 拿这里的结果。两份实现（Rust/TS）曾实测漂移过，别再走回头路。
-use smelt_core::{permission_menu, term_text};
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -437,6 +434,45 @@ impl EventListener for StateListener {
         };
         broadcast_state(&self.subscribers, &snapshot);
     }
+}
+
+/// 将终端协议事实归约进守护的唯一 SessionState。Hook 仍是主信号；Codex OSC 9
+/// 只负责兼容旧客户端以及纠正偶发丢失的 Stop hook。其他 OSC 种类只是普通通知，
+/// 不得改变 agent phase。
+fn apply_osc_notification(state: &mut SessionState, notification: &OscNotification) -> bool {
+    if notification.kind != OscNotificationKind::Osc9
+        || !state.launch.as_deref().is_some_and(is_codex_launch)
+        || !matches!(
+            state.phase,
+            Phase::Idle | Phase::Thinking | Phase::ExecutingTool
+        )
+    {
+        return false;
+    }
+
+    state.phase = Phase::Succeeded;
+    state.phase_since = now_unix();
+    state.pending_question = Some(notification.text.clone());
+    state.updated_at = now_unix();
+    true
+}
+
+fn is_codex_launch(launch: &str) -> bool {
+    launch
+        .split_whitespace()
+        .next()
+        .and_then(|command| std::path::Path::new(command).file_name())
+        .is_some_and(|command| command == "codex")
+}
+
+fn apply_osc_bytes(state: &mut SessionState, scanner: &mut OscScan, bytes: &[u8]) -> bool {
+    let mut changed = false;
+    for &byte in bytes {
+        if let Some(notification) = scanner.feed_notification(byte) {
+            changed |= apply_osc_notification(state, &notification);
+        }
+    }
+    changed
 }
 
 /// 按行列 + 可选像素尺寸 resize PTY（TIOCSWINSZ）。
@@ -1660,6 +1696,7 @@ fn resume_handoff(
             Box::new(reader),
             id.to_string(),
             Arc::clone(&sessions),
+            Arc::clone(subscribers),
         );
     }
 
@@ -1927,7 +1964,7 @@ mod resume_handoff_tests {
 
     fn term_text_of(sess: &Arc<Session>) -> String {
         let term = sess.term.lock().unwrap();
-        term_text::text_lines(&term).join("\n")
+        smelt_core::term_text::text_lines(&term).join("\n")
     }
 
     /// **永不 feed ring**——本文件头号不变量，此前只有注释在守。
@@ -2496,6 +2533,104 @@ mod state_listener_tests {
         Arc::new(Mutex::new(Vec::new()))
     }
 
+    fn notification(kind: OscNotificationKind) -> OscNotification {
+        OscNotification {
+            kind,
+            text: "done".into(),
+        }
+    }
+
+    #[test]
+    fn codex_osc9_completes_stale_running_state() {
+        for phase in [Phase::Idle, Phase::Thinking, Phase::ExecutingTool] {
+            let mut state = SessionState {
+                launch: Some("codex --dangerously-bypass-approvals-and-sandbox".into()),
+                phase,
+                structured_events: true,
+                pending_question: Some("Bash".into()),
+                ..Default::default()
+            };
+            assert!(apply_osc_notification(
+                &mut state,
+                &notification(OscNotificationKind::Osc9)
+            ));
+            assert_eq!(state.phase, Phase::Succeeded);
+            assert_eq!(state.pending_question.as_deref(), Some("done"));
+        }
+    }
+
+    #[test]
+    fn osc_state_reducer_survives_pty_read_boundaries() {
+        let mut state = SessionState {
+            launch: Some("codex".into()),
+            phase: Phase::ExecutingTool,
+            structured_events: true,
+            ..Default::default()
+        };
+        let mut scanner = OscScan::default();
+
+        assert!(!apply_osc_bytes(
+            &mut state,
+            &mut scanner,
+            b"output\x1b]9;turn "
+        ));
+        assert_eq!(state.phase, Phase::ExecutingTool);
+        assert!(apply_osc_bytes(
+            &mut state,
+            &mut scanner,
+            b"complete\x1b\\prompt"
+        ));
+        assert_eq!(state.phase, Phase::Succeeded);
+    }
+
+    #[test]
+    fn osc_fallback_never_overrides_stronger_or_unrelated_state() {
+        for phase in [
+            Phase::AwaitingApproval,
+            Phase::WaitingForUser,
+            Phase::Succeeded,
+            Phase::Failed,
+            Phase::Dead,
+        ] {
+            let mut state = SessionState {
+                launch: Some("codex".into()),
+                phase,
+                ..Default::default()
+            };
+            assert!(!apply_osc_notification(
+                &mut state,
+                &notification(OscNotificationKind::Osc9)
+            ));
+            assert_eq!(state.phase, phase);
+        }
+
+        let mut non_codex = SessionState {
+            launch: Some("claude".into()),
+            phase: Phase::Thinking,
+            ..Default::default()
+        };
+        assert!(!apply_osc_notification(
+            &mut non_codex,
+            &notification(OscNotificationKind::Osc9)
+        ));
+
+        non_codex.launch = Some("codex-helper".into());
+        assert!(!apply_osc_notification(
+            &mut non_codex,
+            &notification(OscNotificationKind::Osc9)
+        ));
+
+        let mut kitty = SessionState {
+            launch: Some("codex".into()),
+            phase: Phase::Thinking,
+            ..Default::default()
+        };
+        assert!(!apply_osc_notification(
+            &mut kitty,
+            &notification(OscNotificationKind::Osc99)
+        ));
+    }
+
     /// 标题以 spinner 开头 → 认定 Thinking，且更新 phase_since；标题本身也要存。
     #[test]
     fn title_with_spinner_sets_thinking_phase() {
@@ -3038,23 +3173,6 @@ fn handle_conn(
         Some("acp_open") => handle_acp_open(conn, reader, &v, acp_sessions, subscribers),
         Some("acp_watch") => handle_acp_watch(conn, reader, &v, acp_sessions),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
-        // 扫当前可视区里的权限菜单，解析结果原样回给调用方（网关 → 手机端）。
-        // 只读、无副作用，所以不要写权限：看得见菜单 ≠ 能点它，点是走 input/action。
-        //
-        // 为什么是「拉」而不是随 state 广播：state 广播由 hook 驱动（phase 变化），
-        // 没接 hook 的 agent 永远不广播，菜单就永远到不了手机。而画面变化只有客户端
-        // 最清楚——它在渲染 xterm，debounce 之后拉一次即可，服务端不必在 PTY 泵那条
-        // 每字节都过的热路径上挂解析。
-        Some("menu") => {
-            let id = v["id"].as_str().unwrap_or_default();
-            let sess = sessions.lock().unwrap().get(id).cloned();
-            let menu = sess.and_then(|s| {
-                let term = s.term.lock().ok()?;
-                permission_menu::parse_permission_prompt(&term_text::last_lines(&term, 28))
-            });
-            let mut c = conn;
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true, "menu": menu }));
-        }
         Some("list") => {
             let (mut ids, mut states): (Vec<String>, Vec<SessionState>) = sessions
                 .lock()
@@ -3430,6 +3548,7 @@ fn handle_open(
                 pty_reader,
                 id.clone(),
                 Arc::clone(&sessions),
+                Arc::clone(&subscribers),
             );
             sess
         }
@@ -4545,10 +4664,12 @@ fn start_pty_pump(
     mut pty_reader: Box<dyn Read + Send>,
     id: String,
     sessions: Sessions,
+    subscribers: Subscribers,
 ) {
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut parser: Processor = Processor::new();
+        let mut osc = OscScan::default();
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
@@ -4559,6 +4680,21 @@ fn start_pty_pump(
                         let _ = catch_unwind(AssertUnwindSafe(|| {
                             parser.advance(&mut *term, chunk);
                         }));
+                    }
+                    // 标题事件先归约，再消费同一批字节里的 OSC 完成信号。否则标题
+                    // spinner 可能在 OSC 已标完成后又把 phase 推回 Thinking。
+                    let snapshot = if let Ok(mut state) = sess.state.lock() {
+                        apply_osc_bytes(&mut state, &mut osc, chunk).then(|| state.clone())
+                    } else {
+                        // 状态镜像即使损坏也不能阻断 PTY 主数据流；继续推进扫描器，
+                        // 保持跨 read 边界同步，然后照常把 chunk 转发给客户端。
+                        for &byte in chunk {
+                            let _ = osc.feed_notification(byte);
+                        }
+                        None
+                    };
+                    if let Some(snapshot) = snapshot {
+                        broadcast_state(&subscribers, &snapshot);
                     }
                     let mut out = sess.out.lock().unwrap();
                     if let Some(c) = out.client.as_mut() {
@@ -5545,6 +5681,7 @@ mod watch_tests {
             Box::new(pty_reader_end),
             "t".to_string(),
             Arc::clone(&sessions),
+            Arc::new(Mutex::new(Vec::new())),
         );
 
         // 第一路：open（同 id 唯一 client）。

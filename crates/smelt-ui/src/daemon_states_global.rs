@@ -25,9 +25,17 @@ pub enum AgentNotificationKind {
     Failure,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAgentNotification {
+    pub session_id: String,
+    pub title: String,
+    pub message: String,
+    pub kind: AgentNotificationKind,
+}
+
 /// 状态通道待弹出的应用内 Notification（subscribe 线程没有 Window，render 时
 /// drain）。
 #[derive(Clone, Default)]
-pub struct PendingAgentNotifs(pub Arc<Mutex<Vec<(String, String, AgentNotificationKind)>>>);
+pub struct PendingAgentNotifs(pub Arc<Mutex<Vec<PendingAgentNotification>>>);
 
 impl Global for PendingAgentNotifs {}

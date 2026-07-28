@@ -45,8 +45,6 @@ pub struct SessionSummary {
     /// 本份会话消耗的 token 总量（input+output+两种 cache 相加，算法跟 usage_stats
     /// 一致），供总览卡片展示「当前会话」口径的用量——跟用量页的整项目累计口径不同。
     pub total_tokens: u64,
-    /// 最近一次工具调用名（按文件行序，最后一个 tool_use 块），供总览卡片展示。
-    pub last_tool: Option<String>,
 }
 
 /// 一轮对话：用户发言 / Claude 回复（含它这轮调用了哪些工具）。
@@ -142,7 +140,6 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
     let mut last_active_at: Option<DateTime<Utc>> = None;
     let mut message_count = 0usize;
     let mut total_tokens = 0u64;
-    let mut last_tool: Option<String> = None;
     let mut seen_uuids: HashSet<String> = HashSet::new();
 
     for line in text.lines() {
@@ -202,15 +199,6 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
             if has_text {
                 message_count += 1;
             }
-            if let Some(blocks) = blocks {
-                for b in blocks {
-                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
-                            last_tool = Some(name.to_string());
-                        }
-                    }
-                }
-            }
             if !dup {
                 if let Some(usage) = row.get("message").and_then(|m| m.get("usage")) {
                     let field = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -234,7 +222,6 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
         last_active_at,
         message_count,
         total_tokens,
-        last_tool,
     })
 }
 
@@ -409,7 +396,6 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
         .and_then(parse_rfc3339);
     let mut last_active_at = started_at;
     let mut message_count = 0usize;
-    let mut last_tool: Option<String> = None;
 
     for line in lines {
         let line = line.trim();
@@ -456,11 +442,7 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
                     title = Some(truncate(msg_text.trim(), 80));
                 }
             }
-            Some("function_call") => {
-                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                    last_tool = Some(name.to_string());
-                }
-            }
+            Some("function_call") => {}
             _ => {}
         }
     }
@@ -475,7 +457,6 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
         // Codex 的 event_msg.token_count 是「速率限制用量占比」，不是这一份会话的
         // token 总数，跟 Claude 那份口径对不上，宁可不接也不接一个会误导人的数字。
         total_tokens: 0,
-        last_tool,
     })
 }
 
@@ -636,7 +617,6 @@ fn summarize_grok_session(session_dir: &Path, want_cwd: &str) -> Option<SessionS
             .unwrap_or(0) as usize,
         // summary.json 没有 token 统计字段（实测），跟 Codex 一样宁可留空。
         total_tokens: 0,
-        last_tool: None, // 要扫 chat_history.jsonl 才能拿到，摘要行不为这一列多付这个成本
     })
 }
 
@@ -813,9 +793,8 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
         .map(|s| truncate(s, 80))
         .unwrap_or_else(|| session_id.clone());
 
-    // workspace.yaml 没存消息数/最近工具名，要拿这两项就得扫一遍 events.jsonl——
-    // 跟 Claude/Codex 列表页同样的代价，不算特殊。
-    let (mut message_count, mut last_tool) = (0usize, None);
+    // workspace.yaml 没存消息数，要拿到它就得扫一遍 events.jsonl。
+    let mut message_count = 0usize;
     if let Ok(text) = std::fs::read_to_string(session_dir.join("events.jsonl")) {
         for line in text.lines() {
             let Ok(row) = serde_json::from_str::<Value>(line.trim()) else {
@@ -823,15 +802,6 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
             };
             match row.get("type").and_then(|v| v.as_str()) {
                 Some("user.message") | Some("assistant.message") => message_count += 1,
-                Some("tool.execution_start") => {
-                    if let Some(name) = row
-                        .get("data")
-                        .and_then(|d| d.get("toolName"))
-                        .and_then(|v| v.as_str())
-                    {
-                        last_tool = Some(name.to_string());
-                    }
-                }
                 _ => {}
             }
         }
@@ -845,7 +815,6 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
         last_active_at: fields.get("updated_at").and_then(|v| parse_rfc3339(v)),
         message_count,
         total_tokens: 0, // events.jsonl 没有可靠的整会话 token 汇总字段（实测）
-        last_tool,
     })
 }
 
@@ -982,6 +951,7 @@ pub fn history_view(
     cwd: Option<String>,
     list: HistoryListState,
     detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
+    detail_list_state: gpui::ListState,
     memories: Option<Rc<Vec<MemoryEntry>>>,
     memory_selected: Option<usize>,
     cx: &mut Context<Workspace>,
@@ -1257,94 +1227,42 @@ pub fn history_view(
         Some((_, d)) if d.turns.is_empty() => {
             placeholder_view("这份会话没有可展示的对话内容", muted).into_any_element()
         }
-        Some((_, d)) => div()
-            .id("session-detail")
+        Some((_, d)) => {
+            let detail = d.clone();
+            let workspace = cx.entity();
+            let agent_label = agent.short_label();
+            gpui::list(detail_list_state, move |i, _window, app| {
+                workspace.update(app, |_, _cx| {
+                    let turn = &detail.turns[i];
+                    div()
+                        .w_full()
+                        .px_3()
+                        .pb_3()
+                        .child(history_turn(
+                            turn,
+                            i,
+                            agent_label,
+                            muted,
+                            fg,
+                            accent,
+                            secondary,
+                        ))
+                        .into_any_element()
+                })
+            })
+            .w_full()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_3()
-            .children(d.turns.iter().enumerate().map(|(i, t)| {
-                let role = if t.is_user { "用户" } else { "Claude" };
-                let role_color = if t.is_user { accent } else { fg };
-                let bubble_bg = if t.is_user {
-                    accent.opacity(0.12)
-                } else {
-                    secondary
-                };
-                // 工具名按出现顺序去重计数，多次调用同一工具合并成一行摘要
-                // （比如连续 3 次 Bash 就显示"Bash ×3"），不然长会话里全是重复胶囊。
-                let tool_summary = (!t.tools.is_empty()).then(|| {
-                    let mut order: Vec<&String> = Vec::new();
-                    let mut counts: HashMap<&String, usize> = HashMap::new();
-                    for tool in &t.tools {
-                        counts
-                            .entry(tool)
-                            .and_modify(|c| *c += 1)
-                            .or_insert_with(|| {
-                                order.push(tool);
-                                1
-                            });
-                    }
-                    order
-                        .into_iter()
-                        .map(|name| {
-                            let c = counts[name];
-                            if c > 1 {
-                                format!("{name} ×{c}")
-                            } else {
-                                name.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                });
-                v_flex()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(8.))
-                    .bg(bubble_bg)
-                    .when(t.is_user, |el| el.max_w(px(560.)))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_baseline()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .text_sm()
-                                    .text_color(role_color)
-                                    .child(role),
-                            )
-                            .children(t.timestamp.map(|ts| {
-                                div().text_xs().text_color(muted).child(
-                                    ts.with_timezone(&chrono::Local)
-                                        .format("%m-%d %H:%M")
-                                        .to_string(),
-                                )
-                            })),
-                    )
-                    // 必须逐气泡给唯一 id：便捷函数 text::markdown() 拿调用处代码位置
-                    // 当 id，循环里所有气泡会共享同一份 TextView 状态（文本互踩、高度
-                    // 测量错乱，气泡整个叠在一起）。
-                    .child(div().text_sm().text_color(fg).child(
-                        crate::markdown_mermaid::markdown_view(("turn-md", i), t.text.clone()),
-                    ))
-                    .children(
-                        tool_summary
-                            .map(|s| div().text_xs().text_color(muted).child(format!("🔧 {s}"))),
-                    )
-                    .into_any_element()
-            }))
-            .into_any_element(),
+            .min_w_0()
+            .pt_3()
+            .into_any_element()
+        }
     };
 
     let detail_body = v_flex()
         .flex_1()
         .min_h_0()
+        .min_w_0()
         .children(detail_header)
         .child(turns_body);
 
@@ -1357,10 +1275,12 @@ pub fn history_view(
             div()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .flex()
                 .child(
                     div()
                         .w(px(280.))
+                        .flex_none()
                         .flex()
                         .flex_col()
                         .min_h_0()
@@ -1370,6 +1290,86 @@ pub fn history_view(
                 )
                 .child(detail_body),
         )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_turn(
+    turn: &Turn,
+    index: usize,
+    agent_label: &'static str,
+    muted: Hsla,
+    fg: Hsla,
+    accent: Hsla,
+    secondary: Hsla,
+) -> AnyElement {
+    let role = if turn.is_user { "用户" } else { agent_label };
+    let role_color = if turn.is_user { accent } else { fg };
+    let bubble_bg = if turn.is_user {
+        accent.opacity(0.12)
+    } else {
+        secondary
+    };
+    let tool_summary = (!turn.tools.is_empty()).then(|| {
+        let mut order: Vec<&String> = Vec::new();
+        let mut counts: HashMap<&String, usize> = HashMap::new();
+        for tool in &turn.tools {
+            counts
+                .entry(tool)
+                .and_modify(|count| *count += 1)
+                .or_insert_with(|| {
+                    order.push(tool);
+                    1
+                });
+        }
+        order
+            .into_iter()
+            .map(|name| match counts[name] {
+                count if count > 1 => format!("{name} ×{count}"),
+                _ => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    });
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .rounded(px(8.))
+        .bg(bubble_bg)
+        .when(turn.is_user, |element| element.max_w(px(560.)))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_baseline()
+                .child(
+                    div()
+                        .font_semibold()
+                        .text_sm()
+                        .text_color(role_color)
+                        .child(role),
+                )
+                .children(turn.timestamp.map(|timestamp| {
+                    div().text_xs().text_color(muted).child(
+                        timestamp
+                            .with_timezone(&chrono::Local)
+                            .format("%m-%d %H:%M")
+                            .to_string(),
+                    )
+                })),
+        )
+        .child(div().w_full().min_w_0().text_sm().text_color(fg).child(
+            crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone()),
+        ))
+        .children(tool_summary.map(|summary| {
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(format!("🔧 {summary}"))
+        }))
+        .into_any_element()
 }
 
 /// 会话来源 tab 上的一个按钮，选中态用 accent 底色标出来（跟 `pane_button` 同款
@@ -1670,6 +1670,7 @@ impl Workspace {
         self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
         let r#gen = self.session_detail_gen;
         self.session_detail = None;
+        self.history_detail_list_state.reset(0);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1683,6 +1684,7 @@ impl Workspace {
                     return;
                 }
                 if let Some(detail) = detail {
+                    this.history_detail_list_state.reset(detail.turns.len());
                     this.session_detail = Some((path, Rc::new(detail)));
                 }
                 cx.notify();
@@ -1932,7 +1934,6 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "实际问题"); // 合成的 environment_context 不该被当标题
         assert_eq!(sessions[0].message_count, 2);
-        assert_eq!(sessions[0].last_tool.as_deref(), Some("exec_command"));
 
         let detail = load_codex_session_detail(&sessions[0].path).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -2010,7 +2011,6 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "调试问题");
         assert_eq!(sessions[0].message_count, 2);
-        assert_eq!(sessions[0].last_tool.as_deref(), Some("bash"));
 
         let detail = load_copilot_session_detail(&sessions[0].path).unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();

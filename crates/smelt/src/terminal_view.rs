@@ -176,6 +176,12 @@ pub struct TerminalView {
     notified_at: Option<Instant>,
     /// 上一帧该终端是否在「运行中」（标题以 braille spinner 开头）；用于检测完成边沿。
     was_running: bool,
+    /// 结构化状态上一帧是否已经是 Succeeded；hook 激活后完成边沿以此为准，
+    /// 不能再让标题 spinner 的短暂消失误判任务完成。
+    was_structured_succeeded: bool,
+    /// 上一次轮询看到的结构化 phase；BEL 只被同一竞速窗口内的新 phase 转换覆盖，
+    /// 不能因为 daemon 长期停在旧 Succeeded 就吞掉以后普通 shell 发出的 BEL。
+    last_structured_phase: Option<crate::terminal::DaemonPhase>,
     /// 已连续运行的帧数（REFRESH 为单位）；超阈值判为「卡住」，提醒一次。
     running_frames: u32,
     /// 是否已就「卡住」提醒过（同一段运行只提醒一次）。
@@ -192,6 +198,9 @@ pub struct TerminalView {
     /// Workspace::render 每帧来取，取走即清空。跟 last_notified 共用同一条
     /// 60s 同文本去重（见轮询循环），系统通知 / toast 二选一，不会重复弹。
     pending_toast: Option<String>,
+    /// 刚收到但尚未展示的 BEL。仅用于没有结构化状态通道的普通终端/agent fallback；
+    /// hook 一旦激活，BEL 永久让位给明确的 phase，不再展示泛化“响铃”。
+    pending_bell_at: Option<Instant>,
     /// 绑定任务刚被标 Done 时写入「完成项目 cwd」；Workspace::render 取走后
     /// 触发同项目自动续跑下一条待办。None = 本帧无需续跑。
     pending_task_continue_cwd: Option<String>,
@@ -225,46 +234,59 @@ fn appearance_changed(a: &crate::Appearance, b: &crate::Appearance) -> bool {
         || a.blur != b.blur
 }
 
-// 权限菜单解析已抽到 smelt_core::permission_menu（唯一真源，GUI 与 smeltd 共用）。
-// 这里只 use 自己要用的；消费者（main.rs 等）直接从 permission_menu 取类型，不经这里
-// 转发——转发一层就等于多一个「看起来像定义处」的地方。
-use crate::permission_menu::{PermissionPrompt, parse_permission_prompt};
-
 /// 同一终端同文本的系统通知最小间隔。
 const NOTIFY_DEDUP: Duration = Duration::from_secs(60);
+
+/// BEL 常和 agent 的完成信号出现在同一批输出中。稍等一帧窗口，让更准确的
+/// Succeeded/Failed/Waiting 通知优先，避免通知中心同时出现“响铃”和“已完成”。
+const BELL_NOTIFICATION_GRACE: Duration = Duration::from_millis(250);
+
+fn bell_notification_due(pending_at: Option<Instant>, now: Instant) -> bool {
+    pending_at.is_some_and(|at| now.duration_since(at) >= BELL_NOTIFICATION_GRACE)
+}
 
 /// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
 fn title_is_running(title: Option<String>) -> bool {
     title.is_some_and(|t| crate::osc::title_starts_with_spinner(&t))
 }
 
-fn structured_agent_events_active(session_id: &str, cx: &App) -> bool {
+fn daemon_agent_state(
+    session_id: &str,
+    cx: &App,
+) -> Option<smelt_core::daemon_state::DaemonSessionState> {
     cx.try_global::<smelt_ui::daemon_states_global::DaemonStates>()
         .and_then(|states| states.0.lock().ok()?.get(session_id).cloned())
-        .is_some_and(|state| state.structured_events)
+}
+
+fn terminal_bell_notifications_enabled(cx: &App) -> bool {
+    cx.try_global::<smelt_ui::agent_ui_config::AgentUiConfig>()
+        .map(|config| config.notify_terminal_bell)
+        .unwrap_or(true)
 }
 
 /// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。
 const STUCK_FRAMES: u32 = 8 * 60 * 1000 / 30;
 
 /// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里各项的图标对齐
-/// （新建终端/Claude Code/Codex/Copilot 一一对应），一眼认出这一行是哪种会话。
+/// （新建终端/Claude Code/Codex/Copilot/Grok 一一对应），一眼认出这一行是哪种会话。
 /// 建好之后不变：daemon 重启触发的 `reconnect()` 只换底层连接，不重置这个。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchKind {
     Terminal,
     Claude,
     Codex,
     Copilot,
+    Grok,
 }
 
 /// 从 `launch` 命令行猜启动方式（见各「+」菜单项的 on_click：'claude'/'claude
-/// --dangerously-skip-permissions'/'codex'/'copilot'），用前缀匹配以后加参数不失配。
+/// --dangerously-skip-permissions'/'codex'/'copilot'/'grok'），用前缀匹配以后加参数不失配。
 fn classify_launch(launch: Option<&str>) -> LaunchKind {
     match launch.map(str::trim) {
         Some(l) if l.starts_with("claude") => LaunchKind::Claude,
         Some(l) if l.starts_with("codex") => LaunchKind::Codex,
         Some(l) if l.starts_with("copilot") => LaunchKind::Copilot,
+        Some(l) if l.starts_with("grok") => LaunchKind::Grok,
         _ => LaunchKind::Terminal,
     }
 }
@@ -301,29 +323,50 @@ impl TerminalView {
             loop {
                 Timer::after(REFRESH).await;
                 let r = this.update(cx, |this, cx| {
-                    let bell = this.terminal.take_bell_notification();
-                    // Warp 同类策略：结构化插件一旦在当前 pane 激活，丢弃旧 OSC
-                    // agent fallback，避免 hook + OSC 对同一完成/审批重复提醒。BEL 是
-                    // 独立的普通终端提醒，不受此门控影响。
-                    let msg = bell.or_else(|| {
-                        let osc = this.terminal.take_notification();
-                        (!structured_agent_events_active(&this.session_id, cx))
-                            .then_some(osc)
-                            .flatten()
-                    });
+                    let bell_received = this.terminal.take_bell_notification().is_some();
+                    // 结构化插件一旦在当前 pane 激活，OSC 和 BEL fallback 都让位给
+                    // hook phase。Copilot 常在 Stop hook 之后才发 BEL，只按“同一帧转换”
+                    // 抑制仍会漏出泛化响铃，因此这里按整条会话永久门控。
+                    let daemon_state = daemon_agent_state(&this.session_id, cx);
+                    let structured_events = daemon_state
+                        .as_ref()
+                        .is_some_and(|state| state.structured_events);
+                    let osc = this.terminal.take_notification();
+                    // Warp 的 Codex fallback 语义：未激活结构化插件时，一条普通文本
+                    // OSC 9 就是 Stop。数字 OSC 9 控制命令已在解析层过滤，不会到这里。
+                    let codex_osc_stop = osc.is_some()
+                        && !structured_events
+                        && this.launch_kind == LaunchKind::Codex;
+                    let now = Instant::now();
+                    let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
+                    if structured_events || !bell_notifications_enabled {
+                        this.pending_bell_at = None;
+                    } else if bell_received {
+                        this.pending_bell_at = Some(now);
+                    }
+                    if codex_osc_stop {
+                        this.pending_bell_at = None;
+                    }
+                    let bell = this
+                        .pending_bell_at
+                        .filter(|_| bell_notification_due(this.pending_bell_at, now))
+                        .map(|_| "🔔 响铃".to_string());
+                    if bell.is_some() {
+                        this.pending_bell_at = None;
+                    }
+                    let msg = bell.or_else(|| (!structured_events).then_some(osc).flatten());
                     if let Some(msg) = msg {
                         let task = this.terminal.current_title();
                         // 焦点感知（借鉴 codex）：app 在前台时不弹系统通知——你自己看得见
                         // 蓝点/徽章，弹了是打扰；切走了才提醒。cx.active_window() 在 app
                         // 失活时为 None（宠物窗是 NonactivatingPanel，不参与）。
                         // 同文本 60s 去重：Claude Code 会反复上报同一条 waiting。
-                        let now = Instant::now();
                         let dup = this.last_notified.as_ref().is_some_and(|(m, t)| {
                             *m == msg && now.duration_since(*t) < NOTIFY_DEDUP
                         });
                         if !dup {
                             if cx.active_window().is_none() {
-                                system_notify(&this.title, task.as_deref(), &msg);
+                                system_notify(&this.session_id, &this.title, task.as_deref(), &msg);
                             } else {
                                 // app 在前台：系统通知不弹，改交给 Workspace::render 判断——
                                 // 只有「没在看这个 pane」才真弹 toast，正在看的直接吃掉。
@@ -341,11 +384,34 @@ impl TerminalView {
                         this.notified_at = Some(Instant::now());
                     }
 
-                    // 运行状态边沿检测（标题 spinner）：完成提醒 + 卡住提醒。
-                    let running = title_is_running(this.terminal.current_title());
+                    // hook 一旦激活，运行/完成都以结构化 phase 为准；否则才回退标题
+                    // spinner。混用两条信源会在标题短暂清空时把仍在执行工具的任务误判
+                    // 为完成，甚至提前触发绑定任务的自动续跑。
+                    let structured_succeeded = structured_events
+                        && daemon_state.as_ref().is_some_and(|state| {
+                            state.phase == crate::terminal::DaemonPhase::Succeeded
+                        });
+                    let running = if structured_events {
+                        daemon_state.as_ref().is_some_and(|state| {
+                            matches!(
+                                state.phase,
+                                crate::terminal::DaemonPhase::Thinking
+                                    | crate::terminal::DaemonPhase::ExecutingTool
+                            )
+                        })
+                    } else {
+                        !codex_osc_stop
+                            && !this.completed_unread
+                            && title_is_running(this.terminal.current_title())
+                    };
+                    let completion_edge = if structured_events {
+                        !this.was_structured_succeeded && structured_succeeded
+                    } else {
+                        codex_osc_stop || (this.was_running && !running)
+                    };
                     let name = this.title.clone();
-                    if this.was_running && !running {
-                        // Running → Idle：该会话的 agent 干完了 → 标「完成未读」（总览绿标）。
+                    if completion_edge {
+                        // agent 明确完成 → 标「完成未读」（总览绿标）。
                         this.completed_unread = true;
                         // 绑了本 session 的任务 → Done；若确实收尾了任务，挂旗让 Workspace
                         // 同项目自动 claim 下一条待办（见 `on_session_task_idle`）。
@@ -358,6 +424,10 @@ impl TerminalView {
                             format!("「{name}」任务完成啦，来看看结果吧"),
                         );
                     }
+                    this.was_structured_succeeded = structured_succeeded;
+                    this.last_structured_phase = structured_events
+                        .then(|| daemon_state.as_ref().map(|state| state.phase))
+                        .flatten();
                     if running {
                         this.running_frames += 1;
                         if this.running_frames == STUCK_FRAMES && !this.stuck_notified {
@@ -442,12 +512,15 @@ impl TerminalView {
             notification: None,
             notified_at: None,
             was_running: false,
+            was_structured_succeeded: false,
+            last_structured_phase: None,
             running_frames: 0,
             stuck_notified: false,
             session_id,
             completed_unread: false,
             last_notified: None,
             pending_toast: None,
+            pending_bell_at: None,
             pending_task_continue_cwd: None,
             last_appearance: None,
             scroll_accum: 0.0,
@@ -471,18 +544,6 @@ impl TerminalView {
     /// 快捷启动实际命令行；裸终端为 None。
     pub fn launch_cmd(&self) -> Option<&str> {
         self.launch_cmd.as_deref()
-    }
-
-    /// 从终端末尾网格解析权限菜单；无菜单时 `None`。
-    pub fn permission_prompt(&self) -> Option<PermissionPrompt> {
-        let lines = self.last_lines(28);
-        parse_permission_prompt(&lines)
-    }
-
-    /// 是否确实「等审批」：当前终端网格里扫到权限菜单。
-    /// daemon/ACP 的协议状态由上层 `Session::status` 单独判断。
-    pub fn is_awaiting_approval(&self) -> bool {
-        self.permission_prompt().is_some()
     }
 
     /// 是否「任务完成未读」（Running→Idle 后用户还没回应过）。
@@ -533,6 +594,8 @@ impl TerminalView {
         self.notification = None;
         self.notified_at = None;
         self.was_running = false;
+        self.was_structured_succeeded = false;
+        self.last_structured_phase = None;
         self.running_frames = 0;
         self.stuck_notified = false;
         self.completed_unread = false;
@@ -547,20 +610,27 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 最近通知时刻（总览页「N 分钟前」用）。
-    pub fn notified_at(&self) -> Option<Instant> {
-        self.notified_at
-    }
-
-    /// 终端末尾最多 n 行非空文本（总览页迷你预览用）。走 [`Terminal::text_lines`] 的纯文本
-    /// 路径，不为了几行字把整个网格连同颜色/属性 clone 一遍。
-    pub fn last_lines(&self, n: usize) -> Vec<String> {
-        self.terminal.last_lines(n)
-    }
-
     /// 通知消息文本（供通知面板显示）。
     pub fn notification(&self) -> Option<&str> {
         self.notification.as_deref()
+    }
+
+    /// 结构化 hook/ACP 事件（等输入/已完成/失败/等批准）也写进铃铛面板同一个字段，
+    /// 跟 OSC/响铃路径共用展示与已读清除逻辑（mark_read / send_text 等）。
+    pub fn note_structured_notification(&mut self, message: String, cx: &mut Context<Self>) {
+        self.notification = Some(message);
+        self.notified_at = Some(Instant::now());
+        cx.notify();
+    }
+
+    /// 当前 pane 已被用户看到：清掉一次性通知和“完成未读”标记。
+    ///
+    /// 这里只清展示层未读，不改 daemon 的结构化 phase；仍在等批准/等输入的会话会继续
+    /// 保持对应状态灯，只是不再把同一条消息塞回右上角铃铛。
+    pub fn mark_read(&mut self) {
+        self.notification = None;
+        self.completed_unread = false;
+        self.pending_toast = None;
     }
 
     /// 取走待发的 toast 消息（见 pending_toast）；Workspace::render 每帧调用一次。
@@ -2076,56 +2146,14 @@ fn text_batches(
 /// 弹一条 macOS 系统通知（osascript，无额外依赖）。title 固定 smelt、
 /// 副标题为「会话名 · agent 任务名」、正文为通知消息（对齐 cmux 的信息量）。
 /// 失败静默忽略（未签名 / 无权限时可能不显示）。
-fn system_notify(session: &str, task: Option<&str>, body: &str) {
+fn system_notify(session_id: &str, session: &str, task: Option<&str>, body: &str) {
     let subtitle = match task {
         Some(t) if !t.trim().is_empty() => format!("{session} · {t}"),
         _ => session.to_string(),
     };
     // 只走原生通知：打包成 smelt.app（有 bundle id）时用 smelt 名字 + 图标显示；
     // 开发版（cargo run 无 bundle）自动静默不打扰，不再回落 osascript。
-    #[cfg(target_os = "macos")]
-    deliver_native_notification("smelt", &subtitle, body);
-    #[cfg(not(target_os = "macos"))]
-    let _ = (subtitle, body);
-}
-
-/// 原生 `NSUserNotification`：仅在已打包（有 bundle identifier）时投递，用宿主 .app 图标。
-/// 未打包 / 不可用则直接返回（开发版静默）。
-#[cfg(target_os = "macos")]
-fn deliver_native_notification(title: &str, subtitle: &str, body: &str) {
-    use objc::runtime::Object;
-    use objc::{class, msg_send, sel, sel_impl};
-
-    unsafe {
-        // 无 bundle identifier（cargo run 直接跑）→ 原生通知不会投递，静默返回。
-        let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
-        if bundle.is_null() {
-            return;
-        }
-        let ident: *mut Object = msg_send![bundle, bundleIdentifier];
-        if ident.is_null() {
-            return;
-        }
-        let center: *mut Object = msg_send![
-            class!(NSUserNotificationCenter),
-            defaultUserNotificationCenter
-        ];
-        if center.is_null() {
-            return;
-        }
-        let nsstr = |s: &str| -> *mut Object {
-            let obj: *mut Object = msg_send![class!(NSString), alloc];
-            let ptr = s.as_ptr() as *const std::ffi::c_void;
-            // encoding 4 = NSUTF8StringEncoding。
-            msg_send![obj, initWithBytes: ptr length: s.len() encoding: 4usize]
-        };
-        let n: *mut Object = msg_send![class!(NSUserNotification), alloc];
-        let n: *mut Object = msg_send![n, init];
-        let _: () = msg_send![n, setTitle: nsstr(title)];
-        let _: () = msg_send![n, setSubtitle: nsstr(subtitle)];
-        let _: () = msg_send![n, setInformativeText: nsstr(body)];
-        let _: () = msg_send![center, deliverNotification: n];
-    }
+    crate::status_item::deliver_notification(session_id, &subtitle, body);
 }
 
 /// 在一行里找出所有 URL，返回 (起列, 止列含, url)。
@@ -2446,11 +2474,13 @@ fn csi_u_modifiers(m: &Modifiers) -> u8 {
 mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
-        CellStyle, SCROLLBAR_THUMB_MIN, bg_spans, cells_to_token, keystroke_to_bytes, link_at,
-        scrollbar_thumb, text_batches, visible_end,
+        BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
+        bg_spans, cells_to_token, classify_launch, keystroke_to_bytes, link_at, scrollbar_thumb,
+        text_batches, visible_end,
     };
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
+    use std::time::{Duration, Instant};
 
     /// 默认样式：bg = None 表示「终端默认底色」（不画底色矩形）。
     const PLAIN: CellStyle = CellStyle {
@@ -2463,6 +2493,33 @@ mod tests {
         undercurl: false,
         strikeout: false,
     };
+
+    #[test]
+    fn classifies_all_builtin_terminal_agents() {
+        assert_eq!(classify_launch(Some("claude --help")), LaunchKind::Claude);
+        assert_eq!(classify_launch(Some("codex")), LaunchKind::Codex);
+        assert_eq!(
+            classify_launch(Some("copilot --allow-all")),
+            LaunchKind::Copilot
+        );
+        assert_eq!(classify_launch(Some("grok --minimal")), LaunchKind::Grok);
+        assert_eq!(classify_launch(Some("zsh")), LaunchKind::Terminal);
+    }
+
+    #[test]
+    fn terminal_bell_waits_for_completion_grace_period() {
+        let received_at = Instant::now();
+        assert!(!bell_notification_due(Some(received_at), received_at));
+        assert!(!bell_notification_due(
+            Some(received_at),
+            received_at + BELL_NOTIFICATION_GRACE - Duration::from_millis(1)
+        ));
+        assert!(bell_notification_due(
+            Some(received_at),
+            received_at + BELL_NOTIFICATION_GRACE
+        ));
+        assert!(!bell_notification_due(None, received_at));
+    }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。
     ///

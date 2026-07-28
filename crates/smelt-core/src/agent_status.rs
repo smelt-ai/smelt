@@ -7,7 +7,7 @@
 pub enum AgentStatus {
     /// Claude 等你批准操作（通知文本含 permission/权限等）→ 最高优先，红色。
     WaitingApproval,
-    /// 其他需要处理：等输入 / 响铃 / 自定义通知 → 橙色。
+    /// 其他需要处理：等输入或失败 → 橙色。普通 BEL/OSC 通知不进入 Agent 状态。
     NeedsAttention,
     /// 标题以 Braille spinner 开头 → 运行中，蓝色。
     Running,
