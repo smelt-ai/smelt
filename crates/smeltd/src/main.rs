@@ -3359,64 +3359,14 @@ fn handle_conn(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MissingSessionAction {
-    Shell,
-    Launch(String),
-    Reject(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MissingSessionDecision {
-    Attach,
-    Spawn(Option<String>),
-    Reject(String),
-}
-
-fn parse_missing_session_action(v: &serde_json::Value) -> MissingSessionAction {
-    if let Some(missing) = v.get("missing") {
-        return match missing["kind"].as_str() {
-            Some("launch") => missing["command"]
-                .as_str()
-                .map(|command| MissingSessionAction::Launch(command.to_string()))
-                .unwrap_or_else(|| MissingSessionAction::Reject("无法恢复：缺少启动命令".into())),
-            Some("reject") => MissingSessionAction::Reject(
-                missing["reason"]
-                    .as_str()
-                    .unwrap_or("无法恢复：客户端拒绝重新创建会话")
-                    .to_string(),
-            ),
-            _ => MissingSessionAction::Shell,
-        };
-    }
-    v["launch"]
-        .as_str()
-        .map(|command| MissingSessionAction::Launch(command.to_string()))
-        .unwrap_or(MissingSessionAction::Shell)
-}
-
-fn select_missing_session_command(
-    exists: bool,
-    action: MissingSessionAction,
-) -> MissingSessionDecision {
-    if exists {
-        return MissingSessionDecision::Attach;
-    }
-    match action {
-        MissingSessionAction::Shell => MissingSessionDecision::Spawn(None),
-        MissingSessionAction::Launch(command) => MissingSessionDecision::Spawn(Some(command)),
-        MissingSessionAction::Reject(reason) => MissingSessionDecision::Reject(reason),
-    }
-}
-
-fn rejected_terminal_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
+fn terminal_error_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
     let reason: String = reason
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     let header = serde_json::json!({
         "ok": false,
-        "rejected": reason,
+        "err": reason,
         "rows": rows,
         "cols": cols,
         "replay_len": 0,
@@ -3424,8 +3374,8 @@ fn rejected_terminal_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {
     format!("{header}\n\r\n\x1b[31m{reason}\x1b[0m\r\n").into_bytes()
 }
 
-fn write_rejected_terminal(mut conn: &UnixStream, reason: &str, rows: u16, cols: u16) {
-    let _ = conn.write_all(&rejected_terminal_reply(reason, rows, cols));
+fn write_terminal_error(mut conn: &UnixStream, reason: &str, rows: u16, cols: u16) {
+    let _ = conn.write_all(&terminal_error_reply(reason, rows, cols));
 }
 
 fn handle_open(
@@ -3442,12 +3392,11 @@ fn handle_open(
     let cols = v["cols"].as_u64().unwrap_or(80) as u16;
     let rows = v["rows"].as_u64().unwrap_or(24) as u16;
     let cwd = v["cwd"].as_str().map(String::from);
-    let missing_action = parse_missing_session_action(v);
+    let launch = v["initial_launch"].as_str().map(String::from);
 
     // 取既有会话（reattach）或新建。
     let existing = sessions.lock().unwrap().get(&id).cloned();
     let reattach = existing.is_some();
-    let decision = select_missing_session_command(reattach, missing_action);
     let sess = match existing {
         Some(s) => {
             // reattach：等客户端首帧 resize（含真实 cell 像素）再 jolt，避免在错误
@@ -3456,14 +3405,6 @@ fn handle_open(
             s
         }
         None => {
-            let launch = match decision {
-                MissingSessionDecision::Spawn(launch) => launch,
-                MissingSessionDecision::Reject(reason) => {
-                    write_rejected_terminal(&conn, &reason, rows, cols);
-                    return;
-                }
-                MissingSessionDecision::Attach => unreachable!(),
-            };
             let result = spawn_session(
                 &id,
                 rows,
@@ -3475,7 +3416,7 @@ fn handle_open(
             let (sess, pty_reader) = match result {
                 Ok(result) => result,
                 Err(error) => {
-                    write_rejected_terminal(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
+                    write_terminal_error(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
                     return;
                 }
             };
@@ -4490,9 +4431,16 @@ fn handle_upgrade(
 
 /// 开 PTY + 起 shell（环境设置与 GUI 内嵌版完全一致，见 workspace/terminal.rs 的注释）。
 /// `launch`：项目「+」悬浮菜单的 Claude Code / Codex 快捷入口——把要跑的命令直接编进
-/// 启动命令行（`-c '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
+/// 启动命令行（`-ilc '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
 /// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个
 /// 正常交互 login shell，之后就是一个普通会话。
+fn shell_launch_args(shell: &str, launch: Option<&str>) -> Vec<String> {
+    match launch {
+        Some(launch) => vec!["-ilc".to_string(), format!("{launch}; exec {shell} -l")],
+        None => vec!["-l".to_string()],
+    }
+}
+
 fn spawn_session(
     id: &str,
     rows: u16,
@@ -4511,11 +4459,10 @@ fn spawn_session(
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(shell.clone());
-    // login shell：拿完整 PATH（.app 双击启动时系统 PATH 很精简）。
-    cmd.arg("-l");
-    if let Some(launch) = launch {
-        cmd.arg("-c");
-        cmd.arg(format!("{launch}; exec {shell} -l"));
+    // 快捷启动必须同时是 interactive + login：用户级 CLI 安装器通常把 PATH
+    // 写进 .zshrc，只用 `-lc` 读不到，Dock 启动的 smeltd 又只有系统 PATH。
+    for arg in shell_launch_args(&shell, launch) {
+        cmd.arg(arg);
     }
     if let Some(dir) = cwd {
         cmd.cwd(dir);
@@ -5442,6 +5389,18 @@ mod snapshot_tests {
     }
 
     #[test]
+    fn agent_launch_reads_interactive_shell_config() {
+        assert_eq!(
+            shell_launch_args("/bin/zsh", Some("claude --dangerously-skip-permissions")),
+            vec![
+                "-ilc".to_string(),
+                "claude --dangerously-skip-permissions; exec /bin/zsh -l".to_string(),
+            ]
+        );
+        assert_eq!(shell_launch_args("/bin/zsh", None), vec!["-l".to_string()]);
+    }
+
+    #[test]
     fn snapshot_includes_scrollback_history() {
         // 3 行屏高，灌 10 行 → 前几行进 history
         let size = DaemonTermSize { rows: 3, cols: 40 };
@@ -5512,49 +5471,6 @@ mod snapshot_tests {
             "快照应含 OSC 8 URI，got {s}"
         );
         assert!(snap.windows(4).any(|w| w == b"link"));
-    }
-}
-
-/// Phase 0：`watch` 只读旁观必须能跟 `open` 独占连接并存，且互不干扰。
-#[cfg(test)]
-mod missing_session_action_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_open_request_preserves_launch_behavior() {
-        assert_eq!(
-            parse_missing_session_action(&serde_json::json!({"launch":"claude"})),
-            MissingSessionAction::Launch("claude".into())
-        );
-    }
-
-    #[test]
-    fn reject_action_never_produces_a_spawn_command() {
-        assert_eq!(
-            parse_missing_session_action(&serde_json::json!({
-                "missing":{"kind":"reject","reason":"无法恢复"}
-            })),
-            MissingSessionAction::Reject("无法恢复".into())
-        );
-    }
-
-    #[test]
-    fn existing_session_ignores_reject_action() {
-        assert_eq!(
-            select_missing_session_command(
-                true,
-                MissingSessionAction::Reject("must not run".into())
-            ),
-            MissingSessionDecision::Attach
-        );
-    }
-
-    #[test]
-    fn rejected_terminal_reply_contains_actionable_reason() {
-        let reply = rejected_terminal_reply("无法恢复：历史不存在", 24, 80);
-        let text = String::from_utf8_lossy(&reply);
-        assert!(text.contains(r#""rejected":"无法恢复：历史不存在""#));
-        assert!(text.contains("\u{1b}[31m无法恢复：历史不存在\u{1b}[0m"));
     }
 }
 
