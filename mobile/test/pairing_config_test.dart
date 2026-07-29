@@ -116,5 +116,46 @@ void main() {
         ),
       );
     });
+
+    test('parses an iroh pairing code', () {
+      final pairing = PairingConfig.parse(
+        'smelt+iroh://k7d3ffb1c9a24e5f/?token=secret-token',
+      );
+      expect(pairing.isIroh, isTrue);
+      expect(pairing.irohEndpointId, 'k7d3ffb1c9a24e5f');
+      expect(pairing.token, 'secret-token');
+      // 存的必须是稳定的 endpoint id，而不是隧道端口：端口每次都会变。
+      expect(pairing.endpoint, 'smelt+iroh://k7d3ffb1c9a24e5f');
+    });
+
+    test('iroh codes are exempt from the cleartext rule', () {
+      // 这一路的机密性由 QUIC 保证，不该被 http/ws 那套判定拦下。
+      expect(
+        () => PairingConfig.parse('smelt+iroh://k7d3ffb1c9a24e5f/?token=t'),
+        returnsNormally,
+      );
+    });
+
+    test('rejects an iroh code without a token', () {
+      expect(
+        () => PairingConfig.parse('smelt+iroh://k7d3ffb1c9a24e5f/'),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('rejects an iroh code without an endpoint id', () {
+      expect(
+        () => PairingConfig.parse('smelt+iroh:///?token=t'),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('non-iroh pairings report themselves as such', () {
+      final pairing = PairingConfig.parse(
+        'http://192.168.1.20:59903/?token=secret-token',
+      );
+      expect(pairing.isIroh, isFalse);
+      expect(pairing.irohEndpointId, isNull);
+    });
   });
 }

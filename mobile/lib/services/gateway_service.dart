@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/acp_snapshot.dart';
+import '../models/pairing_config.dart';
 
 class LifecycleAttention {
   final String sessionId;
@@ -109,12 +110,26 @@ int compareSessionMenuOrder(SessionSummary a, SessionSummary b) {
 /// WebSocket 连接状态
 enum WsState { disconnected, connecting, connected, reconnecting }
 
+/// 启动 iroh 隧道并返回手机本地入口端口。
+///
+/// 做成可注入的函数而不是直接调 FFI，是为了让 `GatewayService` 的测试
+/// 不必依赖编译好的 Rust 动态库。
+typedef IrohTunnelOpener = Future<int> Function(String endpointId);
+
 /// Gateway WebSocket 服务
 class GatewayService {
-  GatewayService({this.connectTimeout = const Duration(seconds: 10)});
+  GatewayService({
+    this.connectTimeout = const Duration(seconds: 10),
+    IrohTunnelOpener? irohTunnelOpener,
+  }) : _openIrohTunnel = irohTunnelOpener ?? _irohUnavailable;
 
   /// 从发起连接到收到服务端 `connected` 的整体上限。
   final Duration connectTimeout;
+
+  final IrohTunnelOpener _openIrohTunnel;
+
+  static Future<int> _irohUnavailable(String _) =>
+      Future.error(StateError('本版本未编入 iroh 隧道支持'));
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _channelSubscription;
@@ -124,6 +139,7 @@ class GatewayService {
   String? _endpoint;
   String? _token;
   bool _manuallyDisconnected = true;
+
   /// 当前目标是否曾经握手成功过。没成功过的地址（打错、主机不存在）失败后直接
   /// 回到断开态让用户改，而不是无限自动重连。
   bool _everConnected = false;
@@ -196,7 +212,9 @@ class GatewayService {
 
     final generation = ++_connectionGeneration;
     try {
-      final channel = WebSocketChannel.connect(_gatewayUri(_endpoint!, token));
+      final wsUri = await _resolveWsUri(_endpoint!, token);
+      if (generation != _connectionGeneration) return;
+      final channel = WebSocketChannel.connect(wsUri);
       _channel = channel;
       _channelSubscription = channel.stream.listen(
         (data) {
@@ -217,6 +235,22 @@ class GatewayService {
       _errorController.add('连接失败: $e');
       _failConnection();
     }
+  }
+
+  /// 把存下来的 endpoint 变成这次真正要连的 WebSocket 地址。
+  ///
+  /// iroh 配对存的是 `smelt+iroh://<endpoint_id>`，本身不可拨号：得先把隧道
+  /// 拉起来拿到手机本地端口，再按普通 ws 连过去。隧道口只在回环上，明文
+  /// 不出手机；离开手机那一段由 QUIC 加密。
+  Future<Uri> _resolveWsUri(String endpoint, String token) async {
+    final parsed = Uri.parse(endpoint);
+    if (parsed.scheme != PairingConfig.irohScheme) {
+      return _gatewayUri(endpoint, token);
+    }
+    // 打洞/中继协商可能很久，必须有上限：否则打错的 EndpointId 会让界面
+    // 永远停在「连接中」，这正是之前踩过的坑。
+    final port = await _openIrohTunnel(parsed.host).timeout(connectTimeout);
+    return _gatewayUri('http://127.0.0.1:$port', token);
   }
 
   Uri _gatewayUri(String endpoint, String token) {
