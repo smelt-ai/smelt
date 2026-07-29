@@ -256,6 +256,16 @@ impl AcpView {
         let auto_resume_pending = true;
         let initial_entry_count = entries.len();
         let rendered_images = decode_entry_images(&entries, 0);
+        let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
+        list_state.set_follow_mode(FollowMode::Tail);
+        let view = cx.entity().downgrade();
+        list_state.set_scroll_handler(move |_event, _window, cx| {
+            let view = view.clone();
+            // list 正在可变借用自己的状态，延后通知外层重新判断 sticky 提问。
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |_this, cx| cx.notify());
+            });
+        });
         Self {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
@@ -295,11 +305,7 @@ impl AcpView {
             expanded_tools: std::collections::HashSet::new(),
             expanded_tool_cards: std::collections::HashSet::new(),
             collapsed_tool_cards: std::collections::HashSet::new(),
-            list_state: {
-                let state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
-                state.set_follow_mode(FollowMode::Tail);
-                state
-            },
+            list_state,
             focus_handle: cx.focus_handle(),
             _input_sub: None,
         }
@@ -1410,6 +1416,74 @@ impl Render for AcpView {
 
         // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
         // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
+        let sticky_prompt = self
+            .entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(ix, entry)| {
+                is_user_entry(entry)
+                    && !matches!(entry, AcpEntry::User(text) if is_interrupt_marker(text))
+                    && self.list_state.item_is_above_viewport(*ix) == Some(true)
+            })
+            .map(|(ix, entry)| {
+                let summary = match entry {
+                    AcpEntry::User(text) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+                    AcpEntry::UserWithImages { text, images } => {
+                        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if text.is_empty() {
+                            format!("{} 张图片", images.len())
+                        } else {
+                            format!("{text} · {} 张图片", images.len())
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                h_flex()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .justify_center()
+                    .px_4()
+                    .child(
+                        h_flex()
+                            .id("acp-sticky-prompt")
+                            .w_full()
+                            .max_w(px(1040.))
+                            .h(px(38.))
+                            .px_3()
+                            .gap_2()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(t.border)
+                            .bg(gpui::rgb(ui_theme::bg_bar()))
+                            .cursor_pointer()
+                            .hover(|row| row.bg(ui_theme::overlay(0x18)))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(gpui::rgb(ui_theme::accent()))
+                                    .child("本轮提问"),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                                    .child(summary),
+                            )
+                            .child(div().flex_shrink_0().text_xs().text_color(muted).child("↑"))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.list_state.scroll_to_reveal_item(ix);
+                                cx.notify();
+                            })),
+                    )
+            });
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             view.update(app, |this, cx| {
@@ -1455,7 +1529,9 @@ impl Render for AcpView {
                                 .px_4()
                                 .py_2p5()
                                 .rounded_lg()
-                                .bg(t.muted)
+                                .border_1()
+                                .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
+                                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
                                 .text_sm()
                                 .child(smelt_ui::markdown_mermaid::markdown_view(
                                     ("acp-user-md", i),
@@ -1503,7 +1579,9 @@ impl Render for AcpView {
                                     .px_3()
                                     .py_3()
                                     .rounded_lg()
-                                    .bg(t.muted)
+                                    .border_1()
+                                    .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
+                                    .bg(ui_theme::tint(ui_theme::accent(), 0x14))
                                     .text_sm()
                                     .child(content.child(image_strip)),
                             )
@@ -1594,6 +1672,7 @@ impl Render for AcpView {
                             .w_full()
                             .min_w_0()
                             .text_sm()
+                            .text_color(t.foreground)
                             .child(smelt_ui::markdown_mermaid::markdown_view(
                                 ("acp-md", i),
                                 markdown_text_for_cwd(text, this.cwd.as_deref()),
@@ -1695,6 +1774,7 @@ impl Render for AcpView {
                             .rounded_md()
                             .border_1()
                             .border_color(t.border)
+                            .bg(t.muted)
                             .child(
                                 h_flex()
                                     .id(("acp-tool-card-toggle", i))
@@ -2465,8 +2545,7 @@ impl Render for AcpView {
                 .rounded_xl()
                 .border_1()
                 .border_color(t.border)
-                .bg(ui_theme::overlay(0x0c))
-                .shadow_sm()
+                .bg(t.background)
                 .child(
                     div()
                         .px_4()
@@ -2597,7 +2676,7 @@ impl Render for AcpView {
                 .w_full()
                 .border_t_1()
                 .border_color(t.border)
-                .bg(ui_theme::overlay(0x08))
+                .bg(gpui::rgb(ui_theme::bg_bar()))
                 .px_4()
                 .py_3()
                 .items_center()
@@ -2619,10 +2698,9 @@ impl Render for AcpView {
                 .py_2()
                 .border_t_1()
                 .border_color(t.border)
-                // GPUI 没有 CSS backdrop-filter；用高不透明主题底色 + 阴影形成
-                // 稳定的玻璃浮层观感，同时真正遮住下方滚动正文。
-                .bg(t.background.opacity(0.94))
-                .shadow_sm()
+                // 使用不透明主题表面遮住下方滚动正文；浅色模式不再叠黑色薄层和
+                // 阴影，避免状态条与 composer 变成一整块脏灰浮层。
+                .bg(gpui::rgb(ui_theme::bg_bar()))
                 .child(
                     h_flex()
                         .w_full()
@@ -2766,7 +2844,15 @@ impl Render for AcpView {
             .bg(t.background)
             .children(banner)
             .children(plan_bar)
-            .child(list)
+            .child(
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(list)
+                    .children(sticky_prompt),
+            )
             .children(activity_status)
             .children(permission)
             .children(elicitation)
