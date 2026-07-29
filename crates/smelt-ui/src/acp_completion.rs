@@ -32,8 +32,9 @@ pub enum Kind {
     Slash,
 }
 
-/// 候选数上限：菜单只有那么高，全量塞进去纯属浪费。
-const MAX_ITEMS: usize = 50;
+/// 候选数上限。补全是快速选择器，不是文件浏览器；结果太多只会增加噪音，
+/// 也会让键盘选中项滚出视野。
+const MAX_ITEMS: usize = 12;
 
 /// 光标前那段正在输入的补全 token。
 pub struct Trigger {
@@ -85,27 +86,65 @@ pub fn candidates(
 ) -> Vec<Candidate> {
     let needle = &trigger.needle;
     match trigger.kind {
-        Kind::Slash => commands
-            .iter()
-            .filter(|(name, _)| needle.is_empty() || name.to_lowercase().contains(needle))
-            .take(MAX_ITEMS)
-            .map(|(name, desc)| Candidate {
-                label: format!("/{name}"),
-                insert: format!("/{name} "),
-                hint: desc.clone(),
-            })
-            .collect(),
-        Kind::At => files
-            .iter()
-            .filter(|p| needle.is_empty() || p.to_lowercase().contains(needle))
-            .take(MAX_ITEMS)
-            .map(|p| Candidate {
-                label: format!("@{p}"),
-                insert: format!("@{p} "),
-                hint: String::new(),
-            })
-            .collect(),
+        Kind::Slash => {
+            let mut matches: Vec<_> = commands
+                .iter()
+                .filter(|(name, _)| needle.is_empty() || name.to_lowercase().contains(needle))
+                .collect();
+            matches.sort_by_key(|(name, _)| match_rank(name, needle));
+            matches
+                .into_iter()
+                .take(MAX_ITEMS)
+                .map(|(name, desc)| Candidate {
+                    label: format!("/{name}"),
+                    insert: format!("/{name} "),
+                    hint: desc.clone(),
+                })
+                .collect()
+        }
+        Kind::At => {
+            let mut matches: Vec<_> = files
+                .iter()
+                .filter(|p| needle.is_empty() || p.to_lowercase().contains(needle))
+                .collect();
+            matches.sort_by_key(|path| file_rank(path, needle));
+            matches
+                .into_iter()
+                .take(MAX_ITEMS)
+                .map(|p| Candidate {
+                    label: format!("@{p}"),
+                    insert: format!("@{p} "),
+                    hint: String::new(),
+                })
+                .collect()
+        }
     }
+}
+
+fn match_rank(value: &str, needle: &str) -> (u8, usize, String) {
+    let value = value.to_lowercase();
+    let position = value.find(needle).unwrap_or(usize::MAX);
+    let quality = if needle.is_empty() || value.starts_with(needle) {
+        0
+    } else if value
+        .split(['/', '-', '_', '.'])
+        .any(|part| part.starts_with(needle))
+    {
+        1
+    } else {
+        2
+    };
+    (quality, position, value)
+}
+
+fn file_rank(path: &str, needle: &str) -> (u8, u8, usize, usize, String) {
+    let hidden = path.split('/').any(|part| part.starts_with('.')) as u8;
+    let depth = path.matches('/').count();
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    let (quality, position, _) = match_rank(basename, needle);
+    // 有搜索词时文件名命中优先；空查询时先给顶层、非隐藏文件，避免 `.github`
+    // 霸占首屏。
+    (quality, hidden, position, depth, path.to_lowercase())
 }
 
 /// 列一个目录下的文件（相对路径）。优先 `git ls-files`：它天然尊重
@@ -231,5 +270,25 @@ mod tests {
         let out = candidates(&t, &files, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].insert, "@src/Main.rs ");
+    }
+
+    #[test]
+    fn empty_file_query_prefers_shallow_non_hidden_files() {
+        let files = vec![
+            ".github/workflows/ci.yml".to_string(),
+            "src/deep/module.rs".to_string(),
+            "Cargo.toml".to_string(),
+            "README.md".to_string(),
+        ];
+        let out = candidates(&detect_trigger("@").unwrap(), &files, &[]);
+        assert_eq!(out[0].label, "@Cargo.toml");
+        assert_eq!(out[1].label, "@README.md");
+    }
+
+    #[test]
+    fn file_name_prefix_beats_directory_match() {
+        let files = vec!["main/docs.txt".to_string(), "src/main.rs".to_string()];
+        let out = candidates(&detect_trigger("@main").unwrap(), &files, &[]);
+        assert_eq!(out[0].label, "@src/main.rs");
     }
 }

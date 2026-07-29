@@ -7266,6 +7266,7 @@ dependencies = [
  "smelt-core",
  "smelt-ui",
  "smol",
+ "url",
  "uuid",
 ]
 
