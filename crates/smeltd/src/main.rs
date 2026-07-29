@@ -4372,16 +4372,14 @@ fn apply_acp_user_action(
             let Some(cmd_tx) = cmd_tx else {
                 return Err("ACP session is not running");
             };
-            let img_count = images.len();
-            // 展示文案跟旧版 GUI `send_prompt` 一致：base64 图片体积大，历史里
-            // 只留「带了几张图」的标记。
-            let shown = match (text.is_empty(), img_count) {
-                (_, 0) => text.clone(),
-                (true, n) => format!("[{n} 张图片]"),
-                (false, n) => format!("{text}\n[{n} 张图片]"),
-            };
+            let shown_images = images.clone();
+            let shown_text = text.clone();
             if cmd_tx.try_send(AcpCommand::Prompt { text, images }).is_ok() {
-                smelt_core::acp_session::note_prompt_sent(&mut sess.reduced.lock().unwrap(), shown);
+                smelt_core::acp_session::note_prompt_sent(
+                    &mut sess.reduced.lock().unwrap(),
+                    shown_text,
+                    shown_images,
+                );
                 push_acp_snapshot(sess, false);
                 update_acp_daemon_state(sess, subscribers);
                 Ok(())

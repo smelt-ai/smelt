@@ -30,9 +30,8 @@ pub fn delivery_channel(
     enabled: bool,
     window_active: bool,
     is_current_view: bool,
-    requires_action: bool,
 ) -> DeliveryChannel {
-    if !enabled || (is_current_view && !requires_action) {
+    if !enabled || (window_active && is_current_view) {
         DeliveryChannel::Suppress
     } else if window_active {
         DeliveryChannel::Toast
@@ -379,25 +378,19 @@ mod tests {
     #[test]
     fn delivery_policy_covers_focus_background_and_settings() {
         assert_eq!(
-            delivery_channel(true, true, true, false),
+            delivery_channel(true, true, true),
             DeliveryChannel::Suppress
         );
         assert_eq!(
-            delivery_channel(false, true, false, true),
+            delivery_channel(false, true, false),
             DeliveryChannel::Suppress
         );
+        assert_eq!(delivery_channel(true, true, false), DeliveryChannel::Toast);
         assert_eq!(
-            delivery_channel(true, true, true, true),
-            DeliveryChannel::Toast
-        );
-        assert_eq!(
-            delivery_channel(true, true, false, false),
-            DeliveryChannel::Toast
-        );
-        assert_eq!(
-            delivery_channel(true, false, false, false),
+            delivery_channel(true, false, false),
             DeliveryChannel::System
         );
+        assert_eq!(delivery_channel(true, false, true), DeliveryChannel::System);
     }
 
     #[test]

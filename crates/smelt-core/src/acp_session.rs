@@ -455,6 +455,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
     if !matches!(
         ev,
         AcpEvent::UserChunk(_)
+            | AcpEvent::UserImage(_)
             | AcpEvent::Status(_)
             | AcpEvent::AvailableCommands(_)
             | AcpEvent::Usage { .. }
@@ -481,7 +482,28 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             } else {
                 match state.entries.last_mut() {
                     Some(AcpEntry::User(t)) => t.push_str(&text),
+                    Some(AcpEntry::UserWithImages { text: t, .. }) => t.push_str(&text),
                     _ => state.entries.push(AcpEntry::User(text)),
+                }
+            }
+        }
+        AcpEvent::UserImage(image) => {
+            if !state.awaiting_user_echo {
+                match state.entries.last_mut() {
+                    Some(AcpEntry::UserWithImages { images, .. }) => images.push(image),
+                    Some(AcpEntry::User(_)) => {
+                        let Some(AcpEntry::User(text)) = state.entries.pop() else {
+                            unreachable!();
+                        };
+                        state.entries.push(AcpEntry::UserWithImages {
+                            text,
+                            images: vec![image],
+                        });
+                    }
+                    _ => state.entries.push(AcpEntry::UserWithImages {
+                        text: String::new(),
+                        images: vec![image],
+                    }),
                 }
             }
         }
@@ -781,8 +803,18 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
 /// 用户发的一条 prompt（本地立即回显 + 打开等回声窗口），跟旧版 `send_prompt`
 /// 里非 I/O 的那部分对应（`h.cmd_tx.try_send` 由调用方在成功后自己做，因为
 /// 这个函数不持有 `AcpHandle`）。
-pub fn note_prompt_sent(state: &mut AcpSessionState, shown_text: String) {
-    state.entries.push(AcpEntry::User(shown_text));
+pub fn note_prompt_sent(
+    state: &mut AcpSessionState,
+    text: String,
+    images: Vec<crate::acp_chat::AcpImage>,
+) {
+    if images.is_empty() {
+        state.entries.push(AcpEntry::User(text));
+    } else {
+        state
+            .entries
+            .push(AcpEntry::UserWithImages { text, images });
+    }
     state.awaiting_user_echo = true;
     state.phase = AcpPhase::Running;
     state.completed_unread = false;
@@ -1007,7 +1039,7 @@ mod tests {
     #[test]
     fn user_echo_suppressed_once_after_prompt_sent() {
         let mut s = fresh_state();
-        note_prompt_sent(&mut s, "hi".into());
+        note_prompt_sent(&mut s, "hi".into(), Vec::new());
         assert!(s.awaiting_user_echo);
         // 回声窗口内收到 UserChunk：吞掉，不重复追加。
         apply_event(&mut s, AcpEvent::UserChunk("hi".into()));
@@ -1025,6 +1057,25 @@ mod tests {
         apply_event(&mut s, AcpEvent::UserChunk("old question".into()));
         assert_eq!(s.entries.len(), 3);
         assert!(matches!(&s.entries[2], AcpEntry::User(t) if t == "old question"));
+    }
+
+    #[test]
+    fn replayed_user_image_is_kept_with_its_text() {
+        let mut s = fresh_state();
+        apply_event(&mut s, AcpEvent::UserChunk("看这里".into()));
+        apply_event(
+            &mut s,
+            AcpEvent::UserImage(crate::acp_chat::AcpImage {
+                mime: "image/png".into(),
+                data_b64: "QUJD".into(),
+            }),
+        );
+
+        assert!(matches!(
+            &s.entries[..],
+            [AcpEntry::UserWithImages { text, images }]
+                if text == "看这里" && images.len() == 1
+        ));
     }
 
     #[test]
