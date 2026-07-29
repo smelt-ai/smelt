@@ -162,6 +162,8 @@ pub struct AcpView {
     collapsed_tool_cards: std::collections::HashSet<String>,
     /// 可变高度消息虚拟列表：只测量和构建视口附近的 Markdown/工具卡。
     list_state: ListState,
+    /// 用户是否已滚离消息尾部；由 ListScrollEvent 更新。
+    viewing_history: bool,
     /// 冷恢复占位待自动启动：GUI 重启后第一次切到这个会话时自动 restart，
     /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
     /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
@@ -259,11 +261,15 @@ impl AcpView {
         let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
         list_state.set_follow_mode(FollowMode::Tail);
         let view = cx.entity().downgrade();
-        list_state.set_scroll_handler(move |_event, _window, cx| {
+        list_state.set_scroll_handler(move |event, _window, cx| {
             let view = view.clone();
+            let viewing_history = event.is_scrolled && !event.is_following_tail;
             // list 正在可变借用自己的状态，延后通知外层重新判断 sticky 提问。
             cx.defer(move |cx| {
-                let _ = view.update(cx, |_this, cx| cx.notify());
+                let _ = view.update(cx, |this, cx| {
+                    this.viewing_history = viewing_history;
+                    cx.notify();
+                });
             });
         });
         Self {
@@ -306,6 +312,7 @@ impl AcpView {
             expanded_tool_cards: std::collections::HashSet::new(),
             collapsed_tool_cards: std::collections::HashSet::new(),
             list_state,
+            viewing_history: false,
             focus_handle: cx.focus_handle(),
             _input_sub: None,
         }
@@ -1484,6 +1491,42 @@ impl Render for AcpView {
                             })),
                     )
             });
+        let jump_to_latest = self.viewing_history.then(|| {
+            h_flex()
+                .absolute()
+                .bottom(px(14.))
+                .left_0()
+                .right_0()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .id("acp-jump-to-latest")
+                        .h(px(36.))
+                        .px_3()
+                        .gap_2()
+                        .items_center()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(gpui::rgb(ui_theme::bg_card()))
+                        .shadow_sm()
+                        .cursor_pointer()
+                        .hover(|button| button.bg(gpui::rgb(ui_theme::bg_hover())))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .child("回到最新"),
+                        )
+                        .child(div().text_sm().text_color(muted).child("↓"))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.viewing_history = false;
+                            this.list_state.set_follow_mode(FollowMode::Tail);
+                            cx.notify();
+                        })),
+                )
+        });
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             view.update(app, |this, cx| {
@@ -2851,7 +2894,8 @@ impl Render for AcpView {
                     .min_h_0()
                     .w_full()
                     .child(list)
-                    .children(sticky_prompt),
+                    .children(sticky_prompt)
+                    .children(jump_to_latest),
             )
             .children(activity_status)
             .children(permission)
