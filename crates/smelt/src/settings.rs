@@ -865,6 +865,10 @@ pub struct RemoteConfig {
     /// 跨网主路径：WebRTC + 自营信令（docs/webrtc-edge.md）。
     #[serde(default)]
     pub webrtc_enabled: bool,
+    /// iroh P2P 隧道（见 smeltd.rs「iroh 隧道」）。与 WebRTC/Cloudflare 的区别是
+    /// 配对码由落盘私钥决定、**重启不变**，扫一次能长期用。
+    #[serde(default)]
+    pub iroh_enabled: bool,
     /// 公网信令 HTTP 根（SPA 同域），如 `https://signal.example.com`。
     /// **无内置默认域名**——须用户在设置里填写自己部署的 smelt-signal。
     #[serde(default)]
@@ -883,6 +887,7 @@ impl Default for RemoteConfig {
             enabled: false,
             tunnel_enabled: false,
             webrtc_enabled: false,
+            iroh_enabled: false,
             signal_http: String::new(),
             write_enabled: false,
         }
@@ -1012,6 +1017,117 @@ fn spawn_tunnel_start(write: bool, cx: &mut App) {
     .detach();
 }
 
+// ===================== iroh P2P 隧道（见 smeltd.rs「iroh 隧道」） =====================
+
+/// iroh 隧道运行时（不落盘）：配对 URI + 二维码 PNG。
+///
+/// 跟 `TunnelRuntimeState` 存 URL 不同，这里存的是 `smelt+iroh://` 配对 URI。
+/// 它由 `endpoint_id`（重启不变）+ token 组成，所以只有换过 token（重开网关）
+/// 才需要重新扫码。
+#[derive(Clone, Default)]
+pub struct IrohRuntimeState {
+    pub connecting: bool,
+    pub pairing_uri: Option<String>,
+    pub qr_png: Option<Vec<u8>>,
+    pub error: Option<String>,
+    pub write: bool,
+}
+
+impl Global for IrohRuntimeState {}
+
+/// 异步拉起 iroh 隧道。绑定要联网找中继，可能耗时数秒，**必须**走后台。
+fn spawn_iroh_start(write: bool, cx: &mut App) {
+    cx.set_global(IrohRuntimeState {
+        connecting: true,
+        ..Default::default()
+    });
+    cx.spawn(async move |cx| {
+        let (result, remote, qr_png) = cx
+            .background_executor()
+            .spawn(async move {
+                let result = terminal::iroh_start(write);
+                // iroh_start 可能顺带把网关也开了（守护侧的 ensure_remote_gateway），
+                // 所以要回读一次网关现状，否则 UI 上「本机链接」那块会一直是空的。
+                let remote = terminal::remote_status();
+                // 二维码在后台线程算好再交给 UI：绝不在 UI 线程现算 QR。
+                let qr_png = match &result {
+                    Ok(s) => match (s.endpoint_id.as_deref(), s.token.as_deref()) {
+                        (Some(id), Some(tok)) if !tok.is_empty() => {
+                            qr_png_for_url(&smelt_core::pairing::iroh_pairing_uri(id, tok))
+                        }
+                        _ => None,
+                    },
+                    Err(_) => None,
+                };
+                (result, remote, qr_png)
+            })
+            .await;
+        let _ = cx.update(|cx| {
+            if remote.running {
+                cx.set_global(RemoteRuntimeState {
+                    token: remote.token.clone(),
+                    addr: remote.addr.clone(),
+                    write: remote.write,
+                    error: None,
+                });
+            }
+            let rt = match result {
+                Ok(s) => {
+                    let uri = match (s.endpoint_id.as_deref(), s.token.as_deref()) {
+                        (Some(id), Some(tok)) if !tok.is_empty() => {
+                            Some(smelt_core::pairing::iroh_pairing_uri(id, tok))
+                        }
+                        _ => None,
+                    };
+                    match uri {
+                        Some(uri) => IrohRuntimeState {
+                            connecting: false,
+                            pairing_uri: Some(uri),
+                            qr_png,
+                            error: None,
+                            write: s.write,
+                        },
+                        // 隧道起来了但 token 没拿到：配对码缺一半，给不出可用的码。
+                        None => IrohRuntimeState {
+                            connecting: false,
+                            error: Some("P2P 通道已建立，但分享密钥还没就绪，点重试即可".into()),
+                            ..Default::default()
+                        },
+                    }
+                }
+                Err(e) => IrohRuntimeState {
+                    connecting: false,
+                    error: Some(e),
+                    ..Default::default()
+                },
+            };
+            cx.set_global(rt);
+        });
+    })
+    .detach();
+}
+
+/// 开关「P2P 直连（iroh）」：只改配置 + 异步拉隧道，不在 UI 线程阻塞。
+pub fn apply_iroh_toggle(enabled: bool, cx: &mut App) {
+    let mut c = cx.global::<RemoteConfig>().clone();
+    c.iroh_enabled = enabled;
+    if enabled {
+        // 隧道要转发给本机网关，顺手把「远程」总开关也打开，跟 tunnel 一致。
+        c.enabled = true;
+    }
+    let write = c.write_enabled;
+    save_remote_config(&c);
+    cx.set_global(c);
+
+    if enabled {
+        spawn_iroh_start(write, cx);
+    } else {
+        terminal::iroh_stop();
+        cx.set_global(IrohRuntimeState::default());
+    }
+    cx.refresh_windows();
+}
+
 /// 总开关：开启远程。关掉时自动拆掉隧道 / WebRTC 桥，用户不必先关外网再关远程。
 pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
     if enabled {
@@ -1019,6 +1135,7 @@ pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
         let write = c.write_enabled;
         let want_tunnel = c.tunnel_enabled;
         let want_webrtc = c.webrtc_enabled;
+        let want_iroh = c.iroh_enabled;
         set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = true;
@@ -1031,19 +1148,27 @@ pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
         if want_webrtc {
             spawn_webrtc_start(cx);
         }
+        if want_iroh {
+            spawn_iroh_start(write, cx);
+        }
     } else {
         stop_webrtc_bridge(cx);
         terminal::tunnel_stop();
+        // iroh 要赶在网关之前停，理由同 smeltd 的 cleanup：反过来正在转发的流
+        // 会撞上已死端口，手机侧看到的是连接被拒而非干净关闭。
+        terminal::iroh_stop();
         terminal::remote_stop();
         cx.set_global(TunnelRuntimeState::default());
         cx.set_global(RemoteRuntimeState::default());
         cx.set_global(WebrtcRuntimeState::default());
+        cx.set_global(IrohRuntimeState::default());
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = false;
         // 总开关关掉 = 停止分享。外网开关一并熄灭，避免「远程关了但手机访问还亮着」
         // 的误解；写入偏好保留，下次再开远程仍按原权限。
         c.tunnel_enabled = false;
         c.webrtc_enabled = false;
+        c.iroh_enabled = false;
         save_remote_config(&c);
         cx.set_global(c);
     }
@@ -1337,6 +1462,13 @@ pub fn apply_webrtc_toggle(enabled: bool, cx: &mut App) {
 /// 供 main 启动恢复调用（网关 hydrate 之后）。
 pub fn spawn_webrtc_start_public(cx: &mut App) {
     spawn_webrtc_start(cx);
+}
+
+/// 供 main 启动恢复调用：必须等网关 token 就绪之后再调，否则拼出来的配对码
+/// 缺 token 那一半。
+pub fn spawn_iroh_start_public(cx: &mut App) {
+    let write = cx.global::<RemoteConfig>().write_enabled;
+    spawn_iroh_start(write, cx);
 }
 
 /// 供 main 的 on_app_quit 钩子调用：App 直接 Cmd+Q 退出（没有先手动关开关）时，
@@ -1756,14 +1888,18 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
         return;
     }
 
-    // 可同时开 WebRTC + CF：两边都要跟着换 token，不能 if/else 只走一路
-    let need_restart = c.webrtc_enabled || c.tunnel_enabled;
+    // 可同时开 WebRTC + CF + iroh：每条都要跟着换 token，不能 if/else 只走一路。
+    // iroh 也必须重来一遍：endpoint_id 不变，但配对码里的 token 那一半会失效。
+    let need_restart = c.webrtc_enabled || c.tunnel_enabled || c.iroh_enabled;
     if need_restart {
         if c.webrtc_enabled {
             stop_webrtc_bridge(cx);
         }
         if c.tunnel_enabled {
             terminal::tunnel_stop();
+        }
+        if c.iroh_enabled {
+            terminal::iroh_stop();
         }
         terminal::remote_stop();
         set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
@@ -1772,6 +1908,9 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
         }
         if c.webrtc_enabled {
             spawn_webrtc_start(cx);
+        }
+        if c.iroh_enabled {
+            spawn_iroh_start(enabled, cx);
         }
     } else {
         terminal::remote_stop();
@@ -1784,11 +1923,11 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
 /// 重启，不能 if/else 只走一路（否则另一路仍挂旧 token/端口）。
 pub fn retry_remote_setup(cx: &mut App) {
     let mut c = cx.global::<RemoteConfig>().clone();
-    if !c.enabled && !c.tunnel_enabled && !c.webrtc_enabled {
+    if !c.enabled && !c.tunnel_enabled && !c.webrtc_enabled && !c.iroh_enabled {
         return;
     }
     // 外网通道开着时确保总开关也开着（依赖由这里消化）
-    if c.tunnel_enabled || c.webrtc_enabled {
+    if c.tunnel_enabled || c.webrtc_enabled || c.iroh_enabled {
         c.enabled = true;
         save_remote_config(&c);
         cx.set_global(c.clone());
@@ -1801,7 +1940,10 @@ pub fn retry_remote_setup(cx: &mut App) {
     if c.tunnel_enabled {
         terminal::tunnel_stop();
     }
-    // 网关先停再起，让 token/端口与两条外网通道对齐
+    if c.iroh_enabled {
+        terminal::iroh_stop();
+    }
+    // 网关先停再起，让 token/端口与几条外网通道对齐
     terminal::remote_stop();
     set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
     if c.tunnel_enabled {
@@ -1809,6 +1951,9 @@ pub fn retry_remote_setup(cx: &mut App) {
     }
     if c.webrtc_enabled {
         spawn_webrtc_start(cx);
+    }
+    if c.iroh_enabled {
+        spawn_iroh_start(write, cx);
     }
 }
 
@@ -3696,6 +3841,18 @@ impl Workspace {
                     }
                 }),
                 SettingItem::new(
+                    "P2P 直连（iroh）",
+                    SettingField::switch(
+                        |cx: &App| cx.global::<RemoteConfig>().iroh_enabled,
+                        |v: bool, cx: &mut App| apply_iroh_toggle(v, cx),
+                    ),
+                )
+                .description(
+                    "配对码重启不变，扫一次长期有效——不像下面两条每次重开都要重扫。\
+                     优先打洞直连，打不通自动走中继；不需要信令服务器或 cloudflared。\
+                     需要手机 app 支持（网页端仍走 WebRTC）。",
+                ),
+                SettingItem::new(
                     "跨网（WebRTC）",
                     SettingField::switch(
                         |cx: &App| cx.global::<RemoteConfig>().webrtc_enabled,
@@ -3767,7 +3924,7 @@ impl Workspace {
                     "链接持有者可在手机上输入、批准/拒绝权限。分享即授权。\
                      切换后会自动换一条新链接（旧链接失效）。",
                 ),
-                // 分享卡片：WebRTC 优先 → CF → 本机；复制 + 二维码
+                // 分享卡片：iroh 优先 → WebRTC → CF → 本机；复制 + 二维码
                 SettingItem::render(move |_, _, cx: &mut App| {
                     let cfg = cx.global::<RemoteConfig>().clone();
                     let remote = cx.global::<RemoteRuntimeState>().clone();
@@ -3776,15 +3933,28 @@ impl Workspace {
                         .try_global::<WebrtcRuntimeState>()
                         .cloned()
                         .unwrap_or_default();
+                    let iroh = cx
+                        .try_global::<IrohRuntimeState>()
+                        .cloned()
+                        .unwrap_or_default();
                     let danger = cx.theme().danger;
                     let muted = cx.theme().muted_foreground;
                     let fg = cx.theme().foreground;
 
-                    if !cfg.enabled && !cfg.tunnel_enabled && !cfg.webrtc_enabled {
+                    if !cfg.enabled && !cfg.tunnel_enabled && !cfg.webrtc_enabled && !cfg.iroh_enabled
+                    {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("打开「开启远程」或「跨网（WebRTC）」后，这里出现分享链接与二维码。");
+                            .child("打开「开启远程」或「P2P 直连（iroh）」后，这里出现分享链接与二维码。");
+                    }
+
+                    // iroh 准备中（绑定要联网找中继）
+                    if cfg.iroh_enabled && iroh.connecting {
+                        return div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("正在建立 P2P 通道…（找中继 + 打洞）");
                     }
 
                     // WebRTC 准备中
@@ -3798,6 +3968,7 @@ impl Workspace {
                     let preparing = tunnel.connecting
                         || (cfg.enabled
                             && !cfg.webrtc_enabled
+                            && !cfg.iroh_enabled
                             && remote.error.is_none()
                             && !remote.token.as_ref().is_some_and(|t| !t.is_empty()));
 
@@ -3810,9 +3981,10 @@ impl Workspace {
                         return div().text_xs().text_color(muted).child(msg);
                     }
 
-                    if let Some(err) = webrtc
+                    if let Some(err) = iroh
                         .error
                         .as_ref()
+                        .or(webrtc.error.as_ref())
                         .or(remote.error.as_ref())
                         .or(tunnel.error.as_ref())
                     {
@@ -3872,7 +4044,9 @@ impl Workspace {
                         return box_;
                     }
 
-                    // 主链接优先级：WebRTC → CF → 本机
+                    // 主链接优先级：iroh → WebRTC → CF → 本机。
+                    // iroh 排第一是因为它的配对码重启不变，其余几条每次重开都要重扫。
+                    let iroh_uri = iroh.pairing_uri.clone().filter(|_| cfg.iroh_enabled);
                     let webrtc_url = webrtc
                         .share_url
                         .clone()
@@ -3888,8 +4062,9 @@ impl Workspace {
                         .as_ref()
                         .and_then(|a| token.as_ref().map(|t| format!("http://{a}/?token={t}")));
 
-                    let primary = webrtc_url
+                    let primary = iroh_uri
                         .clone()
+                        .or_else(|| webrtc_url.clone())
                         .or_else(|| public.clone())
                         .or_else(|| local.clone());
 
@@ -3910,7 +4085,12 @@ impl Workspace {
                             );
                     };
 
-                    let (scope, mode) = if webrtc_url.is_some() {
+                    let (scope, mode) = if iroh_uri.is_some() {
+                        (
+                            "P2P 直连 iroh（配对码长期有效）",
+                            if iroh.write { "可写入" } else { "只读" },
+                        )
+                    } else if webrtc_url.is_some() {
                         (
                             "跨网 WebRTC（手机扫码 / 蜂窝可用）",
                             if remote.write {
@@ -3938,7 +4118,9 @@ impl Workspace {
                     // 仅展示后台预生成的 RGB 二维码（绝不在 UI 线程现算 QR）。
                     // 本机 loopback 链接故意不出二维码：`http://127.0.0.1:port`
                     // 扫到手机上指向的是手机自己，扫了也连不上。
-                    let qr_png = if webrtc_url.is_some() {
+                    let qr_png = if iroh_uri.is_some() {
+                        iroh.qr_png.clone()
+                    } else if webrtc_url.is_some() {
                         webrtc.qr_png.clone()
                     } else if public.is_some() {
                         tunnel.qr_png.clone()
@@ -4165,6 +4347,34 @@ impl Workspace {
                 .expect("打开设置窗口失败");
             cx.set_global(SettingsWindowHandle(Some(handle)));
         });
+    }
+}
+
+#[cfg(test)]
+mod iroh_pairing_tests {
+    use super::{RemoteConfig, qr_png_for_url};
+    use smelt_core::pairing::iroh_pairing_uri;
+
+    #[test]
+    fn old_config_without_iroh_field_still_loads() {
+        // 线上已有的 collab.json 没有 iroh_enabled 这个键。少了 serde(default)
+        // 会让整份配置解析失败、静默回退成全默认（远程被关掉），用户会以为设置丢了。
+        let json = r#"{"enabled":true,"tunnel_enabled":false,"webrtc_enabled":true,
+                       "signal_http":"https://s.example.com","write_enabled":true}"#;
+        let c: RemoteConfig = serde_json::from_str(json).expect("旧配置必须还能解析");
+        assert!(c.enabled);
+        assert!(c.write_enabled);
+        assert!(!c.iroh_enabled, "旧配置缺省应按关闭处理");
+    }
+
+    #[test]
+    fn pairing_uri_renders_to_a_qr() {
+        // 配对码比 http 链接长（endpoint_id 是 64 个十六进制字符），
+        // 这里钉住「它确实能编成二维码」——超长内容会让 QrCode::new 失败。
+        let uri = iroh_pairing_uri(&"a".repeat(64), &"b".repeat(32));
+        let png = qr_png_for_url(&uri).expect("配对码必须能生成二维码");
+        assert!(!png.is_empty());
+        assert_eq!(&png[1..4], b"PNG", "应当是 PNG 字节流");
     }
 }
 

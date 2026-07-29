@@ -20,6 +20,7 @@ pub mod font_config;
 pub mod json_store;
 pub mod login_env;
 pub mod osc;
+pub mod pairing;
 pub mod remote_gateway;
 pub mod term_text;
 pub mod title_spinner;
