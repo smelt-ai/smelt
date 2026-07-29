@@ -198,6 +198,12 @@ pub struct AcpSnapshot {
     pub plan: Option<PlanView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
+    /// 当前回合开始的 Unix 毫秒时间戳；None = 当前没有运行中的回合。
+    #[serde(default)]
+    pub turn_started_at_ms: Option<u64>,
+    /// 最近完成回合的耗时。开始下一轮时清空。
+    #[serde(default)]
+    pub last_turn_duration_ms: Option<u64>,
     /// 回合结束且没人看过 → 「有结果可看」绿点，跟旧版 `completed_unread` 同一
     /// 语义，只是现在从服务端算，客户端不用自己维护。
     pub completed_unread: bool,
@@ -259,6 +265,8 @@ pub struct AcpSessionState {
     pub plan: Option<PlanView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
+    pub turn_started_at_ms: Option<u64>,
+    pub last_turn_duration_ms: Option<u64>,
 }
 
 impl Default for AcpSessionState {
@@ -279,6 +287,8 @@ impl Default for AcpSessionState {
             plan: None,
             model: None,
             config_options: Vec::new(),
+            turn_started_at_ms: None,
+            last_turn_duration_ms: None,
         }
     }
 }
@@ -324,6 +334,8 @@ impl AcpSessionState {
             plan: snap.plan,
             model: snap.model,
             config_options: snap.config_options,
+            turn_started_at_ms: snap.turn_started_at_ms,
+            last_turn_duration_ms: snap.last_turn_duration_ms,
         }
     }
 
@@ -381,6 +393,8 @@ impl AcpSessionState {
             plan: self.plan.clone(),
             model: self.model.clone(),
             config_options: self.config_options.clone(),
+            turn_started_at_ms: self.turn_started_at_ms,
+            last_turn_duration_ms: self.last_turn_duration_ms,
             completed_unread: self.completed_unread,
             should_persist,
         }
@@ -655,6 +669,10 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.elicitation = None;
             state.phase = AcpPhase::Idle;
             state.completed_unread = true;
+            state.last_turn_duration_ms = state
+                .turn_started_at_ms
+                .take()
+                .map(|started| unix_time_ms().saturating_sub(started));
             let _ = reason;
         }
         AcpEvent::Fatal(msg) => {
@@ -768,6 +786,16 @@ pub fn note_prompt_sent(state: &mut AcpSessionState, shown_text: String) {
     state.awaiting_user_echo = true;
     state.phase = AcpPhase::Running;
     state.completed_unread = false;
+    state.turn_started_at_ms = Some(unix_time_ms());
+    state.last_turn_duration_ms = None;
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 /// 权限审批：按工具调用与 option id 精确定位。批准一项只移除对应卡片，其余
