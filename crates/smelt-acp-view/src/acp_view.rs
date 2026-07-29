@@ -10,9 +10,10 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode,
-    InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, list as virtual_list, px,
+    Animation, AnimationExt, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list as virtual_list,
+    px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -2611,6 +2612,8 @@ impl Render for AcpView {
                 .map(|started| unix_time_ms().saturating_sub(started));
             h_flex()
                 .w_full()
+                .relative()
+                .overflow_hidden()
                 .justify_center()
                 .px_4()
                 .py_2()
@@ -2633,15 +2636,47 @@ impl Render for AcpView {
                                 .child(format!("进行中 · 已用 {}", format_duration(elapsed)))
                         }))
                         .when(show_thinking, |row| {
-                            row.child(div().w(px(1.)).h_3().bg(t.border))
-                                .child(Spinner::new().xsmall().color(muted))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(format!("{} 正在思考…", self.agent.short_label())),
-                                )
+                            row.child(div().w(px(1.)).h_3().bg(t.border)).child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Spinner::new().xsmall().color(muted))
+                                    .child(
+                                        div().text_sm().text_color(muted).child(format!(
+                                            "{} 正在思考…",
+                                            self.agent.short_label()
+                                        )),
+                                    )
+                                    .with_animation(
+                                        "acp-thinking-breathe",
+                                        Animation::new(std::time::Duration::from_millis(1800))
+                                            .repeat(),
+                                        |this, delta| {
+                                            let wave =
+                                                (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                            this.opacity(0.68 + wave * 0.28)
+                                        },
+                                    ),
+                            )
                         }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .h(px(1.5))
+                        .w(gpui::relative(0.3))
+                        .rounded_full()
+                        .bg(gpui::rgb(ui_theme::accent()))
+                        .with_animation(
+                            "acp-activity-sweep",
+                            Animation::new(std::time::Duration::from_millis(2400)).repeat(),
+                            |this, delta| {
+                                let fade = (delta * std::f32::consts::PI).sin().max(0.0);
+                                this.left(gpui::relative(delta * 1.3 - 0.3))
+                                    .opacity(0.16 + fade * 0.5)
+                            },
+                        ),
                 )
         });
 
@@ -2819,10 +2854,10 @@ fn is_user_entry(entry: &AcpEntry) -> bool {
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 
-/// 整个工具卡片的默认展开策略：已完成的工具收起，正在跑、失败、待审批的工具展开。
+/// 工具卡片首次出现一律折叠，避免运行过程中的大量输出撑高消息流。
 /// 用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards` 覆盖这个默认值。
-fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bool) -> bool {
-    has_pending_permission || !matches!(status, ToolCallStatus::Completed)
+fn tool_card_default_expanded(_status: ToolCallStatus, _has_pending_permission: bool) -> bool {
+    false
 }
 
 /// 一轮里最后一段非思考正文才是最终回答。工具调用和思考可以夹在正文之间，
@@ -3257,18 +3292,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_card_defaults_keep_active_or_attention_states_expanded() {
+    fn tool_cards_are_collapsed_by_default_for_every_state() {
         assert!(!tool_card_default_expanded(
             ToolCallStatus::Completed,
             false
         ));
-        assert!(tool_card_default_expanded(ToolCallStatus::Completed, true));
-        assert!(tool_card_default_expanded(ToolCallStatus::Pending, false));
-        assert!(tool_card_default_expanded(
+        assert!(!tool_card_default_expanded(ToolCallStatus::Completed, true));
+        assert!(!tool_card_default_expanded(ToolCallStatus::Pending, false));
+        assert!(!tool_card_default_expanded(
             ToolCallStatus::InProgress,
             false
         ));
-        assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
+        assert!(!tool_card_default_expanded(ToolCallStatus::Failed, false));
     }
 
     #[test]
