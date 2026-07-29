@@ -13,9 +13,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use tokio::io::AsyncWriteExt as _;
-use tokio::net::TcpStream;
-use tracing::{info, warn};
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 fn parse_args() -> Result<(SocketAddr, Option<String>)> {
@@ -58,63 +56,10 @@ async fn main() -> Result<()> {
     println!("EndpointId（配对码，重启不变）：{}", endpoint.id());
     println!("转发到本机网关：{gateway}");
 
-    while let Some(incoming) = endpoint.accept().await {
-        tokio::spawn(async move {
-            if let Err(e) = serve(incoming, gateway).await {
-                warn!("连接处理失败：{e:#}");
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn serve(incoming: iroh::endpoint::Incoming, gateway: SocketAddr) -> Result<()> {
-    let conn = incoming.await.context("握手失败")?;
-    let remote = conn.remote_id();
-    info!(%remote, "已接受连接");
-
-    // 一条连接可以开多条流（手机上多个会话各占一条），每条流独立转发。
-    loop {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(pair) => pair,
-            // 对端正常关闭时 accept_bi 会返回错误，这里不算异常。
-            Err(e) => {
-                info!(%remote, "连接结束：{e}");
-                return Ok(());
-            }
-        };
-        tokio::spawn(async move {
-            if let Err(e) = pump(send, recv, gateway).await {
-                warn!("流转发失败：{e:#}");
-            }
-        });
-    }
-}
-
-async fn pump(
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
-    gateway: SocketAddr,
-) -> Result<()> {
-    let tcp = TcpStream::connect(gateway)
-        .await
-        .with_context(|| format!("连不上本机网关 {gateway}"))?;
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
-
-    let up = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await?;
-        tcp_write.shutdown().await
-    };
-    let down = async {
-        tokio::io::copy(&mut tcp_read, &mut send).await?;
-        send.finish().map_err(std::io::Error::other)
-    };
-
-    // 任一方向结束就收摊：HTTP/WS 半关闭的语义交给网关和客户端自己处理，
-    // 隧道这层只保证不泄漏 task。
-    tokio::select! {
-        r = up => r?,
-        r = down => r?,
-    }
+    // Ctrl-C 收摊：让 endpoint 有机会跟对端道别，而不是被硬杀。
+    smelt_iroh::serve_tunnel(endpoint, gateway, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await;
     Ok(())
 }

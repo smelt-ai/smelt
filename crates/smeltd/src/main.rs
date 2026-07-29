@@ -37,6 +37,12 @@
 //!                                                              （见下「Cloudflare Tunnel」）
 //!   {"op":"tunnel_stop"}                                     → 回 {"ok":true} 后关闭
 //!   {"op":"tunnel_status"}                                   → 回 {"running":bool,"url":"..","write":bool} 后关闭
+//!   {"op":"iroh_start","write":false}                         → 回 {"ok":true,"endpoint_id":"..","token":"..",
+//!                                                              "addr":"..","write":bool}，把远程网关经 iroh
+//!                                                              P2P 暴露出去（见下「iroh 隧道」）
+//!   {"op":"iroh_stop"}                                       → 回 {"ok":true} 后关闭
+//!   {"op":"iroh_status"}                                     → 回 {"running":bool,"endpoint_id":"..","token":"..",
+//!                                                              "write":bool} 后关闭
 //!   {"op":"state","id":"..","phase":"..","question":".."}    → 回 {"ok":true} 后关闭，hook 直写（见下
 //!                                                              「状态通道」），question 可省
 //!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，v1 归一化
@@ -103,6 +109,23 @@
 //! `upgrade` 之后如果之前开着远程网关，会随旧进程退出而关闭，新进程里默认是关的
 //! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
 //! 默认关闭、绑回环，见 collaboration.md 的安全底线。
+//!
+//! ## iroh 隧道（`iroh_start`/`iroh_stop`/`iroh_status`）
+//!
+//! 跟 Cloudflare Tunnel 解决同一个问题（手机在外网连不上回环网关），但换了条路：
+//! iroh 优先打洞直连、打不通才走中继，而 cloudflared 是全程第三方中转。
+//!
+//! 真正的差别在**配对码的寿命**：quick tunnel 的 URL 每次重开都变，手机上存的配对
+//! 必然失效；iroh 的 `endpoint_id` 由 `~/.smelt/iroh-secret` 里的私钥决定，重启不变，
+//! 于是二维码可以一次扫、长期用。这是加这条路的主要理由。
+//!
+//! 实现上比 tunnel 简单：没有子进程，因此没有孤儿进程和日志扒 URL 那套；跟远程网关
+//! 一样另起一条 OS 线程跑自己的 tokio runtime。转发逻辑在 `smelt-iroh` crate，与命令行
+//! 版 `smelt-iroh-host` 共用一份（一条 iroh 双向流 ⟷ 一条到网关的 TCP 连接，逐字节转发，
+//! 上层 HTTP/WebSocket/token 鉴权完全不变）。
+//!
+//! 注意 `endpoint_id` **不是**授权凭证：拿到它的人只是能连上网关，能不能操作仍由网关的
+//! token 决定，所以配对码必须 endpoint_id + token 一起给。
 //!
 //! ## Cloudflare Tunnel（`tunnel_start`/`tunnel_stop`/`tunnel_status`）
 //!
@@ -923,6 +946,112 @@ fn stop_remote_gateway(state: &RemoteState) {
     }
 }
 
+/// iroh 隧道（见 `crates/smelt-iroh`）：把本机远程网关经 P2P 暴露出去。
+///
+/// 跟 Cloudflare 隧道的关键差别 —— 也是加这条路的理由：
+/// 1. `endpoint_id` 由落盘私钥决定，**重启不变**，配对二维码可以永久有效；
+///    quick tunnel 的 URL 每次重开都换，手机上存的配对必然失效。
+/// 2. 优先打洞直连，打不通才走中继，不是全程第三方中转。
+/// 3. 没有子进程，因此不像 cloudflared 那样有孤儿进程风险。
+///
+/// 私钥落在 `~/.smelt/iroh-secret`，与命令行 `smelt-iroh-host` 共用同一把，
+/// 这样两种起法给出的配对码是同一个。
+struct IrohTunnel {
+    endpoint_id: String,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+type IrohState = Arc<Mutex<Option<IrohTunnel>>>;
+
+/// 幂等：已经开着直接回现有 endpoint_id。会先确保远程网关按 `write` 开着
+/// （隧道要转发给它），语义与 `start_tunnel` 一致。
+///
+/// 与网关同样「先等就绪再写 state」：iroh 绑定要联网发现中继，失败率不低，
+/// 抢先标 running 会让幂等路径永远回一个连不上的 endpoint_id。
+fn start_iroh(
+    iroh_state: &IrohState,
+    remote_state: &RemoteState,
+    write: bool,
+) -> Result<(String, String, std::net::SocketAddr, bool), String> {
+    if let Some(t) = iroh_state.lock().unwrap().as_ref() {
+        let (token, addr, effective_write) = {
+            let guard = remote_state.lock().unwrap();
+            match guard.as_ref() {
+                Some(g) => (g.token.clone(), g.addr, g.write),
+                // 网关被单独停掉了：报错而不是回一个通往虚空的配对码。
+                None => return Err("iroh 隧道开着但本机网关已停，请先 iroh_stop".into()),
+            }
+        };
+        return Ok((t.endpoint_id.clone(), token, addr, effective_write));
+    }
+
+    let (token, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = ready_tx.send(Err(format!("iroh 起不了 tokio runtime：{e}")));
+                return;
+            }
+        };
+        rt.block_on(async move {
+            let secret = match smelt_iroh::default_secret_path()
+                .and_then(|p| smelt_iroh::load_or_create_secret(&p))
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("iroh 密钥不可用：{e:#}")));
+                    return;
+                }
+            };
+            let endpoint =
+                match smelt_iroh::bind_endpoint(secret, vec![smelt_iroh::ALPN.to_vec()]).await {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(format!("iroh 绑定失败：{e:#}")));
+                        return;
+                    }
+                };
+            let _ = ready_tx.send(Ok(endpoint.id().to_string()));
+            smelt_iroh::serve_tunnel(endpoint, addr, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+        });
+    });
+
+    // 30s：绑定要联网找中继，比本地绑端口慢得多，5s 在弱网下会误判失败。
+    match ready_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(endpoint_id)) => {
+            *iroh_state.lock().unwrap() = Some(IrohTunnel {
+                endpoint_id: endpoint_id.clone(),
+                shutdown_tx,
+            });
+            Ok((endpoint_id, token, addr, effective_write))
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("iroh 隧道启动超时（30s）".into()),
+    }
+}
+
+fn stop_iroh(state: &IrohState) {
+    if let Some(t) = state.lock().unwrap().take() {
+        let _ = t.shutdown_tx.send(());
+    }
+}
+
+fn iroh_status(state: &IrohState) -> Option<String> {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|t| t.endpoint_id.clone())
+}
+
 /// Cloudflare Tunnel（Phase 3，见 docs/remote-ops-roadmap.md）：spawn `cloudflared`
 /// 子进程把本机远程网关暴露到公网，不是 P2P，是走 Cloudflare 中转——见 roadmap 里
 /// 放弃自建信令+WebRTC 的理由。持有子进程句柄，`tunnel_stop` 时负责杀干净。
@@ -941,17 +1070,21 @@ type TunnelState = Arc<Mutex<Option<TunnelSlot>>>;
 
 /// 进程退出 / upgrade exec 前清理远程网关与 tunnel。菜单栏 quit 与 accept 线程
 /// 不同线程，靠这份 OnceLock 共享 Arc（main 启动时 register）。
-static LIFECYCLE: std::sync::OnceLock<(RemoteState, TunnelState)> = std::sync::OnceLock::new();
+static LIFECYCLE: std::sync::OnceLock<(RemoteState, TunnelState, IrohState)> =
+    std::sync::OnceLock::new();
 
-fn register_lifecycle(remote: RemoteState, tunnel: TunnelState) {
-    let _ = LIFECYCLE.set((remote, tunnel));
+fn register_lifecycle(remote: RemoteState, tunnel: TunnelState, iroh: IrohState) {
+    let _ = LIFECYCLE.set((remote, tunnel, iroh));
 }
 
-/// 杀 cloudflared、关内嵌网关。exit/exec 前必须调——否则子进程孤儿化或
+/// 杀 cloudflared、关内嵌网关与 iroh 隧道。exit/exec 前必须调——否则子进程孤儿化或
 /// exec 后 PID 仍在但 `TunnelState` 已丢句柄。
 fn cleanup_sidecar_services() {
-    if let Some((remote, tunnel)) = LIFECYCLE.get() {
+    if let Some((remote, tunnel, iroh)) = LIFECYCLE.get() {
         stop_tunnel(tunnel);
+        // iroh 要赶在网关之前停：反过来的话，正在转发的流会先撞上一个已经死掉的
+        // 网关端口，手机侧看到的是连接被拒而不是干净的隧道关闭。
+        stop_iroh(iroh);
         stop_remote_gateway(remote);
     }
 }
@@ -1593,10 +1726,15 @@ fn main() {
     // 见 RemoteGateway / Tunnel 定义处注释。
     let remote_state: RemoteState = Arc::new(Mutex::new(None));
     let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+    let iroh_state: IrohState = Arc::new(Mutex::new(None));
     // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
     // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
-    register_lifecycle(Arc::clone(&remote_state), Arc::clone(&tunnel_state));
+    register_lifecycle(
+        Arc::clone(&remote_state),
+        Arc::clone(&tunnel_state),
+        Arc::clone(&iroh_state),
+    );
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
@@ -1607,6 +1745,7 @@ fn main() {
             let acp_sessions = Arc::clone(&acp_sessions);
             let remote_state = Arc::clone(&remote_state);
             let tunnel_state = Arc::clone(&tunnel_state);
+            let iroh_state = Arc::clone(&iroh_state);
             let subscribers = Arc::clone(&subscribers);
             thread::spawn(move || {
                 handle_conn(
@@ -1617,6 +1756,7 @@ fn main() {
                     listen_fd,
                     remote_state,
                     tunnel_state,
+                    iroh_state,
                     subscribers,
                 )
             });
@@ -3155,6 +3295,7 @@ mod action_integration_tests {
         let (server, client) = UnixStream::pair().unwrap();
         let remote_state: RemoteState = Arc::new(Mutex::new(None));
         let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+        let iroh_state: IrohState = Arc::new(Mutex::new(None));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let mut client = client;
         writeln!(
@@ -3171,6 +3312,7 @@ mod action_integration_tests {
             -1,
             remote_state,
             tunnel_state,
+            iroh_state,
             subscribers,
         );
         let mut resp = String::new();
@@ -3290,6 +3432,7 @@ mod input_integration_tests {
         let (server, client) = UnixStream::pair().unwrap();
         let remote_state: RemoteState = Arc::new(Mutex::new(None));
         let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+        let iroh_state: IrohState = Arc::new(Mutex::new(None));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let mut client = client;
         writeln!(
@@ -3306,6 +3449,7 @@ mod input_integration_tests {
             -1,
             remote_state,
             tunnel_state,
+            iroh_state,
             subscribers,
         );
         let mut resp = String::new();
@@ -3385,6 +3529,7 @@ fn handle_conn(
     listen_fd: RawFd,
     remote_state: RemoteState,
     tunnel_state: TunnelState,
+    iroh_state: IrohState,
     subscribers: Subscribers,
 ) {
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。
@@ -3544,6 +3689,51 @@ fn handle_conn(
                         .map(|g| g.write)
                         .unwrap_or(false);
                     serde_json::json!({ "running": true, "url": url, "write": write })
+                }
+                None => serde_json::json!({ "running": false }),
+            };
+            let _ = writeln!(c, "{}", body);
+        }
+        Some("iroh_start") => {
+            let write = v["write"].as_bool().unwrap_or(false);
+            let mut c = conn;
+            match start_iroh(&iroh_state, &remote_state, write) {
+                Ok((endpoint_id, token, addr, write)) => {
+                    // token 一并回：配对码 = endpoint_id + token，缺一不可
+                    // （隧道只负责把字节送到，鉴权仍归网关）。
+                    let _ = writeln!(
+                        c,
+                        "{}",
+                        serde_json::json!({
+                            "ok": true, "endpoint_id": endpoint_id, "token": token,
+                            "addr": addr.to_string(), "write": write
+                        })
+                    );
+                }
+                Err(e) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": e }));
+                }
+            }
+        }
+        Some("iroh_stop") => {
+            stop_iroh(&iroh_state);
+            let mut c = conn;
+            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+        }
+        Some("iroh_status") => {
+            let mut c = conn;
+            let body = match iroh_status(&iroh_state) {
+                Some(endpoint_id) => {
+                    let (token, write) = remote_state
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|g| (g.token.clone(), g.write))
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "running": true, "endpoint_id": endpoint_id,
+                        "token": token, "write": write
+                    })
                 }
                 None => serde_json::json!({ "running": false }),
             };
@@ -6189,6 +6379,7 @@ mod watch_tests {
                         new_acp_sessions(),
                         0,
                         -1,
+                        Arc::new(Mutex::new(None)),
                         Arc::new(Mutex::new(None)),
                         Arc::new(Mutex::new(None)),
                         Arc::clone(&subscribers),
