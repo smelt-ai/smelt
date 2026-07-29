@@ -494,6 +494,7 @@ impl Workspace {
         let has_project = cwd.is_some();
 
         let e_new = this.clone();
+        let e_import = this.clone();
         let header = div()
             .h(px(36.))
             .flex_shrink_0()
@@ -521,6 +522,21 @@ impl Workspace {
                             .text_color(rgb(ui_theme::text_faint()))
                             .child(s.len().to_string())
                     }))
+                    .child(
+                        div()
+                            .id("inspector-skill-import")
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.8))
+                            .child("导入")
+                            .on_click(move |_ev, _window, cx| {
+                                e_import.update(cx, |ws, cx| {
+                                    ws.import_skill_from_folder(has_project, cx)
+                                });
+                            }),
+                    )
                     .child(
                         div()
                             .id("inspector-skill-new")
@@ -679,6 +695,18 @@ impl Workspace {
                                             .truncate()
                                             .child(sk.name.clone()),
                                     )
+                                    .when(!sk.managed, |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px_1()
+                                                .rounded_xs()
+                                                .text_size(px(9.))
+                                                .text_color(rgb(ui_theme::text_faint()))
+                                                .bg(rgb(ui_theme::bg_elev()))
+                                                .child("旧"),
+                                        )
+                                    })
                                     .child(hover_bar),
                             )
                             .when(!sk.description.is_empty(), |d| {

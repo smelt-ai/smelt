@@ -1,40 +1,61 @@
-//! Skills 面板数据源：扫 `~/.claude/skills/*/SKILL.md`（用户级）与
-//! `<项目>/.claude/skills/*/SKILL.md`（项目级），读 YAML frontmatter 的
-//! `name` / `description`。
+//! Skills 面板数据源与 CRUD：真身统一存 `.smelt/skills/<name>/SKILL.md`
+//! （用户级 `~/.smelt/skills`，项目级 `<项目>/.smelt/skills`），创建/改名/删除时
+//! 自动在已知 agent 的 skills 目录（`~/.claude/skills`、`~/.codex/skills` 及
+//! 项目级对应目录——两者都遵循同一套 `<name>/SKILL.md` 约定）里维护一份
+//! **symlink** 指回真身，这样同一个 skill 改一处、各 agent 都同步生效，不用
+//! 逐个目录复制。
 //!
-//! **只读**：Claude Code 没有「启用/停用某个 skill」的开关机制（settings.json 里
-//! 的 `enabledPlugins` 管的是插件，不是 skill），所以这里不做开关——放一个拨了
-//! 不生效的开关比不放更糟。面板的价值在「看清有哪些能力 + 一键把 /name 填进
-//! 当前会话」。
+//! 面板同时也认「不是 symlink、直接躺在某个 agent 目录里」的旧 skill（不是
+//! 我们建的，管不了同步，标 `managed = false`，编辑/删除仍可对它直接操作，
+//! 但只影响那一个 agent）。
+//!
+//! **只读开关**：Claude Code 没有「启用/停用某个 skill」的开关机制
+//! （settings.json 里的 `enabledPlugins` 管的是插件，不是 skill），所以这里
+//! 不做开关——放一个拨了不生效的开关比不放更糟。
 //!
 //! 跟 claude_memory.rs 同一个套路：纯数据函数，后台线程扫盘，render 只读缓存。
 
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use gpui::AppContext;
 use gpui_component::input::Input;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::ui_theme;
+
+/// 已知会扫描 `<agent 目录>/skills/<name>/SKILL.md` 的 agent 目录名——目前是
+/// Claude Code 和 Codex CLI，两者用的是完全相同的目录 + SKILL.md 约定。新增
+/// 支持别的 agent 只需要在这加一项。
+const AGENT_SKILL_DIRS: [&str; 2] = [".claude/skills", ".codex/skills"];
 
 /// 一条 skill。
 #[derive(Clone)]
 pub struct SkillEntry {
     pub name: String,
     pub description: String,
-    /// true = 项目级（`<项目>/.claude/skills`），false = 用户级（`~/.claude/skills`）。
+    /// true = 项目级，false = 用户级。
     pub project_scope: bool,
-    /// skill 所在目录（含 `SKILL.md` 的那一层），编辑/删除都对着它操作。
+    /// skill 的真实数据所在目录（含 `SKILL.md` 的那一层）：托管 skill 指向
+    /// `.smelt/skills/<name>`，非托管（legacy）指向它在某个 agent 目录里的
+    /// 实际路径。编辑/删除都对着它操作。
     pub dir: PathBuf,
+    /// 这个 scope 的根：用户级 = 主目录，项目级 = 项目 cwd。创建 symlink /
+    /// 改名重新链接时用它拼出各 agent 目录。
+    pub base: PathBuf,
+    /// true = 真身在 `.smelt/skills` 下、已同步链接到各 agent 目录；
+    /// false = 旧 skill，直接躺在某个 agent 自己的 skills 目录里，不受
+    /// 「一处改、处处生效」管理，改名/删除只影响它所在的那一个 agent。
+    pub managed: bool,
 }
 
 /// 扫描用户级 + 项目级 skills（阻塞读盘，调用方放后台线程）。
 pub fn scan_skills(project_cwd: Option<&str>) -> Vec<SkillEntry> {
     let mut out = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        collect_dir(&home.join(".claude/skills"), false, &mut out);
+        collect_scope(&home, false, &mut out);
     }
     if let Some(cwd) = project_cwd {
-        collect_dir(&PathBuf::from(cwd).join(".claude/skills"), true, &mut out);
+        collect_scope(&PathBuf::from(cwd), true, &mut out);
     }
     // 项目级在前（更贴近手头的活），组内按名字排。
     out.sort_by(|a, b| {
@@ -45,7 +66,42 @@ pub fn scan_skills(project_cwd: Option<&str>) -> Vec<SkillEntry> {
     out
 }
 
-fn collect_dir(dir: &PathBuf, project_scope: bool, out: &mut Vec<SkillEntry>) {
+/// 扫一个 scope（用户级或项目级）：先收 `.smelt/skills` 下的托管 skill，
+/// 再扫各 agent 自己的 skills 目录——跳过已经解析回 `.smelt/skills` 的
+/// symlink（那就是托管 skill 在这个 agent 下的落地，不重复列出），剩下的
+/// 真实目录当 legacy 收进来。
+fn collect_scope(base: &Path, project_scope: bool, out: &mut Vec<SkillEntry>) {
+    let canonical_root = base.join(".smelt/skills");
+    let mut managed_names: HashSet<String> = HashSet::new();
+    collect_dir(
+        &canonical_root,
+        project_scope,
+        base,
+        true,
+        &mut managed_names,
+        out,
+    );
+    for rel in AGENT_SKILL_DIRS {
+        collect_dir(
+            &base.join(rel),
+            project_scope,
+            base,
+            false,
+            &mut managed_names,
+            out,
+        );
+    }
+}
+
+fn collect_dir(
+    dir: &Path,
+    project_scope: bool,
+    base: &Path,
+    managed: bool,
+    managed_names: &mut HashSet<String>,
+    out: &mut Vec<SkillEntry>,
+) {
+    let canonical_root = base.join(".smelt/skills");
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -53,6 +109,21 @@ fn collect_dir(dir: &PathBuf, project_scope: bool, out: &mut Vec<SkillEntry>) {
         let path = entry.path();
         if !path.is_dir() {
             continue;
+        }
+        if !managed {
+            // legacy 扫描时，跳过指回 `.smelt/skills` 的 symlink——那是托管
+            // skill 链接到这个 agent 的落地，已经在 collect_dir(managed=true)
+            // 那一趟收过了，这里再收就重复。
+            let is_symlink = std::fs::symlink_metadata(&path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_symlink {
+                if let Ok(target) = std::fs::canonicalize(&path) {
+                    if target.starts_with(&canonical_root) {
+                        continue;
+                    }
+                }
+            }
         }
         let md = path.join("SKILL.md");
         let Ok(text) = std::fs::read_to_string(&md) else {
@@ -68,18 +139,27 @@ fn collect_dir(dir: &PathBuf, project_scope: bool, out: &mut Vec<SkillEntry>) {
         if name.is_empty() {
             continue;
         }
+        if managed {
+            managed_names.insert(name.clone());
+        } else if managed_names.contains(&name) {
+            // 同名已有托管 skill——大概率是历史遗留的重名冲突，托管的那份
+            // 才是「一处改、处处生效」的来源，legacy 这份不重复展示。
+            continue;
+        }
         out.push(SkillEntry {
             name,
             description: description.unwrap_or_default(),
             project_scope,
             dir: path,
+            base: base.to_path_buf(),
+            managed,
         });
     }
 }
 
 /// 校验 skill 名（同时是目录名和 frontmatter `name`，两者本该一致）：非空、
 /// 不超长、只允许字母/数字/连字符/下划线——避免路径穿越（`..`、`/`）或写出
-/// Claude 不认的名字。
+/// Claude / Codex 不认的名字。
 pub fn validate_skill_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("名称不能为空".into());
@@ -99,13 +179,15 @@ pub fn validate_skill_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 某个作用域的 skills 根目录：项目级要求 `project_cwd` 已知，否则返回 `None`
-/// （调用方应该在项目未打开时禁掉「项目级」这个选项）。
-fn skills_root(project_cwd: Option<&str>, project_scope: bool) -> Option<PathBuf> {
+/// 某个 scope 的根：项目级要求 `project_cwd` 已知，否则报错（调用方应该在
+/// 项目未打开时禁掉「项目级」这个选项）。
+fn scope_base(project_cwd: Option<&str>, project_scope: bool) -> Result<PathBuf, String> {
     if project_scope {
-        project_cwd.map(|c| PathBuf::from(c).join(".claude/skills"))
+        project_cwd
+            .map(PathBuf::from)
+            .ok_or_else(|| "项目未打开，无法创建项目级 skill".to_string())
     } else {
-        dirs::home_dir().map(|h| h.join(".claude/skills"))
+        dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())
     }
 }
 
@@ -120,8 +202,52 @@ fn quote_scalar(s: &str) -> String {
     )
 }
 
-/// 创建一个新 skill：校验名字、确认目标目录不存在（避免覆盖同名 skill）、
-/// 写最小可用的 `SKILL.md`。返回新目录路径。
+/// 把 `<base>/.smelt/skills/<name>` 链接到各已知 agent 的 skills 目录下。
+/// 尽力而为：某个 agent 目录下已经有非 symlink 的同名 legacy skill，就跳过
+/// 那一个（打印到 stderr），不影响其它 agent 和 `.smelt` 里真身已经建好这个
+/// 事实——不能因为一个 agent 有历史冲突就让整个创建失败。
+fn link_to_agents(base: &Path, name: &str, target: &Path) {
+    for rel in AGENT_SKILL_DIRS {
+        let root = base.join(rel);
+        if std::fs::create_dir_all(&root).is_err() {
+            continue;
+        }
+        let link = root.join(name);
+        match std::fs::symlink_metadata(&link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let _ = std::fs::remove_file(&link);
+            }
+            Ok(_) => {
+                eprintln!(
+                    "[skills] {} 已存在非托管的同名 skill，跳过链接",
+                    link.display()
+                );
+                continue;
+            }
+            Err(_) => {}
+        }
+        if let Err(e) = std::os::unix::fs::symlink(target, &link) {
+            eprintln!("[skills] symlink {} -> {} 失败：{e}", link.display(), target.display());
+        }
+    }
+}
+
+/// 从各已知 agent 的 skills 目录里移除 `name` 对应的 symlink（改名/删除托管
+/// skill 前调用）。只删 symlink，遇到非 symlink（legacy 撞了同名）绝不动。
+fn unlink_from_agents(base: &Path, name: &str) {
+    for rel in AGENT_SKILL_DIRS {
+        let link = base.join(rel).join(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&link) {
+            if meta.file_type().is_symlink() {
+                let _ = std::fs::remove_file(&link);
+            }
+        }
+    }
+}
+
+/// 创建一个新 skill：真身写进 `.smelt/skills/<name>`，再同步链接到各已知
+/// agent 目录。校验名字、确认目标目录不存在（避免覆盖同名 skill）、写最小
+/// 可用的 `SKILL.md`。返回真身目录路径。
 pub fn create_skill(
     project_cwd: Option<&str>,
     project_scope: bool,
@@ -130,8 +256,8 @@ pub fn create_skill(
 ) -> Result<PathBuf, String> {
     let name = name.trim();
     validate_skill_name(name)?;
-    let root = skills_root(project_cwd, project_scope).ok_or("项目未打开，无法创建项目级 skill")?;
-    let dir = root.join(name);
+    let base = scope_base(project_cwd, project_scope)?;
+    let dir = base.join(".smelt/skills").join(name);
     if dir.exists() {
         return Err(format!("已存在同名 skill：{}", dir.display()));
     }
@@ -144,15 +270,68 @@ pub fn create_skill(
         name
     );
     std::fs::write(dir.join("SKILL.md"), content).map_err(|e| format!("写入 SKILL.md 失败：{e}"))?;
+    link_to_agents(&base, name, &dir);
     Ok(dir)
+}
+
+/// 从本地已有目录导入一个 skill：目录里必须已有 `SKILL.md`。整个目录（含
+/// 附属文件，比如 references/ 脚本等）复制进 `.smelt/skills/<name>`——`name`
+/// 优先取 frontmatter 里的 `name`，没有就退回源目录名；复制完同样同步链接到
+/// 各已知 agent 目录。
+pub fn import_skill(
+    project_cwd: Option<&str>,
+    project_scope: bool,
+    source_dir: &Path,
+) -> Result<PathBuf, String> {
+    let md_path = source_dir.join("SKILL.md");
+    let text =
+        std::fs::read_to_string(&md_path).map_err(|_| "所选目录中没有 SKILL.md".to_string())?;
+    let (fm_name, _) = parse_frontmatter(&text);
+    let name = fm_name.unwrap_or_else(|| {
+        source_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let name = name.trim().to_string();
+    validate_skill_name(&name)?;
+    let base = scope_base(project_cwd, project_scope)?;
+    let dir = base.join(".smelt/skills").join(&name);
+    if dir.exists() {
+        return Err(format!("已存在同名 skill：{}", dir.display()));
+    }
+    copy_dir_recursive(source_dir, &dir).map_err(|e| format!("复制目录失败：{e}"))?;
+    link_to_agents(&base, &name, &dir);
+    Ok(dir)
+}
+
+/// 递归复制目录（`std::fs` 没有内建的目录复制）。跳过 symlink 本身（避免把
+/// 源目录里意外存在的 symlink 原样带进真身，日后改名/删除时行为会出乎意料），
+/// 只复制常规文件和子目录。
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(&from, &to)?;
+        }
+        // 跳过 symlink / 其它特殊文件类型。
+    }
+    Ok(())
 }
 
 /// 更新一个已有 skill：改名字/描述，保留 frontmatter 里的其它字段和正文不动。
 /// 名字变了就顺手把目录也改名（目录名 = 调用名是约定），目标目录已存在则报错
-/// 而不是静默覆盖。
-pub fn update_skill(dir: &Path, name: &str, description: &str) -> Result<PathBuf, String> {
+/// 而不是静默覆盖；托管 skill 改名时同步重新链接各 agent 目录。
+pub fn update_skill(entry: &SkillEntry, name: &str, description: &str) -> Result<PathBuf, String> {
     let name = name.trim();
     validate_skill_name(name)?;
+    let dir = &entry.dir;
     let md_path = dir.join("SKILL.md");
     let text = std::fs::read_to_string(&md_path).map_err(|e| format!("读取 SKILL.md 失败：{e}"))?;
     let new_text = rewrite_frontmatter(&text, name, description.trim());
@@ -165,18 +344,26 @@ pub fn update_skill(dir: &Path, name: &str, description: &str) -> Result<PathBuf
             return Err(format!("已存在同名 skill：{}", new_dir.display()));
         }
         std::fs::rename(dir, &new_dir).map_err(|e| format!("重命名目录失败：{e}"))?;
+        if entry.managed {
+            unlink_from_agents(&entry.base, cur_name);
+            link_to_agents(&entry.base, name, &new_dir);
+        }
         return Ok(new_dir);
     }
     Ok(dir.to_path_buf())
 }
 
-/// 删除一个 skill 目录。删前确认目录里确有 `SKILL.md`——避免误删传进来的
-/// 任意目录（比如上层状态没同步好，指向了别的路径）。
-pub fn delete_skill(dir: &Path) -> Result<(), String> {
-    if !dir.join("SKILL.md").exists() {
+/// 删除一个 skill。删前确认目录里确有 `SKILL.md`——避免误删传进来的任意目录
+/// （比如上层状态没同步好，指向了别的路径）；托管 skill 删除前先摘掉各 agent
+/// 目录里的 symlink，再删真身。
+pub fn delete_skill(entry: &SkillEntry) -> Result<(), String> {
+    if !entry.dir.join("SKILL.md").exists() {
         return Err("目录中没有 SKILL.md，拒绝删除".into());
     }
-    std::fs::remove_dir_all(dir).map_err(|e| format!("删除失败：{e}"))
+    if entry.managed {
+        unlink_from_agents(&entry.base, &entry.name);
+    }
+    std::fs::remove_dir_all(&entry.dir).map_err(|e| format!("删除失败：{e}"))
 }
 
 /// 重写 frontmatter 的 `name` / `description` 两个字段，其余字段（含未知的
@@ -411,7 +598,7 @@ impl crate::Workspace {
             cx.new(|cx| InputState::new(window, cx).default_value(entry.description.clone()));
         name_input.update(cx, |s, cx| s.focus(window, cx));
         self.skill_modal = Some(SkillModalState {
-            editing: Some(entry.dir.clone()),
+            editing: Some(entry.clone()),
             project_scope: entry.project_scope,
             name_input,
             desc_input,
@@ -438,7 +625,7 @@ impl crate::Workspace {
         let cwd = self.cur().and_then(|s| s.cwd(cx));
 
         let result = match editing {
-            Some(dir) => update_skill(&dir, &name, &description).map(|_| ()),
+            Some(entry) => update_skill(&entry, &name, &description).map(|_| ()),
             None => create_skill(cwd.as_deref(), project_scope, &name, &description).map(|_| ()),
         };
 
@@ -454,6 +641,41 @@ impl crate::Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// 「导入 skill」：弹原生目录选择框，选中的目录必须已含 `SKILL.md`——整个
+    /// 目录（含附属文件）复制进 `.smelt/skills/<name>`，并同步链接到各已知
+    /// agent 目录。失败只打日志，不额外弹错误框（跟这批「安静失败」的克制处理
+    /// 一致；面板缓存照常清空重扫，用户从列表里能直接看出有没有成功）。
+    pub(crate) fn import_skill_from_folder(
+        &mut self,
+        project_scope: bool,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        use gpui::PathPromptOptions;
+        let cwd = self.cur().and_then(|s| s.cwd(cx));
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择要导入的 skill 目录（需含 SKILL.md）".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(source) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                match import_skill(cwd.as_deref(), project_scope, &source) {
+                    Ok(_) => this.skills_cache = None,
+                    Err(e) => eprintln!("[skills] 导入失败：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 弹出「删除 skill」二次确认。
@@ -473,7 +695,7 @@ impl crate::Workspace {
         let Some(target) = self.skill_delete_target.take() else {
             return;
         };
-        let _ = delete_skill(&target.dir);
+        let _ = delete_skill(&target);
         self.skills_cache = None;
         cx.notify();
     }
@@ -514,6 +736,15 @@ impl crate::Workspace {
             .child(Input::new(&modal.name_input))
             .child(div().text_xs().text_color(muted).child("描述（何时该用它）"))
             .child(Input::new(&modal.desc_input));
+
+        if let Some(entry) = modal.editing.as_ref().filter(|e| !e.managed) {
+            content = content.child(
+                div().text_xs().text_color(rgb(ui_theme::text_faint())).child(format!(
+                    "这是历史遗留的 skill（不在 .smelt 统一管理下），改动只影响它当前所在的位置：{}",
+                    entry.dir.display()
+                )),
+            );
+        }
 
         if !is_edit {
             let e_user = cx.entity();
@@ -669,10 +900,10 @@ impl crate::Workspace {
     }
 }
 
-/// 「新建/编辑 skill」弹窗状态。`editing` 为 `None` 表示新建，`Some(dir)` 表示
-/// 正在编辑该目录下的 skill（提交走 [`update_skill`] 而非 [`create_skill`]）。
+/// 「新建/编辑 skill」弹窗状态。`editing` 为 `None` 表示新建，`Some(entry)` 表示
+/// 正在编辑该 skill（提交走 [`update_skill`] 而非 [`create_skill`]）。
 pub(crate) struct SkillModalState {
-    pub editing: Option<PathBuf>,
+    pub editing: Option<SkillEntry>,
     pub project_scope: bool,
     pub name_input: gpui::Entity<gpui_component::input::InputState>,
     pub desc_input: gpui::Entity<gpui_component::input::InputState>,
@@ -727,26 +958,113 @@ mod tests {
 
         let dir = super::create_skill(Some(&cwd), true, "my-skill", "does a thing").unwrap();
         assert!(dir.join("SKILL.md").exists());
+        assert!(dir.ends_with(".smelt/skills/my-skill"));
 
         // 同名再建应报错，不覆盖。
         assert!(super::create_skill(Some(&cwd), true, "my-skill", "x").is_err());
 
+        // 应该同步链接到两个已知 agent 目录。
+        for agent in [".claude/skills", ".codex/skills"] {
+            let link = tmp.join(agent).join("my-skill");
+            let meta = std::fs::symlink_metadata(&link).unwrap();
+            assert!(meta.file_type().is_symlink());
+            assert!(link.join("SKILL.md").exists());
+        }
+
         let scanned = super::scan_skills(Some(&cwd));
         let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        // legacy 扫描要跳过指回 .smelt 的 symlink，只应该出现这一条托管记录。
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].name, "my-skill");
         assert_eq!(scanned[0].description, "does a thing");
+        assert!(scanned[0].managed);
 
-        let new_dir = super::update_skill(&dir, "renamed-skill", "new desc").unwrap();
+        let entry = scanned.into_iter().next().unwrap();
+        let new_dir = super::update_skill(&entry, "renamed-skill", "new desc").unwrap();
         assert!(new_dir.join("SKILL.md").exists());
         assert!(!dir.exists());
+        // 改名后旧 symlink 应该消失，新 symlink 应该指向新目录。
+        for agent in [".claude/skills", ".codex/skills"] {
+            assert!(!tmp.join(agent).join("my-skill").exists());
+            let link = tmp.join(agent).join("renamed-skill");
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
         let scanned = super::scan_skills(Some(&cwd));
         let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].name, "renamed-skill");
         assert_eq!(scanned[0].description, "new desc");
 
-        super::delete_skill(&new_dir).unwrap();
+        let entry = scanned.into_iter().next().unwrap();
+        super::delete_skill(&entry).unwrap();
         assert!(!new_dir.exists());
+        for agent in [".claude/skills", ".codex/skills"] {
+            assert!(!tmp.join(agent).join("renamed-skill").exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn legacy_skill_is_listed_but_not_managed() {
+        let tmp = std::env::temp_dir().join(format!("smelt-skill-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let legacy_dir = tmp.join(".claude/skills/old-skill");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(
+            legacy_dir.join("SKILL.md"),
+            "---\nname: old-skill\ndescription: 手工建的旧 skill\n---\n",
+        )
+        .unwrap();
+
+        let cwd = tmp.to_string_lossy().into_owned();
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].name, "old-skill");
+        assert!(!scanned[0].managed);
+        assert_eq!(scanned[0].dir, legacy_dir);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_skill_copies_directory_and_links_to_agents() {
+        let tmp = std::env::temp_dir().join(format!("smelt-skill-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let source = tmp.join("source-skill");
+        std::fs::create_dir_all(source.join("references")).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: imported-skill\ndescription: 从本地目录导入\n---\n\n# body\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("references/notes.md"), "extra file").unwrap();
+
+        let project = tmp.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cwd = project.to_string_lossy().into_owned();
+
+        let dir = super::import_skill(Some(&cwd), true, &source).unwrap();
+        assert!(dir.ends_with(".smelt/skills/imported-skill"));
+        assert!(dir.join("SKILL.md").exists());
+        assert!(dir.join("references/notes.md").exists());
+
+        for agent in [".claude/skills", ".codex/skills"] {
+            let link = project.join(agent).join("imported-skill");
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].name, "imported-skill");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
