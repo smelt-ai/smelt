@@ -761,44 +761,40 @@ impl Workspace {
                                 )
                             })
                             .when(sk.managed, |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .children(crate::skills::AGENT_TARGETS.iter().map(|t| {
-                                            let linked = sk.linked_agents.contains(&t.label);
-                                            let e_toggle = this.clone();
-                                            let sk_toggle = sk.clone();
-                                            let label = t.label;
-                                            div()
-                                                .id(("inspector-skill-link-chip", six, label))
-                                                .px_1()
-                                                .rounded_xs()
-                                                .text_size(px(9.))
-                                                .cursor_pointer()
-                                                .when(linked, |d| {
-                                                    d.text_color(rgb(ui_theme::text_bright()))
-                                                        .bg(rgb(ui_theme::bg_elev()))
-                                                })
-                                                .when(!linked, |d| {
-                                                    d.text_color(rgb(ui_theme::text_faint()))
-                                                        .opacity(0.5)
-                                                        .hover(|d| d.opacity(0.85))
-                                                })
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                    cx.stop_propagation()
-                                                })
-                                                .on_click(move |_ev, _window, cx| {
-                                                    e_toggle.update(cx, |ws, cx| {
-                                                        ws.toggle_managed_skill_link(
-                                                            &sk_toggle, label, cx,
-                                                        )
-                                                    });
-                                                })
-                                                .child(label)
-                                        })),
-                                )
+                                d.child(div().flex().items_center().gap_1().children(
+                                    crate::skills::AGENT_TARGETS.iter().map(|t| {
+                                        let linked = sk.linked_agents.contains(&t.label);
+                                        let e_toggle = this.clone();
+                                        let sk_toggle = sk.clone();
+                                        let label = t.label;
+                                        div()
+                                            .id(format!("inspector-skill-link-chip-{six}-{label}"))
+                                            .px_1()
+                                            .rounded_xs()
+                                            .text_size(px(9.))
+                                            .cursor_pointer()
+                                            .when(linked, |d| {
+                                                d.text_color(rgb(ui_theme::text_bright()))
+                                                    .bg(rgb(ui_theme::bg_elev()))
+                                            })
+                                            .when(!linked, |d| {
+                                                d.text_color(rgb(ui_theme::text_faint()))
+                                                    .opacity(0.5)
+                                                    .hover(|d| d.opacity(0.85))
+                                            })
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(move |_ev, _window, cx| {
+                                                e_toggle.update(cx, |ws, cx| {
+                                                    ws.toggle_managed_skill_link(
+                                                        &sk_toggle, label, cx,
+                                                    )
+                                                });
+                                            })
+                                            .child(label)
+                                    }),
+                                ))
                             })
                             .on_click(move |_ev, window, cx| {
                                 let cmd = cmd.clone();
