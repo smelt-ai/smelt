@@ -21,7 +21,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::{Rgba, rgb, rgba};
+use gpui::{Anchor, Rgba, rgb, rgba};
 
 use smelt_core::agent_status::AgentStatus;
 
@@ -313,6 +313,9 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     // 「白底 + 白对勾」——勾选了却看不见勾，就是这个回归。
     let theme = cx.global_mut::<Theme>();
     theme.tokens = (&theme.colors).into();
+    // 应用内通知固定在右下角，避开左侧高频操作的会话列表；主题切换会重置通知配置，
+    // 所以必须在每次 Theme::change 之后和色板一起重新覆盖。
+    theme.notification.placement = Anchor::BottomRight;
 }
 
 /// 把一个 RGB 按比例调亮（factor > 1）或压暗（< 1），逐通道饱和截断。

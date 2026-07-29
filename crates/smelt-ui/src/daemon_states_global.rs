@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui::Global;
 
+pub use smelt_core::attention::{AttentionItem, AttentionKind, AttentionStore};
 use smelt_core::daemon_state::DaemonSessionState;
 
 /// 守护上报的会话状态镜像（全局单例，跨窗口共享）。key = smeltd session id
@@ -17,25 +18,9 @@ pub struct DaemonStates(pub Arc<Mutex<HashMap<String, DaemonSessionState>>>);
 
 impl Global for DaemonStates {}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentNotificationKind {
-    Approval,
-    Input,
-    Success,
-    Failure,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingAgentNotification {
-    pub session_id: String,
-    pub title: String,
-    pub message: String,
-    pub kind: AgentNotificationKind,
-}
-
-/// 状态通道待弹出的应用内 Notification（subscribe 线程没有 Window，render 时
-/// drain）。
+/// 所有 agent 关注事件的唯一 UI store。生产者写入未读/待投递，Workspace render
+/// 统一决定 toast 或系统通知；铃铛、Dock 与菜单栏只读未读集合。
 #[derive(Clone, Default)]
-pub struct PendingAgentNotifs(pub Arc<Mutex<Vec<PendingAgentNotification>>>);
+pub struct AttentionGlobal(pub Arc<Mutex<AttentionStore>>);
 
-impl Global for PendingAgentNotifs {}
+impl Global for AttentionGlobal {}

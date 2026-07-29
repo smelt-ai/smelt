@@ -31,6 +31,7 @@ use smelt_core::acp_session::{
     PendingElicitation, PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView,
 };
 use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec};
+use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionKind};
 use smelt_ui::ui_theme;
 
 /// Codex ACP 的 mode 值定义了审批与沙箱预设。只翻译其稳定的公开值；其他
@@ -86,8 +87,6 @@ pub struct AcpView {
     /// 自由文本 elicitation 的本地编辑器；协议状态只保存字符串，不持有 GPUI 实体。
     elicitation_inputs: std::collections::HashMap<usize, Entity<InputState>>,
     phase: AcpPhase,
-    /// 回合结束且用户还没回应过 → Session 状态给绿点「有结果可看」。
-    completed_unread: bool,
     /// 启动阶段的进度文案（下载运行时等），Starting 横幅显示。
     status_line: Option<String>,
     /// None = 已结束的占位视图（重开后才建；Ended 态没有输入框）。
@@ -257,7 +256,6 @@ impl AcpView {
             elicitation_inputs: Default::default(),
             status_line: None,
             phase: AcpPhase::Ended(reason),
-            completed_unread: false,
             input: None,
             handle: None,
             launch,
@@ -315,7 +313,6 @@ impl AcpView {
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
         self.usage = None; // 上下文用量属于旧会话，别带到新的上
-        self.completed_unread = false;
         self.phase = AcpPhase::Starting;
         self.starting_since = Some(std::time::Instant::now());
         self.init_input(window, cx);
@@ -614,13 +611,22 @@ impl AcpView {
         out
     }
 
-    pub fn completed_unread(&self) -> bool {
-        self.completed_unread
+    pub fn completed_unread(&self, cx: &App) -> bool {
+        cx.try_global::<AttentionGlobal>().is_some_and(|store| {
+            store
+                .0
+                .lock()
+                .unwrap()
+                .unread(&self.sid)
+                .is_some_and(|item| item.kind == AttentionKind::Success)
+        })
     }
 
     /// 会话被激活查看后清「有结果可看」。
-    pub fn mark_read(&mut self) {
-        self.completed_unread = false;
+    pub fn mark_read(&mut self, cx: &mut Context<Self>) {
+        if let Some(store) = cx.try_global::<AttentionGlobal>() {
+            store.0.lock().unwrap().mark_read(&self.sid);
+        }
     }
 
     pub fn is_awaiting_approval(&self) -> bool {
@@ -806,7 +812,7 @@ impl AcpView {
         self.plan = snap.plan;
         self.model = snap.model;
         self.config_options = snap.config_options;
-        self.completed_unread = snap.completed_unread;
+        let _ = snap.completed_unread;
         self.prune_tool_ui_state();
 
         if matches!(self.phase, AcpPhase::Ended(_)) {

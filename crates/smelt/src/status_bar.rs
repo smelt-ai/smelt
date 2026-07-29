@@ -4,7 +4,10 @@
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::*;
-use gpui_component::{Icon, IconName};
+use gpui_component::{
+    IconName, Sizable,
+    button::{Button, ButtonVariants},
+};
 
 use crate::{AgentStatus, Workspace, ui_theme};
 
@@ -109,15 +112,12 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .id("help-entry")
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                            .child(Icon::new(IconName::BookOpen).size(px(14.)))
-                            .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new("帮助文档").build(window, cx)
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                        Button::new("help-entry")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::BookOpen)
+                            .tooltip("帮助文档")
+                            .on_click(|_, _window, cx| {
                                 cx.open_url("https://smelt.onoo.io/");
                             }),
                     )
