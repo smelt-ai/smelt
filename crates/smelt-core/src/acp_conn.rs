@@ -35,6 +35,7 @@ use agent_client_protocol::{
     AcpAgent, ActiveSession, Agent, Client, ConnectionTo, Lines, SessionMessage,
 };
 
+pub use crate::acp_chat::AcpImage as PromptImage;
 use crate::agent_kind::AcpLaunchSpec;
 
 /// 一次 ACP 会话的启动参数。
@@ -59,14 +60,6 @@ pub struct AcpLaunch {
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PromptImage {
-    /// `image/png` 这类 MIME。
-    pub mime: String,
-    /// base64 编码后的原始字节（不带 data: 前缀）。
-    pub data_b64: String,
-}
-
 /// UI → 连接线程的指令。
 pub enum AcpCommand {
     /// 发一轮 prompt（agent 空闲时才该发；UI 侧负责在 turn 进行中排队/禁用）。
@@ -153,6 +146,9 @@ pub enum AcpEvent {
     /// 我们没有替它们手动 push 过）。正常 live 对话是否也会收到这个事件目前
     /// 没有把握确认，UI 侧用「等回声」状态机兼容两种可能，见 acp_view.rs。
     UserChunk(String),
+    /// 用户消息里的图片块。会话恢复时 agent 会逐块重放，不能降级成 `[图片]`，
+    /// 否则桌面端没有可渲染的数据。
+    UserImage(PromptImage),
     /// 会话当前可用的斜杠命令（`/compact` 这类，不是「工具」）：(名字, 说明)。
     /// 以前只存数量——一个光秃秃的「47 条命令」既点不开也没法用，等于没有。
     AvailableCommands(Vec<(String, String)>),
@@ -1156,9 +1152,13 @@ async fn translate_update(
                         }),
                         SessionUpdate::ToolCall(tc) => Some(AcpEvent::ToolCall(tc)),
                         SessionUpdate::ToolCallUpdate(u) => Some(AcpEvent::ToolCallUpdate(u)),
-                        SessionUpdate::UserMessageChunk(chunk) => {
-                            Some(AcpEvent::UserChunk(content_text(&chunk.content)))
-                        }
+                        SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
+                            ContentBlock::Image(image) => Some(AcpEvent::UserImage(PromptImage {
+                                mime: image.mime_type,
+                                data_b64: image.data,
+                            })),
+                            content => Some(AcpEvent::UserChunk(content_text(&content))),
+                        },
                         SessionUpdate::AvailableCommandsUpdate(u) => {
                             Some(AcpEvent::AvailableCommands(
                                 u.available_commands

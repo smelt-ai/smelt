@@ -8,10 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 消息流里的一条。落盘持久化，进程重启/会话「重新开始」都要保住历史。
+/// 消息流里的一条。由 agent 会话历史重放，也可随 smeltd 热升级快照交接。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AcpEntry {
     User(String),
+    /// 带图片的用户消息。保留旧的 `User(String)` 变体，兼容已有快照。
+    UserWithImages {
+        text: String,
+        images: Vec<AcpImage>,
+    },
     /// assistant 正文或思考块（thought 弱化显示）；连续 chunk 就地追加。
     Assistant {
         text: String,
@@ -28,6 +33,14 @@ pub enum AcpEntry {
     },
     /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
     Divider(String),
+}
+
+/// ACP/app-server 图片的传输与热升级快照表示。长期历史仍以 agent
+/// 自己的 transcript 为准，Smelt 不把图片重复写入 workspace.json。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcpImage {
+    pub mime: String,
+    pub data_b64: String,
 }
 
 /// 工具调用的一段输出：纯文本，或者一份文件 diff。
@@ -175,6 +188,30 @@ mod tests {
             "[Request interrupted by user for tool use]"
         ));
         assert!(!is_interrupt_marker("请把这段中断逻辑说清楚"));
+    }
+
+    #[test]
+    fn user_images_roundtrip_without_breaking_legacy_entries() {
+        let legacy: AcpEntry = serde_json::from_str(r#"{"User":"hello"}"#).unwrap();
+        assert!(matches!(legacy, AcpEntry::User(text) if text == "hello"));
+
+        let entry = AcpEntry::UserWithImages {
+            text: "看这里".into(),
+            images: vec![AcpImage {
+                mime: "image/png".into(),
+                data_b64: "QUJD".into(),
+            }],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: AcpEntry = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored,
+            AcpEntry::UserWithImages { text, images }
+                if text == "看这里"
+                    && images.len() == 1
+                    && images[0].mime == "image/png"
+                    && images[0].data_b64 == "QUJD"
+        ));
     }
 
     #[test]

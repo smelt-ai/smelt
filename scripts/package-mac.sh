@@ -140,6 +140,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>${VERSION}</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>${BUNDLE_ID}.file</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>smelt-file</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>

@@ -200,11 +200,9 @@ impl Workspace {
             self.sessions.len(),
         );
 
-        // ---- 头部：SESSIONS · 总数 + 历史入口 ----
+        // ---- 头部：工作区标题 + 分组设置 ----
         // 新建入口全撤：建会话一律走「项目行 hover 出的 +」（落到那个项目），不属于任何
-        // 项目的裸终端走底部「终端」。顶部只留查看类的「历史」——原来的「对话 / 终端」是
-        // 落到当前项目的快捷新建，跟 + 重复，且两个彩色词太吵。
-        let e_hist = this.clone();
+        // 项目的裸终端走底部「终端」。历史是项目级操作，放在项目行的右键菜单里。
         let e_group = this.clone();
         let grouping = self.sidebar_grouping;
         let header = div()
@@ -267,24 +265,6 @@ impl Workspace {
                                 add_item(menu, SidebarGrouping::None, "没有任何", e_group.clone())
                             }),
                     ),
-            )
-            .child(
-                // 历史会话页入口（原顶部 TabBar 的「历史会话」标签迁到这里）。
-                div()
-                    .id("sess-history")
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                    .child("历史")
-                    .on_click(move |_ev, window, cx| {
-                        e_hist.update(cx, |ws, cx| {
-                            ws.stage_override = Some(MainView::History);
-                            cx.notify();
-                        });
-                        let h = e_hist.read(cx).focus_handle.clone();
-                        window.focus(&h, cx);
-                    }),
             );
 
         let mut rows = div()
@@ -580,6 +560,7 @@ impl Workspace {
                             // 不是整个 context_menu 按条件挂）。
                             let e_del = e_menu.clone();
                             let e_pin = e_menu.clone();
+                            let e_history = e_menu.clone();
                             let e_close_proj = e_menu.clone();
                             let path = cwd.clone();
                             let close_root = cwd.clone();
@@ -595,7 +576,9 @@ impl Workspace {
                                 let pin_path = path.clone();
                                 let e_del = e_del.clone();
                                 let e_pin = e_pin.clone();
+                                let e_history = e_history.clone();
                                 let e_close_proj = e_close_proj.clone();
+                                let history_root = path.clone();
                                 let close_root = close_root.clone();
                                 let del_main_root = del_main_root.clone();
                                 let del_branch = del_branch.clone();
@@ -622,6 +605,21 @@ impl Workspace {
                                             e_pin.update(cx, |ws, cx| {
                                                 ws.toggle_file_tree_root(pin_path, cx)
                                             });
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("历史")
+                                        .icon(IconName::BookOpen)
+                                        .on_click(move |_ev, window, cx| {
+                                            let root = history_root.clone();
+                                            e_history.update(cx, |ws, cx| {
+                                                ws.active_project = Some(root);
+                                                ws.stage_override = Some(MainView::History);
+                                                ws.save_state(cx);
+                                                cx.notify();
+                                            });
+                                            let focus = e_history.read(cx).focus_handle.clone();
+                                            window.focus(&focus, cx);
                                         }),
                                 )
                                 // 关项目 = 从工作台移走这个项目，连带关掉它下面的会话

@@ -11,8 +11,9 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1::{
     ElicitationContentValue, SessionId, StopReason, ToolCallId,
 };
+use base64::Engine as _;
 
-use crate::acp_chat::{ToolCallStatus, ToolKind, ToolOutputPart};
+use crate::acp_chat::{AcpImage, ToolCallStatus, ToolKind, ToolOutputPart};
 use crate::acp_conn::{
     AcpCommand, AcpEvent, AcpHandle, AcpLaunch, ElicitField, ElicitFieldKind, ElicitOption,
     ElicitationResponder, ModelState, PermissionResponder, ReadyKind, SessionConfigState,
@@ -1817,19 +1818,33 @@ fn replay_codex_thread(response: &serde_json::Value, event_tx: &smol::channel::S
     for item in items {
         match item.get("type").and_then(|value| value.as_str()) {
             Some("userMessage") => {
-                let text = item
+                let mut emitted_text = false;
+                for part in item
                     .get("content")
                     .and_then(|value| value.as_array())
                     .into_iter()
                     .flatten()
-                    .filter(|part| {
-                        part.get("type").and_then(|value| value.as_str()) == Some("text")
-                    })
-                    .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    let _ = event_tx.try_send(AcpEvent::UserChunk(text));
+                {
+                    match part.get("type").and_then(|value| value.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = part
+                                .get("text")
+                                .and_then(|value| value.as_str())
+                                .filter(|text| !text.is_empty())
+                            {
+                                let separator = if emitted_text { "\n" } else { "" };
+                                let _ = event_tx
+                                    .try_send(AcpEvent::UserChunk(format!("{separator}{text}")));
+                                emitted_text = true;
+                            }
+                        }
+                        Some("image") | Some("localImage") => {
+                            if let Some(image) = codex_user_image(part) {
+                                let _ = event_tx.try_send(AcpEvent::UserImage(image));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Some("agentMessage") => {
@@ -1872,6 +1887,63 @@ fn replay_codex_thread(response: &serde_json::Value, event_tx: &smol::channel::S
                 }
             }
         }
+    }
+}
+
+const MAX_REPLAY_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+
+fn codex_user_image(part: &serde_json::Value) -> Option<AcpImage> {
+    match part.get("type")?.as_str()? {
+        "image" => image_from_data_url(part.get("url")?.as_str()?),
+        "localImage" => image_from_local_path(std::path::Path::new(part.get("path")?.as_str()?)),
+        _ => None,
+    }
+}
+
+fn image_from_data_url(url: &str) -> Option<AcpImage> {
+    let data = url.strip_prefix("data:")?;
+    let (metadata, data_b64) = data.split_once(',')?;
+    let declared_mime = metadata.strip_suffix(";base64")?;
+    if !declared_mime.starts_with("image/") || data_b64.is_empty() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .ok()?;
+    if bytes.len() as u64 > MAX_REPLAY_IMAGE_BYTES {
+        return None;
+    }
+    let mime = image_mime(&bytes)?;
+    Some(AcpImage {
+        mime: mime.to_string(),
+        data_b64: data_b64.to_string(),
+    })
+}
+
+fn image_from_local_path(path: &std::path::Path) -> Option<AcpImage> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_REPLAY_IMAGE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let mime = image_mime(&bytes)?;
+    Some(AcpImage {
+        mime: mime.to_string(),
+        data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 
@@ -2256,7 +2328,10 @@ mod tests {
                 {"id":"summary","type":"agentMessage","text":"summary must not win"}
             ]}]},
             "initialTurnsPage":{"data":[{"items":[
-                {"id":"user-1","type":"userMessage","content":[{"type":"text","text":"question"}]},
+                {"id":"user-1","type":"userMessage","content":[
+                    {"type":"text","text":"question"},
+                    {"type":"image","url":"data:image/png;base64,iVBORw0KGgo="}
+                ]},
                 {"id":"reason-1","type":"reasoning","summary":["thinking"]},
                 {"id":"agent-1","type":"agentMessage","text":"answer"},
                 {"id":"tool-1","type":"commandExecution","command":"pwd","status":"completed","aggregatedOutput":"/repo"}
@@ -2276,16 +2351,61 @@ mod tests {
         assert!(matches!(events[0], AcpEvent::HistoryReplayStarted));
         assert!(matches!(&events[1], AcpEvent::UserChunk(text) if text == "question"));
         assert!(matches!(
-            &events[2],
-            AcpEvent::AgentChunk { thought: true, text } if text == "thinking"
+            &events[2], AcpEvent::UserImage(image)
+                if image.mime == "image/png" && image.data_b64 == "iVBORw0KGgo="
         ));
         assert!(matches!(
             &events[3],
+            AcpEvent::AgentChunk { thought: true, text } if text == "thinking"
+        ));
+        assert!(matches!(
+            &events[4],
             AcpEvent::AgentChunk { thought: false, text } if text == "answer"
         ));
-        assert!(matches!(&events[4], AcpEvent::ToolStarted { id, .. } if id == "tool-1"));
-        assert!(matches!(&events[5], AcpEvent::ToolFinished { id, .. } if id == "tool-1"));
-        assert_eq!(events.len(), 6);
+        assert!(matches!(&events[5], AcpEvent::ToolStarted { id, .. } if id == "tool-1"));
+        assert!(matches!(&events[6], AcpEvent::ToolFinished { id, .. } if id == "tool-1"));
+        assert_eq!(events.len(), 7);
+    }
+
+    #[test]
+    fn codex_user_images_accept_data_urls_and_valid_local_images() {
+        let inline = serde_json::json!({
+            "type":"image", "url":"data:image/jpeg;base64,/9j/"
+        });
+        let image = codex_user_image(&inline).unwrap();
+        assert_eq!(image.mime, "image/jpeg");
+        assert_eq!(image.data_b64, "/9j/");
+
+        let path = std::env::temp_dir().join(format!(
+            "smelt-codex-replay-image-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\ncontent").unwrap();
+        let local = serde_json::json!({"type":"localImage", "path":path});
+        let image = codex_user_image(&local).unwrap();
+        let _ = std::fs::remove_file(local["path"].as_str().unwrap());
+        assert_eq!(image.mime, "image/png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(image.data_b64)
+                .unwrap(),
+            b"\x89PNG\r\n\x1a\ncontent"
+        );
+    }
+
+    #[test]
+    fn codex_user_images_reject_non_images_and_remote_urls() {
+        assert!(
+            codex_user_image(&serde_json::json!({
+                "type":"image", "url":"https://example.com/image.png"
+            }))
+            .is_none()
+        );
+        assert!(image_from_data_url("data:text/plain;base64,SGVsbG8=").is_none());
+        assert!(image_from_data_url("data:image/png;base64,not-base64").is_none());
+        assert!(image_from_data_url("data:image/png;base64,SGVsbG8=").is_none());
+        assert!(image_mime(b"not an image").is_none());
     }
 
     #[test]
