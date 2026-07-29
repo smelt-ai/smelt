@@ -293,6 +293,20 @@ fn bind_single_instance(
     UnixListener::bind(path).map(Some)
 }
 
+fn bind_fresh_daemon(
+    path: &std::path::Path,
+    stale_handoff: &std::path::Path,
+    check_existing: bool,
+) -> std::io::Result<Option<UnixListener>> {
+    let listener = bind_single_instance(path, check_existing)?;
+    if listener.is_some() {
+        // 只有确认自己取得 listener 后才能清理。若已有 daemon 正在 upgrade，
+        // 它刚写下的 handoff 是活数据，竞争启动者必须原样保留并直接退出。
+        let _ = std::fs::remove_file(stale_handoff);
+    }
+    Ok(listener)
+}
+
 #[cfg(test)]
 mod single_instance_tests {
     use super::*;
@@ -342,6 +356,42 @@ mod single_instance_tests {
             .expect("没有活实例时应取得 listener");
         assert!(UnixStream::connect(&path).is_ok());
 
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[test]
+    fn existing_daemon_keeps_live_handoff_file() {
+        let path = test_socket("live-handoff");
+        let handoff = path.with_extension("handoff");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::write(&handoff, b"live upgrade snapshot").unwrap();
+
+        let result = bind_fresh_daemon(&path, &handoff, true).unwrap();
+
+        assert!(result.is_none(), "已有 daemon 时竞争启动者必须退出");
+        assert!(
+            handoff.is_file(),
+            "竞争启动者不能删除已有 daemon 正在使用的 handoff"
+        );
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&handoff);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[test]
+    fn fresh_daemon_removes_stale_handoff_file() {
+        let path = test_socket("stale-handoff");
+        let handoff = path.with_extension("handoff");
+        std::fs::write(&handoff, b"stale").unwrap();
+
+        let listener = bind_fresh_daemon(&path, &handoff, true)
+            .unwrap()
+            .expect("没有已有 daemon 时应取得 listener");
+
+        assert!(!handoff.exists(), "新 daemon 应清理陈旧 handoff");
         drop(listener);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("lock"));
@@ -1642,8 +1692,7 @@ fn main() {
                 // 一个泄漏的 fd 留在本进程里，无害但也无法优雅关闭——resume_handoff
                 // 失败通常发生在 JSON 都解析不出来的极端情况，代价可接受），把 socket
                 // 文件净空重 bind，保证守护本身不能倒。
-                let _ = std::fs::remove_file(handoff_path()); // 清掉可能残留的上次交接文件
-                let listener = match bind_single_instance(&path, !came_from_handoff) {
+                let listener = match bind_fresh_daemon(&path, &handoff_path(), !came_from_handoff) {
                     Ok(Some(l)) => l,
                     Ok(None) => return,
                     Err(e) => {
