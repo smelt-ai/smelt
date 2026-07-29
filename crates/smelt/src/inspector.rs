@@ -761,30 +761,22 @@ impl Workspace {
                                 )
                             })
                             .when(sk.managed, |d| {
-                                let e_manage = this.clone();
-                                let sk_manage = sk.clone();
                                 d.child(
                                     div()
-                                        .id(("inspector-skill-links", six))
                                         .flex()
                                         .items_center()
                                         .gap_1()
-                                        .cursor_pointer()
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(move |_ev, _window, cx| {
-                                            let sk = sk_manage.clone();
-                                            e_manage.update(cx, |ws, cx| {
-                                                ws.open_skill_link_modal(&sk, cx)
-                                            });
-                                        })
                                         .children(crate::skills::AGENT_TARGETS.iter().map(|t| {
                                             let linked = sk.linked_agents.contains(&t.label);
+                                            let e_toggle = this.clone();
+                                            let sk_toggle = sk.clone();
+                                            let label = t.label;
                                             div()
+                                                .id(("inspector-skill-link-chip", six, label))
                                                 .px_1()
                                                 .rounded_xs()
                                                 .text_size(px(9.))
+                                                .cursor_pointer()
                                                 .when(linked, |d| {
                                                     d.text_color(rgb(ui_theme::text_bright()))
                                                         .bg(rgb(ui_theme::bg_elev()))
@@ -792,8 +784,19 @@ impl Workspace {
                                                 .when(!linked, |d| {
                                                     d.text_color(rgb(ui_theme::text_faint()))
                                                         .opacity(0.5)
+                                                        .hover(|d| d.opacity(0.85))
                                                 })
-                                                .child(t.label)
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
+                                                .on_click(move |_ev, _window, cx| {
+                                                    e_toggle.update(cx, |ws, cx| {
+                                                        ws.toggle_managed_skill_link(
+                                                            &sk_toggle, label, cx,
+                                                        )
+                                                    });
+                                                })
+                                                .child(label)
                                         })),
                                 )
                             })
