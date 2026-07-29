@@ -61,6 +61,11 @@ pub const AGENT_TARGETS: &[AgentTarget] = &[
         user_rel: ".copilot/skills",
         project_rel: ".github/skills",
     },
+    AgentTarget {
+        label: "Grok",
+        user_rel: ".grok/skills",
+        project_rel: ".grok/skills",
+    },
 ];
 
 /// 一条 skill。
@@ -85,6 +90,10 @@ pub struct SkillEntry {
     /// 非托管 skill 这里始终是空，UI 不必也不该为它画链接矩阵，它本来就只
     /// 活在自己所在的那一个 agent 目录里，原样显示即可。
     pub linked_agents: Vec<&'static str>,
+    /// 非托管 skill 实际躺在哪个 agent 自己的目录里（`AgentTarget::label`）
+    /// ——托管 skill 真身在 `.smelt`，这里始终是 `None`。UI 靠它告诉用户
+    /// 「这条到底是谁的」，而不是一个笼统看不出来源的「旧」。
+    pub source_agent: Option<&'static str>,
 }
 
 /// 扫描用户级 + 项目级 skills（阻塞读盘，调用方放后台线程）。
@@ -117,6 +126,7 @@ fn collect_scope(base: &Path, project_scope: bool, out: &mut Vec<SkillEntry>) {
         project_scope,
         base,
         true,
+        None,
         &mut managed_names,
         out,
     );
@@ -126,6 +136,7 @@ fn collect_scope(base: &Path, project_scope: bool, out: &mut Vec<SkillEntry>) {
             project_scope,
             base,
             false,
+            Some(t.label),
             &mut managed_names,
             out,
         );
@@ -137,6 +148,7 @@ fn collect_dir(
     project_scope: bool,
     base: &Path,
     managed: bool,
+    source_label: Option<&'static str>,
     managed_names: &mut HashSet<String>,
     out: &mut Vec<SkillEntry>,
 ) {
@@ -199,6 +211,7 @@ fn collect_dir(
             base: base.to_path_buf(),
             managed,
             linked_agents,
+            source_agent: source_label,
         });
     }
 }
@@ -808,9 +821,11 @@ impl crate::Workspace {
             .child(Input::new(&modal.desc_input));
 
         if let Some(entry) = modal.editing.as_ref().filter(|e| !e.managed) {
+            let agent = entry.source_agent.unwrap_or("未知 agent");
             content = content.child(
                 div().text_xs().text_color(rgb(ui_theme::text_faint())).child(format!(
-                    "这是历史遗留的 skill（不在 .smelt 统一管理下），改动只影响它当前所在的位置：{}",
+                    "这是 {} 的历史遗留 skill（不在 .smelt 统一管理下），改动只影响它当前所在的位置：{}",
+                    agent,
                     entry.dir.display()
                 )),
             );
@@ -1034,7 +1049,7 @@ mod tests {
         assert!(super::create_skill(Some(&cwd), true, "my-skill", "x").is_err());
 
         // 应该同步链接到两个已知 agent 目录。
-        for agent in [".claude/skills", ".codex/skills", ".github/skills"] {
+        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
             let link = tmp.join(agent).join("my-skill");
             let meta = std::fs::symlink_metadata(&link).unwrap();
             assert!(meta.file_type().is_symlink());
@@ -1055,7 +1070,7 @@ mod tests {
         assert!(new_dir.join("SKILL.md").exists());
         assert!(!dir.exists());
         // 改名后旧 symlink 应该消失，新 symlink 应该指向新目录。
-        for agent in [".claude/skills", ".codex/skills", ".github/skills"] {
+        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
             assert!(!tmp.join(agent).join("my-skill").exists());
             let link = tmp.join(agent).join("renamed-skill");
             assert!(std::fs::symlink_metadata(&link)
@@ -1072,7 +1087,7 @@ mod tests {
         let entry = scanned.into_iter().next().unwrap();
         super::delete_skill(&entry).unwrap();
         assert!(!new_dir.exists());
-        for agent in [".claude/skills", ".codex/skills", ".github/skills"] {
+        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
             assert!(!tmp.join(agent).join("renamed-skill").exists());
         }
 
@@ -1098,6 +1113,7 @@ mod tests {
         assert_eq!(scanned[0].name, "old-skill");
         assert!(!scanned[0].managed);
         assert!(scanned[0].linked_agents.is_empty());
+        assert_eq!(scanned[0].source_agent, Some("Claude"));
         assert_eq!(scanned[0].dir, legacy_dir);
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1125,7 +1141,7 @@ mod tests {
         assert!(dir.join("SKILL.md").exists());
         assert!(dir.join("references/notes.md").exists());
 
-        for agent in [".claude/skills", ".codex/skills", ".github/skills"] {
+        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
             let link = project.join(agent).join("imported-skill");
             assert!(std::fs::symlink_metadata(&link)
                 .unwrap()
