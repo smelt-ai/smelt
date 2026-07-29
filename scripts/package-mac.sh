@@ -70,9 +70,9 @@ REMOTE_WEB_DIST="$ROOT/remote-web/dist"
 if [[ ! -f "$REMOTE_WEB_DIST/index.html" ]]; then
   if command -v npm >/dev/null 2>&1; then
     echo "▶ 构建 remote-web（npm run build）…"
-    (cd "$ROOT/remote-web" && npm install && npm run build)
+    (cd "$ROOT/remote-web" && npm ci && npm run build)
   else
-    echo "✗ 缺少 remote-web/dist，且本机无 npm。请先：cd remote-web && npm install && npm run build" >&2
+    echo "✗ 缺少 remote-web/dist，且本机无 npm。请先：cd remote-web && npm ci && npm run build" >&2
     exit 1
   fi
 fi

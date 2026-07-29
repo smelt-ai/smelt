@@ -18,7 +18,7 @@ run: ## 本地直接跑 GUI（开发用；先保证 smeltd / bridge 同编）
 	cargo run --bin $(BIN)
 
 remote-web: ## 构建远程 H5（Preact CLI 面板 → remote-web/dist）
-	cd remote-web && npm install && npm run build
+	cd remote-web && npm ci && npm run build
 
 remote-web-dev: ## 远程 H5 热更新（需另开 gateway --port 18765）
 	cd remote-web && npm run dev
