@@ -9,7 +9,7 @@
 基于 [GPUI](https://gpui.rs) 的原生应用，内嵌真终端，多项目 × 多标签。
 Claude Code、Codex、Gemini CLI……凡是跑在终端里的 agent，都能在这里并排看住。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
@@ -97,4 +97,4 @@ commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
