@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 2126967747;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 204024798;
 
 // Section: executor
 
@@ -46,110 +46,7 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
-fn wire__crate__api__connect_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    host: impl CstDecode<crate::api::HostConfig>,
-    device_token: impl CstDecode<String>,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "connect",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let api_host = host.cst_decode();
-            let api_device_token = device_token.cst_decode();
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok = crate::api::connect(api_host, api_device_token).await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__connection_state_impl(port_: flutter_rust_bridge::for_generated::MessagePort) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "connection_state",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            move |context| {
-                transform_result_dco::<_, _, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok(crate::api::connection_state())?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__disconnect_impl(port_: flutter_rust_bridge::for_generated::MessagePort) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "disconnect",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            move |context| {
-                transform_result_dco::<_, _, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok({
-                        crate::api::disconnect();
-                    })?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__generate_keypair_impl(port_: flutter_rust_bridge::for_generated::MessagePort) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "generate_keypair",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            move |context| {
-                transform_result_dco::<_, _, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok(crate::api::generate_keypair())?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__get_approval_menu_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    session_id: impl CstDecode<String>,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "get_approval_menu",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let api_session_id = session_id.cst_decode();
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok = crate::api::get_approval_menu(api_session_id).await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__init_app_impl(port_: flutter_rust_bridge::for_generated::MessagePort) {
+fn wire__crate__api_iroh__init_app_impl(port_: flutter_rust_bridge::for_generated::MessagePort) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
             debug_name: "init_app",
@@ -160,7 +57,7 @@ fn wire__crate__api__init_app_impl(port_: flutter_rust_bridge::for_generated::Me
             move |context| {
                 transform_result_dco::<_, _, ()>((move || {
                     let output_ok = Result::<_, ()>::Ok({
-                        crate::api::init_app();
+                        crate::api_iroh::init_app();
                     })?;
                     Ok(output_ok)
                 })())
@@ -168,42 +65,21 @@ fn wire__crate__api__init_app_impl(port_: flutter_rust_bridge::for_generated::Me
         },
     )
 }
-fn wire__crate__api__list_sessions_impl(port_: flutter_rust_bridge::for_generated::MessagePort) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "list_sessions",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok = crate::api::list_sessions().await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__mark_session_read_impl(
+fn wire__crate__api_iroh__iroh_tunnel_port_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
-    session_id: impl CstDecode<String>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "mark_session_read",
+            debug_name: "iroh_tunnel_port",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
         move || {
-            let api_session_id = session_id.cst_decode();
             move |context| async move {
-                transform_result_dco::<_, _, String>(
+                transform_result_dco::<_, _, ()>(
                     (move || async move {
-                        let output_ok = crate::api::mark_session_read(api_session_id).await?;
+                        let output_ok =
+                            Result::<_, ()>::Ok(crate::api_iroh::iroh_tunnel_port().await)?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -212,134 +88,71 @@ fn wire__crate__api__mark_session_read_impl(
         },
     )
 }
-fn wire__crate__api__parse_pairing_qr_impl(
+fn wire__crate__api_iroh__iroh_tunnel_start_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
-    qr_data: impl CstDecode<String>,
+    endpoint_id: impl CstDecode<String>,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "iroh_tunnel_start",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let api_endpoint_id = endpoint_id.cst_decode();
+            move |context| async move {
+                transform_result_dco::<_, _, String>(
+                    (move || async move {
+                        let output_ok = crate::api_iroh::iroh_tunnel_start(api_endpoint_id).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api_iroh__iroh_tunnel_stop_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "iroh_tunnel_stop",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            move |context| async move {
+                transform_result_dco::<_, _, ()>(
+                    (move || async move {
+                        let output_ok = Result::<_, ()>::Ok({
+                            crate::api_iroh::iroh_tunnel_stop().await;
+                        })?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api_iroh__parse_iroh_pairing_uri_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    uri: impl CstDecode<String>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::DcoCodec, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "parse_pairing_qr",
+            debug_name: "parse_iroh_pairing_uri",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
         move || {
-            let api_qr_data = qr_data.cst_decode();
+            let api_uri = uri.cst_decode();
             move |context| {
                 transform_result_dco::<_, _, String>((move || {
-                    let output_ok = crate::api::parse_pairing_qr(api_qr_data)?;
+                    let output_ok = crate::api_iroh::parse_iroh_pairing_uri(api_uri)?;
                     Ok(output_ok)
                 })())
-            }
-        },
-    )
-}
-fn wire__crate__api__poll_session_entries_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    session_id: impl CstDecode<String>,
-    since_index: impl CstDecode<u32>,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "poll_session_entries",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let api_session_id = session_id.cst_decode();
-            let api_since_index = since_index.cst_decode();
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok =
-                            crate::api::poll_session_entries(api_session_id, api_since_index)
-                                .await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__respond_approval_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    session_id: impl CstDecode<String>,
-    option_key: impl CstDecode<String>,
-    custom_text: impl CstDecode<Option<String>>,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "respond_approval",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let api_session_id = session_id.cst_decode();
-            let api_option_key = option_key.cst_decode();
-            let api_custom_text = custom_text.cst_decode();
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok = crate::api::respond_approval(
-                            api_session_id,
-                            api_option_key,
-                            api_custom_text,
-                        )
-                        .await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__send_message_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    session_id: impl CstDecode<String>,
-    text: impl CstDecode<String>,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "send_message",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let api_session_id = session_id.cst_decode();
-            let api_text = text.cst_decode();
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok = crate::api::send_message(api_session_id, api_text).await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__subscribe_session_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    session_id: impl CstDecode<String>,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "subscribe_session",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let api_session_id = session_id.cst_decode();
-            move |context| async move {
-                transform_result_dco::<_, _, String>(
-                    (move || async move {
-                        let output_ok = crate::api::subscribe_session(api_session_id).await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
             }
         },
     )
@@ -347,99 +160,6 @@ fn wire__crate__api__subscribe_session_impl(
 
 // Section: dart2rust
 
-impl CstDecode<crate::api::AgentKind> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::AgentKind {
-        match self {
-            0 => crate::api::AgentKind::Claude,
-            1 => crate::api::AgentKind::Codex,
-            2 => crate::api::AgentKind::Copilot,
-            3 => crate::api::AgentKind::Grok,
-            4 => crate::api::AgentKind::Other,
-            _ => unreachable!("Invalid variant for AgentKind: {}", self),
-        }
-    }
-}
-impl CstDecode<crate::api::ApprovalKind> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::ApprovalKind {
-        match self {
-            0 => crate::api::ApprovalKind::Approve,
-            1 => crate::api::ApprovalKind::Deny,
-            2 => crate::api::ApprovalKind::Custom,
-            _ => unreachable!("Invalid variant for ApprovalKind: {}", self),
-        }
-    }
-}
-impl CstDecode<bool> for bool {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> bool {
-        self
-    }
-}
-impl CstDecode<crate::api::ConnectionState> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::ConnectionState {
-        match self {
-            0 => crate::api::ConnectionState::Disconnected,
-            1 => crate::api::ConnectionState::Connecting,
-            2 => crate::api::ConnectionState::Handshaking,
-            3 => crate::api::ConnectionState::Connected,
-            4 => crate::api::ConnectionState::Reconnecting,
-            5 => crate::api::ConnectionState::AuthFailed,
-            _ => unreachable!("Invalid variant for ConnectionState: {}", self),
-        }
-    }
-}
-impl CstDecode<i32> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> i32 {
-        self
-    }
-}
-impl CstDecode<i64> for i64 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> i64 {
-        self
-    }
-}
-impl CstDecode<crate::api::SessionStatus> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::SessionStatus {
-        match self {
-            0 => crate::api::SessionStatus::Idle,
-            1 => crate::api::SessionStatus::Running,
-            2 => crate::api::SessionStatus::WaitingApproval,
-            3 => crate::api::SessionStatus::WaitingInput,
-            4 => crate::api::SessionStatus::Error,
-            _ => unreachable!("Invalid variant for SessionStatus: {}", self),
-        }
-    }
-}
-impl CstDecode<crate::api::ToolKind> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::ToolKind {
-        match self {
-            0 => crate::api::ToolKind::Read,
-            1 => crate::api::ToolKind::Write,
-            2 => crate::api::ToolKind::Edit,
-            3 => crate::api::ToolKind::Bash,
-            4 => crate::api::ToolKind::Other,
-            _ => unreachable!("Invalid variant for ToolKind: {}", self),
-        }
-    }
-}
-impl CstDecode<crate::api::ToolStatus> for i32 {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    fn cst_decode(self) -> crate::api::ToolStatus {
-        match self {
-            0 => crate::api::ToolStatus::Running,
-            1 => crate::api::ToolStatus::Completed,
-            2 => crate::api::ToolStatus::Failed,
-            _ => unreachable!("Invalid variant for ToolStatus: {}", self),
-        }
-    }
-}
 impl CstDecode<u32> for u32 {
     // Codec=Cst (C-struct based), see doc to use other codecs
     fn cst_decode(self) -> u32 {
@@ -460,200 +180,15 @@ impl SseDecode for String {
     }
 }
 
-impl SseDecode for crate::api::AcpEntry {
+impl SseDecode for crate::api_iroh::IrohPairing {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut tag_ = <i32>::sse_decode(deserializer);
-        match tag_ {
-            0 => {
-                let mut var_text = <String>::sse_decode(deserializer);
-                return crate::api::AcpEntry::User { text: var_text };
-            }
-            1 => {
-                let mut var_text = <String>::sse_decode(deserializer);
-                let mut var_thought = <bool>::sse_decode(deserializer);
-                return crate::api::AcpEntry::Assistant {
-                    text: var_text,
-                    thought: var_thought,
-                };
-            }
-            2 => {
-                let mut var_id = <String>::sse_decode(deserializer);
-                let mut var_title = <String>::sse_decode(deserializer);
-                let mut var_kind = <crate::api::ToolKind>::sse_decode(deserializer);
-                let mut var_status = <crate::api::ToolStatus>::sse_decode(deserializer);
-                let mut var_output = <Vec<String>>::sse_decode(deserializer);
-                return crate::api::AcpEntry::ToolCall {
-                    id: var_id,
-                    title: var_title,
-                    kind: var_kind,
-                    status: var_status,
-                    output: var_output,
-                };
-            }
-            _ => {
-                unimplemented!("");
-            }
-        }
-    }
-}
-
-impl SseDecode for crate::api::AgentKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::AgentKind::Claude,
-            1 => crate::api::AgentKind::Codex,
-            2 => crate::api::AgentKind::Copilot,
-            3 => crate::api::AgentKind::Grok,
-            4 => crate::api::AgentKind::Other,
-            _ => unreachable!("Invalid variant for AgentKind: {}", inner),
+        let mut var_endpointId = <String>::sse_decode(deserializer);
+        let mut var_token = <String>::sse_decode(deserializer);
+        return crate::api_iroh::IrohPairing {
+            endpoint_id: var_endpointId,
+            token: var_token,
         };
-    }
-}
-
-impl SseDecode for crate::api::ApprovalKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::ApprovalKind::Approve,
-            1 => crate::api::ApprovalKind::Deny,
-            2 => crate::api::ApprovalKind::Custom,
-            _ => unreachable!("Invalid variant for ApprovalKind: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::ApprovalMenu {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_key = <String>::sse_decode(deserializer);
-        let mut var_prompt = <String>::sse_decode(deserializer);
-        let mut var_options = <Vec<crate::api::ApprovalOption>>::sse_decode(deserializer);
-        let mut var_allowsTextInput = <bool>::sse_decode(deserializer);
-        return crate::api::ApprovalMenu {
-            key: var_key,
-            prompt: var_prompt,
-            options: var_options,
-            allows_text_input: var_allowsTextInput,
-        };
-    }
-}
-
-impl SseDecode for crate::api::ApprovalOption {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_key = <String>::sse_decode(deserializer);
-        let mut var_label = <String>::sse_decode(deserializer);
-        let mut var_kind = <crate::api::ApprovalKind>::sse_decode(deserializer);
-        return crate::api::ApprovalOption {
-            key: var_key,
-            label: var_label,
-            kind: var_kind,
-        };
-    }
-}
-
-impl SseDecode for bool {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_u8().unwrap() != 0
-    }
-}
-
-impl SseDecode for crate::api::ConnectionState {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::ConnectionState::Disconnected,
-            1 => crate::api::ConnectionState::Connecting,
-            2 => crate::api::ConnectionState::Handshaking,
-            3 => crate::api::ConnectionState::Connected,
-            4 => crate::api::ConnectionState::Reconnecting,
-            5 => crate::api::ConnectionState::AuthFailed,
-            _ => unreachable!("Invalid variant for ConnectionState: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::HostConfig {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_id = <String>::sse_decode(deserializer);
-        let mut var_name = <String>::sse_decode(deserializer);
-        let mut var_endpoint = <String>::sse_decode(deserializer);
-        let mut var_publicKeyB64 = <String>::sse_decode(deserializer);
-        return crate::api::HostConfig {
-            id: var_id,
-            name: var_name,
-            endpoint: var_endpoint,
-            public_key_b64: var_publicKeyB64,
-        };
-    }
-}
-
-impl SseDecode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
-    }
-}
-
-impl SseDecode for i64 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_i64::<NativeEndian>().unwrap()
-    }
-}
-
-impl SseDecode for crate::api::KeyPair {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_publicKeyB64 = <String>::sse_decode(deserializer);
-        let mut var_secretKeyB64 = <String>::sse_decode(deserializer);
-        return crate::api::KeyPair {
-            public_key_b64: var_publicKeyB64,
-            secret_key_b64: var_secretKeyB64,
-        };
-    }
-}
-
-impl SseDecode for Vec<String> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = Vec::with_capacity(len_ as usize);
-        for idx_ in 0..len_ {
-            ans_.push(<String>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::AcpEntry> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = Vec::with_capacity(len_ as usize);
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::AcpEntry>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Vec<crate::api::ApprovalOption> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = Vec::with_capacity(len_ as usize);
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::ApprovalOption>::sse_decode(deserializer));
-        }
-        return ans_;
     }
 }
 
@@ -669,102 +204,14 @@ impl SseDecode for Vec<u8> {
     }
 }
 
-impl SseDecode for Vec<crate::api::SessionSummary> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut len_ = <i32>::sse_decode(deserializer);
-        let mut ans_ = Vec::with_capacity(len_ as usize);
-        for idx_ in 0..len_ {
-            ans_.push(<crate::api::SessionSummary>::sse_decode(deserializer));
-        }
-        return ans_;
-    }
-}
-
-impl SseDecode for Option<String> {
+impl SseDecode for Option<u32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
-            return Some(<String>::sse_decode(deserializer));
+            return Some(<u32>::sse_decode(deserializer));
         } else {
             return None;
         }
-    }
-}
-
-impl SseDecode for Option<crate::api::ApprovalMenu> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::ApprovalMenu>::sse_decode(deserializer));
-        } else {
-            return None;
-        }
-    }
-}
-
-impl SseDecode for crate::api::SessionStatus {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::SessionStatus::Idle,
-            1 => crate::api::SessionStatus::Running,
-            2 => crate::api::SessionStatus::WaitingApproval,
-            3 => crate::api::SessionStatus::WaitingInput,
-            4 => crate::api::SessionStatus::Error,
-            _ => unreachable!("Invalid variant for SessionStatus: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::SessionSummary {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_id = <String>::sse_decode(deserializer);
-        let mut var_title = <String>::sse_decode(deserializer);
-        let mut var_status = <crate::api::SessionStatus>::sse_decode(deserializer);
-        let mut var_agentKind = <crate::api::AgentKind>::sse_decode(deserializer);
-        let mut var_lastMessage = <Option<String>>::sse_decode(deserializer);
-        let mut var_unread = <bool>::sse_decode(deserializer);
-        let mut var_updatedAt = <i64>::sse_decode(deserializer);
-        return crate::api::SessionSummary {
-            id: var_id,
-            title: var_title,
-            status: var_status,
-            agent_kind: var_agentKind,
-            last_message: var_lastMessage,
-            unread: var_unread,
-            updated_at: var_updatedAt,
-        };
-    }
-}
-
-impl SseDecode for crate::api::ToolKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::ToolKind::Read,
-            1 => crate::api::ToolKind::Write,
-            2 => crate::api::ToolKind::Edit,
-            3 => crate::api::ToolKind::Bash,
-            4 => crate::api::ToolKind::Other,
-            _ => unreachable!("Invalid variant for ToolKind: {}", inner),
-        };
-    }
-}
-
-impl SseDecode for crate::api::ToolStatus {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <i32>::sse_decode(deserializer);
-        return match inner {
-            0 => crate::api::ToolStatus::Running,
-            1 => crate::api::ToolStatus::Completed,
-            2 => crate::api::ToolStatus::Failed,
-            _ => unreachable!("Invalid variant for ToolStatus: {}", inner),
-        };
     }
 }
 
@@ -785,6 +232,20 @@ impl SseDecode for u8 {
 impl SseDecode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
+}
+
+impl SseDecode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for bool {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u8().unwrap() != 0
+    }
 }
 
 fn pde_ffi_dispatcher_primary_impl(
@@ -815,245 +276,20 @@ fn pde_ffi_dispatcher_sync_impl(
 // Section: rust2dart
 
 // Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::AcpEntry {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            crate::api::AcpEntry::User { text } => {
-                [0.into_dart(), text.into_into_dart().into_dart()].into_dart()
-            }
-            crate::api::AcpEntry::Assistant { text, thought } => [
-                1.into_dart(),
-                text.into_into_dart().into_dart(),
-                thought.into_into_dart().into_dart(),
-            ]
-            .into_dart(),
-            crate::api::AcpEntry::ToolCall {
-                id,
-                title,
-                kind,
-                status,
-                output,
-            } => [
-                2.into_dart(),
-                id.into_into_dart().into_dart(),
-                title.into_into_dart().into_dart(),
-                kind.into_into_dart().into_dart(),
-                status.into_into_dart().into_dart(),
-                output.into_into_dart().into_dart(),
-            ]
-            .into_dart(),
-            _ => {
-                unimplemented!("");
-            }
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::AcpEntry {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::AcpEntry> for crate::api::AcpEntry {
-    fn into_into_dart(self) -> crate::api::AcpEntry {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::AgentKind {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Claude => 0.into_dart(),
-            Self::Codex => 1.into_dart(),
-            Self::Copilot => 2.into_dart(),
-            Self::Grok => 3.into_dart(),
-            Self::Other => 4.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::AgentKind {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::AgentKind> for crate::api::AgentKind {
-    fn into_into_dart(self) -> crate::api::AgentKind {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::ApprovalKind {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Approve => 0.into_dart(),
-            Self::Deny => 1.into_dart(),
-            Self::Custom => 2.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ApprovalKind {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::ApprovalKind> for crate::api::ApprovalKind {
-    fn into_into_dart(self) -> crate::api::ApprovalKind {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::ApprovalMenu {
+impl flutter_rust_bridge::IntoDart for crate::api_iroh::IrohPairing {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
-            self.key.into_into_dart().into_dart(),
-            self.prompt.into_into_dart().into_dart(),
-            self.options.into_into_dart().into_dart(),
-            self.allows_text_input.into_into_dart().into_dart(),
+            self.endpoint_id.into_into_dart().into_dart(),
+            self.token.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
 }
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ApprovalMenu {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::ApprovalMenu> for crate::api::ApprovalMenu {
-    fn into_into_dart(self) -> crate::api::ApprovalMenu {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::ApprovalOption {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.key.into_into_dart().into_dart(),
-            self.label.into_into_dart().into_dart(),
-            self.kind.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ApprovalOption {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::ApprovalOption> for crate::api::ApprovalOption {
-    fn into_into_dart(self) -> crate::api::ApprovalOption {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::ConnectionState {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Disconnected => 0.into_dart(),
-            Self::Connecting => 1.into_dart(),
-            Self::Handshaking => 2.into_dart(),
-            Self::Connected => 3.into_dart(),
-            Self::Reconnecting => 4.into_dart(),
-            Self::AuthFailed => 5.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ConnectionState {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::ConnectionState>
-    for crate::api::ConnectionState
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api_iroh::IrohPairing {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api_iroh::IrohPairing>
+    for crate::api_iroh::IrohPairing
 {
-    fn into_into_dart(self) -> crate::api::ConnectionState {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::HostConfig {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.id.into_into_dart().into_dart(),
-            self.name.into_into_dart().into_dart(),
-            self.endpoint.into_into_dart().into_dart(),
-            self.public_key_b64.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::HostConfig {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::HostConfig> for crate::api::HostConfig {
-    fn into_into_dart(self) -> crate::api::HostConfig {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::KeyPair {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.public_key_b64.into_into_dart().into_dart(),
-            self.secret_key_b64.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::KeyPair {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::KeyPair> for crate::api::KeyPair {
-    fn into_into_dart(self) -> crate::api::KeyPair {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::SessionStatus {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Idle => 0.into_dart(),
-            Self::Running => 1.into_dart(),
-            Self::WaitingApproval => 2.into_dart(),
-            Self::WaitingInput => 3.into_dart(),
-            Self::Error => 4.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::SessionStatus {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::SessionStatus> for crate::api::SessionStatus {
-    fn into_into_dart(self) -> crate::api::SessionStatus {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::SessionSummary {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.id.into_into_dart().into_dart(),
-            self.title.into_into_dart().into_dart(),
-            self.status.into_into_dart().into_dart(),
-            self.agent_kind.into_into_dart().into_dart(),
-            self.last_message.into_into_dart().into_dart(),
-            self.unread.into_into_dart().into_dart(),
-            self.updated_at.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::SessionSummary {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::SessionSummary> for crate::api::SessionSummary {
-    fn into_into_dart(self) -> crate::api::SessionSummary {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::ToolKind {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Read => 0.into_dart(),
-            Self::Write => 1.into_dart(),
-            Self::Edit => 2.into_dart(),
-            Self::Bash => 3.into_dart(),
-            Self::Other => 4.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ToolKind {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::ToolKind> for crate::api::ToolKind {
-    fn into_into_dart(self) -> crate::api::ToolKind {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::ToolStatus {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        match self {
-            Self::Running => 0.into_dart(),
-            Self::Completed => 1.into_dart(),
-            Self::Failed => 2.into_dart(),
-            _ => unreachable!(),
-        }
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::ToolStatus {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::ToolStatus> for crate::api::ToolStatus {
-    fn into_into_dart(self) -> crate::api::ToolStatus {
+    fn into_into_dart(self) -> crate::api_iroh::IrohPairing {
         self
     }
 }
@@ -1065,181 +301,11 @@ impl SseEncode for String {
     }
 }
 
-impl SseEncode for crate::api::AcpEntry {
+impl SseEncode for crate::api_iroh::IrohPairing {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        match self {
-            crate::api::AcpEntry::User { text } => {
-                <i32>::sse_encode(0, serializer);
-                <String>::sse_encode(text, serializer);
-            }
-            crate::api::AcpEntry::Assistant { text, thought } => {
-                <i32>::sse_encode(1, serializer);
-                <String>::sse_encode(text, serializer);
-                <bool>::sse_encode(thought, serializer);
-            }
-            crate::api::AcpEntry::ToolCall {
-                id,
-                title,
-                kind,
-                status,
-                output,
-            } => {
-                <i32>::sse_encode(2, serializer);
-                <String>::sse_encode(id, serializer);
-                <String>::sse_encode(title, serializer);
-                <crate::api::ToolKind>::sse_encode(kind, serializer);
-                <crate::api::ToolStatus>::sse_encode(status, serializer);
-                <Vec<String>>::sse_encode(output, serializer);
-            }
-            _ => {
-                unimplemented!("");
-            }
-        }
-    }
-}
-
-impl SseEncode for crate::api::AgentKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::AgentKind::Claude => 0,
-                crate::api::AgentKind::Codex => 1,
-                crate::api::AgentKind::Copilot => 2,
-                crate::api::AgentKind::Grok => 3,
-                crate::api::AgentKind::Other => 4,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::ApprovalKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::ApprovalKind::Approve => 0,
-                crate::api::ApprovalKind::Deny => 1,
-                crate::api::ApprovalKind::Custom => 2,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::ApprovalMenu {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.key, serializer);
-        <String>::sse_encode(self.prompt, serializer);
-        <Vec<crate::api::ApprovalOption>>::sse_encode(self.options, serializer);
-        <bool>::sse_encode(self.allows_text_input, serializer);
-    }
-}
-
-impl SseEncode for crate::api::ApprovalOption {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.key, serializer);
-        <String>::sse_encode(self.label, serializer);
-        <crate::api::ApprovalKind>::sse_encode(self.kind, serializer);
-    }
-}
-
-impl SseEncode for bool {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_u8(self as _).unwrap();
-    }
-}
-
-impl SseEncode for crate::api::ConnectionState {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::ConnectionState::Disconnected => 0,
-                crate::api::ConnectionState::Connecting => 1,
-                crate::api::ConnectionState::Handshaking => 2,
-                crate::api::ConnectionState::Connected => 3,
-                crate::api::ConnectionState::Reconnecting => 4,
-                crate::api::ConnectionState::AuthFailed => 5,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::HostConfig {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.id, serializer);
-        <String>::sse_encode(self.name, serializer);
-        <String>::sse_encode(self.endpoint, serializer);
-        <String>::sse_encode(self.public_key_b64, serializer);
-    }
-}
-
-impl SseEncode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
-    }
-}
-
-impl SseEncode for i64 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
-    }
-}
-
-impl SseEncode for crate::api::KeyPair {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.public_key_b64, serializer);
-        <String>::sse_encode(self.secret_key_b64, serializer);
-    }
-}
-
-impl SseEncode for Vec<String> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <String>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::AcpEntry> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::AcpEntry>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Vec<crate::api::ApprovalOption> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::ApprovalOption>::sse_encode(item, serializer);
-        }
+        <String>::sse_encode(self.endpoint_id, serializer);
+        <String>::sse_encode(self.token, serializer);
     }
 }
 
@@ -1253,101 +319,13 @@ impl SseEncode for Vec<u8> {
     }
 }
 
-impl SseEncode for Vec<crate::api::SessionSummary> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(self.len() as _, serializer);
-        for item in self {
-            <crate::api::SessionSummary>::sse_encode(item, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<String> {
+impl SseEncode for Option<u32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
-            <String>::sse_encode(value, serializer);
+            <u32>::sse_encode(value, serializer);
         }
-    }
-}
-
-impl SseEncode for Option<crate::api::ApprovalMenu> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::ApprovalMenu>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for crate::api::SessionStatus {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::SessionStatus::Idle => 0,
-                crate::api::SessionStatus::Running => 1,
-                crate::api::SessionStatus::WaitingApproval => 2,
-                crate::api::SessionStatus::WaitingInput => 3,
-                crate::api::SessionStatus::Error => 4,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::SessionSummary {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <String>::sse_encode(self.id, serializer);
-        <String>::sse_encode(self.title, serializer);
-        <crate::api::SessionStatus>::sse_encode(self.status, serializer);
-        <crate::api::AgentKind>::sse_encode(self.agent_kind, serializer);
-        <Option<String>>::sse_encode(self.last_message, serializer);
-        <bool>::sse_encode(self.unread, serializer);
-        <i64>::sse_encode(self.updated_at, serializer);
-    }
-}
-
-impl SseEncode for crate::api::ToolKind {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::ToolKind::Read => 0,
-                crate::api::ToolKind::Write => 1,
-                crate::api::ToolKind::Edit => 2,
-                crate::api::ToolKind::Bash => 3,
-                crate::api::ToolKind::Other => 4,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
-    }
-}
-
-impl SseEncode for crate::api::ToolStatus {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <i32>::sse_encode(
-            match self {
-                crate::api::ToolStatus::Running => 0,
-                crate::api::ToolStatus::Completed => 1,
-                crate::api::ToolStatus::Failed => 2,
-                _ => {
-                    unimplemented!("");
-                }
-            },
-            serializer,
-        );
     }
 }
 
@@ -1368,6 +346,20 @@ impl SseEncode for u8 {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
+}
+
+impl SseEncode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for bool {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u8(self as _).unwrap();
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1397,120 +389,19 @@ mod io {
             String::from_utf8(vec).unwrap()
         }
     }
-    impl CstDecode<crate::api::AcpEntry> for wire_cst_acp_entry {
+    impl CstDecode<u32> for *mut u32 {
         // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::AcpEntry {
-            match self.tag {
-                0 => {
-                    let ans = unsafe { self.kind.User };
-                    crate::api::AcpEntry::User {
-                        text: ans.text.cst_decode(),
-                    }
-                }
-                1 => {
-                    let ans = unsafe { self.kind.Assistant };
-                    crate::api::AcpEntry::Assistant {
-                        text: ans.text.cst_decode(),
-                        thought: ans.thought.cst_decode(),
-                    }
-                }
-                2 => {
-                    let ans = unsafe { self.kind.ToolCall };
-                    crate::api::AcpEntry::ToolCall {
-                        id: ans.id.cst_decode(),
-                        title: ans.title.cst_decode(),
-                        kind: ans.kind.cst_decode(),
-                        status: ans.status.cst_decode(),
-                        output: ans.output.cst_decode(),
-                    }
-                }
-                _ => unreachable!(),
+        fn cst_decode(self) -> u32 {
+            unsafe { *flutter_rust_bridge::for_generated::box_from_leak_ptr(self) }
+        }
+    }
+    impl CstDecode<crate::api_iroh::IrohPairing> for wire_cst_iroh_pairing {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api_iroh::IrohPairing {
+            crate::api_iroh::IrohPairing {
+                endpoint_id: self.endpoint_id.cst_decode(),
+                token: self.token.cst_decode(),
             }
-        }
-    }
-    impl CstDecode<crate::api::ApprovalMenu> for wire_cst_approval_menu {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ApprovalMenu {
-            crate::api::ApprovalMenu {
-                key: self.key.cst_decode(),
-                prompt: self.prompt.cst_decode(),
-                options: self.options.cst_decode(),
-                allows_text_input: self.allows_text_input.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::ApprovalOption> for wire_cst_approval_option {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ApprovalOption {
-            crate::api::ApprovalOption {
-                key: self.key.cst_decode(),
-                label: self.label.cst_decode(),
-                kind: self.kind.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::ApprovalMenu> for *mut wire_cst_approval_menu {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ApprovalMenu {
-            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
-            CstDecode::<crate::api::ApprovalMenu>::cst_decode(*wrap).into()
-        }
-    }
-    impl CstDecode<crate::api::HostConfig> for *mut wire_cst_host_config {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::HostConfig {
-            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
-            CstDecode::<crate::api::HostConfig>::cst_decode(*wrap).into()
-        }
-    }
-    impl CstDecode<crate::api::HostConfig> for wire_cst_host_config {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::HostConfig {
-            crate::api::HostConfig {
-                id: self.id.cst_decode(),
-                name: self.name.cst_decode(),
-                endpoint: self.endpoint.cst_decode(),
-                public_key_b64: self.public_key_b64.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::KeyPair> for wire_cst_key_pair {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::KeyPair {
-            crate::api::KeyPair {
-                public_key_b64: self.public_key_b64.cst_decode(),
-                secret_key_b64: self.secret_key_b64.cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<Vec<String>> for *mut wire_cst_list_String {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<String> {
-            let vec = unsafe {
-                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
-                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
-            };
-            vec.into_iter().map(CstDecode::cst_decode).collect()
-        }
-    }
-    impl CstDecode<Vec<crate::api::AcpEntry>> for *mut wire_cst_list_acp_entry {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::AcpEntry> {
-            let vec = unsafe {
-                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
-                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
-            };
-            vec.into_iter().map(CstDecode::cst_decode).collect()
-        }
-    }
-    impl CstDecode<Vec<crate::api::ApprovalOption>> for *mut wire_cst_list_approval_option {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::ApprovalOption> {
-            let vec = unsafe {
-                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
-                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
-            };
-            vec.into_iter().map(CstDecode::cst_decode).collect()
         }
     }
     impl CstDecode<Vec<u8>> for *mut wire_cst_list_prim_u_8_strict {
@@ -1522,269 +413,54 @@ mod io {
             }
         }
     }
-    impl CstDecode<Vec<crate::api::SessionSummary>> for *mut wire_cst_list_session_summary {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::SessionSummary> {
-            let vec = unsafe {
-                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
-                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
-            };
-            vec.into_iter().map(CstDecode::cst_decode).collect()
-        }
-    }
-    impl CstDecode<crate::api::SessionSummary> for wire_cst_session_summary {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::SessionSummary {
-            crate::api::SessionSummary {
-                id: self.id.cst_decode(),
-                title: self.title.cst_decode(),
-                status: self.status.cst_decode(),
-                agent_kind: self.agent_kind.cst_decode(),
-                last_message: self.last_message.cst_decode(),
-                unread: self.unread.cst_decode(),
-                updated_at: self.updated_at.cst_decode(),
-            }
-        }
-    }
-    impl NewWithNullPtr for wire_cst_acp_entry {
+    impl NewWithNullPtr for wire_cst_iroh_pairing {
         fn new_with_null_ptr() -> Self {
             Self {
-                tag: -1,
-                kind: AcpEntryKind { nil__: () },
+                endpoint_id: core::ptr::null_mut(),
+                token: core::ptr::null_mut(),
             }
         }
     }
-    impl Default for wire_cst_acp_entry {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_approval_menu {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                key: core::ptr::null_mut(),
-                prompt: core::ptr::null_mut(),
-                options: core::ptr::null_mut(),
-                allows_text_input: Default::default(),
-            }
-        }
-    }
-    impl Default for wire_cst_approval_menu {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_approval_option {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                key: core::ptr::null_mut(),
-                label: core::ptr::null_mut(),
-                kind: Default::default(),
-            }
-        }
-    }
-    impl Default for wire_cst_approval_option {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_host_config {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                id: core::ptr::null_mut(),
-                name: core::ptr::null_mut(),
-                endpoint: core::ptr::null_mut(),
-                public_key_b64: core::ptr::null_mut(),
-            }
-        }
-    }
-    impl Default for wire_cst_host_config {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_key_pair {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                public_key_b64: core::ptr::null_mut(),
-                secret_key_b64: core::ptr::null_mut(),
-            }
-        }
-    }
-    impl Default for wire_cst_key_pair {
-        fn default() -> Self {
-            Self::new_with_null_ptr()
-        }
-    }
-    impl NewWithNullPtr for wire_cst_session_summary {
-        fn new_with_null_ptr() -> Self {
-            Self {
-                id: core::ptr::null_mut(),
-                title: core::ptr::null_mut(),
-                status: Default::default(),
-                agent_kind: Default::default(),
-                last_message: core::ptr::null_mut(),
-                unread: Default::default(),
-                updated_at: Default::default(),
-            }
-        }
-    }
-    impl Default for wire_cst_session_summary {
+    impl Default for wire_cst_iroh_pairing {
         fn default() -> Self {
             Self::new_with_null_ptr()
         }
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__connect(
+    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__init_app(port_: i64) {
+        wire__crate__api_iroh__init_app_impl(port_)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_port(port_: i64) {
+        wire__crate__api_iroh__iroh_tunnel_port_impl(port_)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_start(
         port_: i64,
-        host: *mut wire_cst_host_config,
-        device_token: *mut wire_cst_list_prim_u_8_strict,
+        endpoint_id: *mut wire_cst_list_prim_u_8_strict,
     ) {
-        wire__crate__api__connect_impl(port_, host, device_token)
+        wire__crate__api_iroh__iroh_tunnel_start_impl(port_, endpoint_id)
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__connection_state(port_: i64) {
-        wire__crate__api__connection_state_impl(port_)
+    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_stop(port_: i64) {
+        wire__crate__api_iroh__iroh_tunnel_stop_impl(port_)
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__disconnect(port_: i64) {
-        wire__crate__api__disconnect_impl(port_)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__generate_keypair(port_: i64) {
-        wire__crate__api__generate_keypair_impl(port_)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__get_approval_menu(
+    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__parse_iroh_pairing_uri(
         port_: i64,
-        session_id: *mut wire_cst_list_prim_u_8_strict,
+        uri: *mut wire_cst_list_prim_u_8_strict,
     ) {
-        wire__crate__api__get_approval_menu_impl(port_, session_id)
+        wire__crate__api_iroh__parse_iroh_pairing_uri_impl(port_, uri)
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__init_app(port_: i64) {
-        wire__crate__api__init_app_impl(port_)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__list_sessions(port_: i64) {
-        wire__crate__api__list_sessions_impl(port_)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__mark_session_read(
-        port_: i64,
-        session_id: *mut wire_cst_list_prim_u_8_strict,
-    ) {
-        wire__crate__api__mark_session_read_impl(port_, session_id)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__parse_pairing_qr(
-        port_: i64,
-        qr_data: *mut wire_cst_list_prim_u_8_strict,
-    ) {
-        wire__crate__api__parse_pairing_qr_impl(port_, qr_data)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__poll_session_entries(
-        port_: i64,
-        session_id: *mut wire_cst_list_prim_u_8_strict,
-        since_index: u32,
-    ) {
-        wire__crate__api__poll_session_entries_impl(port_, session_id, since_index)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__respond_approval(
-        port_: i64,
-        session_id: *mut wire_cst_list_prim_u_8_strict,
-        option_key: *mut wire_cst_list_prim_u_8_strict,
-        custom_text: *mut wire_cst_list_prim_u_8_strict,
-    ) {
-        wire__crate__api__respond_approval_impl(port_, session_id, option_key, custom_text)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__send_message(
-        port_: i64,
-        session_id: *mut wire_cst_list_prim_u_8_strict,
-        text: *mut wire_cst_list_prim_u_8_strict,
-    ) {
-        wire__crate__api__send_message_impl(port_, session_id, text)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api__subscribe_session(
-        port_: i64,
-        session_id: *mut wire_cst_list_prim_u_8_strict,
-    ) {
-        wire__crate__api__subscribe_session_impl(port_, session_id)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_cst_new_box_autoadd_approval_menu(
-    ) -> *mut wire_cst_approval_menu {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(
-            wire_cst_approval_menu::new_with_null_ptr(),
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_cst_new_box_autoadd_host_config(
-    ) -> *mut wire_cst_host_config {
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(
-            wire_cst_host_config::new_with_null_ptr(),
-        )
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_cst_new_list_String(
-        len: i32,
-    ) -> *mut wire_cst_list_String {
-        let wrap = wire_cst_list_String {
-            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
-                <*mut wire_cst_list_prim_u_8_strict>::new_with_null_ptr(),
-                len,
-            ),
-            len,
-        };
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_cst_new_list_acp_entry(
-        len: i32,
-    ) -> *mut wire_cst_list_acp_entry {
-        let wrap = wire_cst_list_acp_entry {
-            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
-                <wire_cst_acp_entry>::new_with_null_ptr(),
-                len,
-            ),
-            len,
-        };
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_cst_new_list_approval_option(
-        len: i32,
-    ) -> *mut wire_cst_list_approval_option {
-        let wrap = wire_cst_list_approval_option {
-            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
-                <wire_cst_approval_option>::new_with_null_ptr(),
-                len,
-            ),
-            len,
-        };
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
+    pub extern "C" fn frbgen_smelt_mobile_cst_new_box_autoadd_u_32(value: u32) -> *mut u32 {
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(value)
     }
 
     #[unsafe(no_mangle)]
@@ -1798,123 +474,17 @@ mod io {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(ans)
     }
 
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_smelt_mobile_cst_new_list_session_summary(
-        len: i32,
-    ) -> *mut wire_cst_list_session_summary {
-        let wrap = wire_cst_list_session_summary {
-            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
-                <wire_cst_session_summary>::new_with_null_ptr(),
-                len,
-            ),
-            len,
-        };
-        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
-    }
-
     #[repr(C)]
     #[derive(Clone, Copy)]
-    pub struct wire_cst_acp_entry {
-        tag: i32,
-        kind: AcpEntryKind,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub union AcpEntryKind {
-        User: wire_cst_AcpEntry_User,
-        Assistant: wire_cst_AcpEntry_Assistant,
-        ToolCall: wire_cst_AcpEntry_ToolCall,
-        nil__: (),
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_AcpEntry_User {
-        text: *mut wire_cst_list_prim_u_8_strict,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_AcpEntry_Assistant {
-        text: *mut wire_cst_list_prim_u_8_strict,
-        thought: bool,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_AcpEntry_ToolCall {
-        id: *mut wire_cst_list_prim_u_8_strict,
-        title: *mut wire_cst_list_prim_u_8_strict,
-        kind: i32,
-        status: i32,
-        output: *mut wire_cst_list_String,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_approval_menu {
-        key: *mut wire_cst_list_prim_u_8_strict,
-        prompt: *mut wire_cst_list_prim_u_8_strict,
-        options: *mut wire_cst_list_approval_option,
-        allows_text_input: bool,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_approval_option {
-        key: *mut wire_cst_list_prim_u_8_strict,
-        label: *mut wire_cst_list_prim_u_8_strict,
-        kind: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_host_config {
-        id: *mut wire_cst_list_prim_u_8_strict,
-        name: *mut wire_cst_list_prim_u_8_strict,
-        endpoint: *mut wire_cst_list_prim_u_8_strict,
-        public_key_b64: *mut wire_cst_list_prim_u_8_strict,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_key_pair {
-        public_key_b64: *mut wire_cst_list_prim_u_8_strict,
-        secret_key_b64: *mut wire_cst_list_prim_u_8_strict,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_list_String {
-        ptr: *mut *mut wire_cst_list_prim_u_8_strict,
-        len: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_list_acp_entry {
-        ptr: *mut wire_cst_acp_entry,
-        len: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_list_approval_option {
-        ptr: *mut wire_cst_approval_option,
-        len: i32,
+    pub struct wire_cst_iroh_pairing {
+        endpoint_id: *mut wire_cst_list_prim_u_8_strict,
+        token: *mut wire_cst_list_prim_u_8_strict,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct wire_cst_list_prim_u_8_strict {
         ptr: *mut u8,
         len: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_list_session_summary {
-        ptr: *mut wire_cst_session_summary,
-        len: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct wire_cst_session_summary {
-        id: *mut wire_cst_list_prim_u_8_strict,
-        title: *mut wire_cst_list_prim_u_8_strict,
-        status: i32,
-        agent_kind: i32,
-        last_message: *mut wire_cst_list_prim_u_8_strict,
-        unread: bool,
-        updated_at: i64,
     }
 }
 #[cfg(not(target_family = "wasm"))]
@@ -1949,97 +519,11 @@ mod web {
             self
         }
     }
-    impl CstDecode<crate::api::AcpEntry> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::AcpEntry {
-            let self_ = self.unchecked_into::<flutter_rust_bridge::for_generated::js_sys::Array>();
-            match self_.get(0).unchecked_into_f64() as _ {
-                0 => crate::api::AcpEntry::User {
-                    text: self_.get(1).cst_decode(),
-                },
-                1 => crate::api::AcpEntry::Assistant {
-                    text: self_.get(1).cst_decode(),
-                    thought: self_.get(2).cst_decode(),
-                },
-                2 => crate::api::AcpEntry::ToolCall {
-                    id: self_.get(1).cst_decode(),
-                    title: self_.get(2).cst_decode(),
-                    kind: self_.get(3).cst_decode(),
-                    status: self_.get(4).cst_decode(),
-                    output: self_.get(5).cst_decode(),
-                },
-                _ => unreachable!(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::ApprovalMenu>
+    impl CstDecode<crate::api_iroh::IrohPairing>
         for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
     {
         // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ApprovalMenu {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                4,
-                "Expected 4 elements, got {}",
-                self_.length()
-            );
-            crate::api::ApprovalMenu {
-                key: self_.get(0).cst_decode(),
-                prompt: self_.get(1).cst_decode(),
-                options: self_.get(2).cst_decode(),
-                allows_text_input: self_.get(3).cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::ApprovalOption>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ApprovalOption {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                3,
-                "Expected 3 elements, got {}",
-                self_.length()
-            );
-            crate::api::ApprovalOption {
-                key: self_.get(0).cst_decode(),
-                label: self_.get(1).cst_decode(),
-                kind: self_.get(2).cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::HostConfig>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::HostConfig {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                4,
-                "Expected 4 elements, got {}",
-                self_.length()
-            );
-            crate::api::HostConfig {
-                id: self_.get(0).cst_decode(),
-                name: self_.get(1).cst_decode(),
-                endpoint: self_.get(2).cst_decode(),
-                public_key_b64: self_.get(3).cst_decode(),
-            }
-        }
-    }
-    impl CstDecode<crate::api::KeyPair> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::KeyPair {
+        fn cst_decode(self) -> crate::api_iroh::IrohPairing {
             let self_ = self
                 .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
                 .unwrap();
@@ -2049,44 +533,10 @@ mod web {
                 "Expected 2 elements, got {}",
                 self_.length()
             );
-            crate::api::KeyPair {
-                public_key_b64: self_.get(0).cst_decode(),
-                secret_key_b64: self_.get(1).cst_decode(),
+            crate::api_iroh::IrohPairing {
+                endpoint_id: self_.get(0).cst_decode(),
+                token: self_.get(1).cst_decode(),
             }
-        }
-    }
-    impl CstDecode<Vec<String>> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<String> {
-            self.dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap()
-                .iter()
-                .map(CstDecode::cst_decode)
-                .collect()
-        }
-    }
-    impl CstDecode<Vec<crate::api::AcpEntry>>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::AcpEntry> {
-            self.dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap()
-                .iter()
-                .map(CstDecode::cst_decode)
-                .collect()
-        }
-    }
-    impl CstDecode<Vec<crate::api::ApprovalOption>>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::ApprovalOption> {
-            self.dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap()
-                .iter()
-                .map(CstDecode::cst_decode)
-                .collect()
         }
     }
     impl CstDecode<Vec<u8>> for Box<[u8]> {
@@ -2095,95 +545,10 @@ mod web {
             self.into_vec()
         }
     }
-    impl CstDecode<Vec<crate::api::SessionSummary>>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Vec<crate::api::SessionSummary> {
-            self.dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap()
-                .iter()
-                .map(CstDecode::cst_decode)
-                .collect()
-        }
-    }
-    impl CstDecode<Option<String>> for Option<String> {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> Option<String> {
-            self.map(CstDecode::cst_decode)
-        }
-    }
-    impl CstDecode<crate::api::SessionSummary>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::SessionSummary {
-            let self_ = self
-                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
-                .unwrap();
-            assert_eq!(
-                self_.length(),
-                7,
-                "Expected 7 elements, got {}",
-                self_.length()
-            );
-            crate::api::SessionSummary {
-                id: self_.get(0).cst_decode(),
-                title: self_.get(1).cst_decode(),
-                status: self_.get(2).cst_decode(),
-                agent_kind: self_.get(3).cst_decode(),
-                last_message: self_.get(4).cst_decode(),
-                unread: self_.get(5).cst_decode(),
-                updated_at: self_.get(6).cst_decode(),
-            }
-        }
-    }
     impl CstDecode<String> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> String {
             self.as_string().expect("non-UTF-8 string, or not a string")
-        }
-    }
-    impl CstDecode<crate::api::AgentKind>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::AgentKind {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
-    impl CstDecode<crate::api::ApprovalKind>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ApprovalKind {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
-    impl CstDecode<bool> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> bool {
-            self.is_truthy()
-        }
-    }
-    impl CstDecode<crate::api::ConnectionState>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ConnectionState {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
-    impl CstDecode<i32> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> i32 {
-            self.unchecked_into_f64() as _
-        }
-    }
-    impl CstDecode<i64> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> i64 {
-            ::std::convert::TryInto::<i64>::try_into(self).unwrap() as _
         }
     }
     impl CstDecode<Vec<u8>> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
@@ -2192,28 +557,6 @@ mod web {
             self.unchecked_into::<flutter_rust_bridge::for_generated::js_sys::Uint8Array>()
                 .to_vec()
                 .into()
-        }
-    }
-    impl CstDecode<crate::api::SessionStatus>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::SessionStatus {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
-    impl CstDecode<crate::api::ToolKind> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ToolKind {
-            (self.unchecked_into_f64() as i32).cst_decode()
-        }
-    }
-    impl CstDecode<crate::api::ToolStatus>
-        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
-    {
-        // Codec=Cst (C-struct based), see doc to use other codecs
-        fn cst_decode(self) -> crate::api::ToolStatus {
-            (self.unchecked_into_f64() as i32).cst_decode()
         }
     }
     impl CstDecode<u32> for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue {
@@ -2230,101 +573,38 @@ mod web {
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__connect(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        host: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
-        device_token: String,
-    ) {
-        wire__crate__api__connect_impl(port_, host, device_token)
+    pub fn wire__crate__api_iroh__init_app(port_: flutter_rust_bridge::for_generated::MessagePort) {
+        wire__crate__api_iroh__init_app_impl(port_)
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__connection_state(
+    pub fn wire__crate__api_iroh__iroh_tunnel_port(
         port_: flutter_rust_bridge::for_generated::MessagePort,
     ) {
-        wire__crate__api__connection_state_impl(port_)
+        wire__crate__api_iroh__iroh_tunnel_port_impl(port_)
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__disconnect(port_: flutter_rust_bridge::for_generated::MessagePort) {
-        wire__crate__api__disconnect_impl(port_)
+    pub fn wire__crate__api_iroh__iroh_tunnel_start(
+        port_: flutter_rust_bridge::for_generated::MessagePort,
+        endpoint_id: String,
+    ) {
+        wire__crate__api_iroh__iroh_tunnel_start_impl(port_, endpoint_id)
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__generate_keypair(
+    pub fn wire__crate__api_iroh__iroh_tunnel_stop(
         port_: flutter_rust_bridge::for_generated::MessagePort,
     ) {
-        wire__crate__api__generate_keypair_impl(port_)
+        wire__crate__api_iroh__iroh_tunnel_stop_impl(port_)
     }
 
     #[wasm_bindgen]
-    pub fn wire__crate__api__get_approval_menu(
+    pub fn wire__crate__api_iroh__parse_iroh_pairing_uri(
         port_: flutter_rust_bridge::for_generated::MessagePort,
-        session_id: String,
+        uri: String,
     ) {
-        wire__crate__api__get_approval_menu_impl(port_, session_id)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__init_app(port_: flutter_rust_bridge::for_generated::MessagePort) {
-        wire__crate__api__init_app_impl(port_)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__list_sessions(port_: flutter_rust_bridge::for_generated::MessagePort) {
-        wire__crate__api__list_sessions_impl(port_)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__mark_session_read(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        session_id: String,
-    ) {
-        wire__crate__api__mark_session_read_impl(port_, session_id)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__parse_pairing_qr(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        qr_data: String,
-    ) {
-        wire__crate__api__parse_pairing_qr_impl(port_, qr_data)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__poll_session_entries(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        session_id: String,
-        since_index: u32,
-    ) {
-        wire__crate__api__poll_session_entries_impl(port_, session_id, since_index)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__respond_approval(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        session_id: String,
-        option_key: String,
-        custom_text: Option<String>,
-    ) {
-        wire__crate__api__respond_approval_impl(port_, session_id, option_key, custom_text)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__send_message(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        session_id: String,
-        text: String,
-    ) {
-        wire__crate__api__send_message_impl(port_, session_id, text)
-    }
-
-    #[wasm_bindgen]
-    pub fn wire__crate__api__subscribe_session(
-        port_: flutter_rust_bridge::for_generated::MessagePort,
-        session_id: String,
-    ) {
-        wire__crate__api__subscribe_session_impl(port_, session_id)
+        wire__crate__api_iroh__parse_iroh_pairing_uri_impl(port_, uri)
     }
 }
 #[cfg(target_family = "wasm")]

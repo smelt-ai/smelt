@@ -1,6 +1,9 @@
-//! Flutter 调用的 API
+//! 早期设计的 API —— **目前不生成 Dart 绑定**。
 //!
-//! 所有 `#[flutter_rust_bridge::frb]` 标记的函数和类型会被 codegen 生成 Dart 绑定。
+//! 这里的连接/会话/E2EE 是一套后来被放弃的方向：自造握手协议、`rpc()` 从未
+//! 实现，与手机端实际在跑的 `/acp/ws` 协议对不上。桥到 Dart 只会生成看着能用
+//! 的空壳，所以 `flutter_rust_bridge.yaml` 的 `rust_input` 指向的是
+//! [`crate::api_iroh`]。要恢复这条路之前，先确认它和网关协议对得上。
 
 use flutter_rust_bridge::frb;
 use serde::{Deserialize, Serialize};
@@ -248,57 +251,6 @@ pub struct KeyPair {
 #[frb]
 pub fn parse_pairing_qr(qr_data: String) -> Result<HostConfig, String> {
     crate::crypto::parse_pairing_qr(&qr_data).map_err(|e| e.to_string())
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// iroh P2P 隧道
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/// 启动到指定 EndpointId 的 iroh 隧道，返回本地入口端口。
-///
-/// Dart 侧随后照常连 `ws://127.0.0.1:<port>/acp/ws?token=...`：
-/// 隧道对上层是透明的，鉴权和消息格式都和直连网关时完全一样。
-///
-/// 幂等 —— 同一个 endpoint 重复调用返回同一个端口。
-#[frb]
-pub async fn iroh_tunnel_start(endpoint_id: String) -> Result<u32, String> {
-    crate::iroh_tunnel::start(&endpoint_id)
-        .await
-        .map(|p| p as u32)
-        .map_err(|e| format!("{e:#}"))
-}
-
-/// 停止 iroh 隧道。没有隧道时是 no-op。
-#[frb]
-pub async fn iroh_tunnel_stop() {
-    crate::iroh_tunnel::stop().await;
-}
-
-/// 当前隧道的本地端口，没有则返回 `None`。
-#[frb]
-pub async fn iroh_tunnel_port() -> Option<u32> {
-    crate::iroh_tunnel::port().await.map(|p| p as u32)
-}
-
-/// 解析 `smelt+iroh://` 配对码。
-///
-/// 与桌面侧生成方共用 `smelt-core::pairing` 的定义，避免格式在两端漂移。
-#[frb]
-pub fn parse_iroh_pairing_uri(uri: String) -> Result<IrohPairing, String> {
-    let parsed = smelt_core::pairing::parse_iroh_pairing_uri(&uri).map_err(|e| e.to_string())?;
-    Ok(IrohPairing {
-        endpoint_id: parsed.endpoint_id,
-        token: parsed.token,
-    })
-}
-
-/// `smelt+iroh://` 配对码的两半。缺一不可：EndpointId 决定连得上谁，
-/// token 决定连上之后能不能操作。
-#[frb]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IrohPairing {
-    pub endpoint_id: String,
-    pub token: String,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

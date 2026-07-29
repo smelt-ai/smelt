@@ -47,3 +47,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# cargokit 的构建缓存（rust_builder 本身要入库，它的产物不要）
+/rust_builder/**/.dart_tool/
+/rust_builder/**/build/

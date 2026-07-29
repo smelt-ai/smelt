@@ -12,7 +12,7 @@ members = [
     "crates/smelt-signal",
     "crates/smelt-bridge",
     "crates/smelt-iroh",
-    "crates/smelt-mobile",
+    "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）
 ]
 resolver = "3"
 
