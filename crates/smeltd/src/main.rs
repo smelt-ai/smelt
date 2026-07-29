@@ -266,6 +266,88 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
+/// 串行化“检查现有实例 → 清理僵尸 socket → bind”整段启动流程。
+///
+/// 只做 connect 后 remove_file 存在 TOCTOU：两个并发启动者都可能先观察到
+/// socket 不存在，后启动者再把先启动者刚 bind 的有效路径删掉，令先启动者变成
+/// 仍托管会话但无法接受新连接的孤立 daemon。flock 随进程退出自动释放，也能覆盖
+/// 多个 GUI 进程同时拉起守护的情况。
+fn bind_single_instance(
+    path: &std::path::Path,
+    check_existing: bool,
+) -> std::io::Result<Option<UnixListener>> {
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    if check_existing && UnixStream::connect(path).is_ok() {
+        return Ok(None);
+    }
+    let _ = std::fs::remove_file(path);
+    UnixListener::bind(path).map(Some)
+}
+
+#[cfg(test)]
+mod single_instance_tests {
+    use super::*;
+
+    fn test_socket(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("smeltd-{name}-{}-{nonce}.sock", std::process::id()))
+    }
+
+    #[test]
+    fn concurrent_starters_leave_exactly_one_listener() {
+        const STARTERS: usize = 8;
+        let path = test_socket("single-instance");
+        let barrier = Arc::new(std::sync::Barrier::new(STARTERS));
+        let mut starters = Vec::new();
+
+        for _ in 0..STARTERS {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            starters.push(thread::spawn(move || {
+                let listener = bind_single_instance(&path, true).expect("并发启动不应 bind 失败");
+                barrier.wait();
+                listener.is_some()
+            }));
+        }
+
+        let listeners = starters
+            .into_iter()
+            .map(|starter| starter.join().unwrap())
+            .filter(|has_listener| *has_listener)
+            .count();
+        assert_eq!(listeners, 1, "并发启动只能有一个进程取得 listener");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[test]
+    fn stale_socket_path_is_replaced_while_holding_startup_lock() {
+        let path = test_socket("stale");
+        std::fs::write(&path, b"stale").unwrap();
+
+        let listener = bind_single_instance(&path, true)
+            .expect("僵尸 socket 应可恢复")
+            .expect("没有活实例时应取得 listener");
+        assert!(UnixStream::connect(&path).is_ok());
+
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+}
+
 /// 追加一行到 ~/.smelt/daemon.log。只给「守护无声死亡」的几条路径留痕用——
 /// 守护被 SIGKILL（例：装新版时用 cp 覆盖了已签名二进制，upgrade 的 exec 会被
 /// macOS 内核直接杀掉，无输出无崩溃报告）或静默 return 时，这份日志是唯一线索：
@@ -1560,13 +1642,10 @@ fn main() {
                 // 一个泄漏的 fd 留在本进程里，无害但也无法优雅关闭——resume_handoff
                 // 失败通常发生在 JSON 都解析不出来的极端情况，代价可接受），把 socket
                 // 文件净空重 bind，保证守护本身不能倒。
-                if !came_from_handoff && UnixStream::connect(&path).is_ok() {
-                    return;
-                }
-                let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(handoff_path()); // 清掉可能残留的上次交接文件
-                let listener = match UnixListener::bind(&path) {
-                    Ok(l) => l,
+                let listener = match bind_single_instance(&path, !came_from_handoff) {
+                    Ok(Some(l)) => l,
+                    Ok(None) => return,
                     Err(e) => {
                         // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
                         // 死因（排障时被坑过——必须留痕）。
