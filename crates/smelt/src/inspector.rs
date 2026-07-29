@@ -696,15 +696,19 @@ impl Workspace {
                                             .child(sk.name.clone()),
                                     )
                                     .when(!sk.managed, |d| {
+                                        // 非托管 skill：不用笼统的「旧」，直接
+                                        // 标出它实际躺在哪个 agent 的目录里，
+                                        // 免得用户看着一堆卡片分不清归属。
                                         d.child(
                                             div()
                                                 .flex_shrink_0()
                                                 .px_1()
                                                 .rounded_xs()
+                                                .border_1()
+                                                .border_color(rgb(ui_theme::border_dim()))
                                                 .text_size(px(9.))
                                                 .text_color(rgb(ui_theme::text_faint()))
-                                                .bg(rgb(ui_theme::bg_elev()))
-                                                .child("旧"),
+                                                .child(sk.source_agent.unwrap_or("旧")),
                                         )
                                     })
                                     .child(hover_bar),
