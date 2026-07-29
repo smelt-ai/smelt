@@ -110,6 +110,8 @@ fn fallback_snapshot(reason: &str) -> AcpSnapshot {
         plan: None,
         model: None,
         config_options: Vec::new(),
+        turn_started_at_ms: None,
+        last_turn_duration_ms: None,
         completed_unread: false,
         // 连接终态（连不上 smeltd / 握手失败 / 断线）值得存盘，跟旧版 Fatal
         // 事件一样不在"跳过持久化"的名单里。

@@ -598,6 +598,9 @@ fn wait_response(
 
 fn codex_commands() -> Vec<(String, String)> {
     vec![
+        ("compact".into(), "压缩当前线程上下文".into()),
+        ("review".into(), "审查工作区未提交的改动".into()),
+        ("plan".into(), "切换计划模式：/plan [任务]".into()),
         ("status".into(), "查看会话配置与线程信息".into()),
         ("diff".into(), "查看工作区当前改动".into()),
         ("init".into(), "创建项目 AGENTS.md 指引".into()),
@@ -2093,18 +2096,16 @@ mod tests {
     }
 
     #[test]
-    fn message_flow_commands_are_complete_without_duplicating_quick_actions() {
+    fn command_list_includes_all_supported_commands() {
         let commands = codex_commands();
         let names: Vec<&str> = commands.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(
             names,
             [
-                "status", "diff", "init", "rename", "goal", "mcp", "skills", "apps"
+                "compact", "review", "plan", "status", "diff", "init", "rename", "goal", "mcp",
+                "skills", "apps"
             ]
         );
-        assert!(!names.contains(&"compact"));
-        assert!(!names.contains(&"review"));
-        assert!(!names.contains(&"plan"));
     }
 
     #[test]
