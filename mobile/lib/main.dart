@@ -41,6 +41,7 @@ class _HomePageState extends State<HomePage> {
   List<SessionSummary> _sessions = [];
   late final StreamSubscription<WsState> _stateSubscription;
   late final StreamSubscription<List<SessionSummary>> _sessionsSubscription;
+  late final StreamSubscription<LifecycleAttention> _attentionSubscription;
   late final StreamSubscription<String> _errorSubscription;
 
   // 临时配对信息（后续改为 QR 扫描）
@@ -59,6 +60,27 @@ class _HomePageState extends State<HomePage> {
     _sessionsSubscription = gatewayService.sessionsStream.listen((sessions) {
       if (!mounted) return;
       setState(() => _sessions = sessions);
+    });
+    _attentionSubscription = gatewayService.attentionStream.listen((item) {
+      if (!mounted) return;
+      final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
+      if (isCurrent && !item.requiresAction) return;
+      final session = _sessions
+          .where((candidate) => candidate.id == item.sessionId)
+          .firstOrNull;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('${item.title}: ${item.message}'),
+          action: session != null && !isCurrent
+              ? SnackBarAction(
+                  label: 'Open',
+                  onPressed: () => _openSession(session),
+                )
+              : null,
+        ),
+      );
     });
     _errorSubscription = gatewayService.errorStream.listen((error) {
       if (!mounted) return;
@@ -188,8 +210,15 @@ class _HomePageState extends State<HomePage> {
               contentPadding: const EdgeInsets.only(left: 32, right: 16),
               leading: _getAgentIcon(session.agent),
               title: Text(_agentLabel(session.agent)),
-              subtitle: Text(showTitle ? sessionTitle : session.phase),
-              trailing: _getPhaseChip(session.phase),
+              subtitle: Text(
+                session.detail?.trim().isNotEmpty == true
+                    ? session.detail!
+                    : (showTitle ? sessionTitle : session.phase),
+              ),
+              trailing: Badge(
+                isLabelVisible: session.unread,
+                child: _getStatusChip(session.status),
+              ),
               onTap: () => _openSession(session),
             );
           }).toList(),
@@ -240,12 +269,13 @@ class _HomePageState extends State<HomePage> {
     return CircleAvatar(backgroundColor: color, child: Text(letter));
   }
 
-  Widget _getPhaseChip(String phase) {
-    final (color, label) = switch (phase.toLowerCase()) {
-      'running' => (Colors.green, 'Running'),
-      'idle' => (Colors.grey, 'Idle'),
-      'ended' => (Colors.red, 'Ended'),
-      _ => (Colors.grey, phase),
+  Widget _getStatusChip(String status) {
+    final (color, label) = switch (status.toLowerCase()) {
+      'waiting_approval' => (Colors.red, 'Approve'),
+      'needs_attention' => (Colors.orange, 'Attention'),
+      'running' => (Colors.blue, 'Running'),
+      'done' => (Colors.green, 'Done'),
+      _ => (Colors.grey, 'Idle'),
     };
     return Chip(
       label: Text(label, style: const TextStyle(fontSize: 12)),
@@ -274,6 +304,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _openSession(SessionSummary session) {
+    gatewayService.markRead(session.id);
     Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => SessionPage(session: session)),
@@ -284,6 +315,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _stateSubscription.cancel();
     _sessionsSubscription.cancel();
+    _attentionSubscription.cancel();
     _errorSubscription.cancel();
     _endpointController.dispose();
     _tokenController.dispose();

@@ -5,22 +5,56 @@ import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/acp_snapshot.dart';
 
+class LifecycleAttention {
+  final String sessionId;
+  final String title;
+  final String message;
+  final String kind;
+
+  const LifecycleAttention({
+    required this.sessionId,
+    required this.title,
+    required this.message,
+    required this.kind,
+  });
+
+  bool get requiresAction =>
+      kind == 'approval' || kind == 'input' || kind == 'failure';
+
+  factory LifecycleAttention.fromJson(Map<String, dynamic> json) {
+    return LifecycleAttention(
+      sessionId: json['sessionId'] as String? ?? '',
+      title: json['title'] as String? ?? '',
+      message: json['message'] as String? ?? '',
+      kind: json['kind'] as String? ?? 'notice',
+    );
+  }
+}
+
 /// 会话摘要（列表用）
 class SessionSummary {
   final String id;
   final String title;
   final String phase;
+  final String status;
   final String agent;
   final String? cwd;
   final int updatedAt;
+  final String? detail;
+  final bool unread;
+  final LifecycleAttention? attention;
 
   const SessionSummary({
     required this.id,
     required this.title,
     required this.phase,
+    this.status = 'idle',
     required this.agent,
     this.cwd,
     this.updatedAt = 0,
+    this.detail,
+    this.unread = false,
+    this.attention,
   });
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) {
@@ -28,9 +62,17 @@ class SessionSummary {
       id: json['id'] as String? ?? '',
       title: json['title'] as String? ?? '',
       phase: json['phase'] as String? ?? 'idle',
+      status: json['status'] as String? ?? 'idle',
       agent: json['agent'] as String? ?? 'other',
       cwd: json['cwd'] as String?,
       updatedAt: json['updated_at'] as int? ?? 0,
+      detail: json['detail'] as String?,
+      unread: json['unread'] as bool? ?? false,
+      attention: json['attention'] is Map<String, dynamic>
+          ? LifecycleAttention.fromJson(
+              json['attention'] as Map<String, dynamic>,
+            )
+          : null,
     );
   }
 }
@@ -54,6 +96,7 @@ class GatewayService {
   final _sessionsController =
       StreamController<List<SessionSummary>>.broadcast();
   final _snapshotController = StreamController<AcpSnapshot>.broadcast();
+  final _attentionController = StreamController<LifecycleAttention>.broadcast();
   final _errorController = StreamController<String>.broadcast();
 
   String? _subscribedSessionId;
@@ -66,6 +109,9 @@ class GatewayService {
 
   /// 当前订阅会话的快照流
   Stream<AcpSnapshot> get snapshotStream => _snapshotController.stream;
+
+  /// smeltd 统一生命周期产生的关注事件。
+  Stream<LifecycleAttention> get attentionStream => _attentionController.stream;
 
   /// 错误流
   Stream<String> get errorStream => _errorController.stream;
@@ -232,6 +278,13 @@ class GatewayService {
     });
   }
 
+  void markRead(String sessionId) {
+    _send({
+      'method': 'markRead',
+      'params': {'sessionId': sessionId},
+    });
+  }
+
   void _send(Map<String, dynamic> message) {
     if (_channel != null && _state == WsState.connected) {
       _channel!.sink.add(jsonEncode(message));
@@ -277,6 +330,12 @@ class GatewayService {
           // 旧格式兼容
           final snapshot = AcpSnapshot.fromJson(json);
           _snapshotController.add(snapshot);
+
+        case 'attention':
+          final item = json['item'];
+          if (item is Map<String, dynamic>) {
+            _attentionController.add(LifecycleAttention.fromJson(item));
+          }
 
         case 'error':
           _errorController.add(json['error'] as String? ?? 'Gateway 请求失败');
@@ -324,6 +383,7 @@ class GatewayService {
     _stateController.close();
     _sessionsController.close();
     _snapshotController.close();
+    _attentionController.close();
     _errorController.close();
   }
 }

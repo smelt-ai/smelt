@@ -8,7 +8,8 @@ use crate::daemon_state::{DaemonPhase, DaemonSessionState};
 
 const DELIVERY_DEDUP: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AttentionKind {
     Approval,
     Input,
@@ -46,7 +47,8 @@ impl AttentionKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AttentionItem {
     pub session_id: String,
     pub title: String,
