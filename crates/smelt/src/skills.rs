@@ -849,25 +849,44 @@ impl crate::Workspace {
         cx.notify();
     }
 
-    /// 打开「管理链接」弹窗：托管 skill 预勾当前已链接的 agent；非托管
-    /// skill 默认全勾（含它原本所在的那个），供用户确认前再手动去掉。
+    /// 打开「应用到其他工具」弹窗——只给非托管（legacy）skill 用：收编 +
+    /// 删原目录是有点破坏性的一次性操作（且必须强制保留原 agent），值得让
+    /// 用户勾完再点确定。默认全勾（含它原本所在的那个）。
+    ///
+    /// 托管 skill 不走这个弹窗——见 `toggle_managed_skill_link`：链接/取消
+    /// 链接只是加减一个 symlink，随点随撤销，不需要弹窗二次确认。
     pub(crate) fn open_skill_link_modal(
         &mut self,
         entry: &SkillEntry,
         cx: &mut gpui::Context<Self>,
     ) {
-        let selected = if entry.managed {
-            AGENT_TARGETS
-                .iter()
-                .map(|t| entry.linked_agents.contains(&t.label))
-                .collect()
-        } else {
-            vec![true; AGENT_TARGETS.len()]
-        };
         self.skill_link_modal = Some(SkillLinkModalState {
             entry: entry.clone(),
-            selected,
+            selected: vec![true; AGENT_TARGETS.len()],
         });
+        cx.notify();
+    }
+
+    /// 点一下托管 skill 的某个 agent 链接小标签，直接就地加/减那一个 symlink，
+    /// 不弹窗——这是纯粹可逆的操作（撤销只需再点一下）。
+    pub(crate) fn toggle_managed_skill_link(
+        &mut self,
+        entry: &SkillEntry,
+        label: &'static str,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if !entry.managed {
+            return;
+        }
+        let Some(t) = AGENT_TARGETS.iter().find(|t| t.label == label) else {
+            return;
+        };
+        if entry.linked_agents.contains(&label) {
+            unlink_one_agent(&entry.base, entry.project_scope, &entry.name, t);
+        } else {
+            link_one_agent(&entry.base, entry.project_scope, &entry.name, &entry.dir, t);
+        }
+        self.skills_cache = None;
         cx.notify();
     }
 
@@ -921,7 +940,6 @@ impl crate::Workspace {
 
     /// 「管理链接」弹窗：一个 skill + 每个已知 agent 一个勾选框。
     pub(crate) fn render_skill_link_modal(&self, cx: &mut gpui::Context<Self>) -> gpui::Div {
-        use gpui::prelude::FluentBuilder;
         use gpui::*;
         use gpui_component::checkbox::Checkbox;
         use gpui_component::*;
@@ -952,28 +970,22 @@ impl crate::Workspace {
         for (i, t) in AGENT_TARGETS.iter().enumerate() {
             let checked = modal.selected.get(i).copied().unwrap_or(false);
             let locked = !modal.entry.managed && modal.entry.source_agent == Some(t.label);
-            content = content.child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Checkbox::new(("skill-link-agent", i))
-                            .checked(checked)
-                            .disabled(locked)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_skill_link_agent(i, cx)
-                            })),
-                    )
-                    .child(div().text_sm().text_color(fg).child(t.label))
-                    .when(locked, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("（当前所在位置，不能取消）"),
-                        )
-                    }),
-            );
+            // 之前把 agent 名字文字放在 Checkbox 外面的兄弟 div 里，导致点文字没反应，
+            // 只有点中那个小方框才算数——改用 `.label()` 让整行（方框+文字）都能点。
+            let mut checkbox = Checkbox::new(("skill-link-agent", i))
+                .checked(checked)
+                .disabled(locked)
+                .label(t.label)
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_skill_link_agent(i, cx)));
+            if locked {
+                checkbox = checkbox.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("（当前所在位置，不能取消）"),
+                );
+            }
+            content = content.child(checkbox);
         }
 
         content = content.child(
@@ -1474,7 +1486,8 @@ mod tests {
 
     #[test]
     fn adopt_skill_selected_only_links_chosen_agents_but_keeps_origin() {
-        let tmp = std::env::temp_dir().join(format!("smelt-skill-adopt-sel-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("smelt-skill-adopt-sel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let legacy_dir = tmp.join(".grok/skills/help");
         std::fs::create_dir_all(&legacy_dir).unwrap();
@@ -1498,14 +1511,18 @@ mod tests {
         let claude_link = tmp.join(".claude/skills/help");
         let codex_link = tmp.join(".codex/skills/help");
         let copilot_link = tmp.join(".github/skills/help");
-        assert!(std::fs::symlink_metadata(&grok_link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(std::fs::symlink_metadata(&claude_link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&grok_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::symlink_metadata(&claude_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(!codex_link.exists());
         assert!(!copilot_link.exists());
 
@@ -1537,20 +1554,24 @@ mod tests {
         // 收窄到只有 Claude。
         super::set_agent_links(&entry, &["Claude"]).unwrap();
         assert!(dir.exists());
-        assert!(std::fs::symlink_metadata(tmp.join(".claude/skills/commit-work"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(tmp.join(".claude/skills/commit-work"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(!tmp.join(".codex/skills/commit-work").exists());
         assert!(!tmp.join(".github/skills/commit-work").exists());
         assert!(!tmp.join(".grok/skills/commit-work").exists());
 
         // 再加回 Codex。
         super::set_agent_links(&entry, &["Claude", "Codex"]).unwrap();
-        assert!(std::fs::symlink_metadata(tmp.join(".codex/skills/commit-work"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(tmp.join(".codex/skills/commit-work"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
