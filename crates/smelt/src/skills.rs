@@ -224,7 +224,8 @@ fn linked_targets(
     name: &str,
     canonical_dir: &Path,
 ) -> Vec<&'static str> {
-    let canon = std::fs::canonicalize(canonical_dir).unwrap_or_else(|_| canonical_dir.to_path_buf());
+    let canon =
+        std::fs::canonicalize(canonical_dir).unwrap_or_else(|_| canonical_dir.to_path_buf());
     AGENT_TARGETS
         .iter()
         .filter(|t| {
@@ -285,47 +286,84 @@ fn quote_scalar(s: &str) -> String {
     )
 }
 
-/// 把 `<base>/.smelt/skills/<name>` 链接到各已知 agent 的 skills 目录下。
-/// 尽力而为：某个 agent 目录下已经有非 symlink 的同名 legacy skill，就跳过
-/// 那一个（打印到 stderr），不影响其它 agent 和 `.smelt` 里真身已经建好这个
-/// 事实——不能因为一个 agent 有历史冲突就让整个创建失败。
-fn link_to_agents(base: &Path, project_scope: bool, name: &str, target: &Path) {
-    for t in AGENT_TARGETS {
-        let root = base.join(t.rel_dir(project_scope));
-        if std::fs::create_dir_all(&root).is_err() {
-            continue;
+/// 把 `<base>/.smelt/skills/<name>` 链接到某一个 agent 目录下。尽力而为：
+/// 那个 agent 目录下已经有非 symlink 的同名 legacy skill，就跳过（打印到
+/// stderr），不让单个 agent 的历史冲突挡住其它 agent。
+fn link_one_agent(
+    base: &Path,
+    project_scope: bool,
+    name: &str,
+    target: &Path,
+    agent: &AgentTarget,
+) {
+    let root = base.join(agent.rel_dir(project_scope));
+    if std::fs::create_dir_all(&root).is_err() {
+        return;
+    }
+    let link = root.join(name);
+    match std::fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&link);
         }
-        let link = root.join(name);
-        match std::fs::symlink_metadata(&link) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                let _ = std::fs::remove_file(&link);
-            }
-            Ok(_) => {
-                eprintln!(
-                    "[skills] {} 已存在非托管的同名 skill，跳过链接",
-                    link.display()
-                );
-                continue;
-            }
-            Err(_) => {}
+        Ok(_) => {
+            eprintln!(
+                "[skills] {} 已存在非托管的同名 skill，跳过链接",
+                link.display()
+            );
+            return;
         }
-        if let Err(e) = std::os::unix::fs::symlink(target, &link) {
-            eprintln!("[skills] symlink {} -> {} 失败：{e}", link.display(), target.display());
+        Err(_) => {}
+    }
+    if let Err(e) = std::os::unix::fs::symlink(target, &link) {
+        eprintln!(
+            "[skills] symlink {} -> {} 失败：{e}",
+            link.display(),
+            target.display()
+        );
+    }
+}
+
+/// 从某一个 agent 目录里移除 `name` 对应的 symlink。只删 symlink，遇到非
+/// symlink（legacy 撞了同名）绝不动。
+fn unlink_one_agent(base: &Path, project_scope: bool, name: &str, agent: &AgentTarget) {
+    let link = base.join(agent.rel_dir(project_scope)).join(name);
+    if let Ok(meta) = std::fs::symlink_metadata(&link) {
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&link);
         }
     }
 }
 
-/// 从各已知 agent 的 skills 目录里移除 `name` 对应的 symlink（改名/删除托管
-/// skill 前调用）。只删 symlink，遇到非 symlink（legacy 撞了同名）绝不动。
+/// 把 `<base>/.smelt/skills/<name>` 链接到全部已知 agent 的 skills 目录下。
+fn link_to_agents(base: &Path, project_scope: bool, name: &str, target: &Path) {
+    for t in AGENT_TARGETS {
+        link_one_agent(base, project_scope, name, target, t);
+    }
+}
+
+/// 从全部已知 agent 的 skills 目录里移除 `name` 对应的 symlink（改名/删除
+/// 托管 skill 前调用）。
 fn unlink_from_agents(base: &Path, project_scope: bool, name: &str) {
     for t in AGENT_TARGETS {
-        let link = base.join(t.rel_dir(project_scope)).join(name);
-        if let Ok(meta) = std::fs::symlink_metadata(&link) {
-            if meta.file_type().is_symlink() {
-                let _ = std::fs::remove_file(&link);
-            }
+        unlink_one_agent(base, project_scope, name, t);
+    }
+}
+
+/// 按用户勾选的 agent 列表调整一个**托管** skill 的链接：勾了就确保有
+/// symlink，没勾就摘掉。用于「管理链接」弹窗的确认动作——用户想让一个已经
+/// 只同步到 Claude 的 skill 也覆盖到 Codex/Copilot/Grok，或者反过来收窄。
+pub fn set_agent_links(entry: &SkillEntry, selected_labels: &[&'static str]) -> Result<(), String> {
+    if !entry.managed {
+        return Err("只有 .smelt 托管的 skill 才能这样调整链接".into());
+    }
+    for t in AGENT_TARGETS {
+        if selected_labels.contains(&t.label) {
+            link_one_agent(&entry.base, entry.project_scope, &entry.name, &entry.dir, t);
+        } else {
+            unlink_one_agent(&entry.base, entry.project_scope, &entry.name, t);
         }
     }
+    Ok(())
 }
 
 /// 创建一个新 skill：真身写进 `.smelt/skills/<name>`，再同步链接到各已知
@@ -352,7 +390,8 @@ pub fn create_skill(
         quote_scalar(description),
         name
     );
-    std::fs::write(dir.join("SKILL.md"), content).map_err(|e| format!("写入 SKILL.md 失败：{e}"))?;
+    std::fs::write(dir.join("SKILL.md"), content)
+        .map_err(|e| format!("写入 SKILL.md 失败：{e}"))?;
     link_to_agents(&base, project_scope, name, &dir);
     Ok(dir)
 }
@@ -386,6 +425,53 @@ pub fn import_skill(
     copy_dir_recursive(source_dir, &dir).map_err(|e| format!("复制目录失败：{e}"))?;
     link_to_agents(&base, project_scope, &name, &dir);
     Ok(dir)
+}
+
+/// 把一个非托管（legacy）skill「收编」进 `.smelt` 统一管理：把它的内容原样
+/// 复制进 `.smelt/skills/<name>`，删掉它原来那份实体目录，再按 `selected_labels`
+/// 同步链接到勾选的 agent。这样用户可以把一个只有 Claude 能用的 skill 挑着
+/// 覆盖到 Codex/Copilot/Grok，不用手动复制。
+///
+/// 只对非托管 skill 调用；`entry.dir` 此时是真实目录（不是 symlink），复制
+/// 完直接删掉即可，不用像 `unlink_from_agents` 那样只敢删 symlink。调用方
+/// （UI 弹窗）应该强制勾上 `entry.source_agent` 对应的那个，不然这个 skill
+/// 会从它原本所在的位置消失。
+pub fn adopt_skill_selected(
+    entry: &SkillEntry,
+    selected_labels: &[&'static str],
+) -> Result<PathBuf, String> {
+    if entry.managed {
+        return Err("这个 skill 已经在 .smelt 统一管理下了".into());
+    }
+    let canonical_dir = entry.base.join(".smelt/skills").join(&entry.name);
+    if canonical_dir.exists() {
+        return Err(format!(
+            "已存在同名的托管 skill：{}",
+            canonical_dir.display()
+        ));
+    }
+    copy_dir_recursive(&entry.dir, &canonical_dir).map_err(|e| format!("复制目录失败：{e}"))?;
+    std::fs::remove_dir_all(&entry.dir).map_err(|e| format!("删除原目录失败：{e}"))?;
+    for t in AGENT_TARGETS {
+        if selected_labels.contains(&t.label) {
+            link_one_agent(
+                &entry.base,
+                entry.project_scope,
+                &entry.name,
+                &canonical_dir,
+                t,
+            );
+        }
+    }
+    Ok(canonical_dir)
+}
+
+/// 收编到全部已知 agent——`adopt_skill_selected` 勾全部 label 的简写，测试
+/// 和「不需要挑」的调用点用它更省事。
+#[cfg(test)]
+pub fn adopt_skill(entry: &SkillEntry) -> Result<PathBuf, String> {
+    let labels: Vec<&'static str> = AGENT_TARGETS.iter().map(|t| t.label).collect();
+    adopt_skill_selected(entry, &labels)
 }
 
 /// 递归复制目录（`std::fs` 没有内建的目录复制）。跳过 symlink 本身（避免把
@@ -644,29 +730,6 @@ impl crate::Workspace {
         cx.notify();
     }
 
-    /// 打开「新建 skill」弹窗。`default_project_scope`：有活动项目就默认建项目级，
-    /// 否则只能建用户级。
-    pub(crate) fn open_create_skill_modal(
-        &mut self,
-        default_project_scope: bool,
-        window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        use gpui_component::input::InputState;
-        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("my-skill-name"));
-        let desc_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("触发条件与用途，一句话说清楚"));
-        name_input.update(cx, |s, cx| s.focus(window, cx));
-        self.skill_modal = Some(SkillModalState {
-            editing: None,
-            project_scope: default_project_scope,
-            name_input,
-            desc_input,
-            error: None,
-        });
-        cx.notify();
-    }
-
     /// 打开「编辑 skill」弹窗，预填现有的名字/描述。
     pub(crate) fn open_edit_skill_modal(
         &mut self,
@@ -675,8 +738,7 @@ impl crate::Workspace {
         cx: &mut gpui::Context<Self>,
     ) {
         use gpui_component::input::InputState;
-        let name_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(entry.name.clone()));
+        let name_input = cx.new(|cx| InputState::new(window, cx).default_value(entry.name.clone()));
         let desc_input =
             cx.new(|cx| InputState::new(window, cx).default_value(entry.description.clone()));
         name_input.update(cx, |s, cx| s.focus(window, cx));
@@ -762,7 +824,11 @@ impl crate::Workspace {
     }
 
     /// 弹出「删除 skill」二次确认。
-    pub(crate) fn request_delete_skill(&mut self, entry: &SkillEntry, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn request_delete_skill(
+        &mut self,
+        entry: &SkillEntry,
+        cx: &mut gpui::Context<Self>,
+    ) {
         self.skill_delete_target = Some(entry.clone());
         cx.notify();
     }
@@ -781,6 +847,159 @@ impl crate::Workspace {
         let _ = delete_skill(&target);
         self.skills_cache = None;
         cx.notify();
+    }
+
+    /// 打开「管理链接」弹窗：托管 skill 预勾当前已链接的 agent；非托管
+    /// skill 默认全勾（含它原本所在的那个），供用户确认前再手动去掉。
+    pub(crate) fn open_skill_link_modal(
+        &mut self,
+        entry: &SkillEntry,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let selected = if entry.managed {
+            AGENT_TARGETS
+                .iter()
+                .map(|t| entry.linked_agents.contains(&t.label))
+                .collect()
+        } else {
+            vec![true; AGENT_TARGETS.len()]
+        };
+        self.skill_link_modal = Some(SkillLinkModalState {
+            entry: entry.clone(),
+            selected,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_skill_link_modal(&mut self, cx: &mut gpui::Context<Self>) {
+        self.skill_link_modal = None;
+        cx.notify();
+    }
+
+    /// 勾选框切换：非托管 skill 时，它原本所在的那个 agent 不让取消勾选——
+    /// 不然收编完这个 skill 就从它原来待的地方消失了，用户多半不是故意的。
+    pub(crate) fn toggle_skill_link_agent(&mut self, idx: usize, cx: &mut gpui::Context<Self>) {
+        let Some(modal) = self.skill_link_modal.as_mut() else {
+            return;
+        };
+        let Some(t) = AGENT_TARGETS.get(idx) else {
+            return;
+        };
+        if !modal.entry.managed && modal.entry.source_agent == Some(t.label) {
+            return;
+        }
+        if let Some(v) = modal.selected.get_mut(idx) {
+            *v = !*v;
+            cx.notify();
+        }
+    }
+
+    /// 确认「管理链接」弹窗：托管 skill 按勾选结果增删 symlink；非托管
+    /// skill 按勾选结果收编进 `.smelt` 并链接。失败只打日志，跟其它「尽力
+    /// 而为」的操作一致。
+    pub(crate) fn confirm_skill_link_modal(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(modal) = self.skill_link_modal.take() else {
+            return;
+        };
+        let labels: Vec<&'static str> = AGENT_TARGETS
+            .iter()
+            .zip(modal.selected.iter())
+            .filter(|(_, sel)| **sel)
+            .map(|(t, _)| t.label)
+            .collect();
+        let result = if modal.entry.managed {
+            set_agent_links(&modal.entry, &labels)
+        } else {
+            adopt_skill_selected(&modal.entry, &labels).map(|_| ())
+        };
+        if let Err(e) = result {
+            eprintln!("[skills] {} 调整链接失败：{e}", modal.entry.name);
+        }
+        self.skills_cache = None;
+        cx.notify();
+    }
+
+    /// 「管理链接」弹窗：一个 skill + 每个已知 agent 一个勾选框。
+    pub(crate) fn render_skill_link_modal(&self, cx: &mut gpui::Context<Self>) -> gpui::Div {
+        use gpui::prelude::FluentBuilder;
+        use gpui::*;
+        use gpui_component::checkbox::Checkbox;
+        use gpui_component::*;
+        let Some(modal) = self.skill_link_modal.as_ref() else {
+            return div();
+        };
+        let (fg, muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
+            crate::Workspace::modal_accent_colors(false);
+        let title = if modal.entry.managed {
+            "管理链接"
+        } else {
+            "应用到其他工具"
+        };
+
+        let mut content = v_flex()
+            .child(div().font_bold().text_color(fg).text_lg().child(title))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(format!("勾选要同步「{}」的 agent：", modal.entry.name)),
+            );
+
+        for (i, t) in AGENT_TARGETS.iter().enumerate() {
+            let checked = modal.selected.get(i).copied().unwrap_or(false);
+            let locked = !modal.entry.managed && modal.entry.source_agent == Some(t.label);
+            content = content.child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Checkbox::new(("skill-link-agent", i))
+                            .checked(checked)
+                            .disabled(locked)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_skill_link_agent(i, cx)
+                            })),
+                    )
+                    .child(div().text_sm().text_color(fg).child(t.label))
+                    .when(locked, |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("（当前所在位置，不能取消）"),
+                        )
+                    }),
+            );
+        }
+
+        content = content.child(
+            h_flex()
+                .justify_end()
+                .gap_2()
+                .child(crate::Workspace::modal_button(
+                    "cancel-skill-link",
+                    "取消",
+                    neutral_bg,
+                    neutral_hover,
+                    fg,
+                    |this, _, _, cx| this.cancel_skill_link_modal(cx),
+                    cx,
+                ))
+                .child(crate::Workspace::modal_button(
+                    "confirm-skill-link",
+                    "确定",
+                    tint,
+                    hover,
+                    accent_text,
+                    |this, _, _, cx| this.confirm_skill_link_modal(cx),
+                    cx,
+                )),
+        );
+        crate::Workspace::modal_shell(360., false, content, cx)
     }
 
     /// 「新建/编辑 skill」弹窗：与 render_rename_session 同款视觉，正文换成
@@ -808,7 +1027,11 @@ impl crate::Workspace {
                     .font_bold()
                     .text_color(fg)
                     .text_lg()
-                    .child(if is_edit { "编辑 skill" } else { "新建 skill" }),
+                    .child(if is_edit {
+                        "编辑 skill"
+                    } else {
+                        "新建 skill"
+                    }),
             )
             .child(
                 div()
@@ -817,7 +1040,12 @@ impl crate::Workspace {
                     .child("名称（目录名与调用名，字母/数字/连字符/下划线）"),
             )
             .child(Input::new(&modal.name_input))
-            .child(div().text_xs().text_color(muted).child("描述（何时该用它）"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("描述（何时该用它）"),
+            )
             .child(Input::new(&modal.desc_input));
 
         if let Some(entry) = modal.editing.as_ref().filter(|e| !e.managed) {
@@ -847,9 +1075,7 @@ impl crate::Workspace {
                             .rounded_md()
                             .text_xs()
                             .cursor_pointer()
-                            .when(!project_scope, |d| {
-                                d.bg(tint).text_color(accent_text)
-                            })
+                            .when(!project_scope, |d| d.bg(tint).text_color(accent_text))
                             .when(project_scope, |d| d.text_color(muted))
                             .child("用户级")
                             .on_click(move |_ev, _window, cx: &mut App| {
@@ -950,14 +1176,12 @@ impl crate::Workspace {
                     .text_lg()
                     .child("确定删除这个 skill 吗？"),
             )
-            .child(
-                div().text_sm().text_color(muted).child(format!(
-                    "将永久删除{}「{}」，位于 {}，此操作不可撤销。",
-                    scope,
-                    target.name,
-                    target.dir.display()
-                )),
-            )
+            .child(div().text_sm().text_color(muted).child(format!(
+                "将永久删除{}「{}」，位于 {}，此操作不可撤销。",
+                scope,
+                target.name,
+                target.dir.display()
+            )))
             .child(
                 h_flex()
                     .justify_end()
@@ -993,6 +1217,15 @@ pub(crate) struct SkillModalState {
     pub name_input: gpui::Entity<gpui_component::input::InputState>,
     pub desc_input: gpui::Entity<gpui_component::input::InputState>,
     pub error: Option<String>,
+}
+
+/// 「管理 / 应用到其他工具」弹窗状态：一个 skill + 每个 `AGENT_TARGETS` 对应
+/// 一个勾选框（下标一一对应）。托管 skill 用它调整已有链接；非托管 skill
+/// 用它选要收编进哪些 agent（原本所在的那个会被强制勾上，不然收编完这个
+/// skill 就从它原来的位置消失了）。
+pub(crate) struct SkillLinkModalState {
+    pub entry: SkillEntry,
+    pub selected: Vec<bool>,
 }
 
 #[cfg(test)]
@@ -1049,7 +1282,12 @@ mod tests {
         assert!(super::create_skill(Some(&cwd), true, "my-skill", "x").is_err());
 
         // 应该同步链接到两个已知 agent 目录。
-        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
+        for agent in [
+            ".claude/skills",
+            ".codex/skills",
+            ".github/skills",
+            ".grok/skills",
+        ] {
             let link = tmp.join(agent).join("my-skill");
             let meta = std::fs::symlink_metadata(&link).unwrap();
             assert!(meta.file_type().is_symlink());
@@ -1070,13 +1308,20 @@ mod tests {
         assert!(new_dir.join("SKILL.md").exists());
         assert!(!dir.exists());
         // 改名后旧 symlink 应该消失，新 symlink 应该指向新目录。
-        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
+        for agent in [
+            ".claude/skills",
+            ".codex/skills",
+            ".github/skills",
+            ".grok/skills",
+        ] {
             assert!(!tmp.join(agent).join("my-skill").exists());
             let link = tmp.join(agent).join("renamed-skill");
-            assert!(std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink());
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
         }
         let scanned = super::scan_skills(Some(&cwd));
         let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
@@ -1087,7 +1332,12 @@ mod tests {
         let entry = scanned.into_iter().next().unwrap();
         super::delete_skill(&entry).unwrap();
         assert!(!new_dir.exists());
-        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
+        for agent in [
+            ".claude/skills",
+            ".codex/skills",
+            ".github/skills",
+            ".grok/skills",
+        ] {
             assert!(!tmp.join(agent).join("renamed-skill").exists());
         }
 
@@ -1141,18 +1391,82 @@ mod tests {
         assert!(dir.join("SKILL.md").exists());
         assert!(dir.join("references/notes.md").exists());
 
-        for agent in [".claude/skills", ".codex/skills", ".github/skills", ".grok/skills"] {
+        for agent in [
+            ".claude/skills",
+            ".codex/skills",
+            ".github/skills",
+            ".grok/skills",
+        ] {
             let link = project.join(agent).join("imported-skill");
-            assert!(std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink());
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
         }
 
         let scanned = super::scan_skills(Some(&cwd));
         let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
         assert_eq!(scanned.len(), 1);
         assert_eq!(scanned[0].name, "imported-skill");
+        assert_eq!(scanned[0].linked_agents.len(), super::AGENT_TARGETS.len());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn adopt_skill_promotes_legacy_into_smelt_and_links_all_agents() {
+        let tmp = std::env::temp_dir().join(format!("smelt-skill-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let legacy_dir = tmp.join(".claude/skills/old-skill");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(
+            legacy_dir.join("SKILL.md"),
+            "---\nname: old-skill\ndescription: 手工建的旧 skill\n---\n\n# body\n",
+        )
+        .unwrap();
+        std::fs::write(legacy_dir.join("notes.txt"), "extra file").unwrap();
+
+        let cwd = tmp.to_string_lossy().into_owned();
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        assert_eq!(scanned.len(), 1);
+        let entry = scanned.into_iter().next().unwrap();
+        assert!(!entry.managed);
+
+        let canonical_dir = super::adopt_skill(&entry).unwrap();
+        assert!(canonical_dir.ends_with(".smelt/skills/old-skill"));
+        assert!(canonical_dir.join("SKILL.md").exists());
+        assert!(canonical_dir.join("notes.txt").exists());
+        // 原来的实体目录应该被删掉了（下面会验证它变成了 symlink）。
+        assert!(
+            !legacy_dir.is_dir()
+                || std::fs::symlink_metadata(&legacy_dir)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+        );
+
+        for agent in [
+            ".claude/skills",
+            ".codex/skills",
+            ".github/skills",
+            ".grok/skills",
+        ] {
+            let link = tmp.join(agent).join("old-skill");
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        assert_eq!(scanned.len(), 1);
+        assert!(scanned[0].managed);
         assert_eq!(scanned[0].linked_agents.len(), super::AGENT_TARGETS.len());
 
         let _ = std::fs::remove_dir_all(&tmp);

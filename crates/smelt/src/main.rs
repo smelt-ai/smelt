@@ -1499,6 +1499,8 @@ struct Workspace {
     skill_modal: Option<skills::SkillModalState>,
     /// 「删除 skill」二次确认目标；`None` = 未在删。
     skill_delete_target: Option<skills::SkillEntry>,
+    /// 「管理链接 / 应用到其他工具」弹窗；`None` = 未打开。
+    skill_link_modal: Option<skills::SkillLinkModalState>,
     /// 通知面板是否打开（标题栏铃铛切换）。
     notifications_open: bool,
     /// 命令面板（Cmd+K）；None 表示未打开。搜索/导航/确认由 ListState 负责。
@@ -1863,6 +1865,7 @@ impl Workspace {
             skills_inflight: false,
             skill_modal: None,
             skill_delete_target: None,
+            skill_link_modal: None,
             notifications_open: false,
             palette: None,
             _palette_sub: None,
@@ -5971,6 +5974,12 @@ impl Render for Workspace {
                 self.skill_delete_target
                     .is_some()
                     .then(|| self.render_delete_skill_confirm(cx)),
+            )
+            // 管理 skill 在各 agent 下的链接。
+            .children(
+                self.skill_link_modal
+                    .is_some()
+                    .then(|| self.render_skill_link_modal(cx)),
             )
             // 重启守护确认弹层改挂在设置窗（SettingsWindow::render），不在主窗口画。
             // Finder 拖文件/文件夹：只在有拖拽时叠全窗 drop 层。
