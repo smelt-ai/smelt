@@ -1471,4 +1471,87 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn adopt_skill_selected_only_links_chosen_agents_but_keeps_origin() {
+        let tmp = std::env::temp_dir().join(format!("smelt-skill-adopt-sel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let legacy_dir = tmp.join(".grok/skills/help");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(
+            legacy_dir.join("SKILL.md"),
+            "---\nname: help\ndescription: Grok 自带的帮助 skill\n---\n",
+        )
+        .unwrap();
+
+        let cwd = tmp.to_string_lossy().into_owned();
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        let entry = scanned.into_iter().next().unwrap();
+        assert_eq!(entry.source_agent, Some("Grok"));
+
+        // 只勾 Grok（原位置）和 Claude，不勾 Codex/Copilot。
+        let canonical_dir = super::adopt_skill_selected(&entry, &["Grok", "Claude"]).unwrap();
+        assert!(canonical_dir.join("SKILL.md").exists());
+
+        let grok_link = tmp.join(".grok/skills/help");
+        let claude_link = tmp.join(".claude/skills/help");
+        let codex_link = tmp.join(".codex/skills/help");
+        let copilot_link = tmp.join(".github/skills/help");
+        assert!(std::fs::symlink_metadata(&grok_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&claude_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!codex_link.exists());
+        assert!(!copilot_link.exists());
+
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        assert_eq!(scanned.len(), 1);
+        assert!(scanned[0].managed);
+        let mut linked = scanned[0].linked_agents.clone();
+        linked.sort();
+        assert_eq!(linked, vec!["Claude", "Grok"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn set_agent_links_adds_and_removes_symlinks_for_managed_skill() {
+        let tmp = std::env::temp_dir().join(format!("smelt-skill-setlinks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cwd = tmp.to_string_lossy().into_owned();
+
+        let dir = super::create_skill(Some(&cwd), true, "commit-work", "desc").unwrap();
+        let scanned = super::scan_skills(Some(&cwd));
+        let scanned: Vec<_> = scanned.into_iter().filter(|s| s.project_scope).collect();
+        let entry = scanned.into_iter().next().unwrap();
+        assert!(entry.managed);
+        assert_eq!(entry.linked_agents.len(), super::AGENT_TARGETS.len());
+
+        // 收窄到只有 Claude。
+        super::set_agent_links(&entry, &["Claude"]).unwrap();
+        assert!(dir.exists());
+        assert!(std::fs::symlink_metadata(tmp.join(".claude/skills/commit-work"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!tmp.join(".codex/skills/commit-work").exists());
+        assert!(!tmp.join(".github/skills/commit-work").exists());
+        assert!(!tmp.join(".grok/skills/commit-work").exists());
+
+        // 再加回 Codex。
+        super::set_agent_links(&entry, &["Claude", "Codex"]).unwrap();
+        assert!(std::fs::symlink_metadata(tmp.join(".codex/skills/commit-work"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
