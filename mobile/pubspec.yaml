@@ -49,6 +49,9 @@ dev_dependencies:
     sdk: flutter
   # flutter_rust_bridge codegen 需要它来解析 C 头文件生成 FFI 绑定
   ffigen: ^19.1.0
+  # 在真设备/模拟器上验证 FFI —— 隧道能不能通只有在真运行时才知道
+  integration_test:
+    sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

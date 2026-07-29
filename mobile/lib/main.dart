@@ -7,8 +7,8 @@ import 'pages/qr_scanner_page.dart';
 import 'services/gateway_service.dart';
 import 'models/acp_snapshot.dart';
 import 'services/pairing_storage.dart';
+import 'rust_lib.dart';
 import 'src/rust/api_iroh.dart';
-import 'src/rust/frb_generated.dart';
 
 bool isNearMessageBottom(
   double pixels,
@@ -23,7 +23,7 @@ bool shouldAutoFollowSnapshot({
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await RustLib.init();
+  await initRustLib();
   // 在组装根接线，而不是让 GatewayService 直接依赖 FFI：服务层保持纯 Dart，
   // 单测才能不带动态库地跑。
   gatewayService.irohTunnelOpener = (endpointId) =>
