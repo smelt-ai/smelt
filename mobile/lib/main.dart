@@ -5,6 +5,17 @@ import 'package:flutter/services.dart';
 import 'services/gateway_service.dart';
 import 'models/acp_snapshot.dart';
 
+bool isNearMessageBottom(
+  double pixels,
+  double minScrollExtent, {
+  double tolerance = 48,
+}) => (pixels - minScrollExtent).abs() <= tolerance;
+
+bool shouldAutoFollowSnapshot({
+  required bool initialLoad,
+  required bool wasAtBottom,
+}) => initialLoad || wasAtBottom;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const SmeltApp());
@@ -42,7 +53,9 @@ class _HomePageState extends State<HomePage> {
   late final StreamSubscription<WsState> _stateSubscription;
   late final StreamSubscription<List<SessionSummary>> _sessionsSubscription;
   late final StreamSubscription<LifecycleAttention> _attentionSubscription;
+  late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
+  String? _shownAttentionSessionId;
 
   // 临时配对信息（后续改为 QR 扫描）
   final _endpointController = TextEditingController(
@@ -70,18 +83,32 @@ class _HomePageState extends State<HomePage> {
           .firstOrNull;
       final messenger = ScaffoldMessenger.of(context);
       messenger.hideCurrentSnackBar();
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('${item.title}: ${item.message}'),
-          action: session != null && !isCurrent
-              ? SnackBarAction(
-                  label: 'Open',
-                  onPressed: () => _openSession(session),
-                )
-              : null,
-        ),
-      );
+      _shownAttentionSessionId = item.sessionId;
+      messenger
+          .showSnackBar(
+            SnackBar(
+              content: Text('${item.title}: ${item.message}'),
+              action: session != null && !isCurrent
+                  ? SnackBarAction(
+                      label: 'Open',
+                      onPressed: () => _openSession(session),
+                    )
+                  : null,
+            ),
+          )
+          .closed
+          .then((_) {
+            if (_shownAttentionSessionId == item.sessionId) {
+              _shownAttentionSessionId = null;
+            }
+          });
     });
+    _attentionResolvedSubscription = gatewayService.attentionResolvedStream
+        .listen((sessionId) {
+          if (!mounted || _shownAttentionSessionId != sessionId) return;
+          _shownAttentionSessionId = null;
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        });
     _errorSubscription = gatewayService.errorStream.listen((error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -187,25 +214,27 @@ class _HomePageState extends State<HomePage> {
       return const Center(child: Text('No active sessions'));
     }
 
+    final orderedSessions = List<SessionSummary>.of(_sessions)
+      ..sort(compareSessionMenuOrder);
     final projects = <String, List<SessionSummary>>{};
-    for (final session in _sessions) {
-      final project = _projectName(session);
-      projects.putIfAbsent(project, () => []).add(session);
+    for (final session in orderedSessions) {
+      projects.putIfAbsent(_projectKey(session), () => []).add(session);
     }
 
     return ListView(
       children: projects.entries.map((entry) {
         final sessions = entry.value;
+        final projectTitle = _projectName(sessions.first);
         return ExpansionTile(
           leading: const Icon(Icons.folder_outlined),
-          title: Text(entry.key),
+          title: Text(projectTitle),
           subtitle: Text(
             '${sessions.length} agent${sessions.length == 1 ? '' : 's'}',
           ),
           children: sessions.map((session) {
             final sessionTitle = session.title.trim();
             final showTitle =
-                sessionTitle.isNotEmpty && sessionTitle != entry.key;
+                sessionTitle.isNotEmpty && sessionTitle != projectTitle;
             return ListTile(
               contentPadding: const EdgeInsets.only(left: 32, right: 16),
               leading: _getAgentIcon(session.agent),
@@ -228,11 +257,25 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _projectName(SessionSummary session) {
+    final projectTitle = session.projectTitle?.trim();
+    if (projectTitle != null && projectTitle.isNotEmpty) {
+      return projectTitle;
+    }
     final cwd = session.cwd?.replaceAll(RegExp(r'/+$'), '');
     if (cwd != null && cwd.isNotEmpty) {
       return cwd.split('/').last;
     }
     return session.title.isNotEmpty ? session.title : 'Other';
+  }
+
+  String _projectKey(SessionSummary session) {
+    final projectRoot = session.projectRoot?.replaceAll(RegExp(r'/+$'), '');
+    if (projectRoot != null && projectRoot.isNotEmpty) {
+      return projectRoot;
+    }
+    final cwd = session.cwd?.replaceAll(RegExp(r'/+$'), '');
+    if (cwd != null && cwd.isNotEmpty) return cwd;
+    return session.title.isNotEmpty ? session.title : session.id;
   }
 
   String _agentLabel(String agent) {
@@ -316,6 +359,7 @@ class _HomePageState extends State<HomePage> {
     _stateSubscription.cancel();
     _sessionsSubscription.cancel();
     _attentionSubscription.cancel();
+    _attentionResolvedSubscription.cancel();
     _errorSubscription.cancel();
     _endpointController.dispose();
     _tokenController.dispose();
@@ -337,13 +381,33 @@ class _SessionPageState extends State<SessionPage> {
   final ScrollController _scrollController = ScrollController();
   AcpSnapshot? _snapshot;
   bool _loading = true;
+  bool _isAtBottom = true;
   final Map<int, String> _elicitationTextValues = {};
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
+  late final StreamSubscription<String> _attentionResolvedSubscription;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_handleScrollPosition);
+    _attentionResolvedSubscription = gatewayService.attentionResolvedStream
+        .listen((sessionId) {
+          if (!mounted || sessionId != widget.session.id) return;
+          // 重新挂载 watcher 获取完整权威快照，避免本地根据 phase 猜哪张卡已解决。
+          gatewayService.subscribe(widget.session.id);
+        });
     _subscribeSession();
+  }
+
+  void _handleScrollPosition() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final isAtBottom = isNearMessageBottom(
+      position.pixels,
+      position.minScrollExtent,
+    );
+    if (isAtBottom == _isAtBottom || !mounted) return;
+    setState(() => _isAtBottom = isAtBottom);
   }
 
   void _subscribeSession() {
@@ -352,6 +416,10 @@ class _SessionPageState extends State<SessionPage> {
         return;
       }
       final initialLoad = _snapshot == null;
+      final shouldFollowLatest = shouldAutoFollowSnapshot(
+        initialLoad: initialLoad,
+        wasAtBottom: _isAtBottom,
+      );
       setState(() {
         _snapshot = _snapshot?.merge(snapshot) ?? snapshot;
         final elicitation = _snapshot?.pendingElicitation;
@@ -364,7 +432,9 @@ class _SessionPageState extends State<SessionPage> {
         }
         _loading = false;
       });
-      _scrollToBottom(animate: !initialLoad);
+      if (shouldFollowLatest) {
+        _scrollToBottom(animate: !initialLoad);
+      }
     });
     gatewayService.subscribe(widget.session.id);
   }
@@ -414,7 +484,25 @@ class _SessionPageState extends State<SessionPage> {
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
-                : _buildEntryList(),
+                : Stack(
+                    children: [
+                      Positioned.fill(child: _buildEntryList()),
+                      if (!_isAtBottom)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 12,
+                          child: Center(
+                            child: FilledButton.tonalIcon(
+                              key: const ValueKey('scroll-to-bottom'),
+                              onPressed: _scrollToBottom,
+                              icon: const Icon(Icons.arrow_downward, size: 18),
+                              label: const Text('滚动到底部'),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
           ),
           _buildInputBar(),
         ],
@@ -842,6 +930,7 @@ class _SessionPageState extends State<SessionPage> {
   @override
   void dispose() {
     _snapshotSubscription.cancel();
+    _attentionResolvedSubscription.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {
       gatewayService.unsubscribe();
     }
