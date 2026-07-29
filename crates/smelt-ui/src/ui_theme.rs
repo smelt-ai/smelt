@@ -198,11 +198,11 @@ pub const LIGHT: Palette = Palette {
     bg_hover: 0xe6e9ee,
     // 浅色下同理：划过只比 bg_elev(0xeff1f4) 压深一点，选中才明显。
     bg_row_hover: 0xe8eaee,
-    bg_selected: 0xdadee6,
+    bg_selected: 0xd3d8e1,
     bg_status: 0xdcdfe4,
 
-    border_dim: 0xe8eaee,
-    border: 0xdde0e5,
+    border_dim: 0xe0e3e8,
+    border: 0xd4d8df,
     border_mid: 0xc9ced6,
     border_loud: 0xb4bac4,
     border_focus: 0x8e9297,
@@ -212,7 +212,7 @@ pub const LIGHT: Palette = Palette {
     text: 0x2e3338,
     text_mid: 0x4e5058,
     text_muted: 0x5c5e66,
-    text_faint: 0x80848e,
+    text_faint: 0x6f7680,
 
     accent: 0x5865f2,
     green: 0x248046,

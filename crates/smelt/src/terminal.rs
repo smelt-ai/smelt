@@ -80,7 +80,8 @@ const PALETTE_DARK: [u32; 16] = [
     0x00ff_ffff,
 ];
 const PALETTE_LIGHT: [u32; 16] = [
-    0x0024_283b,
+    // 显式 ANSI black 常被 TUI 用来画分隔线；浅底上用深灰，避免比正文还抢眼。
+    0x003f_4654,
     0x00c0_324a,
     0x004e_8a2f,
     0x00a1_690f,

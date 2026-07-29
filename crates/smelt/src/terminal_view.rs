@@ -1849,8 +1849,9 @@ fn paint_row(
         }
         let mut color = Hsla::from(rgb(st.fg));
         if st.dim {
-            // faint(SGR 2)：压 alpha 而不是改 RGB——跟 Zed / alacritty 的观感一致。
-            color.a *= 0.7;
+            // faint(SGR 2)：深色维持原层级；浅色底本来就会冲淡字色，少压一点
+            // alpha，避免 TUI 的辅助信息淡到难以辨认。
+            color.a *= if terminal::is_dark() { 0.7 } else { 0.8 };
         }
         TextRun {
             len: text.len(),
