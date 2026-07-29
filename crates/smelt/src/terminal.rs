@@ -5,6 +5,7 @@
 //! vte 解析器 advance → 更新共享的 Term 网格；UI 线程定时对网格做快照并重绘。
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -587,6 +588,28 @@ fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
 /// 多 pane 同时 connect 时串行化迁移，避免并发 upgrade 踩踏。
 static MANAGED_DAEMON_GATE: Mutex<()> = Mutex::new(());
 
+struct ManagedDaemonFileLock {
+    _file: std::fs::File,
+}
+
+fn acquire_file_lock(path: &std::path::Path) -> std::io::Result<ManagedDaemonFileLock> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(ManagedDaemonFileLock { _file: file })
+}
+
+fn acquire_managed_daemon_file_lock() -> std::io::Result<ManagedDaemonFileLock> {
+    let dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dir)?;
+    acquire_file_lock(&dir.join("smeltd.install.lock"))
+}
+
 /// 确保守护跑在 `~/.smelt/bin/smeltd` 且不旧于 App 内分发物。
 ///
 /// GUI 启动 / 连守护 / 装包后 **必须** 调用。返回 managed 路径（可能尚未有进程，
@@ -595,6 +618,7 @@ pub fn ensure_managed_daemon_current() -> std::io::Result<std::path::PathBuf> {
     let _gate = MANAGED_DAEMON_GATE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _file_gate = acquire_managed_daemon_file_lock()?;
     remember_managed_daemon_ensure(
         ensure_managed_daemon_current_locked(),
         &CONNECT_MANAGED_ENSURED,
@@ -1037,6 +1061,11 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
 ///
 /// 顺序绝不能反：若先整包覆盖，App 内 smeltd 会被 SIGKILL → 会话全灭 → 对话「重新初始化」。
 pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::Result<()> {
+    let _gate = MANAGED_DAEMON_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _file_gate = acquire_managed_daemon_file_lock()?;
+
     let staged_smeltd = staged_app.join("Contents/MacOS/smeltd");
     if staged_smeltd.is_file() {
         match handoff_daemon_to_managed(&staged_smeltd) {
@@ -1057,7 +1086,10 @@ pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::
     if let Ok(app) = crate::updater::current_app_bundle_path() {
         let app_smeltd = app.join("Contents/MacOS/smeltd");
         if app_smeltd.is_file() {
-            match ensure_managed_daemon_current() {
+            match remember_managed_daemon_ensure(
+                ensure_managed_daemon_current_locked(),
+                &CONNECT_MANAGED_ENSURED,
+            ) {
                 Ok(p) => eprintln!("[workspace] 装包后 managed 守护：{}", p.display()),
                 Err(e) => eprintln!("[workspace] 装包后同步 managed 失败：{e}"),
             }
@@ -2826,6 +2858,7 @@ mod handshake_timeout_tests {
 mod managed_daemon_ensure_tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::AtomicUsize;
 
     fn managed_test_file(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -2879,6 +2912,41 @@ mod managed_daemon_ensure_tests {
         assert_eq!(result.unwrap(), managed);
         assert_eq!(calls.get(), 1, "文件消失后不能继续盲信 ensure 缓存");
         let _ = std::fs::remove_file(managed);
+    }
+
+    #[test]
+    fn file_lock_serializes_managed_daemon_installers() {
+        const INSTALLERS: usize = 8;
+        let lock_path = managed_test_file("install-lock");
+        let barrier = Arc::new(std::sync::Barrier::new(INSTALLERS));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut installers = Vec::new();
+
+        for _ in 0..INSTALLERS {
+            let lock_path = lock_path.clone();
+            let barrier = Arc::clone(&barrier);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            installers.push(thread::spawn(move || {
+                barrier.wait();
+                let _lock = acquire_file_lock(&lock_path).expect("安装锁获取失败");
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(now, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        for installer in installers {
+            installer.join().unwrap();
+        }
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "跨执行上下文的 managed 安装必须完全串行"
+        );
+        let _ = std::fs::remove_file(lock_path);
     }
 }
 
