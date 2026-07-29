@@ -19,7 +19,12 @@ use serde::Deserialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
+
+use crate::agent_status::AgentStatus;
+use crate::attention::{AttentionItem, AttentionStore, apply_daemon_transition};
+use crate::daemon_state::{DaemonPhase, DaemonSessionState};
 
 const REFERENCE_PAGE: &str = include_str!("remote_gateway_page.html");
 const LIST_PAGE: &str = include_str!("remote_gateway_list_page.html");
@@ -108,6 +113,24 @@ struct AppState {
     /// smeltd.rs「远程操控」一节的授权模型说明。开没开由生成链接时的 GUI 开关
     /// 决定，`build_router` 只是如实转达。
     write_enabled: bool,
+    mobile_lifecycle: Arc<MobileLifecycleHub>,
+}
+
+struct MobileLifecycleHub {
+    state: Mutex<MobileLifecycleState>,
+    updates: tokio::sync::broadcast::Sender<MobileLifecycleEvent>,
+}
+
+#[derive(Default)]
+struct MobileLifecycleState {
+    sessions: std::collections::HashMap<String, DaemonSessionState>,
+    attention: AttentionStore,
+}
+
+#[derive(Clone)]
+enum MobileLifecycleEvent {
+    SessionsChanged,
+    Attention(AttentionItem),
 }
 
 #[derive(Deserialize)]
@@ -144,9 +167,11 @@ struct ResizeBody {
 /// 前端：优先托管 `remote-web/dist`（Preact + Tailwind + xterm 的 CLI 面板）。
 /// 未构建时回退内嵌 HTML（list / console / xterm）。
 pub fn build_router(token: String, write_enabled: bool) -> Router {
+    let mobile_lifecycle = MobileLifecycleHub::start();
     let state = AppState {
         token: Arc::new(token),
         write_enabled,
+        mobile_lifecycle,
     };
     let mut r = Router::new()
         .route("/sessions", get(sessions_json_handler))
@@ -1108,15 +1133,217 @@ fn watch_and_forward(id: &str, tx: tokio::sync::mpsc::Sender<Frame>) {
 // ACP 路由（移动端）
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+impl MobileLifecycleHub {
+    fn start() -> Arc<Self> {
+        let (updates, _) = tokio::sync::broadcast::channel(128);
+        let hub = Arc::new(Self {
+            state: Mutex::new(MobileLifecycleState::default()),
+            updates,
+        });
+        let weak = Arc::downgrade(&hub);
+        std::thread::spawn(move || mobile_lifecycle_subscription(weak));
+        hub
+    }
+
+    fn apply_snapshot(&self, sessions: Vec<DaemonSessionState>) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let ids: std::collections::HashSet<_> =
+            sessions.iter().map(|session| session.id.clone()).collect();
+        for session in &sessions {
+            let previous = state.sessions.get(&session.id).map(|old| old.phase);
+            apply_daemon_transition(&mut state.attention, previous, session, now);
+        }
+        let stale: Vec<_> = state
+            .sessions
+            .keys()
+            .filter(|id| !ids.contains(*id))
+            .cloned()
+            .collect();
+        for id in stale {
+            state.attention.remove_session(&id);
+        }
+        state.sessions = sessions
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect();
+        drop(state);
+        let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
+    }
+
+    fn apply_update(&self, session: DaemonSessionState) {
+        let mut state = self.state.lock().unwrap();
+        let previous = state.sessions.get(&session.id).map(|old| old.phase);
+        let attention =
+            apply_daemon_transition(&mut state.attention, previous, &session, Instant::now());
+        state.sessions.insert(session.id.clone(), session);
+        drop(state);
+        let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
+        if let Some(item) = attention {
+            let _ = self.updates.send(MobileLifecycleEvent::Attention(item));
+        }
+    }
+
+    fn mark_read(&self, session_id: &str) -> bool {
+        let changed = self
+            .state
+            .lock()
+            .unwrap()
+            .attention
+            .mark_read(session_id)
+            .is_some();
+        if changed {
+            let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
+        }
+        changed
+    }
+
+    fn summaries(&self) -> Vec<AcpSessionSummary> {
+        let gui_titles = load_gui_acp_titles();
+        let state = self.state.lock().unwrap();
+        let mut summaries: Vec<_> = state
+            .sessions
+            .values()
+            .filter_map(|session| acp_summary_from_daemon(session, &gui_titles, &state.attention))
+            .collect();
+        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries
+    }
+}
+
+fn mobile_lifecycle_subscription(hub: Weak<MobileLifecycleHub>) {
+    while hub.strong_count() > 0 {
+        if let Ok(mut stream) = UnixStream::connect(sock_path()) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            if writeln!(stream, "{}", serde_json::json!({ "op": "subscribe" })).is_ok() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                loop {
+                    if hub.strong_count() == 0 {
+                        return;
+                    }
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                                continue;
+                            };
+                            let Some(hub) = hub.upgrade() else {
+                                return;
+                            };
+                            if let Some(sessions) = value.get("sessions") {
+                                if let Ok(sessions) = serde_json::from_value(sessions.clone()) {
+                                    hub.apply_snapshot(sessions);
+                                }
+                            } else if let Some(session) = value.get("session") {
+                                if let Ok(session) = serde_json::from_value(session.clone()) {
+                                    hub.apply_update(session);
+                                }
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        if hub.strong_count() == 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// ACP 会话摘要（移动端列表用）
 #[derive(serde::Serialize)]
 struct AcpSessionSummary {
     id: String,
     title: String,
     phase: String,
+    status: String,
     agent: String,
     cwd: Option<String>,
     updated_at: i64,
+    detail: Option<String>,
+    unread: bool,
+    attention: Option<AttentionItem>,
+}
+
+fn daemon_phase_name(phase: DaemonPhase) -> &'static str {
+    match phase {
+        DaemonPhase::Thinking => "thinking",
+        DaemonPhase::ExecutingTool => "executing_tool",
+        DaemonPhase::AwaitingApproval => "awaiting_approval",
+        DaemonPhase::WaitingForUser => "waiting_for_user",
+        DaemonPhase::Succeeded => "succeeded",
+        DaemonPhase::Failed => "failed",
+        DaemonPhase::Idle => "idle",
+        DaemonPhase::Dead => "dead",
+    }
+}
+
+fn mobile_status_name(phase: DaemonPhase, unread: bool) -> &'static str {
+    match AgentStatus::from_daemon_phase(phase) {
+        Some(AgentStatus::WaitingApproval) => "waiting_approval",
+        Some(AgentStatus::NeedsAttention) => "needs_attention",
+        Some(AgentStatus::Running) => "running",
+        Some(AgentStatus::Done) if unread => "done",
+        Some(AgentStatus::Done) | Some(AgentStatus::Idle) | None => "idle",
+    }
+}
+
+fn agent_from_launch(launch: &str) -> &'static str {
+    if launch.contains("claude") {
+        "claude"
+    } else if launch.contains("copilot") {
+        "copilot"
+    } else if launch.contains("codex") {
+        "codex"
+    } else if launch.contains("grok") {
+        "grok"
+    } else {
+        "other"
+    }
+}
+
+fn acp_summary_from_daemon(
+    session: &DaemonSessionState,
+    gui_titles: &std::collections::HashMap<String, String>,
+    attention_store: &AttentionStore,
+) -> Option<AcpSessionSummary> {
+    let launch = session.launch.as_deref()?;
+    let attention = attention_store.unread(&session.id).cloned();
+    let unread = attention.is_some();
+    let title = gui_titles
+        .get(&session.id)
+        .cloned()
+        .or_else(|| session.title.clone().filter(|title| !title.is_empty()))
+        .or_else(|| {
+            session
+                .cwd
+                .as_ref()
+                .and_then(|path| std::path::Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| session.id.clone());
+    Some(AcpSessionSummary {
+        id: session.id.clone(),
+        title,
+        phase: daemon_phase_name(session.phase).to_string(),
+        status: mobile_status_name(session.phase, unread).to_string(),
+        agent: agent_from_launch(launch).to_string(),
+        cwd: session.cwd.clone(),
+        updated_at: session.updated_at.min(i64::MAX as u64) as i64,
+        detail: session.detail_line(),
+        unread,
+        attention,
+    })
 }
 
 /// GET /acp/sessions - 列出所有 ACP 会话
@@ -1132,58 +1359,7 @@ async fn acp_sessions_handler(
             .into_response();
     }
 
-    // 通过 smeltd unix socket 获取会话列表
-    let sessions = tokio::task::spawn_blocking(|| {
-        let mut stream = match UnixStream::connect(sock_path()) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-
-        let req = serde_json::json!({"op": "list"});
-        if writeln!(stream, "{}", req).is_err() {
-            return Vec::new();
-        }
-
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            return Vec::new();
-        }
-
-        let Ok(resp): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
-            return Vec::new();
-        };
-
-        let mut summaries = Vec::new();
-        if let Some(acp_sessions) = resp["acp_sessions"].as_array() {
-            for s in acp_sessions {
-                let id = s["id"].as_str().unwrap_or_default().to_string();
-                let phase = s["phase"].as_str().unwrap_or("idle").to_string();
-                let cwd = s["cwd"].as_str().map(String::from);
-
-                // 从 cwd 提取项目名作为 title
-                let title = cwd
-                    .as_ref()
-                    .and_then(|p| std::path::Path::new(p).file_name())
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&id)
-                    .to_string();
-
-                summaries.push(AcpSessionSummary {
-                    id,
-                    title,
-                    phase,
-                    agent: s["agent"].as_str().unwrap_or("claude").to_string(),
-                    cwd,
-                    updated_at: chrono::Utc::now().timestamp(),
-                });
-            }
-        }
-        summaries
-    })
-    .await
-    .unwrap_or_default();
+    let sessions = state.mobile_lifecycle.summaries();
 
     Json(serde_json::json!({
         "sessions": sessions
@@ -1286,16 +1462,18 @@ async fn acp_ws_handler(
     if q.token != *state.token {
         return (StatusCode::FORBIDDEN, "token 不对").into_response();
     }
-    ws.on_upgrade(move |socket| acp_ws_pump(socket, state.write_enabled))
+    ws.on_upgrade(move |socket| acp_ws_pump(socket, state))
         .into_response()
 }
 
 /// ACP WebSocket 主循环
-async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
+async fn acp_ws_pump(socket: WebSocket, state: AppState) {
     use futures::stream::StreamExt;
     use tokio::sync::mpsc;
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let write_enabled = state.write_enabled;
+    let mut lifecycle_rx = state.mobile_lifecycle.updates.subscribe();
 
     // 发送欢迎消息
     let welcome = serde_json::json!({
@@ -1342,11 +1520,7 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
 
                 match req {
                     AcpWsRequest::ListSessions => {
-                        let sessions = tokio::task::spawn_blocking(list_acp_sessions_blocking)
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
+                        let sessions = state.mobile_lifecycle.summaries();
                         let resp = serde_json::json!({
                             "type": "sessions",
                             "sessions": sessions,
@@ -1486,10 +1660,39 @@ async fn acp_ws_pump(socket: WebSocket, write_enabled: bool) {
                         ).await;
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
-                    AcpWsRequest::MarkRead { params: _ } => {
-                        let resp = serde_json::json!({"type": "markedRead", "ok": true});
+                    AcpWsRequest::MarkRead { params } => {
+                        let changed = state.mobile_lifecycle.mark_read(&params.session_id);
+                        let resp = serde_json::json!({
+                            "type": "markedRead",
+                            "ok": true,
+                            "changed": changed,
+                            "sessionId": params.session_id,
+                        });
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
+                }
+            }
+            lifecycle = lifecycle_rx.recv() => {
+                match lifecycle {
+                    Ok(MobileLifecycleEvent::SessionsChanged) => {
+                        let resp = serde_json::json!({
+                            "type": "sessions",
+                            "sessions": state.mobile_lifecycle.summaries(),
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    Ok(MobileLifecycleEvent::Attention(item)) => {
+                        let resp = serde_json::json!({"type": "attention", "item": item});
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let resp = serde_json::json!({
+                            "type": "sessions",
+                            "sessions": state.mobile_lifecycle.summaries(),
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             // 接收来自 smeltd 的推送，直接透传原始格式
@@ -1576,131 +1779,6 @@ fn acp_watch_loop(
     }
 }
 
-/// 列出所有 ACP 会话（阻塞版本）
-fn list_acp_sessions_blocking() -> Option<Vec<AcpSessionSummary>> {
-    let mut stream = UnixStream::connect(sock_path()).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok()?;
-
-    let req = serde_json::json!({"op": "list"});
-    writeln!(stream, "{}", req).ok()?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-
-    let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
-
-    let mut summaries = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-    let gui_titles = load_gui_acp_titles();
-
-    // 1. 从 states 中筛选有 launch 字段的会话（终端内启动的 agent）
-    if let Some(states) = resp["states"].as_array() {
-        for s in states {
-            // 只选择有 launch 命令的会话
-            let launch = s["launch"].as_str();
-            if launch.is_none() {
-                continue;
-            }
-            let launch_cmd = launch.unwrap();
-
-            let id = s["id"].as_str().unwrap_or_default().to_string();
-            if id.is_empty() || seen_ids.contains(&id) {
-                continue;
-            }
-            seen_ids.insert(id.clone());
-
-            let phase = s["phase"].as_str().unwrap_or("idle").to_string();
-            let cwd = s["cwd"].as_str().map(String::from);
-
-            // 从 launch 命令推断 agent 类型
-            let agent = if launch_cmd.contains("claude") {
-                "claude"
-            } else if launch_cmd.contains("copilot") {
-                "copilot"
-            } else if launch_cmd.contains("codex") {
-                "codex"
-            } else if launch_cmd.contains("grok") {
-                "grok"
-            } else {
-                "other"
-            };
-
-            // 优先使用 title，否则用目录名
-            let title = gui_titles
-                .get(&id)
-                .cloned()
-                .or_else(|| {
-                    s["title"]
-                        .as_str()
-                        .filter(|t| !t.is_empty())
-                        .map(String::from)
-                })
-                .or_else(|| {
-                    cwd.as_ref()
-                        .and_then(|p| std::path::Path::new(p).file_name())
-                        .and_then(|n| n.to_str())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| id.clone());
-
-            summaries.push(AcpSessionSummary {
-                id,
-                title,
-                phase,
-                agent: agent.to_string(),
-                cwd,
-                updated_at: s["updated_at"].as_i64().unwrap_or(0),
-            });
-        }
-    }
-
-    // 2. 从 acp_sessions 中添加纯 ACP 会话（通过 acp_open 创建）
-    if let Some(acp_sessions) = resp["acp_sessions"].as_array() {
-        for s in acp_sessions {
-            let id = s["id"].as_str().unwrap_or_default().to_string();
-            if id.is_empty() || seen_ids.contains(&id) {
-                continue;
-            }
-            seen_ids.insert(id.clone());
-
-            let phase = s["phase"].as_str().unwrap_or("idle").to_string();
-            let cwd = s["cwd"].as_str().map(String::from);
-            let agent = s["agent"].as_str().unwrap_or("claude").to_string();
-
-            let title = gui_titles
-                .get(&id)
-                .cloned()
-                .or_else(|| {
-                    s["title"]
-                        .as_str()
-                        .filter(|t| !t.is_empty())
-                        .map(String::from)
-                })
-                .or_else(|| {
-                    cwd.as_ref()
-                        .and_then(|p| std::path::Path::new(p).file_name())
-                        .and_then(|n| n.to_str())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| id.clone());
-
-            summaries.push(AcpSessionSummary {
-                id,
-                title,
-                phase,
-                agent,
-                cwd,
-                updated_at: s["updated_at"].as_i64().unwrap_or(0),
-            });
-        }
-    }
-
-    Some(summaries)
-}
-
 fn send_acp_action(session_id: &str, action: serde_json::Value) -> Result<(), String> {
     let mut stream =
         UnixStream::connect(sock_path()).map_err(|e| format!("connect failed: {e}"))?;
@@ -1765,6 +1843,62 @@ fn respond_acp_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mobile_daemon_state(phase: DaemonPhase) -> DaemonSessionState {
+        DaemonSessionState {
+            id: "session-mobile".into(),
+            phase,
+            title: Some("Mobile agent".into()),
+            launch: Some("codex app-server".into()),
+            cwd: Some("/tmp/mobile-project".into()),
+            updated_at: 42,
+            structured_events: true,
+            ..Default::default()
+        }
+    }
+
+    fn mobile_lifecycle_hub_for_test() -> MobileLifecycleHub {
+        let (updates, _) = tokio::sync::broadcast::channel(16);
+        MobileLifecycleHub {
+            state: Mutex::new(MobileLifecycleState::default()),
+            updates,
+        }
+    }
+
+    #[test]
+    fn mobile_lifecycle_marks_completed_attention_read_without_changing_phase() {
+        let hub = mobile_lifecycle_hub_for_test();
+        hub.apply_snapshot(vec![mobile_daemon_state(DaemonPhase::Thinking)]);
+        hub.apply_update(mobile_daemon_state(DaemonPhase::Succeeded));
+
+        let before = hub.summaries().pop().unwrap();
+        assert_eq!(before.phase, "succeeded");
+        assert_eq!(before.status, "done");
+        assert!(before.unread);
+        assert_eq!(
+            before.attention.unwrap().kind,
+            crate::attention::AttentionKind::Success
+        );
+
+        assert!(hub.mark_read("session-mobile"));
+        let after = hub.summaries().pop().unwrap();
+        assert_eq!(after.phase, "succeeded");
+        assert_eq!(after.status, "idle");
+        assert!(!after.unread);
+        assert!(after.attention.is_none());
+    }
+
+    #[test]
+    fn mobile_lifecycle_keeps_action_status_after_mark_read() {
+        let hub = mobile_lifecycle_hub_for_test();
+        hub.apply_snapshot(vec![mobile_daemon_state(DaemonPhase::Thinking)]);
+        hub.apply_update(mobile_daemon_state(DaemonPhase::AwaitingApproval));
+
+        assert!(hub.mark_read("session-mobile"));
+        let summary = hub.summaries().pop().unwrap();
+        assert_eq!(summary.status, "waiting_approval");
+        assert!(!summary.unread);
+    }
 
     /// 反射型 XSS 的核心防线：id/token 里带 `</script>` 不能提前把内联脚本切断。
     #[test]

@@ -38,6 +38,9 @@ pub struct DaemonSessionState {
     /// unix 秒，进入当前 phase 的时刻。
     #[serde(default)]
     pub phase_since: u64,
+    /// unix 秒，守护最后一次更新该会话状态的时刻。
+    #[serde(default)]
+    pub updated_at: u64,
     /// 该 pane 是否已经收到 hook/ACP 结构化事件。为 true 后，终端 OSC 通知不再
     /// 作为 agent 兼容信号消费，避免同一事件双通知。
     #[serde(default)]
