@@ -245,13 +245,19 @@ enum GitTab {
 // 全库既有的 `AgentStatus::x` 写法不用逐处改。
 pub(crate) use smelt_core::agent_status::AgentStatus;
 
-// DaemonStates（守护上报的会话状态镜像，全局单例）/ PendingAgentNotifs（状态
-// 通道待弹出的应用内 Notification）：ACP 视图独立成 smelt-acp-view 后要跨
+// DaemonStates（守护上报的会话状态镜像）/ AttentionGlobal（统一关注事件 store）：
+// ACP 视图独立成 smelt-acp-view 后要跨
 // crate 读写，搬进 smelt-ui（daemon_states_global.rs）共享，这里重导出成原来
 // 的裸名字。
 pub(crate) use smelt_ui::daemon_states_global::{
-    AgentNotificationKind, DaemonStates, PendingAgentNotification, PendingAgentNotifs,
+    AttentionGlobal, AttentionItem, AttentionKind, DaemonStates,
 };
+
+struct NotificationRow {
+    session_ix: usize,
+    pane: Option<Entity<TerminalView>>,
+    item: AttentionItem,
+}
 
 /// 取某个 pane 对应的守护状态；没有全局单例（比如极早期尚未走到注册那一步）或
 /// 那个 session id 还没有数据都返回 None。
@@ -265,63 +271,36 @@ fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::D
         .cloned()
 }
 
-/// 守护状态刚进入需要用户关注或回合结束的 phase 时，入队一条应用内通知。
-fn awaiting_notification_for_transition(
-    previous_phase: Option<terminal::DaemonPhase>,
+fn daemon_agent_status(
+    session_id: &str,
     state: &terminal::DaemonSessionState,
-) -> Option<(String, String, AgentNotificationKind)> {
-    // 未启用结构化事件时，终端视图仍直接消费 OSC 9/99/777。这里再入队会让
-    // daemon 状态通知和原 OSC 通知各弹一次。
-    if !state.structured_events {
-        return None;
+    cx: &App,
+) -> Option<AgentStatus> {
+    let status = AgentStatus::from_daemon_phase(state.phase)?;
+    if status != AgentStatus::Done {
+        return Some(status);
     }
-    let entered_notifiable = matches!(
-        state.phase,
-        terminal::DaemonPhase::AwaitingApproval
-            | terminal::DaemonPhase::WaitingForUser
-            | terminal::DaemonPhase::Succeeded
-            | terminal::DaemonPhase::Failed
-    ) && previous_phase != Some(state.phase);
-    if !entered_notifiable {
-        return None;
-    }
-
-    let title = state.phase_label().to_string();
-    let message = state
-        .detail_line()
-        .or_else(|| state.title.clone())
-        .unwrap_or_else(|| format!("会话 {}", &state.id[..8.min(state.id.len())]));
-    let kind = match state.phase {
-        terminal::DaemonPhase::AwaitingApproval => AgentNotificationKind::Approval,
-        terminal::DaemonPhase::WaitingForUser => AgentNotificationKind::Input,
-        terminal::DaemonPhase::Succeeded => AgentNotificationKind::Success,
-        terminal::DaemonPhase::Failed => AgentNotificationKind::Failure,
-        _ => return None,
-    };
-    Some((title, message, kind))
+    cx.try_global::<AttentionGlobal>()
+        .and_then(|store| {
+            store
+                .0
+                .lock()
+                .unwrap()
+                .unread(session_id)
+                .map(|item| item.kind)
+        })
+        .filter(|kind| *kind == AttentionKind::Success)
+        .map(|_| AgentStatus::Done)
 }
 
-fn pending_agent_notification(
-    state: &terminal::DaemonSessionState,
-    transition: (String, String, AgentNotificationKind),
-) -> PendingAgentNotification {
-    PendingAgentNotification {
-        session_id: state.id.clone(),
-        title: transition.0,
-        message: transition.1,
-        kind: transition.2,
-    }
-}
-
-fn agent_notification_enabled(
-    config: &settings::AgentUiConfig,
-    kind: AgentNotificationKind,
-) -> bool {
+fn agent_notification_enabled(config: &settings::AgentUiConfig, kind: AttentionKind) -> bool {
     match kind {
-        AgentNotificationKind::Approval => config.notify_approval,
-        AgentNotificationKind::Input => config.notify_input,
-        AgentNotificationKind::Success => config.notify_success,
-        AgentNotificationKind::Failure => config.notify_failure,
+        AttentionKind::Approval => config.notify_approval,
+        AttentionKind::Input => config.notify_input,
+        AttentionKind::Success => config.notify_success,
+        AttentionKind::Failure => config.notify_failure,
+        AttentionKind::Bell => config.notify_terminal_bell,
+        AttentionKind::Notice => true,
     }
 }
 
@@ -565,7 +544,7 @@ impl Session {
                 if v.is_running() {
                     return AgentStatus::Running;
                 }
-                if v.completed_unread() {
+                if v.completed_unread(cx) {
                     return AgentStatus::Done;
                 }
                 return AgentStatus::Idle;
@@ -578,20 +557,16 @@ impl Session {
         for t in &v {
             let daemon_state = daemon_state_for(t, cx);
             if let Some(state) = daemon_state.as_ref() {
-                match state.structured_events.then_some(state.phase) {
-                    Some(terminal::DaemonPhase::AwaitingApproval) => {
-                        return AgentStatus::WaitingApproval;
-                    }
-                    Some(terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed) => {
-                        needs_attention = true;
-                    }
-                    Some(
-                        terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool,
-                    ) => {
-                        running = true;
-                    }
-                    Some(terminal::DaemonPhase::Succeeded) => done = true,
-                    Some(terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead) | None => {}
+                match state
+                    .structured_events
+                    .then(|| daemon_agent_status(t.read(cx).session_id(), state, cx))
+                    .flatten()
+                {
+                    Some(AgentStatus::WaitingApproval) => return AgentStatus::WaitingApproval,
+                    Some(AgentStatus::NeedsAttention) => needs_attention = true,
+                    Some(AgentStatus::Running) => running = true,
+                    Some(AgentStatus::Done) => done = true,
+                    Some(AgentStatus::Idle) | None => {}
                 }
             }
         }
@@ -605,7 +580,7 @@ impl Session {
             return AgentStatus::Done;
         }
         // Codex OSC 9 fallback 的 Stop 必须压过可能长期不复位的 spinner 标题。
-        if v.iter().any(|t| t.read(cx).completed_unread()) {
+        if v.iter().any(|t| t.read(cx).completed_unread(cx)) {
             return AgentStatus::Done;
         }
         // 没有结构化运行事实时才退化到标题 spinner。
@@ -677,20 +652,12 @@ fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
     if let Some(state) = &daemon_state
         && state.structured_events
     {
-        match state.phase {
-            terminal::DaemonPhase::AwaitingApproval => return AgentStatus::WaitingApproval,
-            terminal::DaemonPhase::WaitingForUser | terminal::DaemonPhase::Failed => {
-                return AgentStatus::NeedsAttention;
-            }
-            terminal::DaemonPhase::Thinking | terminal::DaemonPhase::ExecutingTool => {
-                return AgentStatus::Running;
-            }
-            terminal::DaemonPhase::Succeeded => return AgentStatus::Done,
-            terminal::DaemonPhase::Idle | terminal::DaemonPhase::Dead => {}
+        if let Some(status) = daemon_agent_status(view.read(cx).session_id(), state, cx) {
+            return status;
         }
     }
     let t = view.read(cx);
-    if t.completed_unread() {
+    if t.completed_unread(cx) {
         return AgentStatus::Done;
     }
     if !daemon_state.is_some_and(|state| state.structured_events)
@@ -3146,11 +3113,25 @@ impl Workspace {
             .find(|g| g.sessions.contains(&ix))
             .map(|g| g.root);
         self.remember_session_project(project_root.as_deref());
+        let attention_ids: Vec<String> = match &self.sessions[ix].kind {
+            SessionKind::Term { .. } => self.sessions[ix]
+                .term_leaves()
+                .iter()
+                .map(|t| t.read(cx).session_id().to_string())
+                .collect(),
+            SessionKind::Acp(view) => vec![view.read(cx).session_id().to_string()],
+        };
         for t in &self.sessions[ix].term_leaves() {
             terminal::kill_remote(t.read(cx).session_id());
         }
         if let SessionKind::Acp(view) = &self.sessions[ix].kind {
             view.update(cx, |v, cx| v.shutdown(cx));
+        }
+        if let Some(store) = cx.try_global::<AttentionGlobal>() {
+            let mut store = store.0.lock().unwrap();
+            for id in attention_ids {
+                store.remove_session(&id);
+            }
         }
         self.sessions.remove(ix);
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
@@ -3229,7 +3210,11 @@ impl Workspace {
             return;
         }
         // 用户主动关 pane → 守护真正杀掉该 shell（区别于退出 GUI：那时保活）。
-        terminal::kill_remote(view.read(cx).session_id());
+        let closed_session_id = view.read(cx).session_id().to_string();
+        terminal::kill_remote(&closed_session_id);
+        if let Some(store) = cx.try_global::<AttentionGlobal>() {
+            store.0.lock().unwrap().remove_session(&closed_session_id);
+        }
         let sess = &mut self.sessions[ix];
         if let Some(layout) = sess.term_layout_mut() {
             remove_leaf(layout, target);
@@ -3267,7 +3252,7 @@ impl Workspace {
         if let Some(sess) = self.sessions.get_mut(self.active_session) {
             sess.set_active_term(e.clone());
         }
-        e.update(cx, |terminal, _cx| terminal.mark_read());
+        e.update(cx, |terminal, cx| terminal.mark_read(cx));
         let h = e.read(cx).focus_handle();
         window.focus(&h, cx);
         self.save_state(cx);
@@ -3379,12 +3364,12 @@ impl Workspace {
                     if should_auto_resume_active_acp(self.sessions_restored) {
                         v.maybe_auto_resume(window, cx);
                     }
-                    v.mark_read();
+                    v.mark_read(cx);
                     v.focus_input(window, cx);
                 });
             } else {
                 if let Some(view) = self.sessions[ix].active_term().cloned() {
-                    view.update(cx, |terminal, _cx| terminal.mark_read());
+                    view.update(cx, |terminal, cx| terminal.mark_read(cx));
                 }
                 self.focus_active(window, cx);
             }
@@ -3774,8 +3759,8 @@ impl Workspace {
     }
 
     /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是孤儿（没有任何
-    /// 侧栏在追踪），逐个/批量清理。跟 render_quit_confirm 同款视觉。
-    fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
+    /// 侧栏在追踪），逐个/批量清理。入口和弹层都在设置窗口里。
+    pub(crate) fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground, t.border)
@@ -4007,43 +3992,39 @@ impl Workspace {
 
     /// 收集所有待处理通知：(会话索引, 可选 pane 终端, 消息文本)。
     /// 排除「正在看的那个活动 pane」——用户已在看，不算待处理。
-    fn collect_notifications(
-        &self,
-        cx: &App,
-    ) -> Vec<(usize, Option<Entity<TerminalView>>, String)> {
+    fn collect_notifications(&self, cx: &App) -> Vec<NotificationRow> {
         let mut out = Vec::new();
-        for (si, s) in self.sessions.iter().enumerate() {
-            let viewing = (si == self.active_session).then(|| s.anchor_id());
-            match &s.kind {
-                SessionKind::Term { .. } => {
-                    for t in s.term_leaves() {
-                        if Some(t.entity_id()) == viewing {
-                            continue;
-                        }
-                        if let Some(msg) = t.read(cx).notification() {
-                            out.push((si, Some(t.clone()), msg.to_string()));
+        let items = cx
+            .try_global::<AttentionGlobal>()
+            .map(|store| store.0.lock().unwrap().unread_items())
+            .unwrap_or_default();
+        for item in items {
+            for (si, session) in self.sessions.iter().enumerate() {
+                match &session.kind {
+                    SessionKind::Term { .. } => {
+                        if let Some(pane) = session
+                            .term_leaves()
+                            .into_iter()
+                            .find(|pane| pane.read(cx).session_id() == item.session_id)
+                        {
+                            out.push(NotificationRow {
+                                session_ix: si,
+                                pane: Some(pane),
+                                item: item.clone(),
+                            });
+                            break;
                         }
                     }
-                }
-                SessionKind::Acp(view) if viewing.is_none() => {
-                    let v = view.read(cx);
-                    let state = cx
-                        .try_global::<DaemonStates>()
-                        .and_then(|states| states.0.lock().unwrap().get(v.session_id()).cloned());
-                    let message = state.as_ref().and_then(|state| match state.phase {
-                        terminal::DaemonPhase::AwaitingApproval
-                        | terminal::DaemonPhase::WaitingForUser => state
-                            .detail_line()
-                            .or_else(|| Some(state.phase_label().to_string())),
-                        _ => None,
-                    });
-                    if let Some(message) =
-                        message.or_else(|| v.completed_unread().then(|| "已完成".to_string()))
-                    {
-                        out.push((si, None, message));
+                    SessionKind::Acp(view) if view.read(cx).session_id() == item.session_id => {
+                        out.push(NotificationRow {
+                            session_ix: si,
+                            pane: None,
+                            item: item.clone(),
+                        });
+                        break;
                     }
+                    SessionKind::Acp(_) => {}
                 }
-                SessionKind::Acp(_) => {}
             }
         }
         out
@@ -4065,6 +4046,34 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Toast / 系统通知只保存稳定的守护会话 id；点击时再查当前侧栏位置，避免通知
+    /// 出现后用户重排、关闭会话导致旧索引跳错目标。
+    fn goto_notification_session(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self
+            .sessions
+            .iter()
+            .enumerate()
+            .find_map(|(session_ix, session)| match &session.kind {
+                SessionKind::Term { .. } => session
+                    .term_leaves()
+                    .into_iter()
+                    .find(|pane| pane.read(cx).session_id() == session_id)
+                    .map(|pane| (session_ix, Some(pane))),
+                SessionKind::Acp(view) if view.read(cx).session_id() == session_id => {
+                    Some((session_ix, None))
+                }
+                SessionKind::Acp(_) => None,
+            });
+        if let Some((session_ix, pane)) = target {
+            self.goto_notification(session_ix, pane.as_ref(), window, cx);
+        }
+    }
+
     /// 渲染通知面板浮层（标题栏铃铛打开）：列出所有待处理会话 + 消息，点击跳转。
     fn render_notifications(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted, border, popover) = {
@@ -4076,12 +4085,23 @@ impl Workspace {
         let list: Vec<_> = items
             .into_iter()
             .enumerate()
-            .map(|(item_ix, (si, pane, msg))| {
+            .map(|(item_ix, row)| {
+                let NotificationRow {
+                    session_ix,
+                    pane,
+                    item,
+                } = row;
                 let name = self
                     .sessions
-                    .get(si)
+                    .get(session_ix)
                     .map(|s| s.title(cx))
                     .unwrap_or_default();
+                let color = match item.kind {
+                    AttentionKind::Approval | AttentionKind::Failure => ui_theme::red(),
+                    AttentionKind::Input => ui_theme::yellow(),
+                    AttentionKind::Success => ui_theme::green(),
+                    AttentionKind::Bell | AttentionKind::Notice => ui_theme::blue(),
+                };
                 div()
                     .id(("notif", item_ix))
                     .p_2()
@@ -4096,14 +4116,14 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().size_2().rounded_full().bg(rgb(ui_theme::blue())))
+                            .child(div().size_2().rounded_full().bg(rgb(color)))
                             .child(div().text_sm().text_color(fg).child(name)),
                     )
-                    .child(div().text_xs().text_color(muted).child(msg))
+                    .child(div().text_xs().text_color(muted).child(item.message))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _ev, window, cx| {
-                            this.goto_notification(si, pane.as_ref(), window, cx)
+                            this.goto_notification(session_ix, pane.as_ref(), window, cx)
                         }),
                     )
             })
@@ -4987,18 +5007,43 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active_session;
 
-        // Dock 角标 + 菜单栏图标角标/下拉菜单：同一份状态数据源（AgentStatus），
+        // 当前正在看的 pane 每帧确认未读，覆盖“查看期间刚到”的事件；行动项只标已读，
+        // 仍由 daemon 后续 phase 转换 resolve。
+        if let Some(session) = self.sessions.get(active) {
+            let viewed_sid = match &session.kind {
+                SessionKind::Term { active, .. } => Some(active.read(cx).session_id().to_string()),
+                SessionKind::Acp(view) => Some(view.read(cx).session_id().to_string()),
+            };
+            if let (Some(store), Some(sid)) = (cx.try_global::<AttentionGlobal>(), viewed_sid) {
+                store.0.lock().unwrap().mark_read(&sid);
+            }
+        }
+
+        // Dock 角标 + 菜单栏图标角标/下拉菜单：行动项计数来自统一 store，
         // 变了才调 Cocoa API 更新（避免每次 render 都发一遍）。
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
-        let attention_count = statuses
+        let known_session_ids: Vec<String> = self
+            .sessions
             .iter()
-            .filter(|s| {
-                matches!(
-                    s,
-                    AgentStatus::WaitingApproval | AgentStatus::NeedsAttention
-                )
+            .flat_map(|session| match &session.kind {
+                SessionKind::Term { .. } => session
+                    .term_leaves()
+                    .iter()
+                    .map(|pane| pane.read(cx).session_id().to_string())
+                    .collect(),
+                SessionKind::Acp(view) => vec![view.read(cx).session_id().to_string()],
             })
-            .count();
+            .collect();
+        let attention_count = cx
+            .try_global::<AttentionGlobal>()
+            .map(|store| {
+                let store = store.0.lock().unwrap();
+                known_session_ids
+                    .iter()
+                    .filter(|id| store.has_unresolved_action(id))
+                    .count()
+            })
+            .unwrap_or(0);
         if self.dock_badge_count != Some(attention_count) {
             self.dock_badge_count = Some(attention_count);
             dock::set_badge(attention_count);
@@ -5062,34 +5107,15 @@ impl Render for Workspace {
             self.ensure_git_watch(root, cx);
         }
 
-        // 组件 toast：app 前台但没在看的 pane 有新通知时弹一条（右上角浮层，5s
-        // 自动消失）。完全切到别的 app 时不弹 toast，走 terminal_view.rs 里的系统
-        // 通知；正在看的那个 pane 直接吃掉待发消息，不弹——你自己看得见。
-        // 每帧都要来取（不管是否前台），否则待发消息会一直攒着，等哪天恰好前台又
-        // 不是当前 pane 时全冒出来。
-        // 同时捞「任务完成 → 自动续跑」挂旗（先收集再处理，避免 run 时改 sessions）。
-        let window_active = window.is_window_active();
+        // 捞「任务完成 → 自动续跑」挂旗（先收集再处理，避免 run 时改 sessions）。
         let mut task_continues: Vec<(String, String)> = Vec::new();
-        for (ix, sess) in self.sessions.iter().enumerate() {
+        for sess in &self.sessions {
             let leaves = sess.term_leaves();
-            let active_pane_id = sess.anchor_id();
             for leaf in &leaves {
-                let is_current_view = ix == active && leaf.entity_id() == active_pane_id;
-                let (toast, cont_cwd) = leaf.update(cx, |t, _cx| {
-                    if is_current_view {
-                        // 不能只在 collect_notifications 里临时过滤当前 pane：那会让消息
-                        // 切走后复活。当前 pane 每帧都真实标已读，覆盖“查看期间刚到”的通知。
-                        t.mark_read();
-                    }
-                    (t.take_pending_toast(), t.take_pending_task_continue())
-                });
+                let cont_cwd = leaf.update(cx, |t, _cx| t.take_pending_task_continue());
                 if let Some(cwd) = cont_cwd {
                     let sid = leaf.read(cx).session_id().to_string();
                     task_continues.push((sid, cwd));
-                }
-                let Some(msg) = toast else { continue };
-                if window_active && !is_current_view {
-                    window.push_notification(Notification::info(msg), cx);
                 }
             }
         }
@@ -5111,15 +5137,16 @@ impl Render for Workspace {
         if let Some(msg) = self.background_error.take() {
             window.push_notification(Notification::error(msg), cx);
         }
-        // 状态通道：等批准 / 等输入 → gpui-component Notification
-        if let Some(pending) = cx.try_global::<PendingAgentNotifs>() {
-            let batch = std::mem::take(&mut *pending.0.lock().unwrap());
+        // 所有 producer 共用的投递出口：前台 toast，后台 macOS 通知，正在看的 pane
+        // 只确认未读不弹。设置开关只控制打扰渠道，不影响 store 的状态与铃铛记录。
+        let workspace = cx.entity();
+        if let Some(store) = cx.try_global::<AttentionGlobal>() {
+            let batch = store.0.lock().unwrap().drain_deliveries();
+            let notify_config = cx
+                .try_global::<settings::AgentUiConfig>()
+                .cloned()
+                .unwrap_or_default();
             for notification in batch {
-                // 铃铛面板：跟 OSC 路径共用同一个 TerminalView.notification 字段，
-                // 结构化事件才有机会进这个列表（之前只有 OSC/响铃能写它）。顺带
-                // 判断这条通知对应的 pane 是不是正在看——跟 OSC 路径同一口径：
-                // 正在看就不弹 toast（你自己看得见），只有真没在看才弹。找不到对应
-                // pane（比如会话还没落地成 leaf）就只走 toast/系统通知。
                 let mut is_current_view = false;
                 let mut session_title = None;
                 for (ix, sess) in self.sessions.iter().enumerate() {
@@ -5139,30 +5166,47 @@ impl Render for Workspace {
                             if ix == active && leaf.entity_id() == anchor {
                                 is_current_view = true;
                             }
-                            leaf.update(cx, |t, cx| {
-                                t.note_structured_notification(notification.message.clone(), cx);
-                            });
                         }
                     }
                 }
-                let message = session_title.unwrap_or(notification.message);
-                if window.is_window_active() {
-                    if !is_current_view {
+                let display_title = session_title
+                    .map(|session| format!("{} · {session}", notification.title))
+                    .unwrap_or_else(|| notification.title.clone());
+                let message = notification.message.clone();
+                match smelt_core::attention::delivery_channel(
+                    agent_notification_enabled(&notify_config, notification.kind),
+                    window.is_window_active(),
+                    is_current_view,
+                    notification.kind.requires_action(),
+                ) {
+                    smelt_core::attention::DeliveryChannel::Suppress => {}
+                    smelt_core::attention::DeliveryChannel::Toast => {
+                        let session_id = notification.session_id.clone();
+                        let workspace = workspace.clone();
                         let toast = match notification.kind {
-                            AgentNotificationKind::Approval => Notification::warning(message),
-                            AgentNotificationKind::Input => Notification::info(message),
-                            AgentNotificationKind::Success => Notification::success(message),
-                            AgentNotificationKind::Failure => Notification::error(message),
+                            AttentionKind::Approval => Notification::warning(message),
+                            AttentionKind::Input => Notification::info(message),
+                            AttentionKind::Success => Notification::success(message),
+                            AttentionKind::Failure => Notification::error(message),
+                            AttentionKind::Bell | AttentionKind::Notice => {
+                                Notification::info(message)
+                            }
                         }
-                        .title(notification.title);
+                        .title(display_title)
+                        .on_click(move |_, window, cx| {
+                            workspace.update(cx, |this, cx| {
+                                this.goto_notification_session(&session_id, window, cx);
+                            });
+                        });
                         window.push_notification(toast, cx);
                     }
-                } else {
-                    status_item::deliver_notification(
-                        &notification.session_id,
-                        &notification.title,
-                        &message,
-                    );
+                    smelt_core::attention::DeliveryChannel::System => {
+                        status_item::deliver_notification(
+                            &notification.session_id,
+                            &display_title,
+                            &message,
+                        )
+                    }
                 }
             }
         }
@@ -5795,11 +5839,6 @@ impl Render for Workspace {
             .children(palette_overlay)
             // 退出确认拦截弹层
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
-            // 会话管理弹窗（设置页「更新」tab 点开）
-            .children(
-                self.session_manager_open
-                    .then(|| self.render_session_manager(cx)),
-            )
             // 会话重命名拦截弹层
             .children(
                 self.rename_target
@@ -5880,6 +5919,10 @@ impl Render for Workspace {
                 self.notifications_open
                     .then(|| self.render_notifications(cx)),
             )
+            // gpui-component 的 Root 负责保存 toast 队列，但当前版本不会在 Root::render
+            // 里自动挂通知层。显式画到工作区最外层，否则 push_notification 成功后只会
+            // 留在队列里：铃铛有未读数字，左下角却什么都看不到。
+            .children(gpui_component::Root::render_notification_layer(window, cx))
             // 调试 HUD：右上角帧率 + 帧耗时 + RSS（Cmd+Shift+F 切换）
             .children(self.debug_hud.then(|| {
                 let fps = self.fps_ema;
@@ -6132,29 +6175,24 @@ fn main() {
         // 是同一个搭桥模式。
         let daemon_states = DaemonStates::default();
         cx.set_global(daemon_states.clone());
-        cx.set_global(PendingAgentNotifs::default());
+        let attention = AttentionGlobal::default();
+        cx.set_global(attention.clone());
         let agent_ui_config = settings::load_agent_ui_config();
         let agent_hooks_enabled = agent_ui_config.agent_hooks_enabled;
-        let legacy_agent_hooks_preference = agent_ui_config.agent_hooks_preference_legacy;
         cx.set_global(agent_ui_config);
         // hook 配置和 helper 必须作为一个版本单元升级：先把 App 内最新版同步到稳定
         // managed 路径，再改写各 provider 的 hook 命令。失败时保留旧 helper，不阻塞 GUI。
         if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
-        // 新安装默认开启托管 hooks；已有配置缺少开关时保持关闭。安装含 Codex
-        // app-server 信任握手和文件 IO，全部放后台，不能阻塞首帧。
+        // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
+        // 安装含 Codex app-server 信任握手和文件 IO，全部放后台，不能阻塞首帧。
         if agent_hooks_enabled {
             thread::spawn(|| {
                 if let Err(error) = settings::install_agent_hooks() {
                     eprintln!("[workspace] 自动安装 Agent hooks 失败：{error}");
                 }
             });
-        } else if legacy_agent_hooks_preference {
-            // 升级自旧版本、尚无开关的用户维持原行为：只修复 Smelt 已拥有的
-            // hooks，不给从未启用过集成的人新增配置。
-            settings::upgrade_owned_copilot_hooks();
-            thread::spawn(settings::upgrade_owned_codex_hooks_and_trust);
         }
         let (daemon_state_tx, daemon_state_rx) =
             smol::channel::unbounded::<terminal::DaemonStateEvent>();
@@ -6168,28 +6206,18 @@ fn main() {
             while let Ok(event) = daemon_state_rx.recv().await {
                 let _ = cx.update(|cx| {
                     let states = cx.global::<DaemonStates>().0.clone();
-                    let notify_config = cx
-                        .try_global::<settings::AgentUiConfig>()
-                        .cloned()
-                        .unwrap_or_default();
-                    let pending = cx.try_global::<PendingAgentNotifs>().map(|p| p.0.clone());
+                    let attention = cx.global::<AttentionGlobal>().0.clone();
                     {
                         let mut map = states.lock().unwrap();
                         match event {
                             terminal::DaemonStateEvent::Snapshot(list) => {
-                                if let Some(q) = &pending {
-                                    for s in &list {
-                                        if let Some(entry) = awaiting_notification_for_transition(
-                                            map.get(&s.id).map(|p| p.phase),
-                                            s,
-                                        ) {
-                                            if agent_notification_enabled(&notify_config, entry.2) {
-                                                q.lock()
-                                                    .unwrap()
-                                                    .push(pending_agent_notification(s, entry));
-                                            }
-                                        }
-                                    }
+                                for s in &list {
+                                    smelt_core::attention::apply_daemon_transition(
+                                        &mut attention.lock().unwrap(),
+                                        map.get(&s.id).map(|p| p.phase),
+                                        s,
+                                        Instant::now(),
+                                    );
                                 }
                                 // 只清守护侧条目：`acp-` 前缀是 GUI 内 ACP 会话自己
                                 // 维护的状态，smeltd 重连发快照时不能把它们抹掉。
@@ -6199,18 +6227,12 @@ fn main() {
                                 }
                             }
                             terminal::DaemonStateEvent::Update(s) => {
-                                if let Some(q) = &pending {
-                                    if let Some(entry) = awaiting_notification_for_transition(
-                                        map.get(&s.id).map(|p| p.phase),
-                                        &s,
-                                    ) {
-                                        if agent_notification_enabled(&notify_config, entry.2) {
-                                            q.lock()
-                                                .unwrap()
-                                                .push(pending_agent_notification(&s, entry));
-                                        }
-                                    }
-                                }
+                                smelt_core::attention::apply_daemon_transition(
+                                    &mut attention.lock().unwrap(),
+                                    map.get(&s.id).map(|p| p.phase),
+                                    &s,
+                                    Instant::now(),
+                                );
                                 map.insert(s.id.clone(), s);
                             }
                         }
@@ -6661,131 +6683,17 @@ mod project_tests {
 
 #[cfg(test)]
 mod daemon_state_notification_tests {
-    use super::{
-        AgentNotificationKind, agent_notification_enabled, awaiting_notification_for_transition,
-    };
-    use crate::terminal::{DaemonPhase, DaemonSessionState};
-
-    fn daemon_state(id: &str, phase: DaemonPhase) -> DaemonSessionState {
-        DaemonSessionState {
-            id: id.into(),
-            phase,
-            pending_question: None,
-            title: None,
-            launch: None,
-            cwd: None,
-            phase_since: 0,
-            structured_events: true,
-        }
-    }
-
-    #[test]
-    fn daemon_awaiting_notification_running_to_waiting_produces_one_choice_notification() {
-        let mut state = daemon_state("session-12345678", DaemonPhase::WaitingForUser);
-        state.pending_question = Some("Pick one".into());
-
-        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
-
-        assert_eq!(
-            notif,
-            Some((
-                "等你输入".into(),
-                "💬 Pick one".into(),
-                AgentNotificationKind::Input
-            ))
-        );
-    }
-
-    #[test]
-    fn daemon_awaiting_notification_waiting_to_same_waiting_produces_none() {
-        let mut state = daemon_state("session-12345678", DaemonPhase::WaitingForUser);
-        state.pending_question = Some("Still waiting".into());
-
-        let notif = awaiting_notification_for_transition(Some(DaemonPhase::WaitingForUser), &state);
-
-        assert_eq!(notif, None);
-    }
-
-    #[test]
-    fn daemon_awaiting_notification_approval_uses_title_fallback_and_marks_approval() {
-        let mut state = daemon_state("session-12345678", DaemonPhase::AwaitingApproval);
-        state.title = Some("Need review".into());
-
-        let notif = awaiting_notification_for_transition(Some(DaemonPhase::ExecutingTool), &state);
-
-        assert_eq!(
-            notif,
-            Some((
-                "等你批准".into(),
-                "Need review".into(),
-                AgentNotificationKind::Approval
-            ))
-        );
-    }
-
-    #[test]
-    fn daemon_stop_produces_completion_notification_not_input_notification() {
-        let state = daemon_state("session-12345678", DaemonPhase::Succeeded);
-        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
-
-        assert_eq!(
-            notif,
-            Some((
-                "已完成".into(),
-                "会话 session-".into(),
-                AgentNotificationKind::Success
-            ))
-        );
-    }
-
-    #[test]
-    fn unstructured_osc_completion_stays_on_terminal_notification_path() {
-        let mut state = daemon_state("session-12345678", DaemonPhase::Succeeded);
-        state.structured_events = false;
-
-        assert_eq!(
-            awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state),
-            None
-        );
-    }
-
-    #[test]
-    fn daemon_error_produces_failure_notification() {
-        let mut state = daemon_state("session-12345678", DaemonPhase::Failed);
-        state.pending_question = Some("rate limited".into());
-        let notif = awaiting_notification_for_transition(Some(DaemonPhase::Thinking), &state);
-
-        assert_eq!(
-            notif,
-            Some((
-                "失败".into(),
-                "rate limited".into(),
-                AgentNotificationKind::Failure
-            ))
-        );
-    }
+    use super::{AttentionKind, agent_notification_enabled};
 
     #[test]
     fn notification_switches_are_independent() {
         let mut config = crate::settings::AgentUiConfig::default();
         config.notify_success = false;
 
-        assert!(!agent_notification_enabled(
-            &config,
-            AgentNotificationKind::Success
-        ));
-        assert!(agent_notification_enabled(
-            &config,
-            AgentNotificationKind::Approval
-        ));
-        assert!(agent_notification_enabled(
-            &config,
-            AgentNotificationKind::Input
-        ));
-        assert!(agent_notification_enabled(
-            &config,
-            AgentNotificationKind::Failure
-        ));
+        assert!(!agent_notification_enabled(&config, AttentionKind::Success));
+        assert!(agent_notification_enabled(&config, AttentionKind::Approval));
+        assert!(agent_notification_enabled(&config, AttentionKind::Input));
+        assert!(agent_notification_enabled(&config, AttentionKind::Failure));
     }
 }
 

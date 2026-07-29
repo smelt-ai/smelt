@@ -687,21 +687,6 @@ pub fn copilot_hooks_installed() -> bool {
     })
 }
 
-/// 升级 Smelt 自己安装过的旧 Copilot hook。旧版命令没有注入事件名，而 Copilot
-/// stdin 也不带 hook_event_name，导致所有结构化状态静默丢失。只在文件里已经存在
-/// smelt-notify 时改写，不会替用户擅自开启原本没启用的集成。
-pub fn upgrade_owned_copilot_hooks() {
-    let Some(path) = copilot_hooks_path() else {
-        return;
-    };
-    let owned = std::fs::read_to_string(path)
-        .ok()
-        .is_some_and(|raw| raw.contains("smelt-notify"));
-    if owned && !copilot_hooks_installed() {
-        let _ = install_copilot_hooks();
-    }
-}
-
 pub fn codex_hooks_installed() -> bool {
     hook_file_installed(codex_hooks_path(), CODEX_HOOK_EVENTS)
 }
@@ -776,19 +761,6 @@ pub fn install_codex_hooks() -> Result<(), String> {
     smelt_core::codex_app_server::grant_codex_hook_trust(&path, &cwd, &commands)
         .map(|_| ())
         .map_err(|error| format!("Codex hooks 已安装，但自动信任失败：{error}"))
-}
-
-/// 只升级用户已经通过 Smelt 安装过的 Codex hooks，不替未启用的用户开启集成。
-pub fn upgrade_owned_codex_hooks_and_trust() {
-    let Some(path) = codex_hooks_path() else {
-        return;
-    };
-    let owned = std::fs::read_to_string(path)
-        .ok()
-        .is_some_and(|raw| raw.contains("smelt-notify"));
-    if owned {
-        let _ = install_codex_hooks();
-    }
 }
 
 pub fn uninstall_copilot_hooks() -> Result<(), String> {
@@ -1936,8 +1908,8 @@ pub struct SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 设置内容 +（可选）重启守护确认层：弹层必须画在本窗，不能只改 Workspace 上的
-        // flag 却在主窗口 render——用户点的是设置里的按钮，确认框却跑到主界面。
+        // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
+        // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
         self.workspace.update(cx, |ws, cx| {
             div()
                 .relative()
@@ -1946,6 +1918,10 @@ impl Render for SettingsWindow {
                 .children(
                     ws.show_daemon_restart_confirm
                         .then(|| ws.render_daemon_restart_confirm(cx)),
+                )
+                .children(
+                    ws.session_manager_open
+                        .then(|| ws.render_session_manager(cx)),
                 )
         })
     }
@@ -3422,7 +3398,6 @@ impl Workspace {
                                             // 下次启动也会继续校正，而不是悄悄退回关闭。
                                             apply_agent_ui(|c| {
                                                 c.agent_hooks_enabled = true;
-                                                c.agent_hooks_preference_legacy = false;
                                             }, cx);
                                             let result = install_agent_hooks();
                                             match result {
@@ -3461,7 +3436,6 @@ impl Workspace {
                                             // 先关闭自动安装，避免部分移除失败后重启又被装回。
                                             apply_agent_ui(|c| {
                                                 c.agent_hooks_enabled = false;
-                                                c.agent_hooks_preference_legacy = false;
                                             }, cx);
                                             let result = uninstall_agent_hooks();
                                             match result {

@@ -36,85 +36,28 @@ smelt 把终端——agent 真正干活的地方——变成主战场。
 
 ## 功能
 
-**工作台**
-- 多项目 × 多标签内嵌真终端，`claude`、`codex`、`copilot`、`vim`、`htop` 等交互式程序与全屏 TUI 都能跑
-- 快捷启动：项目「+」菜单的启动项可在设置里自定义（名称 + 命令列表），默认含 Claude Code / Codex / Copilot
-- 分屏：竖切 / 横切，一个会话里并排看多个 agent
-- 命令面板（`Cmd+K`）、可折叠侧栏
+- **工作台**：多项目 × 多标签内嵌真终端（跑 `claude`/`codex`/`copilot`/`vim`/`htop` 等交互式程序与全屏 TUI），
+  分屏、命令面板（`Cmd+K`）、可自定义的快捷启动
+- **看住 agent**：靠终端标题（OSC 0/2）+ OSC 9/777 通知 + 响铃感知会话状态（等你批准 / 等你输入 /
+  跑着呢 / 有结果可看），需要关注时角标提醒 + 系统通知；不依赖任何一家的私有格式
+- **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、代码热力图、Markdown/Mermaid 渲染
+- **Claude Code 专属**：用量统计、历史会话与记忆浏览（读本地 `~/.claude/projects/**` transcript）
+- **远程访问**（默认关闭）：手机浏览器实时查看/操控本机 agent 会话，局域网直连，跨网可选
+  WebRTC 自建信令或 Cloudflare quick tunnel。**链接即权限，务必先读
+  [远程访问文档](https://github.com/smelt-ai/smelt/blob/main/website/content/docs.md#远程访问)** 再开
+- **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）、可选接 LLM 大脑的桌面宠物
 
-**看住 agent**
-- 会话状态监控：区分「等你批准」「等你输入」「跑着呢」「有结果可看」四档，总览页一眼扫完
-- 「需要关注」角标同时出现在 Dock 图标和菜单栏常驻图标上，切走 smelt 也能瞥见
-- 系统通知：agent 干完活或需要你时主动提醒，app 在前台时自动噤声
-
-  状态靠终端标题（OSC 0/2）与 OSC 9/777 通知、响铃感知，不依赖任何一家的私有格式——
-  凡是按这套终端约定输出的 agent 都能被识别（Claude Code 开箱即用）。
-
-**Claude Code 专属**
-
-这两项要读 Claude Code 写在本地的 transcript（`~/.claude/projects/**/*.jsonl`）：
-
-- 用量统计：按工具 / 模型 / 项目拆分 token 用量，含今日走势与活动热力图
-- 历史会话浏览：翻看完整对话（只读）
-
-**读写代码**
-- 文件树 + 文件名/内容搜索，内置编辑器（tree-sitter 语法高亮、行号、`Cmd+S` 保存）
-- Git diff 视图，字符级行内高亮
-- 代码热力图：从 `git log` 提炼改动热点（改得越勤、越近，分数越高）
-- Markdown 渲染（会话历史、ACP 对话、文件预览三处统一）支持 ```mermaid 代码块画图，
-  跟着亮暗主题走，纯 Rust 渲染不依赖浏览器/Node
-
-**远程访问**（默认关闭）
-- 开个开关拿一条链接，手机浏览器就能看本机 agent 会话的实时终端画面（真 xterm 渲染，TUI 正常显示）
-- 可选开放写入：手机上打字、批准 / 拒绝权限；Claude Code 的编号选项会被识别成大按钮，点一下就选
-- 出门也能连：装了 [`cloudflared`](https://developers.cloudflare.com/cloudflare-tunnel/) 后自动建 Cloudflare quick tunnel 生成公网链接（临时链接，重启会变）
-
-  > ⚠️ **链接即权限**：鉴权只有 URL 里的随机 token，无密码、无过期，一条链接管本机全部会话。
-  > 开着「允许远程写入」把链接发出去，等于交出一个远程 shell。默认三个开关全关、只绑回环地址。
-  > 细节见[文档](https://github.com/smelt-ai/smelt/blob/main/website/content/docs.md#远程访问)。
-
-  做到「一个人用手机遥控自己的 Mac」为止；IM 卡片、同事协作 / 认领 / 移交都还没动工，
-  见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
-
-**其它**
-- 终端会话持久化：GUI 退出或崩溃不影响 shell 存活，重开自动 reattach
-- 桌面宠物：透明置顶浮窗，可选接 LLM 大脑（OpenAI 兼容协议）
-
-终端本身支持完整 ANSI / xterm 256 色 / 24-bit 真彩、Nerd Font、中文输入法（IME）、
-框选与双击选词、10000 行滚动回看、`Cmd+点击` 打开链接。
-
-## 快捷键
-
-| 快捷键 | 作用 |
-|---|---|
-| `Cmd+K` | 命令面板 |
-| `Cmd+B` | 切换侧栏 |
-| `Cmd+[` / `Cmd+]` | 上一个 / 下一个会话 |
-| `Cmd+D` / `Cmd+Shift+D` | 竖切 / 横切分屏 |
-| `Cmd+W` | 关闭当前 pane |
-| `Cmd+S` | 保存文件（文件树页） |
-| `Cmd+,` | 设置 |
-| `Cmd+C` / `Cmd+V` | 复制选区 / 粘贴（终端内） |
-| `Shift+PageUp` / `Shift+PageDown` | 翻滚历史缓冲 |
+完整功能清单、快捷键与架构细节见 [`docs/workspace.md`](docs/workspace.md)；
+产品方向见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
 
 ## 从源码构建
 
 需要 Rust stable 与 macOS。**无需安装完整 Xcode**——项目通过 `gpui_platform` 的
 `runtime_shaders` feature 把 Metal 着色器改到运行时编译，只装 Command Line Tools 即可。
 
-普通 `cargo` 开发不依赖 Python；打包 DMG 的 `make dist-build` 还需要 **Python 3.10
-或以上版本**。Command Line Tools 提供的 `/usr/bin/python3` 可能仍是 3.9，请先检查：
-
-```sh
-python3 --version
-brew install python  # 如果版本低于 3.10
-```
-
-如果兼容版本不在 `python3`，可显式指定解释器：
-
-```sh
-SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build
-```
+打包 DMG 的 `make dist-build` 需要 **Python 3.10+**（Command Line Tools 自带的
+`/usr/bin/python3` 可能仍是 3.9，版本不够可 `brew install python` 或用
+`SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build` 指定解释器）。
 
 ```sh
 cargo run --bin smelt       # 开发模式直接跑 GUI
@@ -131,39 +74,21 @@ cargo test
 
 ## 架构
 
-仓库有四个二进制，日常只需要跑第一个：
+Rust 2021 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component)（GUI）、
+portable-pty + alacritty_terminal（内嵌终端）、tokio、axum + webrtc-rs（远程网关/跨网信令）。
+配置放 `~/.smelt/`。
 
-| 二进制 | 作用 |
-|---|---|
-| `smelt` | GUI 主程序（`crates/smelt/`） |
-| `smeltd` | 终端持久化守护进程，类 tmux（`crates/smeltd/src/main.rs`）；远程网关也跑在它里面 |
-| `gateway` | 远程网关的独立可执行版（`crates/smeltd/src/bin/gateway.rs`），与 smeltd 共用 `crates/smelt-core/src/remote_gateway.rs`，主要用于开发调试 |
-| `smelt-notify` | Claude Code hooks 调用的状态上报小工具（`crates/smeltd/src/bin/smelt-notify.rs`） |
+仓库产出六个二进制，日常只需要跑第一个：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，
+类 tmux，由 GUI 按需拉起，不需要手动运行）、`gateway`（远程网关的独立可执行版，用于开发调试）、
+`smelt-notify`（Claude Code hooks 调用的状态上报小工具）、`smelt-signal` / `smelt-bridge`
+（跨网远程访问的自建信令 + WebRTC bridge，可选自部署，见
+[`docs/webrtc-edge.md`](docs/webrtc-edge.md)）。
 
-`smeltd` 由 GUI 按需自动拉起并托管（独立进程组，GUI 退出不波及），**不需要手动运行**。
-它以字节流 + 重放 + 尺寸协商的方式为每个终端会话保活，重开 GUI 时按会话 id reattach。
-守护常驻 `~/.smelt/bin/smeltd`；App 启动时也会把随 DMG 分发的 `smelt-notify` 同步到
-`~/.smelt/bin/smelt-notify`，保证 hooks 在 GUI 关闭时仍使用当前版本。
-
-手机端 H5（`remote-web/`，Preact + Tailwind + xterm）在编译期由 `rust-embed` 打进
-`smeltd` / `gateway`，所以只拷二进制也能跑；改前端后需重新 `npm run build` 再 `cargo build`。
-
-详细架构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，
-产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)
-（含 ACP / App / Review / 任务 / **手机远程** / 体验），
+详细架构、目录结构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，
+产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，
 杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)，
-远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
-
-## 技术栈
-
-Rust 2021 · [GPUI](https://github.com/zed-industries/zed) + [gpui-component](https://github.com/longbridge/gpui-component)
-· portable-pty（PTY）· alacritty_terminal（ANSI 状态机）· tokio · smol · similar（diff）
-· notify（文件监听）· reqwest · anyhow · axum（远程网关 HTTP/WS）· rust-embed（把手机端 H5 编进二进制）
-· rusty-mermaid（markdown 里的 mermaid 图渲染）
-
-手机端 H5：Preact + Tailwind + xterm.js（`remote-web/`，Vite 构建）。
-
-配置放在 `~/.smelt/`。
+远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md) 与
+[`docs/webrtc-edge.md`](docs/webrtc-edge.md)。
 
 ## 贡献
 

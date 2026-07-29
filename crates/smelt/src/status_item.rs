@@ -37,6 +37,11 @@ mod imp {
     use objc::{class, msg_send, sel, sel_impl};
     use std::sync::OnceLock;
 
+    #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {
+        static NSUserNotificationDefaultSoundName: *mut Object;
+    }
+
     /// 应用图标母图（`scripts/make-icon.sh` 产出），直接编进二进制当菜单栏图标用——
     /// 不用 SF Symbol 占位符了，用户要的是自己的 logo。彩色原样显示（不走
     /// `setTemplate:`，那个只吃 alpha 通道，会把带颜色的方形 logo 拍成纯色剪影）。
@@ -209,9 +214,9 @@ mod imp {
             let image: *mut Object = msg_send![class!(NSImage), alloc];
             let image: *mut Object = msg_send![image, initWithData: data];
             if !image.is_null() {
-                // 母图是 1024×1024，菜单栏图标按 18pt 显示（跟系统自带图标的观感尺寸
+                // 母图是 1024×1024，菜单栏图标按 20pt 显示（跟系统自带图标的观感尺寸
                 // 对齐），NSImage 自己插值缩小，不用额外裁剪/预生成小图。
-                let _: () = msg_send![image, setSize: NSSize { width: 18.0, height: 18.0 }];
+                let _: () = msg_send![image, setSize: NSSize { width: 20.0, height: 20.0 }];
                 let _: () = msg_send![button, setImage: image];
                 let _: () = msg_send![button, setImagePosition: 2u64]; // NSImageLeft：图标靠左，角标数字（若有）跟在右边
             } else {
@@ -330,6 +335,10 @@ mod imp {
             let _: () = msg_send![notification, setSubtitle: nsstring(subtitle)];
             let _: () = msg_send![notification, setInformativeText: nsstring(body)];
             let _: () = msg_send![notification, setUserInfo: info];
+            // NSUserNotification 的默认 soundName 是 nil（静音）；显式指定系统默认
+            // 通知音，同时仍由 macOS 的应用通知设置和专注模式决定最终是否播放。
+            let _: () = msg_send![notification,
+                setSoundName: NSUserNotificationDefaultSoundName];
             let _: () = msg_send![center, deliverNotification: notification];
             let _: () = msg_send![notification, release];
         }

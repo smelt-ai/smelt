@@ -1,20 +1,24 @@
 //! Agent hook 调用的小工具：把 Claude、Copilot、Codex 的结构化事件翻译成
-//! smeltd 的 `state` op。
-//! 见 docs/state-channel-plan.md「hook 链路」一节。
+//! smeltd 的版本化 `agent_event` op；旧 daemon 不支持时自动回退到 `state` op。
+//! 见 docs/notification-architecture.md。
 //!
 //! stdin: Claude Code 传来的 hook JSON（`hook_event_name` / `tool_name` /
 //!        `notification_type` / `message` 等，字段名见官方 hooks 文档）
 //! env:   `SMELT_SESSION_ID`（smeltd 会话 id，spawn_session 时注入）、
 //!        `SMELT_SOCK`（smeltd.sock 路径，同样是 spawn 时注入）
-//! 出参:  连 `$SMELT_SOCK` 发一行 `{"op":"state","id":"..","phase":"..","question":".."}`
+//! 出参:  连 `$SMELT_SOCK` 发一行 `{"op":"agent_event","id":"..","event":{...}}`
 //!
 //! **必须 exit 0，并先打印空决策 JSON**：Claude、Copilot 和 Codex 都可能解析 hook
 //! stdout，`{}` 对三者都是无副作用的有效响应。非 0 退出码（尤其是 2）可能阻塞工具
 //! 执行——这个工具只负责上报状态，绝不能意外干扰 agent 的正常运行。任何失败
 //! （socket 连不上、JSON 解析不出来、字段缺失、env 没设置）都静默退出。
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+use smelt_core::agent_event::{AgentEvent, AgentEventKind};
 
 fn main() {
     // 用户级 hooks 在 Smelt 外也会运行；即使下方因缺少 SMELT_* 环境变量而退出，
@@ -34,19 +38,65 @@ fn run() -> Option<()> {
     let hook: serde_json::Value = serde_json::from_str(&input).ok()?;
 
     let provider = std::env::var("SMELT_HOOK_PROVIDER").unwrap_or_else(|_| "claude".into());
-    let (phase, question) = map_hook_event_for_provider(&hook, &provider)?;
+    let event = normalize_hook_event_for_provider(&hook, &provider)?;
 
-    let mut s = UnixStream::connect(&sock).ok()?;
     let payload = serde_json::json!({
-        "op": "state",
-        "id": session_id,
-        "phase": phase,
-        "question": question,
+        "op": "agent_event",
+        "id": &session_id,
+        "event": event,
     });
     // 连不上/写失败都无所谓——状态通道本就是「有则更准，没有就继续猜」，
     // 不是必须成功的关键路径。
-    let _ = writeln!(s, "{payload}");
+    if !send_and_confirm(&sock, &payload) {
+        let (phase, question) = legacy_state(&event);
+        let payload = serde_json::json!({
+            "op": "state",
+            "id": session_id,
+            "phase": phase,
+            "question": question,
+        });
+        let _ = send_without_confirmation(&sock, &payload);
+    }
     Some(())
+}
+
+fn send_and_confirm(sock: &str, payload: &serde_json::Value) -> bool {
+    let Ok(mut stream) = UnixStream::connect(sock) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    if writeln!(stream, "{payload}").is_err() {
+        return false;
+    }
+    let _ = stream.shutdown(Shutdown::Write);
+    let mut response = String::new();
+    BufReader::new(stream).read_line(&mut response).is_ok()
+        && serde_json::from_str::<serde_json::Value>(&response)
+            .ok()
+            .and_then(|value| value["ok"].as_bool())
+            == Some(true)
+}
+
+fn send_without_confirmation(sock: &str, payload: &serde_json::Value) -> std::io::Result<()> {
+    let mut stream = UnixStream::connect(sock)?;
+    writeln!(stream, "{payload}")
+}
+
+fn legacy_state(event: &AgentEvent) -> (&'static str, Option<&str>) {
+    let phase = match event.kind {
+        AgentEventKind::SessionStarted => "idle",
+        AgentEventKind::PromptSubmitted
+        | AgentEventKind::ToolFinished
+        | AgentEventKind::ToolFailed
+        | AgentEventKind::SubagentStopped => "thinking",
+        AgentEventKind::ToolStarted | AgentEventKind::SubagentStarted => "executing_tool",
+        AgentEventKind::ApprovalRequested => "awaiting_approval",
+        AgentEventKind::InputRequested => "waiting_for_user",
+        AgentEventKind::TurnSucceeded => "succeeded",
+        AgentEventKind::TurnFailed => "failed",
+        AgentEventKind::SessionEnded => "dead",
+    };
+    (phase, event.message.as_deref())
 }
 
 /// hook 事件 → (phase 字符串, pending_question)。不认识的事件返回 None（不上报，
@@ -60,10 +110,20 @@ fn map_hook_event(hook: &serde_json::Value) -> Option<(&'static str, Option<Stri
     map_hook_event_for_provider(hook, "claude")
 }
 
+#[cfg(test)]
 fn map_hook_event_for_provider(
     hook: &serde_json::Value,
     provider: &str,
 ) -> Option<(&'static str, Option<String>)> {
+    let event = normalize_hook_event_for_provider(hook, provider)?;
+    let (phase, _) = legacy_state(&event);
+    Some((phase, event.message))
+}
+
+fn normalize_hook_event_for_provider(
+    hook: &serde_json::Value,
+    provider: &str,
+) -> Option<AgentEvent> {
     // 兼容不带 hook_event_name 的 Copilot 版本：安装器按配置项把事件名注入环境变量。
     // 有协议原生字段时始终优先使用它。
     let event_from_env;
@@ -73,42 +133,52 @@ fn map_hook_event_for_provider(
         event_from_env = std::env::var("SMELT_HOOK_EVENT").ok()?;
         event_from_env.as_str()
     };
-    match event {
+    let kind_and_message = match event {
         // 会话刚起、hooks 链路第一次有机会发声——不上报的话，Idle 态和「hooks
         // 根本没装/装的是旧配置/socket 连不上」在 UI 上长得一模一样；有这一条，
         // DaemonStates 里出现记录本身就是「链路确认通了」的信号。
-        "SessionStart" | "sessionStart" => Some(("idle", None)),
-        "UserPromptSubmit" | "userPromptSubmitted" => Some(("thinking", None)),
+        "SessionStart" | "sessionStart" => Some((AgentEventKind::SessionStarted, None)),
+        "UserPromptSubmit" | "userPromptSubmitted" => Some((AgentEventKind::PromptSubmitted, None)),
         "PreToolUse" | "preToolUse" => {
-            if hook["tool_name"].as_str().is_some_and(|tool| {
-                matches!(
-                    tool.to_ascii_lowercase().as_str(),
-                    "askuser" | "ask_user" | "askuserquestion"
-                )
-            }) {
-                return Some(("waiting_for_user", describe_tool_call(hook)));
+            if let Some(tool) = hook_tool_name(hook) {
+                let normalized = tool.to_ascii_lowercase();
+                if matches!(
+                    normalized.as_str(),
+                    "askuser" | "ask_user" | "askuserquestion" | "request_user_input"
+                ) {
+                    let question = if normalized == "request_user_input" {
+                        Some(describe_codex_user_input(hook))
+                    } else {
+                        describe_tool_call(hook)
+                    };
+                    return Some(build_agent_event(
+                        hook,
+                        provider,
+                        AgentEventKind::InputRequested,
+                        question,
+                    ));
+                }
             }
-            // question 槽位复用为「当前工具」展示（结构面板 / 总览）。
-            Some(("executing_tool", describe_tool_call(hook)))
+            Some((AgentEventKind::ToolStarted, describe_tool_call(hook)))
         }
-        "PostToolUse" | "postToolUse" => Some(("thinking", None)),
+        "PostToolUse" | "postToolUse" => Some((AgentEventKind::ToolFinished, None)),
         // 工具跑挂了：跟 PostToolUse 一样回到 thinking（agent 马上会看着错误决定
         // 下一步），但 question 带上失败标记——不然「刚才那个工具是不是炸了」在
         // UI 上完全看不出来，跟正常跑完长得一样。
         "PostToolUseFailure" | "postToolUseFailure" => {
-            let tool = hook["tool_name"].as_str().unwrap_or("工具");
+            let tool = hook_tool_name(hook).unwrap_or("工具");
             let err = first_present_str(hook, &["error", "error_message", "tool_error", "reason"]);
             let q = match err {
                 Some(e) => format!("⚠ {tool} 执行失败：{}", truncate_chars(e, 60)),
                 None => format!("⚠ {tool} 执行失败"),
             };
-            Some(("thinking", Some(q)))
+            Some((AgentEventKind::ToolFailed, Some(q)))
         }
         // 独立的权限请求事件（比 Notification 更明确），见官方 hooks 文档。
         "PermissionRequest" | "permissionRequest" if provider != "copilot" => {
-            let tool = hook["tool_name"].as_str().unwrap_or("");
+            let tool = hook_tool_name(hook).unwrap_or("");
             let q = format!("请求执行 {tool}");
-            Some(("awaiting_approval", Some(q)))
+            Some((AgentEventKind::ApprovalRequested, Some(q)))
         }
         // Copilot 在自身权限引擎作出 allow/deny/ask 决定前就发送此事件；只有后续
         // Notification(permission_prompt) 才证明用户真的看到了审批框。
@@ -118,9 +188,11 @@ fn map_hook_event_for_provider(
             // 认不出来的子类型不改 phase（比如 auth_success 这种跟"要不要
             // 批准/输入"无关的通知）。
             let message = hook["message"].as_str().map(String::from);
-            match hook["notification_type"].as_str() {
-                Some("permission_prompt") => Some(("awaiting_approval", message)),
-                Some("idle_prompt" | "elicitation_dialog") => Some(("waiting_for_user", message)),
+            match first_present_str(hook, &["notification_type", "notificationType"]) {
+                Some("permission_prompt") => Some((AgentEventKind::ApprovalRequested, message)),
+                Some("idle_prompt" | "elicitation_dialog") => {
+                    Some((AgentEventKind::InputRequested, message))
+                }
                 _ => None,
             }
         }
@@ -133,11 +205,11 @@ fn map_hook_event_for_provider(
                 Some(n) => format!("子任务：{n}"),
                 None => "运行子任务".to_string(),
             };
-            Some(("executing_tool", Some(q)))
+            Some((AgentEventKind::SubagentStarted, Some(q)))
         }
         // 子任务做完，主 agent 回去汇总/继续思考。
-        "SubagentStop" | "subagentStop" => Some(("thinking", None)),
-        "Stop" | "agentStop" => Some(("succeeded", None)),
+        "SubagentStop" | "subagentStop" => Some((AgentEventKind::SubagentStopped, None)),
+        "Stop" | "agentStop" => Some((AgentEventKind::TurnSucceeded, None)),
         // 回合因 API 错误中断，跟正常「说完了等你」（Stop）语义不同——同样落
         // waiting_for_user（协议里没有更细的档位，见 status_color 只到五色），
         // 但 question 标出「出错」，detail_line 上能看出差别，不会跟正常收尾混淆。
@@ -147,27 +219,57 @@ fn map_hook_event_for_provider(
                 Some(r) => format!("⚠ 因错误中断：{r}"),
                 None => "⚠ 因错误中断".to_string(),
             };
-            Some(("failed", Some(q)))
+            Some((AgentEventKind::TurnFailed, Some(q)))
         }
         "ErrorOccurred" | "errorOccurred" => {
             let reason = first_present_str(hook, &["message", "error", "reason"]);
-            Some((
-                "failed",
-                Some(match reason {
-                    Some(reason) => format!("⚠ 因错误中断：{}", truncate_chars(reason, 60)),
-                    None => "⚠ 因错误中断".to_string(),
-                }),
-            ))
+            let message = Some(match reason {
+                Some(reason) => format!("⚠ 因错误中断：{}", truncate_chars(reason, 60)),
+                None => "⚠ 因错误中断".to_string(),
+            });
+            if hook["recoverable"].as_bool() == Some(true) {
+                Some((AgentEventKind::ToolFailed, message))
+            } else {
+                Some((AgentEventKind::TurnFailed, message))
+            }
         }
-        "SessionEnd" | "sessionEnd" => Some(("dead", None)),
+        "SessionEnd" | "sessionEnd" => Some((AgentEventKind::SessionEnded, None)),
         _ => None,
-    }
+    }?;
+    Some(build_agent_event(
+        hook,
+        provider,
+        kind_and_message.0,
+        kind_and_message.1,
+    ))
+}
+
+fn build_agent_event(
+    hook: &serde_json::Value,
+    provider: &str,
+    kind: AgentEventKind,
+    message: Option<String>,
+) -> AgentEvent {
+    let mut event = AgentEvent::new(provider, kind);
+    event.message = message;
+    event.tool_name = hook_tool_name(hook).map(String::from);
+    event.tool_use_id = first_present_str(hook, &["tool_use_id", "toolUseId"]).map(String::from);
+    event.agent_id = first_present_str(hook, &["agent_id", "agentId"]).map(String::from);
+    event
 }
 
 /// PreToolUse 的「当前工具」摘要：尽量带点路径/命令细节。
 fn describe_tool_call(hook: &serde_json::Value) -> Option<String> {
-    let tool = hook["tool_name"].as_str()?;
-    let input = &hook["tool_input"];
+    let tool = hook_tool_name(hook)?;
+    let parsed_input;
+    let input = if !hook["tool_input"].is_null() {
+        &hook["tool_input"]
+    } else if let Some(raw) = hook["toolArgs"].as_str() {
+        parsed_input = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+        &parsed_input
+    } else {
+        &hook["toolArgs"]
+    };
     Some(if let Some(cmd) = input["command"].as_str() {
         format!("Bash: {}", truncate_chars(cmd, 48))
     } else if let Some(p) = input["file_path"]
@@ -179,6 +281,24 @@ fn describe_tool_call(hook: &serde_json::Value) -> Option<String> {
     } else {
         tool.to_string()
     })
+}
+
+/// Codex TUI 的选择器/确认框走 `request_user_input` 本地工具。通知优先展示第一道
+/// 问题本身；旧客户端若只带 header，或载荷不完整，也要给出可理解的固定提示。
+fn describe_codex_user_input(hook: &serde_json::Value) -> String {
+    hook.pointer("/tool_input/questions/0/question")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            hook.pointer("/tool_input/questions/0/header")
+                .and_then(|value| value.as_str())
+        })
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| truncate_chars(text.trim(), 80))
+        .unwrap_or_else(|| "Codex 等待你的输入".to_string())
+}
+
+fn hook_tool_name(hook: &serde_json::Value) -> Option<&str> {
+    first_present_str(hook, &["tool_name", "toolName"])
 }
 
 /// 按**字符**截断，不能按字节切：`&s[..n]` 是字节切片，第 n 字节一旦落在中文/
@@ -298,6 +418,101 @@ mod tests {
         assert_eq!(
             map_hook_event_for_provider(&hook, "copilot"),
             Some(("waiting_for_user", Some("ask_user".to_string())))
+        );
+    }
+
+    #[test]
+    fn codex_request_user_input_waits_with_question_summary() {
+        let hook = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "request_user_input",
+            "tool_input": {
+                "questions": [{
+                    "header": "选择水果",
+                    "question": "你想选哪一种水果？"
+                }]
+            }
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "codex"),
+            Some(("waiting_for_user", Some("你想选哪一种水果？".to_string())))
+        );
+        let event = normalize_hook_event_for_provider(&hook, "codex").unwrap();
+        assert_eq!(event.version, 1);
+        assert_eq!(event.kind, AgentEventKind::InputRequested);
+        assert_eq!(event.tool_name.as_deref(), Some("request_user_input"));
+    }
+
+    #[test]
+    fn codex_request_user_input_summary_falls_back_cleanly() {
+        let header_only = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "request_user_input",
+            "tool_input": { "questions": [{ "header": "确认操作" }] }
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&header_only, "codex"),
+            Some(("waiting_for_user", Some("确认操作".to_string())))
+        );
+
+        let missing = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "request_user_input",
+            "tool_input": {}
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&missing, "codex"),
+            Some(("waiting_for_user", Some("Codex 等待你的输入".to_string())))
+        );
+    }
+
+    #[test]
+    fn codex_request_user_input_post_tool_use_resumes_thinking() {
+        let hook = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "request_user_input"
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "codex"),
+            Some(("thinking", None))
+        );
+    }
+
+    #[test]
+    fn copilot_native_ask_user_payload_waits_for_input() {
+        let hook = json!({
+            "hook_event_name": "preToolUse",
+            "toolName": "ask_user",
+            "toolArgs": "{\"question\":\"选择通知场景\"}"
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "copilot"),
+            Some(("waiting_for_user", Some("ask_user".to_string())))
+        );
+    }
+
+    #[test]
+    fn copilot_native_tool_payload_builds_summary() {
+        let hook = json!({
+            "toolName": "bash",
+            "toolArgs": "{\"command\":\"git status\"}"
+        });
+        assert_eq!(
+            describe_tool_call(&hook).as_deref(),
+            Some("Bash: git status")
+        );
+    }
+
+    #[test]
+    fn copilot_native_notification_type_waits_for_input() {
+        let hook = json!({
+            "hook_event_name": "notification",
+            "notificationType": "elicitation_dialog",
+            "message": "请选择"
+        });
+        assert_eq!(
+            map_hook_event_for_provider(&hook, "copilot"),
+            Some(("waiting_for_user", Some("请选择".to_string())))
         );
     }
 
@@ -426,6 +641,24 @@ mod tests {
         assert_eq!(
             map_hook_event_for_provider(&hook, "copilot"),
             Some(("failed", Some("⚠ 因错误中断：rate limited".to_string())))
+        );
+    }
+
+    #[test]
+    fn copilot_recoverable_error_keeps_the_turn_working() {
+        let hook = json!({
+            "hook_event_name": "errorOccurred",
+            "message": "temporary network error",
+            "recoverable": true
+        });
+        let event = normalize_hook_event_for_provider(&hook, "copilot").unwrap();
+        assert_eq!(event.kind, AgentEventKind::ToolFailed);
+        assert!(
+            event
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("temporary network error")
         );
     }
 
