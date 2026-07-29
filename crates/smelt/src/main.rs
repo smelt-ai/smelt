@@ -6284,6 +6284,7 @@ fn main() {
                 cx.set_global(settings::TunnelRuntimeState {
                     connecting: true,
                     url: None,
+                    qr_png: None,
                     error: None,
                     write: false,
                 });
@@ -6334,6 +6335,7 @@ fn main() {
                                 settings::TunnelRuntimeState {
                                     connecting: false,
                                     url: None,
+                                    qr_png: None,
                                     error: Some("本机远程网关没起来，无法建立隧道".into()),
                                     write: false,
                                 }
@@ -6343,6 +6345,7 @@ fn main() {
                                     settings::TunnelRuntimeState {
                                         connecting: false,
                                         url: existing.url,
+                                        qr_png: None,
                                         error: None,
                                         write: existing.write,
                                     }
@@ -6351,12 +6354,14 @@ fn main() {
                                         Ok(s) => settings::TunnelRuntimeState {
                                             connecting: false,
                                             url: s.url,
+                                            qr_png: None,
                                             error: None,
                                             write: s.write,
                                         },
                                         Err(e) => settings::TunnelRuntimeState {
                                             connecting: false,
                                             url: None,
+                                            qr_png: None,
                                             error: Some(e),
                                             write: false,
                                         },
@@ -6392,6 +6397,7 @@ fn main() {
                             settings::TunnelRuntimeState {
                                 connecting: false,
                                 url: None,
+                                qr_png: None,
                                 error: Some(
                                     "隧道在跑但拿不到网关 token，请在设置里重开远程访问".into(),
                                 ),
@@ -6399,6 +6405,15 @@ fn main() {
                             }
                         } else {
                             tunnel_rt
+                        };
+
+                        let tunnel_rt = match (tunnel_rt.url.as_deref(), remote_rt.token.as_deref())
+                        {
+                            (Some(url), Some(token)) => settings::TunnelRuntimeState {
+                                qr_png: settings::gateway_pairing_qr_png(url, token),
+                                ..tunnel_rt
+                            },
+                            _ => tunnel_rt,
                         };
 
                         (remote_rt, tunnel_rt, want_webrtc)

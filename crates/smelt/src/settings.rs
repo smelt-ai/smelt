@@ -954,16 +954,28 @@ fn spawn_tunnel_start(write: bool, cx: &mut App) {
     cx.set_global(TunnelRuntimeState {
         connecting: true,
         url: None,
+        qr_png: None,
         error: None,
         write: false,
     });
     cx.spawn(async move |cx| {
-        let result = cx
+        let (result, remote, qr_png) = cx
             .background_executor()
-            .spawn(async move { terminal::tunnel_start(write) })
+            .spawn(async move {
+                let result = terminal::tunnel_start(write);
+                let remote = terminal::remote_status();
+                let qr_png = match (&result, remote.token.as_deref()) {
+                    (Ok(status), Some(token)) => status
+                        .url
+                        .as_deref()
+                        .map(|url| gateway_share_url(url, token))
+                        .and_then(|url| qr_png_for_url(&url)),
+                    _ => None,
+                };
+                (result, remote, qr_png)
+            })
             .await;
         let _ = cx.update(|cx| {
-            let remote = terminal::remote_status();
             let has_token = remote.token.as_ref().is_some_and(|t| !t.is_empty());
             cx.set_global(RemoteRuntimeState {
                 token: remote.token.clone(),
@@ -975,18 +987,21 @@ fn spawn_tunnel_start(write: bool, cx: &mut App) {
                 Ok(status) if has_token => TunnelRuntimeState {
                     connecting: false,
                     url: status.url,
+                    qr_png,
                     error: None,
                     write: status.write,
                 },
                 Ok(_) => TunnelRuntimeState {
                     connecting: false,
                     url: None,
+                    qr_png: None,
                     error: Some("外网通道建好了，但分享密钥还没就绪，点下方重试即可".into()),
                     write: false,
                 },
                 Err(e) => TunnelRuntimeState {
                     connecting: false,
                     url: None,
+                    qr_png: None,
                     error: Some(e),
                     write: false,
                 },
@@ -1613,6 +1628,18 @@ fn urlencoding_minimal(s: &str) -> String {
         .collect()
 }
 
+fn gateway_share_url(base: &str, token: &str) -> String {
+    format!(
+        "{}/?token={}",
+        base.trim_end_matches('/'),
+        urlencoding_minimal(token)
+    )
+}
+
+pub(crate) fn gateway_pairing_qr_png(base: &str, token: &str) -> Option<Vec<u8>> {
+    qr_png_for_url(&gateway_share_url(base, token))
+}
+
 /// Cloudflare Tunnel 运行时状态（不落盘）：`connecting` 是"cloudflared 起来了但
 /// 还没等到结果"这个中间态——`tunnel_start` 可能要跑好几秒到 ~30s，UI 得显示
 /// "连接中…"而不是看起来卡住没反应。
@@ -1620,6 +1647,8 @@ fn urlencoding_minimal(s: &str) -> String {
 pub struct TunnelRuntimeState {
     pub connecting: bool,
     pub url: Option<String>,
+    /// 可由移动端直接扫描的完整分享链接二维码；与 tunnel 启动一起在后台生成。
+    pub qr_png: Option<Vec<u8>>,
     pub error: Option<String>,
     /// 同 [`RemoteRuntimeState::write`]：这条公网链接实际的写权限，来自守护回执。
     pub write: bool,
@@ -3853,7 +3882,7 @@ impl Workspace {
                         .url
                         .as_ref()
                         .filter(|_| cfg.tunnel_enabled)
-                        .and_then(|u| token.as_ref().map(|t| format!("{u}/?token={t}")));
+                        .and_then(|u| token.as_ref().map(|t| gateway_share_url(u, t)));
                     let local = remote
                         .addr
                         .as_ref()
@@ -3904,7 +3933,13 @@ impl Workspace {
 
                     let primary_copy = primary.clone();
                     // 仅展示后台预生成的 RGB 二维码（绝不在 UI 线程现算 QR）
-                    let qr_png = webrtc.qr_png.clone().filter(|_| webrtc_url.is_some());
+                    let qr_png = if webrtc_url.is_some() {
+                        webrtc.qr_png.clone()
+                    } else if public.is_some() {
+                        tunnel.qr_png.clone()
+                    } else {
+                        None
+                    };
 
                     let mut card = v_flex().gap_2();
 
