@@ -1337,6 +1337,62 @@ pub fn tunnel_status() -> TunnelStatus {
     }
 }
 
+/// iroh 隧道（见 smeltd.rs「iroh 隧道」一节）的运行状态。
+///
+/// 跟 `TunnelStatus` 的关键差别：`endpoint_id` **重启不变**，所以基于它生成的
+/// 配对二维码可以一次扫、长期用；Cloudflare 那条路的 URL 每次重开都变。
+#[derive(Clone, Debug, Default)]
+pub struct IrohStatus {
+    pub endpoint_id: Option<String>,
+    /// 网关 token。`endpoint_id` 只让人连得上，能不能操作仍由它决定，
+    /// 所以配对码必须两者一起给。
+    pub token: Option<String>,
+    pub write: bool,
+}
+
+/// 让守护开启 iroh 隧道（幂等）。绑定要联网找中继，**可能耗时数秒**，
+/// 跟 `tunnel_start` 一样必须扔进后台任务，别在 UI 线程同步调。
+pub fn iroh_start(write: bool) -> Result<IrohStatus, String> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return Err("连不上守护".to_string());
+    };
+    if writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": "iroh_start", "write": write })
+    )
+    .is_err()
+    {
+        return Err("发送请求失败".to_string());
+    }
+    // 守护那边就绪超时 30s，这里留余量。
+    let _ = s.set_read_timeout(Some(Duration::from_secs(35)));
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Err("守护没有响应（等 iroh 绑定超时）".to_string());
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
+    if v["ok"].as_bool() == Some(true) {
+        Ok(IrohStatus {
+            endpoint_id: v["endpoint_id"].as_str().map(String::from),
+            token: v["token"].as_str().map(String::from),
+            write: v["write"].as_bool().unwrap_or(false),
+        })
+    } else {
+        Err(v["err"].as_str().unwrap_or("未知错误").to_string())
+    }
+}
+
+/// 关掉 iroh 隧道（不影响本机远程网关本身）。
+pub fn iroh_stop() {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return;
+    };
+    let _ = writeln!(s, "{}", serde_json::json!({ "op": "iroh_stop" }));
+    let mut resp = String::new();
+    let _ = BufReader::new(s).read_line(&mut resp);
+}
+
 // ===================== 状态通道（见 docs/state-channel-plan.md） =====================
 //
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP

@@ -6256,6 +6256,7 @@ fn main() {
         // （apply_tunnel_toggle 存盘时就是这么同步的），但独立判断一次更保险。
         let want_tunnel = remote_config.tunnel_enabled;
         let want_webrtc = remote_config.webrtc_enabled;
+        let want_iroh = remote_config.iroh_enabled;
         let want_write = remote_config.write_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
@@ -6278,8 +6279,9 @@ fn main() {
             async move {}
         })
         .detach();
-        // 恢复跨网：隧道仍走下面 spawn；WebRTC 在网关 hydrate 后再拉 bridge
-        if want_remote || want_tunnel || want_webrtc {
+        // 恢复跨网：隧道仍走下面 spawn；WebRTC / iroh 在网关 hydrate 后再拉起
+        // （两者都要用网关 token，早拉会拿到空 token）
+        if want_remote || want_tunnel || want_webrtc || want_iroh {
             if want_tunnel {
                 cx.set_global(settings::TunnelRuntimeState {
                     connecting: true,
@@ -6290,14 +6292,14 @@ fn main() {
                 });
             }
             cx.spawn(async move |cx| {
-                let (remote_rt, tunnel_rt, want_webrtc) = cx
+                let (remote_rt, tunnel_rt, want_webrtc, want_iroh) = cx
                     .background_executor()
                     .spawn(async move {
                         terminal::ensure_daemon_running();
 
                         // 1) 本机网关：已在跑就复用 token，否则按配置 start
                         // WebRTC 也需要本机网关 token
-                        let remote_rt = if want_remote || want_tunnel || want_webrtc {
+                        let remote_rt = if want_remote || want_tunnel || want_webrtc || want_iroh {
                             let existing = terminal::remote_status();
                             if existing.running
                                 && existing.token.as_ref().is_some_and(|t| !t.is_empty())
@@ -6373,7 +6375,7 @@ fn main() {
                         };
 
                         // 隧道 start 可能顺带（重）开了网关：再读一次 token，避免 UI 仍空
-                        let remote_rt = if want_remote || want_tunnel || want_webrtc {
+                        let remote_rt = if want_remote || want_tunnel || want_webrtc || want_iroh {
                             let again = terminal::remote_status();
                             if again.running && again.token.as_ref().is_some_and(|t| !t.is_empty())
                             {
@@ -6416,7 +6418,7 @@ fn main() {
                             _ => tunnel_rt,
                         };
 
-                        (remote_rt, tunnel_rt, want_webrtc)
+                        (remote_rt, tunnel_rt, want_webrtc, want_iroh)
                     })
                     .await;
                 let _ = cx.update(|cx| {
@@ -6425,6 +6427,9 @@ fn main() {
                     // 网关 token 就绪后再恢复 WebRTC bridge（否则建房有 token 却无本机网关）
                     if want_webrtc {
                         settings::spawn_webrtc_start_public(cx);
+                    }
+                    if want_iroh {
+                        settings::spawn_iroh_start_public(cx);
                     }
                 });
             })
@@ -7026,8 +7031,8 @@ mod acp_agent_tests {
 
         assert_eq!(restored.profile_id.as_deref(), Some("quant"));
         assert_eq!(
-            restored.history_session_id.as_deref(),
-            Some("canonical-history")
+            restored.history_session_id.as_ref().map(|s| s.to_string()),
+            Some("canonical-history".to_string())
         );
         assert_eq!(
             restored
@@ -7050,8 +7055,8 @@ mod acp_agent_tests {
         .unwrap();
 
         assert_eq!(
-            restored.history_session_id.as_deref(),
-            Some("legacy-canonical")
+            restored.history_session_id.as_ref().map(|s| s.to_string()),
+            Some("legacy-canonical".to_string())
         );
         let migrated = serde_json::to_value(restored).unwrap();
         assert_eq!(migrated["history_session_id"], "legacy-canonical");
