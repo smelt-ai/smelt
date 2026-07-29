@@ -33,12 +33,19 @@ class LifecycleAttention {
 
 /// 会话摘要（列表用）
 class SessionSummary {
+  static const unknownOrder = 0xffffffff;
+
   final String id;
   final String title;
   final String phase;
   final String status;
   final String agent;
   final String? cwd;
+  final String? projectRoot;
+  final String? projectTitle;
+  final int projectOrder;
+  final int sessionOrder;
+  final int leafOrder;
   final int updatedAt;
   final String? detail;
   final bool unread;
@@ -51,6 +58,11 @@ class SessionSummary {
     this.status = 'idle',
     required this.agent,
     this.cwd,
+    this.projectRoot,
+    this.projectTitle,
+    this.projectOrder = unknownOrder,
+    this.sessionOrder = unknownOrder,
+    this.leafOrder = unknownOrder,
     this.updatedAt = 0,
     this.detail,
     this.unread = false,
@@ -65,6 +77,11 @@ class SessionSummary {
       status: json['status'] as String? ?? 'idle',
       agent: json['agent'] as String? ?? 'other',
       cwd: json['cwd'] as String?,
+      projectRoot: json['project_root'] as String?,
+      projectTitle: json['project_title'] as String?,
+      projectOrder: json['project_order'] as int? ?? unknownOrder,
+      sessionOrder: json['session_order'] as int? ?? unknownOrder,
+      leafOrder: json['leaf_order'] as int? ?? unknownOrder,
       updatedAt: json['updated_at'] as int? ?? 0,
       detail: json['detail'] as String?,
       unread: json['unread'] as bool? ?? false,
@@ -75,6 +92,18 @@ class SessionSummary {
           : null,
     );
   }
+}
+
+int compareSessionMenuOrder(SessionSummary a, SessionSummary b) {
+  var compared = a.projectOrder.compareTo(b.projectOrder);
+  if (compared != 0) return compared;
+  compared = a.sessionOrder.compareTo(b.sessionOrder);
+  if (compared != 0) return compared;
+  compared = a.leafOrder.compareTo(b.leafOrder);
+  if (compared != 0) return compared;
+  compared = a.title.compareTo(b.title);
+  if (compared != 0) return compared;
+  return a.id.compareTo(b.id);
 }
 
 /// WebSocket 连接状态
@@ -97,6 +126,7 @@ class GatewayService {
       StreamController<List<SessionSummary>>.broadcast();
   final _snapshotController = StreamController<AcpSnapshot>.broadcast();
   final _attentionController = StreamController<LifecycleAttention>.broadcast();
+  final _attentionResolvedController = StreamController<String>.broadcast();
   final _errorController = StreamController<String>.broadcast();
 
   String? _subscribedSessionId;
@@ -112,6 +142,10 @@ class GatewayService {
 
   /// smeltd 统一生命周期产生的关注事件。
   Stream<LifecycleAttention> get attentionStream => _attentionController.stream;
+
+  /// 任一客户端处理完行动项后，由同一 AttentionStore 发出的解决事件。
+  Stream<String> get attentionResolvedStream =>
+      _attentionResolvedController.stream;
 
   /// 错误流
   Stream<String> get errorStream => _errorController.stream;
@@ -337,6 +371,12 @@ class GatewayService {
             _attentionController.add(LifecycleAttention.fromJson(item));
           }
 
+        case 'attentionResolved':
+          final sessionId = json['sessionId'] as String?;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _attentionResolvedController.add(sessionId);
+          }
+
         case 'error':
           _errorController.add(json['error'] as String? ?? 'Gateway 请求失败');
 
@@ -384,6 +424,7 @@ class GatewayService {
     _sessionsController.close();
     _snapshotController.close();
     _attentionController.close();
+    _attentionResolvedController.close();
     _errorController.close();
   }
 }

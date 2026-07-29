@@ -131,6 +131,7 @@ struct MobileLifecycleState {
 enum MobileLifecycleEvent {
     SessionsChanged,
     Attention(AttentionItem),
+    AttentionResolved(String),
 }
 
 #[derive(Deserialize)]
@@ -477,6 +478,82 @@ fn load_gui_acp_titles() -> std::collections::HashMap<String, String> {
             (!title.is_empty()).then(|| (id.to_string(), title.to_string()))
         })
         .collect()
+}
+
+#[derive(Default)]
+struct MobileWorkspaceOrder {
+    projects: Vec<String>,
+    sessions: std::collections::HashMap<String, (usize, usize)>,
+}
+
+fn mobile_workspace_order_from_value(value: &serde_json::Value) -> MobileWorkspaceOrder {
+    let projects = value["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.as_str().map(String::from))
+        .collect();
+    let mut sessions = std::collections::HashMap::new();
+    for (session_order, session) in value["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(sid) = session["acp"]["sid"].as_str() {
+            sessions.insert(sid.to_string(), (session_order, 0));
+        }
+        let Some(layout) = session.get("layout") else {
+            continue;
+        };
+        let mut leaf_order = 0;
+        fn collect_ordered_leaf_ids(
+            pane: &serde_json::Value,
+            session_order: usize,
+            leaf_order: &mut usize,
+            out: &mut std::collections::HashMap<String, (usize, usize)>,
+        ) {
+            if let Some(leaf) = pane.get("Leaf") {
+                if let Some(id) = leaf["id"].as_str() {
+                    out.insert(id.to_string(), (session_order, *leaf_order));
+                }
+                *leaf_order += 1;
+            } else if let Some(children) = pane
+                .get("Split")
+                .and_then(|split| split.get("children"))
+                .and_then(|children| children.as_array())
+            {
+                for child in children {
+                    collect_ordered_leaf_ids(child, session_order, leaf_order, out);
+                }
+            }
+        }
+        collect_ordered_leaf_ids(layout, session_order, &mut leaf_order, &mut sessions);
+    }
+    MobileWorkspaceOrder { projects, sessions }
+}
+
+fn load_mobile_workspace_order() -> MobileWorkspaceOrder {
+    let Ok(raw) = std::fs::read_to_string(workspace_json_path()) else {
+        return MobileWorkspaceOrder::default();
+    };
+    let Ok(value) = serde_json::from_str(&raw) else {
+        return MobileWorkspaceOrder::default();
+    };
+    mobile_workspace_order_from_value(&value)
+}
+
+fn mobile_project_root(projects: &[String], cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let cwd = cwd.trim_end_matches('/');
+    projects
+        .iter()
+        .map(|project| project.trim_end_matches('/'))
+        .filter(|root| !root.is_empty() && (cwd == *root || cwd.starts_with(&format!("{root}/"))))
+        .max_by_key(|root| root.len())
+        .map(String::from)
 }
 
 /// 从 OSC 标题里剥掉 spinner / 状态前缀，只留人类可读的短名；剥空了就当没有。
@@ -1148,11 +1225,16 @@ impl MobileLifecycleHub {
     fn apply_snapshot(&self, sessions: Vec<DaemonSessionState>) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
+        let mut resolved = Vec::new();
         let ids: std::collections::HashSet<_> =
             sessions.iter().map(|session| session.id.clone()).collect();
         for session in &sessions {
+            let had_unresolved_action = state.attention.has_unresolved_action(&session.id);
             let previous = state.sessions.get(&session.id).map(|old| old.phase);
             apply_daemon_transition(&mut state.attention, previous, session, now);
+            if had_unresolved_action && !state.attention.has_unresolved_action(&session.id) {
+                resolved.push(session.id.clone());
+            }
         }
         let stale: Vec<_> = state
             .sessions
@@ -1161,6 +1243,9 @@ impl MobileLifecycleHub {
             .cloned()
             .collect();
         for id in stale {
+            if state.attention.has_unresolved_action(&id) {
+                resolved.push(id.clone());
+            }
             state.attention.remove_session(&id);
         }
         state.sessions = sessions
@@ -1169,18 +1254,31 @@ impl MobileLifecycleHub {
             .collect();
         drop(state);
         let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
+        for session_id in resolved {
+            let _ = self
+                .updates
+                .send(MobileLifecycleEvent::AttentionResolved(session_id));
+        }
     }
 
     fn apply_update(&self, session: DaemonSessionState) {
         let mut state = self.state.lock().unwrap();
+        let had_unresolved_action = state.attention.has_unresolved_action(&session.id);
         let previous = state.sessions.get(&session.id).map(|old| old.phase);
         let attention =
             apply_daemon_transition(&mut state.attention, previous, &session, Instant::now());
+        let resolved = had_unresolved_action && !state.attention.has_unresolved_action(&session.id);
+        let session_id = session.id.clone();
         state.sessions.insert(session.id.clone(), session);
         drop(state);
         let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
         if let Some(item) = attention {
             let _ = self.updates.send(MobileLifecycleEvent::Attention(item));
+        }
+        if resolved {
+            let _ = self
+                .updates
+                .send(MobileLifecycleEvent::AttentionResolved(session_id));
         }
     }
 
@@ -1200,13 +1298,23 @@ impl MobileLifecycleHub {
 
     fn summaries(&self) -> Vec<AcpSessionSummary> {
         let gui_titles = load_gui_acp_titles();
+        let workspace_order = load_mobile_workspace_order();
         let state = self.state.lock().unwrap();
         let mut summaries: Vec<_> = state
             .sessions
             .values()
-            .filter_map(|session| acp_summary_from_daemon(session, &gui_titles, &state.attention))
+            .filter_map(|session| {
+                acp_summary_from_daemon(session, &gui_titles, &workspace_order, &state.attention)
+            })
             .collect();
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.sort_by(|a, b| {
+            a.project_order
+                .cmp(&b.project_order)
+                .then(a.session_order.cmp(&b.session_order))
+                .then(a.leaf_order.cmp(&b.leaf_order))
+                .then(a.title.cmp(&b.title))
+                .then(a.id.cmp(&b.id))
+        });
         summaries
     }
 }
@@ -1268,6 +1376,11 @@ struct AcpSessionSummary {
     status: String,
     agent: String,
     cwd: Option<String>,
+    project_root: Option<String>,
+    project_title: Option<String>,
+    project_order: u32,
+    session_order: u32,
+    leaf_order: u32,
     updated_at: i64,
     detail: Option<String>,
     unread: bool,
@@ -1314,6 +1427,7 @@ fn agent_from_launch(launch: &str) -> &'static str {
 fn acp_summary_from_daemon(
     session: &DaemonSessionState,
     gui_titles: &std::collections::HashMap<String, String>,
+    workspace_order: &MobileWorkspaceOrder,
     attention_store: &AttentionStore,
 ) -> Option<AcpSessionSummary> {
     let launch = session.launch.as_deref()?;
@@ -1332,6 +1446,29 @@ fn acp_summary_from_daemon(
                 .map(String::from)
         })
         .unwrap_or_else(|| session.id.clone());
+    let (session_order, leaf_order) = workspace_order
+        .sessions
+        .get(&session.id)
+        .copied()
+        .unwrap_or((usize::MAX, usize::MAX));
+    let project_root = session.cwd.as_deref().and_then(|cwd| {
+        mobile_project_root(&workspace_order.projects, cwd)
+            .or_else(|| Some(cwd.trim_end_matches('/').to_string()))
+    });
+    let project_order = project_root
+        .as_deref()
+        .and_then(|root| {
+            workspace_order
+                .projects
+                .iter()
+                .position(|project| project.trim_end_matches('/') == root)
+        })
+        .unwrap_or_else(|| workspace_order.projects.len().saturating_add(session_order));
+    let project_title = project_root
+        .as_deref()
+        .and_then(|root| std::path::Path::new(root).file_name())
+        .and_then(|name| name.to_str())
+        .map(String::from);
     Some(AcpSessionSummary {
         id: session.id.clone(),
         title,
@@ -1339,6 +1476,11 @@ fn acp_summary_from_daemon(
         status: mobile_status_name(session.phase, unread).to_string(),
         agent: agent_from_launch(launch).to_string(),
         cwd: session.cwd.clone(),
+        project_root,
+        project_title,
+        project_order: project_order.min(u32::MAX as usize) as u32,
+        session_order: session_order.min(u32::MAX as usize) as u32,
+        leaf_order: leaf_order.min(u32::MAX as usize) as u32,
         updated_at: session.updated_at.min(i64::MAX as u64) as i64,
         detail: session.detail_line(),
         unread,
@@ -1685,6 +1827,13 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         let resp = serde_json::json!({"type": "attention", "item": item});
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
+                    Ok(MobileLifecycleEvent::AttentionResolved(session_id)) => {
+                        let resp = serde_json::json!({
+                            "type": "attentionResolved",
+                            "sessionId": session_id,
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         let resp = serde_json::json!({
                             "type": "sessions",
@@ -1866,6 +2015,47 @@ mod tests {
     }
 
     #[test]
+    fn mobile_workspace_order_uses_pc_project_and_session_order() {
+        let value = serde_json::json!({
+            "projects": ["/repo/two", "/repo/one"],
+            "sessions": [
+                {
+                    "layout": {"Leaf": {"id": "terminal-first"}},
+                    "acp": null
+                },
+                {
+                    "layout": {
+                        "Split": {
+                            "children": [
+                                {"Leaf": {"id": "terminal-a"}},
+                                {"Leaf": {"id": "terminal-b"}}
+                            ]
+                        }
+                    },
+                    "acp": {"sid": "acp-second"}
+                }
+            ]
+        });
+
+        let order = mobile_workspace_order_from_value(&value);
+        assert_eq!(order.projects, vec!["/repo/two", "/repo/one"]);
+        assert_eq!(order.sessions["terminal-first"], (0, 0));
+        assert_eq!(order.sessions["acp-second"], (1, 0));
+        assert_eq!(order.sessions["terminal-a"], (1, 0));
+        assert_eq!(order.sessions["terminal-b"], (1, 1));
+    }
+
+    #[test]
+    fn mobile_project_root_matches_deepest_pc_project() {
+        let projects = vec!["/repo".into(), "/repo/packages/app".into()];
+        assert_eq!(
+            mobile_project_root(&projects, "/repo/packages/app/src"),
+            Some("/repo/packages/app".into())
+        );
+        assert_eq!(mobile_project_root(&projects, "/repo-other"), None);
+    }
+
+    #[test]
     fn mobile_lifecycle_marks_completed_attention_read_without_changing_phase() {
         let hub = mobile_lifecycle_hub_for_test();
         hub.apply_snapshot(vec![mobile_daemon_state(DaemonPhase::Thinking)]);
@@ -1898,6 +2088,23 @@ mod tests {
         let summary = hub.summaries().pop().unwrap();
         assert_eq!(summary.status, "waiting_approval");
         assert!(!summary.unread);
+    }
+
+    #[test]
+    fn mobile_lifecycle_broadcasts_when_an_action_is_resolved_elsewhere() {
+        let hub = mobile_lifecycle_hub_for_test();
+        let mut updates = hub.updates.subscribe();
+        hub.apply_snapshot(vec![mobile_daemon_state(DaemonPhase::Thinking)]);
+        hub.apply_update(mobile_daemon_state(DaemonPhase::AwaitingApproval));
+        hub.apply_update(mobile_daemon_state(DaemonPhase::Thinking));
+
+        let mut resolved = Vec::new();
+        while let Ok(event) = updates.try_recv() {
+            if let MobileLifecycleEvent::AttentionResolved(session_id) = event {
+                resolved.push(session_id);
+            }
+        }
+        assert_eq!(resolved, vec!["session-mobile"]);
     }
 
     /// 反射型 XSS 的核心防线：id/token 里带 `</script>` 不能提前把内联脚本切断。
