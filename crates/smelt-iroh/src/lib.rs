@@ -8,10 +8,14 @@
 //! 对比现有 `smelt-bridge`（WebRTC）：那条路要自建信令 + coturn，且只有浏览器
 //! SPA 用得上；这条路 Rust 原生，手机 app 能直接复用（见 `crates/smelt-mobile`）。
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use iroh::{Endpoint, SecretKey};
+use tokio::io::AsyncWriteExt as _;
+use tokio::net::TcpStream;
+use tracing::{info, warn};
 
 /// 隧道的 ALPN。换协议语义时必须同步改两端，否则 iroh 会直接拒绝握手——
 /// 这正是我们要的：宁可连不上，也不要两端对协议理解不一致还硬跑。
@@ -85,6 +89,86 @@ pub async fn bind_endpoint(secret: SecretKey, alpns: Vec<Vec<u8>>) -> Result<End
         .await
         .context("iroh Endpoint 绑定失败")?;
     Ok(endpoint)
+}
+
+/// 跑转发循环直到 `shutdown` 完成：每条进来的 iroh 双向流对应一条到 `gateway`
+/// 的 TCP 连接。
+///
+/// 提到 lib 里是因为有两个调用方——`smelt-iroh-host` 命令行和 smeltd 的
+/// `iroh_start` op。两份实现迟早会漂移，转发逻辑这种地方漂移了很难查。
+pub async fn serve_tunnel(
+    endpoint: Endpoint,
+    gateway: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) {
+    tokio::pin!(shutdown);
+    loop {
+        let incoming = tokio::select! {
+            _ = &mut shutdown => break,
+            incoming = endpoint.accept() => match incoming {
+                Some(i) => i,
+                None => break,
+            },
+        };
+        tokio::spawn(async move {
+            if let Err(e) = serve_conn(incoming, gateway).await {
+                warn!("iroh 连接处理失败：{e:#}");
+            }
+        });
+    }
+    // 通知对端「是我主动关的」，否则手机侧只能靠超时才发现，会白等一轮重连。
+    endpoint.close().await;
+}
+
+async fn serve_conn(incoming: iroh::endpoint::Incoming, gateway: SocketAddr) -> Result<()> {
+    let conn = incoming.await.context("握手失败")?;
+    let remote = conn.remote_id();
+    info!(%remote, "iroh 已接受连接");
+
+    // 一条连接可以开多条流（手机上多个会话各占一条），每条流独立转发。
+    loop {
+        let (send, recv) = match conn.accept_bi().await {
+            Ok(pair) => pair,
+            // 对端正常关闭时 accept_bi 会返回错误，这里不算异常。
+            Err(e) => {
+                info!(%remote, "iroh 连接结束：{e}");
+                return Ok(());
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(e) = pump(send, recv, gateway).await {
+                warn!("iroh 流转发失败：{e:#}");
+            }
+        });
+    }
+}
+
+async fn pump(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    gateway: SocketAddr,
+) -> Result<()> {
+    let tcp = TcpStream::connect(gateway)
+        .await
+        .with_context(|| format!("连不上本机网关 {gateway}"))?;
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+
+    let up = async {
+        tokio::io::copy(&mut recv, &mut tcp_write).await?;
+        tcp_write.shutdown().await
+    };
+    let down = async {
+        tokio::io::copy(&mut tcp_read, &mut send).await?;
+        send.finish().map_err(std::io::Error::other)
+    };
+
+    // 任一方向结束就收摊：HTTP/WS 半关闭的语义交给网关和客户端自己处理，
+    // 隧道这层只保证不泄漏 task。
+    tokio::select! {
+        r = up => r?,
+        r = down => r?,
+    }
+    Ok(())
 }
 
 #[cfg(test)]

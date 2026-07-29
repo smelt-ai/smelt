@@ -8910,6 +8910,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-core",
+ "smelt-iroh",
  "smol",
  "tokio",
  "uuid",
