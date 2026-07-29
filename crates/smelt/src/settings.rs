@@ -3926,13 +3926,18 @@ impl Workspace {
                         )
                     } else {
                         (
-                            "仅本机 / 局域网",
+                            // 网关只绑 127.0.0.1（见 remote_start 的调用点），
+                            // 别写成"局域网"——同 Wi-Fi 的手机也够不着，写错了
+                            // 用户会以为能扫码配对。
+                            "仅本机（手机需开 WebRTC 或公网隧道）",
                             if remote.write { "可写入" } else { "只读" },
                         )
                     };
 
                     let primary_copy = primary.clone();
-                    // 仅展示后台预生成的 RGB 二维码（绝不在 UI 线程现算 QR）
+                    // 仅展示后台预生成的 RGB 二维码（绝不在 UI 线程现算 QR）。
+                    // 本机 loopback 链接故意不出二维码：`http://127.0.0.1:port`
+                    // 扫到手机上指向的是手机自己，扫了也连不上。
                     let qr_png = if webrtc_url.is_some() {
                         webrtc.qr_png.clone()
                     } else if public.is_some() {
