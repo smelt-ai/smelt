@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'models/pairing_config.dart';
+import 'pages/qr_scanner_page.dart';
 import 'services/gateway_service.dart';
 import 'models/acp_snapshot.dart';
+import 'services/pairing_storage.dart';
 
 bool isNearMessageBottom(
   double pixels,
@@ -22,7 +25,9 @@ Future<void> main() async {
 }
 
 class SmeltApp extends StatelessWidget {
-  const SmeltApp({super.key});
+  const SmeltApp({super.key, this.pairingStorage});
+
+  final PairingStorage? pairingStorage;
 
   @override
   Widget build(BuildContext context) {
@@ -35,13 +40,15 @@ class SmeltApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      home: HomePage(pairingStorage: pairingStorage),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.pairingStorage});
+
+  final PairingStorage? pairingStorage;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -55,20 +62,26 @@ class _HomePageState extends State<HomePage> {
   late final StreamSubscription<LifecycleAttention> _attentionSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
+  late final PairingStorage _pairingStorage;
   String? _shownAttentionSessionId;
+  PairingConfig? _pendingPairing;
+  bool _restoringPairing = true;
+  bool _hasSavedPairing = false;
+  bool _showToken = false;
 
-  // 临时配对信息（后续改为 QR 扫描）
-  final _endpointController = TextEditingController(
-    text: 'ws://192.168.1.100:9877',
-  );
+  final _endpointController = TextEditingController();
   final _tokenController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    _pairingStorage = widget.pairingStorage ?? SecurePairingStorage();
     _stateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
+      if (state == WsState.connected && _pendingPairing != null) {
+        unawaited(_savePendingPairing());
+      }
     });
     _sessionsSubscription = gatewayService.sessionsStream.listen((sessions) {
       if (!mounted) return;
@@ -115,6 +128,43 @@ class _HomePageState extends State<HomePage> {
         context,
       ).showSnackBar(SnackBar(content: Text(error)));
     });
+    unawaited(_restorePairing());
+  }
+
+  Future<void> _restorePairing() async {
+    try {
+      final pairing = await _pairingStorage.load();
+      if (!mounted) return;
+      setState(() {
+        _restoringPairing = false;
+        _hasSavedPairing = pairing != null;
+      });
+      if (pairing != null) _connect(pairing, saveWhenConnected: false);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _restoringPairing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not restore pairing: $error')),
+      );
+    }
+  }
+
+  Future<void> _savePendingPairing() async {
+    final pairing = _pendingPairing;
+    if (pairing == null) return;
+    // 只在真正连上的就是这组配对时才落盘，避免自动重连到旧桌面时把新扫的
+    // endpoint/token 写进去。
+    if (!gatewayService.matchesTarget(pairing.endpoint, pairing.token)) return;
+    _pendingPairing = null;
+    try {
+      await _pairingStorage.save(pairing);
+      if (mounted) setState(() => _hasSavedPairing = true);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connected, but pairing was not saved: $error')),
+      );
+    }
   }
 
   @override
@@ -128,7 +178,7 @@ class _HomePageState extends State<HomePage> {
             onPressed: _scanQrCode,
             tooltip: 'Pair with Desktop',
           ),
-          if (_connectionState == WsState.connected)
+          if (_connectionState != WsState.disconnected)
             IconButton(
               icon: const Icon(Icons.logout),
               onPressed: () => gatewayService.disconnect(),
@@ -147,11 +197,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
+    if (_restoringPairing) {
+      return const Center(child: CircularProgressIndicator());
+    }
     switch (_connectionState) {
       case WsState.disconnected:
         return _buildDisconnectedView();
       case WsState.connecting:
-        return const Center(child: CircularProgressIndicator());
+        return _buildConnectingView();
       case WsState.connected:
         return _buildSessionList();
       case WsState.reconnecting:
@@ -182,11 +235,23 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 12),
           TextField(
             controller: _tokenController,
-            decoration: const InputDecoration(
-              labelText: 'Token',
-              hintText: 'Enter token from desktop',
-              border: OutlineInputBorder(),
-            ),
+            obscureText: !_showToken,
+            enableSuggestions: false,
+            autocorrect: false,
+            decoration:
+                const InputDecoration(
+                  labelText: 'Token',
+                  hintText: 'Enter token from desktop',
+                  border: OutlineInputBorder(),
+                ).copyWith(
+                  suffixIcon: IconButton(
+                    tooltip: _showToken ? 'Hide token' : 'Show token',
+                    onPressed: () => setState(() => _showToken = !_showToken),
+                    icon: Icon(
+                      _showToken ? Icons.visibility_off : Icons.visibility,
+                    ),
+                  ),
+                ),
           ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
@@ -204,6 +269,14 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.qr_code_scanner),
             label: const Text('Scan QR Code to Pair'),
           ),
+          if (_hasSavedPairing) ...[
+            const SizedBox(height: 12),
+            TextButton.icon(
+              onPressed: _forgetPairing,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Forget saved pairing'),
+            ),
+          ],
         ],
       ),
     );
@@ -288,14 +361,42 @@ class _HomePageState extends State<HomePage> {
     };
   }
 
-  Widget _buildReconnectingView() {
-    return const Center(
+  Widget _buildConnectingView() {
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Reconnecting...'),
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(
+            'Connecting to ${_endpointController.text}...',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            onPressed: gatewayService.disconnect,
+            icon: const Icon(Icons.close),
+            label: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReconnectingView() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          const Text("Reconnecting..."),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            onPressed: gatewayService.disconnect,
+            icon: const Icon(Icons.link_off),
+            label: const Text("Change pairing"),
+          ),
         ],
       ),
     );
@@ -328,22 +429,59 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  void _scanQrCode() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('QR scanning not yet implemented')),
+  Future<void> _scanQrCode() async {
+    final pairing = await Navigator.push<PairingConfig>(
+      context,
+      MaterialPageRoute(builder: (context) => const QrScannerPage()),
     );
+    if (!mounted || pairing == null) return;
+    _endpointController.text = pairing.endpoint;
+    _tokenController.text = pairing.token;
+    _connect(pairing);
   }
 
   void _manualConnect() {
-    final endpoint = _endpointController.text.trim();
-    final token = _tokenController.text.trim();
-    if (endpoint.isEmpty || token.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter endpoint and token')),
+    try {
+      final pairing = PairingConfig.fromFields(
+        _endpointController.text,
+        _tokenController.text,
       );
-      return;
+      _connect(pairing);
+    } on FormatException catch (error) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message.toString())));
     }
-    gatewayService.connect(endpoint, token);
+  }
+
+  void _connect(PairingConfig pairing, {bool saveWhenConnected = true}) {
+    _endpointController.text = pairing.endpoint;
+    _tokenController.text = pairing.token;
+    _pendingPairing = saveWhenConnected ? pairing : null;
+    gatewayService.connect(pairing.endpoint, pairing.token);
+    // 重扫同一台桌面时 connect() 是幂等空操作，不会再有 connected 状态变化来
+    // 触发落盘，这里补一次。
+    if (saveWhenConnected && gatewayService.state == WsState.connected) {
+      unawaited(_savePendingPairing());
+    }
+  }
+
+  Future<void> _forgetPairing() async {
+    try {
+      await _pairingStorage.clear();
+      if (!mounted) return;
+      setState(() {
+        _hasSavedPairing = false;
+        _pendingPairing = null;
+        _endpointController.clear();
+        _tokenController.clear();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not remove pairing: $error')),
+      );
+    }
   }
 
   void _openSession(SessionSummary session) {

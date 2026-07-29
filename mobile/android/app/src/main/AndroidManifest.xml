@@ -1,8 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
+    <!-- Cleartext is needed for LAN gateways such as ws://192.168.1.20:9877.
+         Android's network security config cannot whitelist IP ranges, so the
+         actual "cleartext only on the local network" rule is enforced in
+         lib/models/pairing_config.dart for both platforms. -->
     <application
         android:label="smelt_mobile"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

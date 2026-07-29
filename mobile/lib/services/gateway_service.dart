@@ -111,13 +111,22 @@ enum WsState { disconnected, connecting, connected, reconnecting }
 
 /// Gateway WebSocket 服务
 class GatewayService {
+  GatewayService({this.connectTimeout = const Duration(seconds: 10)});
+
+  /// 从发起连接到收到服务端 `connected` 的整体上限。
+  final Duration connectTimeout;
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _channelSubscription;
   Timer? _reconnectTimer;
+  Timer? _connectWatchdog;
   WsState _state = WsState.disconnected;
   String? _endpoint;
   String? _token;
   bool _manuallyDisconnected = true;
+  /// 当前目标是否曾经握手成功过。没成功过的地址（打错、主机不存在）失败后直接
+  /// 回到断开态让用户改，而不是无限自动重连。
+  bool _everConnected = false;
   int _connectionGeneration = 0;
   bool _writeEnabled = false;
 
@@ -161,15 +170,29 @@ class GatewayService {
 
   /// 连接到 gateway
   Future<void> connect(String endpoint, String token) async {
-    if (_state == WsState.connected || _state == WsState.connecting) {
-      return;
+    final target = endpoint.trim();
+    // 同一目标已连/在连 → 幂等返回；换了目标 → 拆掉旧连接改连新的，否则扫码切换
+    // 桌面会被静默忽略（UI 显示新地址、实际连着旧的）。
+    if (matchesTarget(target, token)) {
+      if (_state == WsState.connected || _state == WsState.connecting) return;
+    } else {
+      _teardownSocket();
+      _everConnected = false;
     }
 
-    _endpoint = endpoint.trim();
+    _endpoint = target;
     _token = token;
     _manuallyDisconnected = false;
     _reconnectTimer?.cancel();
     _setState(WsState.connecting);
+    // 不可达但可路由的地址（打错 IP）不会立刻报错，`ready` 会一直挂着；握手成功
+    // 但服务端不发 `connected` 同样会卡住。用一个看门狗兜住整段握手。
+    _connectWatchdog?.cancel();
+    _connectWatchdog = Timer(connectTimeout, () {
+      if (_state != WsState.connecting) return;
+      _errorController.add('连接超时：$target 没有响应');
+      _failConnection();
+    });
 
     final generation = ++_connectionGeneration;
     try {
@@ -186,11 +209,13 @@ class GatewayService {
           if (generation == _connectionGeneration) _onDone();
         },
       );
-      await channel.ready;
+      // 看门狗只负责改状态；这里同样要超时，否则 `connect()` 返回的 Future
+      // 永远不完成，调用方无法 await。
+      await channel.ready.timeout(connectTimeout);
     } catch (e) {
       if (generation != _connectionGeneration) return;
       _errorController.add('连接失败: $e');
-      _scheduleReconnect();
+      _failConnection();
     }
   }
 
@@ -213,16 +238,27 @@ class GatewayService {
   /// 断开连接
   void disconnect() {
     _manuallyDisconnected = true;
+    _teardownSocket();
+    _setState(WsState.disconnected);
+  }
+
+  /// 当前连接（或正在重连）的目标是否就是这组 endpoint/token。
+  bool matchesTarget(String endpoint, String token) =>
+      _endpoint == endpoint.trim() && _token == token;
+
+  /// 关闭底层通道并作废旧连接的回调，不改变对外状态。
+  void _teardownSocket() {
     _connectionGeneration++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _connectWatchdog?.cancel();
+    _connectWatchdog = null;
     _subscribedSessionId = null;
     _writeEnabled = false;
     _channelSubscription?.cancel();
     _channelSubscription = null;
     _channel?.sink.close();
     _channel = null;
-    _setState(WsState.disconnected);
   }
 
   /// 请求会话列表
@@ -326,8 +362,24 @@ class GatewayService {
   }
 
   void _setState(WsState newState) {
+    if (newState == WsState.connected) {
+      _connectWatchdog?.cancel();
+      _connectWatchdog = null;
+      _everConnected = true;
+    }
     _state = newState;
     _stateController.add(newState);
+  }
+
+  /// 一次连接尝试失败后的收尾：从没连通过的地址直接回断开态（让用户改地址），
+  /// 只有掉线重连才值得自动重试。
+  void _failConnection() {
+    if (_everConnected) {
+      _scheduleReconnect();
+      return;
+    }
+    _teardownSocket();
+    _setState(WsState.disconnected);
   }
 
   void _onMessage(dynamic data) {
@@ -394,11 +446,11 @@ class GatewayService {
 
   void _onError(dynamic error) {
     _errorController.add('WebSocket 错误: $error');
-    _scheduleReconnect();
+    _failConnection();
   }
 
   void _onDone() {
-    _scheduleReconnect();
+    _failConnection();
   }
 
   void _scheduleReconnect() {
