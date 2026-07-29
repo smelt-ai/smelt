@@ -24,6 +24,22 @@ fn send(writer: &Arc<Mutex<std::process::ChildStdin>>, value: serde_json::Value)
     writeln!(writer, "{value}").is_ok() && writer.flush().is_ok()
 }
 
+fn codex_start_params(cwd: &Option<String>, extended_history: bool) -> serde_json::Value {
+    let mut params = serde_json::json!({"cwd": cwd});
+    if extended_history {
+        params["persistExtendedHistory"] = serde_json::Value::Bool(true);
+    }
+    params
+}
+
+fn codex_resume_params(session_id: &SessionId, extended_history: bool) -> serde_json::Value {
+    let mut params = serde_json::json!({"threadId": session_id.to_string()});
+    if extended_history {
+        params["persistExtendedHistory"] = serde_json::Value::Bool(true);
+    }
+    params
+}
+
 fn command_parts(command: &str) -> Result<Vec<String>, String> {
     let parts: Vec<String> = command.split_whitespace().map(str::to_string).collect();
     if parts.is_empty() {
@@ -334,9 +350,28 @@ fn run(
     let thread_result = if let Some(session_id) = &launch.resume_session_id {
         send(
             &writer,
-            serde_json::json!({"id":next_id,"method":"thread/resume","params":{"threadId":session_id.to_string()}}),
+            serde_json::json!({
+                "id": next_id,
+                "method": "thread/resume",
+                "params": codex_resume_params(session_id, true),
+            }),
         );
-        match wait_response(&line_rx, next_id) {
+        let mut resume_result = wait_response(&line_rx, next_id);
+        if resume_result.is_err() {
+            // 旧版 app-server 可能不认识扩展历史参数。重试 legacy resume，不能
+            // 因为能力协商失败就直接新建线程，造成上下文悄悄丢失。
+            next_id += 1;
+            send(
+                &writer,
+                serde_json::json!({
+                    "id": next_id,
+                    "method": "thread/resume",
+                    "params": codex_resume_params(session_id, false),
+                }),
+            );
+            resume_result = wait_response(&line_rx, next_id);
+        }
+        match resume_result {
             Ok(value) => {
                 resumed = true;
                 value
@@ -345,17 +380,53 @@ fn run(
                 next_id += 1;
                 send(
                     &writer,
-                    serde_json::json!({"id":next_id,"method":"thread/start","params":{"cwd":launch.cwd}}),
+                    serde_json::json!({
+                        "id": next_id,
+                        "method": "thread/start",
+                        "params": codex_start_params(&launch.cwd, true),
+                    }),
                 );
-                wait_response(&line_rx, next_id)?
+                match wait_response(&line_rx, next_id) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        next_id += 1;
+                        send(
+                            &writer,
+                            serde_json::json!({
+                                "id": next_id,
+                                "method": "thread/start",
+                                "params": codex_start_params(&launch.cwd, false),
+                            }),
+                        );
+                        wait_response(&line_rx, next_id)?
+                    }
+                }
             }
         }
     } else {
         send(
             &writer,
-            serde_json::json!({"id":next_id,"method":"thread/start","params":{"cwd":launch.cwd}}),
+            serde_json::json!({
+                "id": next_id,
+                "method": "thread/start",
+                "params": codex_start_params(&launch.cwd, true),
+            }),
         );
-        wait_response(&line_rx, next_id)?
+        match wait_response(&line_rx, next_id) {
+            Ok(value) => value,
+            Err(_) => {
+                next_id += 1;
+                send(
+                    &writer,
+                    serde_json::json!({
+                        "id": next_id,
+                        "method": "thread/start",
+                        "params": codex_start_params(&launch.cwd, false),
+                    }),
+                );
+                wait_response(&line_rx, next_id)?
+            }
+        }
     };
     if resumed {
         replay_codex_thread(&thread_result, &event_tx);
@@ -1722,13 +1793,19 @@ fn tool_started(item: &serde_json::Value) -> Option<(String, String, ToolKind)> 
     }
 }
 
-/// `thread/resume` 不会逐条重发历史通知；完整的持久化 turns 直接放在响应里。
-/// 把它翻译成与 ACP `session/load` 相同的事件流，让 daemon 只维护一种投影。
+/// `thread/resume` 不会逐条重发历史通知。若调用方提供了分页历史，优先消费
+/// `initialTurnsPage.data`；当前兼容路径则读取 `thread.turns` 摘要，再翻译成与
+/// ACP `session/load` 相同的事件流。
 fn replay_codex_thread(response: &serde_json::Value, event_tx: &smol::channel::Sender<AcpEvent>) {
     let _ = event_tx.try_send(AcpEvent::HistoryReplayStarted);
     let items = response
-        .pointer("/result/thread/turns")
+        .pointer("/result/initialTurnsPage/data")
         .and_then(|value| value.as_array())
+        .or_else(|| {
+            response
+                .pointer("/result/thread/turns")
+                .and_then(|value| value.as_array())
+        })
         .into_iter()
         .flatten()
         .filter_map(|turn| turn.get("items").and_then(|value| value.as_array()))
@@ -2171,12 +2248,17 @@ mod tests {
     #[test]
     fn resumed_thread_is_replayed_in_protocol_order() {
         let (tx, rx) = smol::channel::unbounded();
-        let response = serde_json::json!({"result":{"thread":{"turns":[{"items":[
-            {"id":"user-1","type":"userMessage","content":[{"type":"text","text":"question"}]},
-            {"id":"reason-1","type":"reasoning","summary":["thinking"]},
-            {"id":"agent-1","type":"agentMessage","text":"answer"},
-            {"id":"tool-1","type":"commandExecution","command":"pwd","status":"completed","aggregatedOutput":"/repo"}
-        ]}]}}});
+        let response = serde_json::json!({"result":{
+            "thread":{"turns":[{"items":[
+                {"id":"summary","type":"agentMessage","text":"summary must not win"}
+            ]}]},
+            "initialTurnsPage":{"data":[{"items":[
+                {"id":"user-1","type":"userMessage","content":[{"type":"text","text":"question"}]},
+                {"id":"reason-1","type":"reasoning","summary":["thinking"]},
+                {"id":"agent-1","type":"agentMessage","text":"answer"},
+                {"id":"tool-1","type":"commandExecution","command":"pwd","status":"completed","aggregatedOutput":"/repo"}
+            ]}]}
+        }});
 
         replay_codex_thread(&response, &tx);
         drop(tx);
@@ -2201,6 +2283,23 @@ mod tests {
         assert!(matches!(&events[4], AcpEvent::ToolStarted { id, .. } if id == "tool-1"));
         assert!(matches!(&events[5], AcpEvent::ToolFinished { id, .. } if id == "tool-1"));
         assert_eq!(events.len(), 6);
+    }
+
+    #[test]
+    fn codex_history_params_enable_full_extended_replay_with_legacy_fallbacks() {
+        let session_id = SessionId::new("thread-1");
+        let enhanced = codex_resume_params(&session_id, true);
+        assert_eq!(enhanced["threadId"], "thread-1");
+        assert_eq!(enhanced["persistExtendedHistory"], true);
+        assert!(enhanced.get("excludeTurns").is_none());
+        assert!(enhanced.get("initialTurnsPage").is_none());
+
+        let legacy = codex_resume_params(&session_id, false);
+        assert_eq!(legacy, serde_json::json!({"threadId":"thread-1"}));
+        assert_eq!(
+            codex_start_params(&Some("/repo".into()), true),
+            serde_json::json!({"cwd":"/repo","persistExtendedHistory":true})
+        );
     }
 
     #[test]
