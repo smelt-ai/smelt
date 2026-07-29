@@ -721,6 +721,33 @@ impl Workspace {
                                         .child(sk.description.clone()),
                                 )
                             })
+                            .when(sk.managed, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .children(crate::skills::AGENT_TARGETS.iter().map(
+                                            |t| {
+                                                let linked =
+                                                    sk.linked_agents.contains(&t.label);
+                                                div()
+                                                    .px_1()
+                                                    .rounded_xs()
+                                                    .text_size(px(9.))
+                                                    .when(linked, |d| {
+                                                        d.text_color(rgb(ui_theme::text_bright()))
+                                                            .bg(rgb(ui_theme::bg_elev()))
+                                                    })
+                                                    .when(!linked, |d| {
+                                                        d.text_color(rgb(ui_theme::text_faint()))
+                                                            .opacity(0.5)
+                                                    })
+                                                    .child(t.label)
+                                            },
+                                        )),
+                                )
+                            })
                             .on_click(move |_ev, window, cx| {
                                 let cmd = cmd.clone();
                                 e_use.update(cx, |ws, cx| {
