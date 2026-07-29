@@ -293,7 +293,10 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     c.secondary_hover = rgb(p.bg_hover).into();
     c.secondary_active = rgb(p.bg_selected).into();
     c.secondary_foreground = rgb(p.text).into();
-    c.accent = rgb(p.bg_hover).into();
+    // gpui-component 的 Markdown 行内代码直接拿 `accent` 当背景色。`bg_hover`
+    // 在正文面板上对比太弱，反引号内容几乎看不出标记；用更明确但仍中性的
+    // selected 表面，同时也让组件库菜单的选中/hover 状态更容易辨认。
+    c.accent = rgb(p.bg_selected).into();
     c.accent_foreground = rgb(p.text_bright).into();
     c.danger = rgb(p.red).into();
     c.danger_foreground = rgb(p.on_accent).into();
