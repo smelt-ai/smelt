@@ -14,8 +14,12 @@ flutter_rust_bridge = "=2.12.0"
 # 复用 smelt-core
 smelt-core = { path = "../smelt-core" }
 
+# iroh 隧道：直接复用桌面侧的 ALPN 与 endpoint 构建，避免两端各写一份而悄悄连不上
+smelt-iroh = { path = "../smelt-iroh" }
+iroh = "1"
+
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "net", "io-util"] }
 futures = "0.3"
 
 # Serialization

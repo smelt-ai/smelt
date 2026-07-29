@@ -7,6 +7,24 @@ class PairingConfig {
   final String endpoint;
   final String token;
 
+  /// iroh 配对码的 scheme。权威定义在 `crates/smelt-core/src/pairing.rs`，
+  /// 改这里必须同步改那边，否则桌面出的码手机认不出来。
+  static const irohScheme = 'smelt+iroh';
+
+  /// 这组配对是否走 iroh P2P 隧道。
+  ///
+  /// 之所以把 `smelt+iroh://<endpoint_id>/` 整个存下来、而不是存隧道启起来后的
+  /// `ws://127.0.0.1:<port>`，是因为那个端口每次开隧道都不一样：存端口的话
+  /// App 重启或隧道重连后会去连一个已经死掉的端口。
+  bool get isIroh => Uri.parse(endpoint).scheme == irohScheme;
+
+  /// iroh 目标的 EndpointId；非 iroh 配对返回 `null`。
+  String? get irohEndpointId {
+    if (!isIroh) return null;
+    final host = Uri.parse(endpoint).host;
+    return host.isEmpty ? null : host;
+  }
+
   factory PairingConfig.fromFields(String endpoint, String token) {
     final trimmedEndpoint = endpoint.trim();
     final trimmedToken = token.trim();
@@ -38,7 +56,32 @@ class PairingConfig {
     return _fromUri(Uri.parse(raw));
   }
 
+  /// 解析 `smelt+iroh://<endpoint_id>/?token=<token>`。
+  ///
+  /// 与 http(s) 分支分开，因为它压根不是可直接拨号的地址：真正的目标要等
+  /// iroh 隧道起来后才有本地端口，而且这一路的密文由 QUIC 保证，
+  /// 不适用下面那套 cleartext 规则。
+  static PairingConfig _fromIrohUri(Uri uri, {String? token}) {
+    final endpointId = uri.host;
+    if (endpointId.isEmpty) {
+      throw const FormatException('Pairing code is missing its endpoint id');
+    }
+    final resolvedToken = (token ?? uri.queryParameters['token'] ?? '').trim();
+    if (resolvedToken.isEmpty) {
+      throw const FormatException('Pairing code is missing its token');
+    }
+    // 规范化：只留 scheme + host，token 单独存。这样同一台 Mac 的配对码
+    // 不论带什么多余 query，`matchesTarget` 都认得出是同一个目标。
+    return PairingConfig(
+      endpoint: '$irohScheme://$endpointId',
+      token: resolvedToken,
+    );
+  }
+
   static PairingConfig _fromUri(Uri uri, {String? token}) {
+    if (uri.scheme == irohScheme) {
+      return _fromIrohUri(uri, token: token);
+    }
     if (!const {'http', 'https', 'ws', 'wss'}.contains(uri.scheme) ||
         uri.host.isEmpty) {
       throw const FormatException('Unsupported Smelt gateway address');
