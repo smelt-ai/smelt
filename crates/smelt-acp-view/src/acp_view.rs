@@ -12,13 +12,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Animation, AnimationExt, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
     Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list as virtual_list,
-    px,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window, div,
+    list as virtual_list, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h_flex, v_flex};
 
@@ -116,6 +117,8 @@ pub struct AcpView {
     paste_hint: Option<String>,
     /// `@` / `/` 补全弹层的当前状态；None = 没在补全。
     completion: Option<CompletionPopup>,
+    /// 补全候选列表的滚动位置；键盘移动选中项时同步保证其可见。
+    completion_scroll: ScrollHandle,
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
     /// 会明显卡手，所以一次会话只列一次。
     file_cache: Option<std::rc::Rc<Vec<String>>>,
@@ -294,6 +297,7 @@ impl AcpView {
             supports_image: true,
             paste_hint: None,
             completion: None,
+            completion_scroll: ScrollHandle::new(),
             file_cache: None,
             acp_session_id: None,
             history_session_id: resume_session_id,
@@ -573,6 +577,7 @@ impl AcpView {
             items,
             selected: 0,
         });
+        self.completion_scroll.scroll_to_item(0);
         cx.notify();
     }
 
@@ -583,6 +588,7 @@ impl AcpView {
         };
         let n = popup.items.len() as i32;
         popup.selected = (popup.selected as i32 + delta).rem_euclid(n) as usize;
+        self.completion_scroll.scroll_to_item(popup.selected);
         cx.notify();
         true
     }
@@ -1466,7 +1472,7 @@ impl Render for AcpView {
                             .border_color(t.border)
                             .bg(gpui::rgb(ui_theme::bg_bar()))
                             .cursor_pointer()
-                            .hover(|row| row.bg(ui_theme::overlay(0x18)))
+                            .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -1524,7 +1530,12 @@ impl Render for AcpView {
                             this.viewing_history = false;
                             this.list_state.set_follow_mode(FollowMode::Tail);
                             cx.notify();
-                        })),
+                        }))
+                        .with_animation(
+                            "acp-jump-to-latest-enter",
+                            Animation::new(std::time::Duration::from_millis(160)),
+                            |button, delta| button.opacity(delta),
+                        ),
                 )
         });
         let view = cx.entity();
@@ -1575,6 +1586,11 @@ impl Render for AcpView {
                                 .border_1()
                                 .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
                                 .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                .hover(|bubble| {
+                                    bubble
+                                        .border_color(ui_theme::tint(ui_theme::accent(), 0x52))
+                                        .bg(ui_theme::tint(ui_theme::accent(), 0x20))
+                                })
                                 .text_sm()
                                 .child(smelt_ui::markdown_mermaid::markdown_view(
                                     ("acp-user-md", i),
@@ -1602,7 +1618,12 @@ impl Render for AcpView {
                                         .border_1()
                                         .border_color(t.border)
                                         .cursor_pointer()
-                                        .hover(|d| d.opacity(0.88))
+                                        .hover(|image| {
+                                            image.border_color(ui_theme::tint(
+                                                ui_theme::accent(),
+                                                0x72,
+                                            ))
+                                        })
                                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                                             let _ = this;
                                             cx.emit(AcpViewEvent::PreviewImage(
@@ -1625,6 +1646,11 @@ impl Render for AcpView {
                                     .border_1()
                                     .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
                                     .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                    .hover(|bubble| {
+                                        bubble
+                                            .border_color(ui_theme::tint(ui_theme::accent(), 0x52))
+                                            .bg(ui_theme::tint(ui_theme::accent(), 0x20))
+                                    })
                                     .text_sm()
                                     .child(content.child(image_strip)),
                             )
@@ -1655,7 +1681,7 @@ impl Render for AcpView {
                                     .rounded_md()
                                     .px_2()
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(ui_theme::overlay(0x14)))
+                                    .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                                     .child(
                                         div()
                                             .w(px(12.))
@@ -1826,7 +1852,7 @@ impl Render for AcpView {
                                     .gap_2()
                                     .items_center()
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(ui_theme::overlay(0x10)))
+                                    .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
                                         cx.listener(move |this, _ev, _window, cx| {
@@ -2003,7 +2029,7 @@ impl Render for AcpView {
                         .items_center()
                         .rounded_md()
                         .cursor_pointer()
-                        .hover(|d| d.bg(ui_theme::overlay(0x10)))
+                        .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                         .child(
                             div()
                                 .w(px(12.))
@@ -2382,6 +2408,7 @@ impl Render for AcpView {
                 .max_w(px(1040.))
                 .max_h(px(260.))
                 .overflow_y_scroll()
+                .track_scroll(&self.completion_scroll)
                 .mb_2()
                 .rounded_lg()
                 .border_1()
@@ -2390,6 +2417,35 @@ impl Render for AcpView {
                 .shadow_lg();
             for (ix, item) in popup.items.iter().enumerate() {
                 let selected = ix == popup.selected;
+                let label_color = if selected {
+                    gpui::rgb(ui_theme::text_bright())
+                } else {
+                    gpui::rgb(ui_theme::text_mid())
+                };
+                let label = if let Some(range) = item.match_range.clone() {
+                    h_flex()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(label_color)
+                        .child(item.label[..range.start].to_string())
+                        .child(
+                            div()
+                                .font_semibold()
+                                .text_color(gpui::rgb(ui_theme::accent()))
+                                .child(item.label[range.clone()].to_string()),
+                        )
+                        .child(item.label[range.end..].to_string())
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(label_color)
+                        .child(item.label.clone())
+                        .into_any_element()
+                };
                 list = list.child(
                     h_flex()
                         .id(("acp-completion-item", ix))
@@ -2406,18 +2462,7 @@ impl Render for AcpView {
                                 ui_theme::overlay(0x20)
                             })
                         })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .font_family("monospace")
-                                .text_color(if selected {
-                                    gpui::rgb(ui_theme::text_bright())
-                                } else {
-                                    gpui::rgb(ui_theme::text_mid())
-                                })
-                                .child(item.label.clone()),
-                        )
+                        .child(label)
                         .when(!item.hint.is_empty(), |row| {
                             row.child(
                                 div()
@@ -2717,9 +2762,6 @@ impl Render for AcpView {
                 // `max_w`，若父节点按内容收缩，IME 组合文本触发重测量时会让
                 // `w_full` 在不同帧解析成不同宽度，导致输入框从居中跳到左侧。
                 .w_full()
-                .border_t_1()
-                .border_color(t.border)
-                .bg(gpui::rgb(ui_theme::bg_bar()))
                 .px_4()
                 .py_3()
                 .items_center()
@@ -2732,73 +2774,67 @@ impl Render for AcpView {
             let elapsed = self
                 .turn_started_at_ms
                 .map(|started| unix_time_ms().saturating_sub(started));
-            h_flex()
-                .w_full()
-                .relative()
-                .overflow_hidden()
-                .justify_center()
-                .px_4()
-                .py_2()
-                .border_t_1()
-                .border_color(t.border)
-                // 使用不透明主题表面遮住下方滚动正文；浅色模式不再叠黑色薄层和
-                // 阴影，避免状态条与 composer 变成一整块脏灰浮层。
-                .bg(gpui::rgb(ui_theme::bg_bar()))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .max_w(px(1040.))
-                        .items_center()
-                        .gap_2()
-                        .children(elapsed.map(|elapsed| {
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(format!("进行中 · 已用 {}", format_duration(elapsed)))
-                        }))
-                        .when(show_thinking, |row| {
-                            row.child(div().w(px(1.)).h_3().bg(t.border)).child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(Spinner::new().xsmall().color(muted))
-                                    .child(
-                                        div().text_sm().text_color(muted).child(format!(
-                                            "{} 正在思考…",
-                                            self.agent.short_label()
-                                        )),
-                                    )
-                                    .with_animation(
-                                        "acp-thinking-breathe",
-                                        Animation::new(std::time::Duration::from_millis(1800))
-                                            .repeat(),
-                                        |this, delta| {
-                                            let wave =
-                                                (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                                            this.opacity(0.68 + wave * 0.28)
-                                        },
-                                    ),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .bottom_0()
-                        .h(px(1.5))
-                        .w(gpui::relative(0.3))
-                        .rounded_full()
-                        .bg(gpui::rgb(ui_theme::accent()))
-                        .with_animation(
-                            "acp-activity-sweep",
-                            Animation::new(std::time::Duration::from_millis(2400)).repeat(),
-                            |this, delta| {
-                                let fade = (delta * std::f32::consts::PI).sin().max(0.0);
-                                this.left(gpui::relative(delta * 1.3 - 0.3))
-                                    .opacity(0.16 + fade * 0.5)
-                            },
-                        ),
-                )
+            h_flex().w_full().justify_center().px_4().child(
+                h_flex()
+                    .w_full()
+                    .max_w(px(1040.))
+                    .relative()
+                    .overflow_hidden()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(gpui::rgb(ui_theme::bg_bar()))
+                    .children(elapsed.map(|elapsed| {
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("进行中 · 已用 {}", format_duration(elapsed)))
+                    }))
+                    .when(show_thinking, |row| {
+                        row.child(div().w(px(1.)).h_3().bg(t.border)).child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Spinner::new().xsmall().color(muted))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child(format!("{} 正在思考…", self.agent.short_label())),
+                                )
+                                .with_animation(
+                                    "acp-thinking-breathe",
+                                    Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                                    |this, delta| {
+                                        let wave =
+                                            (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                        this.opacity(0.68 + wave * 0.28)
+                                    },
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(1.5))
+                            .bg(gpui::rgb(ui_theme::accent()))
+                            .with_animation(
+                                "acp-activity-pulse",
+                                Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                                |this, delta| {
+                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                    this.opacity(0.16 + wave * 0.34)
+                                },
+                            ),
+                    ),
+            )
         });
 
         v_flex()
@@ -2894,6 +2930,11 @@ impl Render for AcpView {
                     .min_h_0()
                     .w_full()
                     .child(list)
+                    .children((!self.entries.is_empty()).then(|| {
+                        Scrollbar::vertical(&self.list_state)
+                            .id("acp-message-scrollbar")
+                            .scrollbar_show(ScrollbarShow::Always)
+                    }))
                     .children(sticky_prompt)
                     .children(jump_to_latest),
             )
