@@ -121,12 +121,14 @@ class GatewayService {
   GatewayService({
     this.connectTimeout = const Duration(seconds: 10),
     IrohTunnelOpener? irohTunnelOpener,
-  }) : _openIrohTunnel = irohTunnelOpener ?? _irohUnavailable;
+  }) : irohTunnelOpener = irohTunnelOpener ?? _irohUnavailable;
 
   /// 从发起连接到收到服务端 `connected` 的整体上限。
   final Duration connectTimeout;
 
-  final IrohTunnelOpener _openIrohTunnel;
+  /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
+  /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
+  IrohTunnelOpener irohTunnelOpener;
 
   static Future<int> _irohUnavailable(String _) =>
       Future.error(StateError('本版本未编入 iroh 隧道支持'));
@@ -249,7 +251,7 @@ class GatewayService {
     }
     // 打洞/中继协商可能很久，必须有上限：否则打错的 EndpointId 会让界面
     // 永远停在「连接中」，这正是之前踩过的坑。
-    final port = await _openIrohTunnel(parsed.host).timeout(connectTimeout);
+    final port = await irohTunnelOpener(parsed.host).timeout(connectTimeout);
     return _gatewayUri('http://127.0.0.1:$port', token);
   }
 

@@ -37,10 +37,18 @@ dependencies:
   web_socket_channel: ^3.0.3
   mobile_scanner: ^7.4.0
   flutter_secure_storage: ^10.3.1
+  # 版本必须与 crates/smelt-mobile 里 pin 的 flutter_rust_bridge 完全一致，
+  # 否则生成的绑定与运行时对不上，表现为启动即崩。
+  flutter_rust_bridge: 2.12.0
+  # 负责把 smelt-mobile 编成各平台原生库并塞进 App，由 codegen 生成。
+  rust_lib_smelt_mobile:
+    path: rust_builder
   
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # flutter_rust_bridge codegen 需要它来解析 C 头文件生成 FFI 绑定
+  ffigen: ^19.1.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
