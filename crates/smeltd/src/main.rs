@@ -4226,11 +4226,10 @@ fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
 /// `ApplyOutcome::should_persist`；用户动作（发 prompt/选权限）驱动的固定
 /// false——跟旧版行为一致，用户主动发起的变化不单独触发落盘，等下一次
 /// 协议事件（通常是 TurnEnded）时一并存。
-fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
+fn push_acp_snapshot_since(sess: &AcpSession, should_persist: bool, entries_offset: Option<usize>) {
     let snap = {
         let reduced = sess.reduced.lock().unwrap();
-        // 最后一项可能正在接收流式增量；连同它一起覆盖即可，不再复制整段历史。
-        let offset = reduced.entries.len().saturating_sub(1);
+        let offset = entries_offset.unwrap_or(reduced.entries.len());
         reduced.to_snapshot_since(should_persist, offset)
     };
     let payload = serde_json::json!({ "snapshot": snap }).to_string();
@@ -4242,6 +4241,11 @@ fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
     }
     out.watchers
         .retain_mut(|w| writeln!(w, "{payload}").is_ok());
+}
+
+fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
+    let offset = sess.reduced.lock().unwrap().entries.len().saturating_sub(1);
+    push_acp_snapshot_since(sess, should_persist, Some(offset));
 }
 
 /// 事件 drain：整个会话生命周期只有这一条线程在改 `reduced`（`apply_acp_user_action`
@@ -4262,7 +4266,7 @@ fn start_acp_event_drain(
                     let mut st = sess.reduced.lock().unwrap();
                     smelt_core::acp_session::apply_event(&mut st, ev)
                 };
-                push_acp_snapshot(&sess, outcome.should_persist);
+                push_acp_snapshot_since(&sess, outcome.should_persist, outcome.entries_offset);
                 update_acp_daemon_state(&sess, &subscribers);
             }
         });
@@ -4274,7 +4278,7 @@ fn start_acp_event_drain(
         if !already_ended {
             sess.reduced.lock().unwrap().phase =
                 smelt_core::acp_session::AcpPhase::Ended("连接意外中断".to_string());
-            push_acp_snapshot(&sess, true);
+            push_acp_snapshot_since(&sess, true, None);
         }
         update_acp_daemon_state(&sess, &subscribers);
     });
@@ -6499,6 +6503,50 @@ mod acp_tests {
         BufReader::new(w_client).read_line(&mut line).unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert!(v.get("snapshot").is_some());
+    }
+
+    #[test]
+    fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
+        let mut reduced = AcpSessionState::default();
+        for id in ["tool-a", "tool-b"] {
+            reduced.entries.push(AcpEntry::ToolCall {
+                id: id.into(),
+                title: id.into(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                output: Vec::new(),
+            });
+        }
+        let sess = make_acp_session("acp-parallel", reduced);
+        let (server, client) = UnixStream::pair().unwrap();
+        sess.out.lock().unwrap().client = Some(server);
+
+        let outcome = {
+            let mut state = sess.reduced.lock().unwrap();
+            smelt_core::acp_session::apply_event(
+                &mut state,
+                smelt_core::acp_conn::AcpEvent::ToolFinished {
+                    id: "tool-a".into(),
+                    status: ToolCallStatus::Completed,
+                    output: Vec::new(),
+                },
+            )
+        };
+        push_acp_snapshot_since(&sess, false, outcome.entries_offset);
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["snapshot"]["entries_offset"], 0);
+        assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            response["snapshot"]["entries"][0]["ToolCall"]["status"],
+            "completed"
+        );
+        assert_eq!(
+            response["snapshot"]["entries"][1]["ToolCall"]["status"],
+            "in_progress"
+        );
     }
 
     #[test]
