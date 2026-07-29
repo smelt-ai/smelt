@@ -433,6 +433,9 @@ fn elicit_field_view(f: &ElicitField) -> ElicitFieldView {
 pub struct ApplyOutcome {
     /// 值得持久化（entries 有实质变化，排除逐块流式增量）。
     pub should_persist: bool,
+    /// 本次事件修改 entries 的最早位置。daemon 从这里发送尾部快照；`None`
+    /// 表示 entries 未变化，只需同步 phase / permission 等旁路状态。
+    pub entries_offset: Option<usize>,
     /// 相位刚变成需要人处理 → (标题, 正文, is_approval)，调用方决定要不要弹
     /// 通知（GUI 按各类 Agent 通知开关决定；这个决定权不下放到
     /// smeltd，因为那是纯 GUI 展示偏好，smeltd 不该知道）。
@@ -474,21 +477,27 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.status_line = Some(msg);
         }
         AcpEvent::HistoryReplayStarted => {
+            outcome.entries_offset = Some(0);
             state.entries.clear();
         }
         AcpEvent::UserChunk(text) => {
             if state.awaiting_user_echo {
                 // 自己刚发那条的回声——本地已经在 apply_user_action(Prompt) 时显示过了。
             } else {
+                outcome.entries_offset = Some(state.entries.len().saturating_sub(1));
                 match state.entries.last_mut() {
                     Some(AcpEntry::User(t)) => t.push_str(&text),
                     Some(AcpEntry::UserWithImages { text: t, .. }) => t.push_str(&text),
-                    _ => state.entries.push(AcpEntry::User(text)),
+                    _ => {
+                        outcome.entries_offset = Some(state.entries.len());
+                        state.entries.push(AcpEntry::User(text));
+                    }
                 }
             }
         }
         AcpEvent::UserImage(image) => {
             if !state.awaiting_user_echo {
+                outcome.entries_offset = Some(state.entries.len().saturating_sub(1));
                 match state.entries.last_mut() {
                     Some(AcpEntry::UserWithImages { images, .. }) => images.push(image),
                     Some(AcpEntry::User(_)) => {
@@ -500,10 +509,13 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                             images: vec![image],
                         });
                     }
-                    _ => state.entries.push(AcpEntry::UserWithImages {
-                        text: String::new(),
-                        images: vec![image],
-                    }),
+                    _ => {
+                        outcome.entries_offset = Some(state.entries.len());
+                        state.entries.push(AcpEntry::UserWithImages {
+                            text: String::new(),
+                            images: vec![image],
+                        });
+                    }
                 }
             }
         }
@@ -521,6 +533,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 ReadyKind::ResumedWithReplay => {}
                 ReadyKind::ResumedKeepHistory => {}
                 ReadyKind::Fresh if !state.entries.is_empty() => {
+                    outcome.entries_offset = Some(state.entries.len());
                     state.entries.push(AcpEntry::Divider(format!(
                         "新会话 · agent 不记得以上内容 · {}",
                         chrono::Local::now().format("%m-%d %H:%M")
@@ -538,6 +551,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.status_line = None;
         }
         AcpEvent::AgentChunk { thought, text } => {
+            outcome.entries_offset = Some(state.entries.len().saturating_sub(1));
             match state.entries.last_mut() {
                 Some(AcpEntry::Assistant {
                     text: t,
@@ -545,12 +559,16 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 }) if *th == thought => {
                     t.push_str(&text);
                 }
-                _ => state.entries.push(AcpEntry::Assistant { text, thought }),
+                _ => {
+                    outcome.entries_offset = Some(state.entries.len());
+                    state.entries.push(AcpEntry::Assistant { text, thought });
+                }
             }
             state.phase = AcpPhase::Running;
         }
         AcpEvent::ToolCall(tc) => {
             let replayed_elicitation = recovered_elicitation(&tc.title, tc.raw_input.as_ref());
+            outcome.entries_offset = Some(state.entries.len());
             state.entries.push(AcpEntry::ToolCall {
                 id: tc.tool_call_id.to_string(),
                 title: tc.title,
@@ -578,18 +596,19 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 })?;
                 recovered_elicitation(title, Some(raw_input))
             });
-            if let Some(AcpEntry::ToolCall {
-                title,
-                kind,
-                status,
-                output,
-                ..
-            }) = state
-                .entries
-                .iter_mut()
-                .rev()
-                .find(|e| matches!(e, AcpEntry::ToolCall { id, .. } if *id == update_id))
+            let entry_index = state.entries.iter().rposition(
+                |entry| matches!(entry, AcpEntry::ToolCall { id, .. } if id == &update_id),
+            );
+            if let Some(index) = entry_index
+                && let AcpEntry::ToolCall {
+                    title,
+                    kind,
+                    status,
+                    output,
+                    ..
+                } = &mut state.entries[index]
             {
+                outcome.entries_offset = Some(index);
                 if let Some(t) = u.fields.title {
                     *title = t;
                 }
@@ -609,6 +628,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             }
         }
         AcpEvent::ToolStarted { id, title, kind } => {
+            outcome.entries_offset = Some(state.entries.len());
             state.entries.push(AcpEntry::ToolCall {
                 id,
                 title,
@@ -619,9 +639,13 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.phase = AcpPhase::Running;
         }
         AcpEvent::ToolOutputDelta { id, delta } => {
-            if let Some(AcpEntry::ToolCall { output, .. }) = state.entries.iter_mut().rev().find(
+            let entry_index = state.entries.iter().rposition(
                 |entry| matches!(entry, AcpEntry::ToolCall { id: entry_id, .. } if entry_id == &id),
-            ) {
+            );
+            if let Some(index) = entry_index
+                && let AcpEntry::ToolCall { output, .. } = &mut state.entries[index]
+            {
+                outcome.entries_offset = Some(index);
                 match output.last_mut() {
                     Some(crate::acp_chat::ToolOutputPart::Text(text)) => text.push_str(&delta),
                     _ => output.push(crate::acp_chat::ToolOutputPart::Text(delta)),
@@ -629,13 +653,17 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             }
         }
         AcpEvent::ToolFinished { id, status, output } => {
-            if let Some(AcpEntry::ToolCall {
-                status: current,
-                output: current_output,
-                ..
-            }) = state.entries.iter_mut().rev().find(
+            let entry_index = state.entries.iter().rposition(
                 |entry| matches!(entry, AcpEntry::ToolCall { id: entry_id, .. } if entry_id == &id),
-            ) {
+            );
+            if let Some(index) = entry_index
+                && let AcpEntry::ToolCall {
+                    status: current,
+                    output: current_output,
+                    ..
+                } = &mut state.entries[index]
+            {
+                outcome.entries_offset = Some(index);
                 *current = status;
                 *current_output = output;
             }
@@ -1006,6 +1034,7 @@ pub enum AcpUserAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp_chat::{ToolCallStatus, ToolKind, ToolOutputPart};
     use agent_client_protocol::schema::v1::StopReason;
 
     fn fresh_state() -> AcpSessionState {
@@ -1293,6 +1322,46 @@ mod tests {
         assert!(!o.should_persist);
         let o = apply_event(&mut s, AcpEvent::TurnEnded(StopReason::EndTurn));
         assert!(o.should_persist);
+    }
+
+    #[test]
+    fn parallel_tool_completion_reports_the_matching_entry_offset() {
+        let mut s = fresh_state();
+        for id in ["tool-a", "tool-b"] {
+            apply_event(
+                &mut s,
+                AcpEvent::ToolStarted {
+                    id: id.into(),
+                    title: id.into(),
+                    kind: ToolKind::Execute,
+                },
+            );
+        }
+
+        let outcome = apply_event(
+            &mut s,
+            AcpEvent::ToolFinished {
+                id: "tool-a".into(),
+                status: ToolCallStatus::Completed,
+                output: vec![ToolOutputPart::Text("done".into())],
+            },
+        );
+
+        assert_eq!(outcome.entries_offset, Some(0));
+        assert!(matches!(
+            &s.entries[0],
+            AcpEntry::ToolCall {
+                status: ToolCallStatus::Completed,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &s.entries[1],
+            AcpEntry::ToolCall {
+                status: ToolCallStatus::InProgress,
+                ..
+            }
+        ));
     }
 
     #[test]
