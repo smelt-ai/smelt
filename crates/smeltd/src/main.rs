@@ -397,7 +397,7 @@ mod single_instance_tests {
     }
 }
 
-/// 追加一行到 ~/.smelt/daemon.log。只给「守护无声死亡」的几条路径留痕用——
+/// 追加一行到 ~/.smelt/daemon.log。给守护交接故障和需要跨进程查看的网络状态留痕——
 /// 守护被 SIGKILL（例：装新版时用 cp 覆盖了已签名二进制，upgrade 的 exec 会被
 /// macOS 内核直接杀掉，无输出无崩溃报告）或静默 return 时，这份日志是唯一线索：
 /// 日志停在「即将 exec」而没有下一行「交接完成」，就是 exec 被杀。
@@ -1124,9 +1124,23 @@ fn start_iroh(
                     }
                 };
             let _ = ready_tx.send(Ok(endpoint.id().to_string()));
-            smelt_iroh::serve_tunnel(endpoint, addr, async move {
-                let _ = shutdown_rx.await;
-            })
+            let path_observer = std::sync::Arc::new(|status: smelt_iroh::PathStatus| {
+                dlog(&format!(
+                    "iroh path remote={} kind={} address={} rtt_ms={}",
+                    status.remote,
+                    status.kind,
+                    status.address,
+                    status.rtt.as_millis()
+                ));
+            });
+            smelt_iroh::serve_tunnel_with_observer(
+                endpoint,
+                addr,
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                path_observer,
+            )
             .await;
         });
     });

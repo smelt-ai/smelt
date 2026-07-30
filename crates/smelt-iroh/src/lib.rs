@@ -9,11 +9,15 @@
 //! 两条路，都已下线：前者 URL 每次重启都变、二维码活不过一晚，后者要维护信令 +
 //! coturn，且只对浏览器面板有意义，而浏览器面板本身也一并去掉了。
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use iroh::{Endpoint, SecretKey};
+use futures_util::StreamExt as _;
+use iroh::{Endpoint, SecretKey, endpoint::Connection};
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
@@ -21,6 +25,35 @@ use tracing::{info, warn};
 /// 隧道的 ALPN。换协议语义时必须同步改两端，否则 iroh 会直接拒绝握手——
 /// 这正是我们要的：宁可连不上，也不要两端对协议理解不一致还硬跑。
 pub const ALPN: &[u8] = b"smelt/tunnel/1";
+
+/// iroh 当前实际用于发送业务数据的路径类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathKind {
+    Direct,
+    Relay,
+    Custom,
+}
+
+impl fmt::Display for PathKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+            Self::Custom => "custom",
+        })
+    }
+}
+
+/// 一次选中路径的快照。iroh 会随网络变化迁移路径，因此观察者可能收到多次更新。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathStatus {
+    pub remote: String,
+    pub kind: PathKind,
+    pub address: String,
+    pub rtt: Duration,
+}
+
+pub type PathObserver = Arc<dyn Fn(PathStatus) + Send + Sync + 'static>;
 
 /// 默认密钥路径：`~/.smelt/iroh-secret`。
 ///
@@ -102,6 +135,25 @@ pub async fn serve_tunnel(
     gateway: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
+    serve_tunnel_inner(endpoint, gateway, shutdown, None).await;
+}
+
+/// 与 [`serve_tunnel`] 相同，但在 iroh 选中或切换传输路径时通知观察者。
+pub async fn serve_tunnel_with_observer(
+    endpoint: Endpoint,
+    gateway: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    observer: PathObserver,
+) {
+    serve_tunnel_inner(endpoint, gateway, shutdown, Some(observer)).await;
+}
+
+async fn serve_tunnel_inner(
+    endpoint: Endpoint,
+    gateway: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    observer: Option<PathObserver>,
+) {
     tokio::pin!(shutdown);
     loop {
         let incoming = tokio::select! {
@@ -111,8 +163,9 @@ pub async fn serve_tunnel(
                 None => break,
             },
         };
+        let observer = observer.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(incoming, gateway).await {
+            if let Err(e) = serve_conn(incoming, gateway, observer).await {
                 warn!("iroh 连接处理失败：{e:#}");
             }
         });
@@ -121,10 +174,15 @@ pub async fn serve_tunnel(
     endpoint.close().await;
 }
 
-async fn serve_conn(incoming: iroh::endpoint::Incoming, gateway: SocketAddr) -> Result<()> {
+async fn serve_conn(
+    incoming: iroh::endpoint::Incoming,
+    gateway: SocketAddr,
+    observer: Option<PathObserver>,
+) -> Result<()> {
     let conn = incoming.await.context("握手失败")?;
     let remote = conn.remote_id();
     info!(%remote, "iroh 已接受连接");
+    observe_selected_paths(conn.clone(), remote.to_string(), observer);
 
     // 一条连接可以开多条流（手机上多个会话各占一条），每条流独立转发。
     loop {
@@ -141,6 +199,65 @@ async fn serve_conn(incoming: iroh::endpoint::Incoming, gateway: SocketAddr) -> 
                 warn!("iroh 流转发失败：{e:#}");
             }
         });
+    }
+}
+
+fn observe_selected_paths(conn: Connection, remote: String, observer: Option<PathObserver>) {
+    tokio::spawn(async move {
+        let mut events = conn.path_events();
+        let mut last_address = None;
+
+        report_selected_path(&conn, &remote, observer.as_ref(), &mut last_address);
+        while let Some(event) = events.next().await {
+            match event {
+                iroh::endpoint::PathEvent::Selected { .. }
+                | iroh::endpoint::PathEvent::Lagged { .. } => {
+                    report_selected_path(&conn, &remote, observer.as_ref(), &mut last_address);
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+fn report_selected_path(
+    conn: &Connection,
+    remote: &str,
+    observer: Option<&PathObserver>,
+    last_address: &mut Option<String>,
+) {
+    let paths = conn.paths();
+    let Some(path) = paths.iter().find(|path| path.is_selected()) else {
+        return;
+    };
+    let address = path.remote_addr().to_string();
+    if last_address.as_ref() == Some(&address) {
+        return;
+    }
+    *last_address = Some(address.clone());
+
+    let kind = if path.is_ip() {
+        PathKind::Direct
+    } else if path.is_relay() {
+        PathKind::Relay
+    } else {
+        PathKind::Custom
+    };
+    let status = PathStatus {
+        remote: remote.to_string(),
+        kind,
+        address,
+        rtt: path.rtt(),
+    };
+    info!(
+        remote = %status.remote,
+        path = %status.kind,
+        address = %status.address,
+        rtt_ms = status.rtt.as_millis(),
+        "iroh 已选择传输路径"
+    );
+    if let Some(observer) = observer {
+        observer(status);
     }
 }
 

@@ -8404,6 +8404,7 @@ version = "0.6.8"
 dependencies = [
  "anyhow",
  "data-encoding",
+ "futures-util",
  "iroh",
  "tokio",
  "tracing",
