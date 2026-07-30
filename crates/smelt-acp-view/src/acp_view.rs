@@ -190,6 +190,14 @@ pub struct AcpView {
     list_state: ListState,
     /// 用户是否已滚离消息尾部；由 ListScrollEvent 更新。
     viewing_history: bool,
+    /// 「强制重启」请求正在路上：期间按钮显示处理中、防止重复点击。跟
+    /// `AcpPhase::Starting` 不是一回事——那是新进程握手阶段，这个是"旧进程
+    /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
+    /// Starting 快照之间有个网络往返）。
+    restarting: bool,
+    /// 「强制重启」失败时的提示文案（连不上 smeltd、会话已不存在等）；下次
+    /// 操作前一直显示，成功后清空。只属于本地展示状态，不落盘。
+    restart_error: Option<String>,
     /// 冷恢复占位待自动启动：GUI 重启后第一次切到这个会话时自动 restart，
     /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
     /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
@@ -372,6 +380,8 @@ impl AcpView {
             collapsed_tool_cards: std::collections::HashSet::new(),
             list_state,
             viewing_history: false,
+            restarting: false,
+            restart_error: None,
             pending_initial_prompt: None,
             pending_initial_config: Vec::new(),
             fork_origin: None,
@@ -560,6 +570,37 @@ impl AcpView {
         if let Some(h) = &self.handle {
             let _ = h.action_tx.try_send(AcpUserAction::Cancel);
         }
+    }
+
+    /// 「停止」打不断（agent 卡在工具调用里对 cancel 不理不睬）时的兜底：
+    /// 让 smeltd 直接杀掉整个 agent 进程组、换一个新的接着跑，带
+    /// `history_session_id` 走 `session/load` 接回同一份历史——标签、这条视图
+    /// 的 entries、GUI 这边的 acp_open 连接全部原地不动，只是底下的进程换了
+    /// 一个。跟 `restart()`（给已 Ended 的占位视图用）不是一回事：那个要重新
+    /// 建 GUI 自己的 socket 连接；这个不需要，smeltd 杀完重连内部子进程后会
+    /// 照常沿着现有连接推新快照过来（`attach_handle` 起的 drain 循环还在跑）。
+    pub fn force_restart(&mut self, cx: &mut Context<Self>) {
+        if self.restarting {
+            return;
+        }
+        self.restarting = true;
+        self.restart_error = None;
+        cx.notify();
+        let sid = self.sid.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { smelt_core::acp_client::restart_acp_session(&sid) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.restarting = false;
+                if let Err(err) = result {
+                    view.restart_error = Some(err);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn cwd(&self) -> Option<String> {
@@ -1530,20 +1571,24 @@ impl Render for AcpView {
                 let name = card.options[pix].name.clone();
                 let option_id = card.options[pix].option_id.clone();
                 let tool_call_id = tool_call_id.clone();
+                // 主按钮改胶囊 + hover 时轻微上浮带阴影——批准是这张卡最想让人点的
+                // 动作，得比其余选项更有「弹一下」的手感，不只是纯色块换个透明度。
                 allow_buttons = allow_buttons.child(
                     div()
                         .id(format!("acp-perm-primary-{option_id}"))
+                        .relative()
                         .h(px(36.))
                         .px_4()
                         .flex()
                         .items_center()
-                        .rounded_lg()
+                        .rounded_full()
                         .bg(gpui::rgb(ui_theme::green()))
                         .text_color(gpui::rgb(ui_theme::on_accent()))
                         .text_sm()
                         .font_semibold()
                         .cursor_pointer()
-                        .hover(|d| d.opacity(0.9))
+                        .shadow_sm()
+                        .hover(|d| d.opacity(0.9).shadow_md().top(px(-1.)))
                         .child(format!("{name} ⌘⏎"))
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                             this.pick_permission(&tool_call_id, &option_id, cx);
@@ -1560,23 +1605,30 @@ impl Render for AcpView {
                 );
                 let option_id = opt.option_id.clone();
                 let tool_call_id = tool_call_id.clone();
+                // 次级选项也改软底胶囊：danger 用红色调软底，其余用中性灰软底,
+                // 不再是空心线框——跟主按钮的实心胶囊放一起才是同一套语言，
+                // 而不是「一个填色一个描边」的两套风格拼在一起。
+                let bg_u32 = if danger {
+                    ui_theme::red()
+                } else {
+                    ui_theme::text_muted()
+                };
                 let button = div()
-                        .id(format!("acp-perm-opt-{option_id}"))
-                        .h(px(36.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(t.border)
-                        .text_sm()
-                        .cursor_pointer()
-                        .when(danger, |d| d.text_color(gpui::rgb(ui_theme::red())))
-                        .hover(|d| d.opacity(0.85))
-                        .child(opt.name.clone())
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.pick_permission(&tool_call_id, &option_id, cx);
-                        }));
+                    .id(format!("acp-perm-opt-{option_id}"))
+                    .h(px(36.))
+                    .px_3p5()
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(ui_theme::tint(bg_u32, 0x1c))
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(danger, |d| d.text_color(gpui::rgb(ui_theme::red())))
+                    .hover(|d| d.bg(ui_theme::tint(bg_u32, 0x30)))
+                    .child(opt.name.clone())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.pick_permission(&tool_call_id, &option_id, cx);
+                    }));
                 if danger {
                     reject_buttons = reject_buttons.child(button);
                 } else {
@@ -1817,12 +1869,13 @@ impl Render for AcpView {
                         thought: true,
                     } => {
                         let expanded = this.expanded_thoughts.contains(&i);
-                        let preview = text
-                            .lines()
-                            .find(|line| !line.trim().is_empty())
-                            .unwrap_or("正在思考…")
-                            .trim()
-                            .to_string();
+                        let preview = strip_thought_heading_markers(
+                            text.lines()
+                                .find(|line| !line.trim().is_empty())
+                                .unwrap_or("正在思考…")
+                                .trim(),
+                        )
+                        .to_string();
                         v_flex()
                             .w_full()
                             .min_w_0()
@@ -2009,6 +2062,14 @@ impl Render for AcpView {
                         output,
                     } => {
                         let accent = tool_accent_color(kind);
+                        let accent_u32 = tool_accent_u32(kind);
+                        let failed = matches!(status, ToolCallStatus::Failed);
+                        // 失败时左侧色条改红——出错是比「这是哪种工具」更急的信息，
+                        // 状态色盖过身份色。hover 高亮边框也得用同一个 u32，否则
+                        // 悬浮时四周描边是工具身份色（比如 Edit 的紫）、左侧色条
+                        // 却还是红，两截颜色对不上，看着像描边套错了。
+                        let bar_u32 = if failed { ui_theme::red() } else { accent_u32 };
+                        let bar_color: gpui::Rgba = gpui::rgb(bar_u32);
                         let (status_dot, status_label): (gpui::Hsla, &str) = match status {
                             ToolCallStatus::Pending => (t.muted_foreground, "待执行"),
                             ToolCallStatus::InProgress => {
@@ -2039,39 +2100,103 @@ impl Render for AcpView {
                         let card_expanded =
                             this.tool_card_is_expanded(id, *status, has_pending_permission);
 
+                        // diff / 状态角标都改成 Discord 那种圆角软底色小药丸，
+                        // 而不是裸文字——同样的信息，胶囊比平铺文字更有「标签」的
+                        // 活泼感，也跟下面的工具名药丸呼应成一套视觉语言。
                         let header_right: gpui::AnyElement = if has_diff {
                             h_flex()
-                                .gap_2()
-                                .text_xs()
-                                .font_family("monospace")
+                                .gap_1p5()
                                 .child(
                                     div()
+                                        .px_1p5()
+                                        .rounded_full()
+                                        .bg(ui_theme::tint(ui_theme::green(), 0x22))
+                                        .text_xs()
+                                        .font_family("monospace")
                                         .text_color(gpui::rgb(ui_theme::green()))
                                         .child(format!("+{total_added}")),
                                 )
                                 .child(
                                     div()
+                                        .px_1p5()
+                                        .rounded_full()
+                                        .bg(ui_theme::tint(ui_theme::red(), 0x22))
+                                        .text_xs()
+                                        .font_family("monospace")
                                         .text_color(gpui::rgb(ui_theme::red()))
                                         .child(format!("-{total_removed}")),
                                 )
                                 .into_any_element()
+                        } else if matches!(status, ToolCallStatus::Completed) {
+                            // 完成是默认预期结果，一排卡片全打「完成」绿点纯噪音——
+                            // 只在异常态（进行中/失败/待执行）才需要占用视觉注意力。
+                            div().into_any_element()
                         } else {
-                            h_flex()
-                                .gap_2()
+                            let pill = h_flex()
+                                .gap_1p5()
                                 .items_center()
-                                .child(div().size_2().rounded_full().bg(status_dot))
-                                .child(div().text_xs().text_color(muted).child(status_label))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(ui_theme::tint(
+                                    match status {
+                                        ToolCallStatus::InProgress => ui_theme::blue(),
+                                        ToolCallStatus::Failed => ui_theme::red(),
+                                        _ => ui_theme::text_muted(),
+                                    },
+                                    0x22,
+                                ))
+                                .child(div().size_1p5().rounded_full().bg(status_dot))
+                                .child(div().text_xs().text_color(status_dot).child(status_label));
+                            if matches!(status, ToolCallStatus::InProgress) {
+                                // 「执行中」呼吸一下——进行时的动作要有活的感觉，
+                                // 完全静止的胶囊看着像卡死。
+                                pill.with_animation(
+                                    "acp-tool-status-breathe",
+                                    Animation::new(std::time::Duration::from_millis(1400))
+                                        .repeat(),
+                                    |this, delta| {
+                                        let wave = (delta * std::f32::consts::TAU).sin() * 0.5
+                                            + 0.5;
+                                        this.opacity(0.65 + wave * 0.35)
+                                    },
+                                )
                                 .into_any_element()
+                            } else {
+                                pill.into_any_element()
+                            }
                         };
 
                         let id_for_toggle = id.clone();
                         let status_for_toggle = *status;
                         let mut card = v_flex()
+                            .relative()
                             .w_full()
-                            .rounded_md()
+                            .overflow_hidden()
+                            .rounded_lg()
                             .border_1()
+                            // 左边框跟下面的彩色色条挤在同一条边上：灰线会从色条
+                            // 两端露出一小截，看着像镶了道多余的灰边。色条本身已经
+                            // 把左边这条线的视觉职责接管了，这里直接去掉。
+                            .border_l_0()
                             .border_color(t.border)
                             .bg(t.muted)
+                            .hover(|card| {
+                                card.border_color(ui_theme::tint(bar_u32, 0x66))
+                                    .shadow_md()
+                            })
+                            .child(
+                                // 工具卡左侧色条：跟标题/图标同一套 accent 色，一眼
+                                // 就能在一长串卡片里扫出「这是执行/读/改/查」,不用
+                                // 逐条读文字。失败态额外加粗一点，异常更抓眼。
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(if failed { 3. } else { 2. }))
+                                    .bg(bar_color),
+                            )
                             .child(
                                 h_flex()
                                     .id(("acp-tool-card-toggle", i))
@@ -2101,13 +2226,27 @@ impl Render for AcpView {
                                             .child(if card_expanded { "▾" } else { "▸" }),
                                     )
                                     .child(
-                                        Icon::new(tool_kind_icon(kind))
-                                            .size(px(13.))
-                                            .text_color(accent),
+                                        // 图标套一个同色软底的圆角徽章，而不是裸图标——
+                                        // Discord 那种带色块的小 icon chip，比纯线框图标
+                                        // 更有「彩色标签」的活泼感，扫描时也更抓眼。
+                                        div()
+                                            .flex_shrink_0()
+                                            .size(px(20.))
+                                            .rounded_md()
+                                            .bg(ui_theme::tint(accent_u32, 0x24))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(Icon::new(tool_kind_icon(kind)).size(px(12.)).text_color(accent)),
                                     )
                                     .child(
                                         div()
-                                            .text_sm()
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(ui_theme::tint(accent_u32, 0x18))
+                                            .text_xs()
                                             .font_semibold()
                                             .text_color(accent)
                                             .child(tool_kind_label(kind)),
@@ -2174,18 +2313,32 @@ impl Render for AcpView {
                                                 lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
                                             };
                                         let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
+                                        // 真正的控制台输出（bash stdout、文件内容……）保持等宽纯文本，
+                                        // 星号、井号都是内容本身，不能被当 markdown 解析。但像
+                                        // task_complete 这类没有专门 kind、靠 agent 自己写一段总结
+                                        // 陈述的工具（落到 `ToolKind::Other`），内容本来就是按 markdown
+                                        // 写的（`##`/`**`/列表），纯文本渲染只会把这些符号原样吐出来。
+                                        let body_el: gpui::AnyElement =
+                                            if matches!(kind, ToolKind::Other) {
+                                                smelt_ui::markdown_mermaid::markdown_view(
+                                                    ("acp-tool-output-md", i * 100 + part_ix),
+                                                    shown,
+                                                )
+                                                .into_any_element()
+                                            } else {
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .font_family("monospace")
+                                                    .child(shown)
+                                                    .into_any_element()
+                                            };
                                         card.child(
                                             v_flex()
                                                 .px_4()
                                                 .pb_3()
                                                 .gap_1()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(muted)
-                                                        .font_family("monospace")
-                                                        .child(shown),
-                                                )
+                                                .child(body_el)
                                                 .when(need_toggle, |d| {
                                                     let key = key.clone();
                                                     d.child(
@@ -2254,10 +2407,11 @@ impl Render for AcpView {
                         .id(("acp-process-group", group.first))
                         .w_full()
                         .min_h(px(32.))
-                        .px_2()
+                        .px_2p5()
                         .gap_2()
                         .items_center()
-                        .rounded_md()
+                        .rounded_full()
+                        .bg(ui_theme::overlay(0x10))
                         .cursor_pointer()
                         .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                         .child(
@@ -2286,9 +2440,16 @@ impl Render for AcpView {
                             cx.notify();
                         }));
                     if group.failed > 0 {
+                        // 之前是裸红字飘在行尾；跟其余地方统一成软底小胶囊，
+                        // 这一条折叠摘要本身也不再是没有任何底色的纯文字行。
                         header = header.child(div().flex_1()).child(
                             div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(ui_theme::tint(ui_theme::red(), 0x22))
                                 .text_xs()
+                                .font_semibold()
                                 .text_color(gpui::rgb(ui_theme::red()))
                                 .child(format!("{} 项失败", group.failed)),
                         );
@@ -2418,10 +2579,40 @@ impl Render for AcpView {
                                 .gap_2()
                                 .items_center()
                                 .child(
+                                    // 需要批准的点缀一个扩散的 ping 环——跟系统级
+                                    // 通知红点常见的那种脉冲一样，比静止圆点更有
+                                    // 「这里正等你」的紧迫感，而不是容易被忽略的
+                                    // 一个死圆点。
                                     div()
+                                        .relative()
                                         .size_2()
-                                        .rounded_full()
-                                        .bg(gpui::rgb(ui_theme::yellow())),
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .inset_0()
+                                                .rounded_full()
+                                                .bg(gpui::rgb(ui_theme::yellow()))
+                                                .with_animation(
+                                                    "acp-permission-ping",
+                                                    Animation::new(std::time::Duration::from_millis(
+                                                        1600,
+                                                    ))
+                                                    .repeat(),
+                                                    |this, delta| {
+                                                        let scale = 1.0 + delta * 1.6;
+                                                        this.opacity((1.0 - delta).max(0.0) * 0.7)
+                                                            .size(px(8. * scale))
+                                                    },
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .inset_0()
+                                                .size_2()
+                                                .rounded_full()
+                                                .bg(gpui::rgb(ui_theme::yellow())),
+                                        ),
                                 )
                                 .child(div().text_sm().font_semibold().child("需要批准"))
                                 .child(div().flex_1())
@@ -3011,7 +3202,49 @@ impl Render for AcpView {
                                         cx.listener(|this, _ev, _window, _cx| this.cancel_turn()),
                                     ),
                             )
+                            .child(
+                                // 「停止」发出去但 agent 卡在工具调用里不理会时的兜底：
+                                // 直接杀掉整个 agent 进程组换一个新的接着跑（见
+                                // `force_restart` 注释）。跟"停止"分开放，不做成
+                                // 二次点击升级——卡没卡住只有用户自己看得出来，不能
+                                // 靠猜时间自动升级，误杀一个只是运行慢、没真卡死的
+                                // 回合代价太大。
+                                div()
+                                    .id("acp-force-restart")
+                                    .flex_shrink_0()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .text_xs()
+                                    .text_color(if self.restarting {
+                                        muted
+                                    } else {
+                                        gpui::rgb(ui_theme::red()).into()
+                                    })
+                                    .when(!self.restarting, |d| {
+                                        d.cursor_pointer().hover(|d| d.opacity(0.8))
+                                    })
+                                    .child(if self.restarting {
+                                        "重启中…"
+                                    } else {
+                                        "强制重启"
+                                    })
+                                    .when(!self.restarting, |d| {
+                                        d.on_click(cx.listener(|this, _ev, _window, cx| {
+                                            this.force_restart(cx);
+                                        }))
+                                    }),
+                            )
                         })
+                        .children(self.restart_error.as_ref().map(|err| {
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::red()))
+                                .child(format!("重启失败：{err}"))
+                        }))
                         .child(
                             // 主发送按钮（橙实心，对齐设计稿 Send ⏎）。
                             div()
@@ -3077,10 +3310,39 @@ impl Render for AcpView {
                                 .gap_2()
                                 .child(Spinner::new().xsmall().color(muted))
                                 .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(format!("{} 正在思考…", self.agent.short_label())),
+                                    div().text_sm().text_color(muted).child(format!(
+                                        "{} 正在思考",
+                                        self.agent.short_label()
+                                    )),
+                                )
+                                .child(
+                                    // Discord「对方正在输入」经典三连跳点：比死气沉沉的
+                                    // 「…」更有「真的在动脑子」的感觉。三颗点错开相位,
+                                    // 逐个跳起再落下，只用 `top` 位移不影响布局。
+                                    h_flex()
+                                        .items_center()
+                                        .gap(px(3.))
+                                        .children((0..3usize).map(|n| {
+                                            let phase = n as f32 / 3.0;
+                                            div()
+                                                .relative()
+                                                .size(px(4.))
+                                                .rounded_full()
+                                                .bg(muted)
+                                                .with_animation(
+                                                    ("acp-thinking-dot", n),
+                                                    Animation::new(
+                                                        std::time::Duration::from_millis(900),
+                                                    )
+                                                    .repeat(),
+                                                    move |this, delta| {
+                                                        let t = (delta + phase).fract();
+                                                        let lift =
+                                                            (t * std::f32::consts::TAU).sin().max(0.0);
+                                                        this.top(px(-lift * 4.))
+                                                    },
+                                                )
+                                        })),
                                 )
                                 .with_animation(
                                     "acp-thinking-breathe",
@@ -3094,20 +3356,29 @@ impl Render for AcpView {
                         )
                     })
                     .child(
+                        // 底部这条线之前是整条一起淡入淡出的静态呼吸；现在改成一段
+                        // 更亮的「彗星」在暗轨道上来回扫，观感更像正在跑的进度条，
+                        // 而不是一条若有若无的静止线。容器有 `overflow_hidden`，
+                        // 彗星划出卡片边界的部分会被圆角裁掉，不会露怪。
                         div()
                             .absolute()
                             .left_0()
                             .right_0()
                             .bottom_0()
                             .h(px(1.5))
+                            .bg(ui_theme::tint(ui_theme::accent(), 0x1c)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .h(px(1.5))
+                            .w(px(160.))
                             .bg(gpui::rgb(ui_theme::accent()))
                             .with_animation(
-                                "acp-activity-pulse",
-                                Animation::new(std::time::Duration::from_millis(1800)).repeat(),
-                                |this, delta| {
-                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                                    this.opacity(0.16 + wave * 0.34)
-                                },
+                                "acp-activity-sweep",
+                                Animation::new(std::time::Duration::from_millis(2200)).repeat(),
+                                |this, delta| this.left(px(-160. + delta * (1040. + 320.))),
                             ),
                     ),
             )
@@ -3403,6 +3674,20 @@ fn text_fingerprint(text: &str) -> (usize, u64) {
 
 fn is_user_entry(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+}
+
+/// 模型的思考摘要标题经常整行套 `**像这样**`/`__这样__`；折叠预览是纯文本
+/// `div`，不走 markdown 渲染，裸露的星号看着像漏渲染的格式错误。只在整行
+/// 前后都包着同一种标记时才剥掉，避免误伤正文里本来就有的单个星号。
+fn strip_thought_heading_markers(line: &str) -> &str {
+    for wrapper in ["**", "__"] {
+        if let Some(inner) = line.strip_prefix(wrapper).and_then(|s| s.strip_suffix(wrapper))
+            && !inner.is_empty()
+        {
+            return inner;
+        }
+    }
+    line
 }
 
 const HANDOFF_MAX_CHARS: usize = 24_000;
@@ -3731,17 +4016,26 @@ fn strip_kind_prefix<'a>(title: &'a str, kind: &ToolKind) -> &'a str {
 }
 
 /// ToolKind → 强调色：读类蓝、改类橙、执行类绿，一眼区分工具在干什么类型的事。
-fn tool_accent_color(kind: &ToolKind) -> gpui::Rgba {
+/// 原始 u32 色值——`tint()` 要的是这个，不是转换过的 `Rgba`，所以跟
+/// `tool_accent_color` 分开放：后者给文字/图标上色，前者给徽章调透明度。
+fn tool_accent_u32(kind: &ToolKind) -> u32 {
     match kind {
-        ToolKind::Read | ToolKind::Search | ToolKind::Fetch => gpui::rgb(ui_theme::blue()),
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => gpui::rgb(ui_theme::accent()),
-        ToolKind::Execute => gpui::rgb(ui_theme::green()),
-        ToolKind::Collaborate => gpui::rgb(ui_theme::blue()),
-        ToolKind::Review => gpui::rgb(ui_theme::yellow()),
-        ToolKind::Image => gpui::rgb(ui_theme::accent()),
-        ToolKind::Compact | ToolKind::Wait => gpui::rgb(ui_theme::text_muted()),
-        _ => gpui::rgb(ui_theme::text_muted()),
+        ToolKind::Read | ToolKind::Search | ToolKind::Fetch => ui_theme::blue(),
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => ui_theme::accent(),
+        ToolKind::Execute => ui_theme::green(),
+        ToolKind::Collaborate => ui_theme::blue(),
+        ToolKind::Review => ui_theme::yellow(),
+        ToolKind::Image => ui_theme::accent(),
+        ToolKind::Compact | ToolKind::Wait => ui_theme::text_muted(),
+        // `Other`（如 task_complete 这类协议里没有专门 kind 的调用）以及 SwitchMode：
+        // 之前跟着 muted 灰走，跟卡片本身的灰色边框撞色，左边的强调条看起来像
+        // "边框没删干净"。换成 purple 一眼能看出这也是一根有意画的强调条。
+        _ => ui_theme::purple(),
     }
+}
+
+fn tool_accent_color(kind: &ToolKind) -> gpui::Rgba {
+    gpui::rgb(tool_accent_u32(kind))
 }
 
 /// ToolKind → 简短英文标签（跟工具本身在协议里的调用名对齐，比长句子扫得快）。
