@@ -229,7 +229,12 @@ mod imp {
                 class!(NSUserNotificationCenter),
                 defaultUserNotificationCenter
             ];
-            let _: () = msg_send![center, setDelegate: target];
+            // 部分系统版本上该类可能已不可用，`center` 会是空指针；空指针发消息在 ObjC
+            // 层面本是安全的空操作，但 objc crate 的 msg_send! 会把接收者当引用解引用，
+            // 空指针在这里会直接触发 Rust 的空指针解引用 panic，所以必须提前判空跳过。
+            if !center.is_null() {
+                let _: () = msg_send![center, setDelegate: target];
+            }
 
             let menu: *mut Object = msg_send![class!(NSMenu), new]; // +1，永不 release
             let _ = MENU_PTR.set(menu as usize);
