@@ -58,6 +58,7 @@ Future<void> main() async {
         relayUrl: relayUrl,
         relayToken: relayToken,
       );
+  gatewayService.irohTunnelStopper = irohTunnelStop;
   runApp(const SmeltApp());
 }
 
@@ -537,11 +538,13 @@ class SessionPage extends StatefulWidget {
 
 class _SessionPageState extends State<SessionPage> {
   final TextEditingController _messageController = TextEditingController();
+  final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
   final ImagePicker _imagePicker = ImagePicker();
   AcpSnapshot? _snapshot;
   bool _loading = true;
   bool _isAtBottom = true;
+  bool _isMessageFocused = false;
   String? _permissionSubmittingToolId;
   final List<AcpImageData> _pendingImages = [];
   final Map<int, String> _elicitationTextValues = {};
@@ -552,6 +555,7 @@ class _SessionPageState extends State<SessionPage> {
   @override
   void initState() {
     super.initState();
+    _messageFocusNode.addListener(_handleMessageFocus);
     _turnTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted && _snapshot?.phase is AcpPhaseRunning) setState(() {});
     });
@@ -564,6 +568,13 @@ class _SessionPageState extends State<SessionPage> {
         });
     _subscribeSession();
   }
+
+  void _handleMessageFocus() {
+    if (!mounted || _isMessageFocused == _messageFocusNode.hasFocus) return;
+    setState(() => _isMessageFocused = _messageFocusNode.hasFocus);
+  }
+
+  void _dismissKeyboard() => _messageFocusNode.unfocus();
 
   void _handleScrollPosition() {
     if (!_scrollController.hasClients) return;
@@ -1081,6 +1092,7 @@ class _SessionPageState extends State<SessionPage> {
     return ListView.builder(
       controller: _scrollController,
       reverse: true,
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: entries.length,
       itemBuilder: (context, index) {
         final entryIndex = entries.length - 1 - index;
@@ -1237,6 +1249,7 @@ class _SessionPageState extends State<SessionPage> {
                     _messageController.selection = TextSelection.collapsed(
                       offset: _messageController.text.length,
                     );
+                    _messageFocusNode.requestFocus();
                     setState(() {});
                   },
                   itemBuilder: (context) => _snapshot!.availableCommands
@@ -1257,10 +1270,12 @@ class _SessionPageState extends State<SessionPage> {
               Expanded(
                 child: TextField(
                   controller: _messageController,
+                  focusNode: _messageFocusNode,
                   enabled: canCompose,
                   minLines: 1,
                   maxLines: 5,
                   textInputAction: TextInputAction.newline,
+                  onTapOutside: (_) => _dismissKeyboard(),
                   decoration: InputDecoration(
                     hintText: !gatewayService.writeEnabled
                         ? 'Desktop connection is read-only'
@@ -1270,6 +1285,13 @@ class _SessionPageState extends State<SessionPage> {
                         ? 'Message the agent...'
                         : 'Draft while the agent is running...',
                     border: const OutlineInputBorder(),
+                    suffixIcon: _isMessageFocused
+                        ? IconButton(
+                            tooltip: 'Dismiss keyboard',
+                            onPressed: _dismissKeyboard,
+                            icon: const Icon(Icons.keyboard_hide_outlined),
+                          )
+                        : null,
                   ),
                   onChanged: (_) => setState(() {}),
                 ),
@@ -1458,6 +1480,9 @@ class _SessionPageState extends State<SessionPage> {
       gatewayService.unsubscribe();
     }
     _messageController.dispose();
+    _messageFocusNode
+      ..removeListener(_handleMessageFocus)
+      ..dispose();
     _scrollController.dispose();
     super.dispose();
   }

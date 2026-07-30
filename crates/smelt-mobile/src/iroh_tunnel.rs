@@ -73,6 +73,20 @@ impl Shared {
         *slot = Some(conn.clone());
         Ok(conn)
     }
+
+    /// 淘汰一次实际 I/O 已经证明不可用的连接。
+    ///
+    /// 网络切换后 QUIC 的 `close_reason` 可能暂时仍是 `None`，但开流已经失败。
+    /// 只按 stable id 清理，避免并发请求误删另一条刚刚重拨成功的新连接。
+    async fn invalidate_connection(&self, failed: &Connection) {
+        let mut slot = self.conn.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.stable_id() == failed.stable_id())
+        {
+            *slot = None;
+        }
+    }
 }
 
 /// 启动隧道，返回手机本地的入口端口。
@@ -185,6 +199,14 @@ fn shutdown(tunnel: Tunnel) {
 /// 一条本地 TCP 连接 ⟷ 一条 iroh 双向流，逐字节转发。
 async fn pump(tcp: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let conn = shared.connection().await?;
+    let result = pump_connection(tcp, &conn).await;
+    if result.is_err() {
+        shared.invalidate_connection(&conn).await;
+    }
+    result
+}
+
+async fn pump_connection(tcp: TcpStream, conn: &Connection) -> Result<()> {
     let (mut send, mut recv) = conn.open_bi().await.context("开流失败")?;
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
 
@@ -212,7 +234,9 @@ mod tests {
     fn rejects_malformed_endpoint_id() {
         // 打错的配对码要在 start 就报错，而不是等 WebSocket 连不上才浮现。
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt.block_on(start("not-an-endpoint-id")).unwrap_err();
+        let err = rt
+            .block_on(start("not-an-endpoint-id", "https://relay.invalid", ""))
+            .unwrap_err();
         assert!(
             err.to_string().contains("EndpointId"),
             "错误信息应指明是 EndpointId 有问题：{err}"
@@ -237,12 +261,17 @@ mod tests {
 
         let peer = std::env::var("SMELT_IROH_TEST_PEER")
             .expect("请设置 SMELT_IROH_TEST_PEER=<EndpointId>");
+        let relay = std::env::var("SMELT_IROH_TEST_RELAY")
+            .expect("请设置 SMELT_IROH_TEST_RELAY=<Relay URL>");
+        let relay_token = std::env::var("SMELT_IROH_TEST_RELAY_TOKEN").unwrap_or_default();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let p = start(&peer).await.expect("隧道应能建立");
+            let p = start(&peer, &relay, &relay_token)
+                .await
+                .expect("隧道应能建立");
             assert_eq!(port().await, Some(p), "port() 应报告刚建立的隧道");
             // 幂等：同一个 peer 再来一次不该换端口。
-            assert_eq!(start(&peer).await.unwrap(), p);
+            assert_eq!(start(&peer, &relay, &relay_token).await.unwrap(), p);
 
             let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", p))
                 .await
