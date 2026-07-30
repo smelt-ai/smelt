@@ -264,7 +264,7 @@ flowchart LR
 
 - [ ] smeltd 托管 **ACP** 子进程 + 事件落盘；GUI / 手机均可 reattach
 - [ ] 远程网关：stream / state / input / **action** 契约稳定（手机主走 action）
-- [ ] 公网可达：tunnel（如 cloudflared）一键开、状态可见、可关
+- [x] 公网可达：iroh P2P 一键开、状态可见、可关（配对码永久有效）
 - [ ] 多端同时看不顶掉桌面 GUI；权限操作幂等、可审计
 
 ### 飞书（轻量通道，与手机共用 action）

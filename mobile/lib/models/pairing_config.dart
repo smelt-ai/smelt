@@ -99,10 +99,14 @@ class PairingConfig {
         'network.',
       );
     }
+    // Desktop dropped WebRTC/signalling entirely in favour of iroh, but users
+    // may still have an old sharing code saved or printed. Fail with a hint to
+    // regenerate rather than letting the connection time out mysteriously.
     if (uri.queryParameters.containsKey('room') ||
         uri.queryParameters.containsKey('signal')) {
       throw const FormatException(
-        'This WebRTC sharing code is not supported by the mobile app yet',
+        'This WebRTC sharing code is no longer supported. Open Smelt on your '
+        'Mac and generate a new pairing code.',
       );
     }
 

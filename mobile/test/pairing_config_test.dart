@@ -34,7 +34,7 @@ void main() {
       expect(pairing.endpoint, 'https://example.test/gateway?region=cn');
     });
 
-    test('rejects WebRTC sharing codes with a useful error', () {
+    test('rejects retired WebRTC sharing codes with a useful error', () {
       expect(
         () => PairingConfig.parse(
           'https://signal.example.test/?room=abc&signal=wss%3A%2F%2Fsignal&token=x',
@@ -43,7 +43,7 @@ void main() {
           isA<FormatException>().having(
             (error) => error.message,
             'message',
-            contains('WebRTC'),
+            contains('no longer supported'),
           ),
         ),
       );

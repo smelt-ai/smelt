@@ -1565,8 +1565,6 @@ struct Workspace {
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
     llm_subs: Vec<Subscription>,
-    /// 远程：信令服务地址输入框（用户自部署 smelt-signal，无内置默认）。
-    signal_http_input: Option<Entity<gpui_component::input::InputState>>,
     /// 启动项列表编辑器（设置页「启动」分组懒创建）。
     launch_inputs: Option<settings::LaunchInputs>,
     /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
@@ -1918,7 +1916,6 @@ impl Workspace {
             memory_selected: None,
             llm_inputs: None,
             llm_subs: Vec::new(),
-            signal_http_input: None,
             launch_inputs: None,
             profile_inputs: None,
             opacity_slider: None,
@@ -6384,182 +6381,58 @@ fn main() {
         // UI 会拼出 `?token=` 的死链。
         let remote_config = settings::load_remote_config();
         let want_remote = remote_config.enabled;
-        // 隧道依赖本机网关；配置里 tunnel_enabled=true 时 enabled 理应也是 true
-        // （apply_tunnel_toggle 存盘时就是这么同步的），但独立判断一次更保险。
-        let want_tunnel = remote_config.tunnel_enabled;
-        let want_webrtc = remote_config.webrtc_enabled;
+        // iroh 隧道依赖本机网关；配置里 iroh_enabled=true 时 enabled 理应也是 true
+        // （apply_iroh_toggle 存盘时就是这么同步的），但独立判断一次更保险。
         let want_iroh = remote_config.iroh_enabled;
         let want_write = remote_config.write_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
-        cx.set_global(settings::TunnelRuntimeState::default());
-        cx.set_global(settings::WebrtcRuntimeState::default());
-        cx.set_global(settings::SignalProbeState::default());
-        // Cmd+Q 直接退出 App（没有先手动关跨网开关）时，WebRTC bridge 子进程原本
-        // 没人管——会被系统收养成孤儿，一直占着信令服务器上的房间和本机网关连接
-        // 直到房间 TTL 到期。退出前顺手杀掉它。
-        //
-        // ACP 会话不需要在这里做任何事了：agent 子进程现在是 smeltd 托管的
+        // ACP 会话不需要在退出时做任何事：agent 子进程现在是 smeltd 托管的
         // （见 smelt_core::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
-        // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题，参见
-        // smelt-acp-view::AcpView 的 `handle` 字段类型已经变成
-        // `smelt_core::acp_client::AcpClientHandle`，Drop 时只会断开 socket，
-        // 会话在 smeltd 里照样活着。旧版这里还要「发 Shutdown + 等线程收尾」是
-        // 因为那时子进程是 GUI 自己 fork 出来的，现在没有这个必要。
-        cx.on_app_quit(move |cx| {
-            settings::stop_webrtc_bridge_on_quit(cx);
-            async move {}
-        })
-        .detach();
-        // 恢复跨网：隧道仍走下面 spawn；WebRTC / iroh 在网关 hydrate 后再拉起
-        // （两者都要用网关 token，早拉会拿到空 token）
-        if want_remote || want_tunnel || want_webrtc || want_iroh {
-            if want_tunnel {
-                cx.set_global(settings::TunnelRuntimeState {
-                    connecting: true,
-                    url: None,
-                    qr_png: None,
-                    error: None,
-                    write: false,
-                });
-            }
+        // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。
+        // iroh 隧道同理跑在 smeltd 里，GUI 退出不影响手机端连接。
+        if want_remote || want_iroh {
             cx.spawn(async move |cx| {
-                let (remote_rt, tunnel_rt, want_webrtc, want_iroh) = cx
+                let (remote_rt, want_iroh) = cx
                     .background_executor()
                     .spawn(async move {
                         terminal::ensure_daemon_running();
 
-                        // 1) 本机网关：已在跑就复用 token，否则按配置 start
-                        // WebRTC 也需要本机网关 token
-                        let remote_rt = if want_remote || want_tunnel || want_webrtc || want_iroh {
-                            let existing = terminal::remote_status();
-                            if existing.running
-                                && existing.token.as_ref().is_some_and(|t| !t.is_empty())
-                            {
-                                settings::RemoteRuntimeState {
-                                    token: existing.token,
-                                    addr: existing.addr,
-                                    write: existing.write,
-                                    error: None,
-                                }
-                            } else {
-                                match terminal::remote_start("127.0.0.1", want_write) {
-                                    Ok(s) => settings::RemoteRuntimeState {
-                                        token: s.token,
-                                        addr: s.addr,
-                                        write: s.write,
-                                        error: None,
-                                    },
-                                    Err(e) => settings::RemoteRuntimeState {
-                                        token: None,
-                                        addr: None,
-                                        write: false,
-                                        error: Some(e),
-                                    },
-                                }
+                        // 本机网关：已在跑就复用 token，否则按配置 start。
+                        // iroh 也需要本机网关 token（配对码里带着它）。
+                        let existing = terminal::remote_status();
+                        let remote_rt = if existing.running
+                            && existing.token.as_ref().is_some_and(|t| !t.is_empty())
+                        {
+                            settings::RemoteRuntimeState {
+                                token: existing.token,
+                                addr: existing.addr,
+                                write: existing.write,
+                                error: None,
                             }
                         } else {
-                            settings::RemoteRuntimeState::default()
-                        };
-
-                        // 2) 隧道：同样先 status 再 start；最终以「有 token 才能展示 URL」为准
-                        let tunnel_rt = if want_tunnel {
-                            let has_token = remote_rt.token.as_ref().is_some_and(|t| !t.is_empty());
-                            if !has_token {
-                                settings::TunnelRuntimeState {
-                                    connecting: false,
-                                    url: None,
-                                    qr_png: None,
-                                    error: Some("本机远程网关没起来，无法建立隧道".into()),
+                            match terminal::remote_start("127.0.0.1", want_write) {
+                                Ok(s) => settings::RemoteRuntimeState {
+                                    token: s.token,
+                                    addr: s.addr,
+                                    write: s.write,
+                                    error: None,
+                                },
+                                Err(e) => settings::RemoteRuntimeState {
+                                    token: None,
+                                    addr: None,
                                     write: false,
-                                }
-                            } else {
-                                let existing = terminal::tunnel_status();
-                                if existing.running && existing.url.is_some() {
-                                    settings::TunnelRuntimeState {
-                                        connecting: false,
-                                        url: existing.url,
-                                        qr_png: None,
-                                        error: None,
-                                        write: existing.write,
-                                    }
-                                } else {
-                                    match terminal::tunnel_start(want_write) {
-                                        Ok(s) => settings::TunnelRuntimeState {
-                                            connecting: false,
-                                            url: s.url,
-                                            qr_png: None,
-                                            error: None,
-                                            write: s.write,
-                                        },
-                                        Err(e) => settings::TunnelRuntimeState {
-                                            connecting: false,
-                                            url: None,
-                                            qr_png: None,
-                                            error: Some(e),
-                                            write: false,
-                                        },
-                                    }
-                                }
+                                    error: Some(e),
+                                },
                             }
-                        } else {
-                            settings::TunnelRuntimeState::default()
                         };
 
-                        // 隧道 start 可能顺带（重）开了网关：再读一次 token，避免 UI 仍空
-                        let remote_rt = if want_remote || want_tunnel || want_webrtc || want_iroh {
-                            let again = terminal::remote_status();
-                            if again.running && again.token.as_ref().is_some_and(|t| !t.is_empty())
-                            {
-                                settings::RemoteRuntimeState {
-                                    token: again.token,
-                                    addr: again.addr,
-                                    write: again.write,
-                                    error: None,
-                                }
-                            } else {
-                                remote_rt
-                            }
-                        } else {
-                            remote_rt
-                        };
-
-                        // token 仍空时，即使隧道有 URL 也不给 UI 展示（防 `?token=`）
-                        let tunnel_rt = if tunnel_rt.url.is_some()
-                            && !remote_rt.token.as_ref().is_some_and(|t| !t.is_empty())
-                        {
-                            settings::TunnelRuntimeState {
-                                connecting: false,
-                                url: None,
-                                qr_png: None,
-                                error: Some(
-                                    "隧道在跑但拿不到网关 token，请在设置里重开远程访问".into(),
-                                ),
-                                write: false,
-                            }
-                        } else {
-                            tunnel_rt
-                        };
-
-                        let tunnel_rt = match (tunnel_rt.url.as_deref(), remote_rt.token.as_deref())
-                        {
-                            (Some(url), Some(token)) => settings::TunnelRuntimeState {
-                                qr_png: settings::gateway_pairing_qr_png(url, token),
-                                ..tunnel_rt
-                            },
-                            _ => tunnel_rt,
-                        };
-
-                        (remote_rt, tunnel_rt, want_webrtc, want_iroh)
+                        (remote_rt, want_iroh)
                     })
                     .await;
                 let _ = cx.update(|cx| {
                     cx.set_global(remote_rt);
-                    cx.set_global(tunnel_rt);
-                    // 网关 token 就绪后再恢复 WebRTC bridge（否则建房有 token 却无本机网关）
-                    if want_webrtc {
-                        settings::spawn_webrtc_start_public(cx);
-                    }
+                    // 网关 token 就绪后再拉 iroh：配对码要把 token 拼进去，早拉会拿到空的
                     if want_iroh {
                         settings::spawn_iroh_start_public(cx);
                     }

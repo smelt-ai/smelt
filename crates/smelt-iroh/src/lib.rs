@@ -5,8 +5,9 @@
 //! 连接，逐字节转发。上层 HTTP / WebSocket / token 鉴权原样复用，`/acp/ws` 那套
 //! 手机端代码一行都不用改。这也是为什么这里没有任何业务帧的概念——业务在网关里。
 //!
-//! 对比现有 `smelt-bridge`（WebRTC）：那条路要自建信令 + coturn，且只有浏览器
-//! SPA 用得上；这条路 Rust 原生，手机 app 能直接复用（见 `crates/smelt-mobile`）。
+//! 这是**唯一**的公网通路。早先还有 Cloudflare quick tunnel 和自建信令 + WebRTC
+//! 两条路，都已下线：前者 URL 每次重启都变、二维码活不过一晚，后者要维护信令 +
+//! coturn，且只对浏览器面板有意义，而浏览器面板本身也一并去掉了。
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
