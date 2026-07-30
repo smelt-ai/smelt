@@ -331,7 +331,9 @@ impl Workspace {
                             // 「+」新建下拉：在本项目里新建（终端通道 / 对话通道）。
                             // absolute 浮在行右端，平时不占位（会话数因此贴到最右、无留白），
                             // hover 整行才淡入、盖在会话数上。背景取 bg_row_hover（= 项目行
-                            // hover 底），无缝把下面的数字盖住。
+                            // hover 底），无缝把下面的数字盖住。图标本身常态就以弱化透明度
+                            // 露一点形——非空项目上完全没有「怎么新建会话」的常态提示，
+                            // 新用户找不到入口，得留一条常态可见的线索，hover 再提到全不透明。
                             div()
                                 .when(!is_project_group, |d| d.hidden())
                                 .absolute()
@@ -342,11 +344,13 @@ impl Workspace {
                                 .items_center()
                                 .pl_3()
                                 .rounded(px(4.))
-                                .bg(rgb(ui_theme::bg_row_hover()))
-                                .opacity(0.0)
-                                .group_hover(PROJ_HEADER_GROUP, |s| s.opacity(1.0))
+                                .group_hover(PROJ_HEADER_GROUP, |s| {
+                                    s.bg(rgb(ui_theme::bg_row_hover()))
+                                })
                                 .child(
                                     Button::new(("proj-new", pix))
+                                        .opacity(0.35)
+                                        .group_hover(PROJ_HEADER_GROUP, |s| s.opacity(1.0))
                                         .ghost()
                                         .small()
                                         .icon(IconName::Plus)
