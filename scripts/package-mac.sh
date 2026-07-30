@@ -117,6 +117,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Smelt uses the local network to connect to development devices and remote sessions.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<!-- 声明可打开文件夹：Dock 图标才接受拖入目录（触发 application:openURLs:）。
