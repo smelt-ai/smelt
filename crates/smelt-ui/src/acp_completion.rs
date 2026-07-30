@@ -11,6 +11,8 @@
 //! 自带读文件的工具，给一段路径它们一定会用；ResourceLink 各家支持程度没实测过，
 //! 赌不起「引了没反应」。等有实测再升级。
 
+use std::collections::BTreeSet;
+use std::ops::Range;
 use std::rc::Rc;
 
 /// 一条补全候选。
@@ -21,6 +23,8 @@ pub struct Candidate {
     pub insert: String,
     /// 右侧灰色说明（命令描述；文件没有就空着）。
     pub hint: String,
+    /// label 中命中过滤词的字节范围；渲染层用主题色强调。
+    pub match_range: Option<Range<usize>>,
 }
 
 /// 触发字符决定补哪一类。
@@ -98,7 +102,8 @@ pub fn candidates(
                 .map(|(name, desc)| Candidate {
                     label: format!("/{name}"),
                     insert: format!("/{name} "),
-                    hint: desc.clone(),
+                    hint: meaningful_hint(desc),
+                    match_range: label_match_range(&format!("/{name}"), needle),
                 })
                 .collect()
         }
@@ -113,11 +118,36 @@ pub fn candidates(
                 .take(MAX_ITEMS)
                 .map(|p| Candidate {
                     label: format!("@{p}"),
-                    insert: format!("@{p} "),
+                    insert: if p.ends_with('/') {
+                        format!("@{p}")
+                    } else {
+                        format!("@{p} ")
+                    },
                     hint: String::new(),
+                    match_range: label_match_range(&format!("@{p}"), needle),
                 })
                 .collect()
         }
+    }
+}
+
+fn label_match_range(label: &str, needle: &str) -> Option<Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let start = label.to_lowercase().find(needle)?;
+    let end = start + needle.len();
+    (label.is_char_boundary(start) && label.is_char_boundary(end)).then_some(start..end)
+}
+
+/// 部分 agent 用 `...` / `…` 充当“没有描述”的占位符。菜单继续画出来只会
+/// 让人误以为还有子菜单或内容被截断，因此统一视为空说明。
+fn meaningful_hint(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().all(|ch| ch == '.' || ch == '…') {
+        String::new()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -137,14 +167,26 @@ fn match_rank(value: &str, needle: &str) -> (u8, usize, String) {
     (quality, position, value)
 }
 
-fn file_rank(path: &str, needle: &str) -> (u8, u8, usize, usize, String) {
+fn file_rank(path: &str, needle: &str) -> (u8, u8, usize, u8, usize, String) {
     let hidden = path.split('/').any(|part| part.starts_with('.')) as u8;
     let depth = path.matches('/').count();
-    let basename = path.rsplit('/').next().unwrap_or(path);
+    let basename = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
     let (quality, position, _) = match_rank(basename, needle);
+    let file_kind = (!path.ends_with('/')) as u8;
     // 有搜索词时文件名命中优先；空查询时先给顶层、非隐藏文件，避免 `.github`
     // 霸占首屏。
-    (quality, hidden, position, depth, path.to_lowercase())
+    (
+        quality,
+        hidden,
+        position,
+        file_kind,
+        depth,
+        path.to_lowercase(),
+    )
 }
 
 /// 列一个目录下的文件（相对路径）。优先 `git ls-files`：它天然尊重
@@ -152,7 +194,7 @@ fn file_rank(path: &str, needle: &str) -> (u8, u8, usize, usize, String) {
 /// 退回浅层遍历，只走两层，够用且不会在大目录上卡住。
 pub fn list_files(cwd: &str) -> Rc<Vec<String>> {
     if let Some(files) = git_ls_files(cwd) {
-        return Rc::new(files);
+        return Rc::new(with_parent_directories(files));
     }
     let mut out = Vec::new();
     walk(
@@ -161,8 +203,25 @@ pub fn list_files(cwd: &str) -> Rc<Vec<String>> {
         0,
         &mut out,
     );
-    out.sort();
-    Rc::new(out)
+    Rc::new(with_parent_directories(out))
+}
+
+fn with_parent_directories(files: Vec<String>) -> Vec<String> {
+    let mut entries = BTreeSet::new();
+    for file in files {
+        let mut parent = std::path::Path::new(&file).parent();
+        while let Some(path) = parent {
+            if path.as_os_str().is_empty() {
+                break;
+            }
+            if let Some(path_text) = path.to_str() {
+                entries.insert(format!("{path_text}/"));
+            }
+            parent = path.parent();
+        }
+        entries.insert(file);
+    }
+    entries.into_iter().collect()
 }
 
 fn git_ls_files(cwd: &str) -> Option<Vec<String>> {
@@ -225,6 +284,10 @@ mod tests {
             "应当列出本文件，实际前几条：{:?}",
             &files[..files.len().min(5)]
         );
+        assert!(
+            files.iter().any(|entry| entry.ends_with('/')),
+            "文件补全也应包含可继续下钻的目录"
+        );
         // git ls-files 尊重 .gitignore：构建产物不该混进补全菜单。
         assert!(
             !files.iter().any(|f| f.starts_with("target/")),
@@ -242,6 +305,70 @@ mod tests {
         let t = detect_trigger("看下 /comp").expect("空白后的 / 该触发");
         assert!(matches!(t.kind, Kind::Slash));
         assert_eq!(t.needle, "comp");
+    }
+
+    #[test]
+    fn hides_placeholder_command_descriptions() {
+        let trigger = Trigger {
+            kind: Kind::Slash,
+            start: 0,
+            needle: String::new(),
+        };
+        let commands = vec![
+            ("init".to_string(), "...".to_string()),
+            ("compact".to_string(), " … ".to_string()),
+            ("diff".to_string(), "显示工作区改动".to_string()),
+        ];
+        let items = candidates(&trigger, &[], &commands);
+
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "/init")
+                .unwrap()
+                .hint,
+            String::new()
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "/compact")
+                .unwrap()
+                .hint,
+            String::new()
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "/diff")
+                .unwrap()
+                .hint,
+            "显示工作区改动"
+        );
+    }
+
+    #[test]
+    fn directory_candidates_stay_open_and_expose_match_range() {
+        let trigger = Trigger {
+            kind: Kind::At,
+            start: 0,
+            needle: "smelt".to_string(),
+        };
+        let files = vec![
+            "crates/smelt/".to_string(),
+            "crates/smelt/src/main.rs".to_string(),
+        ];
+        let items = candidates(&trigger, &files, &[]);
+        let directory = items
+            .iter()
+            .find(|item| item.label == "@crates/smelt/")
+            .unwrap();
+
+        assert_eq!(directory.insert, "@crates/smelt/");
+        assert_eq!(
+            &directory.label[directory.match_range.clone().unwrap()],
+            "smelt"
+        );
     }
 
     /// 正常打字不该乱弹菜单：词中间的符号不算触发。

@@ -362,6 +362,7 @@ pub fn daily_heatmap(events: &[UsageEvent], weeks: i64) -> Vec<(NaiveDate, u64)>
 use chrono::Datelike;
 use gpui::*;
 use gpui_component::chart::BarChart;
+use gpui_component::plot::shape::BarAlignment;
 use gpui_component::*;
 use std::rc::Rc;
 use std::time::Instant;
@@ -390,6 +391,33 @@ fn cap_top_n(mut data: Vec<(String, u64)>, n: usize) -> Vec<(String, u64)> {
         data.push(("其他".to_string(), rest));
     }
     data
+}
+
+/// 横向柱状图能给分类名留出独立空间，但项目绝对路径和 MCP 工具名仍可能过长。
+/// 项目只展示末级目录；其他标签从中间截断，同时保留最有辨识度的首尾。
+fn compact_chart_label(label: &str, is_project: bool) -> String {
+    let label = if is_project {
+        Path::new(label)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(label)
+    } else {
+        label
+    };
+
+    const MAX_CHARS: usize = 24;
+    const HEAD_CHARS: usize = 14;
+    let chars: Vec<char> = label.chars().collect();
+    if chars.len() <= MAX_CHARS {
+        return label.to_string();
+    }
+    let tail_chars = MAX_CHARS - HEAD_CHARS - 1;
+    format!(
+        "{}…{}",
+        chars[..HEAD_CHARS].iter().collect::<String>(),
+        chars[chars.len() - tail_chars..].iter().collect::<String>()
+    )
 }
 
 /// 热力格颜色：无数据用极淡的底色描边，有数据按 `sqrt(占比)` 映射透明度——避免线性
@@ -434,7 +462,11 @@ fn bar_section(
 ) -> Div {
     // 种类一多（尤其工具名，含各种 mcp__xxx__yyy 前缀）柱子会挤成一团、x 轴标签
     // 叠在一起看不清，只画头部几项，其余合并成一根"其他"柱子。
-    let data = cap_top_n(data, 6);
+    let is_project = title.ends_with("按项目");
+    let data = cap_top_n(data, 6)
+        .into_iter()
+        .map(|(label, value)| (compact_chart_label(&label, is_project), value))
+        .collect::<Vec<_>>();
     let total: u64 = data.iter().map(|(_, v)| *v).sum();
     let body = if data.is_empty() {
         div()
@@ -451,6 +483,7 @@ fn bar_section(
                 .band(|d: &(String, u64)| d.0.clone())
                 .value(|d: &(String, u64)| d.1 as f64)
                 .fill(move |_, _, _, _| color)
+                .alignment(BarAlignment::Left)
                 .tick_margin(1),
         )
     };
@@ -688,8 +721,8 @@ mod tests {
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期会撞
     // rustc 的递归限制甚至直接崩溃——只导入测试真正用到的几个名字就够了。
     use super::{
-        UsageData, UsageEvent, by_model, by_project, by_tool, daily_heatmap, scan_codex_root,
-        scan_root,
+        UsageData, UsageEvent, by_model, by_project, by_tool, compact_chart_label, daily_heatmap,
+        scan_codex_root, scan_root,
     };
     use chrono::{Local, Utc};
     use std::path::Path;
@@ -871,5 +904,21 @@ mod tests {
         let heat = daily_heatmap(&events, 2);
         assert_eq!(heat.len(), 14);
         assert_eq!(heat.last().map(|(_, v)| *v), Some(7));
+    }
+
+    #[test]
+    fn chart_labels_compact_paths_and_long_unicode_text() {
+        assert_eq!(
+            compact_chart_label("/Users/c.chen/dev/smelt", true),
+            "smelt"
+        );
+        assert_eq!(compact_chart_label("Codex", true), "Codex");
+
+        let long_label = "工具名称".repeat(10);
+        let compacted = compact_chart_label(&long_label, false);
+        assert_eq!(compacted.chars().count(), 24);
+        assert!(compacted.contains('…'));
+        assert!(compacted.starts_with("工具名称工具名称"));
+        assert!(compacted.ends_with("工具名称"));
     }
 }
