@@ -11,9 +11,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use once_cell::sync::Lazy;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
@@ -37,6 +37,7 @@ static TUNNEL: Lazy<Mutex<Option<Tunnel>>> = Lazy::new(|| Mutex::new(None));
 
 struct Tunnel {
     peer: EndpointId,
+    relay: smelt_iroh::RelaySettings,
     port: u16,
     accept_task: tokio::task::JoinHandle<()>,
     shared: Arc<Shared>,
@@ -45,6 +46,7 @@ struct Tunnel {
 struct Shared {
     endpoint: Endpoint,
     peer: EndpointId,
+    target: EndpointAddr,
     /// 缓存的 QUIC 连接。一条 QUIC 连接可以承载任意多条流，所以正常情况下
     /// 只拨号一次；掉线后由下一个请求触发重拨。
     conn: Mutex<Option<Connection>>,
@@ -65,7 +67,7 @@ impl Shared {
         }
         let conn = self
             .endpoint
-            .connect(self.peer, smelt_iroh::ALPN)
+            .connect(self.target.clone(), smelt_iroh::ALPN)
             .await
             .with_context(|| format!("拨号 {} 失败", self.peer))?;
         *slot = Some(conn.clone());
@@ -77,14 +79,15 @@ impl Shared {
 ///
 /// 幂等：对同一个 `endpoint_id` 重复调用会直接返回已有端口，不会重开监听。
 /// 换了 `endpoint_id` 则先停掉旧的 —— 让两条隧道并存只会让上层分不清端口归属。
-pub async fn start(endpoint_id: &str) -> Result<u16> {
+pub async fn start(endpoint_id: &str, relay_address: &str, relay_token: &str) -> Result<u16> {
     let peer: EndpointId = endpoint_id
         .parse()
         .map_err(|_| anyhow!("不是合法的 EndpointId：{endpoint_id}"))?;
+    let relay = smelt_iroh::RelaySettings::parse(relay_address, relay_token)?;
 
     let mut guard = TUNNEL.lock().await;
     if let Some(existing) = guard.as_ref() {
-        if existing.peer == peer && !existing.accept_task.is_finished() {
+        if existing.peer == peer && existing.relay == relay && !existing.accept_task.is_finished() {
             return Ok(existing.port);
         }
         shutdown(guard.take().expect("刚判断过非空"));
@@ -93,14 +96,16 @@ pub async fn start(endpoint_id: &str) -> Result<u16> {
     // 客户端身份每次随机即可：认的是宿主的 EndpointId，手机自己是谁无所谓，
     // 也就省掉了在手机上安全落盘私钥这摊事。
     let secret = iroh::SecretKey::generate();
+    let endpoint_relay = relay.clone();
     let endpoint = RUNTIME
-        .spawn(async move { smelt_iroh::bind_endpoint(secret, vec![]).await })
+        .spawn(async move { smelt_iroh::bind_endpoint(secret, vec![], &endpoint_relay).await })
         .await
         .map_err(|e| anyhow!("绑定 iroh endpoint 的任务失败：{e}"))??;
 
     let shared = Arc::new(Shared {
         endpoint,
         peer,
+        target: EndpointAddr::new(peer).with_relay_url(relay.url.clone()),
         conn: Mutex::new(None),
     });
 
@@ -143,6 +148,7 @@ pub async fn start(endpoint_id: &str) -> Result<u16> {
 
     *guard = Some(Tunnel {
         peer,
+        relay,
         port,
         accept_task,
         shared,

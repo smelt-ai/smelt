@@ -1065,6 +1065,7 @@ fn stop_remote_gateway(state: &RemoteState) {
 /// 这样两种起法给出的配对码是同一个。
 struct IrohTunnel {
     endpoint_id: String,
+    relay: smelt_iroh::RelaySettings,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -1079,8 +1080,15 @@ fn start_iroh(
     iroh_state: &IrohState,
     remote_state: &RemoteState,
     write: bool,
-) -> Result<(String, String, std::net::SocketAddr, bool), String> {
+    relay_address: &str,
+    relay_token: &str,
+) -> Result<(String, String, std::net::SocketAddr, bool, String, String), String> {
+    let relay = smelt_iroh::RelaySettings::parse(relay_address, relay_token)
+        .map_err(|e| format!("iroh relay 配置无效：{e:#}"))?;
     if let Some(t) = iroh_state.lock().unwrap().as_ref() {
+        if t.relay != relay {
+            return Err("iroh relay 配置已变化，请先停止旧隧道再重试".into());
+        }
         let (token, addr, effective_write) = {
             let guard = remote_state.lock().unwrap();
             match guard.as_ref() {
@@ -1089,7 +1097,14 @@ fn start_iroh(
                 None => return Err("iroh 隧道开着但本机网关已停，请先 iroh_stop".into()),
             }
         };
-        return Ok((t.endpoint_id.clone(), token, addr, effective_write));
+        return Ok((
+            t.endpoint_id.clone(),
+            token,
+            addr,
+            effective_write,
+            t.relay.url.to_string(),
+            t.relay.token.clone().unwrap_or_default(),
+        ));
     }
 
     let (token, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
@@ -1097,6 +1112,7 @@ fn start_iroh(
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
+    let tunnel_relay = relay.clone();
     thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -1115,14 +1131,19 @@ fn start_iroh(
                     return;
                 }
             };
-            let endpoint =
-                match smelt_iroh::bind_endpoint(secret, vec![smelt_iroh::ALPN.to_vec()]).await {
-                    Ok(ep) => ep,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(format!("iroh 绑定失败：{e:#}")));
-                        return;
-                    }
-                };
+            let endpoint = match smelt_iroh::bind_endpoint(
+                secret,
+                vec![smelt_iroh::ALPN.to_vec()],
+                &tunnel_relay,
+            )
+            .await
+            {
+                Ok(ep) => ep,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("iroh 绑定失败：{e:#}")));
+                    return;
+                }
+            };
             let _ = ready_tx.send(Ok(endpoint.id().to_string()));
             let path_observer = std::sync::Arc::new(|status: smelt_iroh::PathStatus| {
                 dlog(&format!(
@@ -1145,14 +1166,22 @@ fn start_iroh(
         });
     });
 
-    // 30s：绑定要联网找中继，比本地绑端口慢得多，5s 在弱网下会误判失败。
+    // 30s：绑定要连接用户配置的 relay，比本地绑端口慢得多，5s 在弱网下会误判失败。
     match ready_rx.recv_timeout(Duration::from_secs(30)) {
         Ok(Ok(endpoint_id)) => {
             *iroh_state.lock().unwrap() = Some(IrohTunnel {
                 endpoint_id: endpoint_id.clone(),
+                relay: relay.clone(),
                 shutdown_tx,
             });
-            Ok((endpoint_id, token, addr, effective_write))
+            Ok((
+                endpoint_id,
+                token,
+                addr,
+                effective_write,
+                relay.url.to_string(),
+                relay.token.clone().unwrap_or_default(),
+            ))
         }
         Ok(Err(e)) => Err(e),
         Err(_) => Err("iroh 隧道启动超时（30s）".into()),
@@ -1165,12 +1194,12 @@ fn stop_iroh(state: &IrohState) {
     }
 }
 
-fn iroh_status(state: &IrohState) -> Option<String> {
+fn iroh_status(state: &IrohState) -> Option<(String, smelt_iroh::RelaySettings)> {
     state
         .lock()
         .unwrap()
         .as_ref()
-        .map(|t| t.endpoint_id.clone())
+        .map(|t| (t.endpoint_id.clone(), t.relay.clone()))
 }
 
 /// 进程退出 / upgrade exec 前清理远程网关与 iroh 隧道。菜单栏 quit 与 accept 线程
@@ -3321,9 +3350,11 @@ fn handle_conn(
         }
         Some("iroh_start") => {
             let write = v["write"].as_bool().unwrap_or(false);
+            let relay = v["relay"].as_str().unwrap_or_default();
+            let relay_token = v["relay_token"].as_str().unwrap_or_default();
             let mut c = conn;
-            match start_iroh(&iroh_state, &remote_state, write) {
-                Ok((endpoint_id, token, addr, write)) => {
+            match start_iroh(&iroh_state, &remote_state, write, relay, relay_token) {
+                Ok((endpoint_id, token, addr, write, relay, relay_token)) => {
                     // token 一并回：配对码 = endpoint_id + token，缺一不可
                     // （隧道只负责把字节送到，鉴权仍归网关）。
                     let _ = writeln!(
@@ -3331,7 +3362,8 @@ fn handle_conn(
                         "{}",
                         serde_json::json!({
                             "ok": true, "endpoint_id": endpoint_id, "token": token,
-                            "addr": addr.to_string(), "write": write
+                            "addr": addr.to_string(), "write": write,
+                            "relay": relay, "relay_token": relay_token
                         })
                     );
                 }
@@ -3348,7 +3380,7 @@ fn handle_conn(
         Some("iroh_status") => {
             let mut c = conn;
             let body = match iroh_status(&iroh_state) {
-                Some(endpoint_id) => {
+                Some((endpoint_id, relay)) => {
                     let (token, write) = remote_state
                         .lock()
                         .unwrap()
@@ -3357,7 +3389,9 @@ fn handle_conn(
                         .unwrap_or_default();
                     serde_json::json!({
                         "running": true, "endpoint_id": endpoint_id,
-                        "token": token, "write": write
+                        "token": token, "write": write,
+                        "relay": relay.url.to_string(),
+                        "relay_token": relay.token.unwrap_or_default()
                     })
                 }
                 None => serde_json::json!({ "running": false }),

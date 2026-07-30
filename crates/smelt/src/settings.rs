@@ -852,9 +852,9 @@ pub fn uninstall_agent_hooks() -> Result<(), String> {
 
 // ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
 
-/// 远程操作网关的持久化开关（全局单例，存 ~/.smelt/collab.json）。只记「用户希望
-/// 它是开是关」这一件事——具体的 token/绑定地址是运行时状态，不落盘（见
-/// [`RemoteRuntimeState`]），GUI 启动时按这个字段决定要不要主动 remote_start。
+/// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。网关运行时
+/// token/绑定地址不落盘（见 [`RemoteRuntimeState`]）；用户填写的 relay 地址和可选
+/// relay 访问令牌会持久化，文件按私密配置保存。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub enabled: bool,
@@ -868,6 +868,12 @@ pub struct RemoteConfig {
     /// 只是那几个键从此没人理会。
     #[serde(default)]
     pub iroh_enabled: bool,
+    /// 用户自己的 iroh relay。空值表示未配置，不会回退到公共 relay。
+    #[serde(default)]
+    pub iroh_relay: String,
+    /// 自建 relay 的可选共享访问令牌。
+    #[serde(default)]
+    pub iroh_relay_token: String,
     /// 这条链接是否允许 approve/deny/reply（Phase 6，见 smeltd.rs「远程操控」）。
     /// `#[serde(default)]`：比 `enabled` 更晚加，旧配置缺省按只读处理——不能让
     /// 老用户的配置在升级后突然变成可写。链接分享出去本身就是授权，这里没有
@@ -881,6 +887,8 @@ impl Default for RemoteConfig {
         Self {
             enabled: false,
             iroh_enabled: false,
+            iroh_relay: String::new(),
+            iroh_relay_token: String::new(),
             write_enabled: false,
         }
     }
@@ -898,7 +906,7 @@ pub fn load_remote_config() -> RemoteConfig {
 }
 
 fn save_remote_config(c: &RemoteConfig) {
-    crate::json_store::save_json(remote_config_path(), c)
+    crate::json_store::save_json_private(remote_config_path(), c)
 }
 
 /// 内嵌远程网关的运行时状态（不落盘，纯展示用）：token/绑定地址是当次 remote_start
@@ -950,8 +958,11 @@ pub struct IrohRuntimeState {
 
 impl Global for IrohRuntimeState {}
 
-/// 异步拉起 iroh 隧道。绑定要联网找中继，可能耗时数秒，**必须**走后台。
+/// 异步拉起 iroh 隧道。绑定要连接用户配置的 relay，可能耗时数秒，**必须**走后台。
 fn spawn_iroh_start(write: bool, cx: &mut App) {
+    let config = cx.global::<RemoteConfig>().clone();
+    let relay = config.iroh_relay;
+    let relay_token = config.iroh_relay_token;
     cx.set_global(IrohRuntimeState {
         connecting: true,
         ..Default::default()
@@ -960,15 +971,24 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
         let (result, remote, qr_png) = cx
             .background_executor()
             .spawn(async move {
-                let result = terminal::iroh_start(write);
+                let result = terminal::iroh_start(write, &relay, &relay_token);
                 // iroh_start 可能顺带把网关也开了（守护侧的 ensure_remote_gateway），
                 // 所以要回读一次网关现状，否则 UI 上「本机链接」那块会一直是空的。
                 let remote = terminal::remote_status();
                 // 二维码在后台线程算好再交给 UI：绝不在 UI 线程现算 QR。
                 let qr_png = match &result {
-                    Ok(s) => match (s.endpoint_id.as_deref(), s.token.as_deref()) {
-                        (Some(id), Some(tok)) if !tok.is_empty() => {
-                            qr_png_for_url(&smelt_core::pairing::iroh_pairing_uri(id, tok))
+                    Ok(s) => match (
+                        s.endpoint_id.as_deref(),
+                        s.token.as_deref(),
+                        s.relay.as_deref(),
+                    ) {
+                        (Some(id), Some(tok), Some(relay)) if !tok.is_empty() => {
+                            qr_png_for_url(&smelt_core::pairing::iroh_pairing_uri(
+                                id,
+                                tok,
+                                relay,
+                                s.relay_token.as_deref().unwrap_or_default(),
+                            ))
                         }
                         _ => None,
                     },
@@ -988,9 +1008,18 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
             }
             let rt = match result {
                 Ok(s) => {
-                    let uri = match (s.endpoint_id.as_deref(), s.token.as_deref()) {
-                        (Some(id), Some(tok)) if !tok.is_empty() => {
-                            Some(smelt_core::pairing::iroh_pairing_uri(id, tok))
+                    let uri = match (
+                        s.endpoint_id.as_deref(),
+                        s.token.as_deref(),
+                        s.relay.as_deref(),
+                    ) {
+                        (Some(id), Some(tok), Some(relay)) if !tok.is_empty() => {
+                            Some(smelt_core::pairing::iroh_pairing_uri(
+                                id,
+                                tok,
+                                relay,
+                                s.relay_token.as_deref().unwrap_or_default(),
+                            ))
                         }
                         _ => None,
                     };
@@ -1020,6 +1049,26 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
         });
     })
     .detach();
+}
+
+fn apply_iroh_relay_value(value: SharedString, token: bool, cx: &mut App) {
+    let mut config = cx.global::<RemoteConfig>().clone();
+    if token {
+        config.iroh_relay_token = value.trim().to_string();
+    } else {
+        config.iroh_relay = value.trim().to_string();
+    }
+    let was_enabled = config.iroh_enabled;
+    save_remote_config(&config);
+    cx.set_global(config);
+    if was_enabled {
+        terminal::iroh_stop();
+        cx.set_global(IrohRuntimeState {
+            error: Some("Relay 配置已更新，点重试应用新配置".into()),
+            ..Default::default()
+        });
+    }
+    cx.refresh_windows();
 }
 
 /// 开关「P2P 直连（iroh）」：只改配置 + 异步拉隧道，不在 UI 线程阻塞。
@@ -1074,8 +1123,6 @@ pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
         cx.set_global(c);
     }
 }
-
-
 
 fn qr_png_for_url(url: &str) -> Option<Vec<u8>> {
     use qrcode::QrCode;
@@ -2903,6 +2950,24 @@ impl Workspace {
                 )
                 .description("打开后生成本机分享能力（手机配对依赖它）。关掉会停止所有分享。"),
                 SettingItem::new(
+                    "Relay 地址",
+                    SettingField::input(
+                        |cx: &App| cx.global::<RemoteConfig>().iroh_relay.clone().into(),
+                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, false, cx),
+                    ),
+                )
+                .description(
+                    "填写自建 relay 的域名、IP 或完整 URL；省略协议时使用 https://。留空不会使用公共 relay。",
+                ),
+                SettingItem::new(
+                    "Relay 访问令牌",
+                    SettingField::input(
+                        |cx: &App| cx.global::<RemoteConfig>().iroh_relay_token.clone().into(),
+                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, true, cx),
+                    ),
+                )
+                .description("relay 未开启共享令牌鉴权时可留空。令牌随配对码进入手机安全存储。"),
+                SettingItem::new(
                     "P2P 直连（iroh）",
                     SettingField::switch(
                         |cx: &App| cx.global::<RemoteConfig>().iroh_enabled,
@@ -2911,7 +2976,7 @@ impl Workspace {
                 )
                 .description(
                     "手机 App 的唯一公网通路：配对码重启不变，扫一次长期有效。\
-                     优先打洞直连，打不通自动走中继，不需要任何自建服务器。",
+                     优先打洞直连，打不通自动走用户配置的 relay。",
                 ),
                 SettingItem::new(
                     "允许远程写入",
@@ -2944,12 +3009,12 @@ impl Workspace {
                             .into_any_element();
                     }
 
-                    // iroh 准备中（绑定要联网找中继）
+                    // iroh 准备中（绑定要连接用户配置的 relay）
                     if cfg.iroh_enabled && iroh.connecting {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("正在建立 P2P 通道…（找中继 + 打洞）")
+                            .child("正在建立 P2P 通道…（连接 relay + 打洞）")
                             .into_any_element();
                     }
 
@@ -3326,7 +3391,12 @@ mod iroh_pairing_tests {
     fn pairing_uri_renders_to_a_qr() {
         // 配对码比 http 链接长（endpoint_id 是 64 个十六进制字符），
         // 这里钉住「它确实能编成二维码」——超长内容会让 QrCode::new 失败。
-        let uri = iroh_pairing_uri(&"a".repeat(64), &"b".repeat(32));
+        let uri = iroh_pairing_uri(
+            &"a".repeat(64),
+            &"b".repeat(32),
+            "https://relay.example.test",
+            "relay-token",
+        );
         let png = qr_png_for_url(&uri).expect("配对码必须能生成二维码");
         assert!(!png.is_empty());
         assert_eq!(&png[1..4], b"PNG", "应当是 PNG 字节流");

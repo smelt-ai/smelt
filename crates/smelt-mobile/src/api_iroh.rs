@@ -14,8 +14,12 @@ use flutter_rust_bridge::frb;
 /// 隧道对上层是透明的，鉴权和消息格式都和直连网关时完全一样。
 ///
 /// 幂等 —— 同一个 endpoint 重复调用返回同一个端口。
-pub async fn iroh_tunnel_start(endpoint_id: String) -> Result<u32, String> {
-    crate::iroh_tunnel::start(&endpoint_id)
+pub async fn iroh_tunnel_start(
+    endpoint_id: String,
+    relay_url: String,
+    relay_token: String,
+) -> Result<u32, String> {
+    crate::iroh_tunnel::start(&endpoint_id, &relay_url, &relay_token)
         .await
         .map(|p| p as u32)
         .map_err(|e| format!("{e:#}"))
@@ -37,6 +41,8 @@ pub async fn iroh_tunnel_port() -> Option<u32> {
 pub struct IrohPairing {
     pub endpoint_id: String,
     pub token: String,
+    pub relay_url: String,
+    pub relay_token: String,
 }
 
 /// 解析 `smelt+iroh://` 配对码。
@@ -49,6 +55,8 @@ pub fn parse_iroh_pairing_uri(uri: String) -> Result<IrohPairing, String> {
     Ok(IrohPairing {
         endpoint_id: parsed.endpoint_id,
         token: parsed.token,
+        relay_url: parsed.relay_url,
+        relay_token: parsed.relay_token,
     })
 }
 

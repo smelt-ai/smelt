@@ -14,8 +14,15 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// 隧道对上层是透明的，鉴权和消息格式都和直连网关时完全一样。
 ///
 /// 幂等 —— 同一个 endpoint 重复调用返回同一个端口。
-Future<int> irohTunnelStart({required String endpointId}) =>
-    RustLib.instance.api.crateApiIrohIrohTunnelStart(endpointId: endpointId);
+Future<int> irohTunnelStart({
+  required String endpointId,
+  required String relayUrl,
+  required String relayToken,
+}) => RustLib.instance.api.crateApiIrohIrohTunnelStart(
+  endpointId: endpointId,
+  relayUrl: relayUrl,
+  relayToken: relayToken,
+);
 
 /// 停止 iroh 隧道。没有隧道时是 no-op。
 Future<void> irohTunnelStop() =>
@@ -38,11 +45,22 @@ Future<IrohPairing> parseIrohPairingUri({required String uri}) =>
 class IrohPairing {
   final String endpointId;
   final String token;
+  final String relayUrl;
+  final String relayToken;
 
-  const IrohPairing({required this.endpointId, required this.token});
+  const IrohPairing({
+    required this.endpointId,
+    required this.token,
+    required this.relayUrl,
+    required this.relayToken,
+  });
 
   @override
-  int get hashCode => endpointId.hashCode ^ token.hashCode;
+  int get hashCode =>
+      endpointId.hashCode ^
+      token.hashCode ^
+      relayUrl.hashCode ^
+      relayToken.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -50,5 +68,7 @@ class IrohPairing {
       other is IrohPairing &&
           runtimeType == other.runtimeType &&
           endpointId == other.endpointId &&
-          token == other.token;
+          token == other.token &&
+          relayUrl == other.relayUrl &&
+          relayToken == other.relayToken;
 }

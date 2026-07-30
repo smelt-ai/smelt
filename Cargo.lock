@@ -8396,6 +8396,7 @@ dependencies = [
  "similar",
  "smol",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -8406,6 +8407,7 @@ dependencies = [
  "data-encoding",
  "futures-util",
  "iroh",
+ "iroh-relay",
  "tokio",
  "tracing",
  "tracing-subscriber",
