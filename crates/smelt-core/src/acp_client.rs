@@ -245,6 +245,32 @@ pub fn kill_acp_session(id: &str) {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
+/// 强制重启一个卡死的 ACP 会话：杀掉当前 agent 子进程（整个进程组），换一个
+/// 新的接着跑，带 `resume_session_id` 走 `session/load` 接回同一份历史。跟
+/// `kill_acp_session` 不是一回事——那个是终结会话（关标签），这个是会话本体
+/// （标签、GUI 那条 `acp_open` 连接、entries 历史）原样保留，只是换掉失联的
+/// 那个子进程，专治 `session/cancel` 打不断的死循环工具调用。
+///
+/// 阻塞等守护回执，理由同 `kill_acp_session`：调用方（GUI 点"强制重启"）想要
+/// 一个确定的成功/失败结果，不想留下"到底发出去没有"的悬念。
+pub fn restart_acp_session(id: &str) -> Result<(), String> {
+    let mut s = UnixStream::connect(crate::daemon_state::smeltd_sock_path())
+        .map_err(|e| format!("连不上 smeltd：{e}"))?;
+    writeln!(s, "{}", serde_json::json!({ "op": "acp_restart", "id": id }))
+        .map_err(|e| format!("写请求失败：{e}"))?;
+    let mut resp = String::new();
+    BufReader::new(s)
+        .read_line(&mut resp)
+        .map_err(|e| format!("读回执失败：{e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(resp.trim()).map_err(|_| "回执解析失败".to_string())?;
+    if v["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(v["error"].as_str().unwrap_or("重启失败").to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AcpClientLaunch, acp_open_request, fallback_snapshot};

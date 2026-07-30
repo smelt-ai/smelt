@@ -433,6 +433,15 @@ impl Session {
         }
     }
 
+    /// ACP 会话的视图；终端会话返回 None（跟 `active_term` 反过来，供侧栏右键
+    /// 的「强制重启」这类 ACP 专属操作用）。
+    fn active_acp(&self) -> Option<&Entity<acp_view::AcpView>> {
+        match &self.kind {
+            SessionKind::Term { .. } => None,
+            SessionKind::Acp(view) => Some(view),
+        }
+    }
+
     /// 切换终端会话的活动 pane；非终端会话是 no-op。
     fn set_active_term(&mut self, view: Entity<TerminalView>) {
         match &mut self.kind {
@@ -3473,6 +3482,16 @@ impl Workspace {
         let n = self.sessions.len();
         if n > 0 {
             self.activate((self.active_session + 1) % n, window, cx);
+        }
+    }
+
+    /// 侧栏右键「强制重启」：ACP 会话卡死（`session/cancel` 打不断正在跑的
+    /// 工具调用）时的兜底，见 `AcpView::force_restart` 注释。非 ACP 会话
+    /// （`active_acp` 返回 None）是 no-op，调用方（右键菜单）也只在 ACP
+    /// 会话上才显示这一项。
+    pub(crate) fn force_restart_acp_session(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(view) = self.sessions.get(ix).and_then(|s| s.active_acp()).cloned() {
+            view.update(cx, |v, cx| v.force_restart(cx));
         }
     }
 
