@@ -1342,41 +1342,51 @@ pub fn remote_status() -> RemoteStatus {
     }
 }
 
-/// Cloudflare Tunnel（见 smeltd.rs「Cloudflare Tunnel」一节）的运行状态。
+/// iroh 隧道（见 smeltd.rs「iroh 隧道」一节）的运行状态。
+///
+/// `endpoint_id` **重启不变**，所以基于它生成的配对二维码可以一次扫、长期用。
 #[derive(Clone, Debug, Default)]
-pub struct TunnelStatus {
-    pub running: bool,
-    pub url: Option<String>,
+pub struct IrohStatus {
+    pub endpoint_id: Option<String>,
+    /// 网关 token。`endpoint_id` 只让人连得上，能不能操作仍由它决定，
+    /// 所以配对码必须两者一起给。
+    pub token: Option<String>,
+    pub relay: Option<String>,
+    pub relay_token: Option<String>,
     pub write: bool,
 }
 
-/// 让守护开启 Cloudflare Tunnel（幂等）。**这个调用可能耗时数秒到 ~30s**
-/// （spawn cloudflared 子进程 + 等它连上 Cloudflare 边缘）——调用方必须扔进
-/// 后台任务，不能直接在 UI 线程/事件回调里同步调用，否则界面会冻住。
-pub fn tunnel_start(write: bool) -> Result<TunnelStatus, String> {
+/// 让守护开启 iroh 隧道（幂等）。绑定要连接用户配置的 relay，**可能耗时数秒**，
+/// 跟 `tunnel_start` 一样必须扔进后台任务，别在 UI 线程同步调。
+pub fn iroh_start(write: bool, relay: &str, relay_token: &str) -> Result<IrohStatus, String> {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         return Err("连不上守护".to_string());
     };
     if writeln!(
         s,
         "{}",
-        serde_json::json!({ "op": "tunnel_start", "write": write })
+        serde_json::json!({
+            "op": "iroh_start", "write": write,
+            "relay": relay, "relay_token": relay_token
+        })
     )
     .is_err()
     {
         return Err("发送请求失败".to_string());
     }
-    // 守护那边最多等 30s 建隧道，这里的读超时要留够余量。
+    // 守护那边就绪超时 30s，这里留余量。
     let _ = s.set_read_timeout(Some(Duration::from_secs(35)));
     let mut resp = String::new();
     if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Err("守护没有响应（等隧道建好超时）".to_string());
+        return Err("守护没有响应（等 iroh 绑定超时）".to_string());
     }
     let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
     if v["ok"].as_bool() == Some(true) {
-        Ok(TunnelStatus {
-            running: true,
-            url: v["url"].as_str().map(String::from),
+        Ok(IrohStatus {
+            endpoint_id: v["endpoint_id"].as_str().map(String::from),
+            token: v["token"].as_str().map(String::from),
+            relay: v["relay"].as_str().map(String::from),
+            relay_token: v["relay_token"].as_str().map(String::from),
             write: v["write"].as_bool().unwrap_or(false),
         })
     } else {
@@ -1384,34 +1394,14 @@ pub fn tunnel_start(write: bool) -> Result<TunnelStatus, String> {
     }
 }
 
-/// 关掉 Cloudflare Tunnel（不影响本机远程网关本身）。
-pub fn tunnel_stop() {
+/// 关掉 iroh 隧道（不影响本机远程网关本身）。
+pub fn iroh_stop() {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         return;
     };
-    let _ = writeln!(s, "{}", serde_json::json!({ "op": "tunnel_stop" }));
+    let _ = writeln!(s, "{}", serde_json::json!({ "op": "iroh_stop" }));
     let mut resp = String::new();
     let _ = BufReader::new(s).read_line(&mut resp);
-}
-
-/// 查当前 Cloudflare Tunnel 状态。
-pub fn tunnel_status() -> TunnelStatus {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
-        return TunnelStatus::default();
-    };
-    if writeln!(s, "{}", serde_json::json!({ "op": "tunnel_status" })).is_err() {
-        return TunnelStatus::default();
-    }
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return TunnelStatus::default();
-    }
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
-    TunnelStatus {
-        running: v["running"].as_bool().unwrap_or(false),
-        url: v["url"].as_str().map(String::from),
-        write: v["write"].as_bool().unwrap_or(false),
-    }
 }
 
 // ===================== 状态通道（见 docs/state-channel-plan.md） =====================

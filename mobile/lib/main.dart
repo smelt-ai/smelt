@@ -1,9 +1,19 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'models/pairing_config.dart';
+import 'pages/qr_scanner_page.dart';
 import 'services/gateway_service.dart';
 import 'models/acp_snapshot.dart';
+import 'services/pairing_storage.dart';
+import 'rust_lib.dart';
+import 'src/rust/api_iroh.dart';
+import 'utils/image_processing.dart';
+import 'widgets/acp_content.dart';
 
 bool isNearMessageBottom(
   double pixels,
@@ -16,13 +26,46 @@ bool shouldAutoFollowSnapshot({
   required bool wasAtBottom,
 }) => initialLoad || wasAtBottom;
 
+bool _isInterruptMarker(String text) {
+  final value = text.trim();
+  return value.startsWith('[Request interrupted by user') &&
+      value.endsWith(']');
+}
+
+String _formatElapsed(int milliseconds) {
+  final seconds = milliseconds < 0 ? 0 : milliseconds ~/ 1000;
+  if (seconds < 60) return '${seconds}s';
+  return '${seconds ~/ 60}m ${seconds % 60}s';
+}
+
+String _imageMimeFromName(String name) {
+  final lower = name.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  return 'image/png';
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initRustLib();
+  // 在组装根接线，而不是让 GatewayService 直接依赖 FFI：服务层保持纯 Dart，
+  // 单测才能不带动态库地跑。
+  gatewayService.irohTunnelOpener = (endpointId, relayUrl, relayToken) =>
+      irohTunnelStart(
+        endpointId: endpointId,
+        relayUrl: relayUrl,
+        relayToken: relayToken,
+      );
+  gatewayService.irohTunnelStopper = irohTunnelStop;
   runApp(const SmeltApp());
 }
 
 class SmeltApp extends StatelessWidget {
-  const SmeltApp({super.key});
+  const SmeltApp({super.key, this.pairingStorage});
+
+  final PairingStorage? pairingStorage;
 
   @override
   Widget build(BuildContext context) {
@@ -35,13 +78,15 @@ class SmeltApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      home: HomePage(pairingStorage: pairingStorage),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.pairingStorage});
+
+  final PairingStorage? pairingStorage;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -55,20 +100,25 @@ class _HomePageState extends State<HomePage> {
   late final StreamSubscription<LifecycleAttention> _attentionSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
+  late final PairingStorage _pairingStorage;
   String? _shownAttentionSessionId;
+  PairingConfig? _pendingPairing;
+  bool _restoringPairing = true;
+  bool _hasSavedPairing = false;
+  bool _showPairingCode = false;
 
-  // 临时配对信息（后续改为 QR 扫描）
-  final _endpointController = TextEditingController(
-    text: 'ws://192.168.1.100:9877',
-  );
-  final _tokenController = TextEditingController();
+  final _pairingCodeController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    _pairingStorage = widget.pairingStorage ?? SecurePairingStorage();
     _stateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
+      if (state == WsState.connected && _pendingPairing != null) {
+        unawaited(_savePendingPairing());
+      }
     });
     _sessionsSubscription = gatewayService.sessionsStream.listen((sessions) {
       if (!mounted) return;
@@ -115,6 +165,43 @@ class _HomePageState extends State<HomePage> {
         context,
       ).showSnackBar(SnackBar(content: Text(error)));
     });
+    unawaited(_restorePairing());
+  }
+
+  Future<void> _restorePairing() async {
+    try {
+      final pairing = await _pairingStorage.load();
+      if (!mounted) return;
+      setState(() {
+        _restoringPairing = false;
+        _hasSavedPairing = pairing != null;
+      });
+      if (pairing != null) _connect(pairing, saveWhenConnected: false);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _restoringPairing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not restore pairing: $error')),
+      );
+    }
+  }
+
+  Future<void> _savePendingPairing() async {
+    final pairing = _pendingPairing;
+    if (pairing == null) return;
+    // 只在真正连上的就是这组配对时才落盘，避免自动重连到旧桌面时把新扫的
+    // endpoint/token 写进去。
+    if (!gatewayService.matchesTarget(pairing.endpoint, pairing.token)) return;
+    _pendingPairing = null;
+    try {
+      await _pairingStorage.save(pairing);
+      if (mounted) setState(() => _hasSavedPairing = true);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connected, but pairing was not saved: $error')),
+      );
+    }
   }
 
   @override
@@ -128,7 +215,7 @@ class _HomePageState extends State<HomePage> {
             onPressed: _scanQrCode,
             tooltip: 'Pair with Desktop',
           ),
-          if (_connectionState == WsState.connected)
+          if (_connectionState != WsState.disconnected)
             IconButton(
               icon: const Icon(Icons.logout),
               onPressed: () => gatewayService.disconnect(),
@@ -147,11 +234,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildBody() {
+    if (_restoringPairing) {
+      return const Center(child: CircularProgressIndicator());
+    }
     switch (_connectionState) {
       case WsState.disconnected:
         return _buildDisconnectedView();
       case WsState.connecting:
-        return const Center(child: CircularProgressIndicator());
+        return _buildConnectingView();
       case WsState.connected:
         return _buildSessionList();
       case WsState.reconnecting:
@@ -170,23 +260,32 @@ class _HomePageState extends State<HomePage> {
           const Text('Not connected', textAlign: TextAlign.center),
           const SizedBox(height: 24),
 
-          // 临时手动连接 UI（后续改为 QR）
           TextField(
-            controller: _endpointController,
-            decoration: const InputDecoration(
-              labelText: 'Gateway Endpoint',
-              hintText: 'ws://192.168.1.x:9877',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _tokenController,
-            decoration: const InputDecoration(
-              labelText: 'Token',
-              hintText: 'Enter token from desktop',
-              border: OutlineInputBorder(),
-            ),
+            controller: _pairingCodeController,
+            obscureText: !_showPairingCode,
+            enableSuggestions: false,
+            autocorrect: false,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _manualConnect(),
+            decoration:
+                const InputDecoration(
+                  labelText: 'Pairing Code',
+                  hintText: 'Paste code from Smelt Desktop',
+                  border: OutlineInputBorder(),
+                ).copyWith(
+                  suffixIcon: IconButton(
+                    tooltip: _showPairingCode
+                        ? 'Hide pairing code'
+                        : 'Show pairing code',
+                    onPressed: () =>
+                        setState(() => _showPairingCode = !_showPairingCode),
+                    icon: Icon(
+                      _showPairingCode
+                          ? Icons.visibility_off
+                          : Icons.visibility,
+                    ),
+                  ),
+                ),
           ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
@@ -204,6 +303,14 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.qr_code_scanner),
             label: const Text('Scan QR Code to Pair'),
           ),
+          if (_hasSavedPairing) ...[
+            const SizedBox(height: 12),
+            TextButton.icon(
+              onPressed: _forgetPairing,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Forget saved pairing'),
+            ),
+          ],
         ],
       ),
     );
@@ -288,14 +395,39 @@ class _HomePageState extends State<HomePage> {
     };
   }
 
-  Widget _buildReconnectingView() {
-    return const Center(
+  Widget _buildConnectingView() {
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Reconnecting...'),
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          const Text('Connecting...', textAlign: TextAlign.center),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            onPressed: gatewayService.disconnect,
+            icon: const Icon(Icons.close),
+            label: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReconnectingView() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          const Text("Reconnecting..."),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            onPressed: gatewayService.disconnect,
+            icon: const Icon(Icons.link_off),
+            label: const Text("Change pairing"),
+          ),
         ],
       ),
     );
@@ -328,22 +460,51 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  void _scanQrCode() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('QR scanning not yet implemented')),
+  Future<void> _scanQrCode() async {
+    final pairing = await Navigator.push<PairingConfig>(
+      context,
+      MaterialPageRoute(builder: (context) => const QrScannerPage()),
     );
+    if (!mounted || pairing == null) return;
+    _connect(pairing);
   }
 
   void _manualConnect() {
-    final endpoint = _endpointController.text.trim();
-    final token = _tokenController.text.trim();
-    if (endpoint.isEmpty || token.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter endpoint and token')),
-      );
-      return;
+    try {
+      final pairing = PairingConfig.parse(_pairingCodeController.text);
+      _connect(pairing);
+    } on FormatException catch (error) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message.toString())));
     }
-    gatewayService.connect(endpoint, token);
+  }
+
+  void _connect(PairingConfig pairing, {bool saveWhenConnected = true}) {
+    _pendingPairing = saveWhenConnected ? pairing : null;
+    gatewayService.connect(pairing.endpoint, pairing.token);
+    // 重扫同一台桌面时 connect() 是幂等空操作，不会再有 connected 状态变化来
+    // 触发落盘，这里补一次。
+    if (saveWhenConnected && gatewayService.state == WsState.connected) {
+      unawaited(_savePendingPairing());
+    }
+  }
+
+  Future<void> _forgetPairing() async {
+    try {
+      await _pairingStorage.clear();
+      if (!mounted) return;
+      setState(() {
+        _hasSavedPairing = false;
+        _pendingPairing = null;
+        _pairingCodeController.clear();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not remove pairing: $error')),
+      );
+    }
   }
 
   void _openSession(SessionSummary session) {
@@ -361,8 +522,7 @@ class _HomePageState extends State<HomePage> {
     _attentionSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     _errorSubscription.cancel();
-    _endpointController.dispose();
-    _tokenController.dispose();
+    _pairingCodeController.dispose();
     super.dispose();
   }
 }
@@ -378,17 +538,27 @@ class SessionPage extends StatefulWidget {
 
 class _SessionPageState extends State<SessionPage> {
   final TextEditingController _messageController = TextEditingController();
+  final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
+  final ImagePicker _imagePicker = ImagePicker();
   AcpSnapshot? _snapshot;
   bool _loading = true;
   bool _isAtBottom = true;
+  bool _isMessageFocused = false;
+  String? _permissionSubmittingToolId;
+  final List<AcpImageData> _pendingImages = [];
   final Map<int, String> _elicitationTextValues = {};
+  late final Timer _turnTicker;
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
 
   @override
   void initState() {
     super.initState();
+    _messageFocusNode.addListener(_handleMessageFocus);
+    _turnTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _snapshot?.phase is AcpPhaseRunning) setState(() {});
+    });
     _scrollController.addListener(_handleScrollPosition);
     _attentionResolvedSubscription = gatewayService.attentionResolvedStream
         .listen((sessionId) {
@@ -398,6 +568,13 @@ class _SessionPageState extends State<SessionPage> {
         });
     _subscribeSession();
   }
+
+  void _handleMessageFocus() {
+    if (!mounted || _isMessageFocused == _messageFocusNode.hasFocus) return;
+    setState(() => _isMessageFocused = _messageFocusNode.hasFocus);
+  }
+
+  void _dismissKeyboard() => _messageFocusNode.unfocus();
 
   void _handleScrollPosition() {
     if (!_scrollController.hasClients) return;
@@ -422,6 +599,10 @@ class _SessionPageState extends State<SessionPage> {
       );
       setState(() {
         _snapshot = _snapshot?.merge(snapshot) ?? snapshot;
+        final activePermission = _snapshot?.pendingPermissions.firstOrNull;
+        if (activePermission?.toolCallId != _permissionSubmittingToolId) {
+          _permissionSubmittingToolId = null;
+        }
         final elicitation = _snapshot?.pendingElicitation;
         if (elicitation == null) {
           _elicitationTextValues.clear();
@@ -475,9 +656,12 @@ class _SessionPageState extends State<SessionPage> {
       ),
       body: Column(
         children: [
-          // 权限请求横幅
-          if (_snapshot?.pendingPermissions.isNotEmpty == true)
-            ..._snapshot!.pendingPermissions.map(_buildPermissionBanner),
+          if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
+          if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
+          if (_snapshot?.pendingPermissions
+              case final List<PendingPermission> permissions
+              when permissions.isNotEmpty)
+            _buildPermissionBanner(permissions.first, permissions.length),
           if (_snapshot?.pendingElicitation case final elicitation?)
             _buildElicitationCard(elicitation),
 
@@ -539,7 +723,111 @@ class _SessionPageState extends State<SessionPage> {
     };
   }
 
-  Widget _buildPermissionBanner(PendingPermission permission) {
+  Widget _buildSessionStatus(AcpSnapshot snapshot) {
+    final colors = Theme.of(context).colorScheme;
+    final phase = snapshot.phase;
+    if (phase is AcpPhaseIdle ||
+        phase is AcpPhaseAwaitingApproval ||
+        phase is AcpPhaseAwaitingChoice) {
+      return const SizedBox.shrink();
+    }
+    final (icon, label, color) = switch (phase) {
+      AcpPhaseStarting() => (
+        Icons.rocket_launch_outlined,
+        snapshot.statusLine ?? 'Starting agent...',
+        colors.primary,
+      ),
+      AcpPhaseRunning() => (
+        Icons.auto_awesome,
+        snapshot.statusLine ?? 'Agent is working',
+        colors.primary,
+      ),
+      AcpPhaseEnded(reason: final reason) => (
+        Icons.error_outline,
+        reason.isEmpty ? 'Session ended' : reason,
+        colors.error,
+      ),
+      _ => (Icons.info_outline, '', colors.onSurfaceVariant),
+    };
+    final elapsed = phase is AcpPhaseRunning && snapshot.turnStartedAtMs != null
+        ? DateTime.now().millisecondsSinceEpoch - snapshot.turnStartedAtMs!
+        : null;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: color.withAlpha(18),
+      child: Row(
+        children: [
+          if (phase is AcpPhaseRunning || phase is AcpPhaseStarting)
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2, color: color),
+            )
+          else
+            Icon(icon, size: 18, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              elapsed == null ? label : '$label · ${_formatElapsed(elapsed)}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: color, fontSize: 12),
+            ),
+          ),
+          if (phase is AcpPhaseRunning && gatewayService.writeEnabled)
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Stop current turn',
+              onPressed: () => gatewayService.cancelTurn(widget.session.id),
+              icon: const Icon(Icons.stop_circle_outlined),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlanPanel(AcpPlan plan) {
+    if (plan.steps.isEmpty) return const SizedBox.shrink();
+    final completed = plan.steps.where((step) => step.isCompleted).length;
+    return ExpansionTile(
+      dense: true,
+      initiallyExpanded: plan.steps.any((step) => step.isInProgress),
+      leading: const Icon(Icons.checklist, size: 19),
+      title: Text('Plan · $completed/${plan.steps.length}'),
+      shape: const Border(bottom: BorderSide(color: Colors.transparent)),
+      collapsedShape: const Border(
+        bottom: BorderSide(color: Colors.transparent),
+      ),
+      children: plan.steps.map((step) {
+        final (icon, color) = step.isCompleted
+            ? (Icons.check_circle, Colors.green)
+            : step.isInProgress
+            ? (
+                Icons.radio_button_checked,
+                Theme.of(context).colorScheme.primary,
+              )
+            : (Icons.radio_button_unchecked, Colors.grey);
+        return ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          leading: Icon(icon, size: 17, color: color),
+          title: Text(
+            step.title,
+            style: TextStyle(
+              fontSize: 13,
+              decoration: step.isCompleted ? TextDecoration.lineThrough : null,
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildPermissionBanner(
+    PendingPermission permission,
+    int pendingCount,
+  ) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -547,28 +835,111 @@ class _SessionPageState extends State<SessionPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Permission Required',
-            style: TextStyle(fontWeight: FontWeight.bold),
+          Row(
+            children: [
+              const Icon(Icons.gpp_maybe_outlined, size: 19),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Permission required',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              if (pendingCount > 1)
+                Chip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text('$pendingCount pending'),
+                ),
+            ],
           ),
-          if (permission.question.isNotEmpty) Text(permission.question),
           const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: permission.options.map((opt) {
-              return ElevatedButton(
-                onPressed: () =>
-                    _respondApproval(permission.toolCallId, opt.optionId),
-                style: opt.isAllow
-                    ? ElevatedButton.styleFrom(backgroundColor: Colors.green)
-                    : null,
-                child: Text(opt.name),
-              );
-            }).toList(),
-          ),
+          _buildPermissionDetails(permission),
+          const SizedBox(height: 8),
+          if (_permissionSubmittingToolId == permission.toolCallId)
+            const Row(
+              children: [
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 8),
+                Text('Submitting...'),
+              ],
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: permission.options.map((opt) {
+                return opt.isAllow
+                    ? FilledButton(
+                        onPressed: () => _respondApproval(
+                          permission.toolCallId,
+                          opt.optionId,
+                        ),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.green.shade700,
+                        ),
+                        child: Text(opt.name),
+                      )
+                    : OutlinedButton(
+                        onPressed: () => _respondApproval(
+                          permission.toolCallId,
+                          opt.optionId,
+                        ),
+                        style: opt.isReject
+                            ? OutlinedButton.styleFrom(
+                                foregroundColor: Colors.red.shade300,
+                              )
+                            : null,
+                        child: Text(opt.name),
+                      );
+              }).toList(),
+            ),
         ],
       ),
     );
+  }
+
+  Widget _buildPermissionDetails(PendingPermission permission) {
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return switch (permission.details) {
+      ApprovalDetailsCommand(
+        command: final command,
+        cwd: final cwd,
+        reason: final reason,
+      ) =>
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SelectableText(
+              command,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+            ),
+            if (reason?.isNotEmpty == true) Text(reason!),
+            if (cwd?.isNotEmpty == true)
+              Text(
+                'Working directory: $cwd',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+          ],
+        ),
+      ApprovalDetailsFileChange(reason: final reason, grantRoot: final root) =>
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(reason?.isNotEmpty == true ? reason! : permission.question),
+            if (root?.isNotEmpty == true)
+              Text(
+                'Authorized path: $root',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+          ],
+        ),
+      ApprovalDetailsPermissions(summary: final summary) => Text(summary),
+      ApprovalDetailsGeneric() => Text(permission.question),
+    };
   }
 
   Widget _buildElicitationCard(PendingElicitation elicitation) {
@@ -680,14 +1051,14 @@ class _SessionPageState extends State<SessionPage> {
         children: [
           Expanded(child: SelectableText(url)),
           IconButton(
-            tooltip: 'Copy link',
+            tooltip: 'Open link',
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: url));
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text('Link copied')));
+              final uri = Uri.tryParse(url);
+              if (uri != null) {
+                launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
             },
-            icon: const Icon(Icons.copy),
+            icon: const Icon(Icons.open_in_new),
           ),
         ],
       ),
@@ -721,18 +1092,32 @@ class _SessionPageState extends State<SessionPage> {
     return ListView.builder(
       controller: _scrollController,
       reverse: true,
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: entries.length,
       itemBuilder: (context, index) {
-        return _buildEntry(entries[entries.length - 1 - index]);
+        final entryIndex = entries.length - 1 - index;
+        return _buildEntry(entryIndex, entries[entryIndex]);
       },
     );
   }
 
-  Widget _buildEntry(AcpEntry entry) {
+  Widget _buildEntry(int index, AcpEntry entry) {
     return switch (entry) {
-      AcpEntryUser(text: final text) => _buildUserMessage(text),
+      AcpEntryUser(text: final text) =>
+        _isInterruptMarker(text)
+            ? _buildDivider('Interrupted')
+            : _buildUserMessage(text),
+      AcpEntryUserWithImages(text: final text, images: final images) =>
+        _buildUserMessage(text, images: images),
       AcpEntryAssistant(text: final text, thought: final thought) =>
-        _buildAssistantMessage(text, thought),
+        AcpAssistantMessage(
+          text: text,
+          thought: thought,
+          isFinal: !thought && _isFinalAnswer(index),
+          durationMs: !thought && _isFinalAnswer(index)
+              ? _snapshot?.lastTurnDurationMs
+              : null,
+        ),
       AcpEntryToolCall(
         id: _,
         title: final title,
@@ -740,13 +1125,38 @@ class _SessionPageState extends State<SessionPage> {
         status: final status,
         output: final output,
       ) =>
-        _buildToolCall(title, kind, status, output),
+        AcpToolCallCard(
+          title: title,
+          kind: kind,
+          status: status,
+          output: output,
+        ),
       AcpEntryDivider(label: final label) => _buildDivider(label),
       AcpEntryUnknown() => const SizedBox.shrink(),
     };
   }
 
-  Widget _buildUserMessage(String text) {
+  bool _isFinalAnswer(int index) {
+    if (_snapshot?.phase is! AcpPhaseIdle &&
+        _snapshot?.phase is! AcpPhaseEnded) {
+      return false;
+    }
+    final entries = _snapshot?.entries ?? const <AcpEntry>[];
+    for (var candidate = entries.length - 1; candidate >= 0; candidate--) {
+      if (entries[candidate] case AcpEntryAssistant(
+        thought: false,
+        text: final text,
+      ) when text.trim().isNotEmpty) {
+        return index == candidate;
+      }
+    }
+    return false;
+  }
+
+  Widget _buildUserMessage(
+    String text, {
+    List<AcpImageData> images = const [],
+  }) {
     return Align(
       alignment: Alignment.centerRight,
       child: Container(
@@ -756,101 +1166,25 @@ class _SessionPageState extends State<SessionPage> {
           maxWidth: MediaQuery.of(context).size.width * 0.8,
         ),
         decoration: BoxDecoration(
-          color: Colors.blue,
-          borderRadius: BorderRadius.circular(12),
+          color: Theme.of(context).colorScheme.primaryContainer,
+          borderRadius: BorderRadius.circular(8),
         ),
-        child: Text(text, style: const TextStyle(color: Colors.white)),
-      ),
-    );
-  }
-
-  Widget _buildAssistantMessage(String text, bool thought) {
-    if (text.isEmpty) return const SizedBox.shrink();
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.all(8),
-        padding: const EdgeInsets.all(12),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.8,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (text.trim().isNotEmpty) AcpMarkdown(data: text),
+            if (images.isNotEmpty) ...[
+              if (text.trim().isNotEmpty) const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: images
+                    .map((image) => AcpImageThumbnail(image: image))
+                    .toList(),
+              ),
+            ],
+          ],
         ),
-        decoration: BoxDecoration(
-          color: thought ? Colors.grey[800] : Colors.grey[700],
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Text(
-          text,
-          style: TextStyle(
-            color: Colors.white,
-            fontStyle: thought ? FontStyle.italic : FontStyle.normal,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildToolCall(
-    String title,
-    ToolKind kind,
-    ToolCallStatus status,
-    List<ToolOutputPart> output,
-  ) {
-    final statusIcon = switch (status) {
-      ToolCallStatus.pending || ToolCallStatus.inProgress => const SizedBox(
-        width: 16,
-        height: 16,
-        child: CircularProgressIndicator(strokeWidth: 2),
-      ),
-      ToolCallStatus.completed => const Icon(
-        Icons.check_circle,
-        color: Colors.green,
-        size: 16,
-      ),
-      ToolCallStatus.failed => const Icon(
-        Icons.error,
-        color: Colors.red,
-        size: 16,
-      ),
-    };
-
-    final kindIcon = switch (kind) {
-      ToolKind.read => Icons.visibility,
-      ToolKind.edit => Icons.edit,
-      ToolKind.execute => Icons.terminal,
-      ToolKind.other => Icons.build,
-    };
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: ExpansionTile(
-        leading: Icon(kindIcon, size: 20),
-        title: Text(title, style: const TextStyle(fontSize: 14)),
-        trailing: statusIcon,
-        children: output.isEmpty
-            ? []
-            : [
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(8),
-                  color: Colors.black26,
-                  child: Text(
-                    output
-                        .map(
-                          (p) => switch (p) {
-                            ToolOutputText(text: final t) => t,
-                            ToolOutputDiff(path: final path) => '[Diff: $path]',
-                            ToolOutputImage() => '[Image]',
-                          },
-                        )
-                        .join('\n'),
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ],
       ),
     );
   }
@@ -878,7 +1212,10 @@ class _SessionPageState extends State<SessionPage> {
     final hasSnapshot = _snapshot != null;
     final isIdle = _snapshot?.phase is AcpPhaseIdle;
     final canCompose = gatewayService.writeEnabled;
-    final canSend = hasSnapshot && isIdle && gatewayService.writeEnabled;
+    final hasContent =
+        _messageController.text.trim().isNotEmpty || _pendingImages.isNotEmpty;
+    final canSend =
+        hasSnapshot && isIdle && gatewayService.writeEnabled && hasContent;
 
     return Container(
       padding: const EdgeInsets.all(8),
@@ -886,44 +1223,251 @@ class _SessionPageState extends State<SessionPage> {
         color: Theme.of(context).colorScheme.surface,
         border: Border(top: BorderSide(color: Colors.grey[800]!)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
-            child: TextField(
-              controller: _messageController,
-              enabled: canCompose,
-              decoration: InputDecoration(
-                hintText: !gatewayService.writeEnabled
-                    ? 'Desktop connection is read-only'
-                    : !hasSnapshot
-                    ? 'Loading session...'
-                    : isIdle
-                    ? 'Send a message...'
-                    : 'Agent is running - draft message...',
-                border: const OutlineInputBorder(),
+          if (_snapshot case final snapshot?) _buildComposerMetadata(snapshot),
+          if (_pendingImages.isNotEmpty) _buildPendingImages(),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              IconButton(
+                tooltip: _snapshot?.supportsImage == false
+                    ? 'This agent does not support images'
+                    : 'Attach images',
+                onPressed: canCompose && (_snapshot?.supportsImage ?? false)
+                    ? _pickImages
+                    : null,
+                icon: const Icon(Icons.add_photo_alternate_outlined),
               ),
-              onSubmitted: canSend ? (_) => _sendMessage() : null,
-            ),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: canSend ? _sendMessage : null,
-            icon: const Icon(Icons.send),
+              if (_snapshot?.availableCommands.isNotEmpty == true)
+                PopupMenuButton<List<String>>(
+                  tooltip: 'Insert command',
+                  icon: const Icon(Icons.terminal),
+                  onSelected: (command) {
+                    _messageController.text = '/${command.first} ';
+                    _messageController.selection = TextSelection.collapsed(
+                      offset: _messageController.text.length,
+                    );
+                    _messageFocusNode.requestFocus();
+                    setState(() {});
+                  },
+                  itemBuilder: (context) => _snapshot!.availableCommands
+                      .map(
+                        (command) => PopupMenuItem(
+                          value: command,
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text('/${command.first}'),
+                            subtitle: command.length > 1
+                                ? Text(command[1])
+                                : null,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              Expanded(
+                child: TextField(
+                  controller: _messageController,
+                  focusNode: _messageFocusNode,
+                  enabled: canCompose,
+                  minLines: 1,
+                  maxLines: 5,
+                  textInputAction: TextInputAction.newline,
+                  onTapOutside: (_) => _dismissKeyboard(),
+                  decoration: InputDecoration(
+                    hintText: !gatewayService.writeEnabled
+                        ? 'Desktop connection is read-only'
+                        : !hasSnapshot
+                        ? 'Loading session...'
+                        : isIdle
+                        ? 'Message the agent...'
+                        : 'Draft while the agent is running...',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: _isMessageFocused
+                        ? IconButton(
+                            tooltip: 'Dismiss keyboard',
+                            onPressed: _dismissKeyboard,
+                            icon: const Icon(Icons.keyboard_hide_outlined),
+                          )
+                        : null,
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(width: 4),
+              IconButton.filled(
+                tooltip: 'Send message',
+                onPressed: canSend ? _sendMessage : null,
+                icon: const Icon(Icons.send),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
+  Widget _buildComposerMetadata(AcpSnapshot snapshot) {
+    final items = <Widget>[];
+    if (snapshot.usage case final usage? when usage.contextWindow > 0) {
+      final percent = (usage.usedTokens / usage.contextWindow * 100)
+          .clamp(0, 100)
+          .round();
+      items.add(Chip(label: Text('Context $percent%')));
+    }
+    if (snapshot.model case final model? when model.currentName.isNotEmpty) {
+      items.add(
+        PopupMenuButton<String>(
+          tooltip: 'Switch model',
+          enabled: model.options.length > 1 && gatewayService.writeEnabled,
+          onSelected: (value) => gatewayService.setConfigOption(
+            widget.session.id,
+            model.configId,
+            value,
+          ),
+          itemBuilder: (context) => model.options
+              .map(
+                (option) => CheckedPopupMenuItem(
+                  value: option.first,
+                  checked: option.length > 1 && option[1] == model.currentName,
+                  child: Text(option.length > 1 ? option[1] : option.first),
+                ),
+              )
+              .toList(),
+          child: Chip(
+            avatar: const Icon(Icons.memory, size: 16),
+            label: Text(model.currentName),
+          ),
+        ),
+      );
+    }
+    for (final config in snapshot.configOptions) {
+      if (config.options.length < 2) continue;
+      items.add(
+        PopupMenuButton<String>(
+          tooltip: config.description ?? config.name,
+          enabled: gatewayService.writeEnabled,
+          onSelected: (value) => gatewayService.setConfigOption(
+            widget.session.id,
+            config.configId,
+            value,
+          ),
+          itemBuilder: (context) => config.options
+              .map(
+                (option) => CheckedPopupMenuItem(
+                  value: option.first,
+                  checked: option.length > 1 && option[1] == config.currentName,
+                  child: Text(option.length > 1 ? option[1] : option.first),
+                ),
+              )
+              .toList(),
+          child: Chip(label: Text(config.currentName)),
+        ),
+      );
+    }
+    if (items.isEmpty) return const SizedBox.shrink();
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(spacing: 6, children: items),
+    );
+  }
+
+  Widget _buildPendingImages() {
+    return SizedBox(
+      height: 76,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(bottom: 8),
+        itemCount: _pendingImages.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) => Stack(
+          clipBehavior: Clip.none,
+          children: [
+            SizedBox(
+              width: 76,
+              height: 68,
+              child: AcpImageThumbnail(image: _pendingImages[index]),
+            ),
+            Positioned(
+              top: -6,
+              right: -6,
+              child: IconButton.filled(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Remove image',
+                onPressed: () => setState(() => _pendingImages.removeAt(index)),
+                icon: const Icon(Icons.close, size: 14),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickImages() async {
+    final remaining = 4 - _pendingImages.length;
+    if (remaining <= 0) return;
+    try {
+      final files = await _imagePicker.pickMultiImage(
+        limit: remaining,
+        maxWidth: 2048,
+        maxHeight: 2048,
+        imageQuality: 85,
+        requestFullMetadata: false,
+      );
+      var skipped = 0;
+      final images = <AcpImageData>[];
+      for (final file in files) {
+        var bytes = await file.readAsBytes();
+        var mimeType = file.mimeType ?? _imageMimeFromName(file.name);
+        if (mimeType == 'image/jpeg' || mimeType == 'image/heic') {
+          final normalized = await compute(normalizeJpegOrientation, bytes);
+          if (normalized == null) {
+            skipped++;
+            continue;
+          }
+          bytes = normalized;
+          mimeType = 'image/jpeg';
+        }
+        if (bytes.length > 5 * 1024 * 1024) {
+          skipped++;
+          continue;
+        }
+        images.add(
+          AcpImageData(mimeType: mimeType, base64: base64Encode(bytes)),
+        );
+      }
+      if (!mounted) return;
+      setState(() => _pendingImages.addAll(images));
+      if (skipped > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$skipped image(s) exceeded the 5 MB limit')),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not attach image: $error')));
+    }
+  }
+
   void _sendMessage() {
     final text = _messageController.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty && _pendingImages.isEmpty) return;
 
     _messageController.clear();
-    gatewayService.sendMessage(widget.session.id, text);
+    final images = List<AcpImageData>.of(_pendingImages);
+    setState(_pendingImages.clear);
+    gatewayService.sendMessage(widget.session.id, text, images: images);
   }
 
   void _respondApproval(String toolCallId, String optionKey) {
+    if (_permissionSubmittingToolId != null) return;
+    setState(() => _permissionSubmittingToolId = toolCallId);
     gatewayService.respondApproval(widget.session.id, toolCallId, optionKey);
   }
 
@@ -931,10 +1475,14 @@ class _SessionPageState extends State<SessionPage> {
   void dispose() {
     _snapshotSubscription.cancel();
     _attentionResolvedSubscription.cancel();
+    _turnTicker.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {
       gatewayService.unsubscribe();
     }
     _messageController.dispose();
+    _messageFocusNode
+      ..removeListener(_handleMessageFocus)
+      ..dispose();
     _scrollController.dispose();
     super.dispose();
   }

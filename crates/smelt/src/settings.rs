@@ -852,25 +852,30 @@ pub fn uninstall_agent_hooks() -> Result<(), String> {
 
 // ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
 
-/// 远程操作网关的持久化开关（全局单例，存 ~/.smelt/collab.json）。只记「用户希望
-/// 它是开是关」这一件事——具体的 token/绑定地址是运行时状态，不落盘（见
-/// [`RemoteRuntimeState`]），GUI 启动时按这个字段决定要不要主动 remote_start。
+/// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。网关运行时
+/// token/绑定地址不落盘（见 [`RemoteRuntimeState`]）；用户填写的 relay 地址和可选
+/// relay 访问令牌会持久化，文件按私密配置保存。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub enabled: bool,
-    /// Cloudflare Tunnel 开关（Phase 3，见 smeltd.rs）。`#[serde(default)]`：
-    /// 这个字段比 `enabled` 晚加，旧的 collab.json 里没有这个键，缺省按关闭处理。
+    /// iroh P2P 隧道（见 smeltd.rs「iroh 隧道」）：手机 App 的唯一公网通路。
+    /// 配对码由落盘私钥决定、**重启不变**，扫一次能长期用。
+    /// `#[serde(default)]`：这个字段比 `enabled` 晚加，旧的 collab.json 里没有
+    /// 这个键，缺省按关闭处理。
+    ///
+    /// 早先还有 `tunnel_enabled`（Cloudflare）和 `webrtc_enabled`/`signal_http`
+    /// 两组键，随那两条路一起删了。serde 默认忽略未知字段，所以老配置照样读得进来，
+    /// 只是那几个键从此没人理会。
     #[serde(default)]
-    pub tunnel_enabled: bool,
-    /// 跨网主路径：WebRTC + 自营信令（docs/webrtc-edge.md）。
+    pub iroh_enabled: bool,
+    /// 用户自己的 iroh relay。空值表示未配置，不会回退到公共 relay。
     #[serde(default)]
-    pub webrtc_enabled: bool,
-    /// 公网信令 HTTP 根（SPA 同域），如 `https://signal.example.com`。
-    /// **无内置默认域名**——须用户在设置里填写自己部署的 smelt-signal。
+    pub iroh_relay: String,
+    /// 自建 relay 的可选共享访问令牌。
     #[serde(default)]
-    pub signal_http: String,
+    pub iroh_relay_token: String,
     /// 这条链接是否允许 approve/deny/reply（Phase 6，见 smeltd.rs「远程操控」）。
-    /// `#[serde(default)]`：比前两个字段更晚加，旧配置缺省按只读处理——不能让
+    /// `#[serde(default)]`：比 `enabled` 更晚加，旧配置缺省按只读处理——不能让
     /// 老用户的配置在升级后突然变成可写。链接分享出去本身就是授权，这里没有
     /// 额外的"当面确认"一说，开这个开关前的取舍由用户自己判断。
     #[serde(default)]
@@ -881,23 +886,12 @@ impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            tunnel_enabled: false,
-            webrtc_enabled: false,
-            signal_http: String::new(),
+            iroh_enabled: false,
+            iroh_relay: String::new(),
+            iroh_relay_token: String::new(),
             write_enabled: false,
         }
     }
-}
-
-/// 规范化用户填的信令地址：去空白、去尾 `/`。空字符串表示未配置。
-pub fn normalize_signal_http(raw: &str) -> String {
-    raw.trim().trim_end_matches('/').to_string()
-}
-
-/// 是否是可用来建房的 http(s) 信令根。
-fn signal_http_ok(url: &str) -> bool {
-    let u = normalize_signal_http(url);
-    !u.is_empty() && (u.starts_with("https://") || u.starts_with("http://"))
 }
 
 impl Global for RemoteConfig {}
@@ -912,7 +906,7 @@ pub fn load_remote_config() -> RemoteConfig {
 }
 
 fn save_remote_config(c: &RemoteConfig) {
-    crate::json_store::save_json(remote_config_path(), c)
+    crate::json_store::save_json_private(remote_config_path(), c)
 }
 
 /// 内嵌远程网关的运行时状态（不落盘，纯展示用）：token/绑定地址是当次 remote_start
@@ -947,48 +941,108 @@ fn set_remote_from_start_result(result: Result<terminal::RemoteStatus, String>, 
     }
 }
 
-/// 异步拉起 / 刷新 Cloudflare 隧道，并在结束后用守护现状回填远程 token。
-/// 失败时写进 TunnelRuntimeState.error，**不**要求用户记「先关后开」步骤——
-/// 设置页会给一键「重试」。
-fn spawn_tunnel_start(write: bool, cx: &mut App) {
-    cx.set_global(TunnelRuntimeState {
+// ===================== iroh P2P 隧道（见 smeltd.rs「iroh 隧道」） =====================
+
+/// iroh 隧道运行时（不落盘）：配对 URI + 二维码 PNG。
+///
+/// 存的是 `smelt+iroh://` 配对 URI，由 `endpoint_id`（重启不变）+ token 组成，
+/// 所以只有换过 token（重开网关）才需要重新扫码。
+#[derive(Clone, Default)]
+pub struct IrohRuntimeState {
+    pub connecting: bool,
+    pub pairing_uri: Option<String>,
+    pub qr_png: Option<Vec<u8>>,
+    pub error: Option<String>,
+    pub write: bool,
+}
+
+impl Global for IrohRuntimeState {}
+
+/// 异步拉起 iroh 隧道。绑定要连接用户配置的 relay，可能耗时数秒，**必须**走后台。
+fn spawn_iroh_start(write: bool, cx: &mut App) {
+    let config = cx.global::<RemoteConfig>().clone();
+    let relay = config.iroh_relay;
+    let relay_token = config.iroh_relay_token;
+    cx.set_global(IrohRuntimeState {
         connecting: true,
-        url: None,
-        error: None,
-        write: false,
+        ..Default::default()
     });
     cx.spawn(async move |cx| {
-        let result = cx
+        let (result, remote, qr_png) = cx
             .background_executor()
-            .spawn(async move { terminal::tunnel_start(write) })
+            .spawn(async move {
+                let result = terminal::iroh_start(write, &relay, &relay_token);
+                // iroh_start 可能顺带把网关也开了（守护侧的 ensure_remote_gateway），
+                // 所以要回读一次网关现状，否则 UI 上「本机链接」那块会一直是空的。
+                let remote = terminal::remote_status();
+                // 二维码在后台线程算好再交给 UI：绝不在 UI 线程现算 QR。
+                let qr_png = match &result {
+                    Ok(s) => match (
+                        s.endpoint_id.as_deref(),
+                        s.token.as_deref(),
+                        s.relay.as_deref(),
+                    ) {
+                        (Some(id), Some(tok), Some(relay)) if !tok.is_empty() => {
+                            qr_png_for_url(&smelt_core::pairing::iroh_pairing_uri(
+                                id,
+                                tok,
+                                relay,
+                                s.relay_token.as_deref().unwrap_or_default(),
+                            ))
+                        }
+                        _ => None,
+                    },
+                    Err(_) => None,
+                };
+                (result, remote, qr_png)
+            })
             .await;
         let _ = cx.update(|cx| {
-            let remote = terminal::remote_status();
-            let has_token = remote.token.as_ref().is_some_and(|t| !t.is_empty());
-            cx.set_global(RemoteRuntimeState {
-                token: remote.token.clone(),
-                addr: remote.addr,
-                write: remote.write,
-                error: None,
-            });
-            let rt = match result {
-                Ok(status) if has_token => TunnelRuntimeState {
-                    connecting: false,
-                    url: status.url,
+            if remote.running {
+                cx.set_global(RemoteRuntimeState {
+                    token: remote.token.clone(),
+                    addr: remote.addr.clone(),
+                    write: remote.write,
                     error: None,
-                    write: status.write,
-                },
-                Ok(_) => TunnelRuntimeState {
+                });
+            }
+            let rt = match result {
+                Ok(s) => {
+                    let uri = match (
+                        s.endpoint_id.as_deref(),
+                        s.token.as_deref(),
+                        s.relay.as_deref(),
+                    ) {
+                        (Some(id), Some(tok), Some(relay)) if !tok.is_empty() => {
+                            Some(smelt_core::pairing::iroh_pairing_uri(
+                                id,
+                                tok,
+                                relay,
+                                s.relay_token.as_deref().unwrap_or_default(),
+                            ))
+                        }
+                        _ => None,
+                    };
+                    match uri {
+                        Some(uri) => IrohRuntimeState {
+                            connecting: false,
+                            pairing_uri: Some(uri),
+                            qr_png,
+                            error: None,
+                            write: s.write,
+                        },
+                        // 隧道起来了但 token 没拿到：配对码缺一半，给不出可用的码。
+                        None => IrohRuntimeState {
+                            connecting: false,
+                            error: Some("P2P 通道已建立，但分享密钥还没就绪，点重试即可".into()),
+                            ..Default::default()
+                        },
+                    }
+                }
+                Err(e) => IrohRuntimeState {
                     connecting: false,
-                    url: None,
-                    error: Some("外网通道建好了，但分享密钥还没就绪，点下方重试即可".into()),
-                    write: false,
-                },
-                Err(e) => TunnelRuntimeState {
-                    connecting: false,
-                    url: None,
                     error: Some(e),
-                    write: false,
+                    ..Default::default()
                 },
             };
             cx.set_global(rt);
@@ -997,235 +1051,79 @@ fn spawn_tunnel_start(write: bool, cx: &mut App) {
     .detach();
 }
 
-/// 总开关：开启远程。关掉时自动拆掉隧道 / WebRTC 桥，用户不必先关外网再关远程。
+fn apply_iroh_relay_value(value: SharedString, token: bool, cx: &mut App) {
+    let mut config = cx.global::<RemoteConfig>().clone();
+    if token {
+        config.iroh_relay_token = value.trim().to_string();
+    } else {
+        config.iroh_relay = value.trim().to_string();
+    }
+    let was_enabled = config.iroh_enabled;
+    save_remote_config(&config);
+    cx.set_global(config);
+    if was_enabled {
+        terminal::iroh_stop();
+        cx.set_global(IrohRuntimeState {
+            error: Some("Relay 配置已更新，点重试应用新配置".into()),
+            ..Default::default()
+        });
+    }
+    cx.refresh_windows();
+}
+
+/// 开关「P2P 直连（iroh）」：只改配置 + 异步拉隧道，不在 UI 线程阻塞。
+pub fn apply_iroh_toggle(enabled: bool, cx: &mut App) {
+    let mut c = cx.global::<RemoteConfig>().clone();
+    c.iroh_enabled = enabled;
+    if enabled {
+        // 隧道要转发给本机网关，顺手把「远程」总开关也打开，跟 tunnel 一致。
+        c.enabled = true;
+    }
+    let write = c.write_enabled;
+    save_remote_config(&c);
+    cx.set_global(c);
+
+    if enabled {
+        spawn_iroh_start(write, cx);
+    } else {
+        terminal::iroh_stop();
+        cx.set_global(IrohRuntimeState::default());
+    }
+    cx.refresh_windows();
+}
+
+/// 总开关：开启远程。关掉时自动拆掉 iroh 隧道，用户不必先关外网再关远程。
 pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
     if enabled {
         let c = cx.global::<RemoteConfig>().clone();
         let write = c.write_enabled;
-        let want_tunnel = c.tunnel_enabled;
-        let want_webrtc = c.webrtc_enabled;
+        let want_iroh = c.iroh_enabled;
         set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = true;
         save_remote_config(&c);
         cx.set_global(c);
-        // 若用户是点「手机/外网」间接打开的，want_tunnel 已是 true，这里补上隧道。
-        if want_tunnel {
-            spawn_tunnel_start(write, cx);
-        }
-        if want_webrtc {
-            spawn_webrtc_start(cx);
+        // 若用户是点「手机」间接打开的，want_iroh 已是 true，这里补上隧道。
+        if want_iroh {
+            spawn_iroh_start(write, cx);
         }
     } else {
-        stop_webrtc_bridge(cx);
-        terminal::tunnel_stop();
+        // iroh 要赶在网关之前停，理由同 smeltd 的 cleanup：反过来正在转发的流
+        // 会撞上已死端口，手机侧看到的是连接被拒而非干净关闭。
+        terminal::iroh_stop();
         terminal::remote_stop();
-        cx.set_global(TunnelRuntimeState::default());
         cx.set_global(RemoteRuntimeState::default());
-        cx.set_global(WebrtcRuntimeState::default());
+        cx.set_global(IrohRuntimeState::default());
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = false;
         // 总开关关掉 = 停止分享。外网开关一并熄灭，避免「远程关了但手机访问还亮着」
         // 的误解；写入偏好保留，下次再开远程仍按原权限。
-        c.tunnel_enabled = false;
-        c.webrtc_enabled = false;
+        c.iroh_enabled = false;
         save_remote_config(&c);
         cx.set_global(c);
     }
 }
 
-// ===================== WebRTC 跨网（smelt-bridge + 公网信令） =====================
-
-/// WebRTC 跨网运行时（不落盘）：bridge 子进程 + 分享 URL + 二维码 PNG。
-#[derive(Clone, Default)]
-pub struct WebrtcRuntimeState {
-    pub connecting: bool,
-    pub share_url: Option<String>,
-    pub error: Option<String>,
-    /// bridge 进程 pid，关掉开关时 SIGKILL（GUI 拉起的子进程实测不响应
-    /// SIGTERM，大概率继承了后台执行器线程的阻塞信号掩码；SIGKILL 谁都挡不住）
-    pub bridge_pid: Option<u32>,
-    /// 分享链接的 QR（PNG 字节），URL 变了才重算
-    pub qr_png: Option<Vec<u8>>,
-    /// 每次 spawn_webrtc_start/stop_webrtc_bridge 递增。后台任务落地结果前先
-    /// 核对自己出发时捕获的世代还是不是当前——不是就说明中途被另一次调用取代
-    /// 了（比如 stop 提前把 connecting 清成 false，重入锁没拦住），这次的结果
-    /// （包括刚拉起来的 bridge 子进程）要整个丢弃，不能再注册成"当前"状态。
-    pub generation: u64,
-}
-
-impl Global for WebrtcRuntimeState {}
-
-/// 信令地址「探测连通」结果（不落盘，设置页展示）。
-#[derive(Clone, Default)]
-pub struct SignalProbeState {
-    pub probing: bool,
-    /// 最近一次探测的目标 URL（与当前输入对比时可提示）
-    #[allow(dead_code)]
-    pub url: Option<String>,
-    pub ok: Option<bool>,
-    pub message: Option<String>,
-}
-
-impl Global for SignalProbeState {}
-
-/// 从输入框读出并规范化信令地址；空则 `None`。
-fn signal_http_from_input(
-    input: Option<&Entity<gpui_component::input::InputState>>,
-    cx: &App,
-) -> String {
-    if let Some(s) = input {
-        return normalize_signal_http(&s.read(cx).value());
-    }
-    normalize_signal_http(
-        &cx.try_global::<RemoteConfig>()
-            .map(|c| c.signal_http.clone())
-            .unwrap_or_default(),
-    )
-}
-
-/// 保存信令地址到配置；若跨网已开且地址变化，可选重启 bridge。
-fn apply_signal_http(url: String, restart_if_webrtc: bool, cx: &mut App) {
-    let url = normalize_signal_http(&url);
-    let mut c = cx.global::<RemoteConfig>().clone();
-    let changed = c.signal_http != url;
-    c.signal_http = url.clone();
-    save_remote_config(&c);
-    cx.set_global(c.clone());
-    // 清掉旧探测结果（目标变了）
-    if changed {
-        cx.set_global(SignalProbeState::default());
-    }
-    if restart_if_webrtc && changed && c.webrtc_enabled && signal_http_ok(&url) {
-        stop_webrtc_bridge(cx);
-        spawn_webrtc_start(cx);
-    }
-    cx.refresh_windows();
-}
-
-/// 后台 GET `{url}/health`，更新 [`SignalProbeState`]。
-fn probe_signal_http(url: String, cx: &mut App) {
-    let url = normalize_signal_http(&url);
-    if !signal_http_ok(&url) {
-        cx.set_global(SignalProbeState {
-            probing: false,
-            url: Some(url),
-            ok: Some(false),
-            message: Some("请填写以 http:// 或 https:// 开头的地址".into()),
-        });
-        cx.refresh_windows();
-        return;
-    }
-    cx.set_global(SignalProbeState {
-        probing: true,
-        url: Some(url.clone()),
-        ok: None,
-        message: Some("探测中…".into()),
-    });
-    cx.refresh_windows();
-    cx.spawn(async move |cx| {
-        let probe_url = url.clone();
-        let result: Result<String, String> = cx
-            .background_executor()
-            .spawn(async move {
-                // block_on_tokio 的 T 是 Future::Output；若 Output 本身是 Result 会套两层。
-                match smelt_core::block_on::block_on_tokio(async move {
-                    let client = reqwest::Client::builder()
-                        .timeout(Duration::from_secs(8))
-                        .build()
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let health = format!("{probe_url}/health");
-                    let resp = client
-                        .get(&health)
-                        .send()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("连不上：{e}"))?;
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    if !status.is_success() {
-                        anyhow::bail!(
-                            "HTTP {status}：{}",
-                            body.chars().take(80).collect::<String>()
-                        );
-                    }
-                    // 兼容 { ok: true, rooms: n }
-                    if body.contains("\"ok\"") && body.contains("true") {
-                        Ok::<String, anyhow::Error>(format!("连通正常 · {body}"))
-                    } else {
-                        Ok(format!(
-                            "已响应 HTTP {status} · {}",
-                            body.chars().take(100).collect::<String>()
-                        ))
-                    }
-                }) {
-                    Ok(Ok(msg)) => Ok(msg),
-                    Ok(Err(e)) => Err(e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                }
-            })
-            .await;
-        let _ = cx.update(|cx| {
-            match result {
-                Ok(msg) => {
-                    cx.set_global(SignalProbeState {
-                        probing: false,
-                        url: Some(url),
-                        ok: Some(true),
-                        message: Some(msg),
-                    });
-                }
-                Err(e) => {
-                    cx.set_global(SignalProbeState {
-                        probing: false,
-                        url: Some(url),
-                        ok: Some(false),
-                        message: Some(e),
-                    });
-                }
-            }
-            cx.refresh_windows();
-        });
-    })
-    .detach();
-}
-
-fn resolve_smelt_bridge() -> Option<std::path::PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("smelt-bridge");
-            if p.is_file() {
-                return Some(p);
-            }
-            // 开发：…/target/debug/smelt 旁
-            let p2 = dir.join("smelt-bridge");
-            if p2.is_file() {
-                return Some(p2);
-            }
-        }
-    }
-    let dev = std::path::PathBuf::from("target/debug/smelt-bridge");
-    if dev.is_file() {
-        return Some(dev);
-    }
-    let dev_rel = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/smelt-bridge");
-    if dev_rel.is_file() {
-        return Some(dev_rel);
-    }
-    None
-}
-
-/// `~/.smelt/smelt-bridge.log`，每次 spawn 前截断重开。拿不到 home 目录时返回
-/// `None`，调用方回退到 `/dev/null`（不让日志问题阻塞跨网功能本身）。
-fn bridge_log_file() -> Option<std::fs::File> {
-    let path = dirs::home_dir()?.join(".smelt").join("smelt-bridge.log");
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    std::fs::File::create(&path).ok()
-}
-
-/// 生成 RGB PNG（避免 L8 灰度图在 GPUI/Metal 解码时 abort）。
 fn qr_png_for_url(url: &str) -> Option<Vec<u8>> {
     use qrcode::QrCode;
     let code = QrCode::new(url.as_bytes()).ok()?;
@@ -1243,389 +1141,10 @@ fn qr_png_for_url(url: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// 下一个世代号：任何要让"正在飞的 spawn_webrtc_start"作废的地方都调这个。
-fn next_webrtc_generation(cx: &App) -> u64 {
-    cx.try_global::<WebrtcRuntimeState>()
-        .map(|s| s.generation)
-        .unwrap_or(0)
-        .wrapping_add(1)
+pub fn spawn_iroh_start_public(cx: &mut App) {
+    let write = cx.global::<RemoteConfig>().write_enabled;
+    spawn_iroh_start(write, cx);
 }
-
-fn stop_webrtc_bridge(cx: &mut App) {
-    let next_gen = next_webrtc_generation(cx);
-    if let Some(pid) = cx
-        .try_global::<WebrtcRuntimeState>()
-        .and_then(|s| s.bridge_pid)
-    {
-        // 只杀我们拉起的 bridge，勿误伤自己
-        let self_pid = std::process::id();
-        if pid != 0 && pid != self_pid {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
-        }
-    }
-    // 世代 +1：正在飞的 spawn_webrtc_start（如果有）落地时会发现自己的世代
-    // 过期，把结果（包括它刚拉起来的 bridge 进程）整个丢弃，不会跟这次 stop
-    // 打架。
-    cx.set_global(WebrtcRuntimeState {
-        generation: next_gen,
-        ..Default::default()
-    });
-}
-
-/// 开关「跨网 WebRTC」：只改配置 + 异步拉 bridge（不在 UI 线程阻塞/建房）。
-pub fn apply_webrtc_toggle(enabled: bool, cx: &mut App) {
-    let mut c = cx.global::<RemoteConfig>().clone();
-
-    if enabled {
-        let signal = normalize_signal_http(&c.signal_http);
-        if !signal_http_ok(&signal) {
-            // 未配置信令：不打开开关，提示用户先填地址
-            c.webrtc_enabled = false;
-            save_remote_config(&c);
-            cx.set_global(c);
-            let next_gen = next_webrtc_generation(cx);
-            cx.set_global(WebrtcRuntimeState {
-                connecting: false,
-                error: Some(
-                    "请先填写「信令服务地址」（你部署的 smelt-signal，如 https://signal.example.com）"
-                        .into(),
-                ),
-                generation: next_gen,
-                ..Default::default()
-            });
-            cx.refresh_windows();
-            return;
-        }
-        c.signal_http = signal;
-        c.webrtc_enabled = true;
-        c.enabled = true;
-    } else {
-        c.webrtc_enabled = false;
-    }
-    save_remote_config(&c);
-    cx.set_global(c);
-
-    if !enabled {
-        stop_webrtc_bridge(cx);
-        cx.refresh_windows();
-        return;
-    }
-
-    // 全部放到后台：remote_start / HTTP 建房 / spawn bridge，避免卡 UI 或跨 FFI panic
-    spawn_webrtc_start(cx);
-    cx.refresh_windows();
-}
-
-/// 供 main 启动恢复调用（网关 hydrate 之后）。
-pub fn spawn_webrtc_start_public(cx: &mut App) {
-    spawn_webrtc_start(cx);
-}
-
-/// 供 main 的 on_app_quit 钩子调用：App 直接 Cmd+Q 退出（没有先手动关开关）时，
-/// bridge 子进程不会自己退出——之前只有「关开关」这条路径会杀它，直接退出 App
-/// 完全没人管，子进程被系统收养成孤儿，一直占着信令服务器上的房间直到 TTL 到期。
-pub fn stop_webrtc_bridge_on_quit(cx: &mut App) {
-    stop_webrtc_bridge(cx);
-}
-
-fn spawn_webrtc_start(cx: &mut App) {
-    // 重入防护：上一轮还在 connecting（后台 remote_start/建房/spawn bridge 没
-    // 完成）时再来一次，不能再起一条独立的异步链——两条链各自读 existing_token
-    // 时都可能看到"还没有"，各自去 remote_start，实测真的会各建一个网关、各拉
-    // 一个 bridge，两边互相踩，表现为间歇性连不上本机网关。开关连点两下、或
-    // app 启动恢复跟用户手动开关撞一起都可能触发。
-    if cx
-        .try_global::<WebrtcRuntimeState>()
-        .is_some_and(|s| s.connecting)
-    {
-        eprintln!("[webrtc] spawn_webrtc_start: already connecting, skip duplicate call");
-        return;
-    }
-
-    // 先停旧 bridge（清 pid）
-    if let Some(old) = cx.try_global::<WebrtcRuntimeState>().cloned() {
-        if let Some(pid) = old.bridge_pid {
-            let self_pid = std::process::id();
-            if pid != 0 && pid != self_pid {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
-            }
-        }
-    }
-
-    let cfg = cx.global::<RemoteConfig>().clone();
-    let existing_token = cx
-        .try_global::<RemoteRuntimeState>()
-        .and_then(|r| r.token.clone())
-        .filter(|t| !t.is_empty());
-    let existing_addr = cx
-        .try_global::<RemoteRuntimeState>()
-        .and_then(|r| r.addr.clone());
-    let write = cfg.write_enabled;
-    let signal_http = normalize_signal_http(&cfg.signal_http);
-    let bridge_bin = resolve_smelt_bridge();
-
-    if !signal_http_ok(&signal_http) {
-        let next_gen = next_webrtc_generation(cx);
-        cx.set_global(WebrtcRuntimeState {
-            connecting: false,
-            error: Some("未配置信令服务地址。请在设置 → 远程 填写你的 smelt-signal URL。".into()),
-            generation: next_gen,
-            ..Default::default()
-        });
-        return;
-    }
-
-    let my_gen = next_webrtc_generation(cx);
-    cx.set_global(WebrtcRuntimeState {
-        connecting: true,
-        generation: my_gen,
-        ..Default::default()
-    });
-
-    cx.spawn(async move |cx| {
-        // webrtc_start_blocking 里也有同步的 remote_start/进程 spawn，不止 reqwest 那段，
-        // 所以这里仍额外兜一层 catch_unwind（block_on_tokio 只包它内部的 reqwest 部分）。
-        let result = cx
-            .background_executor()
-            .spawn(async move {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    webrtc_start_blocking(
-                        existing_token,
-                        existing_addr,
-                        write,
-                        signal_http,
-                        bridge_bin,
-                    )
-                }))
-                .unwrap_or_else(|payload| {
-                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                        (*s).to_string()
-                    } else if let Some(s) = payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "WebRTC 启动过程中发生内部错误".into()
-                    };
-                    Err(format!("跨网启动崩溃（已拦截）：{msg}"))
-                })
-            })
-            .await;
-
-        let _ = cx.update(|cx| {
-            // 落地前先核对世代：这段后台任务跑的这几秒里，如果又有人调用过
-            // spawn_webrtc_start/stop_webrtc_bridge，世代会被推进，说明这次
-            // 的结果已经过期，不能再当"当前状态"写回去——尤其是 Ok 分支，
-            // 刚拉起来的 bridge 子进程也得直接杀掉，不然就是又一个孤儿进程、
-            // 又一个没人管的本机网关。
-            let current_gen = cx.global::<WebrtcRuntimeState>().generation;
-            if current_gen != my_gen {
-                if let Ok((_, pid, ..)) = &result {
-                    let self_pid = std::process::id();
-                    if *pid != 0 && *pid != self_pid {
-                        #[cfg(unix)]
-                        unsafe {
-                            libc::kill(*pid as i32, libc::SIGKILL);
-                        }
-                    }
-                }
-                return;
-            }
-            match result {
-                Ok((share, pid, qr, token, addr, write)) => {
-                    // 回填网关状态（可能是这次才 remote_start 的）
-                    cx.set_global(RemoteRuntimeState {
-                        token: Some(token),
-                        addr,
-                        write,
-                        error: None,
-                    });
-                    cx.set_global(WebrtcRuntimeState {
-                        connecting: false,
-                        share_url: Some(share),
-                        error: None,
-                        bridge_pid: Some(pid),
-                        qr_png: qr,
-                        generation: my_gen,
-                    });
-                }
-                Err(e) => {
-                    cx.set_global(WebrtcRuntimeState {
-                        connecting: false,
-                        share_url: None,
-                        error: Some(e),
-                        bridge_pid: None,
-                        qr_png: None,
-                        generation: my_gen,
-                    });
-                }
-            }
-            cx.refresh_windows();
-        });
-    })
-    .detach();
-}
-
-/// 在后台线程同步跑完整条 WebRTC 启动链（网关 → 信令建房 → bridge → QR）。
-/// reqwest 调用经 [`smelt_core::block_on::block_on_tokio`] 跑，避免「no reactor」。
-fn webrtc_start_blocking(
-    existing_token: Option<String>,
-    existing_addr: Option<String>,
-    write: bool,
-    signal_http: String,
-    bridge_bin: Option<std::path::PathBuf>,
-) -> Result<(String, u32, Option<Vec<u8>>, String, Option<String>, bool), String> {
-    // 0) 本机远程网关（阻塞 unix socket）
-    let status = if let Some(t) = existing_token {
-        let cur = terminal::remote_status();
-        if cur.token.as_ref().is_some_and(|x| !x.is_empty()) {
-            cur
-        } else {
-            terminal::RemoteStatus {
-                running: true,
-                token: Some(t),
-                addr: existing_addr,
-                write,
-            }
-        }
-    } else {
-        terminal::remote_start("127.0.0.1", write).map_err(|e| format!("开启本机远程失败：{e}"))?
-    };
-    let token = status
-        .token
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| "本机远程网关没有 token".to_string())?;
-    let gateway_base = status
-        .addr
-        .as_ref()
-        .map(|a| {
-            if a.starts_with("http") {
-                a.clone()
-            } else {
-                format!("http://{a}")
-            }
-        })
-        .unwrap_or_else(|| "http://127.0.0.1:18765".into());
-
-    let Some(bridge) = bridge_bin else {
-        return Err(
-            "找不到 smelt-bridge。请 make dist-build 安装，或 cargo build -p smelt-bridge。".into(),
-        );
-    };
-
-    if !signal_http_ok(&signal_http) {
-        return Err("未配置信令服务地址".into());
-    }
-
-    // 1) 公网信令建房（reqwest 需要 tokio runtime）
-    #[derive(serde::Deserialize)]
-    struct Room {
-        room: String,
-        secret: String,
-    }
-    let room: Room = {
-        let signal_http = signal_http.clone();
-        smelt_core::block_on::block_on_tokio(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(20))
-                .build()
-                .map_err(|e| e.to_string())?;
-            let room_url = format!("{signal_http}/v1/rooms");
-            let resp = client
-                .post(&room_url)
-                .header("content-type", "application/json")
-                .body("{}")
-                .send()
-                .await
-                .map_err(|e| format!("连信令失败（{signal_http}）：{e}"))?;
-            if !resp.status().is_success() {
-                return Err(format!(
-                    "建房失败 HTTP {}：{}",
-                    resp.status(),
-                    resp.text().await.unwrap_or_default()
-                ));
-            }
-            resp.json::<Room>().await.map_err(|e| e.to_string())
-        })
-        .map_err(|e| e.to_string())
-        .and_then(|r| r)?
-    };
-
-    let signal_ws = {
-        let u = signal_http
-            .replacen("https://", "wss://", 1)
-            .replacen("http://", "ws://", 1);
-        format!("{u}/ws")
-    };
-    let share = format!(
-        "{signal_http}/?room={}&k={}&signal={}&token={}",
-        urlencoding_minimal(&room.room),
-        urlencoding_minimal(&room.secret),
-        urlencoding_minimal(&signal_ws),
-        urlencoding_minimal(&token),
-    );
-
-    // 2) 拉起 bridge。stdout/stderr 落盘到 ~/.smelt/smelt-bridge.log（每次启动截断）——
-    // 此前直接扔 /dev/null，ICE/DataChannel 连不上时完全没法从日志排查，只能看现象。
-    let mut cmd = std::process::Command::new(&bridge);
-    cmd.env("SMELT_SIGNAL_HTTP", &signal_http)
-        .env("SMELT_SIGNAL_WS", &signal_ws)
-        .env("SMELT_GATEWAY", &gateway_base)
-        .env("SMELT_GATEWAY_TOKEN", &token)
-        .env("SMELT_ROOM", &room.room)
-        .env("SMELT_SECRET", &room.secret)
-        .env("SMELT_WRITE", if write { "true" } else { "false" })
-        .env("RUST_LOG", "info")
-        .stdin(std::process::Stdio::null());
-    match bridge_log_file() {
-        Some(log) => {
-            let err_log = log
-                .try_clone()
-                .map_err(|e| format!("无法复用 bridge 日志文件描述符：{e}"))?;
-            cmd.stdout(log).stderr(err_log);
-        }
-        None => {
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-        }
-    }
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("启动 smelt-bridge 失败：{e}"))?;
-    let pid = child.id();
-    std::mem::forget(child);
-
-    // 3) RGB 二维码（后台生成，勿在 UI 线程）
-    let qr = qr_png_for_url(&share);
-    Ok((share, pid, qr, token, status.addr, status.write))
-}
-
-fn urlencoding_minimal(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
-}
-
-/// Cloudflare Tunnel 运行时状态（不落盘）：`connecting` 是"cloudflared 起来了但
-/// 还没等到结果"这个中间态——`tunnel_start` 可能要跑好几秒到 ~30s，UI 得显示
-/// "连接中…"而不是看起来卡住没反应。
-#[derive(Clone, Default)]
-pub struct TunnelRuntimeState {
-    pub connecting: bool,
-    pub url: Option<String>,
-    pub error: Option<String>,
-    /// 同 [`RemoteRuntimeState::write`]：这条公网链接实际的写权限，来自守护回执。
-    pub write: bool,
-}
-
-impl Global for TunnelRuntimeState {}
 
 /// 复制按钮的短暂「已复制 ✓」状态（设置页读它改按钮文案）。
 #[derive(Clone, Default)]
@@ -1684,38 +1203,6 @@ fn copy_with_feedback(
     .detach();
 }
 
-/// 开关「手机 / 外网可访问」。开 = 自动确保远程已开 + 拉隧道；关 = 只拆隧道，本机链接保留。
-/// 用户不必知道「必须先开远程」——依赖由这里消化。
-pub fn apply_tunnel_toggle(enabled: bool, cx: &mut App) {
-    let mut c = cx.global::<RemoteConfig>().clone();
-    c.tunnel_enabled = enabled;
-    if enabled {
-        c.enabled = true;
-    }
-    save_remote_config(&c);
-    cx.set_global(c.clone());
-
-    if !enabled {
-        terminal::tunnel_stop();
-        cx.set_global(TunnelRuntimeState::default());
-        return;
-    }
-
-    let write = c.write_enabled;
-    // 先保证本机网关有 token（同步，通常很快），再异步建隧道。
-    if !cx
-        .global::<RemoteRuntimeState>()
-        .token
-        .as_ref()
-        .is_some_and(|t| !t.is_empty())
-    {
-        set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
-    }
-    spawn_tunnel_start(write, cx);
-}
-
-/// 开关「允许写入」。只改偏好时不打扰；远程已开则在后台按新权限换新链接，
-/// 状态卡会显示「正在更新…」，用户不用手动关开关。
 pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
     let mut c = cx.global::<RemoteConfig>().clone();
     c.write_enabled = enabled;
@@ -1727,59 +1214,39 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
         return;
     }
 
-    // 可同时开 WebRTC + CF：两边都要跟着换 token，不能 if/else 只走一路
-    let need_restart = c.webrtc_enabled || c.tunnel_enabled;
-    if need_restart {
-        if c.webrtc_enabled {
-            stop_webrtc_bridge(cx);
-        }
-        if c.tunnel_enabled {
-            terminal::tunnel_stop();
-        }
-        terminal::remote_stop();
-        set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
-        if c.tunnel_enabled {
-            spawn_tunnel_start(enabled, cx);
-        }
-        if c.webrtc_enabled {
-            spawn_webrtc_start(cx);
-        }
-    } else {
-        terminal::remote_stop();
-        set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
+    // iroh 必须重来一遍：endpoint_id 不变，但配对码里的 token 那一半会随网关重开失效。
+    if c.iroh_enabled {
+        terminal::iroh_stop();
+    }
+    terminal::remote_stop();
+    set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
+    if c.iroh_enabled {
+        spawn_iroh_start(enabled, cx);
     }
 }
 
-/// 分享卡片上的「重试」：按当前配置把网关 / 隧道 / WebRTC 重新拉齐。
-/// 与 [`apply_write_toggle`] 相同：WebRTC 与 CF 隧道可同时开，必须各自独立
-/// 重启，不能 if/else 只走一路（否则另一路仍挂旧 token/端口）。
+/// 分享卡片上的「重试」：按当前配置把网关与 iroh 隧道重新拉齐。
 pub fn retry_remote_setup(cx: &mut App) {
     let mut c = cx.global::<RemoteConfig>().clone();
-    if !c.enabled && !c.tunnel_enabled && !c.webrtc_enabled {
+    if !c.enabled && !c.iroh_enabled {
         return;
     }
-    // 外网通道开着时确保总开关也开着（依赖由这里消化）
-    if c.tunnel_enabled || c.webrtc_enabled {
+    // iroh 开着时确保总开关也开着（依赖由这里消化）
+    if c.iroh_enabled {
         c.enabled = true;
         save_remote_config(&c);
         cx.set_global(c.clone());
     }
     let write = c.write_enabled;
 
-    if c.webrtc_enabled {
-        stop_webrtc_bridge(cx);
+    if c.iroh_enabled {
+        terminal::iroh_stop();
     }
-    if c.tunnel_enabled {
-        terminal::tunnel_stop();
-    }
-    // 网关先停再起，让 token/端口与两条外网通道对齐
+    // 网关先停再起，让 token/端口与 iroh 配对码对齐
     terminal::remote_stop();
     set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
-    if c.tunnel_enabled {
-        spawn_tunnel_start(write, cx);
-    }
-    if c.webrtc_enabled {
-        spawn_webrtc_start(cx);
+    if c.iroh_enabled {
+        spawn_iroh_start(write, cx);
     }
 }
 
@@ -2027,18 +1494,6 @@ impl Workspace {
             cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(pc.color)));
 
         self.settings_subs.clear();
-
-        // 信令服务地址：无写死域名，用户填自己的 smelt-signal。故意不订阅 Change/Blur
-        // 自动落盘——下面「保存」按钮走 apply_signal_http，靠 draft≠saved 判断是否要
-        // 重启 bridge；这里要是也自动写 RemoteConfig，会在按「保存」之前就把值同步过去，
-        // dirty 恒为 false，按钮和地址变更重启 bridge 的逻辑都会失效。
-        let remote_sig = normalize_signal_http(&cx.global::<RemoteConfig>().signal_http);
-        let signal_http_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://signal.example.com（你部署的 smelt-signal）")
-                .default_value(remote_sig)
-        });
-        self.signal_http_input = Some(signal_http_input);
 
         self.settings_subs.push(
             cx.subscribe(&opacity_slider, |this, _s, ev: &SliderEvent, cx| {
@@ -3483,8 +2938,7 @@ impl Workspace {
                 })),
         );
 
-        // —— 远程：本机 → 跨网 WebRTC → 临时 CF → 写入 → 分享卡片（复制 + 扫码）——
-        let signal_http_input = self.signal_http_input.clone();
+        // —— 远程：开启 → iroh → 写入 → 分享卡片（复制 + 扫码）——
         let remote_page = SettingPage::new("远程").group(
             SettingGroup::new().items(vec![
                 SettingItem::new(
@@ -3494,251 +2948,36 @@ impl Workspace {
                         |v: bool, cx: &mut App| apply_remote_toggle(v, cx),
                     ),
                 )
-                .description(
-                    "打开后生成本机分享能力（局域网 / 跨网都依赖）。关掉会停止所有分享。",
-                ),
-                // 信令地址完整交互：输入 + 保存 + 探测 + 状态
-                SettingItem::render({
-                    let signal_http_input = signal_http_input.clone();
-                    move |_, _, cx: &mut App| {
-                        let muted = cx.theme().muted_foreground;
-                        let fg = cx.theme().foreground;
-                        let danger = cx.theme().danger;
-                        let secondary = cx.theme().secondary;
-                        let border = cx.theme().border;
-                        let success = cx.theme().success;
-                        let cfg = cx.global::<RemoteConfig>().clone();
-                        let probe = cx
-                            .try_global::<SignalProbeState>()
-                            .cloned()
-                            .unwrap_or_default();
-                        let saved = normalize_signal_http(&cfg.signal_http);
-                        let draft = signal_http_from_input(signal_http_input.as_ref(), cx);
-                        let configured = signal_http_ok(&saved);
-                        let draft_ok = signal_http_ok(&draft);
-                        let dirty = draft != saved;
-
-                        let status_line = if probe.probing {
-                            ("探测中…".to_string(), muted)
-                        } else if let Some(ok) = probe.ok {
-                            let msg = probe.message.clone().unwrap_or_default();
-                            if ok {
-                                (format!("✓ {msg}"), success)
-                            } else {
-                                (format!("✗ {msg}"), danger)
-                            }
-                        } else if configured {
-                            (format!("已保存：{saved}"), muted)
-                        } else {
-                            ("未配置 — 跨网 WebRTC 需要信令地址".into(), danger)
-                        };
-
-                        let input_entity = signal_http_input.clone();
-                        let input_for_save = signal_http_input.clone();
-                        let input_for_probe = signal_http_input.clone();
-                        let input_for_clear = signal_http_input.clone();
-
-                        v_flex()
-                            .w_full()
-                            .gap_2()
-                            .p_3()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(border)
-                            .bg(secondary.opacity(0.35))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(fg)
-                                    .child("信令服务地址"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(
-                                        "自部署的 smelt-signal 根 URL（无内置默认）。\
-                                         例：https://signal.example.com · 部署见 deploy/signal/",
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .children(
-                                                input_entity
-                                                    .as_ref()
-                                                    .map(|s| Input::new(s).small()),
-                                            ),
-                                    )
-                                    .child({
-                                        let can_save = draft_ok && dirty;
-                                        let label = if dirty {
-                                            "保存".to_string()
-                                        } else {
-                                            "已保存".to_string()
-                                        };
-                                        let b = btn("signal-save", label).flex_shrink_0();
-                                        if can_save {
-                                            b.on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_, window, cx: &mut App| {
-                                                    let v = signal_http_from_input(
-                                                        input_for_save.as_ref(),
-                                                        cx,
-                                                    );
-                                                    if !signal_http_ok(&v) {
-                                                        window.push_notification(
-                                                            Notification::error(
-                                                                "请填写 https:// 或 http:// 开头的地址",
-                                                            ),
-                                                            cx,
-                                                        );
-                                                        return;
-                                                    }
-                                                    apply_signal_http(v, true, cx);
-                                                    window.push_notification(
-                                                        Notification::success("信令地址已保存"),
-                                                        cx,
-                                                    );
-                                                },
-                                            )
-                                        } else {
-                                            b.opacity(0.45)
-                                        }
-                                    })
-                                    .child({
-                                        let can_probe = draft_ok && !probe.probing;
-                                        let label = if probe.probing {
-                                            "探测中…".to_string()
-                                        } else {
-                                            "探测连通".to_string()
-                                        };
-                                        let b = btn("signal-probe", label).flex_shrink_0();
-                                        if can_probe {
-                                            b.on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_, _window, cx: &mut App| {
-                                                    let v = signal_http_from_input(
-                                                        input_for_probe.as_ref(),
-                                                        cx,
-                                                    );
-                                                    // 探测前先落盘，避免配置与探测目标不一致
-                                                    if signal_http_ok(&v) {
-                                                        apply_signal_http(v.clone(), false, cx);
-                                                    }
-                                                    probe_signal_http(v, cx);
-                                                },
-                                            )
-                                        } else {
-                                            b.opacity(0.45)
-                                        }
-                                    })
-                                    .child(
-                                        btn("signal-clear", "清除".into())
-                                            .flex_shrink_0()
-                                            .text_color(muted)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_, window, cx: &mut App| {
-                                                    if let Some(inp) = input_for_clear.as_ref() {
-                                                        inp.update(cx, |s, cx| {
-                                                            s.set_value("", window, cx);
-                                                        });
-                                                    }
-                                                    apply_signal_http(String::new(), true, cx);
-                                                    cx.set_global(SignalProbeState::default());
-                                                    window.push_notification(
-                                                        Notification::success("已清除信令地址"),
-                                                        cx,
-                                                    );
-                                                },
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(status_line.1)
-                                    .child(status_line.0),
-                            )
-                            .when(dirty && draft_ok, |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child("有未保存修改，点「保存」写入配置（跨网开启时会重启 bridge）。"),
-                                )
-                            })
-                    }
-                }),
+                .description("打开后生成本机分享能力（手机配对依赖它）。关掉会停止所有分享。"),
                 SettingItem::new(
-                    "跨网（WebRTC）",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<RemoteConfig>().webrtc_enabled,
-                        |v: bool, cx: &mut App| apply_webrtc_toggle(v, cx),
+                    "Relay 地址",
+                    SettingField::input(
+                        |cx: &App| cx.global::<RemoteConfig>().iroh_relay.clone().into(),
+                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, false, cx),
                     ),
                 )
                 .description(
-                    "推荐：手机蜂窝也能连。经上方信令握手，数据优先点对点到本机；\
-                     打开后生成可复制 / 扫码的跨网链接。请先配置并保存信令地址。",
+                    "填写自建 relay 的域名、IP 或完整 URL；省略协议时使用 https://。留空不会使用公共 relay。",
                 ),
                 SettingItem::new(
-                    "临时 Cloudflare（高级）",
+                    "Relay 访问令牌",
+                    SettingField::input(
+                        |cx: &App| cx.global::<RemoteConfig>().iroh_relay_token.clone().into(),
+                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, true, cx),
+                    ),
+                )
+                .description("relay 未开启共享令牌鉴权时可留空。令牌随配对码进入手机安全存储。"),
+                SettingItem::new(
+                    "P2P 直连（iroh）",
                     SettingField::switch(
-                        |cx: &App| cx.global::<RemoteConfig>().tunnel_enabled,
-                        |v: bool, cx: &mut App| apply_tunnel_toggle(v, cx),
+                        |cx: &App| cx.global::<RemoteConfig>().iroh_enabled,
+                        |v: bool, cx: &mut App| apply_iroh_toggle(v, cx),
                     ),
                 )
                 .description(
-                    "Quick Tunnel 临时公网链接，不稳定时优先用上方「跨网 WebRTC」。\
-                     需要本机 cloudflared；打开时会自动开启「远程」。",
+                    "手机 App 的唯一公网通路：配对码重启不变，扫一次长期有效。\
+                     优先打洞直连，打不通自动走用户配置的 relay。",
                 ),
-                SettingItem::render(move |_, _, cx: &mut App| {
-                    let muted = cx.theme().muted_foreground;
-                    let fg = cx.theme().foreground;
-                    let cmd = "brew install cloudflared";
-                    let label = copy_btn_label("copy-brew-cloudflared", "复制", cx);
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("Cloudflare 未安装时："),
-                        )
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded(px(4.))
-                                .bg(cx.theme().secondary)
-                                .text_xs()
-                                .font_family("Menlo")
-                                .text_color(fg)
-                                .child(cmd),
-                        )
-                        .child(
-                            btn("copy-brew-cloudflared", label)
-                                .flex_shrink_0()
-                                .on_mouse_down(MouseButton::Left, move |_, window, cx: &mut App| {
-                                    copy_with_feedback(
-                                        "brew install cloudflared".into(),
-                                        "copy-brew-cloudflared",
-                                        "已复制安装命令",
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                        )
-                }),
                 SettingItem::new(
                     "允许远程写入",
                     SettingField::switch(
@@ -3747,62 +2986,52 @@ impl Workspace {
                     ),
                 )
                 .description(
-                    "链接持有者可在手机上输入、批准/拒绝权限。分享即授权。\
-                     切换后会自动换一条新链接（旧链接失效）。",
+                    "配对码持有者可在手机上输入、批准/拒绝权限。分享即授权。\
+                     切换后会自动换一条新配对码（旧的失效）。",
                 ),
-                // 分享卡片：WebRTC 优先 → CF → 本机；复制 + 二维码
+                // 分享卡片：iroh 配对码优先，没有才退回本机链接
                 SettingItem::render(move |_, _, cx: &mut App| {
                     let cfg = cx.global::<RemoteConfig>().clone();
                     let remote = cx.global::<RemoteRuntimeState>().clone();
-                    let tunnel = cx.global::<TunnelRuntimeState>().clone();
-                    let webrtc = cx
-                        .try_global::<WebrtcRuntimeState>()
+                    let iroh = cx
+                        .try_global::<IrohRuntimeState>()
                         .cloned()
                         .unwrap_or_default();
                     let danger = cx.theme().danger;
                     let muted = cx.theme().muted_foreground;
                     let fg = cx.theme().foreground;
 
-                    if !cfg.enabled && !cfg.tunnel_enabled && !cfg.webrtc_enabled {
+                    if !cfg.enabled && !cfg.iroh_enabled {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("打开「开启远程」或「跨网（WebRTC）」后，这里出现分享链接与二维码。");
+                            .child("打开「开启远程」或「P2P 直连（iroh）」后，这里出现配对码与二维码.")
+                            .into_any_element();
                     }
 
-                    // WebRTC 准备中
-                    if cfg.webrtc_enabled && webrtc.connecting {
+                    // iroh 准备中（绑定要连接用户配置的 relay）
+                    if cfg.iroh_enabled && iroh.connecting {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("正在准备跨网链接…（建房 + 启动 bridge）");
+                            .child("正在建立 P2P 通道…（连接 relay + 打洞）")
+                            .into_any_element();
                     }
 
-                    let preparing = tunnel.connecting
-                        || (cfg.enabled
-                            && !cfg.webrtc_enabled
-                            && remote.error.is_none()
-                            && !remote.token.as_ref().is_some_and(|t| !t.is_empty()));
-
+                    let preparing = cfg.enabled
+                        && !cfg.iroh_enabled
+                        && remote.error.is_none()
+                        && !remote.token.as_ref().is_some_and(|t| !t.is_empty());
                     if preparing {
-                        let msg = if tunnel.connecting {
-                            "正在准备 Cloudflare 链接…（最多约 30 秒）"
-                        } else {
-                            "正在准备分享链接…"
-                        };
-                        return div().text_xs().text_color(muted).child(msg);
+                        return div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("正在准备分享链接…")
+                            .into_any_element();
                     }
 
-                    if let Some(err) = webrtc
-                        .error
-                        .as_ref()
-                        .or(remote.error.as_ref())
-                        .or(tunnel.error.as_ref())
-                    {
-                        let need_cloudflared = err.contains("没找到 cloudflared")
-                            || err.contains("brew install cloudflared")
-                            || err.contains("SMELT_CLOUDFLARED");
-                        let mut box_ = v_flex()
+                    if let Some(err) = iroh.error.as_ref().or(remote.error.as_ref()) {
+                        return v_flex()
                             .gap_2()
                             .child(
                                 div()
@@ -3815,112 +3044,61 @@ impl Workspace {
                                     MouseButton::Left,
                                     |_, _window, cx: &mut App| retry_remote_setup(cx),
                                 ),
-                            );
-                        if need_cloudflared {
-                            let err_label =
-                                copy_btn_label("copy-brew-on-err", "复制安装命令", cx);
-                            box_ = box_.child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded(px(4.))
-                                            .bg(cx.theme().secondary)
-                                            .text_xs()
-                                            .font_family("Menlo")
-                                            .text_color(fg)
-                                            .child("brew install cloudflared"),
-                                    )
-                                    .child(
-                                        btn("copy-brew-on-err", err_label)
-                                            .flex_shrink_0()
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_, window, cx: &mut App| {
-                                                    copy_with_feedback(
-                                                        "brew install cloudflared".into(),
-                                                        "copy-brew-on-err",
-                                                        "已复制安装命令",
-                                                        window,
-                                                        cx,
-                                                    );
-                                                },
-                                            ),
-                                    ),
-                            );
-                        }
-                        return box_;
+                            )
+                            .into_any_element();
                     }
 
-                    // 主链接优先级：WebRTC → CF → 本机
-                    let webrtc_url = webrtc
-                        .share_url
-                        .clone()
-                        .filter(|_| cfg.webrtc_enabled);
+                    let iroh_uri = iroh.pairing_uri.clone().filter(|_| cfg.iroh_enabled);
                     let token = remote.token.clone().filter(|t| !t.is_empty());
-                    let public = tunnel
-                        .url
-                        .as_ref()
-                        .filter(|_| cfg.tunnel_enabled)
-                        .and_then(|u| token.as_ref().map(|t| format!("{u}/?token={t}")));
                     let local = remote
                         .addr
                         .as_ref()
                         .and_then(|a| token.as_ref().map(|t| format!("http://{a}/?token={t}")));
 
-                    let primary = webrtc_url
-                        .clone()
-                        .or_else(|| public.clone())
-                        .or_else(|| local.clone());
-
-                    let Some(primary) = primary else {
+                    let Some(primary) = iroh_uri.clone().or_else(|| local.clone()) else {
                         return v_flex()
                             .gap_2()
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child("还没有可用的分享链接。"),
+                                    .child("还没有可用的配对码。"),
                             )
                             .child(
                                 btn("retry-remote-empty", "重试".into()).on_mouse_down(
                                     MouseButton::Left,
                                     |_, _window, cx: &mut App| retry_remote_setup(cx),
                                 ),
-                            );
+                            )
+                            .into_any_element();
                     };
 
-                    let (scope, mode) = if webrtc_url.is_some() {
+                    let (scope, mode) = if iroh_uri.is_some() {
                         (
-                            "跨网 WebRTC（手机扫码 / 蜂窝可用）",
-                            if remote.write {
-                                "可写入"
-                            } else {
-                                "只读"
-                            },
-                        )
-                    } else if public.is_some() {
-                        (
-                            "临时 Cloudflare 公网",
-                            if tunnel.write { "可写入" } else { "只读" },
+                            "P2P 直连 iroh（配对码长期有效）",
+                            if iroh.write { "可写入" } else { "只读" },
                         )
                     } else {
                         (
-                            "仅本机 / 局域网",
+                            // 网关只绑 127.0.0.1（见 remote_start 的调用点），
+                            // 别写成「局域网」——同 Wi-Fi 的手机也够不着，写错了
+                            // 用户会以为能扫码配对。
+                            "仅本机（手机配对需开 P2P 直连）",
                             if remote.write { "可写入" } else { "只读" },
                         )
                     };
 
                     let primary_copy = primary.clone();
-                    // 仅展示后台预生成的 RGB 二维码（绝不在 UI 线程现算 QR）
-                    let qr_png = webrtc.qr_png.clone().filter(|_| webrtc_url.is_some());
+                    // 仅展示后台预生成的二维码（绝不在 UI 线程现算 QR）。
+                    // 本机 loopback 链接故意不出二维码：`http://127.0.0.1:port`
+                    // 扫到手机上指向的是手机自己，扫了也连不上。
+                    let qr_png = if iroh_uri.is_some() {
+                        iroh.qr_png.clone()
+                    } else {
+                        None
+                    };
 
                     let mut card = v_flex().gap_2();
-
-                    // 二维码 + 链接区
                     let mut row = h_flex().items_start().gap_3();
                     if let Some(png) = qr_png {
                         if !png.is_empty() {
@@ -3958,26 +3136,24 @@ impl Workspace {
                                     .child(primary.clone()),
                             )
                             .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        btn(
-                                            "copy-share-link",
-                                            copy_btn_label("copy-share-link", "复制链接", cx),
-                                        )
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |_, window, cx: &mut App| {
-                                                copy_with_feedback(
-                                                    primary_copy.clone(),
-                                                    "copy-share-link",
-                                                    "已复制分享链接",
-                                                    window,
-                                                    cx,
-                                                );
-                                            },
-                                        ),
+                                h_flex().gap_2().child(
+                                    btn(
+                                        "copy-share-link",
+                                        copy_btn_label("copy-share-link", "复制配对码", cx),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |_, window, cx: &mut App| {
+                                            copy_with_feedback(
+                                                primary_copy.clone(),
+                                                "copy-share-link",
+                                                "已复制配对码",
+                                                window,
+                                                cx,
+                                            );
+                                        },
                                     ),
+                                ),
                             )
                             .child(
                                 div()
@@ -3989,13 +3165,13 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child("手机扫码打开；或复制链接到浏览器。"),
+                                    .child("用 smelt 手机 App 扫码配对。"),
                             ),
                     );
                     card = card.child(row);
 
-                    // 次要：WebRTC 开启时仍可看本机链接
-                    if webrtc_url.is_some() {
+                    // 次要：iroh 开着时仍可看本机链接（在同一台 Mac 上调试用）
+                    if iroh_uri.is_some() {
                         if let Some(local_link) = local.clone() {
                             let local_copy = local_link.clone();
                             card = card.child(
@@ -4033,45 +3209,9 @@ impl Workspace {
                                     ),
                             );
                         }
-                    } else if let (Some(_), Some(local_link)) = (public, local) {
-                        let local_copy = local_link.clone();
-                        card = card.child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .max_w(px(280.))
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis_middle()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(format!("本机：{local_link}")),
-                                )
-                                .child(
-                                    btn(
-                                        "copy-local-link",
-                                        copy_btn_label("copy-local-link", "复制本机", cx),
-                                    )
-                                    .flex_shrink_0()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        move |_, window, cx: &mut App| {
-                                            copy_with_feedback(
-                                                local_copy.clone(),
-                                                "copy-local-link",
-                                                "已复制本机链接",
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ),
-                                ),
-                        );
                     }
 
-                    card
+                    card.into_any_element()
                 }),
             ]),
         );
@@ -4227,6 +3367,39 @@ impl Workspace {
                 .expect("打开设置窗口失败");
             cx.set_global(SettingsWindowHandle(Some(handle)));
         });
+    }
+}
+
+#[cfg(test)]
+mod iroh_pairing_tests {
+    use super::{RemoteConfig, qr_png_for_url};
+    use smelt_core::pairing::iroh_pairing_uri;
+
+    #[test]
+    fn old_config_without_iroh_field_still_loads() {
+        // 线上已有的 collab.json 没有 iroh_enabled 这个键。少了 serde(default)
+        // 会让整份配置解析失败、静默回退成全默认（远程被关掉），用户会以为设置丢了。
+        let json = r#"{"enabled":true,"tunnel_enabled":false,"webrtc_enabled":true,
+                       "signal_http":"https://s.example.com","write_enabled":true}"#;
+        let c: RemoteConfig = serde_json::from_str(json).expect("旧配置必须还能解析");
+        assert!(c.enabled);
+        assert!(c.write_enabled);
+        assert!(!c.iroh_enabled, "旧配置缺省应按关闭处理");
+    }
+
+    #[test]
+    fn pairing_uri_renders_to_a_qr() {
+        // 配对码比 http 链接长（endpoint_id 是 64 个十六进制字符），
+        // 这里钉住「它确实能编成二维码」——超长内容会让 QrCode::new 失败。
+        let uri = iroh_pairing_uri(
+            &"a".repeat(64),
+            &"b".repeat(32),
+            "https://relay.example.test",
+            "relay-token",
+        );
+        let png = qr_png_for_url(&uri).expect("配对码必须能生成二维码");
+        assert!(!png.is_empty());
+        assert_eq!(&png[1..4], b"PNG", "应当是 PNG 字节流");
     }
 }
 

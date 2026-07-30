@@ -1,10 +1,13 @@
 [package]
-name = "smelt-mobile"
+name = "smelt_mobile"
 version = "0.1.0"
 edition = "2021"
 description = "Smelt mobile FFI layer for Flutter"
 
 [lib]
+# 用下划线：cargokit 直接拿 package.name 去拼 `lib<name>.a` 找产物，
+# 不做 cargo 那套 `-`→`_` 转换。用连字符会让它找不到静态库、
+# 报 "Unable to find bundle for dynamic library"。
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
@@ -14,8 +17,12 @@ flutter_rust_bridge = "=2.12.0"
 # 复用 smelt-core
 smelt-core = { path = "../smelt-core" }
 
+# iroh 隧道：直接复用桌面侧的 ALPN 与 endpoint 构建，避免两端各写一份而悄悄连不上
+smelt-iroh = { path = "../smelt-iroh" }
+iroh = "1"
+
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "net", "io-util"] }
 futures = "0.3"
 
 # Serialization

@@ -1,6 +1,9 @@
-//! Flutter 调用的 API
+//! 早期设计的 API —— **目前不生成 Dart 绑定**。
 //!
-//! 所有 `#[flutter_rust_bridge::frb]` 标记的函数和类型会被 codegen 生成 Dart 绑定。
+//! 这里的连接/会话/E2EE 是一套后来被放弃的方向：自造握手协议、`rpc()` 从未
+//! 实现，与手机端实际在跑的 `/acp/ws` 协议对不上。桥到 Dart 只会生成看着能用
+//! 的空壳，所以 `flutter_rust_bridge.yaml` 的 `rust_input` 指向的是
+//! [`crate::api_iroh`]。要恢复这条路之前，先确认它和网关协议对得上。
 
 use flutter_rust_bridge::frb;
 use serde::{Deserialize, Serialize};
