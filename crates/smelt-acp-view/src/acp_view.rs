@@ -10,14 +10,16 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode,
-    InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, list as virtual_list, px,
+    Animation, AnimationExt, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window, div,
+    list as virtual_list, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h_flex, v_flex};
 
@@ -53,8 +55,8 @@ fn config_value_label(config_id: &str, value: &str, fallback: &str) -> String {
 /// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
 pub use smelt_core::acp_chat::{
-    AcpEntry, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart, diff_line_stats, diff_lines,
-    is_interrupt_marker, strip_code_fence,
+    AcpEntry, AcpImage, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart, diff_line_stats,
+    diff_lines, is_interrupt_marker, strip_code_fence,
 };
 
 /// `@` / `/` 补全弹层的状态。回合态，不落盘。
@@ -66,10 +68,9 @@ struct CompletionPopup {
     selected: usize,
 }
 
-/// AcpView 对外发的唯一事件：内容有实质变化，该存盘了。main.rs 订阅它触发
-/// `Workspace::save_state`（与侧栏 resize 订阅同一惯用法）。
 pub enum AcpViewEvent {
     Changed,
+    PreviewImage(std::sync::Arc<gpui::Image>),
 }
 
 impl EventEmitter<AcpViewEvent> for AcpView {}
@@ -106,6 +107,8 @@ pub struct AcpView {
     /// 已粘进来、等着随下一条 prompt 发出去的图片（缩略图条显示，发完清空）。
     /// 只在内存里待到发送为止：图片体积大，不进 workspace.json。
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
+    /// 已发送消息的解码图片缓存，避免流式输出或 spinner 重绘时反复解码 base64。
+    rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
     /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
     supports_image: bool,
@@ -114,6 +117,8 @@ pub struct AcpView {
     paste_hint: Option<String>,
     /// `@` / `/` 补全弹层的当前状态；None = 没在补全。
     completion: Option<CompletionPopup>,
+    /// 补全候选列表的滚动位置；键盘移动选中项时同步保证其可见。
+    completion_scroll: ScrollHandle,
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
     /// 会明显卡手，所以一次会话只列一次。
     file_cache: Option<std::rc::Rc<Vec<String>>>,
@@ -160,6 +165,8 @@ pub struct AcpView {
     collapsed_tool_cards: std::collections::HashSet<String>,
     /// 可变高度消息虚拟列表：只测量和构建视口附近的 Markdown/工具卡。
     list_state: ListState,
+    /// 用户是否已滚离消息尾部；由 ListScrollEvent 更新。
+    viewing_history: bool,
     /// 冷恢复占位待自动启动：GUI 重启后第一次切到这个会话时自动 restart，
     /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
     /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
@@ -253,6 +260,21 @@ impl AcpView {
         // 没有时启动新一轮。历史仍先留在本地，守护端若能 attach 会用其快照覆盖。
         let auto_resume_pending = true;
         let initial_entry_count = entries.len();
+        let rendered_images = decode_entry_images(&entries, 0);
+        let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
+        list_state.set_follow_mode(FollowMode::Tail);
+        let view = cx.entity().downgrade();
+        list_state.set_scroll_handler(move |event, _window, cx| {
+            let view = view.clone();
+            let viewing_history = event.is_scrolled && !event.is_following_tail;
+            // list 正在可变借用自己的状态，延后通知外层重新判断 sticky 提问。
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.viewing_history = viewing_history;
+                    cx.notify();
+                });
+            });
+        });
         Self {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
@@ -271,9 +293,11 @@ impl AcpView {
             profile_id,
             agent,
             pending_images: Vec::new(),
+            rendered_images,
             supports_image: true,
             paste_hint: None,
             completion: None,
+            completion_scroll: ScrollHandle::new(),
             file_cache: None,
             acp_session_id: None,
             history_session_id: resume_session_id,
@@ -291,11 +315,8 @@ impl AcpView {
             expanded_tools: std::collections::HashSet::new(),
             expanded_tool_cards: std::collections::HashSet::new(),
             collapsed_tool_cards: std::collections::HashSet::new(),
-            list_state: {
-                let state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
-                state.set_follow_mode(FollowMode::Tail);
-                state
-            },
+            list_state,
+            viewing_history: false,
             focus_handle: cx.focus_handle(),
             _input_sub: None,
         }
@@ -457,6 +478,7 @@ impl AcpView {
     pub fn auto_title(&self) -> Option<String> {
         let prompt = self.entries.iter().find_map(|entry| match entry {
             AcpEntry::User(text) if !text.trim().is_empty() => Some(text.trim()),
+            AcpEntry::UserWithImages { text, .. } if !text.trim().is_empty() => Some(text.trim()),
             _ => None,
         })?;
         let single_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -555,6 +577,7 @@ impl AcpView {
             items,
             selected: 0,
         });
+        self.completion_scroll.scroll_to_item(0);
         cx.notify();
     }
 
@@ -565,6 +588,7 @@ impl AcpView {
         };
         let n = popup.items.len() as i32;
         popup.selected = (popup.selected as i32 + delta).rem_euclid(n) as usize;
+        self.completion_scroll.scroll_to_item(popup.selected);
         cx.notify();
         true
     }
@@ -610,6 +634,14 @@ impl AcpView {
             }
             let line = match e {
                 AcpEntry::User(t) => format!("> {}", t.lines().next().unwrap_or_default()),
+                AcpEntry::UserWithImages { text, images } => {
+                    let first = text.lines().next().unwrap_or_default();
+                    if first.is_empty() {
+                        format!("> {} 张图片", images.len())
+                    } else {
+                        format!("> {first}")
+                    }
+                }
                 AcpEntry::Assistant {
                     text,
                     thought: false,
@@ -779,17 +811,29 @@ impl AcpView {
     fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
         let should_persist = snap.should_persist;
         let old_entries_len = self.entries.len();
+        let incremental_entries = snap.entries_offset <= self.entries.len();
+        let entries_offset = if incremental_entries {
+            snap.entries_offset
+        } else {
+            0
+        };
         let previous_permission = self
             .permissions
             .first()
             .map(|card| (card.tool_call_id.clone(), card.question.clone()));
-        if snap.entries_offset <= self.entries.len() {
+        if incremental_entries {
             self.entries.truncate(snap.entries_offset);
             self.entries.extend(snap.entries);
         } else {
             // 不应发生：Unix stream 有序且写失败会断开。保守清空，避免显示错位历史。
             self.entries = snap.entries;
         }
+        self.rendered_images
+            .retain(|(entry_ix, _), _| *entry_ix < entries_offset);
+        self.rendered_images.extend(decode_entry_images(
+            &self.entries[entries_offset..],
+            entries_offset,
+        ));
         let new_entries_len = self.entries.len();
         if snap.entries_offset <= old_entries_len {
             self.list_state.splice(
@@ -1333,8 +1377,10 @@ impl Render for AcpView {
                 buttons = buttons.child(
                     div()
                         .id(format!("acp-perm-primary-{option_id}"))
+                        .h(px(36.))
                         .px_4()
-                        .py_2()
+                        .flex()
+                        .items_center()
                         .rounded_lg()
                         .bg(gpui::rgb(ui_theme::green()))
                         .text_color(gpui::rgb(ui_theme::on_accent()))
@@ -1361,8 +1407,10 @@ impl Render for AcpView {
                 buttons = buttons.child(
                     div()
                         .id(format!("acp-perm-opt-{option_id}"))
+                        .h(px(36.))
                         .px_3()
-                        .py_2()
+                        .flex()
+                        .items_center()
                         .rounded_lg()
                         .border_1()
                         .border_color(t.border)
@@ -1381,6 +1429,115 @@ impl Render for AcpView {
 
         // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
         // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
+        let sticky_prompt = self
+            .entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(ix, entry)| {
+                is_user_entry(entry)
+                    && !matches!(entry, AcpEntry::User(text) if is_interrupt_marker(text))
+                    && self.list_state.item_is_above_viewport(*ix) == Some(true)
+            })
+            .map(|(ix, entry)| {
+                let summary = match entry {
+                    AcpEntry::User(text) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+                    AcpEntry::UserWithImages { text, images } => {
+                        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if text.is_empty() {
+                            format!("{} 张图片", images.len())
+                        } else {
+                            format!("{text} · {} 张图片", images.len())
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                h_flex()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .justify_center()
+                    .px_4()
+                    .child(
+                        h_flex()
+                            .id("acp-sticky-prompt")
+                            .w_full()
+                            .max_w(px(1040.))
+                            .h(px(38.))
+                            .px_3()
+                            .gap_2()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(t.border)
+                            .bg(gpui::rgb(ui_theme::bg_bar()))
+                            .cursor_pointer()
+                            .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(gpui::rgb(ui_theme::accent()))
+                                    .child("本轮提问"),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                                    .child(summary),
+                            )
+                            .child(div().flex_shrink_0().text_xs().text_color(muted).child("↑"))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.list_state.scroll_to_reveal_item(ix);
+                                cx.notify();
+                            })),
+                    )
+            });
+        let jump_to_latest = self.viewing_history.then(|| {
+            h_flex()
+                .absolute()
+                .bottom(px(14.))
+                .left_0()
+                .right_0()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .id("acp-jump-to-latest")
+                        .h(px(36.))
+                        .px_3()
+                        .gap_2()
+                        .items_center()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(gpui::rgb(ui_theme::bg_card()))
+                        .shadow_sm()
+                        .cursor_pointer()
+                        .hover(|button| button.bg(gpui::rgb(ui_theme::bg_hover())))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .child("回到最新"),
+                        )
+                        .child(div().text_sm().text_color(muted).child("↓"))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.viewing_history = false;
+                            this.list_state.set_follow_mode(FollowMode::Tail);
+                            cx.notify();
+                        }))
+                        .with_animation(
+                            "acp-jump-to-latest-enter",
+                            Animation::new(std::time::Duration::from_millis(160)),
+                            |button, delta| button.opacity(delta),
+                        ),
+                )
+        });
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             view.update(app, |this, cx| {
@@ -1426,7 +1583,14 @@ impl Render for AcpView {
                                 .px_4()
                                 .py_2p5()
                                 .rounded_lg()
-                                .bg(t.muted)
+                                .border_1()
+                                .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
+                                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                .hover(|bubble| {
+                                    bubble
+                                        .border_color(ui_theme::tint(ui_theme::accent(), 0x52))
+                                        .bg(ui_theme::tint(ui_theme::accent(), 0x20))
+                                })
                                 .text_sm()
                                 .child(smelt_ui::markdown_mermaid::markdown_view(
                                     ("acp-user-md", i),
@@ -1434,6 +1598,64 @@ impl Render for AcpView {
                                 )),
                         )
                         .into_any_element(),
+                    AcpEntry::UserWithImages { text, images } => {
+                        let mut content = v_flex().gap_2();
+                        if !text.trim().is_empty() {
+                            content = content.child(smelt_ui::markdown_mermaid::markdown_view(
+                                ("acp-user-images-md", i),
+                                markdown_text_for_cwd(text, this.cwd.as_deref()),
+                            ));
+                        }
+                        let mut image_strip = h_flex().gap_2().flex_wrap();
+                        for image_ix in 0..images.len() {
+                            if let Some(image) = this.rendered_images.get(&(i, image_ix)).cloned() {
+                                let preview_image = image.clone();
+                                image_strip = image_strip.child(
+                                    div()
+                                        .id(("acp-sent-image", i * 1024 + image_ix))
+                                        .overflow_hidden()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(t.border)
+                                        .cursor_pointer()
+                                        .hover(|image| {
+                                            image.border_color(ui_theme::tint(
+                                                ui_theme::accent(),
+                                                0x72,
+                                            ))
+                                        })
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            let _ = this;
+                                            cx.emit(AcpViewEvent::PreviewImage(
+                                                preview_image.clone(),
+                                            ));
+                                        }))
+                                        .child(gpui::img(image).h(px(160.)).max_w(px(280.))),
+                                );
+                            }
+                        }
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .max_w(gpui::relative(0.8))
+                                    .px_3()
+                                    .py_3()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
+                                    .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                    .hover(|bubble| {
+                                        bubble
+                                            .border_color(ui_theme::tint(ui_theme::accent(), 0x52))
+                                            .bg(ui_theme::tint(ui_theme::accent(), 0x20))
+                                    })
+                                    .text_sm()
+                                    .child(content.child(image_strip)),
+                            )
+                            .into_any_element()
+                    }
                     AcpEntry::Assistant {
                         text,
                         thought: true,
@@ -1447,17 +1669,19 @@ impl Render for AcpView {
                             .to_string();
                         v_flex()
                             .w_full()
+                            .min_w_0()
                             .child(
                                 h_flex()
                                     .id(("acp-thought-toggle", i))
                                     .w_full()
+                                    .min_w_0()
                                     .min_h(px(24.))
                                     .gap_2()
                                     .items_center()
                                     .rounded_md()
                                     .px_2()
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(ui_theme::overlay(0x14)))
+                                    .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                                     .child(
                                         div()
                                             .w(px(12.))
@@ -1476,6 +1700,7 @@ impl Render for AcpView {
                                     .when(!expanded, |row| {
                                         row.child(
                                             div()
+                                                .flex_1()
                                                 .min_w_0()
                                                 .text_color(muted)
                                                 .text_xs()
@@ -1516,6 +1741,7 @@ impl Render for AcpView {
                             .w_full()
                             .min_w_0()
                             .text_sm()
+                            .text_color(t.foreground)
                             .child(smelt_ui::markdown_mermaid::markdown_view(
                                 ("acp-md", i),
                                 markdown_text_for_cwd(text, this.cwd.as_deref()),
@@ -1617,6 +1843,7 @@ impl Render for AcpView {
                             .rounded_md()
                             .border_1()
                             .border_color(t.border)
+                            .bg(t.muted)
                             .child(
                                 h_flex()
                                     .id(("acp-tool-card-toggle", i))
@@ -1625,7 +1852,7 @@ impl Render for AcpView {
                                     .gap_2()
                                     .items_center()
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(ui_theme::overlay(0x10)))
+                                    .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
                                         cx.listener(move |this, _ev, _window, cx| {
@@ -1797,15 +2024,12 @@ impl Render for AcpView {
                         .id(("acp-process-group", group.first))
                         .w_full()
                         .min_h(px(32.))
-                        .px_3()
+                        .px_2()
                         .gap_2()
                         .items_center()
                         .rounded_md()
-                        .bg(ui_theme::overlay(0x0c))
-                        .border_1()
-                        .border_color(t.border)
                         .cursor_pointer()
-                        .hover(|d| d.bg(ui_theme::overlay(0x18)))
+                        .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                         .child(
                             div()
                                 .w(px(12.))
@@ -1815,7 +2039,7 @@ impl Render for AcpView {
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_xs()
                                 .font_medium()
                                 .text_color(gpui::rgb(ui_theme::text_mid()))
                                 .child("执行过程"),
@@ -1876,27 +2100,8 @@ impl Render for AcpView {
         // 落地之间是一整屏纯黑——Copilot 这类首字延迟长的 agent 上看着像卡死。
         // 用 Spinner 而不是「已 N 秒」：GPUI 没有定时重绘，秒数会僵在原地，
         // 反而更像死了；spinner 自带动画帧，转着就说明进程还在。
-        let thinking = if matches!(self.phase, AcpPhase::Running)
-            && !matches!(self.entries.last(), Some(AcpEntry::Assistant { .. }))
-        {
-            Some(
-                h_flex()
-                    .px_4()
-                    .pb_4()
-                    .items_center()
-                    .gap_2()
-                    .child(Spinner::new().xsmall().color(muted))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child(format!("{} 正在思考…", self.agent.short_label())),
-                    )
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
+        let show_thinking = matches!(self.phase, AcpPhase::Running)
+            && !matches!(self.entries.last(), Some(AcpEntry::Assistant { .. }));
 
         // 审批是输入动作，不散落进历史工具卡；统一固定在 composer 上方，
         // 队首切换时卡片位置不动，用户也能看见还有多少项等待处理。
@@ -1971,7 +2176,7 @@ impl Render for AcpView {
                     v_flex()
                         .w_full()
                         .min_w_0()
-                        .max_w(px(920.))
+                        .max_w(px(1040.))
                         .p_4()
                         .gap_3()
                         .rounded_lg()
@@ -2200,9 +2405,10 @@ impl Render for AcpView {
             let mut list = v_flex()
                 .id("acp-completion")
                 .w_full()
-                .max_w(px(920.))
+                .max_w(px(1040.))
                 .max_h(px(260.))
                 .overflow_y_scroll()
+                .track_scroll(&self.completion_scroll)
                 .mb_2()
                 .rounded_lg()
                 .border_1()
@@ -2211,6 +2417,35 @@ impl Render for AcpView {
                 .shadow_lg();
             for (ix, item) in popup.items.iter().enumerate() {
                 let selected = ix == popup.selected;
+                let label_color = if selected {
+                    gpui::rgb(ui_theme::text_bright())
+                } else {
+                    gpui::rgb(ui_theme::text_mid())
+                };
+                let label = if let Some(range) = item.match_range.clone() {
+                    h_flex()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(label_color)
+                        .child(item.label[..range.start].to_string())
+                        .child(
+                            div()
+                                .font_semibold()
+                                .text_color(gpui::rgb(ui_theme::accent()))
+                                .child(item.label[range.clone()].to_string()),
+                        )
+                        .child(item.label[range.end..].to_string())
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(label_color)
+                        .child(item.label.clone())
+                        .into_any_element()
+                };
                 list = list.child(
                     h_flex()
                         .id(("acp-completion-item", ix))
@@ -2227,18 +2462,7 @@ impl Render for AcpView {
                                 ui_theme::overlay(0x20)
                             })
                         })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .font_family("monospace")
-                                .text_color(if selected {
-                                    gpui::rgb(ui_theme::text_bright())
-                                } else {
-                                    gpui::rgb(ui_theme::text_mid())
-                                })
-                                .child(item.label.clone()),
-                        )
+                        .child(label)
                         .when(!item.hint.is_empty(), |row| {
                             row.child(
                                 div()
@@ -2405,12 +2629,11 @@ impl Render for AcpView {
                 .collect();
             let composer = v_flex()
                 .w_full()
-                .max_w(px(920.))
+                .max_w(px(1040.))
                 .rounded_xl()
                 .border_1()
                 .border_color(t.border)
-                .bg(ui_theme::overlay(0x0c))
-                .shadow_sm()
+                .bg(t.background)
                 .child(
                     div()
                         .px_4()
@@ -2423,10 +2646,16 @@ impl Render for AcpView {
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
                     for (ix, im) in self.pending_images.iter().enumerate() {
+                        let preview_image = im.clone();
                         strip = strip.child(
                             div()
                                 .id(("acp-pending-img", ix))
                                 .relative()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    let _ = this;
+                                    cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));
+                                }))
                                 .child(
                                     gpui::img(im.clone())
                                         .h(px(56.))
@@ -2533,9 +2762,6 @@ impl Render for AcpView {
                 // `max_w`，若父节点按内容收缩，IME 组合文本触发重测量时会让
                 // `w_full` 在不同帧解析成不同宽度，导致输入框从居中跳到左侧。
                 .w_full()
-                .border_t_1()
-                .border_color(t.border)
-                .bg(ui_theme::overlay(0x08))
                 .px_4()
                 .py_3()
                 .items_center()
@@ -2544,18 +2770,76 @@ impl Render for AcpView {
         });
 
         let plan_bar = self.render_plan_bar(cx);
-        let running_duration = self.turn_started_at_ms.map(|started| {
-            let elapsed = unix_time_ms().saturating_sub(started);
-            div()
-                .px_4()
-                .py_1()
-                .text_xs()
-                .text_color(muted)
-                .child(format!("进行中 · 已用 {}", format_duration(elapsed)))
+        let activity_status = matches!(self.phase, AcpPhase::Running).then(|| {
+            let elapsed = self
+                .turn_started_at_ms
+                .map(|started| unix_time_ms().saturating_sub(started));
+            h_flex().w_full().justify_center().px_4().child(
+                h_flex()
+                    .w_full()
+                    .max_w(px(1040.))
+                    .relative()
+                    .overflow_hidden()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(t.border)
+                    .bg(gpui::rgb(ui_theme::bg_bar()))
+                    .children(elapsed.map(|elapsed| {
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("进行中 · 已用 {}", format_duration(elapsed)))
+                    }))
+                    .when(show_thinking, |row| {
+                        row.child(div().w(px(1.)).h_3().bg(t.border)).child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Spinner::new().xsmall().color(muted))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child(format!("{} 正在思考…", self.agent.short_label())),
+                                )
+                                .with_animation(
+                                    "acp-thinking-breathe",
+                                    Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                                    |this, delta| {
+                                        let wave =
+                                            (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                        this.opacity(0.68 + wave * 0.28)
+                                    },
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(1.5))
+                            .bg(gpui::rgb(ui_theme::accent()))
+                            .with_animation(
+                                "acp-activity-pulse",
+                                Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                                |this, delta| {
+                                    let wave = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                    this.opacity(0.16 + wave * 0.34)
+                                },
+                            ),
+                    ),
+            )
         });
 
         v_flex()
             .size_full()
+            .relative()
             .track_focus(&self.focus_handle)
             // ⌘⏎ 快捷批准：有待审批卡片时等价于点绿色主按钮。挂在根上冒泡接收，
             // 输入框聚焦时也能生效（Input 只消费不带修饰键的 Enter）。
@@ -2639,9 +2923,22 @@ impl Render for AcpView {
             .bg(t.background)
             .children(banner)
             .children(plan_bar)
-            .child(list)
-            .children(running_duration)
-            .children(thinking)
+            .child(
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(list)
+                    .children((!self.entries.is_empty()).then(|| {
+                        Scrollbar::vertical(&self.list_state)
+                            .id("acp-message-scrollbar")
+                            .scrollbar_show(ScrollbarShow::Always)
+                    }))
+                    .children(sticky_prompt)
+                    .children(jump_to_latest),
+            )
+            .children(activity_status)
             .children(permission)
             .children(elicitation)
             .children(self.paste_hint.as_ref().map(|msg| {
@@ -2682,13 +2979,56 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+fn decode_acp_image(image: &AcpImage) -> Option<std::sync::Arc<gpui::Image>> {
+    use base64::Engine as _;
+
+    let format = match image.mime.as_str() {
+        "image/png" => gpui::ImageFormat::Png,
+        "image/jpeg" => gpui::ImageFormat::Jpeg,
+        "image/webp" => gpui::ImageFormat::Webp,
+        "image/gif" => gpui::ImageFormat::Gif,
+        "image/svg+xml" => gpui::ImageFormat::Svg,
+        "image/bmp" => gpui::ImageFormat::Bmp,
+        "image/tiff" => gpui::ImageFormat::Tiff,
+        _ => return None,
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&image.data_b64)
+        .ok()?;
+    Some(std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)))
+}
+
+fn decode_entry_images(
+    entries: &[AcpEntry],
+    offset: usize,
+) -> std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>> {
+    entries
+        .iter()
+        .enumerate()
+        .flat_map(|(entry_ix, entry)| match entry {
+            AcpEntry::UserWithImages { images, .. } => images
+                .iter()
+                .enumerate()
+                .filter_map(move |(image_ix, image)| {
+                    decode_acp_image(image).map(|decoded| ((offset + entry_ix, image_ix), decoded))
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn is_user_entry(entry: &AcpEntry) -> bool {
+    matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+}
+
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 
-/// 整个工具卡片的默认展开策略：已完成的工具收起，正在跑、失败、待审批的工具展开。
+/// 工具卡片首次出现一律折叠，避免运行过程中的大量输出撑高消息流。
 /// 用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards` 覆盖这个默认值。
-fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bool) -> bool {
-    has_pending_permission || !matches!(status, ToolCallStatus::Completed)
+fn tool_card_default_expanded(_status: ToolCallStatus, _has_pending_permission: bool) -> bool {
+    false
 }
 
 /// 一轮里最后一段非思考正文才是最终回答。工具调用和思考可以夹在正文之间，
@@ -2702,7 +3042,7 @@ fn is_turn_final_answer(entries: &[AcpEntry], index: usize) -> bool {
     }
     !entries[index + 1..]
         .iter()
-        .take_while(|entry| !matches!(entry, AcpEntry::User(_) | AcpEntry::Divider(_)))
+        .take_while(|entry| !is_user_entry(entry) && !matches!(entry, AcpEntry::Divider(_)))
         .any(|entry| matches!(entry, AcpEntry::Assistant { thought: false, .. }))
 }
 
@@ -2718,18 +3058,19 @@ struct ProcessGroupInfo {
 /// 内容与工具调用都属于过程；用户消息、分隔符和最终回答本身不属于。
 fn process_group_for_entry(entries: &[AcpEntry], index: usize) -> Option<ProcessGroupInfo> {
     if index >= entries.len()
-        || matches!(entries[index], AcpEntry::User(_) | AcpEntry::Divider(_))
+        || is_user_entry(&entries[index])
+        || matches!(entries[index], AcpEntry::Divider(_))
         || is_turn_final_answer(entries, index)
     {
         return None;
     }
     let turn_start = entries[..index]
         .iter()
-        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::Divider(_)))
+        .rposition(|entry| is_user_entry(entry) || matches!(entry, AcpEntry::Divider(_)))
         .map_or(0, |ix| ix + 1);
     let turn_end = entries[index..]
         .iter()
-        .position(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::Divider(_)))
+        .position(|entry| is_user_entry(entry) || matches!(entry, AcpEntry::Divider(_)))
         .map_or(entries.len(), |offset| index + offset);
     let final_ix = (turn_start..turn_end)
         .rev()
@@ -2740,7 +3081,8 @@ fn process_group_for_entry(entries: &[AcpEntry], index: usize) -> Option<Process
     }
     let process_indices: Vec<usize> = (turn_start..process_end)
         .filter(|ix| {
-            !matches!(entries[*ix], AcpEntry::User(_) | AcpEntry::Divider(_))
+            !is_user_entry(&entries[*ix])
+                && !matches!(entries[*ix], AcpEntry::Divider(_))
                 && !is_turn_final_answer(entries, *ix)
         })
         .collect();
@@ -2827,7 +3169,6 @@ fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
     let target = target.trim();
     if target.is_empty()
         || target.starts_with('#')
-        || target.starts_with('/')
         || target.starts_with('~')
         || target.contains("://")
         || target.starts_with("mailto:")
@@ -2836,12 +3177,20 @@ fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
         return None;
     }
     let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
-    let absolute = std::path::Path::new(cwd).join(path);
+    let path = std::path::Path::new(path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
     let mut url = url::Url::from_file_path(absolute).ok()?;
     if !fragment.is_empty() {
         url.set_fragment(Some(fragment));
     }
-    Some(url.to_string())
+    // `Url::set_scheme` 会把自定义 scheme 序列化成 `smelt-file:/path`
+    // （单斜杠），而 macOS URL scheme 与主进程解析器都按 authority 形式接收。
+    // 从标准 file URL 替换前缀可稳定保留 `smelt-file:///absolute/path`。
+    Some(url.to_string().replacen("file://", "smelt-file://", 1))
 }
 
 /// 审批请求按收到顺序串行展示和处理，不能越过队首回应后续 responder。
@@ -2989,12 +3338,13 @@ mod tests {
     use smelt_ui::agent_ui_config::AgentUiConfig;
 
     #[test]
-    fn markdown_relative_files_become_absolute_file_urls() {
+    fn markdown_local_files_become_internal_file_urls() {
         let rendered = markdown_text_for_cwd(
-            "看 [workspace.md](docs/workspace.md) 和 [官网](https://example.com)",
+            "看 [workspace.md](docs/workspace.md)、[源码](/tmp/source.rs#L42) 和 [官网](https://example.com)",
             Some("/tmp/project"),
         );
-        assert!(rendered.contains("[workspace.md](file:///tmp/project/docs/workspace.md)"));
+        assert!(rendered.contains("[workspace.md](smelt-file:///tmp/project/docs/workspace.md)"));
+        assert!(rendered.contains("[源码](smelt-file:///tmp/source.rs#L42)"));
         assert!(rendered.contains("[官网](https://example.com)"));
     }
 
@@ -3113,18 +3463,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_card_defaults_keep_active_or_attention_states_expanded() {
+    fn tool_cards_are_collapsed_by_default_for_every_state() {
         assert!(!tool_card_default_expanded(
             ToolCallStatus::Completed,
             false
         ));
-        assert!(tool_card_default_expanded(ToolCallStatus::Completed, true));
-        assert!(tool_card_default_expanded(ToolCallStatus::Pending, false));
-        assert!(tool_card_default_expanded(
+        assert!(!tool_card_default_expanded(ToolCallStatus::Completed, true));
+        assert!(!tool_card_default_expanded(ToolCallStatus::Pending, false));
+        assert!(!tool_card_default_expanded(
             ToolCallStatus::InProgress,
             false
         ));
-        assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
+        assert!(!tool_card_default_expanded(ToolCallStatus::Failed, false));
     }
 
     #[test]

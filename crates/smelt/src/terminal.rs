@@ -5,6 +5,7 @@
 //! vte 解析器 advance → 更新共享的 Term 网格；UI 线程定时对网格做快照并重绘。
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,7 +81,8 @@ const PALETTE_DARK: [u32; 16] = [
     0x00ff_ffff,
 ];
 const PALETTE_LIGHT: [u32; 16] = [
-    0x0024_283b,
+    // 显式 ANSI black 常被 TUI 用来画分隔线；浅底上用深灰，避免比正文还抢眼。
+    0x003f_4654,
     0x00c0_324a,
     0x004e_8a2f,
     0x00a1_690f,
@@ -492,7 +494,8 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     let need = !managed.is_file() || !same_daemon_binary_size(src, &managed);
     if need {
         stage_daemon_binary(src, &dir.join("smeltd.next"))?;
-        let _ = std::fs::remove_file(&managed);
+        // Unix rename 会原子替换目标；先 remove 会制造一个路径不存在的窗口，
+        // 此时若硬重启恰好发生，新守护将无文件可执行。
         std::fs::rename(dir.join("smeltd.next"), &managed)?;
         eprintln!(
             "[workspace] 已同步守护 {} → {}",
@@ -511,6 +514,9 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
 }
 
 fn stage_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    if same_daemon_path(src, dest) {
+        return Ok(());
+    }
     let _ = std::fs::remove_file(dest);
     std::fs::copy(src, dest)?;
     #[cfg(unix)]
@@ -558,7 +564,6 @@ fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
         UpgradeOutcome::Upgraded => {
             thread::sleep(Duration::from_millis(250));
             if target != managed {
-                let _ = std::fs::remove_file(&managed);
                 if let Err(e) = std::fs::rename(&target, &managed) {
                     eprintln!("[workspace] rename → managed 失败：{e}（进程仍在 next inode）");
                 }
@@ -569,7 +574,6 @@ fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
         other => {
             // 失败时尽量把文件落到正式名，供下次冷启动
             if target != managed {
-                let _ = std::fs::remove_file(&managed);
                 let _ = std::fs::rename(&target, &managed);
             }
             eprintln!(
@@ -584,6 +588,28 @@ fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
 /// 多 pane 同时 connect 时串行化迁移，避免并发 upgrade 踩踏。
 static MANAGED_DAEMON_GATE: Mutex<()> = Mutex::new(());
 
+struct ManagedDaemonFileLock {
+    _file: std::fs::File,
+}
+
+fn acquire_file_lock(path: &std::path::Path) -> std::io::Result<ManagedDaemonFileLock> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(ManagedDaemonFileLock { _file: file })
+}
+
+fn acquire_managed_daemon_file_lock() -> std::io::Result<ManagedDaemonFileLock> {
+    let dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dir)?;
+    acquire_file_lock(&dir.join("smeltd.install.lock"))
+}
+
 /// 确保守护跑在 `~/.smelt/bin/smeltd` 且不旧于 App 内分发物。
 ///
 /// GUI 启动 / 连守护 / 装包后 **必须** 调用。返回 managed 路径（可能尚未有进程，
@@ -592,6 +618,7 @@ pub fn ensure_managed_daemon_current() -> std::io::Result<std::path::PathBuf> {
     let _gate = MANAGED_DAEMON_GATE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _file_gate = acquire_managed_daemon_file_lock()?;
     remember_managed_daemon_ensure(
         ensure_managed_daemon_current_locked(),
         &CONNECT_MANAGED_ENSURED,
@@ -616,7 +643,9 @@ fn ensure_managed_daemon_for_connect<F>(
 where
     F: FnOnce() -> std::io::Result<std::path::PathBuf>,
 {
-    if ensured.load(Ordering::Relaxed) {
+    // 这里只能缓存昂贵的版本/迁移检查，不能缓存文件存在性。安装、升级或异常
+    // 重启可能在 GUI 生命周期内替换/移走该文件，命中缓存后仍须自愈。
+    if ensured.load(Ordering::Relaxed) && managed.is_file() {
         Ok(managed)
     } else {
         remember_managed_daemon_ensure(ensure(), ensured)
@@ -1032,6 +1061,11 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
 ///
 /// 顺序绝不能反：若先整包覆盖，App 内 smeltd 会被 SIGKILL → 会话全灭 → 对话「重新初始化」。
 pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::Result<()> {
+    let _gate = MANAGED_DAEMON_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _file_gate = acquire_managed_daemon_file_lock()?;
+
     let staged_smeltd = staged_app.join("Contents/MacOS/smeltd");
     if staged_smeltd.is_file() {
         match handoff_daemon_to_managed(&staged_smeltd) {
@@ -1052,7 +1086,10 @@ pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::
     if let Ok(app) = crate::updater::current_app_bundle_path() {
         let app_smeltd = app.join("Contents/MacOS/smeltd");
         if app_smeltd.is_file() {
-            match ensure_managed_daemon_current() {
+            match remember_managed_daemon_ensure(
+                ensure_managed_daemon_current_locked(),
+                &CONNECT_MANAGED_ENSURED,
+            ) {
                 Ok(p) => eprintln!("[workspace] 装包后 managed 守护：{}", p.display()),
                 Err(e) => eprintln!("[workspace] 装包后同步 managed 失败：{e}"),
             }
@@ -1072,6 +1109,9 @@ pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::
 /// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
 pub fn restart_daemon() {
     let path = sock_path();
+    let daemon_pid = daemon_pid_with_timeout(&path);
+    // 硬重启后必须重新验证托管文件；此前的成功缓存不能跨 daemon 生命周期。
+    CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
     if let Ok(s) = UnixStream::connect(&path) {
         // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
         let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
@@ -1088,7 +1128,22 @@ pub fn restart_daemon() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    if UnixStream::connect(&path).is_ok() {
+    // shutdown 会先回包再清理 sidecar；若清理卡住，另一个启动者可能已经删掉
+    // socket 目录项，此时 lsof(path) 再也找不到旧守护。按重启前记录的 PID 兜底。
+    if let Some(pid) = daemon_pid {
+        if process_is_alive(pid) {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+            for _ in 0..10 {
+                if !process_is_alive(pid) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    } else if UnixStream::connect(&path).is_ok() {
+        // 老守护的 version 响应没有 pid，只能保留按 socket 反查的兼容兜底。
         force_kill_socket_owner(&path);
         thread::sleep(Duration::from_millis(150));
     }
@@ -1096,6 +1151,28 @@ pub fn restart_daemon() {
     if UnixStream::connect(&path).is_err() {
         let _ = std::fs::remove_file(&path);
     }
+    CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
+}
+
+fn daemon_pid_with_timeout(path: &std::path::Path) -> Option<u32> {
+    let mut s = UnixStream::connect(path).ok()?;
+    s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
+    s.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
+    writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
+    let mut resp = String::new();
+    BufReader::new(s).read_line(&mut resp).ok()?;
+    let value: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
+    value["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// 兜底：找到正监听着 `path` 的进程并 SIGKILL，再清掉残留 socket 文件。用于优雅
@@ -2837,12 +2914,25 @@ mod handshake_timeout_tests {
 mod managed_daemon_ensure_tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::AtomicUsize;
+
+    fn managed_test_file(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "smelt-managed-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn explicit_ensure_then_connect_fallback_only_ensures_once() {
         let ensured = AtomicBool::new(false);
         let calls = Cell::new(0);
-        let managed = std::path::PathBuf::from("/tmp/smeltd");
+        let managed = managed_test_file("cached");
+        std::fs::write(&managed, b"daemon").unwrap();
 
         let first = remember_managed_daemon_ensure(
             {
@@ -2860,6 +2950,59 @@ mod managed_daemon_ensure_tests {
         assert_eq!(fallback.unwrap(), managed);
         assert_eq!(calls.get(), 1);
         assert!(ensured.load(Ordering::Relaxed));
+        let _ = std::fs::remove_file(managed);
+    }
+
+    #[test]
+    fn cached_ensure_runs_again_when_managed_binary_disappears() {
+        let ensured = AtomicBool::new(true);
+        let calls = Cell::new(0);
+        let managed = managed_test_file("missing");
+
+        let result = ensure_managed_daemon_for_connect(&ensured, managed.clone(), || {
+            calls.set(calls.get() + 1);
+            std::fs::write(&managed, b"restored")?;
+            Ok(managed.clone())
+        });
+
+        assert_eq!(result.unwrap(), managed);
+        assert_eq!(calls.get(), 1, "文件消失后不能继续盲信 ensure 缓存");
+        let _ = std::fs::remove_file(managed);
+    }
+
+    #[test]
+    fn file_lock_serializes_managed_daemon_installers() {
+        const INSTALLERS: usize = 8;
+        let lock_path = managed_test_file("install-lock");
+        let barrier = Arc::new(std::sync::Barrier::new(INSTALLERS));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut installers = Vec::new();
+
+        for _ in 0..INSTALLERS {
+            let lock_path = lock_path.clone();
+            let barrier = Arc::clone(&barrier);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            installers.push(thread::spawn(move || {
+                barrier.wait();
+                let _lock = acquire_file_lock(&lock_path).expect("安装锁获取失败");
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(now, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        for installer in installers {
+            installer.join().unwrap();
+        }
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "跨执行上下文的 managed 安装必须完全串行"
+        );
+        let _ = std::fs::remove_file(lock_path);
     }
 }
 

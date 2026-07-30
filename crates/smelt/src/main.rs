@@ -1423,6 +1423,9 @@ struct Workspace {
     file_tree_pending_reveal: Option<String>,
     /// 当前在文件树里打开查看的文件（含预高亮的行数据）。
     open_file: Option<OpenFile>,
+    /// ACP 消息图片的窗口级预览。放在 Workspace 而非 AcpView，遮罩才能覆盖侧栏、
+    /// inspector 和输入区，且不受会话面板裁剪。
+    acp_image_preview: Option<Arc<gpui::Image>>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
     file_gen: u64,
     /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
@@ -1492,6 +1495,12 @@ struct Workspace {
     skills_cache: skills::SkillsCache,
     skills_cache_cwd: Option<String>,
     skills_inflight: bool,
+    /// 「新建/编辑 skill」弹窗；`None` = 未打开。
+    skill_modal: Option<skills::SkillModalState>,
+    /// 「删除 skill」二次确认目标；`None` = 未在删。
+    skill_delete_target: Option<skills::SkillEntry>,
+    /// 「管理链接 / 应用到其他工具」弹窗；`None` = 未打开。
+    skill_link_modal: Option<skills::SkillLinkModalState>,
     /// 通知面板是否打开（标题栏铃铛切换）。
     notifications_open: bool,
     /// 命令面板（Cmd+K）；None 表示未打开。搜索/导航/确认由 ListState 负责。
@@ -1810,6 +1819,7 @@ impl Workspace {
             file_tree_selected: None,
             file_tree_pending_reveal: None,
             open_file: None,
+            acp_image_preview: None,
             file_gen: 0,
             pending_file_switch: None,
             delete_file_target: None,
@@ -1853,6 +1863,9 @@ impl Workspace {
             skills_cache: None,
             skills_cache_cwd: None,
             skills_inflight: false,
+            skill_modal: None,
+            skill_delete_target: None,
+            skill_link_modal: None,
             notifications_open: false,
             palette: None,
             _palette_sub: None,
@@ -2486,8 +2499,12 @@ impl Workspace {
     ) -> gpui::Subscription {
         cx.subscribe(
             view,
-            |this: &mut Self, _view, _ev: &acp_view::AcpViewEvent, cx| {
-                this.save_state(cx);
+            |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, cx| match ev {
+                acp_view::AcpViewEvent::Changed => this.save_state(cx),
+                acp_view::AcpViewEvent::PreviewImage(image) => {
+                    this.acp_image_preview = Some(image.clone());
+                    cx.notify();
+                }
             },
         )
     }
@@ -4963,7 +4980,7 @@ impl Workspace {
                 hotspot_view(cwd, data, cx).into_any_element()
             }
             MainView::History => {
-                let cwd = self.cur().and_then(|s| s.cwd(cx));
+                let cwd = self.active_project_root(cx);
                 let list_key = cwd.as_ref().map(|c| {
                     session_history::session_list_key(
                         self.history_agent,
@@ -5137,8 +5154,8 @@ impl Render for Workspace {
         if let Some(msg) = self.background_error.take() {
             window.push_notification(Notification::error(msg), cx);
         }
-        // 所有 producer 共用的投递出口：前台 toast，后台 macOS 通知，正在看的 pane
-        // 只确认未读不弹。设置开关只控制打扰渠道，不影响 store 的状态与铃铛记录。
+        // 所有 producer 共用的投递出口：前台 toast，后台 macOS 通知；应用在前台时，
+        // 正在看的 pane 一律不弹。设置开关只控制打扰渠道，不影响 store 的状态与铃铛记录。
         let workspace = cx.entity();
         if let Some(store) = cx.try_global::<AttentionGlobal>() {
             let batch = store.0.lock().unwrap().drain_deliveries();
@@ -5177,7 +5194,6 @@ impl Render for Workspace {
                     agent_notification_enabled(&notify_config, notification.kind),
                     window.is_window_active(),
                     is_current_view,
-                    notification.kind.requires_action(),
                 ) {
                     smelt_core::attention::DeliveryChannel::Suppress => {}
                     smelt_core::attention::DeliveryChannel::Toast => {
@@ -5246,7 +5262,7 @@ impl Render for Workspace {
 
         // 历史会话页：后台刷新当前项目的会话列表 / 记忆列表（看当前是哪个子页）。
         if self.stage_override == Some(MainView::History) {
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
+            if let Some(root) = self.active_project_root(cx) {
                 match self.history_pane {
                     HistoryPane::Sessions => {
                         let pid = self.history_profile.clone();
@@ -5481,6 +5497,61 @@ impl Render for Workspace {
                 )
         });
 
+        let image_preview_overlay = self.acp_image_preview.as_ref().map(|image| {
+            let image = image.clone();
+            div()
+                .id("workspace-image-preview-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x000000d9))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.acp_image_preview = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("workspace-image-preview-content")
+                        .w(relative(0.86))
+                        .h(relative(0.84))
+                        .cursor_default()
+                        .on_click(|_ev, _window, cx| cx.stop_propagation())
+                        .child(
+                            img(image)
+                                .size_full()
+                                .object_fit(ObjectFit::Contain)
+                                .rounded_md(),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("workspace-image-preview-close")
+                        .absolute()
+                        .top(px(48.))
+                        .right(px(48.))
+                        .size(px(34.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgba(0xffffff33))
+                        .bg(rgba(0x181818ee))
+                        .text_color(rgb(0xffffff))
+                        .text_lg()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgba(0x303030ff)))
+                        .child("×")
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.acp_image_preview = None;
+                            cx.notify();
+                        })),
+                )
+        });
+
         div()
             .relative()
             .flex()
@@ -5547,6 +5618,10 @@ impl Render for Workspace {
             // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
+                if ks.key == "escape" && this.acp_image_preview.take().is_some() {
+                    cx.notify();
+                    return;
+                }
                 // 文件树键盘导航：搜索框 / 编辑器聚焦时不抢键。
                 if matches!(
                     this.stage_override,
@@ -5888,6 +5963,24 @@ impl Render for Workspace {
                     .is_some()
                     .then(|| self.render_delete_file_confirm(cx)),
             )
+            // 新建/编辑 skill 弹窗
+            .children(
+                self.skill_modal
+                    .is_some()
+                    .then(|| self.render_skill_modal(cx)),
+            )
+            // 删除 skill 二次确认拦截弹层
+            .children(
+                self.skill_delete_target
+                    .is_some()
+                    .then(|| self.render_delete_skill_confirm(cx)),
+            )
+            // 管理 skill 在各 agent 下的链接。
+            .children(
+                self.skill_link_modal
+                    .is_some()
+                    .then(|| self.render_skill_link_modal(cx)),
+            )
             // 重启守护确认弹层改挂在设置窗（SettingsWindow::render），不在主窗口画。
             // Finder 拖文件/文件夹：只在有拖拽时叠全窗 drop 层。
             // 常驻 hitbox 会盖住按钮（「新建终端」像没反应）；对齐「有 drag 才出现」。
@@ -5954,6 +6047,8 @@ impl Render for Workspace {
                     .text_color(color)
                     .child(format!("{fps:.0} FPS · {ms:.1} ms · RSS {mem}"))
             }))
+            // 图片预览必须最后挂载，覆盖标题栏、两侧栏、通知和调试层。
+            .children(image_preview_overlay)
     }
 }
 
@@ -6030,6 +6125,33 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(String::from_utf8(bytes).ok()?))
 }
 
+/// ACP Markdown 的内部文件链接。使用独立 scheme，避免 `file://` 被 macOS
+/// LaunchServices 交给外部应用；`#L42` 可选片段用于定位行号。
+fn smelt_file_url_to_target(url: &str) -> Option<(String, Option<usize>)> {
+    let rest = url.strip_prefix("smelt-file://")?;
+    let (path_part, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let path = file_url_to_path(&format!("file://{path_part}"))?;
+    let path = path.to_str()?.to_string();
+    let line = fragment
+        .strip_prefix('L')
+        .and_then(|value| value.parse().ok());
+    Some((path, line))
+}
+
+#[cfg(test)]
+mod internal_file_url_tests {
+    use super::smelt_file_url_to_target;
+
+    #[test]
+    fn decodes_path_and_optional_line() {
+        assert_eq!(
+            smelt_file_url_to_target("smelt-file:///tmp/a%20b.rs#L42"),
+            Some(("/tmp/a b.rs".into(), Some(42)))
+        );
+        assert!(smelt_file_url_to_target("https://example.com/a.rs").is_none());
+    }
+}
+
 /// 开一扇主工作台窗口（Workspace + Root 包装），返回其 weak 引用。
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档 + smeltd
 /// 重新拼出会话布局，跟正常重启应用效果一致。
@@ -6102,6 +6224,16 @@ fn main() {
     app.run(move |cx| {
         // 用任何 gpui-component 功能前必须先初始化。
         gpui_component::init(cx);
+        // Markdown 中的本地文件链接使用 smelt-file://，由 on_open_urls 回流到
+        // Workspace 的内置编辑器。打包时 Info.plist 也声明该 scheme；运行时注册
+        // 用于已安装应用升级后无需重启 LaunchServices 数据库。
+        let register_file_scheme = cx.register_url_scheme("smelt-file");
+        cx.spawn(async move |_cx| {
+            if let Err(error) = register_file_scheme.await {
+                eprintln!("[workspace] 注册 smelt-file URL scheme 失败：{error}");
+            }
+        })
+        .detach();
         // 内嵌终端默认字体 JetBrainsMono Nerd Font Mono（Regular/Bold），Ghostty 同款
         // 思路：默认字体自己带，不赌用户装没装——任何机器上默认字体族都能解析成功，
         // 杜绝"没装字体 → 测量/渲染各自 fallback 到不同字体 → 列宽错乱"。它是打过
@@ -6446,14 +6578,25 @@ fn main() {
         let current_ws_status = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv().await {
+                let internal_files: Vec<(String, Option<usize>)> = urls
+                    .iter()
+                    .filter_map(|url| smelt_file_url_to_target(url))
+                    .collect();
                 let paths: Vec<std::path::PathBuf> =
                     urls.iter().filter_map(|u| file_url_to_path(u)).collect();
-                if paths.is_empty() {
+                if paths.is_empty() && internal_files.is_empty() {
                     continue;
                 }
                 let ws = current_ws.borrow().clone();
                 if let Some(ws) = ws {
-                    let _ = ws.update(cx, |ws, cx| ws.open_paths(&paths, cx));
+                    if !paths.is_empty() {
+                        let _ = ws.update(cx, |ws, cx| ws.open_paths(&paths, cx));
+                    }
+                    for (path, line) in internal_files {
+                        let _ = ws.update_in(cx, |ws, window, cx| {
+                            ws.view_file_at(path, line, window, cx)
+                        });
+                    }
                 }
             }
         })
@@ -6477,10 +6620,17 @@ fn main() {
                                 }
                                 status_item::StatusItemEvent::JumpToDaemonSession(id) => {
                                     ws.sessions.iter().enumerate().find_map(|(ix, session)| {
-                                        session.term_leaves().into_iter().find_map(|pane| {
-                                            (pane.read(cx).session_id() == id)
-                                                .then_some((ix, Some(pane)))
-                                        })
+                                        match &session.kind {
+                                            SessionKind::Term { .. } => {
+                                                session.term_leaves().into_iter().find_map(|pane| {
+                                                    (pane.read(cx).session_id() == id)
+                                                        .then_some((ix, Some(pane)))
+                                                })
+                                            }
+                                            SessionKind::Acp(view) => (view.read(cx).session_id()
+                                                == id)
+                                                .then_some((ix, None)),
+                                        }
                                     })
                                 }
                                 status_item::StatusItemEvent::ActivateMain => None,
@@ -6489,6 +6639,13 @@ fn main() {
                                 ws.active_session = ix;
                                 if let Some(pane) = pane {
                                     ws.sessions[ix].set_active_term(pane);
+                                }
+                                if let Some(group) = ws
+                                    .project_groups(cx)
+                                    .into_iter()
+                                    .find(|group| group.sessions.contains(&ix))
+                                {
+                                    ws.active_project = Some(group.root);
                                 }
                                 ws.stage_override = None;
                                 ws.save_state(cx);
@@ -7031,8 +7188,8 @@ mod acp_agent_tests {
 
         assert_eq!(restored.profile_id.as_deref(), Some("quant"));
         assert_eq!(
-            restored.history_session_id.as_ref().map(|s| s.to_string()),
-            Some("canonical-history".to_string())
+            restored.history_session_id.as_ref().map(|id| id.0.as_ref()),
+            Some("canonical-history")
         );
         assert_eq!(
             restored
@@ -7055,8 +7212,8 @@ mod acp_agent_tests {
         .unwrap();
 
         assert_eq!(
-            restored.history_session_id.as_ref().map(|s| s.to_string()),
-            Some("legacy-canonical".to_string())
+            restored.history_session_id.as_ref().map(|id| id.0.as_ref()),
+            Some("legacy-canonical")
         );
         let migrated = serde_json::to_value(restored).unwrap();
         assert_eq!(migrated["history_session_id"], "legacy-canonical");

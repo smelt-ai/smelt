@@ -289,6 +289,138 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
+/// 串行化“检查现有实例 → 清理僵尸 socket → bind”整段启动流程。
+///
+/// 只做 connect 后 remove_file 存在 TOCTOU：两个并发启动者都可能先观察到
+/// socket 不存在，后启动者再把先启动者刚 bind 的有效路径删掉，令先启动者变成
+/// 仍托管会话但无法接受新连接的孤立 daemon。flock 随进程退出自动释放，也能覆盖
+/// 多个 GUI 进程同时拉起守护的情况。
+fn bind_single_instance(
+    path: &std::path::Path,
+    check_existing: bool,
+) -> std::io::Result<Option<UnixListener>> {
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    if check_existing && UnixStream::connect(path).is_ok() {
+        return Ok(None);
+    }
+    let _ = std::fs::remove_file(path);
+    UnixListener::bind(path).map(Some)
+}
+
+fn bind_fresh_daemon(
+    path: &std::path::Path,
+    stale_handoff: &std::path::Path,
+    check_existing: bool,
+) -> std::io::Result<Option<UnixListener>> {
+    let listener = bind_single_instance(path, check_existing)?;
+    if listener.is_some() {
+        // 只有确认自己取得 listener 后才能清理。若已有 daemon 正在 upgrade，
+        // 它刚写下的 handoff 是活数据，竞争启动者必须原样保留并直接退出。
+        let _ = std::fs::remove_file(stale_handoff);
+    }
+    Ok(listener)
+}
+
+#[cfg(test)]
+mod single_instance_tests {
+    use super::*;
+
+    fn test_socket(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("smeltd-{name}-{}-{nonce}.sock", std::process::id()))
+    }
+
+    #[test]
+    fn concurrent_starters_leave_exactly_one_listener() {
+        const STARTERS: usize = 8;
+        let path = test_socket("single-instance");
+        let barrier = Arc::new(std::sync::Barrier::new(STARTERS));
+        let mut starters = Vec::new();
+
+        for _ in 0..STARTERS {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            starters.push(thread::spawn(move || {
+                let listener = bind_single_instance(&path, true).expect("并发启动不应 bind 失败");
+                barrier.wait();
+                listener.is_some()
+            }));
+        }
+
+        let listeners = starters
+            .into_iter()
+            .map(|starter| starter.join().unwrap())
+            .filter(|has_listener| *has_listener)
+            .count();
+        assert_eq!(listeners, 1, "并发启动只能有一个进程取得 listener");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[test]
+    fn stale_socket_path_is_replaced_while_holding_startup_lock() {
+        let path = test_socket("stale");
+        std::fs::write(&path, b"stale").unwrap();
+
+        let listener = bind_single_instance(&path, true)
+            .expect("僵尸 socket 应可恢复")
+            .expect("没有活实例时应取得 listener");
+        assert!(UnixStream::connect(&path).is_ok());
+
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[test]
+    fn existing_daemon_keeps_live_handoff_file() {
+        let path = test_socket("live-handoff");
+        let handoff = path.with_extension("handoff");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::write(&handoff, b"live upgrade snapshot").unwrap();
+
+        let result = bind_fresh_daemon(&path, &handoff, true).unwrap();
+
+        assert!(result.is_none(), "已有 daemon 时竞争启动者必须退出");
+        assert!(
+            handoff.is_file(),
+            "竞争启动者不能删除已有 daemon 正在使用的 handoff"
+        );
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&handoff);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+
+    #[test]
+    fn fresh_daemon_removes_stale_handoff_file() {
+        let path = test_socket("stale-handoff");
+        let handoff = path.with_extension("handoff");
+        std::fs::write(&handoff, b"stale").unwrap();
+
+        let listener = bind_fresh_daemon(&path, &handoff, true)
+            .unwrap()
+            .expect("没有已有 daemon 时应取得 listener");
+
+        assert!(!handoff.exists(), "新 daemon 应清理陈旧 handoff");
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+    }
+}
+
 /// 追加一行到 ~/.smelt/daemon.log。只给「守护无声死亡」的几条路径留痕用——
 /// 守护被 SIGKILL（例：装新版时用 cp 覆盖了已签名二进制，upgrade 的 exec 会被
 /// macOS 内核直接杀掉，无输出无崩溃报告）或静默 return 时，这份日志是唯一线索：
@@ -1693,13 +1825,9 @@ fn main() {
                 // 一个泄漏的 fd 留在本进程里，无害但也无法优雅关闭——resume_handoff
                 // 失败通常发生在 JSON 都解析不出来的极端情况，代价可接受），把 socket
                 // 文件净空重 bind，保证守护本身不能倒。
-                if !came_from_handoff && UnixStream::connect(&path).is_ok() {
-                    return;
-                }
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(handoff_path()); // 清掉可能残留的上次交接文件
-                let listener = match UnixListener::bind(&path) {
-                    Ok(l) => l,
+                let listener = match bind_fresh_daemon(&path, &handoff_path(), !came_from_handoff) {
+                    Ok(Some(l)) => l,
+                    Ok(None) => return,
                     Err(e) => {
                         // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
                         // 死因（排障时被坑过——必须留痕）。
@@ -4416,11 +4544,10 @@ fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
 /// `ApplyOutcome::should_persist`；用户动作（发 prompt/选权限）驱动的固定
 /// false——跟旧版行为一致，用户主动发起的变化不单独触发落盘，等下一次
 /// 协议事件（通常是 TurnEnded）时一并存。
-fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
+fn push_acp_snapshot_since(sess: &AcpSession, should_persist: bool, entries_offset: Option<usize>) {
     let snap = {
         let reduced = sess.reduced.lock().unwrap();
-        // 最后一项可能正在接收流式增量；连同它一起覆盖即可，不再复制整段历史。
-        let offset = reduced.entries.len().saturating_sub(1);
+        let offset = entries_offset.unwrap_or(reduced.entries.len());
         reduced.to_snapshot_since(should_persist, offset)
     };
     let payload = serde_json::json!({ "snapshot": snap }).to_string();
@@ -4432,6 +4559,11 @@ fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
     }
     out.watchers
         .retain_mut(|w| writeln!(w, "{payload}").is_ok());
+}
+
+fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
+    let offset = sess.reduced.lock().unwrap().entries.len().saturating_sub(1);
+    push_acp_snapshot_since(sess, should_persist, Some(offset));
 }
 
 /// 事件 drain：整个会话生命周期只有这一条线程在改 `reduced`（`apply_acp_user_action`
@@ -4452,7 +4584,7 @@ fn start_acp_event_drain(
                     let mut st = sess.reduced.lock().unwrap();
                     smelt_core::acp_session::apply_event(&mut st, ev)
                 };
-                push_acp_snapshot(&sess, outcome.should_persist);
+                push_acp_snapshot_since(&sess, outcome.should_persist, outcome.entries_offset);
                 update_acp_daemon_state(&sess, &subscribers);
             }
         });
@@ -4464,7 +4596,7 @@ fn start_acp_event_drain(
         if !already_ended {
             sess.reduced.lock().unwrap().phase =
                 smelt_core::acp_session::AcpPhase::Ended("连接意外中断".to_string());
-            push_acp_snapshot(&sess, true);
+            push_acp_snapshot_since(&sess, true, None);
         }
         update_acp_daemon_state(&sess, &subscribers);
     });
@@ -4562,16 +4694,14 @@ fn apply_acp_user_action(
             let Some(cmd_tx) = cmd_tx else {
                 return Err("ACP session is not running");
             };
-            let img_count = images.len();
-            // 展示文案跟旧版 GUI `send_prompt` 一致：base64 图片体积大，历史里
-            // 只留「带了几张图」的标记。
-            let shown = match (text.is_empty(), img_count) {
-                (_, 0) => text.clone(),
-                (true, n) => format!("[{n} 张图片]"),
-                (false, n) => format!("{text}\n[{n} 张图片]"),
-            };
+            let shown_images = images.clone();
+            let shown_text = text.clone();
             if cmd_tx.try_send(AcpCommand::Prompt { text, images }).is_ok() {
-                smelt_core::acp_session::note_prompt_sent(&mut sess.reduced.lock().unwrap(), shown);
+                smelt_core::acp_session::note_prompt_sent(
+                    &mut sess.reduced.lock().unwrap(),
+                    shown_text,
+                    shown_images,
+                );
                 push_acp_snapshot(sess, false);
                 update_acp_daemon_state(sess, subscribers);
                 Ok(())
@@ -6692,6 +6822,50 @@ mod acp_tests {
         BufReader::new(w_client).read_line(&mut line).unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert!(v.get("snapshot").is_some());
+    }
+
+    #[test]
+    fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
+        let mut reduced = AcpSessionState::default();
+        for id in ["tool-a", "tool-b"] {
+            reduced.entries.push(AcpEntry::ToolCall {
+                id: id.into(),
+                title: id.into(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                output: Vec::new(),
+            });
+        }
+        let sess = make_acp_session("acp-parallel", reduced);
+        let (server, client) = UnixStream::pair().unwrap();
+        sess.out.lock().unwrap().client = Some(server);
+
+        let outcome = {
+            let mut state = sess.reduced.lock().unwrap();
+            smelt_core::acp_session::apply_event(
+                &mut state,
+                smelt_core::acp_conn::AcpEvent::ToolFinished {
+                    id: "tool-a".into(),
+                    status: ToolCallStatus::Completed,
+                    output: Vec::new(),
+                },
+            )
+        };
+        push_acp_snapshot_since(&sess, false, outcome.entries_offset);
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["snapshot"]["entries_offset"], 0);
+        assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            response["snapshot"]["entries"][0]["ToolCall"]["status"],
+            "completed"
+        );
+        assert_eq!(
+            response["snapshot"]["entries"][1]["ToolCall"]["status"],
+            "in_progress"
+        );
     }
 
     #[test]

@@ -15,6 +15,10 @@ use crate::{MainView, Workspace, ui_theme};
 /// 鼠标移到卡片才显形「编辑 / 删除」。名字全卡共享，靠 DOM 祖先关系就近生效。
 const TASK_CARD_GROUP: &str = "insp-task-card";
 
+/// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
+/// `.group_hover()`）。
+const SKILL_CARD_GROUP: &str = "insp-skill-card";
+
 /// inspector 面板的四个 tab。
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum InspectorTab {
@@ -484,10 +488,12 @@ impl Workspace {
     /// `enabledPlugins` 管插件不管 skill），拨了不生效的开关比没有更糟。
     fn render_inspector_skills(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let cwd = self.cur().and_then(|s| s.cwd(cx));
-        self.ensure_skills(cwd, cx);
+        self.ensure_skills(cwd.clone(), cx);
         let this = cx.entity();
         let skills = self.skills_cache.as_ref().map(|(_, d)| d.clone());
+        let has_project = cwd.is_some();
 
+        let e_import = this.clone();
         let header = div()
             .h(px(36.))
             .flex_shrink_0()
@@ -504,12 +510,33 @@ impl Workspace {
                     .text_color(rgb(ui_theme::text_muted()))
                     .child("SKILLS"),
             )
-            .children(skills.as_ref().map(|s| {
+            .child(
                 div()
-                    .text_size(px(10.))
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child(s.len().to_string())
-            }));
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(skills.as_ref().map(|s| {
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(ui_theme::text_faint()))
+                            .child(s.len().to_string())
+                    }))
+                    .child(
+                        div()
+                            .id("inspector-skill-import")
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::accent()))
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.8))
+                            .child("导入")
+                            .on_click(move |_ev, _window, cx| {
+                                e_import.update(cx, |ws, cx| {
+                                    ws.import_skill_from_folder(has_project, cx)
+                                });
+                            }),
+                    ),
+            );
 
         let mut list = div()
             .id("inspector-skill-list")
@@ -577,9 +604,104 @@ impl Workspace {
                     };
                     let e_use = this.clone();
                     let cmd = format!("/{}", sk.name);
+                    let e_edit = this.clone();
+                    let e_del = this.clone();
+                    let e_reveal = this.clone();
+                    let e_adopt = this.clone();
+                    let sk_edit = sk.clone();
+                    let sk_del = sk.clone();
+                    let sk_adopt = sk.clone();
+                    let reveal_path = sk.dir.to_string_lossy().into_owned();
+                    let hover_bar = div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .opacity(0.0)
+                        .group_hover(SKILL_CARD_GROUP, |s| s.opacity(1.0))
+                        .when(sk.managed, |d| {
+                            d.child(
+                                div()
+                                    .id(("inspector-skill-edit", six))
+                                    .px_1()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .hover(|s| s.text_color(rgb(ui_theme::accent())))
+                                    .child("编辑")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(move |_ev, window, cx| {
+                                        let sk = sk_edit.clone();
+                                        e_edit.update(cx, |ws, cx| {
+                                            ws.open_edit_skill_modal(&sk, window, cx)
+                                        });
+                                    }),
+                            )
+                        })
+                        .when(!sk.managed, |d| {
+                            // 非托管 skill 的 SKILL.md 格式我们不一定完全吃得
+                            // 准（可能带我们解析不了的复杂 frontmatter），贸然
+                            // 用我们的编辑器重写容易把人家的内容写坏——只给个
+                            // 「访达打开」，让用户自己去看/改源文件。
+                            d.child(
+                                div()
+                                    .id(("inspector-skill-reveal", six))
+                                    .px_1()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .hover(|s| s.text_color(rgb(ui_theme::accent())))
+                                    .child("访达打开")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(move |_ev, _window, cx| {
+                                        let path = reveal_path.clone();
+                                        e_reveal.update(cx, |ws, cx| {
+                                            ws.reveal_path_in_finder(path, cx)
+                                        });
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(("inspector-skill-adopt", six))
+                                    .px_1()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .text_color(rgb(ui_theme::text_faint()))
+                                    .hover(|s| s.text_color(rgb(ui_theme::accent())))
+                                    .child("应用到其他工具")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(move |_ev, _window, cx| {
+                                        let sk = sk_adopt.clone();
+                                        e_adopt
+                                            .update(cx, |ws, cx| ws.open_skill_link_modal(&sk, cx));
+                                    }),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id(("inspector-skill-del", six))
+                                .px_1()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(rgb(ui_theme::text_faint()))
+                                .hover(|s| s.text_color(rgb(ui_theme::red())))
+                                .child("删除")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_ev, _window, cx| {
+                                    let sk = sk_del.clone();
+                                    e_del.update(cx, |ws, cx| ws.request_delete_skill(&sk, cx));
+                                }),
+                        );
                     list = list.child(
                         div()
                             .id(("inspector-skill", six))
+                            .group(SKILL_CARD_GROUP)
                             .rounded(px(8.))
                             .border_1()
                             .border_color(rgb(ui_theme::border_mid()))
@@ -607,7 +729,24 @@ impl Workspace {
                                             .text_color(rgb(ui_theme::text_bright()))
                                             .truncate()
                                             .child(sk.name.clone()),
-                                    ),
+                                    )
+                                    .when(!sk.managed, |d| {
+                                        // 非托管 skill：不用笼统的「旧」，直接
+                                        // 标出它实际躺在哪个 agent 的目录里，
+                                        // 免得用户看着一堆卡片分不清归属。
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px_1()
+                                                .rounded_xs()
+                                                .border_1()
+                                                .border_color(rgb(ui_theme::border_dim()))
+                                                .text_size(px(9.))
+                                                .text_color(rgb(ui_theme::text_faint()))
+                                                .child(sk.source_agent.unwrap_or("旧")),
+                                        )
+                                    })
+                                    .child(hover_bar),
                             )
                             .when(!sk.description.is_empty(), |d| {
                                 d.child(
@@ -620,6 +759,42 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(sk.description.clone()),
                                 )
+                            })
+                            .when(sk.managed, |d| {
+                                d.child(div().flex().items_center().gap_1().children(
+                                    crate::skills::AGENT_TARGETS.iter().map(|t| {
+                                        let linked = sk.linked_agents.contains(&t.label);
+                                        let e_toggle = this.clone();
+                                        let sk_toggle = sk.clone();
+                                        let label = t.label;
+                                        div()
+                                            .id(format!("inspector-skill-link-chip-{six}-{label}"))
+                                            .px_1()
+                                            .rounded_xs()
+                                            .text_size(px(9.))
+                                            .cursor_pointer()
+                                            .when(linked, |d| {
+                                                d.text_color(rgb(ui_theme::text_bright()))
+                                                    .bg(rgb(ui_theme::bg_elev()))
+                                            })
+                                            .when(!linked, |d| {
+                                                d.text_color(rgb(ui_theme::text_faint()))
+                                                    .opacity(0.5)
+                                                    .hover(|d| d.opacity(0.85))
+                                            })
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(move |_ev, _window, cx| {
+                                                e_toggle.update(cx, |ws, cx| {
+                                                    ws.toggle_managed_skill_link(
+                                                        &sk_toggle, label, cx,
+                                                    )
+                                                });
+                                            })
+                                            .child(label)
+                                    }),
+                                ))
                             })
                             .on_click(move |_ev, window, cx| {
                                 let cmd = cmd.clone();
