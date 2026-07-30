@@ -30,20 +30,17 @@ mod inspector;
 mod mem_usage;
 use smelt_core::osc;
 mod pet;
-mod rate_limits;
 mod session_history;
 mod session_list;
 mod settings;
 mod skills;
 mod stage;
-mod status_bar;
 mod status_item;
 mod tasks;
 mod terminal;
 mod terminal_view;
 
 mod updater;
-mod usage_stats;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -56,7 +53,6 @@ use std::time::{Duration, Instant};
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::badge::Badge;
 use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::Input;
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
@@ -69,11 +65,8 @@ use gpui_component::*;
 use notify::RecommendedWatcher;
 use terminal_view::TerminalView;
 
-use file_tree::{
-    DeleteFileTarget, OpenFile, SearchState, file_content_pane, file_tree, search_results_view,
-};
-use git_panel::{BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo, git_view};
-use hotspot::hotspot_view;
+use file_tree::{DeleteFileTarget, OpenFile, SearchState};
+use git_panel::{BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo};
 use session_history::{HistoryListState, HistoryPane, history_view};
 use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
 
@@ -219,14 +212,9 @@ enum MainView {
     Tasks,
     /// 「文件树 + 内容」双栏全宽（inspector FILES 面板 ⤢ 提升上来；此时面板收起）。
     Files,
-    /// 只有文件内容：树留在右侧停靠面板里，舞台不再摆第二份。
-    /// 从停靠的 FILES 面板点文件走这条，不是整页跳转。
-    FileDetail,
     /// 「变更列表 + diff」双栏全宽（inspector GIT 面板 ⤢ 提升上来；此时面板收起）。
+    /// 日志 / 热力图现在是 GIT 面板内部的子标签（见 GitTab），不再是独立变体。
     Git,
-    /// 只有 diff：变更列表留在右侧停靠面板里，舞台只出详情。
-    DiffDetail,
-    Hotspot,
     History,
 }
 
@@ -238,6 +226,15 @@ enum GitTab {
     Changes,
     /// 提交历史 + 分支图。
     Log,
+    /// 改动热力图（原本是舞台单独一页，现收进 GIT 面板当第三个子标签，
+    /// 停靠 / 展开态复用同一份 UI，见 render_stage_override 的解释）。
+    Hotspot,
+}
+
+impl Default for GitTab {
+    fn default() -> Self {
+        Self::Changes
+    }
 }
 
 // 会话里 agent 的状态（总览页状态徽章 / 侧栏状态点）：搬进 smelt-core（跟
@@ -760,6 +757,12 @@ struct WsState {
     /// 会话侧栏拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     sidebar_w: Option<f32>,
+    /// 右侧 inspector 面板拖出的宽度（px）；None = 用默认值。
+    #[serde(default)]
+    inspector_w: Option<f32>,
+    /// 右侧 inspector 面板上次是否展开；None（旧存档）= 默认展开。
+    #[serde(default)]
+    inspector_open: Option<bool>,
     /// 文件树列拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     file_tree_w: Option<f32>,
@@ -775,9 +778,6 @@ struct WsState {
     /// 会话侧栏的分组方式；旧存档默认按项目。
     #[serde(default)]
     sidebar_grouping: SidebarGrouping,
-    /// Git 页左栏（变更文件列表）拖出的宽度（px）；None = 用默认值。
-    #[serde(default)]
-    git_left_w: Option<f32>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
     /// 旧格式：单棵分屏树。
     #[serde(default)]
@@ -1396,12 +1396,34 @@ fn load_ws_state() -> Option<WsState> {
     load_ws_state_from_path(&ws_state_path()?)
 }
 
+/// 单个项目记忆的一份 inspector 状态——见 `Workspace::project_ui`。字段选的是
+/// 会明显跨项目串味、体验上必须各归各的那几个：当前 tab、正在看的文件、Git
+/// 子标签和当前 diff。展开的目录 / 目录缓存这些 key 本来就是绝对路径，天然
+/// 不会跨项目冲突，不需要搬进来。
+#[derive(Default)]
+struct ProjectUiState {
+    inspector_tab: inspector::InspectorTab,
+    open_file: Option<OpenFile>,
+    file_tree_selected: Option<String>,
+    git_tab: GitTab,
+    git_diff: Option<GitDiff>,
+    diff_selected: HashSet<usize>,
+    active_hunk: Option<usize>,
+}
+
 /// 工作台根视图：多标签终端管理器。
 struct Workspace {
     /// 所有会话；每个会话 = 一棵独立分屏树 + 会话内活动 pane。
     sessions: Vec<Session>,
     /// 当前活动会话索引（主区显示它、侧栏高亮它）。
     active_session: usize,
+    /// 按项目 cwd 记忆的侧边栏状态（当前 tab / 打开的文件 / GIT 子标签等），运行
+    /// 时用——不落盘，重启后各项目仍从默认态开始。key 是 `project_root_of` 算出
+    /// 的项目根（没匹配到项目根就退化用 cwd 本身兜底，仍能各开各的）。
+    project_ui: HashMap<String, ProjectUiState>,
+    /// 当前这份 inspector 状态是哪个项目的——每帧 render 开头跟活动会话的项目
+    /// 一比，变了就把旧的存进 project_ui、换一份新项目的上来（见 sync_project_ui）。
+    ui_project_key: Option<String>,
     /// 舞台覆盖页：Some = 旧全屏页（总览/任务/文件树/Git/热力图/历史）盖住会话
     /// 舞台；None = 正常显示当前会话。Esc / 各入口收回时清 None。
     stage_override: Option<MainView>,
@@ -1459,6 +1481,10 @@ struct Workspace {
     delete_branch_target: Option<(String, String, bool)>,
     /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
     git_log_resize: Entity<ResizableState>,
+    /// 工作台主三栏（会话列表 / 舞台 / inspector）的单层拖拽状态。
+    workspace_resize: Entity<ResizableState>,
+    sidebar_w: f32,
+    inspector_w: f32,
     /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
     diff_selected: HashSet<usize>,
     /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
@@ -1509,16 +1535,12 @@ struct Workspace {
     _palette_sub: Option<Subscription>,
     /// 各滚动区的常驻滚动句柄——供 gpui-component Scrollbar 读取位置并绘制。
     /// 必须常驻（每帧新建会丢失滚动位置）。
-    git_files_scroll: ScrollHandle,
     diff_scroll: UniformListScrollHandle,
     /// 文件树列表的滚动句柄（普通滚动，非虚拟滚动——见 file_tree 函数注释）。
     file_tree_scroll: ScrollHandle,
     /// 文件树列宽拖拽状态（对面板：文件树 + 右侧文件内容）；拖动完通过 save_state
     /// 落盘到 file_tree_w，重启后从存档恢复。
     file_tree_resize: Entity<ResizableState>,
-    /// Git 页左栏 resize 状态；宽度落盘到 git_left_w，同文件树一套。
-    git_left_resize: Entity<ResizableState>,
-    git_left_w: f32,
     /// 文件树顶部的过滤输入框；首次渲染文件树时懒创建（需要 window）。
     file_filter: Option<Entity<gpui_component::input::InputState>>,
     /// 过滤框的变更订阅（键入即重渲染）；随视图存活。
@@ -1560,7 +1582,7 @@ struct Workspace {
     file_tree_w: f32,
     /// 文件树列 resize 事件订阅（拖动完写回存档）；随视图存活。
     _file_tree_resize_sub: Subscription,
-    _git_left_resize_sub: Subscription,
+    _workspace_resize_sub: Subscription,
     /// 宠物大脑（LLM）配置的输入框；首次打开设置面板时懒创建（需要 window）。
     llm_inputs: Option<LlmInputs>,
     /// 上面几个输入框的变更订阅（保活；随视图存活）。
@@ -1668,15 +1690,6 @@ struct Workspace {
     /// 上次同步给菜单栏下拉菜单的会话快照；None 强制首帧同步一次。只在快照真的变化
     /// 时才重建 AppKit 菜单，避免每次 render 都拆了重建。
     status_menu_snapshot: Option<Vec<status_item::SessionEntry>>,
-    /// 用量页数据缓存：(取得时刻, 数据)。扫全部本地 transcript 可能有几十毫秒，
-    /// 绝不在 render 里同步跑，后台算完缓存，render 只读。
-    usage_cache: Option<(Instant, Rc<usage_stats::UsageData>)>,
-    /// 正在后台扫描用量数据（防重复并发 spawn）。
-    usage_inflight: bool,
-    /// Codex / Claude 订阅额度快照；后台刷新，侧栏 render 只读。
-    rate_limits: rate_limits::RateLimitSnapshot,
-    /// 额度刷新循环是否已经启动。
-    rate_limits_refresh_started: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话, 插它前面?)。由 drop 层的 on_drag_move
     /// 维护，驱动插入指示条的出现动画；起拖时清空，避免上次拖拽的残留闪一帧。
     sess_drop_hint: Option<(EntityId, bool)>,
@@ -1761,7 +1774,9 @@ impl Workspace {
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let saved = load_ws_state();
         let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
-        let git_left_w = saved.as_ref().and_then(|s| s.git_left_w).unwrap_or(300.);
+        let sidebar_w = saved.as_ref().and_then(|s| s.sidebar_w).unwrap_or(280.);
+        let inspector_w = saved.as_ref().and_then(|s| s.inspector_w).unwrap_or(344.);
+        let inspector_open = saved.as_ref().and_then(|s| s.inspector_open).unwrap_or(true);
 
         let (pending_sessions, active_session) = saved
             .as_ref()
@@ -1790,17 +1805,26 @@ impl Workspace {
         let file_tree_resize = cx.new(|_| ResizableState::default());
         let _file_tree_resize_sub = cx.subscribe(
             &file_tree_resize,
-            |this, _state, _e: &ResizablePanelEvent, cx| {
+            |this, state, _e: &ResizablePanelEvent, cx| {
+                if let Some(size) = state.read(cx).sizes().first() {
+                    this.file_tree_w = f32::from(*size);
+                }
                 this.save_state(cx);
             },
         );
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
         let git_log_resize = cx.new(|_| ResizableState::default());
-        // Git 页左栏 resize：同上一套，拖完落盘。
-        let git_left_resize = cx.new(|_| ResizableState::default());
-        let _git_left_resize_sub = cx.subscribe(
-            &git_left_resize,
-            |this, _state, _e: &ResizablePanelEvent, cx| {
+        let workspace_resize = cx.new(|_| ResizableState::default());
+        let _workspace_resize_sub = cx.subscribe(
+            &workspace_resize,
+            |this, state, _e: &ResizablePanelEvent, cx| {
+                let sizes = state.read(cx).sizes();
+                if let Some(size) = sizes.first() {
+                    this.sidebar_w = f32::from(*size);
+                }
+                if let Some(size) = sizes.get(2) {
+                    this.inspector_w = f32::from(*size);
+                }
                 this.save_state(cx);
             },
         );
@@ -1808,9 +1832,11 @@ impl Workspace {
         let mut ws = Self {
             sessions,
             active_session,
+            project_ui: HashMap::new(),
+            ui_project_key: None,
             stage_override: None,
             inspector_tab: inspector::InspectorTab::Files,
-            inspector_open: true,
+            inspector_open,
             expanded: HashSet::new(),
             dir_cache: HashMap::new(),
             dir_inflight: HashSet::new(),
@@ -1833,6 +1859,9 @@ impl Workspace {
             pushing: false,
             delete_branch_target: None,
             git_log_resize,
+            workspace_resize,
+            sidebar_w,
+            inspector_w,
             diff_selected: HashSet::new(),
             diff_comment_input: None,
             commit_msg_input: None,
@@ -1867,7 +1896,6 @@ impl Workspace {
             notifications_open: false,
             palette: None,
             _palette_sub: None,
-            git_files_scroll: ScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
             file_tree_scroll: ScrollHandle::new(),
             file_tree_resize,
@@ -1891,9 +1919,7 @@ impl Workspace {
             search_gen: 0,
             file_tree_w,
             _file_tree_resize_sub,
-            git_left_resize,
-            git_left_w,
-            _git_left_resize_sub,
+            _workspace_resize_sub,
             git_status: HashMap::new(),
             git_status_inflight: HashSet::new(),
             branches: HashMap::new(),
@@ -1936,10 +1962,6 @@ impl Workspace {
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_menu_snapshot: None,
-            usage_cache: None,
-            usage_inflight: false,
-            rate_limits: rate_limits::RateLimitSnapshot::default(),
-            rate_limits_refresh_started: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
             rename_target: None,
@@ -1970,7 +1992,6 @@ impl Workspace {
         ws.save_state(cx);
         updater::cleanup_stale_backup();
         ws.check_for_update(true, cx);
-        ws.start_rate_limit_refresh(cx);
         // 有待恢复会话：ensure+reattach 在 restore 线程串行做完后再 check_daemon_outdated，
         // 避免与 ensure handoff 三线并行踩踏。无会话则直接查守护状态。
         if !pending_sessions.is_empty() {
@@ -1983,33 +2004,6 @@ impl Workspace {
             ws.check_daemon_outdated(cx);
         }
         ws
-    }
-
-    /// 后台刷新订阅额度。Codex app-server 最慢可等 10 秒，绝不能放进 render/UI 线程。
-    fn start_rate_limit_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.rate_limits_refresh_started {
-            return;
-        }
-        self.rate_limits_refresh_started = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                let snapshot = cx
-                    .background_executor()
-                    .spawn(async { rate_limits::fetch_all() })
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        this.rate_limits = snapshot;
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-                smol::Timer::after(Duration::from_secs(300)).await;
-            }
-        })
-        .detach();
     }
 
     /// 冷启动：专用 OS 线程里 **先 ensure managed 守护，再 reattach 全部会话**。
@@ -2268,6 +2262,48 @@ impl Workspace {
     /// 当前活动会话（不可变引用）。
     fn cur(&self) -> Option<&Session> {
         self.sessions.get(self.active_session)
+    }
+
+    /// 当前活动会话归属的「项目记忆」key：优先用已打开项目的根路径，没匹配到就
+    /// 退化用会话 cwd 本身（同一 cwd 的会话之间也该共享一份），再没有 cwd（比如
+    /// 会话刚起还没拿到）就用空串兜底——空串大家共享一份，好过每帧瞎切换。
+    fn active_project_key(&self, cx: &App) -> String {
+        let cwd = self.cur().and_then(|s| s.cwd(cx)).unwrap_or_default();
+        if cwd.is_empty() {
+            return String::new();
+        }
+        self.project_root_for_cwd(&cwd).unwrap_or(cwd)
+    }
+
+    /// 每帧 render 开头调用：活动会话所属项目变了，就把当前这份 inspector 状态
+    /// （tab / 打开的文件 / Git 子标签 / 当前 diff）存进旧项目的槽位，换上新项目
+    /// 上次留下的那份（没有就用默认态）。同项目内切会话不触发——key 没变。
+    fn sync_project_ui(&mut self, cx: &mut Context<Self>) {
+        let key = self.active_project_key(cx);
+        if self.ui_project_key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        if let Some(old_key) = self.ui_project_key.take() {
+            let old_state = ProjectUiState {
+                inspector_tab: self.inspector_tab,
+                open_file: self.open_file.take(),
+                file_tree_selected: self.file_tree_selected.take(),
+                git_tab: self.git_tab,
+                git_diff: self.git_diff.take(),
+                diff_selected: std::mem::take(&mut self.diff_selected),
+                active_hunk: self.active_hunk.take(),
+            };
+            self.project_ui.insert(old_key, old_state);
+        }
+        let new_state = self.project_ui.remove(&key).unwrap_or_default();
+        self.inspector_tab = new_state.inspector_tab;
+        self.open_file = new_state.open_file;
+        self.file_tree_selected = new_state.file_tree_selected;
+        self.git_tab = new_state.git_tab;
+        self.git_diff = new_state.git_diff;
+        self.diff_selected = new_state.diff_selected;
+        self.active_hunk = new_state.active_hunk;
+        self.ui_project_key = Some(key);
     }
 
     /// 某个 cwd 归属哪个已打开项目（见 project_root_of）。
@@ -2848,16 +2884,10 @@ impl Workspace {
                 &self.restore_orphans,
                 self.sessions_restored,
             ),
-            // 旧档的 sidebar_w 字段保留声明只为 serde 兼容；新布局固定宽，不再写。
-            sidebar_w: None,
+            sidebar_w: Some(self.sidebar_w),
+            inspector_w: Some(self.inspector_w),
+            inspector_open: Some(self.inspector_open),
             file_tree_w,
-            git_left_w: self
-                .git_left_resize
-                .read(cx)
-                .sizes()
-                .first()
-                .copied()
-                .map(f32::from),
             pinned_file_tree_roots: self.pinned_roots.clone(),
             collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
             collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
@@ -3491,7 +3521,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 侧栏版本号与设置齿轮共用它决定要不要缀红点。
+    /// 设置入口与设置页共用它决定要不要显示更新提示。
     fn update_available(&self) -> bool {
         matches!(
             self.update_status,
@@ -4682,300 +4712,13 @@ impl Workspace {
         };
         let _ = (c_border, c_muted, c_fg);
         match v {
-            // 只出详情：对应的列表/树在右侧停靠面板里常驻，舞台不再摆第二份
-            MainView::FileDetail => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .child(file_content_pane(&self.open_file, cx))
-                .into_any_element(),
-            MainView::DiffDetail => self.git_diff_only_pane(window, cx),
             MainView::Tasks => self.render_tasks_page(window, cx).into_any_element(),
-            MainView::Files => {
-                // 有查询串 → 显示搜索结果；否则显示文件树。
-                let has_query = self
-                    .file_filter
-                    .as_ref()
-                    .is_some_and(|s| !s.read(cx).value().trim().is_empty());
-                // 打开文件后的 reveal：祖先目录缓存齐了就滚到树里对应行。
-                if !has_query {
-                    self.try_flush_file_tree_reveal(cx);
-                }
-                let body = if has_query {
-                    match &self.search_results {
-                        Some(state) => search_results_view(state, &self.file_tree_scroll, cx),
-                        // ensure_search 已在 render 顶部同步置位，通常到不了这里。
-                        None => div().flex_1().into_any_element(),
-                    }
-                } else {
-                    let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
-                    let selected = self.file_tree_selected.as_deref();
-                    // 多根工作区：把所有项目根一起铺开（顺序同侧栏项目列表）；
-                    // 每个根各查各自的 git status 标 M/A/D，归属由 file_tree 内部
-                    // 按行所属的根处理，不再是全局一份。
-                    let roots = self.workspace_roots(cx);
-                    file_tree(
-                        &roots,
-                        &self.expanded,
-                        &self.collapsed_roots,
-                        &self.dir_cache,
-                        &self.file_tree_scroll,
-                        open_path,
-                        selected,
-                        self.file_tree_w,
-                        &self.git_status,
-                        cx,
-                    )
-                };
-                // 顶部搜索框（file_filter 已在 render 顶部懒创建）。
-                let search_box = self.file_filter.as_ref().map(|state| {
-                    div()
-                        .px_2()
-                        .py(px(6.))
-                        .border_b_1()
-                        .border_color(c_border)
-                        .child(Input::new(state).small())
-                });
-                let content = file_content_pane(&self.open_file, cx);
-                div()
-                    .flex_1()
-                    // min_h_0：否则这个 flex item 会被文件内容撑到整份文件那么高、
-                    // 溢出窗口，导致内部 uniform_list 拿不到有界高度而无法滚动。
-                    .min_h_0()
-                    .flex()
-                    .child(
-                        // 文件树列宽可拖拽（拖右边框），不再写死 260px——文件名
-                        // 超长时至少还能拖宽了看，配合行上的 tooltip 一起解决
-                        // 「长文件名看不全」的问题。
-                        h_resizable("file-tree-split")
-                            .with_state(&self.file_tree_resize)
-                            .child(
-                                resizable_panel()
-                                    .size(px(self.file_tree_w))
-                                    .size_range(px(160.)..px(480.))
-                                    .child(
-                                        div()
-                                            .size_full()
-                                            .flex()
-                                            .flex_col()
-                                            .min_h_0()
-                                            .border_r_1()
-                                            .border_color(c_border)
-                                            .children(search_box)
-                                            .child(body),
-                                    ),
-                            )
-                            .child(resizable_panel().child(content)),
-                    )
-                    .into_any_element()
-            }
-            MainView::Git => {
-                let cwd = self.cur().and_then(|s| s.cwd(cx));
-                let c_border = cx.theme().border;
-                // 「改动 / 日志」子标签。两者同属 Git 工具窗口，不占两个
-                // 顶层标签（JetBrains 也是这个结构）。
-                let sub_tabs = {
-                    let (fg, muted, accent) = {
-                        let t = cx.theme();
-                        (t.foreground, t.muted_foreground, t.accent)
-                    };
-                    h_flex()
-                        .gap_1()
-                        .px_3()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(c_border)
-                        .children([(GitTab::Changes, "改动"), (GitTab::Log, "日志")].map(
-                            |(tab, label)| {
-                                let on = self.git_tab == tab;
-                                div()
-                                    .id(label)
-                                    .px_2()
-                                    .py(px(1.0))
-                                    .text_sm()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .text_color(if on { fg } else { muted })
-                                    .when(on, |d| d.bg(accent))
-                                    .hover(|d| d.opacity(0.8))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.git_tab = tab;
-                                        cx.notify();
-                                    }))
-                                    .child(label)
-                            },
-                        ))
-                        // 热力图入口：原顶部 TabBar 撤掉后挂靠在 Git 页
-                        // （同为「看仓库」维度的全屏视图）。
-                        .child(
-                            div()
-                                .id("git-tab-hotspot")
-                                .px_2()
-                                .py(px(1.0))
-                                .text_sm()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .text_color(muted)
-                                .hover(|d| d.opacity(0.8))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.stage_override = Some(MainView::Hotspot);
-                                    cx.notify();
-                                }))
-                                .child("热力图"),
-                        )
-                };
-
-                let body = match self.git_tab {
-                    GitTab::Changes => {
-                        let status = cwd
-                            .as_ref()
-                            .and_then(|r| self.git_status.get(r).map(|(_, d)| d));
-                        let branches = cwd
-                            .as_ref()
-                            .and_then(|r| self.branches.get(r).map(|(_, d)| d));
-                        // 评论输入框懒创建（需要 window），跟文件树搜索框同一套模式。
-                        if self.git_diff.is_some() && self.diff_comment_input.is_none() {
-                            use gpui_component::input::InputState;
-                            let state = cx.new(|cx| {
-                                InputState::new(window, cx)
-                                    .placeholder("给选中的行写评论，发送前可以再改改…")
-                            });
-                            self.diff_comment_input = Some(state);
-                        }
-                        // commit message 输入框懒创建，跟上面评论框同一套模式；只要
-                        // 进了 Git 页就常驻（不像评论框依赖已经打开某个 diff）。
-                        if self.commit_msg_input.is_none() {
-                            use gpui_component::input::InputState;
-                            let state = cx.new(|cx| {
-                                // 多行 + 自增高：commit message 的规范写法是
-                                // 「标题空行正文」，单行框根本写不了 body，
-                                // AI 生成的多段说明也会被挤成一行。
-                                InputState::new(window, cx)
-                                    .multi_line(true)
-                                    .auto_grow(2, 8)
-                                    .placeholder("Commit message（可多行；点「AI 生成」起草）")
-                            });
-                            self.commit_msg_input = Some(state);
-                        }
-                        git_view(
-                            cwd.clone(),
-                            status,
-                            branches,
-                            &self.git_diff,
-                            self.diff_split,
-                            &self.diff_selected,
-                            self.diff_comment_input.as_ref(),
-                            self.commit_msg_input.as_ref(),
-                            self.commit_msg_generating,
-                            self.pushing,
-                            &self.git_files_scroll,
-                            &self.diff_scroll,
-                            self.active_hunk,
-                            &self.git_left_resize,
-                            self.git_left_w,
-                            &self.git_tree_collapsed,
-                            self.diff_scope,
-                            cx,
-                        )
-                    }
-                    GitTab::Log => {
-                        if let Some(root) = cwd.clone() {
-                            // 进页面就保证数据在（内部按 root 去重，不会每帧拉）；
-                            // 分支列表复用 Git 页那份缓存，左侧树才有内容。
-                            self.ensure_git_log(root.clone(), cx);
-                            self.ensure_branches(root, cx);
-                        }
-                        // 状态在这里取好再传下去：渲染函数内部绝不能 read 自己的
-                        // entity（render 期间它正被可变借用，重入会直接 abort）。
-                        let branches = cwd
-                            .as_ref()
-                            .and_then(|r| self.branches.get(r))
-                            .map(|(_, b)| b);
-                        // 当前检出的分支：日志默认看它，分支树里也要标出来。
-                        // 复用 Git 页已有的 status 缓存，不另跑一次 git。
-                        let head_branch = cwd
-                            .as_ref()
-                            .and_then(|r| self.git_status.get(r))
-                            .map(|(_, d)| d.branch_name().to_string())
-                            .filter(|b| !b.is_empty());
-                        // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死
-                        // 宽度的话中间的提交列表会被挤得没法看。
-                        div().flex_1().min_h_0().flex().child(
-                            h_resizable("git-log-split")
-                                .with_state(&self.git_log_resize)
-                                // 左：分支树
-                                .child(
-                                    resizable_panel()
-                                        .size(px(200.))
-                                        .size_range(px(140.)..px(360.))
-                                        .child(
-                                            div()
-                                                .size_full()
-                                                .min_h_0()
-                                                .border_r_1()
-                                                .border_color(c_border)
-                                                .child(git_log_view::branch_tree(
-                                                    cwd.clone(),
-                                                    branches,
-                                                    &self.git_log.scope,
-                                                    head_branch.clone(),
-                                                    cx,
-                                                )),
-                                        ),
-                                )
-                                // 中：分支图 + 提交列表
-                                // wrapper 必须 .flex()：div 默认 Block，
-                                // 里面 flex_1 根节点会高度塌 0（同 Git
-                                // 改动页 diff 面板的坑）。
-                                .child(
-                                    resizable_panel().child(
-                                        div()
-                                            .size_full()
-                                            .flex()
-                                            .min_w_0()
-                                            .min_h_0()
-                                            .border_r_1()
-                                            .border_color(c_border)
-                                            .child(git_log_view::git_log_view(
-                                                cwd.clone(),
-                                                &self.git_log,
-                                                head_branch,
-                                                cx,
-                                            )),
-                                    ),
-                                )
-                                // 右：提交详情
-                                .child(
-                                    resizable_panel()
-                                        .size(px(380.))
-                                        .size_range(px(240.)..px(640.))
-                                        .child(div().size_full().flex().min_w_0().min_h_0().child(
-                                            git_log_view::commit_detail_pane(
-                                                cwd,
-                                                &self.git_log,
-                                                cx,
-                                            ),
-                                        )),
-                                ),
-                        )
-                    }
-                };
-
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(sub_tabs)
-                    .child(body)
-                    .into_any_element()
-            }
-            MainView::Hotspot => {
-                let cwd = self.cur().and_then(|s| s.cwd(cx));
-                let data = cwd
-                    .as_ref()
-                    .and_then(|r| self.hotspot_data.get(r).map(|(_, d)| d.clone()));
-                hotspot_view(cwd, data, cx).into_any_element()
-            }
+            // Files / Git 展开态已在调用侧（render 顶部的 stage_override 分派）
+            // 特判，直接复用停靠面板的 render_inspector_rail + render_inspector_*，
+            // 不会把这两个变体传进这个函数。DiffDetail/Hotspot 已删除：diff 内嵌
+            // 在改动页里、热力图收进 GIT 面板的子标签，都不再需要单独的舞台页。
+            MainView::Files => unreachable!("MainView::Files 在调用侧已特判，不会走到这里"),
+            MainView::Git => unreachable!("MainView::Git 在调用侧已特判，不会走到这里"),
             MainView::History => {
                 let cwd = self.active_project_root(cx);
                 let list_key = cwd.as_ref().map(|c| {
@@ -5019,6 +4762,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_project_ui(cx);
         let active = self.active_session;
 
         // 当前正在看的 pane 每帧确认未读，覆盖“查看期间刚到”的事件；行动项只标已读，
@@ -5226,10 +4970,8 @@ impl Render for Workspace {
 
         // Git 页：后台刷新改动列表 + 分支列表（git status/for-each-ref 慢，绝不在
         // render 里同步跑）。
-        if matches!(
-            self.stage_override,
-            Some(MainView::Git | MainView::DiffDetail)
-        ) || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Git)
+        if matches!(self.stage_override, Some(MainView::Git))
+            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Git)
         {
             if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
                 // 进 Git 页主动 fetch 一次，让 ahead/behind 反映远端最新。render 每帧都会
@@ -5250,13 +4992,6 @@ impl Render for Workspace {
             }
         }
 
-        // 热力图页：后台刷新改动热力（git log 扫历史更慢，同样绝不同步跑）。
-        if self.stage_override == Some(MainView::Hotspot) {
-            if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
-                self.ensure_hotspot(root, cx);
-            }
-        }
-
         // 历史会话页：后台刷新当前项目的会话列表 / 记忆列表（看当前是哪个子页）。
         if self.stage_override == Some(MainView::History) {
             if let Some(root) = self.active_project_root(cx) {
@@ -5272,10 +5007,8 @@ impl Render for Workspace {
 
         // 文件树页：后台刷新根目录 + 所有已展开目录的直接子项列表（fs::read_dir 绝不
         // 在 render 里同步跑）。展开新目录时它会先落空，下一帧缓存到位后自动出现。
-        if matches!(
-            self.stage_override,
-            Some(MainView::Files | MainView::FileDetail)
-        ) || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
+        if matches!(self.stage_override, Some(MainView::Files))
+            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
         {
             // 搜索输入框懒创建（需要 window）：键入即 notify，触发文件名 + 内容搜索。
             if self.file_filter.is_none() {
@@ -5373,14 +5106,9 @@ impl Render for Workspace {
         // 会话列表：单列按项目上下分组（替代旧 gpui-component Sidebar 两级菜单；
         // 设计稿的「rail + 列表」左右两列实测割裂，见 session_list.rs 文件头）。
         let list_el = self.render_session_list(window, cx);
-        // inspector：56px 图标条常驻 + 344px 面板（Cmd+B / 图标条切换显隐）。
-        let inspector_rail_el = self.render_inspector_rail(cx);
         // 提升到舞台的那个 tab 不再停靠一份（见 inspector_panel_promoted）。
         let inspector_panel_el = (self.inspector_open && !self.inspector_panel_promoted())
             .then(|| self.render_inspector_panel(window, cx));
-        // 底部状态栏。
-        let status_bar_el = self.render_status_bar(cx);
-
         // ACP 冷恢复会话「上屏即续接」：挂在这里而不是只挂 activate()——冷启动
         // 后停在哪个会话上，那个会话压根不会收到 activate 调用，只挂那边的话
         // 「重开 GUI 后当前这个 ACP 会话仍要手点重新开始」。maybe_auto_resume
@@ -5463,6 +5191,63 @@ impl Render for Workspace {
                         )),
                 )
         };
+
+        let stage = div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(match self.stage_override {
+                // FILES 展开：跟停靠态完全同一份 UI（tab 横条 + EXPLORER 面板），
+                // 只是占了舞台的宽度、会话内容不见了——不再换成另一套「返回条」
+                // 组件，避免头部在展开前后判若两个应用。
+                Some(MainView::Files) => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_inspector_rail(cx))
+                    .child(self.render_inspector_files(window, cx))
+                    .into_any_element(),
+                // GIT 同理：展开只是复用停靠面板（rail + git_narrow_panel）铺满
+                // 舞台宽度，改动列表 + diff / 日志 / 热力图子标签都还是同一份 UI，
+                // 不再切到旧的「变更 + diff」返回条全屏页。
+                Some(MainView::Git) => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_inspector_rail(cx))
+                    .child(self.git_narrow_panel(window, cx))
+                    .into_any_element(),
+                Some(v) => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_stage_back_bar(v, cx))
+                    .child(self.render_stage_override(v, window, cx))
+                    .into_any_element(),
+                None => content.into_any_element(),
+            });
+        let mut workspace_columns = h_resizable("workspace-columns")
+            .with_state(&self.workspace_resize)
+            .child(
+                resizable_panel()
+                    .size(px(self.sidebar_w))
+                    .size_range(px(200.)..Pixels::MAX)
+                    .flex_none()
+                    .child(div().size_full().flex().child(list_el)),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(px(400.)..Pixels::MAX)
+                    .child(stage),
+            );
+        if let Some(inspector) = inspector_panel_el {
+            workspace_columns = workspace_columns.child(
+                resizable_panel()
+                    .size(px(self.inspector_w))
+                    .size_range(px(280.)..Pixels::MAX)
+                    .flex_none()
+                    .child(div().size_full().flex().child(inspector)),
+            );
+        }
 
         // 命令面板弹层：搜索框 + 候选列表全部由 ListState 渲染。
         let palette_overlay = self.palette.as_ref().map(|state| {
@@ -5620,10 +5405,8 @@ impl Render for Workspace {
                     return;
                 }
                 // 文件树键盘导航：搜索框 / 编辑器聚焦时不抢键。
-                if matches!(
-                    this.stage_override,
-                    Some(MainView::Files | MainView::FileDetail)
-                ) && !ks.modifiers.platform
+                if matches!(this.stage_override, Some(MainView::Files))
+                    && !ks.modifiers.platform
                     && !ks.modifiers.control
                 {
                     use gpui::Focusable;
@@ -5663,10 +5446,10 @@ impl Render for Workspace {
                 }
                 // Git 页 F7 / Shift+F7：在改动块之间跳（对齐 JetBrains 的 next/previous
                 // difference）。不带 Cmd，所以要赶在下面的 platform 判断之前处理。
-                if matches!(
-                    this.stage_override,
-                    Some(MainView::Git | MainView::DiffDetail)
-                ) && this.git_tab == GitTab::Changes
+                // diff 现在停靠 / 展开态都能内嵌显示，这个快捷键两种态都该生效。
+                if (matches!(this.stage_override, Some(MainView::Git))
+                    || (this.inspector_open && this.inspector_tab == inspector::InspectorTab::Git))
+                    && this.git_tab == GitTab::Changes
                     && ks.key == "f7"
                     && !ks.modifiers.platform
                 {
@@ -5701,6 +5484,7 @@ impl Render for Workspace {
                     // Cmd+B：inspector 面板显隐（旧语义是左侧栏；会话列表现在常驻）。
                     "b" => {
                         this.inspector_open = !this.inspector_open;
+                        this.save_state(cx);
                         cx.notify();
                     }
                     // 切当前会话内的活动 pane（分屏），不是切会话——切会话见下面的 Cmd+1~9。
@@ -5732,11 +5516,7 @@ impl Render for Workspace {
                     "w" => this.close_active(window, cx),
                     // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
                     // 视图时背着用户悄悄写盘）。
-                    "s" if matches!(
-                        this.stage_override,
-                        Some(MainView::Files | MainView::FileDetail)
-                    ) =>
-                    {
+                    "s" if matches!(this.stage_override, Some(MainView::Files)) => {
                         this.save_open_file(cx)
                     }
                     // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
@@ -5752,7 +5532,7 @@ impl Render for Workspace {
                     _ => {}
                 }
             }))
-            // 顶部集成标题栏：透明 + 红绿灯占位 + 可拖拽，替代割裂的系统灰条。
+            // 顶部集成标题栏：红绿灯占位 + 可拖拽，替代割裂的系统灰条。
             .child(
                 TitleBar::new().child(
                     div()
@@ -5760,33 +5540,14 @@ impl Render for Workspace {
                         .items_center()
                         .justify_end()
                         .w_full()
-                        // 右侧：用量、通知与设置。stop_propagation 避免触发拖拽。
+                        // 右侧：面板入口、通知与侧边面板开关。stop_propagation 避免触发拖拽。
                         .child(
                             h_flex()
+                                .h_full()
                                 .items_center()
                                 .gap_1()
                                 // 留出右侧呼吸间距，别让齿轮贴到窗口边缘。
                                 .pr_2()
-                                .child(
-                                    div()
-                                        .id("usage-entry")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_color(c_muted)
-                                        .hover(|s| s.bg(c_border))
-                                        .child(Icon::new(IconName::ChartPie))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _w, cx| {
-                                                cx.stop_propagation();
-                                                this.open_usage_window(cx);
-                                            }),
-                                        ),
-                                )
                                 .child(
                                     div()
                                         .id("notif-bell")
@@ -5831,21 +5592,13 @@ impl Render for Workspace {
                                         ),
                                 )
                                 .child({
-                                    // 有新版本在下载/已就绪，或守护落后于磁盘二进制 → 齿轮角上
-                                    // 缀一个红点提醒「有待处理事项」，图标本身颜色不跟着变——
-                                    // 之前让整个图标变蓝，看着像常驻高亮状态，容易被当成卡住了。
-                                    let needs_attention = self.update_available()
-                                        || self.daemon_outdated == Some(true);
-                                    let gear: AnyElement = if needs_attention {
-                                        Badge::new()
-                                            .dot()
-                                            .child(Icon::new(IconName::Settings))
-                                            .into_any_element()
-                                    } else {
-                                        Icon::new(IconName::Settings).into_any_element()
-                                    };
+                                    // 面板概念上就是「侧边栏」：展开到舞台全屏只是变宽，
+                                    // 内容本质没变——所以高亮态看「是否有内容在显示」，
+                                    // 停靠和全屏都算，不再因为提升到舞台就显示成关闭态。
+                                    let panel_visible =
+                                        self.inspector_open || self.inspector_panel_promoted();
                                     div()
-                                        .id("settings-gear")
+                                        .id("inspector-toggle")
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -5853,19 +5606,37 @@ impl Render for Workspace {
                                         .rounded_md()
                                         .cursor_pointer()
                                         .text_color(c_muted)
+                                        .when(panel_visible, |s| s.bg(c_border))
                                         .hover(|s| s.bg(c_border))
-                                        .child(gear)
+                                        .child(
+                                            Icon::new(if panel_visible {
+                                                IconName::PanelRightClose
+                                            } else {
+                                                IconName::PanelRightOpen
+                                            })
+                                            .size_4(),
+                                        )
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                "切换侧边面板  ⌘B",
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, window, cx| {
                                                 cx.stop_propagation();
-                                                this.check_daemon_outdated(cx);
-                                                if this.llm_inputs.is_none() {
-                                                    this.init_llm_inputs(window, cx);
+                                                // 全屏展开时点这颗按钮 = 直接完全收起（退出
+                                                // 全屏 + 关闭面板），不是退回停靠态——它本质
+                                                // 还是「侧边栏开关」，点了就该整个消失。
+                                                if this.inspector_panel_promoted() {
+                                                    this.set_stage_override(None, window, cx);
+                                                    this.inspector_open = false;
+                                                } else {
+                                                    this.inspector_open = !this.inspector_open;
                                                 }
-                                                // 同 OpenSettings：新开的窗口回到外观页。
-                                                this.settings_page_ix = SETTINGS_PAGE_APPEARANCE;
-                                                this.open_settings_window(cx);
+                                                this.save_state(cx);
+                                                cx.notify();
                                             }),
                                         )
                                 }),
@@ -5876,37 +5647,14 @@ impl Render for Workspace {
             .child(
                 div().flex_1().min_h_0().flex().child(
                     div()
-                        .size_full()
+                        .w_0()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
                         .flex()
-                        // 会话列表（280px，按项目分组）
-                        .child(list_el)
-                        // 主区：顶部视图切换 + 内容
-                        .child(
-                            div()
-                                .flex_1()
-                                // min_w_0：主区在根 flex 行里默认 min-width:auto，会被最长终端行
-                                // 撑到不肯收缩，导致宽度被内容反向放大。归零后才能正常按剩余空间收缩。
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                // 舞台：覆盖页（旧全屏页）优先，否则显示当前会话。
-                                // 覆盖页顶部带显式返回条——Esc 之外总得有个能点的出口。
-                                .child(match self.stage_override {
-                                    Some(v) => v_flex()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .child(self.render_stage_back_bar(v, cx))
-                                        .child(self.render_stage_override(v, window, cx))
-                                        .into_any_element(),
-                                    None => content.into_any_element(),
-                                }),
-                        )
-                        .children(inspector_panel_el)
-                        .child(inspector_rail_el),
+                        .child(workspace_columns),
                 ),
             )
-            // 底部状态栏
-            .child(status_bar_el)
             // 命令面板（最上层）
             .children(palette_overlay)
             // 退出确认拦截弹层
@@ -5982,22 +5730,29 @@ impl Render for Workspace {
             // Finder 拖文件/文件夹：只在有拖拽时叠全窗 drop 层。
             // 常驻 hitbox 会盖住按钮（「新建终端」像没反应）；对齐「有 drag 才出现」。
             // 终端 hitbox 会挡住根 on_drop，所以必须用上层目标接 ExternalPaths。
-            .when(cx.has_active_drag(), |root| {
-                root.child(
-                    div()
-                        .id("file-drop-overlay")
-                        .absolute()
-                        .inset_0()
-                        .bg(ui_theme::tint(ui_theme::blue(), 0x28))
-                        .border_2()
-                        .border_color(rgb(ui_theme::blue()))
-                        .on_drop::<ExternalPaths>(cx.listener(
-                            |this, ep: &ExternalPaths, _window, cx| {
-                                this.open_paths(ep.paths(), cx);
-                            },
-                        )),
-                )
-            })
+            .when(
+                cx.has_active_drag()
+                    && !matches!(
+                        cx.active_drag_cursor_style(),
+                        Some(CursorStyle::ResizeColumn | CursorStyle::ResizeLeftRight)
+                    ),
+                |root| {
+                    root.child(
+                        div()
+                            .id("file-drop-overlay")
+                            .absolute()
+                            .inset_0()
+                            .bg(ui_theme::tint(ui_theme::blue(), 0x28))
+                            .border_2()
+                            .border_color(rgb(ui_theme::blue()))
+                            .on_drop::<ExternalPaths>(cx.listener(
+                                |this, ep: &ExternalPaths, _window, cx| {
+                                    this.open_paths(ep.paths(), cx);
+                                },
+                            )),
+                    )
+                },
+            )
             // 文件未保存切换确认拦截弹层
             .children(
                 self.pending_file_switch

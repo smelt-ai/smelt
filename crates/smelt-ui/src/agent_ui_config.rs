@@ -14,7 +14,10 @@ fn default_true() -> bool {
 }
 
 const LEGACY_CODEX_ACP_CMD: &str = "bunx --bun @zed-industries/codex-acp@0.16.0";
-const PREVIOUS_CODEX_ACP_CMD: &str = "bunx --bun @agentclientprotocol/codex-acp@1.1.7";
+/// 中间态默认值：曾经短暂把 Codex 换成原生 app-server driver，现已改回标准
+/// ACP 通道（见 `default_acp_codex_cmd`）。旧配置留着这条字符串的用户要能
+/// 自动迁回新默认，不用手动改设置页。
+const LEGACY_CODEX_APP_SERVER_CMD: &str = "codex app-server";
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentUiConfig {
@@ -42,7 +45,8 @@ pub struct AgentUiConfig {
     /// GitHub Copilot ACP 会话的启动命令。
     #[serde(default = "default_acp_copilot_cmd")]
     pub acp_copilot_cmd: String,
-    /// Codex 原生 app-server 的启动命令。字段名为兼容旧配置保留。
+    /// Codex ACP 会话的启动命令（`@agentclientprotocol/codex-acp` 适配器）。
+    /// 字段名为兼容旧配置保留。
     #[serde(default = "default_acp_codex_cmd")]
     pub acp_codex_cmd: String,
     /// Grok ACP 会话的启动命令。
@@ -155,7 +159,7 @@ fn migrate_legacy_notification_setting(
 
 fn migrate_legacy_codex_adapter(config: &mut AgentUiConfig) -> bool {
     if config.acp_codex_cmd != LEGACY_CODEX_ACP_CMD
-        && config.acp_codex_cmd != PREVIOUS_CODEX_ACP_CMD
+        && config.acp_codex_cmd != LEGACY_CODEX_APP_SERVER_CMD
     {
         return false;
     }
@@ -189,11 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn previous_official_codex_adapter_is_replaced_by_app_server() {
+    fn interim_app_server_default_is_replaced_by_current_adapter() {
         let mut config = AgentUiConfig::default();
-        config.acp_codex_cmd = PREVIOUS_CODEX_ACP_CMD.into();
+        config.acp_codex_cmd = LEGACY_CODEX_APP_SERVER_CMD.into();
         assert!(migrate_legacy_codex_adapter(&mut config));
-        assert_eq!(config.acp_codex_cmd, "codex app-server");
+        assert_eq!(config.acp_codex_cmd, default_acp_codex_cmd());
     }
 
     #[test]

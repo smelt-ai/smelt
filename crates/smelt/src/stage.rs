@@ -3,9 +3,11 @@
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::*;
 
+use crate::inspector::InspectorTab;
 use crate::{AgentStatus, MainView, SessionKind, Workspace, ui_theme};
 
 /// 状态胶囊文案（与会话列表副标题同一套口径）。
@@ -28,10 +30,7 @@ impl Workspace {
         let (label, back) = match v {
             MainView::Tasks => ("任务总览", "‹ 返回会话"),
             MainView::Files => ("文件树 + 内容", "⤡ 收回停靠"),
-            MainView::FileDetail => ("文件", "‹ 返回会话"),
             MainView::Git => ("变更 + diff", "⤡ 收回停靠"),
-            MainView::DiffDetail => ("diff", "‹ 返回会话"),
-            MainView::Hotspot => ("热力图", "‹ 返回会话"),
             MainView::History => ("历史会话", "‹ 返回会话"),
         };
         let this = cx.entity();
@@ -107,10 +106,18 @@ impl Workspace {
             SessionKind::Acp(view) => view.read(cx).model_name(),
             SessionKind::Term { .. } => None,
         };
-        let cwd_tail = sess
-            .cwd(cx)
+        let cwd = sess.cwd(cx);
+        let cwd_tail = cwd
+            .as_ref()
             .map(|c| crate::project_name_for_cwd(&c))
             .unwrap_or_default();
+        let git_summary = cwd
+            .as_ref()
+            .and_then(|cwd| self.git_status.get(cwd))
+            .and_then(|(_, status)| {
+                let branch = status.branch_name();
+                (!branch.is_empty()).then(|| (branch.to_string(), status.files.len()))
+            });
         let this = cx.entity();
 
         // 类型点：agent 紫圆 / 终端绿方（与会话列表一致）。
@@ -129,6 +136,7 @@ impl Workspace {
         };
 
         let e_split = this.clone();
+        let e_git = this.clone();
         Some(
             div()
                 .h(px(44.))
@@ -192,6 +200,59 @@ impl Workspace {
                         .text_color(rgb(ui_theme::text_faint()))
                         .child(cwd_tail),
                 )
+                .children(git_summary.map(|(branch, changes)| {
+                    div()
+                        .id("stage-git-status")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .bg(rgb(ui_theme::bg_card()))
+                        .border_1()
+                        .border_color(rgb(ui_theme::border_mid()))
+                        .text_xs()
+                        .font_family("monospace")
+                        .text_color(rgb(ui_theme::text_mid()))
+                        .cursor_pointer()
+                        .hover(|d| {
+                            d.bg(rgb(ui_theme::bg_hover()))
+                                .text_color(rgb(ui_theme::text_bright()))
+                        })
+                        .child(Icon::new(IconName::Github).size(px(12.)))
+                        .child(branch)
+                        .when(changes > 0, |d| {
+                            d.child(
+                                div()
+                                    .min_w(px(16.))
+                                    .h(px(16.))
+                                    .px(px(4.))
+                                    .rounded(px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(rgb(ui_theme::accent()))
+                                    .text_color(rgb(ui_theme::on_accent()))
+                                    .text_size(px(9.))
+                                    .font_semibold()
+                                    .child(changes.to_string()),
+                            )
+                        })
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("打开 Git 面板").build(window, cx)
+                        })
+                        .on_click(move |_ev, window, cx| {
+                            e_git.update(cx, |ws, cx| {
+                                if ws.inspector_panel_promoted() {
+                                    ws.set_stage_override(None, window, cx);
+                                }
+                                ws.inspector_tab = InspectorTab::Git;
+                                ws.inspector_open = true;
+                                cx.notify();
+                            });
+                        })
+                }))
                 .child(div().flex_1())
                 .children(is_term.then(|| {
                     div()

@@ -260,6 +260,10 @@ pub struct AcpSessionState {
     pub supports_image: bool,
     /// 「等自己刚发那条 prompt 的回声」，见旧版字段同名注释——语义原样保留。
     pub awaiting_user_echo: bool,
+    /// `session/load` 正在重建历史投影。回放通知和实时通知共用同一套 ACP
+    /// update，必须在本地记住这段边界，避免历史 assistant/tool 消息把空闲
+    /// 会话误标成 Running。下一次用户 prompt 发出时结束回放态。
+    pub replaying_history: bool,
     pub available_commands: Vec<(String, String)>,
     pub usage: Option<(u64, u64)>,
     pub plan: Option<PlanView>,
@@ -282,6 +286,7 @@ impl Default for AcpSessionState {
             history_session_id: None,
             supports_image: true,
             awaiting_user_echo: false,
+            replaying_history: false,
             available_commands: Vec::new(),
             usage: None,
             plan: None,
@@ -329,6 +334,7 @@ impl AcpSessionState {
             history_session_id: snap.history_session_id,
             supports_image: snap.supports_image,
             awaiting_user_echo: false,
+            replaying_history: false,
             available_commands: snap.available_commands,
             usage: snap.usage,
             plan: snap.plan,
@@ -479,6 +485,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::HistoryReplayStarted => {
             outcome.entries_offset = Some(0);
             state.entries.clear();
+            state.replaying_history = true;
         }
         AcpEvent::UserChunk(text) => {
             if state.awaiting_user_echo {
@@ -529,6 +536,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 state.history_session_id = Some(session_id.to_string());
             }
             state.supports_image = supports_image;
+            if !matches!(kind, ReadyKind::ResumedWithReplay) {
+                state.replaying_history = false;
+            }
             match kind {
                 ReadyKind::ResumedWithReplay => {}
                 ReadyKind::ResumedKeepHistory => {}
@@ -564,7 +574,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                     state.entries.push(AcpEntry::Assistant { text, thought });
                 }
             }
-            state.phase = AcpPhase::Running;
+            if !state.replaying_history {
+                state.phase = AcpPhase::Running;
+            }
         }
         AcpEvent::ToolCall(tc) => {
             let replayed_elicitation = recovered_elicitation(&tc.title, tc.raw_input.as_ref());
@@ -580,7 +592,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 state.elicitation = Some(elicitation);
                 state.phase = AcpPhase::AwaitingChoice;
             } else {
-                state.phase = AcpPhase::Running;
+                if !state.replaying_history {
+                    state.phase = AcpPhase::Running;
+                }
             }
         }
         AcpEvent::ToolCallUpdate(u) => {
@@ -636,7 +650,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 status: crate::acp_chat::ToolCallStatus::InProgress,
                 output: Vec::new(),
             });
-            state.phase = AcpPhase::Running;
+            if !state.replaying_history {
+                state.phase = AcpPhase::Running;
+            }
         }
         AcpEvent::ToolOutputDelta { id, delta } => {
             let entry_index = state.entries.iter().rposition(
@@ -676,7 +692,9 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         }
         AcpEvent::Plan(p) => {
             state.plan = Some(plan_view_from_acp(&p));
-            state.phase = AcpPhase::Running;
+            if !state.replaying_history {
+                state.phase = AcpPhase::Running;
+            }
         }
         AcpEvent::Permission {
             question,
@@ -825,6 +843,7 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.model = None;
     state.usage = None;
     state.completed_unread = false;
+    state.replaying_history = false;
     state.phase = AcpPhase::Starting;
 }
 
@@ -836,6 +855,7 @@ pub fn note_prompt_sent(
     text: String,
     images: Vec<crate::acp_chat::AcpImage>,
 ) {
+    state.replaying_history = false;
     if images.is_empty() {
         state.entries.push(AcpEntry::User(text));
     } else {
@@ -1129,6 +1149,33 @@ mod tests {
         ));
         assert_eq!(s.acp_session_id.as_deref(), Some("runtime-session"));
         assert_eq!(s.history_session_id.as_deref(), Some("canonical-history"));
+    }
+
+    #[test]
+    fn replayed_agent_updates_do_not_leave_session_running() {
+        let mut s = fresh_state();
+        apply_event(&mut s, AcpEvent::HistoryReplayStarted);
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+                kind: ReadyKind::ResumedWithReplay,
+                supports_image: true,
+            },
+        );
+        apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                text: "old answer".into(),
+                thought: false,
+            },
+        );
+
+        assert!(matches!(s.phase, AcpPhase::Idle));
+
+        note_prompt_sent(&mut s, "continue".into(), Vec::new());
+        assert!(matches!(s.phase, AcpPhase::Running));
+        assert!(!s.replaying_history);
     }
 
     #[test]

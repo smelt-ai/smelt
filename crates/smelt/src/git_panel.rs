@@ -16,13 +16,12 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::tag::Tag;
 use gpui_component::*;
 use notify::{RecursiveMode, Watcher};
 
-use crate::{Workspace, agent, placeholder_view, terminal_view};
+use crate::{GitTab, Workspace, agent, placeholder_view, terminal_view};
 
 // ===================== 类型 =====================
 
@@ -1526,479 +1525,6 @@ fn diff_comment_bar(
         )
 }
 
-/// Git 视图左栏底部的 commit message 条：输入框 +「生成」（AI 起草，见
-/// Workspace::generate_commit_message，读整个仓库的 diff 而非只是选中的行）+
-/// 「发送到终端」（拼成 `git commit -m '...'` 写进当前激活终端，不自动回车，等
-/// 用户自己看一眼、needed 的话改两个字再确认执行——跟 diff_comment_bar 一个哲学）。
-fn commit_message_bar(
-    input: Option<&Entity<gpui_component::input::InputState>>,
-    generating: bool,
-    ahead: u32,
-    pushing: bool,
-    cx: &mut Context<Workspace>,
-) -> Div {
-    let (border, muted, fg) = {
-        let t = cx.theme();
-        (t.border, t.muted_foreground, t.foreground)
-    };
-    let has_text = input.is_some_and(|s| !s.read(cx).value().trim().is_empty());
-    let ws_gen = cx.entity();
-    let ws_commit = ws_gen.clone();
-    let ws_commit_push = ws_gen.clone();
-    let ws_push = ws_gen.clone();
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .px_3()
-        .py_2()
-        .border_t_1()
-        .border_color(border)
-        // 「AI 生成」是写 message 的辅助，不是 git 操作——跟提交/推送挤一排只会让
-        // 底下看着像一堆按钮。挪到输入框上沿，做成轻量文字按钮（同「查看完整文件」）。
-        .child(
-            h_flex().justify_end().child(
-                div()
-                    .id("commit-msg-generate")
-                    .px_1()
-                    .text_xs()
-                    .cursor_pointer()
-                    .text_color(muted)
-                    .hover(|s| s.text_color(fg))
-                    .child(if generating {
-                        "生成中…"
-                    } else {
-                        "✨ AI 生成"
-                    })
-                    .on_click(move |_ev, window, cx| {
-                        ws_gen.update(cx, |this, cx| this.generate_commit_message(window, cx));
-                    }),
-            ),
-        )
-        .children(input.map(|state| Input::new(state).small()))
-        .child(
-            h_flex()
-                .gap_2()
-                .pt_1()
-                // 左侧提示待推送数量：ahead 只在分支头显示过（↑3），到了按钮这边
-                // 再说一次，人才知道「推送」按钮为什么亮着。
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(if ahead > 0 {
-                            format!("{ahead} 个提交待推送")
-                        } else {
-                            String::new()
-                        }),
-                )
-                // 单独的「推送」：本地攒了提交但这会儿没有新改动要提交时，
-                // 「提交并推送」是灰的，没有它就完全没法推。
-                .child(
-                    Button::new("git-push-only")
-                        .small()
-                        .label(if pushing { "推送中…" } else { "推送" })
-                        .disabled(pushing || ahead == 0)
-                        .on_click(move |_ev, _window, cx| {
-                            ws_push.update(cx, |this, cx| this.push_only(cx));
-                        }),
-                )
-                .child(
-                    Button::new("commit-msg-commit")
-                        .small()
-                        .label("提交")
-                        .disabled(!has_text)
-                        .on_click(move |_ev, window, cx| {
-                            ws_commit.update(cx, |this, cx| this.commit(false, window, cx));
-                        }),
-                )
-                .child(
-                    Button::new("commit-msg-commit-push")
-                        .small()
-                        .primary()
-                        .label("提交并推送")
-                        .disabled(!has_text)
-                        .on_click(move |_ev, window, cx| {
-                            ws_commit_push.update(cx, |this, cx| this.commit(true, window, cx));
-                        }),
-                ),
-        )
-}
-
-/// Git 视图：左侧分支 + 改动文件列表（可点击），右侧显示选中文件的 diff。
-pub fn git_view(
-    cwd: Option<String>,
-    status: Option<&GitStatusData>,
-    branches: Option<&BranchList>,
-    git_diff: &Option<GitDiff>,
-    split: bool,
-    diff_selected: &HashSet<usize>,
-    diff_comment_input: Option<&Entity<gpui_component::input::InputState>>,
-    commit_msg_input: Option<&Entity<gpui_component::input::InputState>>,
-    commit_msg_generating: bool,
-    pushing: bool,
-    files_scroll: &ScrollHandle,
-    diff_scroll: &UniformListScrollHandle,
-    active_hunk: Option<usize>,
-    git_left_resize: &Entity<ResizableState>,
-    git_left_w: f32,
-    tree_collapsed: &HashSet<String>,
-    scope: DiffScope,
-    cx: &mut Context<Workspace>,
-) -> Div {
-    let (muted, fg, border, accent) = {
-        let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.border, t.accent)
-    };
-    let Some(root) = cwd else {
-        return placeholder_view("无项目目录", muted);
-    };
-    // 只读后台缓存（ensure_git_status 负责刷新）：缺失=首次加载中，ok=false=非 git 仓库。
-    let Some(data) = status else {
-        return placeholder_view("加载改动中…", muted);
-    };
-    if !data.ok {
-        return placeholder_view("不是 git 仓库，或 git 不可用", muted);
-    }
-    let branch = data.branch.clone();
-    let files = data.files.clone();
-
-    let selected = git_diff.as_ref().map(|d| d.path.clone());
-    let file_list = if files.is_empty() {
-        placeholder_view("工作区干净，无改动 ✓", muted).into_any_element()
-    } else {
-        div()
-            .id("git-files")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(files_scroll)
-            .vertical_scrollbar(files_scroll)
-            .flex()
-            .flex_col()
-            .p_1()
-            .children(
-                build_git_tree(&files, tree_collapsed)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, row)| {
-                        // 每层缩进 14px，与文件树页同一套视觉节奏。
-                        let indent = px(4.0 + row.depth as f32 * 14.0);
-                        let path = row.path;
-                        // 目录行：只负责折叠，没有状态码也没有勾选框。
-                        let Some(st) = row.status else {
-                            let collapsed = tree_collapsed.contains(&path);
-                            let p_toggle = path.clone();
-                            return div()
-                                .id(("git-dir", i))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .pl(indent)
-                                .pr_2()
-                                .py(px(1.0))
-                                .text_sm()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .hover(|d| d.bg(accent))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.git_tree_collapsed.remove(&p_toggle) {
-                                        this.git_tree_collapsed.insert(p_toggle.clone());
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(
-                                    Icon::new(if collapsed {
-                                        IconName::ChevronRight
-                                    } else {
-                                        IconName::ChevronDown
-                                    })
-                                    .size_4()
-                                    .text_color(muted),
-                                )
-                                .child(div().min_w_0().text_color(muted).child(row.name))
-                                // 目录行和文件行（挂了 context_menu，类型不同）要统一成
-                                // AnyElement 才能进同一个 children 迭代器。
-                                .into_any_element();
-                        };
-                        let st_trim = st.trim();
-                        // 状态标记用 Tag 彩色胶囊：新增=绿 删除=红 修改=黄 未跟踪=灰 其余=蓝。
-                        let label = if st_trim.is_empty() {
-                            "•".to_string()
-                        } else {
-                            st_trim.to_string()
-                        };
-                        let status_tag = if st_trim.contains('?') {
-                            Tag::secondary()
-                        } else if st_trim.contains('A') {
-                            Tag::success()
-                        } else if st_trim.contains('D') {
-                            Tag::danger()
-                        } else if st_trim.contains('M') {
-                            Tag::warning()
-                        } else {
-                            Tag::info()
-                        }
-                        .small()
-                        .child(label);
-                        let untracked = st.contains('?');
-                        let is_sel = selected.as_deref() == Some(path.as_str());
-                        let (r, p) = (root.clone(), path.clone());
-                        let name = row.name;
-                        // 暂存勾选框：索引状态（porcelain 第一位）不是空格/`?` 就算已暂存
-                        // （`??` 是 untracked，两位都不算暂存；`MM` 这种"暂存过又改"第一位
-                        // 仍是暂存态，勾着）。纯本地索引操作，直接执行不用发终端确认。
-                        let staged = st
-                            .as_bytes()
-                            .first()
-                            .is_some_and(|&b| b != b' ' && b != b'?');
-                        let ws_stage = cx.entity();
-                        let (r_stage, p_stage) = (root.clone(), path.clone());
-                        let stage_checkbox = Checkbox::new(("git-stage", i))
-                            .checked(staged)
-                            .on_click(move |checked, _window, cx| {
-                                cx.stop_propagation();
-                                let checked = *checked;
-                                let root = r_stage.clone();
-                                let path = p_stage.clone();
-                                ws_stage.update(cx, |wsx, cx| {
-                                    if checked {
-                                        wsx.stage_file(root, path, cx);
-                                    } else {
-                                        wsx.unstage_file(root, path, cx);
-                                    }
-                                });
-                            });
-                        let row = div()
-                            .id(("git", i))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pl(indent)
-                            .pr_2()
-                            .py(px(1.0))
-                            .text_sm()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(accent))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_diff(r.clone(), p.clone(), untracked, cx)
-                            }))
-                            .child(stage_checkbox)
-                            .child(status_tag)
-                            // 只显示文件名——路径已经由树的层级表达了。整条路径挂 tooltip，
-                            // 免得同名文件（一堆 mod.rs）分不清。tooltip 需要元素带 id。
-                            .child(
-                                div()
-                                    .id(("git-name", i))
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(fg)
-                                    .child(name)
-                                    .tooltip({
-                                        let full = path.clone();
-                                        move |window, cx| {
-                                            gpui_component::tooltip::Tooltip::new(full.clone())
-                                                .build(window, cx)
-                                        }
-                                    }),
-                            );
-                        // 右键菜单：丢弃改动 / 复制路径 / 在 Finder 中显示。此前 git 页完全
-                        // 没有右键入口，「丢弃这个文件的改动」这种最常用的操作根本没地方点。
-                        let ws_menu = cx.entity();
-                        let full_path = Path::new(&root).join(&path).to_string_lossy().to_string();
-                        let (root_menu, path_menu) = (root.clone(), path.clone());
-                        // 选中高亮要在挂菜单之前上色：context_menu 会把元素包一层，之后
-                        // 就不能再改样式了。
-                        let row = if is_sel { row.bg(accent) } else { row };
-                        row.context_menu(move |menu, _window, _cx| {
-                            let (ws_d, r_d, p_d) =
-                                (ws_menu.clone(), root_menu.clone(), path_menu.clone());
-                            let (ws_c, p_c) = (ws_menu.clone(), full_path.clone());
-                            let (ws_f, p_f) = (ws_menu.clone(), full_path.clone());
-                            menu.item(
-                                PopupMenuItem::new(if untracked {
-                                    "删除文件"
-                                } else {
-                                    "丢弃改动"
-                                })
-                                .on_click(
-                                    move |_ev, _window, cx| {
-                                        ws_d.update(cx, |ws, cx| {
-                                            ws.start_discard_file(
-                                                r_d.clone(),
-                                                p_d.clone(),
-                                                untracked,
-                                                cx,
-                                            )
-                                        });
-                                    },
-                                ),
-                            )
-                            .separator()
-                            .item(PopupMenuItem::new("复制文件路径").on_click(
-                                move |_ev, _window, cx| {
-                                    ws_c.update(cx, |ws, cx| {
-                                        ws.copy_file_path_to_clipboard(p_c.clone(), cx)
-                                    });
-                                },
-                            ))
-                            .item(
-                                PopupMenuItem::new("在 Finder 中显示").on_click(
-                                    move |_ev, _window, cx| {
-                                        ws_f.update(cx, |ws, cx| {
-                                            ws.reveal_path_in_finder(p_f.clone(), cx)
-                                        });
-                                    },
-                                ),
-                            )
-                        })
-                        .into_any_element()
-                    }),
-            )
-            .into_any_element()
-    };
-
-    let branch_header = {
-        let ahead_behind = match (data.ahead, data.behind) {
-            (0, 0) => String::new(),
-            (a, 0) => format!("  ↑{a}"),
-            (0, b) => format!("  ↓{b}"),
-            (a, b) => format!("  ↑{a} ↓{b}"),
-        };
-        let current = branch.clone();
-        let local: Vec<String> = branches.map(|b| b.local.clone()).unwrap_or_default();
-        let remote: Vec<String> = branches.map(|b| b.remote.clone()).unwrap_or_default();
-        let ws = cx.entity();
-        let root_for_menu = root.clone();
-        // 远端同步 / 本地救场操作组要的数据（见 dropdown 开头）。
-        let behind = data.behind;
-        let stash_n = data.stash_count;
-        let has_changes = !data.files.is_empty();
-        div().px_3().py_2().border_b_1().border_color(border).child(
-            Button::new("branch-switch")
-                .ghost()
-                .small()
-                .label(format!("⎇ {branch}{ahead_behind}"))
-                .dropdown_menu(move |menu, _window, _cx| {
-                    // ---- 远端同步 + 本地救场（分支列表之前）----
-                    let mut menu = git_ops_menu_items(
-                        menu,
-                        ws.clone(),
-                        root_for_menu.clone(),
-                        behind,
-                        stash_n,
-                        has_changes,
-                    )
-                    .separator();
-                    // ---- 分支切换 ----
-                    if local.is_empty() && remote.is_empty() {
-                        menu = menu.item(PopupMenuItem::new("（没有其他分支）"));
-                    }
-                    for name in &local {
-                        let item = PopupMenuItem::new(name.clone());
-                        menu = menu.item(if *name == current {
-                            item.icon(IconName::Check)
-                        } else {
-                            let ws = ws.clone();
-                            let root = root_for_menu.clone();
-                            let target = name.clone();
-                            item.on_click(move |_ev, _window, cx| {
-                                ws.update(cx, |wsx, cx| {
-                                    wsx.checkout_branch(root.clone(), target.clone(), cx)
-                                });
-                            })
-                        });
-                    }
-                    if !remote.is_empty() {
-                        menu = menu.separator();
-                        for name in &remote {
-                            let ws = ws.clone();
-                            let root = root_for_menu.clone();
-                            // 远程分支切换用短名（去掉 `<remote>/` 前缀），走 git 内建
-                            // DWIM 自动建好跟踪分支——直接传 `origin/xxx` 全名会变成
-                            // detached HEAD，不是我们想要的（同 create_worktree 的判断）。
-                            let short = name
-                                .split_once('/')
-                                .map(|(_, s)| s.to_string())
-                                .unwrap_or_else(|| name.clone());
-                            menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                move |_ev, _window, cx| {
-                                    ws.update(cx, |wsx, cx| {
-                                        wsx.checkout_branch(root.clone(), short.clone(), cx)
-                                    });
-                                },
-                            ));
-                        }
-                    }
-                    menu
-                }),
-        )
-    };
-
-    let left = div()
-        .size_full()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .border_r_1()
-        .border_color(border)
-        .child(branch_header)
-        .child(file_list)
-        .child(commit_message_bar(
-            commit_msg_input,
-            commit_msg_generating,
-            data.ahead,
-            pushing,
-            cx,
-        ));
-
-    // 拖拽不生效时的诊断口子：`SMELT_DEBUG_RESIZE=1 /Applications/Smelt.app/Contents/MacOS/smelt`
-    // 从终端起，每帧打一行当前 panel 尺寸。尺寸不随拖动变化 = 事件没进来；变化了
-    // 但画面不动 = 布局把它盖掉了。两种病因完全不同，别靠肉眼猜。
-    if std::env::var_os("SMELT_DEBUG_RESIZE").is_some() {
-        eprintln!(
-            "[resize] git-left sizes={:?}",
-            git_left_resize.read(cx).sizes()
-        );
-    }
-
-    // 左栏宽度可拖拽（同文件树那套，拖完落盘）。以前写死 300px，路径一长就只能
-    // 看见结尾几个字符。
-    div().flex_1().min_h_0().flex().child(
-        h_resizable("git-left-split")
-            .with_state(git_left_resize)
-            .child(
-                resizable_panel()
-                    .size(px(git_left_w))
-                    .size_range(px(200.)..px(560.))
-                    .child(left),
-            )
-            // 包一层 size_full 再放内容：diff 面板根节点带 flex_1，而 flex_1
-            // 展开含 `flex-basis: 0%`，直接当 panel 的 child 会盖掉 panel 由
-            // ResizableState 管理的 flex_basis——组件文档专门把 flex_basis 列为
-            // 「调用方不许碰」的保留样式。包一层就把 flex_1 挡在里面了。
-            // 这层必须是 .flex()：GPUI 的 div 默认 display: Block，flex_1 的
-            // 子节点在 Block 里高度塌成 auto（列表 0 高，整个 diff 不可见）。
-            .child(
-                resizable_panel().child(div().size_full().flex().child(git_diff_pane(
-                    &root,
-                    git_diff,
-                    split,
-                    diff_selected,
-                    diff_comment_input,
-                    diff_scroll,
-                    active_hunk,
-                    scope,
-                    cx,
-                ))),
-            ),
-    )
-}
-
 // ===================== Workspace 方法 =====================
 
 impl Workspace {
@@ -3021,11 +2547,8 @@ impl Workspace {
         });
         self.diff_selected.clear(); // 换文件/重开 diff：旧的行选区不再对应新内容
         self.active_hunk = None; // 块下标同理，换了文件就不指向原来那块了
-        // 点变更 = 舞台只出 diff 详情，变更列表留在右侧停靠面板里（不在左边再
-        // 复制一份）。已经在「变更 + diff」双栏全宽里点的，保持双栏别塌成详情。
-        if self.stage_override != Some(crate::MainView::Git) {
-            self.stage_override = Some(crate::MainView::DiffDetail);
-        }
+        // diff 内嵌显示在改动页里（停靠或展开态用同一份 UI，见 git_narrow_panel），
+        // 不再提升到单独的舞台页——跟 Files 点文件不提升到舞台是同一个道理。
         self.git_tab = crate::GitTab::Changes;
         cx.notify();
 
@@ -3462,42 +2985,6 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// 舞台的「只出 diff」视图：从停靠的 GIT 面板点一条变更走这里——变更列表
-    /// 留在右侧面板里，舞台只放 diff 详情，不再把列表在左边复制一份。
-    /// 复用全屏 Git 页那份 `git_diff_pane`（选行评论 / 按块操作 / 并排切换全在）。
-    pub(crate) fn git_diff_only_pane(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) -> AnyElement {
-        let root = self.cur().and_then(|s| s.cwd(cx)).unwrap_or_default();
-        // 评论输入框懒创建（需要 window），跟全屏 Git 页同一套模式。
-        if self.git_diff.is_some() && self.diff_comment_input.is_none() {
-            use gpui_component::input::InputState;
-            let state = cx.new(|cx| {
-                InputState::new(window, cx).placeholder("给选中的行写评论，发送前可以再改改…")
-            });
-            self.diff_comment_input = Some(state);
-        }
-        div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .child(git_diff_pane(
-                &root,
-                &self.git_diff,
-                self.diff_split,
-                &self.diff_selected,
-                self.diff_comment_input.as_ref(),
-                &self.diff_scroll,
-                self.active_hunk,
-                self.diff_scope,
-                cx,
-            ))
-            .into_any_element()
-    }
-
     /// inspector 的窄版 GIT 面板（344px）：SOURCE CONTROL 头（↑ahead ↓behind）+
     /// STAGED / CHANGES 分组文件列表 + commit 输入条；打开某个文件的 diff 后切
     /// DIFF 预览子视图（只读行 + 文件级暂存按钮）。放本文件是因为要读
@@ -3507,11 +2994,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> AnyElement {
-        use crate::inspector::InspectorTab;
         use crate::ui_theme;
 
         let Some(root) = self.cur().and_then(|s| s.cwd(cx)) else {
-            let header = self.inspector_header("SOURCE CONTROL", InspectorTab::Git, cx);
+            let header = self.inspector_header("SOURCE CONTROL", cx);
             return v_flex()
                 .flex_1()
                 .min_h_0()
@@ -3555,26 +3041,24 @@ impl Workspace {
         } else {
             rgb(ui_theme::text_faint())
         };
-        let header = self
-            .inspector_header("SOURCE CONTROL", InspectorTab::Git, cx)
-            .child(
-                Button::new("git-sync-menu")
-                    .ghost()
-                    .xsmall()
-                    .label(sync_label)
-                    .font_family("monospace")
-                    .text_color(sync_color)
-                    .dropdown_menu(move |menu, _window, _cx| {
-                        git_ops_menu_items(
-                            menu,
-                            ws_ops.clone(),
-                            root_ops.clone(),
-                            behind,
-                            stash_n,
-                            has_changes,
-                        )
-                    }),
-            );
+        let header = self.inspector_header("SOURCE CONTROL", cx).child(
+            Button::new("git-sync-menu")
+                .ghost()
+                .xsmall()
+                .label(sync_label)
+                .font_family("monospace")
+                .text_color(sync_color)
+                .dropdown_menu(move |menu, _window, _cx| {
+                    git_ops_menu_items(
+                        menu,
+                        ws_ops.clone(),
+                        root_ops.clone(),
+                        behind,
+                        stash_n,
+                        has_changes,
+                    )
+                }),
+        );
 
         // commit message 输入框懒创建（跟全屏 Git 页同一个实体，两处共享草稿）。
         if self.commit_msg_input.is_none() {
@@ -3586,6 +3070,76 @@ impl Workspace {
                     .placeholder("Commit message（可多行；点「AI 生成」起草）")
             });
             self.commit_msg_input = Some(state);
+        }
+
+        // 「改动 / 日志 / 热力图」子标签：原来是舞台全屏页独有的三个视图，现收进
+        // 停靠面板——展开态直接复用这份 UI（见 main.rs 的 stage_override 特判），
+        // 不再是另一套全屏组件，头部不会因为展开就变了个样。
+        let sub_tabs = {
+            let (fg, muted, accent) = {
+                let t = cx.theme();
+                (t.foreground, t.muted_foreground, t.accent)
+            };
+            h_flex()
+                .gap_1()
+                .px_3()
+                .py_1()
+                .border_b_1()
+                .border_color(rgb(ui_theme::border_dim()))
+                .children(
+                    [
+                        (GitTab::Changes, "改动"),
+                        (GitTab::Log, "日志"),
+                        (GitTab::Hotspot, "热力图"),
+                    ]
+                    .map(|(tab, label)| {
+                        let on = self.git_tab == tab;
+                        div()
+                            .id(label)
+                            .px_2()
+                            .py(px(1.0))
+                            .text_sm()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_color(if on { fg } else { muted })
+                            .when(on, |d| d.bg(accent))
+                            .hover(|d| d.opacity(0.8))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.git_tab = tab;
+                                cx.notify();
+                            }))
+                            .child(label)
+                    }),
+                )
+        };
+
+        if self.git_tab == GitTab::Log {
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .child(header)
+                .child(sub_tabs)
+                .child(self.render_git_log_tab(root.clone(), cx))
+                .into_any_element();
+        }
+        if self.git_tab == GitTab::Hotspot {
+            return v_flex()
+                .flex_1()
+                .min_h_0()
+                .child(header)
+                .child(sub_tabs)
+                .child(self.render_git_hotspot_tab(root.clone(), cx))
+                .into_any_element();
+        }
+
+        // 点了改动文件要看 diff：评论输入框懒创建，跟全屏页同一套逻辑
+        // （diff 内嵌显示在改动页里，不再提升到舞台，见 open_diff 的改动）。
+        if self.git_diff.is_some() && self.diff_comment_input.is_none() {
+            use gpui_component::input::InputState;
+            let state = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("给选中的行写评论，发送前可以再改改…")
+            });
+            self.diff_comment_input = Some(state);
         }
 
         // porcelain XY 两位码拆分组：X（index 侧）非空非 ? → STAGED；
@@ -3694,6 +3248,13 @@ impl Workspace {
                                 .is_some_and(|&b| b != b' ' && b != b'?');
                         let ws_stage = ws.clone();
                         let (r_stage, p_stage) = (root.clone(), row.path.clone());
+                        // 右键菜单要用的克隆先在这几个变量被 move 进别的闭包之前拿好。
+                        let ws_menu = ws.clone();
+                        let file_path = Path::new(&root)
+                            .join(&row.path)
+                            .to_string_lossy()
+                            .to_string();
+                        let (root_menu, path_menu) = (root.clone(), row.path.clone());
                         let stage_checkbox = Checkbox::new((key, rix)).checked(staged).on_click(
                             move |checked, _window, cx| {
                                 // 别冒泡成「打开这份 diff」——勾选是纯索引操作。
@@ -3713,34 +3274,76 @@ impl Workspace {
                         let ws = ws.clone();
                         let root = root.clone();
                         let open_path = row.path.clone();
+                        let row_el = div()
+                            .id((key, rix))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .pl(indent)
+                            .pr_3()
+                            .py(px(3.))
+                            .text_xs()
+                            .font_family("monospace")
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
+                            .child(stage_checkbox)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(rgb(ui_theme::text()))
+                                    .child(row.name),
+                            )
+                            .child(div().flex_shrink_0().text_color(letter_color).child(letter))
+                            .on_click(move |_ev, _window, cx| {
+                                let root = root.clone();
+                                let path = open_path.clone();
+                                ws.update(cx, |ws, cx| ws.open_diff(root, path, untracked, cx));
+                            });
+                        // 右键菜单：丢弃改动 / 复制路径 / 在 Finder 中显示（跟以前全屏
+                        // Git 页那份一致，不再是「展开了才有、停靠时没有」）。
                         col = col.child(
-                            div()
-                                .id((key, rix))
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .pl(indent)
-                                .pr_3()
-                                .py(px(3.))
-                                .text_xs()
-                                .font_family("monospace")
-                                .cursor_pointer()
-                                .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                                .child(stage_checkbox)
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(rgb(ui_theme::text()))
-                                        .child(row.name),
-                                )
-                                .child(div().flex_shrink_0().text_color(letter_color).child(letter))
-                                .on_click(move |_ev, _window, cx| {
-                                    let root = root.clone();
-                                    let path = open_path.clone();
-                                    ws.update(cx, |ws, cx| ws.open_diff(root, path, untracked, cx));
-                                }),
+                            row_el
+                                .context_menu(move |menu, _window, _cx| {
+                                    let (ws_d, r_d, p_d) =
+                                        (ws_menu.clone(), root_menu.clone(), path_menu.clone());
+                                    let (ws_c, p_c) = (ws_menu.clone(), file_path.clone());
+                                    let (ws_f, p_f) = (ws_menu.clone(), file_path.clone());
+                                    menu.item(
+                                        PopupMenuItem::new(if untracked {
+                                            "删除文件"
+                                        } else {
+                                            "丢弃改动"
+                                        })
+                                        .on_click(move |_ev, _window, cx| {
+                                            ws_d.update(cx, |ws, cx| {
+                                                ws.start_discard_file(
+                                                    r_d.clone(),
+                                                    p_d.clone(),
+                                                    untracked,
+                                                    cx,
+                                                )
+                                            });
+                                        }),
+                                    )
+                                    .separator()
+                                    .item(PopupMenuItem::new("复制文件路径").on_click(
+                                        move |_ev, _window, cx| {
+                                            ws_c.update(cx, |ws, cx| {
+                                                ws.copy_file_path_to_clipboard(p_c.clone(), cx)
+                                            });
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("在 Finder 中显示").on_click(
+                                        move |_ev, _window, cx| {
+                                            ws_f.update(cx, |ws, cx| {
+                                                ws.reveal_path_in_finder(p_f.clone(), cx)
+                                            });
+                                        },
+                                    ))
+                                })
+                                .into_any_element(),
                         );
                     }
                 }
@@ -3906,13 +3509,163 @@ impl Workspace {
                     ),
             );
 
+        let list_and_commit = v_flex().flex_1().min_h_0().child(list).child(commit_bar);
+        // 有打开的 diff：内嵌显示（diff 在左占主宽度，改动列表 + commit 框收窄到
+        // 右边），跟 Files 面板「内容左、树右」同一个视觉套路——点了改动不再
+        // 提升到舞台另开一页（见 open_diff 的改动）。
+        // 右栏宽度跟 inspector_w 联动（同 Files 面板 tree_w 的算法）——停靠态默认
+        // 宽度只有 280px，之前写死 280px 右栏会把 diff 挤到 0 宽，中文按大段
+        // 单字换行导致整个面板视觉错乱（见用户反馈截图）。
+        let list_w = (self.inspector_w * 0.4).clamp(160., 260.);
+        let changes_body: AnyElement = if self.git_diff.is_some() {
+            let diff_pane = git_diff_pane(
+                &root,
+                &self.git_diff,
+                self.diff_split,
+                &self.diff_selected,
+                self.diff_comment_input.as_ref(),
+                &self.diff_scroll,
+                self.active_hunk,
+                self.diff_scope,
+                cx,
+            );
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .flex()
+                .child(
+                    h_resizable("git-narrow-diff-split")
+                        .child(
+                            resizable_panel()
+                                .size_range(px(200.)..Pixels::MAX)
+                                .min_w_0()
+                                .min_h_0()
+                                .flex()
+                                .child(diff_pane),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(list_w))
+                                .size_range(px(160.)..Pixels::MAX)
+                                .flex_none()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex()
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .min_h_0()
+                                        .flex()
+                                        .flex_col()
+                                        .border_l_1()
+                                        .border_color(rgb(ui_theme::border_dim()))
+                                        .child(list_and_commit),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            list_and_commit.into_any_element()
+        };
+
         v_flex()
             .flex_1()
             .min_h_0()
             .child(header)
-            .child(list)
-            .child(commit_bar)
+            .child(sub_tabs)
+            .child(changes_body)
             .into_any_element()
+    }
+
+    /// GIT 面板「日志」子标签：提交历史 + 分支图三栏（分支树 / 图+列表 / 详情），
+    /// 停靠 / 舞台展开态共用（root 由调用方保证非空）。
+    pub(crate) fn render_git_log_tab(
+        &mut self,
+        root: String,
+        cx: &mut Context<Workspace>,
+    ) -> AnyElement {
+        // 进页面就保证数据在（内部按 root 去重，不会每帧拉）；分支列表复用
+        // Git 页那份缓存，左侧树才有内容。
+        self.ensure_git_log(root.clone(), cx);
+        self.ensure_branches(root.clone(), cx);
+        let branches = self.branches.get(&root).map(|(_, b)| b);
+        // 当前检出的分支：日志默认看它，分支树里也要标出来。复用 Git 页已有的
+        // status 缓存，不另跑一次 git。
+        let head_branch = self
+            .git_status
+            .get(&root)
+            .map(|(_, d)| d.branch_name().to_string())
+            .filter(|b| !b.is_empty());
+        let border = rgb(crate::ui_theme::border_dim());
+        // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死宽度的话中间的提交
+        // 列表会被挤得没法看。
+        div().flex_1().min_h_0().flex().child(
+            h_resizable("git-log-split")
+                .with_state(&self.git_log_resize)
+                // 左：分支树
+                .child(
+                    resizable_panel()
+                        .size(px(200.))
+                        .size_range(px(140.)..Pixels::MAX)
+                        .child(
+                            div()
+                                .size_full()
+                                .min_h_0()
+                                .border_r_1()
+                                .border_color(border)
+                                .child(crate::git_log_view::branch_tree(
+                                    Some(root.clone()),
+                                    branches,
+                                    &self.git_log.scope,
+                                    head_branch.clone(),
+                                    cx,
+                                )),
+                        ),
+                )
+                // 中：分支图 + 提交列表
+                // wrapper 必须 .flex()：div 默认 Block，里面 flex_1 根节点会
+                // 高度塌 0（同 Git 改动页 diff 面板的坑）。
+                .child(
+                    resizable_panel().child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .min_w_0()
+                            .min_h_0()
+                            .border_r_1()
+                            .border_color(border)
+                            .child(crate::git_log_view::git_log_view(
+                                Some(root.clone()),
+                                &self.git_log,
+                                head_branch,
+                                cx,
+                            )),
+                    ),
+                )
+                // 右：提交详情
+                .child(
+                    resizable_panel()
+                        .size(px(380.))
+                        .size_range(px(240.)..Pixels::MAX)
+                        .child(div().size_full().flex().min_w_0().min_h_0().child(
+                            crate::git_log_view::commit_detail_pane(Some(root), &self.git_log, cx),
+                        )),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// GIT 面板「热力图」子标签：改动热力（原舞台独立页，见 MainView::Hotspot
+    /// 的历史注释），停靠 / 舞台展开态共用。
+    pub(crate) fn render_git_hotspot_tab(
+        &mut self,
+        root: String,
+        cx: &mut Context<Workspace>,
+    ) -> AnyElement {
+        self.ensure_hotspot(root.clone(), cx);
+        let data = self.hotspot_data.get(&root).map(|(_, d)| d.clone());
+        crate::hotspot::hotspot_view(Some(root), data, cx).into_any_element()
     }
 }
 
