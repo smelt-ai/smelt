@@ -41,6 +41,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Not connected'), findsOneWidget);
+    expect(find.text('Pairing Code'), findsOneWidget);
+    expect(find.text('Gateway Endpoint'), findsNothing);
+    expect(find.text('Token'), findsNothing);
     expect(find.text('Connect'), findsOneWidget);
     expect(find.text('Scan QR Code to Pair'), findsOneWidget);
 

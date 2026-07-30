@@ -9,11 +9,15 @@ class AcpSnapshot {
   final PendingElicitation? pendingElicitation;
   final String? statusLine;
   final String? acpSessionId;
+  final String? historySessionId;
   final bool supportsImage;
   final List<List<String>> availableCommands;
   final AcpUsage? usage;
   final AcpPlan? plan;
   final AcpModel? model;
+  final List<AcpSessionConfig> configOptions;
+  final int? turnStartedAtMs;
+  final int? lastTurnDurationMs;
   final bool completedUnread;
   final bool shouldPersist;
 
@@ -25,11 +29,15 @@ class AcpSnapshot {
     this.pendingElicitation,
     this.statusLine,
     this.acpSessionId,
+    this.historySessionId,
     this.supportsImage = true,
     this.availableCommands = const [],
     this.usage,
     this.plan,
     this.model,
+    this.configOptions = const [],
+    this.turnStartedAtMs,
+    this.lastTurnDurationMs,
     this.completedUnread = false,
     this.shouldPersist = false,
   });
@@ -61,6 +69,7 @@ class AcpSnapshot {
           : null,
       statusLine: data['status_line'] as String?,
       acpSessionId: data['acp_session_id'] as String?,
+      historySessionId: data['history_session_id'] as String?,
       supportsImage: data['supports_image'] as bool? ?? true,
       availableCommands:
           (data['available_commands'] as List<dynamic>?)
@@ -73,6 +82,14 @@ class AcpSnapshot {
       usage: data['usage'] != null ? AcpUsage.fromJson(data['usage']) : null,
       plan: data['plan'] != null ? AcpPlan.fromJson(data['plan']) : null,
       model: data['model'] != null ? AcpModel.fromJson(data['model']) : null,
+      configOptions:
+          (data['config_options'] as List<dynamic>?)
+              ?.whereType<Map<String, dynamic>>()
+              .map(AcpSessionConfig.fromJson)
+              .toList() ??
+          [],
+      turnStartedAtMs: (data['turn_started_at_ms'] as num?)?.toInt(),
+      lastTurnDurationMs: (data['last_turn_duration_ms'] as num?)?.toInt(),
       completedUnread: data['completed_unread'] as bool? ?? false,
       shouldPersist: data['should_persist'] as bool? ?? false,
     );
@@ -92,11 +109,15 @@ class AcpSnapshot {
       pendingElicitation: next.pendingElicitation,
       statusLine: next.statusLine,
       acpSessionId: next.acpSessionId,
+      historySessionId: next.historySessionId,
       supportsImage: next.supportsImage,
       availableCommands: next.availableCommands,
       usage: next.usage,
       plan: next.plan,
       model: next.model,
+      configOptions: next.configOptions,
+      turnStartedAtMs: next.turnStartedAtMs,
+      lastTurnDurationMs: next.lastTurnDurationMs,
       completedUnread: next.completedUnread,
       shouldPersist: next.shouldPersist,
     );
@@ -186,6 +207,18 @@ sealed class AcpEntry {
       return AcpEntryUser(text: user.toString());
     }
 
+    if (json['UserWithImages'] case final Map<String, dynamic> user) {
+      return AcpEntryUserWithImages(
+        text: user['text'] as String? ?? '',
+        images:
+            (user['images'] as List<dynamic>?)
+                ?.whereType<Map<String, dynamic>>()
+                .map(AcpImageData.fromJson)
+                .toList() ??
+            [],
+      );
+    }
+
     // Assistant 消息
     if (json.containsKey('Assistant')) {
       final assistant = json['Assistant'];
@@ -233,6 +266,27 @@ class AcpEntryUser extends AcpEntry {
   const AcpEntryUser({required this.text});
 }
 
+class AcpEntryUserWithImages extends AcpEntry {
+  final String text;
+  final List<AcpImageData> images;
+
+  const AcpEntryUserWithImages({required this.text, required this.images});
+}
+
+class AcpImageData {
+  final String mimeType;
+  final String base64;
+
+  const AcpImageData({required this.mimeType, required this.base64});
+
+  factory AcpImageData.fromJson(Map<String, dynamic> json) => AcpImageData(
+    mimeType: json['mime'] as String? ?? 'image/png',
+    base64: json['data_b64'] as String? ?? '',
+  );
+
+  Map<String, String> toJson() => {'mime': mimeType, 'data_b64': base64};
+}
+
 class AcpEntryAssistant extends AcpEntry {
   final String text;
   final bool thought;
@@ -268,15 +322,37 @@ class AcpEntryUnknown extends AcpEntry {
 enum ToolKind {
   read,
   edit,
+  delete,
+  move,
+  search,
   execute,
+  think,
+  fetch,
+  switchMode,
+  collaborate,
+  review,
+  image,
+  compact,
+  wait,
   other;
 
   factory ToolKind.fromJson(dynamic json) {
     if (json is String) {
       return switch (json.toLowerCase()) {
         'read' => ToolKind.read,
-        'edit' || 'write' || 'delete' || 'move' => ToolKind.edit,
+        'edit' || 'write' => ToolKind.edit,
+        'delete' => ToolKind.delete,
+        'move' => ToolKind.move,
+        'search' => ToolKind.search,
         'execute' || 'bash' => ToolKind.execute,
+        'think' => ToolKind.think,
+        'fetch' => ToolKind.fetch,
+        'switch_mode' => ToolKind.switchMode,
+        'collaborate' => ToolKind.collaborate,
+        'review' => ToolKind.review,
+        'image' => ToolKind.image,
+        'compact' => ToolKind.compact,
+        'wait' => ToolKind.wait,
         _ => ToolKind.other,
       };
     }
@@ -366,11 +442,13 @@ class PendingPermission {
   final String toolCallId;
   final String question;
   final List<PermissionOption> options;
+  final ApprovalDetails details;
 
   const PendingPermission({
     required this.toolCallId,
     required this.question,
     required this.options,
+    this.details = const ApprovalDetailsGeneric(),
   });
 
   factory PendingPermission.fromJson(Map<String, dynamic> json) {
@@ -382,8 +460,56 @@ class PendingPermission {
               ?.map((o) => PermissionOption.fromJson(o))
               .toList() ??
           [],
+      details: ApprovalDetails.fromJson(json['details']),
     );
   }
+}
+
+sealed class ApprovalDetails {
+  const ApprovalDetails();
+
+  factory ApprovalDetails.fromJson(dynamic json) {
+    if (json is! Map<String, dynamic>) {
+      return const ApprovalDetailsGeneric();
+    }
+    return switch (json['kind']) {
+      'command' => ApprovalDetailsCommand(
+        command: json['command'] as String? ?? '',
+        cwd: json['cwd'] as String?,
+        reason: json['reason'] as String?,
+      ),
+      'file_change' => ApprovalDetailsFileChange(
+        reason: json['reason'] as String?,
+        grantRoot: json['grant_root'] as String?,
+      ),
+      'permissions' => ApprovalDetailsPermissions(
+        summary: json['summary'] as String? ?? '',
+      ),
+      _ => const ApprovalDetailsGeneric(),
+    };
+  }
+}
+
+class ApprovalDetailsCommand extends ApprovalDetails {
+  final String command;
+  final String? cwd;
+  final String? reason;
+  const ApprovalDetailsCommand({required this.command, this.cwd, this.reason});
+}
+
+class ApprovalDetailsFileChange extends ApprovalDetails {
+  final String? reason;
+  final String? grantRoot;
+  const ApprovalDetailsFileChange({this.reason, this.grantRoot});
+}
+
+class ApprovalDetailsPermissions extends ApprovalDetails {
+  final String summary;
+  const ApprovalDetailsPermissions({required this.summary});
+}
+
+class ApprovalDetailsGeneric extends ApprovalDetails {
+  const ApprovalDetailsGeneric();
 }
 
 /// 权限选项
@@ -590,22 +716,67 @@ class AcpPlanStep {
       status: json['status'] as String? ?? 'pending',
     );
   }
+
+  bool get isCompleted => status.toLowerCase() == 'completed';
+  bool get isInProgress =>
+      status.toLowerCase() == 'inprogress' ||
+      status.toLowerCase() == 'in_progress';
 }
 
 /// 模型信息
 class AcpModel {
+  final String configId;
   final String currentName;
   final List<List<String>> options;
 
-  const AcpModel({required this.currentName, this.options = const []});
+  const AcpModel({
+    required this.configId,
+    required this.currentName,
+    this.options = const [],
+  });
 
   factory AcpModel.fromJson(Map<String, dynamic> json) {
     return AcpModel(
+      configId: json['config_id'] as String? ?? '',
       currentName: json['current_name'] as String? ?? '',
       options:
           (json['options'] as List<dynamic>?)
               ?.map(
                 (o) => (o as List<dynamic>).map((e) => e.toString()).toList(),
+              )
+              .toList() ??
+          [],
+    );
+  }
+}
+
+class AcpSessionConfig {
+  final String configId;
+  final String name;
+  final String? description;
+  final String currentName;
+  final List<List<String>> options;
+
+  const AcpSessionConfig({
+    required this.configId,
+    required this.name,
+    this.description,
+    required this.currentName,
+    this.options = const [],
+  });
+
+  factory AcpSessionConfig.fromJson(Map<String, dynamic> json) {
+    return AcpSessionConfig(
+      configId: json['config_id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      description: json['description'] as String?,
+      currentName: json['current_name'] as String? ?? '',
+      options:
+          (json['options'] as List<dynamic>?)
+              ?.map(
+                (option) => (option as List<dynamic>)
+                    .map((value) => value.toString())
+                    .toList(),
               )
               .toList() ??
           [],

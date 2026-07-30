@@ -10,6 +10,14 @@ void main() {
           'entries': [
             {'User': 'Show the history'},
             {
+              'UserWithImages': {
+                'text': 'Inspect this screenshot',
+                'images': [
+                  {'mime': 'image/png', 'data_b64': 'aW1hZ2U='},
+                ],
+              },
+            },
+            {
               'Assistant': {'text': 'History restored.', 'thought': false},
             },
           ],
@@ -25,6 +33,12 @@ void main() {
                   'kind': 'AllowOnce',
                 },
               ],
+              'details': {
+                'kind': 'command',
+                'command': 'cargo test',
+                'cwd': '/workspace',
+                'reason': 'Verify the change',
+              },
             },
           ],
           'pending_elicitation': null,
@@ -40,24 +54,54 @@ void main() {
               {'content': 'Restore history', 'status': 'Completed'},
             ],
           },
-          'model': null,
+          'model': {
+            'config_id': 'model',
+            'current_name': 'Codex',
+            'options': [
+              ['codex', 'Codex'],
+            ],
+          },
+          'config_options': [
+            {
+              'config_id': 'mode',
+              'name': 'Permission mode',
+              'description': 'Controls tool approvals',
+              'current_name': 'Default',
+              'options': [
+                ['default', 'Default'],
+                ['full', 'Full access'],
+              ],
+            },
+          ],
+          'turn_started_at_ms': 1000,
+          'last_turn_duration_ms': 2500,
           'completed_unread': false,
           'should_persist': true,
         },
       });
 
-      expect(snapshot.entries, hasLength(2));
+      expect(snapshot.entries, hasLength(3));
       expect((snapshot.entries.first as AcpEntryUser).text, 'Show the history');
+      final imageEntry = snapshot.entries[1] as AcpEntryUserWithImages;
+      expect(imageEntry.text, 'Inspect this screenshot');
+      expect(imageEntry.images.single.mimeType, 'image/png');
       expect(
         (snapshot.entries.last as AcpEntryAssistant).text,
         'History restored.',
       );
       expect(snapshot.acpSessionId, 'agent-session-id');
       expect(snapshot.pendingPermissions.single.toolCallId, 'tool-1');
+      final details = snapshot.pendingPermissions.single.details;
+      expect(details, isA<ApprovalDetailsCommand>());
+      expect((details as ApprovalDetailsCommand).command, 'cargo test');
       expect(snapshot.usage?.usedTokens, 120);
       expect(snapshot.usage?.contextWindow, 200000);
       expect(snapshot.plan?.steps.single.title, 'Restore history');
       expect(snapshot.plan?.steps.single.status, 'Completed');
+      expect(snapshot.model?.configId, 'model');
+      expect(snapshot.configOptions.single.configId, 'mode');
+      expect(snapshot.turnStartedAtMs, 1000);
+      expect(snapshot.lastTurnDurationMs, 2500);
     });
 
     test('replaces the snapshot tail at entries_offset', () {
