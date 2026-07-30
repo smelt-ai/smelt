@@ -4,32 +4,26 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build clean remote-web remote-web-dev
+.PHONY: help build run icon dist dist-build clean
 
 help: ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## 编译 release 二进制（GUI + 守护 + 跨网 bridge）
-	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-bridge --bin smelt-notify
+build: ## 编译 release 二进制（GUI + 守护 + 通知器）
+	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify
 
-run: ## 本地直接跑 GUI（开发用；先保证 smeltd / bridge 同编）
-	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-bridge --bin smelt-notify
+run: ## 本地直接跑 GUI（开发用；先保证 smeltd 同编）
+	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify
 	cargo run --bin $(BIN)
-
-remote-web: ## 构建远程 H5（Preact CLI 面板 → remote-web/dist）
-	cd remote-web && npm ci && npm run build
-
-remote-web-dev: ## 远程 H5 热更新（需另开 gateway --port 18765）
-	cd remote-web && npm run dev
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
 	./scripts/make-icon.sh
 
-dist: remote-web ## 用已有 release 产物打包 app + dmg（先确保 H5 已构建）
+dist: ## 用已有 release 产物打包 app + dmg
 	./scripts/package-mac.sh
 
-dist-build: remote-web ## 先编 H5 + release 再打包（一步到位）
+dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
 install: ## 安装 dist/Smelt.app 到 /Applications（先 handoff 守护到 ~/.smelt/bin，再换包）

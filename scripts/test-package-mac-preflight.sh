@@ -8,11 +8,10 @@ trap 'rm -rf "$FIXTURE"' EXIT
 mkdir -p "$FIXTURE/scripts"
 cp "$ROOT/scripts/package-mac.sh" "$FIXTURE/scripts/package-mac.sh"
 cp "$ROOT/Cargo.toml" "$FIXTURE/Cargo.toml"
-mkdir -p "$FIXTURE/target/release" "$FIXTURE/remote-web/dist"
+mkdir -p "$FIXTURE/target/release"
 : >"$FIXTURE/target/release/smelt"
 : >"$FIXTURE/target/release/smeltd"
-: >"$FIXTURE/target/release/smelt-bridge"
-: >"$FIXTURE/remote-web/dist/index.html"
+: >"$FIXTURE/target/release/smelt-notify"
 
 make_fake_python() {
   local path="$1"
