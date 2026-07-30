@@ -5,29 +5,32 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
 
 void main() {
-  test('an unreachable gateway gives up instead of hanging on connecting', () async {
-    // 192.0.2.0/24 is TEST-NET-1: routable-looking but black-holed, which is
-    // exactly the "typo'd IP" case where the WebSocket handshake never
-    // resolves either way.
-    final service = GatewayService(
-      connectTimeout: const Duration(milliseconds: 300),
-    );
-    final states = <WsState>[];
-    final errors = <String>[];
-    final stateSub = service.stateStream.listen(states.add);
-    final errorSub = service.errorStream.listen(errors.add);
+  test(
+    'an unreachable gateway gives up instead of hanging on connecting',
+    () async {
+      // 192.0.2.0/24 is TEST-NET-1: routable-looking but black-holed, which is
+      // exactly the "typo'd IP" case where the WebSocket handshake never
+      // resolves either way.
+      final service = GatewayService(
+        connectTimeout: const Duration(milliseconds: 300),
+      );
+      final states = <WsState>[];
+      final errors = <String>[];
+      final stateSub = service.stateStream.listen(states.add);
+      final errorSub = service.errorStream.listen(errors.add);
 
-    await service.connect('ws://192.0.2.1:9877', 'irrelevant-token');
-    await _waitFor(() => service.state == WsState.disconnected);
+      await service.connect('ws://192.0.2.1:9877', 'irrelevant-token');
+      await _waitFor(() => service.state == WsState.disconnected);
 
-    expect(states, contains(WsState.connecting));
-    expect(service.state, WsState.disconnected);
-    expect(states, isNot(contains(WsState.reconnecting)));
-    expect(errors, isNotEmpty);
+      expect(states, contains(WsState.connecting));
+      expect(service.state, WsState.disconnected);
+      expect(states, isNot(contains(WsState.reconnecting)));
+      expect(errors, isNotEmpty);
 
-    await stateSub.cancel();
-    await errorSub.cancel();
-  });
+      await stateSub.cancel();
+      await errorSub.cancel();
+    },
+  );
 
   test('cancelling while connecting returns to disconnected', () async {
     final service = GatewayService(connectTimeout: const Duration(seconds: 30));
@@ -45,6 +48,7 @@ void main() {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final requestedPaths = <String>[];
     final requestedEndpoints = <String>[];
+    final requestedRelays = <String>[];
     unawaited(
       server.first.then((request) {
         requestedPaths.add(request.uri.toString());
@@ -55,37 +59,48 @@ void main() {
 
     final service = GatewayService(
       connectTimeout: const Duration(seconds: 5),
-      irohTunnelOpener: (endpointId) async {
+      irohTunnelOpener: (endpointId, relayUrl, relayToken) async {
         requestedEndpoints.add(endpointId);
+        requestedRelays.add('$relayUrl|$relayToken');
         return server.port;
       },
     );
 
-    await service.connect('smelt+iroh://k7d3ffb1c9a24e5f', 'tok');
+    await service.connect(
+      'smelt+iroh://k7d3ffb1c9a24e5f?relay=https%3A%2F%2Frelay.test&relay_token=secret',
+      'tok',
+    );
     await _waitFor(() => requestedPaths.isNotEmpty);
 
     expect(requestedEndpoints, ['k7d3ffb1c9a24e5f']);
+    expect(requestedRelays, ['https://relay.test|secret']);
     expect(requestedPaths.single, '/acp/ws?token=tok');
 
     service.disconnect();
     await server.close(force: true);
   });
 
-  test('a tunnel that never opens does not hang the UI on connecting', () async {
-    // 打错的 EndpointId 表现为拨号一直不返回，界面必须能自己退出加载态。
-    final service = GatewayService(
-      connectTimeout: const Duration(milliseconds: 300),
-      irohTunnelOpener: (_) => Completer<int>().future,
-    );
-    final errors = <String>[];
-    final errorSub = service.errorStream.listen(errors.add);
+  test(
+    'a tunnel that never opens does not hang the UI on connecting',
+    () async {
+      // 打错的 EndpointId 表现为拨号一直不返回，界面必须能自己退出加载态。
+      final service = GatewayService(
+        connectTimeout: const Duration(milliseconds: 300),
+        irohTunnelOpener: (_, _, _) => Completer<int>().future,
+      );
+      final errors = <String>[];
+      final errorSub = service.errorStream.listen(errors.add);
 
-    await service.connect('smelt+iroh://k7d3ffb1c9a24e5f', 'tok');
-    await _waitFor(() => service.state == WsState.disconnected);
+      await service.connect(
+        'smelt+iroh://k7d3ffb1c9a24e5f?relay=https%3A%2F%2Frelay.test',
+        'tok',
+      );
+      await _waitFor(() => service.state == WsState.disconnected);
 
-    expect(errors, isNotEmpty);
-    await errorSub.cancel();
-  });
+      expect(errors, isNotEmpty);
+      await errorSub.cancel();
+    },
+  );
 
   test('without a tunnel opener an iroh pairing fails loudly', () async {
     final service = GatewayService(
@@ -94,7 +109,10 @@ void main() {
     final errors = <String>[];
     final errorSub = service.errorStream.listen(errors.add);
 
-    await service.connect('smelt+iroh://k7d3ffb1c9a24e5f', 'tok');
+    await service.connect(
+      'smelt+iroh://k7d3ffb1c9a24e5f?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
     await _waitFor(() => service.state == WsState.disconnected);
 
     expect(errors, isNotEmpty);

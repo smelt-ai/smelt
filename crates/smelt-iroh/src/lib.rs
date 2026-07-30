@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt as _;
-use iroh::{Endpoint, SecretKey, endpoint::Connection};
+use iroh::{Endpoint, RelayMode, RelayUrl, SecretKey, endpoint::Connection};
+use iroh_relay::{RelayConfig, RelayMap};
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
@@ -25,6 +26,43 @@ use tracing::{info, warn};
 /// 隧道的 ALPN。换协议语义时必须同步改两端，否则 iroh 会直接拒绝握手——
 /// 这正是我们要的：宁可连不上，也不要两端对协议理解不一致还硬跑。
 pub const ALPN: &[u8] = b"smelt/tunnel/1";
+
+/// 用户配置的 relay。Smelt 不提供默认值，避免在未告知用户时访问第三方基础设施。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaySettings {
+    pub url: RelayUrl,
+    pub token: Option<String>,
+}
+
+impl RelaySettings {
+    /// 接受域名、IP 或完整 URL；省略 scheme 时按生产 relay 补成 HTTPS。
+    pub fn parse(address: &str, token: &str) -> Result<Self> {
+        let address = address.trim();
+        anyhow::ensure!(!address.is_empty(), "请先填写 iroh relay 地址");
+        let normalized = if address.contains("://") {
+            address.to_string()
+        } else {
+            format!("https://{address}")
+        };
+        let url: RelayUrl = normalized
+            .parse()
+            .with_context(|| format!("不是合法的 iroh relay 地址：{address}"))?;
+        let token = token.trim();
+        Ok(Self {
+            url,
+            token: (!token.is_empty()).then(|| token.to_string()),
+        })
+    }
+
+    fn relay_map(&self) -> RelayMap {
+        let config = RelayConfig::from(self.url.clone());
+        let config = match &self.token {
+            Some(token) => config.with_auth_token(token.clone()),
+            None => config,
+        };
+        config.into()
+    }
+}
 
 /// iroh 当前实际用于发送业务数据的路径类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,14 +149,19 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)
 }
 
-/// 用给定密钥起一个 iroh Endpoint。
+/// 用用户明确配置的 relay 起一个 iroh Endpoint。
 ///
-/// `N0` preset 自带：中继回退 + pkarr/DNS 地址发布 + 本地发现，
-/// 也就是「同网直连、跨网打洞、打不通走中继」这套行为的来源。
-pub async fn bind_endpoint(secret: SecretKey, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
-    let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+/// `Minimal` 不安装 n0 relay 或 n0 DNS 地址发现；双方的配对码显式携带同一个
+/// relay URL，仍可借它交换地址、打洞，并在直连失败时中继。
+pub async fn bind_endpoint(
+    secret: SecretKey,
+    alpns: Vec<Vec<u8>>,
+    relay: &RelaySettings,
+) -> Result<Endpoint> {
+    let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
         .secret_key(secret)
         .alpns(alpns)
+        .relay_mode(RelayMode::Custom(relay.relay_map()))
         .bind()
         .await
         .context("iroh Endpoint 绑定失败")?;
@@ -292,6 +335,22 @@ async fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_settings_adds_https_to_domain_or_ip() {
+        let domain = RelaySettings::parse("relay.example.test", " token ").unwrap();
+        assert_eq!(domain.url.to_string(), "https://relay.example.test/");
+        assert_eq!(domain.token.as_deref(), Some("token"));
+
+        let ip = RelaySettings::parse("192.0.2.10:8443", "").unwrap();
+        assert_eq!(ip.url.to_string(), "https://192.0.2.10:8443/");
+        assert_eq!(ip.token, None);
+    }
+
+    #[test]
+    fn relay_settings_rejects_empty_address() {
+        assert!(RelaySettings::parse("  ", "token").is_err());
+    }
 
     #[test]
     fn secret_roundtrips_and_is_stable() {

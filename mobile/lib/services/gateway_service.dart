@@ -114,7 +114,8 @@ enum WsState { disconnected, connecting, connected, reconnecting }
 ///
 /// 做成可注入的函数而不是直接调 FFI，是为了让 `GatewayService` 的测试
 /// 不必依赖编译好的 Rust 动态库。
-typedef IrohTunnelOpener = Future<int> Function(String endpointId);
+typedef IrohTunnelOpener =
+    Future<int> Function(String endpointId, String relayUrl, String relayToken);
 
 /// Gateway WebSocket 服务
 class GatewayService {
@@ -130,7 +131,7 @@ class GatewayService {
   /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
   IrohTunnelOpener irohTunnelOpener;
 
-  static Future<int> _irohUnavailable(String _) =>
+  static Future<int> _irohUnavailable(String _, String _, String _) =>
       Future.error(StateError('本版本未编入 iroh 隧道支持'));
 
   WebSocketChannel? _channel;
@@ -251,7 +252,18 @@ class GatewayService {
     }
     // 打洞/中继协商可能很久，必须有上限：否则打错的 EndpointId 会让界面
     // 永远停在「连接中」，这正是之前踩过的坑。
-    final port = await irohTunnelOpener(parsed.host).timeout(connectTimeout);
+    final relayUrl = parsed.queryParameters['relay'] ?? '';
+    final relayToken = parsed.queryParameters['relay_token'] ?? '';
+    if (relayUrl.isEmpty) {
+      throw const FormatException(
+        'The iroh pairing is missing its relay address',
+      );
+    }
+    final port = await irohTunnelOpener(
+      parsed.host,
+      relayUrl,
+      relayToken,
+    ).timeout(connectTimeout);
     return _gatewayUri('http://127.0.0.1:$port', token);
   }
 

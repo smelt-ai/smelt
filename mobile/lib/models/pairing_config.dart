@@ -25,6 +25,17 @@ class PairingConfig {
     return host.isEmpty ? null : host;
   }
 
+  String? get irohRelayUrl {
+    if (!isIroh) return null;
+    final value = Uri.parse(endpoint).queryParameters['relay']?.trim() ?? '';
+    return value.isEmpty ? null : value;
+  }
+
+  String get irohRelayToken {
+    if (!isIroh) return '';
+    return Uri.parse(endpoint).queryParameters['relay_token']?.trim() ?? '';
+  }
+
   factory PairingConfig.fromFields(String endpoint, String token) {
     final trimmedEndpoint = endpoint.trim();
     final trimmedToken = token.trim();
@@ -70,12 +81,23 @@ class PairingConfig {
     if (resolvedToken.isEmpty) {
       throw const FormatException('Pairing code is missing its token');
     }
-    // 规范化：只留 scheme + host，token 单独存。这样同一台 Mac 的配对码
-    // 不论带什么多余 query，`matchesTarget` 都认得出是同一个目标。
-    return PairingConfig(
-      endpoint: '$irohScheme://$endpointId',
-      token: resolvedToken,
+    final relayUrl = uri.queryParameters['relay']?.trim() ?? '';
+    if (relayUrl.isEmpty) {
+      throw const FormatException(
+        'Pairing code is missing its relay address. Generate a new code on the Mac.',
+      );
+    }
+    final relayToken = uri.queryParameters['relay_token']?.trim() ?? '';
+    // 网关 token 单独存；relay 配置保留在稳定 endpoint 中，供每次重建隧道使用。
+    final endpoint = Uri(
+      scheme: irohScheme,
+      host: endpointId,
+      queryParameters: {
+        'relay': relayUrl,
+        if (relayToken.isNotEmpty) 'relay_token': relayToken,
+      },
     );
+    return PairingConfig(endpoint: endpoint.toString(), token: resolvedToken);
   }
 
   static PairingConfig _fromUri(Uri uri, {String? token}) {

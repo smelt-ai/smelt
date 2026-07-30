@@ -4,9 +4,10 @@
 // 跑法：
 //   1. 在 Mac 上准备一个 HTTP 服务和宿主：
 //        python3 -m http.server 9988
-//        smelt-iroh-host --gateway 127.0.0.1:9988
+//        smelt-iroh-host --gateway 127.0.0.1:9988 --relay relay.example.com
 //   2. flutter test integration_test/iroh_tunnel_test.dart \
-//        --dart-define=SMELT_IROH_TEST_PEER=<EndpointId>
+//        --dart-define=SMELT_IROH_TEST_PEER=<EndpointId> \
+//        --dart-define=SMELT_IROH_TEST_RELAY=https://relay.example.com
 //
 // 没给 EndpointId 时只跑不依赖宿主的部分，方便在 CI 里当冒烟测试。
 
@@ -14,11 +15,14 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:smelt_mobile/models/pairing_config.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/rust_lib.dart';
 import 'package:smelt_mobile/src/rust/api_iroh.dart';
 
 const _peer = String.fromEnvironment('SMELT_IROH_TEST_PEER');
+const _relay = String.fromEnvironment('SMELT_IROH_TEST_RELAY');
+const _relayToken = String.fromEnvironment('SMELT_IROH_TEST_RELAY_TOKEN');
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -33,7 +37,11 @@ void main() {
 
   test('打错的 EndpointId 会报错而不是挂起', () async {
     await expectLater(
-      irohTunnelStart(endpointId: 'definitely-not-an-endpoint-id'),
+      irohTunnelStart(
+        endpointId: 'definitely-not-an-endpoint-id',
+        relayUrl: _relay,
+        relayToken: _relayToken,
+      ),
       throwsA(anything),
     );
   });
@@ -41,10 +49,21 @@ void main() {
   test(
     '隧道能把 HTTP 请求送到 Mac 上的宿主',
     () async {
-      final port = await irohTunnelStart(endpointId: _peer);
+      final port = await irohTunnelStart(
+        endpointId: _peer,
+        relayUrl: _relay,
+        relayToken: _relayToken,
+      );
       expect(port, greaterThan(0));
       // 幂等：同一个 peer 不该换端口，否则上层重连会打到旧端口。
-      expect(await irohTunnelStart(endpointId: _peer), port);
+      expect(
+        await irohTunnelStart(
+          endpointId: _peer,
+          relayUrl: _relay,
+          relayToken: _relayToken,
+        ),
+        port,
+      );
       expect(await irohTunnelPort(), port);
 
       final client = HttpClient();
@@ -57,8 +76,8 @@ void main() {
       await irohTunnelStop();
       expect(await irohTunnelPort(), isNull);
     },
-    skip: _peer.isEmpty
-        ? '需要 --dart-define=SMELT_IROH_TEST_PEER=<EndpointId>'
+    skip: _peer.isEmpty || _relay.isEmpty
+        ? '需要 SMELT_IROH_TEST_PEER 和 SMELT_IROH_TEST_RELAY'
         : false,
   );
 
@@ -66,14 +85,27 @@ void main() {
     'GatewayService 用真隧道时会去连本地端口',
     () async {
       // 把生产用的接线也跑一遍：main() 里就是这么接的。
-      final service = GatewayService(connectTimeout: const Duration(seconds: 20))
-        ..irohTunnelOpener = (id) => irohTunnelStart(endpointId: id);
+      final service =
+          GatewayService(connectTimeout: const Duration(seconds: 20))
+            ..irohTunnelOpener = (id, relay, relayToken) => irohTunnelStart(
+              endpointId: id,
+              relayUrl: relay,
+              relayToken: relayToken,
+            );
       final errors = <String>[];
       final sub = service.errorStream.listen(errors.add);
 
       // 宿主后面接的是普通 HTTP 服务而非网关，所以 /acp/ws 会失败 ——
       // 这里要的是「确实经隧道打到了对端」，而不是握手成功。
-      await service.connect('smelt+iroh://$_peer', 'irrelevant-token');
+      final endpoint = Uri(
+        scheme: PairingConfig.irohScheme,
+        host: _peer,
+        queryParameters: {
+          'relay': _relay,
+          if (_relayToken.isNotEmpty) 'relay_token': _relayToken,
+        },
+      );
+      await service.connect(endpoint.toString(), 'irrelevant-token');
       await Future<void>.delayed(const Duration(seconds: 3));
 
       expect(service.state, isNot(WsState.connecting), reason: '不该卡在连接中');
@@ -81,8 +113,8 @@ void main() {
       service.disconnect();
       await irohTunnelStop();
     },
-    skip: _peer.isEmpty
-        ? '需要 --dart-define=SMELT_IROH_TEST_PEER=<EndpointId>'
+    skip: _peer.isEmpty || _relay.isEmpty
+        ? '需要 SMELT_IROH_TEST_PEER 和 SMELT_IROH_TEST_RELAY'
         : false,
   );
 }

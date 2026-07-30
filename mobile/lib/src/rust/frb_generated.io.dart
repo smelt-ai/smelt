@@ -107,6 +107,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ) {
     wireObj.endpoint_id = cst_encode_String(apiObj.endpointId);
     wireObj.token = cst_encode_String(apiObj.token);
+    wireObj.relay_url = cst_encode_String(apiObj.relayUrl);
+    wireObj.relay_token = cst_encode_String(apiObj.relayToken);
   }
 
   @protected
@@ -215,8 +217,15 @@ class RustLibWire implements BaseWire {
   void wire__crate__api_iroh__iroh_tunnel_start(
     int port_,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> endpoint_id,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_url,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_token,
   ) {
-    return _wire__crate__api_iroh__iroh_tunnel_start(port_, endpoint_id);
+    return _wire__crate__api_iroh__iroh_tunnel_start(
+      port_,
+      endpoint_id,
+      relay_url,
+      relay_token,
+    );
   }
 
   late final _wire__crate__api_iroh__iroh_tunnel_startPtr =
@@ -225,13 +234,20 @@ class RustLibWire implements BaseWire {
           ffi.Void Function(
             ffi.Int64,
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
           )
         >
       >('frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_start');
   late final _wire__crate__api_iroh__iroh_tunnel_start =
       _wire__crate__api_iroh__iroh_tunnel_startPtr
           .asFunction<
-            void Function(int, ffi.Pointer<wire_cst_list_prim_u_8_strict>)
+            void Function(
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            )
           >();
 
   void wire__crate__api_iroh__iroh_tunnel_stop(int port_) {
@@ -326,4 +342,8 @@ final class wire_cst_iroh_pairing extends ffi.Struct {
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> endpoint_id;
 
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> token;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_url;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_token;
 }

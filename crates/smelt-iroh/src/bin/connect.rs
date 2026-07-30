@@ -5,7 +5,8 @@
 //! 网关——**整条链路走 iroh，不依赖任何公网 URL**。
 //!
 //! 用法：
-//!   smelt-iroh-connect --peer <endpoint-id> [--listen 127.0.0.1:0]
+//!   smelt-iroh-connect --peer <endpoint-id> --relay relay.example.com
+//!     [--relay-token TOKEN] [--listen 127.0.0.1:0]
 //!
 //! `crates/smelt-mobile` 接 iroh 时要复用的就是 `open_bi` 那几行；差别只是
 //! 手机侧不需要本地 TCP 监听，直接把流交给 tungstenite。
@@ -13,26 +14,33 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use iroh::EndpointId;
+use iroh::{EndpointAddr, EndpointId};
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-fn parse_args() -> Result<(EndpointId, SocketAddr)> {
+fn parse_args() -> Result<(EndpointId, SocketAddr, String, String)> {
     let mut peer: Option<String> = None;
     let mut listen = "127.0.0.1:0".to_string();
+    let mut relay: Option<String> = None;
+    let mut relay_token = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--peer" => peer = args.next(),
+            "--relay" => relay = args.next(),
+            "--relay-token" => relay_token = args.next().unwrap_or_default(),
             "--listen" => {
                 if let Some(v) = args.next() {
                     listen = v;
                 }
             }
             "--help" | "-h" => {
-                println!("smelt-iroh-connect --peer <endpoint-id> [--listen 127.0.0.1:0]");
+                println!(
+                    "smelt-iroh-connect --peer <endpoint-id> --relay <domain|url> \
+                     [--relay-token <token>] [--listen 127.0.0.1:0]"
+                );
                 std::process::exit(0);
             }
             other => warn!("忽略未知参数 {other}"),
@@ -45,7 +53,8 @@ fn parse_args() -> Result<(EndpointId, SocketAddr)> {
     let listen: SocketAddr = listen
         .parse()
         .with_context(|| format!("--listen 不是合法的 host:port：{listen}"))?;
-    Ok((peer, listen))
+    let relay = relay.context("必须指定 --relay <domain|url>")?;
+    Ok((peer, listen, relay, relay_token))
 }
 
 #[tokio::main]
@@ -54,13 +63,15 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let (peer, listen) = parse_args()?;
+    let (peer, listen, relay_address, relay_token) = parse_args()?;
     // 客户端不需要稳定身份，每次随机即可（手机侧同理：认的是宿主的 EndpointId）。
     let secret = iroh::SecretKey::generate();
-    let endpoint = smelt_iroh::bind_endpoint(secret, vec![]).await?;
+    let relay = smelt_iroh::RelaySettings::parse(&relay_address, &relay_token)?;
+    let endpoint = smelt_iroh::bind_endpoint(secret, vec![], &relay).await?;
 
+    let target = EndpointAddr::new(peer).with_relay_url(relay.url.clone());
     let conn = endpoint
-        .connect(peer, smelt_iroh::ALPN)
+        .connect(target, smelt_iroh::ALPN)
         .await
         .with_context(|| format!("拨号 {peer} 失败"))?;
     info!("已连上宿主 {peer}");

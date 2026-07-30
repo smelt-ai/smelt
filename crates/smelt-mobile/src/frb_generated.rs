@@ -91,6 +91,8 @@ fn wire__crate__api_iroh__iroh_tunnel_port_impl(
 fn wire__crate__api_iroh__iroh_tunnel_start_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     endpoint_id: impl CstDecode<String>,
+    relay_url: impl CstDecode<String>,
+    relay_token: impl CstDecode<String>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -100,10 +102,17 @@ fn wire__crate__api_iroh__iroh_tunnel_start_impl(
         },
         move || {
             let api_endpoint_id = endpoint_id.cst_decode();
+            let api_relay_url = relay_url.cst_decode();
+            let api_relay_token = relay_token.cst_decode();
             move |context| async move {
                 transform_result_dco::<_, _, String>(
                     (move || async move {
-                        let output_ok = crate::api_iroh::iroh_tunnel_start(api_endpoint_id).await?;
+                        let output_ok = crate::api_iroh::iroh_tunnel_start(
+                            api_endpoint_id,
+                            api_relay_url,
+                            api_relay_token,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -185,9 +194,13 @@ impl SseDecode for crate::api_iroh::IrohPairing {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_endpointId = <String>::sse_decode(deserializer);
         let mut var_token = <String>::sse_decode(deserializer);
+        let mut var_relayUrl = <String>::sse_decode(deserializer);
+        let mut var_relayToken = <String>::sse_decode(deserializer);
         return crate::api_iroh::IrohPairing {
             endpoint_id: var_endpointId,
             token: var_token,
+            relay_url: var_relayUrl,
+            relay_token: var_relayToken,
         };
     }
 }
@@ -281,6 +294,8 @@ impl flutter_rust_bridge::IntoDart for crate::api_iroh::IrohPairing {
         [
             self.endpoint_id.into_into_dart().into_dart(),
             self.token.into_into_dart().into_dart(),
+            self.relay_url.into_into_dart().into_dart(),
+            self.relay_token.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -306,6 +321,8 @@ impl SseEncode for crate::api_iroh::IrohPairing {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.endpoint_id, serializer);
         <String>::sse_encode(self.token, serializer);
+        <String>::sse_encode(self.relay_url, serializer);
+        <String>::sse_encode(self.relay_token, serializer);
     }
 }
 
@@ -401,6 +418,8 @@ mod io {
             crate::api_iroh::IrohPairing {
                 endpoint_id: self.endpoint_id.cst_decode(),
                 token: self.token.cst_decode(),
+                relay_url: self.relay_url.cst_decode(),
+                relay_token: self.relay_token.cst_decode(),
             }
         }
     }
@@ -418,6 +437,8 @@ mod io {
             Self {
                 endpoint_id: core::ptr::null_mut(),
                 token: core::ptr::null_mut(),
+                relay_url: core::ptr::null_mut(),
+                relay_token: core::ptr::null_mut(),
             }
         }
     }
@@ -441,8 +462,10 @@ mod io {
     pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_start(
         port_: i64,
         endpoint_id: *mut wire_cst_list_prim_u_8_strict,
+        relay_url: *mut wire_cst_list_prim_u_8_strict,
+        relay_token: *mut wire_cst_list_prim_u_8_strict,
     ) {
-        wire__crate__api_iroh__iroh_tunnel_start_impl(port_, endpoint_id)
+        wire__crate__api_iroh__iroh_tunnel_start_impl(port_, endpoint_id, relay_url, relay_token)
     }
 
     #[unsafe(no_mangle)]
@@ -479,6 +502,8 @@ mod io {
     pub struct wire_cst_iroh_pairing {
         endpoint_id: *mut wire_cst_list_prim_u_8_strict,
         token: *mut wire_cst_list_prim_u_8_strict,
+        relay_url: *mut wire_cst_list_prim_u_8_strict,
+        relay_token: *mut wire_cst_list_prim_u_8_strict,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -529,13 +554,15 @@ mod web {
                 .unwrap();
             assert_eq!(
                 self_.length(),
-                2,
-                "Expected 2 elements, got {}",
+                4,
+                "Expected 4 elements, got {}",
                 self_.length()
             );
             crate::api_iroh::IrohPairing {
                 endpoint_id: self_.get(0).cst_decode(),
                 token: self_.get(1).cst_decode(),
+                relay_url: self_.get(2).cst_decode(),
+                relay_token: self_.get(3).cst_decode(),
             }
         }
     }
@@ -588,8 +615,10 @@ mod web {
     pub fn wire__crate__api_iroh__iroh_tunnel_start(
         port_: flutter_rust_bridge::for_generated::MessagePort,
         endpoint_id: String,
+        relay_url: String,
+        relay_token: String,
     ) {
-        wire__crate__api_iroh__iroh_tunnel_start_impl(port_, endpoint_id)
+        wire__crate__api_iroh__iroh_tunnel_start_impl(port_, endpoint_id, relay_url, relay_token)
     }
 
     #[wasm_bindgen]

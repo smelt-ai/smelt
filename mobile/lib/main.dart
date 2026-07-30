@@ -26,8 +26,12 @@ Future<void> main() async {
   await initRustLib();
   // 在组装根接线，而不是让 GatewayService 直接依赖 FFI：服务层保持纯 Dart，
   // 单测才能不带动态库地跑。
-  gatewayService.irohTunnelOpener = (endpointId) =>
-      irohTunnelStart(endpointId: endpointId);
+  gatewayService.irohTunnelOpener = (endpointId, relayUrl, relayToken) =>
+      irohTunnelStart(
+        endpointId: endpointId,
+        relayUrl: relayUrl,
+        relayToken: relayToken,
+      );
   runApp(const SmeltApp());
 }
 
