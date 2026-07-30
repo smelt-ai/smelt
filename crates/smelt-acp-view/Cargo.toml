@@ -23,3 +23,4 @@ uuid = { version = "1", features = ["v4"] }
 # ACP 对话粘贴图片：协议要 base64 后的字节（见 PromptImage）。
 base64 = "0.22"
 url = "2"
+serde = { version = "1", features = ["derive"] }
