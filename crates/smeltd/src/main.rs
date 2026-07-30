@@ -32,11 +32,12 @@
 //!                                                              默认回环随机口 + 只读）
 //!   {"op":"remote_stop"}                                     → 回 {"ok":true} 后关闭
 //!   {"op":"remote_status"}                                   → 回 {"running":bool,"token":"..","addr":"..","write":bool} 后关闭
-//!   {"op":"tunnel_start","write":false}                       → 回 {"ok":true,"url":"..","write":bool}，
-//!                                                              spawn cloudflared 把远程网关暴露到公网
-//!                                                              （见下「Cloudflare Tunnel」）
-//!   {"op":"tunnel_stop"}                                     → 回 {"ok":true} 后关闭
-//!   {"op":"tunnel_status"}                                   → 回 {"running":bool,"url":"..","write":bool} 后关闭
+//!   {"op":"iroh_start","write":false}                         → 回 {"ok":true,"endpoint_id":"..","token":"..",
+//!                                                              "addr":"..","write":bool}，把远程网关经 iroh
+//!                                                              P2P 暴露出去（见下「iroh 隧道」）
+//!   {"op":"iroh_stop"}                                       → 回 {"ok":true} 后关闭
+//!   {"op":"iroh_status"}                                     → 回 {"running":bool,"endpoint_id":"..","token":"..",
+//!                                                              "write":bool} 后关闭
 //!   {"op":"state","id":"..","phase":"..","question":".."}    → 回 {"ok":true} 后关闭，hook 直写（见下
 //!                                                              「状态通道」），question 可省
 //!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，v1 归一化
@@ -104,25 +105,23 @@
 //! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
 //! 默认关闭、绑回环，见 collaboration.md 的安全底线。
 //!
-//! ## Cloudflare Tunnel（`tunnel_start`/`tunnel_stop`/`tunnel_status`）
+//! ## iroh 隧道（`iroh_start`/`iroh_stop`/`iroh_status`）
 //!
-//! 解决"内嵌远程网关默认绑回环，手机切到蜂窝网络就连不上"这个问题（见
-//! docs/remote-ops-roadmap.md Phase 3）。`tunnel_start` 会先确保内嵌远程网关已经
-//! 开着（没开就用默认参数开一个），再 spawn `cloudflared tunnel --url` 子进程把它
-//! 暴露到一个 `*.trycloudflare.com` 公网地址——**不是自建信令 + WebRTC**，是走
-//! Cloudflare 的隧道中转，权衡理由见 roadmap 文档。
+//! 解决「内嵌远程网关默认绑回环，手机切到蜂窝网络就连不上」这个问题：iroh 优先
+//! 打洞直连，打不通才回退到中继。
 //!
-//! `cloudflared` 是外部二进制，不 vendor 进仓库；没装时 `tunnel_start` 会明确报错
-//! （提示 `brew install cloudflared`），不是静默失败。查找**不只靠 PATH**：从 Dock
-//! 启动的 GUI 继承的 PATH 通常没有 Homebrew（`/opt/homebrew/bin`），开发时终端里
-//! 有、打成 DMG 后却报「没找到」就是这个原因。见 `resolve_cloudflared`。
-//! 子进程的 stdout/stderr 全程有专门线程持续读干净（不只是为了扒事件，也是为了
-//! 不让管道写满反过来卡住 cloudflared）。同样不参与无缝升级交接，同样默认关闭。
+//! 这是**唯一**的公网通路。早先还有 Cloudflare quick tunnel 和自建信令 + WebRTC
+//! 两条，都已经删掉：前者的 URL 每次重开都变，手机上存的配对必然失效；后者要自建
+//! 信令 + coturn，且只对浏览器有意义。iroh 的 `endpoint_id` 由 `~/.smelt/iroh-secret`
+//! 里的私钥决定，重启不变，于是二维码可以一次扫、长期用——这是留下它的主要理由。
 //!
-//! **强制 `--protocol http2`**（实测踩过的坑）：quick tunnel 默认先试 QUIC，网络挡
-//! UDP/QUIC 时会反复重试好几轮才退化到 http2；而且 cloudflared 打印"隧道已创建"
-//! 的 URL 早于连接真正建好——只看到 URL 就上报成功，实测会先给出一个访问 530 的
-//! 死链接。`start_tunnel` 因此额外等一条 `Registered tunnel connection` 日志才算数。
+//! 实现上没有子进程，因此没有孤儿进程那套；跟远程网关一样另起一条 OS 线程跑自己的
+//! tokio runtime。转发逻辑在 `smelt-iroh` crate，与命令行
+//! 版 `smelt-iroh-host` 共用一份（一条 iroh 双向流 ⟷ 一条到网关的 TCP 连接，逐字节转发，
+//! 上层 HTTP/WebSocket/token 鉴权完全不变）。
+//!
+//! 注意 `endpoint_id` **不是**授权凭证：拿到它的人只是能连上网关，能不能操作仍由网关的
+//! token 决定，所以配对码必须 endpoint_id + token 一起给。
 //!
 //! ## 远程操控（`action` + `input` op）
 //!
@@ -398,7 +397,7 @@ mod single_instance_tests {
     }
 }
 
-/// 追加一行到 ~/.smelt/daemon.log。只给「守护无声死亡」的几条路径留痕用——
+/// 追加一行到 ~/.smelt/daemon.log。给守护交接故障和需要跨进程查看的网络状态留痕——
 /// 守护被 SIGKILL（例：装新版时用 cp 覆盖了已签名二进制，upgrade 的 exec 会被
 /// macOS 内核直接杀掉，无输出无崩溃报告）或静默 return 时，这份日志是唯一线索：
 /// 日志停在「即将 exec」而没有下一行「交接完成」，就是 exec 被杀。
@@ -1055,136 +1054,173 @@ fn stop_remote_gateway(state: &RemoteState) {
     }
 }
 
-/// Cloudflare Tunnel（Phase 3，见 docs/remote-ops-roadmap.md）：spawn `cloudflared`
-/// 子进程把本机远程网关暴露到公网，不是 P2P，是走 Cloudflare 中转——见 roadmap 里
-/// 放弃自建信令+WebRTC 的理由。持有子进程句柄，`tunnel_stop` 时负责杀干净。
+/// iroh 隧道（见 `crates/smelt-iroh`）：把本机远程网关经 P2P 暴露出去。
 ///
-/// `Starting` 占位：挡住并发 `tunnel_start` 在「已确认 None → 等 cloudflared 30s」
-/// 窗口里各起一个子进程、后写覆盖导致前者泄漏的竞态。
-enum TunnelSlot {
-    Starting,
-    Up {
-        child: std::process::Child,
-        url: String,
-    },
+/// 跟已下线的 Cloudflare 隧道相比的关键差别 —— 也是留下这条路的理由：
+/// 1. `endpoint_id` 由落盘私钥决定，**重启不变**，配对二维码可以永久有效。
+/// 2. 优先打洞直连，打不通才走中继，不是全程第三方中转。
+/// 3. 没有子进程，因此没有孤儿进程风险。
+///
+/// 私钥落在 `~/.smelt/iroh-secret`，与命令行 `smelt-iroh-host` 共用同一把，
+/// 这样两种起法给出的配对码是同一个。
+struct IrohTunnel {
+    endpoint_id: String,
+    relay: smelt_iroh::RelaySettings,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
 }
 
-type TunnelState = Arc<Mutex<Option<TunnelSlot>>>;
+type IrohState = Arc<Mutex<Option<IrohTunnel>>>;
 
-/// 进程退出 / upgrade exec 前清理远程网关与 tunnel。菜单栏 quit 与 accept 线程
+/// 幂等：已经开着直接回现有 endpoint_id。会先确保远程网关按 `write` 开着
+/// （隧道要转发给它），语义与 `start_tunnel` 一致。
+///
+/// 与网关同样「先等就绪再写 state」：iroh 绑定要联网发现中继，失败率不低，
+/// 抢先标 running 会让幂等路径永远回一个连不上的 endpoint_id。
+fn start_iroh(
+    iroh_state: &IrohState,
+    remote_state: &RemoteState,
+    write: bool,
+    relay_address: &str,
+    relay_token: &str,
+) -> Result<(String, String, std::net::SocketAddr, bool, String, String), String> {
+    let relay = smelt_iroh::RelaySettings::parse(relay_address, relay_token)
+        .map_err(|e| format!("iroh relay 配置无效：{e:#}"))?;
+    if let Some(t) = iroh_state.lock().unwrap().as_ref() {
+        if t.relay != relay {
+            return Err("iroh relay 配置已变化，请先停止旧隧道再重试".into());
+        }
+        let (token, addr, effective_write) = {
+            let guard = remote_state.lock().unwrap();
+            match guard.as_ref() {
+                Some(g) => (g.token.clone(), g.addr, g.write),
+                // 网关被单独停掉了：报错而不是回一个通往虚空的配对码。
+                None => return Err("iroh 隧道开着但本机网关已停，请先 iroh_stop".into()),
+            }
+        };
+        return Ok((
+            t.endpoint_id.clone(),
+            token,
+            addr,
+            effective_write,
+            t.relay.url.to_string(),
+            t.relay.token.clone().unwrap_or_default(),
+        ));
+    }
+
+    let (token, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+
+    let tunnel_relay = relay.clone();
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = ready_tx.send(Err(format!("iroh 起不了 tokio runtime：{e}")));
+                return;
+            }
+        };
+        rt.block_on(async move {
+            let secret = match smelt_iroh::default_secret_path()
+                .and_then(|p| smelt_iroh::load_or_create_secret(&p))
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("iroh 密钥不可用：{e:#}")));
+                    return;
+                }
+            };
+            let endpoint = match smelt_iroh::bind_endpoint(
+                secret,
+                vec![smelt_iroh::ALPN.to_vec()],
+                &tunnel_relay,
+            )
+            .await
+            {
+                Ok(ep) => ep,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("iroh 绑定失败：{e:#}")));
+                    return;
+                }
+            };
+            let _ = ready_tx.send(Ok(endpoint.id().to_string()));
+            let path_observer = std::sync::Arc::new(|status: smelt_iroh::PathStatus| {
+                dlog(&format!(
+                    "iroh path remote={} kind={} address={} rtt_ms={}",
+                    status.remote,
+                    status.kind,
+                    status.address,
+                    status.rtt.as_millis()
+                ));
+            });
+            smelt_iroh::serve_tunnel_with_observer(
+                endpoint,
+                addr,
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+                path_observer,
+            )
+            .await;
+        });
+    });
+
+    // 30s：绑定要连接用户配置的 relay，比本地绑端口慢得多，5s 在弱网下会误判失败。
+    match ready_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(endpoint_id)) => {
+            *iroh_state.lock().unwrap() = Some(IrohTunnel {
+                endpoint_id: endpoint_id.clone(),
+                relay: relay.clone(),
+                shutdown_tx,
+            });
+            Ok((
+                endpoint_id,
+                token,
+                addr,
+                effective_write,
+                relay.url.to_string(),
+                relay.token.clone().unwrap_or_default(),
+            ))
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("iroh 隧道启动超时（30s）".into()),
+    }
+}
+
+fn stop_iroh(state: &IrohState) {
+    if let Some(t) = state.lock().unwrap().take() {
+        let _ = t.shutdown_tx.send(());
+    }
+}
+
+fn iroh_status(state: &IrohState) -> Option<(String, smelt_iroh::RelaySettings)> {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|t| (t.endpoint_id.clone(), t.relay.clone()))
+}
+
+/// 进程退出 / upgrade exec 前清理远程网关与 iroh 隧道。菜单栏 quit 与 accept 线程
 /// 不同线程，靠这份 OnceLock 共享 Arc（main 启动时 register）。
-static LIFECYCLE: std::sync::OnceLock<(RemoteState, TunnelState)> = std::sync::OnceLock::new();
+static LIFECYCLE: std::sync::OnceLock<(RemoteState, IrohState)> = std::sync::OnceLock::new();
 
-fn register_lifecycle(remote: RemoteState, tunnel: TunnelState) {
-    let _ = LIFECYCLE.set((remote, tunnel));
+fn register_lifecycle(remote: RemoteState, iroh: IrohState) {
+    let _ = LIFECYCLE.set((remote, iroh));
 }
 
-/// 杀 cloudflared、关内嵌网关。exit/exec 前必须调——否则子进程孤儿化或
-/// exec 后 PID 仍在但 `TunnelState` 已丢句柄。
+/// 关内嵌网关与 iroh 隧道。exit/exec 前必须调——否则 exec 后端口还被占着，
+/// 新进程再开网关会撞上「address already in use」。
 fn cleanup_sidecar_services() {
-    if let Some((remote, tunnel)) = LIFECYCLE.get() {
-        stop_tunnel(tunnel);
+    if let Some((remote, iroh)) = LIFECYCLE.get() {
+        // iroh 要赶在网关之前停：反过来的话，正在转发的流会先撞上一个已经死掉的
+        // 网关端口，手机侧看到的是连接被拒而不是干净的隧道关闭。
+        stop_iroh(iroh);
         stop_remote_gateway(remote);
     }
 }
 
-/// 从 cloudflared 的一行日志里认出公网 URL（形如
-/// `https://xxx-xxx-xxx.trycloudflare.com`，混在 box-drawing 字符和时间戳里）。
-fn extract_tunnel_url(line: &str) -> Option<String> {
-    line.split_whitespace()
-        .find(|tok| tok.starts_with("https://") && tok.contains(".trycloudflare.com"))
-        .map(|s| s.trim_matches('|').to_string())
-}
-
-/// URL 打印出来 ≠ 隧道真的能用——cloudflared 注册完 hostname 就先打 URL，实际到
-/// Cloudflare 边缘的连接（尤其网络挡了 QUIC、要退化到 http2 时）可能还要再等一会。
-/// 必须等到这条"已建好连接"的日志才算数（实测：只看 URL 会拿到一个暂时 530 的死链接）。
-enum TunnelEvent {
-    Url(String),
-    Connected,
-    /// cloudflared 明确失败（如 `failed to request quick Tunnel: ...`），应立刻失败
-    /// 而不是傻等到 30s 超时。
-    Failed(String),
-}
-
-const TUNNEL_CONNECTED_MARKER: &str = "Registered tunnel connection";
-
-/// 从 cloudflared 日志里摘「致命错误」摘要，方便 GUI 展示（换网络后常见
-/// `api.trycloudflare.com` 被墙/劫持/断连）。
-fn extract_tunnel_failure(line: &str) -> Option<String> {
-    let lower = line.to_ascii_lowercase();
-    // 官方 quick tunnel 申请失败
-    if lower.contains("failed to request quick tunnel")
-        || lower.contains("failed to create tunnel")
-        || lower.contains("unable to reach the origin service")
-        || lower.contains("context deadline exceeded")
-        || lower.contains("connection refused")
-        || lower.contains("i/o timeout")
-        || lower.contains("no such host")
-        || lower.contains("certificate")
-        || (lower.contains("err ") && lower.contains("tunnel"))
-    {
-        // 去掉时间戳前缀，只留可读部分
-        let msg = line
-            .split_once("ERR ")
-            .map(|(_, rest)| rest)
-            .or_else(|| line.split_once("INF ").map(|(_, rest)| rest))
-            .unwrap_or(line)
-            .trim();
-        if msg.is_empty() {
-            return None;
-        }
-        return Some(msg.to_string());
-    }
-    // 非 ERR 级别但明确失败的整行
-    if line.contains("failed to request quick Tunnel") {
-        return Some(line.trim().to_string());
-    }
-    None
-}
-
-/// 持续把 cloudflared 的一路输出（stdout 或 stderr）读干净，**贯穿整个子进程生命
-/// 周期**，不是只读到握手成功为止：不只是为了扒事件（不读干净会把管道缓冲区写满，
-/// 反过来卡住 cloudflared），也是因为断线重连之后 cloudflared 理论上可能重新申请
-/// 一个新域名（官方对 quick tunnel 只保证"进程存活期间"这一件事，没有更强的承诺）。
-/// 一旦扫到新的 URL，直接更新 `tunnel_state` 里存的那份——不这样做的话，一旦真的
-/// 发生重新分配，GUI 会一直显示一条已经失效的旧链接，且没有任何信号能让它自己发现。
-fn spawn_tunnel_output_scanner(
-    reader: impl Read + Send + 'static,
-    tx: std::sync::mpsc::Sender<TunnelEvent>,
-    tunnel_state: TunnelState,
-) {
-    thread::spawn(move || {
-        let buf = BufReader::new(reader);
-        for line in buf.lines().map_while(Result::ok) {
-            if let Some(url) = extract_tunnel_url(&line) {
-                let _ = tx.send(TunnelEvent::Url(url.clone()));
-                // 握手阶段是 Starting/None，交给 start_tunnel 的 rx 处理首次握手；
-                // 这行只对「握手完成之后又冒出新 URL」更新已上线的槽位。
-                if let Some(TunnelSlot::Up { url: slot_url, .. }) =
-                    tunnel_state.lock().unwrap().as_mut()
-                {
-                    *slot_url = url;
-                }
-            }
-            if line.contains(TUNNEL_CONNECTED_MARKER) {
-                let _ = tx.send(TunnelEvent::Connected);
-            }
-            if let Some(err) = extract_tunnel_failure(&line) {
-                let _ = tx.send(TunnelEvent::Failed(err));
-            }
-        }
-    });
-}
-
-/// 保证本机远程网关按 `write` 开着（隧道启动前要先有可转发的网关）。
-///
-/// - 未开 → 用回环 + 随机端口 + `write` 开一个
-/// - 已开且 `write` 一致 → 复用（不换 token）
-/// - 已开但 `write` 不同 → 先停再开（权限烤进 router，不能热切换；旧链接随之失效）
-///
-/// 这是 `start_tunnel` 的入口，不能直接调幂等的 `start_remote_gateway`：后者在已开时
-/// **忽略**传入的 `write`，会把「隧道要可写」静默落成只读（Phase 6 修过的坑）。
 fn ensure_remote_gateway_with_write(
     state: &RemoteState,
     write: bool,
@@ -1253,260 +1289,6 @@ mod ensure_remote_gateway_write_tests {
     }
 }
 
-/// 定位本机 `cloudflared` 可执行文件。
-///
-/// 不能只写 `Command::new("cloudflared")`：从 Dock / Finder 打开的 `.app` 拿到的
-/// PATH 往往是 `/usr/bin:/bin:/usr/sbin:/sbin`，**没有** Homebrew 的
-/// `/opt/homebrew/bin` 或 `/usr/local/bin`。终端里 `cargo run` 正常、装 DMG 后
-/// 却提示「没找到 cloudflared」就是这个差异。
-fn resolve_cloudflared() -> Result<std::path::PathBuf, String> {
-    use std::path::PathBuf;
-
-    if let Ok(p) = std::env::var("SMELT_CLOUDFLARED") {
-        let p = PathBuf::from(p.trim());
-        if p.is_file() {
-            return Ok(p);
-        }
-        return Err(format!("SMELT_CLOUDFLARED={p:?} 不是可执行文件"));
-    }
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    // Homebrew / 常见前缀（Apple Silicon 与 Intel）
-    candidates.push(PathBuf::from("/opt/homebrew/bin/cloudflared"));
-    candidates.push(PathBuf::from("/usr/local/bin/cloudflared"));
-    candidates.push(PathBuf::from("/usr/bin/cloudflared"));
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".local/bin/cloudflared"));
-        candidates.push(home.join("bin/cloudflared"));
-        // 部分用户用 brew --prefix 装在自定义路径；仍可通过下面 PATH / login shell 兜底
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            candidates.push(PathBuf::from(dir).join("cloudflared"));
-        }
-    }
-
-    for c in &candidates {
-        if c.is_file() {
-            return Ok(c.clone());
-        }
-    }
-
-    // 最后手段：登录 shell 的 PATH（GUI 进程 PATH 太瘦时，zsh -lc 往往还能 which 到）
-    #[cfg(target_os = "macos")]
-    {
-        for shell in ["/bin/zsh", "/bin/bash"] {
-            let Ok(out) = std::process::Command::new(shell)
-                .args(["-lc", "command -v cloudflared"])
-                .output()
-            else {
-                continue;
-            };
-            if !out.status.success() {
-                continue;
-            }
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if p.is_empty() {
-                continue;
-            }
-            let p = PathBuf::from(p);
-            if p.is_file() {
-                return Ok(p);
-            }
-        }
-    }
-
-    Err(
-        "没找到 cloudflared（Dock 启动的 App 读不到 brew 的 PATH 是正常的）。\
-         请确认已安装：brew install cloudflared；或设置环境变量 SMELT_CLOUDFLARED=绝对路径"
-            .into(),
-    )
-}
-
-/// 幂等：已经开着直接回现有 URL。会先确保本机远程网关已经按 `write` 开着（隧道
-/// 要转发给它），没开或写权限对不上会顺带用默认参数（回环 + 随机端口）开/重开一个。
-///
-/// 强制 `--protocol http2`：quick tunnel 默认先试 QUIC，网络挡 UDP/QUIC 时（不少
-/// 企业网/部分云环境如此）要退化重试好几轮才会换协议，直接指定 http2 跳过这段
-/// 摸索，换一点 QUIC 本可能带来的延迟优势，换更快、更可预期的建连。
-fn start_tunnel(
-    tunnel_state: &TunnelState,
-    remote_state: &RemoteState,
-    write: bool,
-) -> Result<(String, bool), String> {
-    {
-        let mut guard = tunnel_state.lock().unwrap();
-        match guard.as_ref() {
-            Some(TunnelSlot::Up { url, .. }) => {
-                // 幂等：已开就不重启。write 以网关现状为准；想改权限得先 stop 再开。
-                let effective_write = remote_state
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|g| g.write)
-                    .unwrap_or(write);
-                return Ok((url.clone(), effective_write));
-            }
-            Some(TunnelSlot::Starting) => {
-                return Err("隧道正在启动，请稍后再试".into());
-            }
-            None => {
-                // 占位：挡住并发 start 在放锁后各起一个 cloudflared 的竞态。
-                *guard = Some(TunnelSlot::Starting);
-            }
-        }
-    }
-
-    let start_result = (|| {
-        let (_, addr, effective_write) = ensure_remote_gateway_with_write(remote_state, write)?;
-
-        use std::process::{Command, Stdio};
-        let cloudflared = resolve_cloudflared()?;
-        let mut child = Command::new(&cloudflared)
-            .arg("tunnel")
-            .arg("--protocol")
-            .arg("http2")
-            .arg("--url")
-            .arg(format!("http://{addr}"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    format!(
-                        "无法执行 {}（文件在但启动失败？）：{e}",
-                        cloudflared.display()
-                    )
-                } else {
-                    format!("启动 cloudflared（{}）失败：{e}", cloudflared.display())
-                }
-            })?;
-
-        let (tx, rx) = std::sync::mpsc::channel::<TunnelEvent>();
-        if let Some(out) = child.stdout.take() {
-            spawn_tunnel_output_scanner(out, tx.clone(), Arc::clone(tunnel_state));
-        }
-        if let Some(err) = child.stderr.take() {
-            spawn_tunnel_output_scanner(err, tx, Arc::clone(tunnel_state));
-        }
-
-        // 45s 内必须同时等到 URL 和"已连接"确认；若 cloudflared 已打出明确错误则立刻失败。
-        let deadline = std::time::Instant::now() + Duration::from_secs(45);
-        let mut url: Option<String> = None;
-        let mut connected = false;
-        let mut last_fail: Option<String> = None;
-        let url = loop {
-            if connected {
-                if let Some(u) = url {
-                    break u;
-                }
-            }
-            // 进程已退出且还没成功 → 用已抓到的失败信息
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                let _ = child.wait();
-                return Err(format_tunnel_timeout_err(last_fail.as_deref(), true));
-            }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format_tunnel_timeout_err(last_fail.as_deref(), false));
-            }
-            match rx.recv_timeout(remaining) {
-                Ok(TunnelEvent::Url(u)) => url = Some(u),
-                Ok(TunnelEvent::Connected) => connected = true,
-                Ok(TunnelEvent::Failed(msg)) => {
-                    last_fail = Some(msg.clone());
-                    // 申请 quick tunnel 失败通常进程会很快退出；先记下来，下一轮 try_wait
-                    // 或再次 Failed 再收尾。若已是明确 "failed to request" 则立刻失败。
-                    let lower = msg.to_ascii_lowercase();
-                    if lower.contains("failed to request")
-                        || lower.contains("failed to create")
-                        || lower.contains("no such host")
-                    {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(format_tunnel_timeout_err(Some(&msg), true));
-                    }
-                }
-                Err(_) => {
-                    // recv 超时：可能是 deadline 到了，回到 loop 顶检查
-                }
-            }
-        };
-
-        Ok((child, url, effective_write))
-    })();
-
-    match start_result {
-        Ok((child, url, effective_write)) => {
-            *tunnel_state.lock().unwrap() = Some(TunnelSlot::Up {
-                child,
-                url: url.clone(),
-            });
-            Ok((url, effective_write))
-        }
-        Err(e) => {
-            // 清掉 Starting 占位，允许下次重试；若中途被 stop_tunnel 清过则保持 None。
-            let mut guard = tunnel_state.lock().unwrap();
-            if matches!(guard.as_ref(), Some(TunnelSlot::Starting)) {
-                *guard = None;
-            }
-            Err(e)
-        }
-    }
-}
-
-fn stop_tunnel(state: &TunnelState) {
-    match state.lock().unwrap().take() {
-        Some(TunnelSlot::Up { mut child, .. }) => {
-            let _ = child.kill();
-            let _ = child.wait(); // 收尸，避免僵尸进程
-        }
-        Some(TunnelSlot::Starting) | None => {
-            // Starting：start_tunnel 失败路径会自己清；这里 take 掉占位可打断并发等待方的假设
-        }
-    }
-}
-
-/// 把超时/进程退出收成用户可读错误。`last_fail` 来自 cloudflared 日志（若有）。
-fn format_tunnel_timeout_err(last_fail: Option<&str>, process_exited: bool) -> String {
-    let hint = "当前网络可能访问不了 Cloudflare Quick Tunnel（api.trycloudflare.com）。\
-                可换网络 / 开代理后再试，或仅用本机/局域网链接。";
-    match (last_fail, process_exited) {
-        (Some(msg), true) => format!("cloudflared 建隧道失败：{msg}。{hint}"),
-        (Some(msg), false) => format!("cloudflared 建隧道超时（45s）：{msg}。{hint}"),
-        (None, true) => format!("cloudflared 已退出，未拿到公网链接。{hint}"),
-        (None, false) => format!("等 cloudflared 建好隧道超时（45s）。{hint}"),
-    }
-}
-
-/// 顺带自愈：cloudflared 意外退出时 `try_wait` 清状态，不让 GUI 一直显示死链。
-fn tunnel_status(state: &TunnelState) -> Option<String> {
-    let mut guard = state.lock().unwrap();
-    match guard.as_mut() {
-        Some(TunnelSlot::Up { child, url }) => {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                *guard = None;
-                None
-            } else {
-                Some(url.clone())
-            }
-        }
-        Some(TunnelSlot::Starting) => None, // 还没 URL，对外等同未运行
-        None => None,
-    }
-}
-
-/// macOS 顶部状态栏常驻图标（accessory 模式：**没有 Dock 图标、不进 ⌘Tab**，只在菜单栏
-/// 留一枚图标）。smeltd 本是无 UI 的守护，但被 GUI 拉起时继承了登录会话、连得上
-/// WindowServer，于是在这里挂个图标当常驻入口——即便 workspace 主窗口关了、图标仍在。
-/// 跟 `workspace/status_item.rs` 同一路数（绕开框架直接摸 AppKit），但更简单：菜单是
-/// 静态两项，不随会话状态重建。仅在 `SMELT_MENUBAR` 存在（即由 GUI 拉起）时才被调用。
-#[cfg(target_os = "macos")]
 mod menubar {
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
@@ -1538,8 +1320,8 @@ mod menubar {
     }
 
     /// 点「退出 smelt」：整个守护进程退出。注意这会关掉所有 PTY——所有会话（含正在
-    /// 跑的 agent）随之结束。后果已写进菜单项文案里。先清 tunnel/远程网关，避免
-    /// cloudflared 孤儿化。
+    /// 跑的 agent）随之结束。后果已写进菜单项文案里。先清 iroh 隧道与远程网关，
+    /// 避免端口残留。
     extern "C" fn on_quit(_this: &Object, _cmd: Sel, _sender: *mut Object) {
         super::cleanup_sidecar_services();
         std::process::exit(0);
@@ -1718,13 +1500,13 @@ fn main() {
     let listen_fd = listener.as_raw_fd();
     let exe_mtime = exe_mtime_secs();
     // 不参与无缝升级交接：每次进程启动（含 upgrade 后的新进程）都是全新的 None，
-    // 见 RemoteGateway / Tunnel 定义处注释。
+    // 见 RemoteGateway / IrohTunnel 定义处注释。
     let remote_state: RemoteState = Arc::new(Mutex::new(None));
-    let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+    let iroh_state: IrohState = Arc::new(Mutex::new(None));
     // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
     // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
-    register_lifecycle(Arc::clone(&remote_state), Arc::clone(&tunnel_state));
+    register_lifecycle(Arc::clone(&remote_state), Arc::clone(&iroh_state));
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
@@ -1734,7 +1516,7 @@ fn main() {
             let sessions = Arc::clone(&sessions);
             let acp_sessions = Arc::clone(&acp_sessions);
             let remote_state = Arc::clone(&remote_state);
-            let tunnel_state = Arc::clone(&tunnel_state);
+            let iroh_state = Arc::clone(&iroh_state);
             let subscribers = Arc::clone(&subscribers);
             thread::spawn(move || {
                 handle_conn(
@@ -1744,7 +1526,7 @@ fn main() {
                     exe_mtime,
                     listen_fd,
                     remote_state,
-                    tunnel_state,
+                    iroh_state,
                     subscribers,
                 )
             });
@@ -2812,80 +2594,6 @@ mod handoff_tests {
 }
 
 #[cfg(test)]
-mod tunnel_tests {
-    use super::*;
-
-    /// 真实抓过的 cloudflared 输出（`cloudflared tunnel --url` 本地实测）：URL 混在
-    /// box-drawing 字符、时间戳、日志级别里，前后有一堆空格垫着对齐画框。
-    #[test]
-    fn extract_tunnel_url_from_real_cloudflared_log_line() {
-        let line = "2026-07-15T08:22:32Z INF |  https://loved-ran-principles-mailto.trycloudflare.com                                     |";
-        assert_eq!(
-            extract_tunnel_url(line).as_deref(),
-            Some("https://loved-ran-principles-mailto.trycloudflare.com")
-        );
-    }
-
-    #[test]
-    fn extract_tunnel_url_ignores_unrelated_lines() {
-        assert_eq!(
-            extract_tunnel_url(
-                "2026-07-15T08:22:22Z INF Requesting new quick Tunnel on trycloudflare.com..."
-            ),
-            None
-        );
-        assert_eq!(
-            extract_tunnel_url("2026-07-15T08:25:01Z ERR Failed to dial a quic connection"),
-            None
-        );
-        assert_eq!(extract_tunnel_url(""), None);
-    }
-
-    #[test]
-    fn extract_tunnel_failure_from_quick_tunnel_eof() {
-        let line =
-            r#"failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": EOF"#;
-        let msg = extract_tunnel_failure(line).expect("应识别 quick tunnel 申请失败");
-        assert!(msg.to_ascii_lowercase().contains("failed to request"));
-    }
-
-    /// 真实抓过的"已连接"确认行（`--protocol http2` 实测）：URL 早就打印过了，
-    /// 但真正能访问是等到这一行才确认——只看 URL 那次拿到的是暂时 530 的死链接，
-    /// 这条测试锁死这个 marker 字符串跟真实日志一致，不能悄悄改错。
-    #[test]
-    fn connected_marker_matches_real_cloudflared_log_line() {
-        let line = "2026-07-15T08:26:46Z INF Registered tunnel connection connIndex=0 connection=0cc8452d-281b-43d2-892a-a60480f845d9 event=0 ip=198.18.20.145 location=lax07 protocol=http2";
-        assert!(line.contains(TUNNEL_CONNECTED_MARKER));
-    }
-
-    /// GUI 瘦 PATH 下也要能扫到 brew 安装路径（本机装了才会过；CI 无 cloudflared 则 skip）。
-    #[test]
-    fn resolve_cloudflared_finds_homebrew_path_when_installed() {
-        let brew = std::path::Path::new("/opt/homebrew/bin/cloudflared");
-        let brew_intel = std::path::Path::new("/usr/local/bin/cloudflared");
-        if !brew.is_file() && !brew_intel.is_file() {
-            return;
-        }
-        // 清掉 PATH，模拟 Dock 启动的 .app
-        let old = std::env::var_os("PATH");
-        // Safety: 单测进程内临时改 PATH；串行跑即可
-        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
-        let found = resolve_cloudflared();
-        if let Some(p) = old {
-            unsafe { std::env::set_var("PATH", p) };
-        } else {
-            unsafe { std::env::remove_var("PATH") };
-        }
-        let p = found.expect("PATH 很瘦时仍应扫到 Homebrew 路径");
-        assert!(p.is_file(), "{p:?}");
-        assert!(
-            p.ends_with("cloudflared"),
-            "应是 cloudflared 本体，得到 {p:?}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod state_listener_tests {
     use super::*;
 
@@ -3282,7 +2990,7 @@ mod action_integration_tests {
     fn call_action(sessions: &Sessions, id: &str, kind: &str) -> serde_json::Value {
         let (server, client) = UnixStream::pair().unwrap();
         let remote_state: RemoteState = Arc::new(Mutex::new(None));
-        let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+        let iroh_state: IrohState = Arc::new(Mutex::new(None));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let mut client = client;
         writeln!(
@@ -3298,7 +3006,7 @@ mod action_integration_tests {
             0,
             -1,
             remote_state,
-            tunnel_state,
+            iroh_state,
             subscribers,
         );
         let mut resp = String::new();
@@ -3417,7 +3125,7 @@ mod input_integration_tests {
     fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
         let (server, client) = UnixStream::pair().unwrap();
         let remote_state: RemoteState = Arc::new(Mutex::new(None));
-        let tunnel_state: TunnelState = Arc::new(Mutex::new(None));
+        let iroh_state: IrohState = Arc::new(Mutex::new(None));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let mut client = client;
         writeln!(
@@ -3433,7 +3141,7 @@ mod input_integration_tests {
             0,
             -1,
             remote_state,
-            tunnel_state,
+            iroh_state,
             subscribers,
         );
         let mut resp = String::new();
@@ -3512,7 +3220,7 @@ fn handle_conn(
     exe_mtime: u64,
     listen_fd: RawFd,
     remote_state: RemoteState,
-    tunnel_state: TunnelState,
+    iroh_state: IrohState,
     subscribers: Subscribers,
 ) {
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。
@@ -3600,8 +3308,8 @@ fn handle_conn(
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
             let _ = c.shutdown(Shutdown::Both);
-            // 先收尸 cloudflared / 远程网关，再 exit——否则隧道子进程会孤儿化并继续
-            // 转发到已死端口。PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
+            // 先收 iroh 隧道与远程网关，再 exit——否则手机侧的连接会继续转发到一个
+            // 已死的端口。PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
             cleanup_sidecar_services();
             std::process::exit(0);
         }
@@ -3640,15 +3348,23 @@ fn handle_conn(
             };
             let _ = writeln!(c, "{}", body);
         }
-        Some("tunnel_start") => {
+        Some("iroh_start") => {
             let write = v["write"].as_bool().unwrap_or(false);
+            let relay = v["relay"].as_str().unwrap_or_default();
+            let relay_token = v["relay_token"].as_str().unwrap_or_default();
             let mut c = conn;
-            match start_tunnel(&tunnel_state, &remote_state, write) {
-                Ok((url, write)) => {
+            match start_iroh(&iroh_state, &remote_state, write, relay, relay_token) {
+                Ok((endpoint_id, token, addr, write, relay, relay_token)) => {
+                    // token 一并回：配对码 = endpoint_id + token，缺一不可
+                    // （隧道只负责把字节送到，鉴权仍归网关）。
                     let _ = writeln!(
                         c,
                         "{}",
-                        serde_json::json!({ "ok": true, "url": url, "write": write })
+                        serde_json::json!({
+                            "ok": true, "endpoint_id": endpoint_id, "token": token,
+                            "addr": addr.to_string(), "write": write,
+                            "relay": relay, "relay_token": relay_token
+                        })
                     );
                 }
                 Err(e) => {
@@ -3656,22 +3372,27 @@ fn handle_conn(
                 }
             }
         }
-        Some("tunnel_stop") => {
-            stop_tunnel(&tunnel_state);
+        Some("iroh_stop") => {
+            stop_iroh(&iroh_state);
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
         }
-        Some("tunnel_status") => {
+        Some("iroh_status") => {
             let mut c = conn;
-            let body = match tunnel_status(&tunnel_state) {
-                Some(url) => {
-                    let write = remote_state
+            let body = match iroh_status(&iroh_state) {
+                Some((endpoint_id, relay)) => {
+                    let (token, write) = remote_state
                         .lock()
                         .unwrap()
                         .as_ref()
-                        .map(|g| g.write)
-                        .unwrap_or(false);
-                    serde_json::json!({ "running": true, "url": url, "write": write })
+                        .map(|g| (g.token.clone(), g.write))
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "running": true, "endpoint_id": endpoint_id,
+                        "token": token, "write": write,
+                        "relay": relay.url.to_string(),
+                        "relay_token": relay.token.unwrap_or_default()
+                    })
                 }
                 None => serde_json::json!({ "running": false }),
             };
@@ -4990,8 +4711,8 @@ fn handle_upgrade(
     // exec 失败的情况客户端会看到 ok:true 但轮询版本发现没变，按"升级未生效"处理。
     let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
 
-    // tunnel/远程网关不参与交接：exec 后新进程状态是空的，必须先杀 cloudflared，
-    // 否则旧子进程仍挂在同一 PID 下却无人 stop，且转发的本机端口已随旧线程消失。
+    // iroh 隧道/远程网关不参与交接：exec 后新进程状态是空的，必须先停掉，
+    // 否则转发的本机端口已随旧线程消失，手机侧却还以为连着。
     cleanup_sidecar_services();
 
     // 死前留痕：exec 可能不返回也不失败——被 macOS 内核 SIGKILL（新二进制以

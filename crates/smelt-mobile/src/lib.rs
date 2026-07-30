@@ -11,7 +11,9 @@
 mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. */
 
 pub mod api;
+pub mod api_iroh;
 pub mod crypto;
+pub mod iroh_tunnel;
 pub mod session;
 pub mod transport;
 

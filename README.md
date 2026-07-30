@@ -42,8 +42,9 @@ smelt 把终端——agent 真正干活的地方——变成主战场。
   跑着呢 / 有结果可看），需要关注时角标提醒 + 系统通知；不依赖任何一家的私有格式
 - **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、代码热力图、Markdown/Mermaid 渲染
 - **Claude Code 专属**：用量统计、历史会话与记忆浏览（读本地 `~/.claude/projects/**` transcript）
-- **远程访问**（默认关闭）：手机浏览器实时查看/操控本机 agent 会话，局域网直连，跨网可选
-  WebRTC 自建信令或 Cloudflare quick tunnel。**链接即权限，务必先读
+- **远程访问**（默认关闭）：用 Smelt 手机 App 查看/操控本机 agent 会话，局域网直连，
+  跨网走 iroh P2P（打洞直连，打不通自动回退中继），配对二维码永久有效。
+  **配对码即权限，务必先读
   [远程访问文档](https://github.com/smelt-ai/smelt/blob/main/website/content/docs.md#远程访问)** 再开
 - **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）、可选接 LLM 大脑的桌面宠物
 
@@ -75,20 +76,18 @@ cargo test
 ## 架构
 
 Rust 2021 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component)（GUI）、
-portable-pty + alacritty_terminal（内嵌终端）、tokio、axum + webrtc-rs（远程网关/跨网信令）。
+portable-pty + alacritty_terminal（内嵌终端）、tokio、axum（远程网关）、iroh（P2P 隧道）。
 配置放 `~/.smelt/`。
 
-仓库产出六个二进制，日常只需要跑第一个：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，
+仓库产出四个二进制，日常只需要跑第一个：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，
 类 tmux，由 GUI 按需拉起，不需要手动运行）、`gateway`（远程网关的独立可执行版，用于开发调试）、
-`smelt-notify`（Claude Code hooks 调用的状态上报小工具）、`smelt-signal` / `smelt-bridge`
-（跨网远程访问的自建信令 + WebRTC bridge，可选自部署，见
-[`docs/webrtc-edge.md`](docs/webrtc-edge.md)）。
+`smelt-notify`（Claude Code hooks 调用的状态上报小工具）。
+移动端在 `mobile/`（Flutter），经 `crates/smelt-mobile` 复用 Rust 侧的 iroh 隧道。
 
 详细架构、目录结构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，
 产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，
 杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)，
-远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md) 与
-[`docs/webrtc-edge.md`](docs/webrtc-edge.md)。
+远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
 
 ## 贡献
 

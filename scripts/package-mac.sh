@@ -23,7 +23,6 @@ MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
 BIN="$ROOT/target/release/$BIN_NAME"
 DAEMON_BIN="$ROOT/target/release/smeltd"   # 终端持久化守护（GUI 按同目录寻址拉起）
-BRIDGE_BIN="$ROOT/target/release/smelt-bridge"  # 跨网 WebRTC 桥（设置页「跨网」拉起）
 NOTIFY_BIN="$ROOT/target/release/smelt-notify" # Agent hooks → smeltd 状态通道
 
 # dmgbuild 1.6.7 要求 Python >= 3.10；Command Line Tools 自带的
@@ -44,7 +43,7 @@ fi
 
 if [[ "${1:-}" == "--build" ]]; then
   echo "▶ 编译 release …"
-  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-bridge --bin smelt-notify
+  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -55,29 +54,8 @@ if [[ ! -f "$DAEMON_BIN" ]]; then
   echo "✗ 找不到 ${DAEMON_BIN}（终端持久化守护），先：cargo build --release --bin smeltd" >&2
   exit 1
 fi
-if [[ ! -f "$BRIDGE_BIN" ]]; then
-  echo "✗ 找不到 ${BRIDGE_BIN}（跨网 bridge），先：cargo build --release --bin smelt-bridge" >&2
-  exit 1
-fi
 if [[ ! -f "$NOTIFY_BIN" ]]; then
   echo "✗ 找不到 ${NOTIFY_BIN}（Agent hook helper），先：cargo build --release --bin smelt-notify" >&2
-  exit 1
-fi
-
-# 远程 H5：手机端 CLI 面板（Preact + Tailwind + xterm）。
-# 必须打进 App Resources；否则 smeltd 找不到 SPA，会回退旧 HTML，移动端样式全乱。
-REMOTE_WEB_DIST="$ROOT/remote-web/dist"
-if [[ ! -f "$REMOTE_WEB_DIST/index.html" ]]; then
-  if command -v npm >/dev/null 2>&1; then
-    echo "▶ 构建 remote-web（npm run build）…"
-    (cd "$ROOT/remote-web" && npm ci && npm run build)
-  else
-    echo "✗ 缺少 remote-web/dist，且本机无 npm。请先：cd remote-web && npm ci && npm run build" >&2
-    exit 1
-  fi
-fi
-if [[ ! -f "$REMOTE_WEB_DIST/index.html" ]]; then
-  echo "✗ remote-web 构建失败：没有 $REMOTE_WEB_DIST/index.html" >&2
   exit 1
 fi
 
@@ -95,9 +73,6 @@ chmod +x "$MACOS/$EXEC_NAME"
 # 守护与 GUI 同目录（GUI 用 current_exe().with_file_name("smeltd") 寻址拉起）。
 cp "$DAEMON_BIN" "$MACOS/smeltd"
 chmod +x "$MACOS/smeltd"
-# 跨网 bridge 与 GUI 同目录（设置页 resolve_smelt_bridge 按 current_exe 旁路找）
-cp "$BRIDGE_BIN" "$MACOS/smelt-bridge"
-chmod +x "$MACOS/smelt-bridge"
 # hooks 在 GUI 关闭时也要工作，因此启动后会把这份分发物原子同步到
 # ~/.smelt/bin/smelt-notify；不能让 hook 直接引用可能被 DMG 覆盖的 App 内路径。
 cp "$NOTIFY_BIN" "$MACOS/smelt-notify"
@@ -108,17 +83,6 @@ ICON_LINE=""
 if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
   cp "$ROOT/assets/AppIcon.icns" "$RES/AppIcon.icns"
   ICON_LINE=$'\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>'
-fi
-
-# 远程 H5 → Contents/Resources/remote-web（smeltd 运行时按 current_exe 解析）
-echo "▶ 拷贝 remote-web → Resources …"
-rm -rf "$RES/remote-web"
-mkdir -p "$RES/remote-web"
-# dist 内容（index.html + assets/）直接落在 remote-web/ 下
-cp -R "$REMOTE_WEB_DIST"/. "$RES/remote-web/"
-if [[ ! -f "$RES/remote-web/index.html" ]]; then
-  echo "✗ 拷贝后缺少 $RES/remote-web/index.html" >&2
-  exit 1
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -153,6 +117,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Smelt uses the local network to connect to development devices and remote sessions.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<!-- 声明可打开文件夹：Dock 图标才接受拖入目录（触发 application:openURLs:）。

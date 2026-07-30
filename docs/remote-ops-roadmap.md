@@ -20,7 +20,7 @@
 3. **不绑死 xterm.js**：完整 ANSI 终端只是 L1 的一种皮肤；手机与 IM 默认走「操作台 / 卡片」。
 4. **可写是完整形态**；只读是安全默认与冷启动第一步。
 5. **smeltd 会话脱离 GUI 存活**；远程不得顶掉主 GUI attach（fan-out 或只读旁路）。
-6. 团队向：**接收方尽量零安装**（浏览器链接或已有飞书）；不做 WebRTC 全家桶（视频/多人会议那一整套）、内嵌 WebView、第二套 Jira——但 Phase 3 用 WebRTC 的 data channel 解决「两台设备不在同一个网络」这一件事，范围窄，不算破例。
+6. 团队向：**接收方尽量零安装**（已有飞书优先）；不做 WebRTC 全家桶、内嵌 WebView、第二套 Jira。跨网「两台设备不在同一个网络」这一件事由 Phase 3 的 iroh P2P 解决，范围窄，且不需要我们运营任何服务。
 
 ---
 
@@ -146,7 +146,7 @@
 
 ---
 
-## Phase 3 — 跨网络访问（Cloudflare Tunnel）⭐ 提前
+## Phase 3 — 跨网络访问（iroh P2P）✅ 已完成
 
 **为什么插在这里、且提前：** 最戳的真实场景是「在电脑上干活，有事出门，手机上接着
 看/接着弄」。Phase 1/2 的网关默认绑回环，跨机器访问要求同局域网或已有 Tailscale——
@@ -154,9 +154,22 @@
 Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这里独立做，不用等前面的
 知情/操控功能齐全。
 
-> **2026-07 决策更新：** 跨网主路径改回 **自建信令 + WebRTC DataChannel + 自营 TURN**
-> （P2P 优先，TURN 仅 NAT 失败时中继业务数据）。Quick Tunnel 降为高级/临时。
-> 定稿见 [webrtc-edge.md](webrtc-edge.md)。以下「改用 CF」为历史记录，实现以 webrtc-edge 为准。
+> **最终决策：跨网只走 iroh P2P。** Cloudflare quick tunnel 与自建信令 + WebRTC +
+> 自营 TURN 都试过、也都已下线，连同它们服务的浏览器面板（`remote-web` SPA）一起删除。
+> 现在唯一的公网通路是 `crates/smelt-iroh`：一条 iroh 双向流对应一条到本机网关的 TCP
+> 连接，逐字节转发，上层 HTTP/WebSocket/token 鉴权原样复用。接收端只剩 `mobile/` 的
+> Flutter App。
+>
+> **为什么是 iroh：**
+> 1. `endpoint_id` 由 `~/.smelt/iroh-secret` 里的私钥决定，**重启不变** —— 配对二维码
+>    可以永久有效。CF quick tunnel 的 URL 每次重启都变，二维码活不过一晚，这是它出局
+>    的直接原因。
+> 2. 发现与打洞由 iroh 自带的公共基础设施负责，打不通才回退 iroh 中继，**我们不运营
+>    任何公网服务** —— 这正是自建信令 + coturn 那条路违背的原则。
+> 3. Rust 原生，没有子进程（CF 要管 `cloudflared` 子进程的生命周期与孤儿风险），
+>    且手机端能直接复用同一份 Rust 代码（`crates/smelt-mobile`）。
+>
+> 以下两段保留为方案演化的历史记录，实现以 `crates/smelt-iroh` 为准。
 
 **（历史）为什么一度改用 Cloudflare Tunnel、不再自己搭信令 + WebRTC**（原方案见
 [collaboration.md](collaboration.md)「点对点连接」一节）：
@@ -176,21 +189,22 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
    注册。代价是数据经过 Cloudflare 中转，不是真正点对点；但 WebRTC 在很多真实
    NAT 场景下最终也是走 TURN 中继，实际体验差别不大，工程量却小一个数量级。
 
+**实际交付（iroh）：**
+
 | 交付 | 说明 |
 |------|------|
-| 检测 `cloudflared` | 本机有没有装；没装则引导用户安装（`brew install cloudflared`），不vendor 这个二进制 |
-| 按需拉起 Quick Tunnel | GUI 侧 spawn `cloudflared tunnel --url http://127.0.0.1:<网关端口>` 子进程，解析 stdout 拿到生成的 `https://xxx.trycloudflare.com` |
-| GUI 展示公网链接 | 跟本机链接一起显示在"远程"设置页；明确标注"临时链接，进程重启会变" |
-| （可选，进阶） Named Tunnel | 给有自己 Cloudflare 账号 + 域名的用户一条稳定链接的路径，写文档即可，不强求做 UI |
+| `crates/smelt-iroh` | 隧道本体：ALPN `smelt/tunnel/1`，iroh 双向流 ⟷ 本机网关 TCP，逐字节转发 |
+| smeltd 的 `iroh_start/stop/status` | 守护侧起停隧道；私钥落 `~/.smelt/iroh-secret`，与命令行 `smelt-iroh-host` 共用同一把 |
+| GUI 设置页「P2P 直连（iroh）」 | 开关 + 配对二维码，格式 `smelt+iroh://<endpoint_id>/?token=<token>`（定义在 `smelt-core::pairing`） |
+| `crates/smelt-mobile` + `mobile/` | 手机侧在本地开一个端口转发进 iroh 流，Dart 照常连本地端口，鉴权/重连逻辑一行没改 |
 
 **明确不做：**
 - 自己实现 WebRTC 信令服务器 / ICE 状态机（上面第 1、2 点已经说明原因）
-- 自己运营任何公网中转/协调服务（不管信令还是 TURN）
-- Named Tunnel 的完整 UI 集成（先文档，MVP 只做 Quick Tunnel）
+- 自己运营任何公网中转/协调服务（不管信令、TURN 还是 iroh relay；自建 relay 见 M5，可选）
+- 浏览器接入。跨网只服务手机 App，`remote-web` 已删除。
 
-**验收：** 手机关掉 Wi-Fi、纯用蜂窝数据，能打开 Cloudflare 生成的公网链接看到实时画面——不需要手机和电脑在同一个网络，不需要用户有 Cloudflare 账号。
-
-**粗量级：** ~1–2 天（比原 WebRTC 方案省下信令协议 + ICE 状态机这一大块）。
+**验收（已通过）：** 手机关掉 Wi-Fi、纯用蜂窝数据，扫码即可连上本机 agent 会话；
+Mac 重启后**同一张二维码继续有效**；宿主不在时 30 秒超时报错而非无限转圈。
 
 ---
 
@@ -266,7 +280,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 |----|------|
 | 板 = Kanban 壳 × 认领池心 | 见 collaboration.md；条目绑 `session_id`，远程链接同一会话 |
 | Provider / Profile / Worktree | 远程「开跑」更稳 |
-| 同事链接 | 浏览器或飞书零安装；复用 Phase 3 的 Cloudflare Tunnel |
+| 同事链接 | 飞书零安装；跨网复用 Phase 3 的 iroh P2P |
 | 移交 | 活会话交接 |
 
 ---
@@ -278,7 +292,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 | 全端强制 xterm | 手机/IM 体验差；与 API 优先相反 |
 | 飞书内嵌完整终端 | 无必要且难维护 |
 | 内嵌 WebView + DOM inspect | 大；先外开 URL + 复制 selector |
-| 自己实现 WebRTC 信令/ICE、自建 WireGuard | Phase 3 改用 Cloudflare Tunnel，不自己运营任何公网中转/协调服务（见 Phase 3 详述） |
+| 自己实现 WebRTC 信令/ICE、自建 WireGuard | Phase 3 最终用 iroh P2P，不自己运营任何公网中转/协调服务（见 Phase 3 详述） |
 | 主 GUI 换 Electron | 与 GPUI + smeltd 路线相反 |
 | 完整项目管理 | 糊掉驾驶舱定位 |
 
@@ -290,7 +304,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 现在  → Phase 0 多连接
       → Phase 1 网关 API + 参考客户端（xterm 只读）
       → Phase 2 列表与可用化
-提前  → Phase 3 跨网络访问（Cloudflare Tunnel）—— 解决"出门后手机继续"的连接问题
+提前  → Phase 3 跨网络访问（iroh P2P）—— 解决"出门后手机继续"的连接问题
 然后  → Phase 4 状态（知情）
       → Phase 5 手机操作台
       → Phase 6 input/action（可写）—— 到这里"出门后手机继续"才算真正闭环

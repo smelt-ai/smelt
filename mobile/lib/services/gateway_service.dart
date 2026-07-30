@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/acp_snapshot.dart';
+import '../models/pairing_config.dart';
 
 class LifecycleAttention {
   final String sessionId;
@@ -109,15 +110,49 @@ int compareSessionMenuOrder(SessionSummary a, SessionSummary b) {
 /// WebSocket 连接状态
 enum WsState { disconnected, connecting, connected, reconnecting }
 
+/// 启动 iroh 隧道并返回手机本地入口端口。
+///
+/// 做成可注入的函数而不是直接调 FFI，是为了让 `GatewayService` 的测试
+/// 不必依赖编译好的 Rust 动态库。
+typedef IrohTunnelOpener =
+    Future<int> Function(String endpointId, String relayUrl, String relayToken);
+typedef IrohTunnelStopper = Future<void> Function();
+
 /// Gateway WebSocket 服务
 class GatewayService {
+  GatewayService({
+    this.connectTimeout = const Duration(seconds: 10),
+    this.reconnectDelay = const Duration(seconds: 2),
+    IrohTunnelOpener? irohTunnelOpener,
+    IrohTunnelStopper? irohTunnelStopper,
+  }) : irohTunnelOpener = irohTunnelOpener ?? _irohUnavailable,
+       irohTunnelStopper = irohTunnelStopper ?? _noopIrohStop;
+
+  /// 从发起连接到收到服务端 `connected` 的整体上限。
+  final Duration connectTimeout;
+  final Duration reconnectDelay;
+
+  /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
+  /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
+  IrohTunnelOpener irohTunnelOpener;
+  IrohTunnelStopper irohTunnelStopper;
+
+  static Future<int> _irohUnavailable(String _, String _, String _) =>
+      Future.error(StateError('本版本未编入 iroh 隧道支持'));
+  static Future<void> _noopIrohStop() async {}
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _channelSubscription;
   Timer? _reconnectTimer;
+  Timer? _connectWatchdog;
   WsState _state = WsState.disconnected;
   String? _endpoint;
   String? _token;
   bool _manuallyDisconnected = true;
+
+  /// 当前目标是否曾经握手成功过。没成功过的地址（打错、主机不存在）失败后直接
+  /// 回到断开态让用户改，而不是无限自动重连。
+  bool _everConnected = false;
   int _connectionGeneration = 0;
   bool _writeEnabled = false;
 
@@ -161,19 +196,42 @@ class GatewayService {
 
   /// 连接到 gateway
   Future<void> connect(String endpoint, String token) async {
-    if (_state == WsState.connected || _state == WsState.connecting) {
-      return;
+    final target = endpoint.trim();
+    final restartIroh =
+        _state == WsState.reconnecting &&
+        Uri.tryParse(target)?.scheme == PairingConfig.irohScheme;
+    // 同一目标已连/在连 → 幂等返回；换了目标 → 拆掉旧连接改连新的，否则扫码切换
+    // 桌面会被静默忽略（UI 显示新地址、实际连着旧的）。
+    if (matchesTarget(target, token)) {
+      if (_state == WsState.connected || _state == WsState.connecting) return;
+    } else {
+      _teardownSocket();
+      _everConnected = false;
     }
 
-    _endpoint = endpoint.trim();
+    _endpoint = target;
     _token = token;
     _manuallyDisconnected = false;
     _reconnectTimer?.cancel();
     _setState(WsState.connecting);
+    // 不可达但可路由的地址（打错 IP）不会立刻报错，`ready` 会一直挂着；握手成功
+    // 但服务端不发 `connected` 同样会卡住。用一个看门狗兜住整段握手。
+    _connectWatchdog?.cancel();
+    _connectWatchdog = Timer(connectTimeout, () {
+      if (_state != WsState.connecting) return;
+      _errorController.add('连接超时：$target 没有响应');
+      _failConnection();
+    });
 
     final generation = ++_connectionGeneration;
     try {
-      final channel = WebSocketChannel.connect(_gatewayUri(_endpoint!, token));
+      final wsUri = await _resolveWsUri(
+        _endpoint!,
+        token,
+        restartIroh: restartIroh,
+      );
+      if (generation != _connectionGeneration) return;
+      final channel = WebSocketChannel.connect(wsUri);
       _channel = channel;
       _channelSubscription = channel.stream.listen(
         (data) {
@@ -186,12 +244,48 @@ class GatewayService {
           if (generation == _connectionGeneration) _onDone();
         },
       );
-      await channel.ready;
+      // 看门狗只负责改状态；这里同样要超时，否则 `connect()` 返回的 Future
+      // 永远不完成，调用方无法 await。
+      await channel.ready.timeout(connectTimeout);
     } catch (e) {
       if (generation != _connectionGeneration) return;
       _errorController.add('连接失败: $e');
-      _scheduleReconnect();
+      _failConnection();
     }
+  }
+
+  /// 把存下来的 endpoint 变成这次真正要连的 WebSocket 地址。
+  ///
+  /// iroh 配对存的是 `smelt+iroh://<endpoint_id>`，本身不可拨号：得先把隧道
+  /// 拉起来拿到手机本地端口，再按普通 ws 连过去。隧道口只在回环上，明文
+  /// 不出手机；离开手机那一段由 QUIC 加密。
+  Future<Uri> _resolveWsUri(
+    String endpoint,
+    String token, {
+    required bool restartIroh,
+  }) async {
+    final parsed = Uri.parse(endpoint);
+    if (parsed.scheme != PairingConfig.irohScheme) {
+      return _gatewayUri(endpoint, token);
+    }
+    // 打洞/中继协商可能很久，必须有上限：否则打错的 EndpointId 会让界面
+    // 永远停在「连接中」，这正是之前踩过的坑。
+    final relayUrl = parsed.queryParameters['relay'] ?? '';
+    final relayToken = parsed.queryParameters['relay_token'] ?? '';
+    if (relayUrl.isEmpty) {
+      throw const FormatException(
+        'The iroh pairing is missing its relay address',
+      );
+    }
+    if (restartIroh) {
+      await irohTunnelStopper().timeout(connectTimeout);
+    }
+    final port = await irohTunnelOpener(
+      parsed.host,
+      relayUrl,
+      relayToken,
+    ).timeout(connectTimeout);
+    return _gatewayUri('http://127.0.0.1:$port', token);
   }
 
   Uri _gatewayUri(String endpoint, String token) {
@@ -213,16 +307,27 @@ class GatewayService {
   /// 断开连接
   void disconnect() {
     _manuallyDisconnected = true;
+    _teardownSocket();
+    _setState(WsState.disconnected);
+  }
+
+  /// 当前连接（或正在重连）的目标是否就是这组 endpoint/token。
+  bool matchesTarget(String endpoint, String token) =>
+      _endpoint == endpoint.trim() && _token == token;
+
+  /// 关闭底层通道并作废旧连接的回调，不改变对外状态。
+  void _teardownSocket() {
     _connectionGeneration++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _connectWatchdog?.cancel();
+    _connectWatchdog = null;
     _subscribedSessionId = null;
     _writeEnabled = false;
     _channelSubscription?.cancel();
     _channelSubscription = null;
     _channel?.sink.close();
     _channel = null;
-    _setState(WsState.disconnected);
   }
 
   /// 请求会话列表
@@ -251,10 +356,36 @@ class GatewayService {
   }
 
   /// 发送消息
-  void sendMessage(String sessionId, String content) {
+  void sendMessage(
+    String sessionId,
+    String content, {
+    List<AcpImageData> images = const [],
+  }) {
     _send({
       'method': 'sendMessage',
-      'params': {'sessionId': sessionId, 'content': content},
+      'params': {
+        'sessionId': sessionId,
+        'content': content,
+        'images': images.map((image) => image.toJson()).toList(),
+      },
+    });
+  }
+
+  void cancelTurn(String sessionId) {
+    _send({
+      'method': 'cancelTurn',
+      'params': {'sessionId': sessionId},
+    });
+  }
+
+  void setConfigOption(String sessionId, String configId, String valueId) {
+    _send({
+      'method': 'setConfigOption',
+      'params': {
+        'sessionId': sessionId,
+        'configId': configId,
+        'valueId': valueId,
+      },
     });
   }
 
@@ -326,8 +457,24 @@ class GatewayService {
   }
 
   void _setState(WsState newState) {
+    if (newState == WsState.connected) {
+      _connectWatchdog?.cancel();
+      _connectWatchdog = null;
+      _everConnected = true;
+    }
     _state = newState;
     _stateController.add(newState);
+  }
+
+  /// 一次连接尝试失败后的收尾：从没连通过的地址直接回断开态（让用户改地址），
+  /// 只有掉线重连才值得自动重试。
+  void _failConnection() {
+    if (_everConnected) {
+      _scheduleReconnect();
+      return;
+    }
+    _teardownSocket();
+    _setState(WsState.disconnected);
   }
 
   void _onMessage(dynamic data) {
@@ -394,11 +541,11 @@ class GatewayService {
 
   void _onError(dynamic error) {
     _errorController.add('WebSocket 错误: $error');
-    _scheduleReconnect();
+    _failConnection();
   }
 
   void _onDone() {
-    _scheduleReconnect();
+    _failConnection();
   }
 
   void _scheduleReconnect() {
@@ -408,7 +555,7 @@ class GatewayService {
       _channel = null;
       _setState(WsState.reconnecting);
       _reconnectTimer?.cancel();
-      _reconnectTimer = Timer(const Duration(seconds: 2), () {
+      _reconnectTimer = Timer(reconnectDelay, () {
         if (_state == WsState.reconnecting) {
           connect(_endpoint!, _token!);
         }

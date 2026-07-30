@@ -1,0 +1,26 @@
+[package]
+name = "smelt-iroh"
+version.workspace = true
+edition.workspace = true
+description = "Mac 侧 iroh 隧道：手机按 EndpointId 拨号，直连/打洞/中继自动回退，转发到本机 remote_gateway"
+
+[[bin]]
+name = "smelt-iroh-host"
+path = "src/bin/host.rs"
+
+[[bin]]
+name = "smelt-iroh-connect"
+path = "src/bin/connect.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+iroh = "1"
+iroh-relay = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+data-encoding = "2"
+futures-util = "0.3"
