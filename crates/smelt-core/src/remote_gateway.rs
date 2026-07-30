@@ -498,6 +498,10 @@ enum AcpWsRequest {
     Unsubscribe,
     #[serde(rename = "sendMessage")]
     SendMessage { params: SendMessageParams },
+    #[serde(rename = "cancelTurn")]
+    CancelTurn { params: SessionActionParams },
+    #[serde(rename = "setConfigOption")]
+    SetConfigOption { params: ConfigOptionParams },
     #[serde(rename = "respondApproval")]
     RespondApproval { params: ApprovalParams },
     #[serde(rename = "chooseElicitation")]
@@ -528,6 +532,18 @@ struct SendMessageParams {
     #[serde(rename = "sessionId")]
     session_id: String,
     content: String,
+    #[serde(default)]
+    images: Vec<crate::acp_chat::AcpImage>,
+}
+
+#[derive(serde::Deserialize)]
+struct ConfigOptionParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "configId")]
+    config_id: String,
+    #[serde(rename = "valueId")]
+    value_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -690,8 +706,9 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
 
                         let session_id = params.session_id.clone();
                         let content = params.content.clone();
+                        let images = params.images.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            send_acp_message(&session_id, &content)
+                            send_acp_message(&session_id, &content, images)
                         }).await;
 
                         let resp = match result {
@@ -702,6 +719,30 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                                 "error": format!("failed to dispatch message: {error}"),
                             }),
                         };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::CancelTurn { params } => {
+                        let resp = dispatch_mobile_action(
+                            write_enabled,
+                            params.session_id,
+                            serde_json::json!("Cancel"),
+                            "turn cancellation",
+                        ).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::SetConfigOption { params } => {
+                        let action = serde_json::json!({
+                            "SetConfigOption": {
+                                "config_id": params.config_id,
+                                "value_id": params.value_id,
+                            }
+                        });
+                        let resp = dispatch_mobile_action(
+                            write_enabled,
+                            params.session_id,
+                            action,
+                            "configuration update",
+                        ).await;
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::RespondApproval { params } => {
@@ -938,13 +979,17 @@ fn send_acp_action(session_id: &str, action: serde_json::Value) -> Result<(), St
 }
 
 /// 发送 ACP 消息，不占用或替换 PC GUI 的 control client。
-fn send_acp_message(session_id: &str, content: &str) -> Result<(), String> {
+fn send_acp_message(
+    session_id: &str,
+    content: &str,
+    images: Vec<crate::acp_chat::AcpImage>,
+) -> Result<(), String> {
     send_acp_action(
         session_id,
         serde_json::json!({
             "Prompt": {
                 "text": content,
-                "images": [],
+                "images": images,
             }
         }),
     )
@@ -971,6 +1016,51 @@ fn respond_acp_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_requests_preserve_images_and_session_controls() {
+        let request: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "sendMessage",
+            "params": {
+                "sessionId": "session-1",
+                "content": "inspect this",
+                "images": [{"mime": "image/png", "data_b64": "aW1hZ2U="}]
+            }
+        }))
+        .unwrap();
+        match request {
+            AcpWsRequest::SendMessage { params } => {
+                assert_eq!(params.session_id, "session-1");
+                assert_eq!(params.images.len(), 1);
+                assert_eq!(params.images[0].mime, "image/png");
+            }
+            _ => panic!("expected sendMessage"),
+        }
+
+        let cancel: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "cancelTurn",
+            "params": {"sessionId": "session-1"}
+        }))
+        .unwrap();
+        assert!(matches!(cancel, AcpWsRequest::CancelTurn { .. }));
+
+        let config: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "setConfigOption",
+            "params": {
+                "sessionId": "session-1",
+                "configId": "mode",
+                "valueId": "full"
+            }
+        }))
+        .unwrap();
+        match config {
+            AcpWsRequest::SetConfigOption { params } => {
+                assert_eq!(params.config_id, "mode");
+                assert_eq!(params.value_id, "full");
+            }
+            _ => panic!("expected setConfigOption"),
+        }
+    }
 
     fn mobile_daemon_state(phase: DaemonPhase) -> DaemonSessionState {
         DaemonSessionState {
@@ -1085,5 +1175,4 @@ mod tests {
         }
         assert_eq!(resolved, vec!["session-mobile"]);
     }
-
 }

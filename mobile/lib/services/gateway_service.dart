@@ -335,10 +335,36 @@ class GatewayService {
   }
 
   /// 发送消息
-  void sendMessage(String sessionId, String content) {
+  void sendMessage(
+    String sessionId,
+    String content, {
+    List<AcpImageData> images = const [],
+  }) {
     _send({
       'method': 'sendMessage',
-      'params': {'sessionId': sessionId, 'content': content},
+      'params': {
+        'sessionId': sessionId,
+        'content': content,
+        'images': images.map((image) => image.toJson()).toList(),
+      },
+    });
+  }
+
+  void cancelTurn(String sessionId) {
+    _send({
+      'method': 'cancelTurn',
+      'params': {'sessionId': sessionId},
+    });
+  }
+
+  void setConfigOption(String sessionId, String configId, String valueId) {
+    _send({
+      'method': 'setConfigOption',
+      'params': {
+        'sessionId': sessionId,
+        'configId': configId,
+        'valueId': valueId,
+      },
     });
   }
 
