@@ -2946,6 +2946,18 @@ impl Workspace {
                                     )
                                     .child(
                                         div()
+                                            .id("settings-help-link")
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .text_color(muted)
+                                            .hover(|s| s.text_color(fg))
+                                            .child("帮助文档 ↗")
+                                            .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                                cx.open_url("https://smelt.onoo.io/");
+                                            }),
+                                    )
+                                    .child(
+                                        div()
                                             .id("settings-report-issue-link")
                                             .text_xs()
                                             .cursor_pointer()
@@ -4064,6 +4076,95 @@ impl Workspace {
             ]),
         );
 
+        // —— 键盘快捷键：只展示当前实际绑定，暂不支持用户改键 ——
+        let shortcuts_page = SettingPage::new("键盘快捷键").resettable(false).group(
+            SettingGroup::new().item(
+                SettingItem::render(move |_, _, _| {
+                    let keycap = move |key: &'static str| {
+                        div()
+                            .min_w(px(34.))
+                            .h(px(24.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(border)
+                            .bg(popover)
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(fg)
+                            .child(key)
+                    };
+                    let section = move |title: &'static str,
+                                        shortcuts: &'static [(
+                        &'static str,
+                        &'static [&'static str],
+                    )]| {
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .pb_1()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(muted)
+                                    .child(title),
+                            )
+                            .children(shortcuts.iter().map(|(label, keys)| {
+                                h_flex()
+                                    .w_full()
+                                    .min_h(px(38.))
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_4()
+                                    .border_b_1()
+                                    .border_color(border)
+                                    .child(div().text_sm().text_color(fg).child(*label))
+                                    .child(
+                                        h_flex()
+                                            .flex_none()
+                                            .gap_1()
+                                            .children(keys.iter().map(|key| keycap(key))),
+                                    )
+                            }))
+                    };
+
+                    const GLOBAL: &[(&str, &[&str])] = &[
+                        ("打开设置", &["⌘,"]),
+                        ("打开命令面板", &["⌘K"]),
+                        ("新建任务", &["⇧⌘N"]),
+                        ("退出 Smelt", &["⌘Q"]),
+                    ];
+                    const SESSION: &[(&str, &[&str])] = &[
+                        ("切换右侧面板", &["⌘B"]),
+                        ("上一个 / 下一个会话", &["⌘↑", "⌘↓"]),
+                        ("切换到第 1–9 个会话", &["⌘1…9"]),
+                        ("上一个 / 下一个分屏", &["⌘[", "⌘]"]),
+                        ("左右分屏 / 上下分屏", &["⌘D", "⇧⌘D"]),
+                        ("关闭当前分屏或会话", &["⌘W"]),
+                    ];
+                    const NAVIGATION: &[(&str, &[&str])] = &[
+                        ("保存当前文件", &["⌘S"]),
+                        ("上一个 / 下一个差异", &["⇧F7", "F7"]),
+                        ("关闭预览或返回", &["Esc"]),
+                        ("终端补全 / 反向补全", &["Tab", "⇧Tab"]),
+                    ];
+
+                    v_flex()
+                        .w_full()
+                        .gap_6()
+                        .child(section("全局", GLOBAL))
+                        .child(section("会话与面板", SESSION))
+                        .child(section("编辑与导航", NAVIGATION))
+                        .into_any_element()
+                })
+                .keywords(["快捷键", "键盘", "shortcut", "keyboard", "hotkey"]),
+            ),
+        );
+
         div().size_full().child(
             // id 里带 nonce：见 `settings_page_nonce`，用来强制跳到 settings_page_ix。
             Settings::new(("settings", self.settings_page_nonce))
@@ -4078,6 +4179,7 @@ impl Workspace {
                     agent_page,
                     update_page,
                     remote_page,
+                    shortcuts_page,
                 ]),
         )
     }

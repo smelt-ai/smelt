@@ -96,9 +96,14 @@ pub fn default_acp_copilot_cmd() -> String {
 }
 
 pub fn default_acp_codex_cmd() -> String {
-    // Codex 直接使用 CLI 原生富客户端协议，避免 codex-acp/Bun 中间层丢失
-    // thread、item 和细粒度审批语义。smeltd 根据 app-server 命令选择专用 driver。
-    "codex app-server".to_string()
+    // 改回标准 ACP 通道：官方 `@agentclientprotocol/codex-acp` 适配器把 Codex
+    // app-server 包了一层 ACP，跟 Claude/Copilot/Grok 走同一套 AcpAgent 驱动，
+    // 不再需要 smeltd 里那条按命令字符串识别的 codex_app_server 专用 driver
+    // （dispatch 逻辑保留，兼容手填 `codex app-server` 的旧存档/自定义命令）。
+    // 锁 1.1.7（当前 npm latest）：build_agent_args 里的 CODEX_PATH 注入逻辑
+    // 已经认这个包名，优先用本机装的 `codex` CLI，没装才 fallback 到适配器
+    // bundle 的版本。
+    "bunx --bun @agentclientprotocol/codex-acp@1.1.7".to_string()
 }
 
 pub fn default_acp_grok_cmd() -> String {
