@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -117,6 +118,58 @@ void main() {
 
     expect(errors, isNotEmpty);
     await errorSub.cancel();
+  });
+
+  test('iroh reconnect replaces a stale local tunnel', () async {
+    final firstServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final secondServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final firstSocketReady = Completer<WebSocket>();
+    final secondSocketReady = Completer<WebSocket>();
+
+    firstServer.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      firstSocketReady.complete(socket);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+    });
+    secondServer.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      secondSocketReady.complete(socket);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+    });
+
+    var tunnelPort = firstServer.port;
+    var stopCount = 0;
+    final openedPorts = <int>[];
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      irohTunnelOpener: (_, _, _) async {
+        openedPorts.add(tunnelPort);
+        return tunnelPort;
+      },
+      irohTunnelStopper: () async {
+        stopCount++;
+        tunnelPort = secondServer.port;
+      },
+    );
+
+    await service.connect(
+      'smelt+iroh://peer?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
+    final firstSocket = await firstSocketReady.future;
+    await _waitFor(() => service.state == WsState.connected);
+
+    await firstSocket.close();
+    await secondSocketReady.future;
+    await _waitFor(() => service.state == WsState.connected);
+
+    expect(stopCount, 1);
+    expect(openedPorts, [firstServer.port, secondServer.port]);
+
+    service.disconnect();
+    await firstServer.close(force: true);
+    await secondServer.close(force: true);
   });
 }
 

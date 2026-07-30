@@ -116,23 +116,30 @@ enum WsState { disconnected, connecting, connected, reconnecting }
 /// 不必依赖编译好的 Rust 动态库。
 typedef IrohTunnelOpener =
     Future<int> Function(String endpointId, String relayUrl, String relayToken);
+typedef IrohTunnelStopper = Future<void> Function();
 
 /// Gateway WebSocket 服务
 class GatewayService {
   GatewayService({
     this.connectTimeout = const Duration(seconds: 10),
+    this.reconnectDelay = const Duration(seconds: 2),
     IrohTunnelOpener? irohTunnelOpener,
-  }) : irohTunnelOpener = irohTunnelOpener ?? _irohUnavailable;
+    IrohTunnelStopper? irohTunnelStopper,
+  }) : irohTunnelOpener = irohTunnelOpener ?? _irohUnavailable,
+       irohTunnelStopper = irohTunnelStopper ?? _noopIrohStop;
 
   /// 从发起连接到收到服务端 `connected` 的整体上限。
   final Duration connectTimeout;
+  final Duration reconnectDelay;
 
   /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
   /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
   IrohTunnelOpener irohTunnelOpener;
+  IrohTunnelStopper irohTunnelStopper;
 
   static Future<int> _irohUnavailable(String _, String _, String _) =>
       Future.error(StateError('本版本未编入 iroh 隧道支持'));
+  static Future<void> _noopIrohStop() async {}
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _channelSubscription;
@@ -190,6 +197,9 @@ class GatewayService {
   /// 连接到 gateway
   Future<void> connect(String endpoint, String token) async {
     final target = endpoint.trim();
+    final restartIroh =
+        _state == WsState.reconnecting &&
+        Uri.tryParse(target)?.scheme == PairingConfig.irohScheme;
     // 同一目标已连/在连 → 幂等返回；换了目标 → 拆掉旧连接改连新的，否则扫码切换
     // 桌面会被静默忽略（UI 显示新地址、实际连着旧的）。
     if (matchesTarget(target, token)) {
@@ -215,7 +225,11 @@ class GatewayService {
 
     final generation = ++_connectionGeneration;
     try {
-      final wsUri = await _resolveWsUri(_endpoint!, token);
+      final wsUri = await _resolveWsUri(
+        _endpoint!,
+        token,
+        restartIroh: restartIroh,
+      );
       if (generation != _connectionGeneration) return;
       final channel = WebSocketChannel.connect(wsUri);
       _channel = channel;
@@ -245,7 +259,11 @@ class GatewayService {
   /// iroh 配对存的是 `smelt+iroh://<endpoint_id>`，本身不可拨号：得先把隧道
   /// 拉起来拿到手机本地端口，再按普通 ws 连过去。隧道口只在回环上，明文
   /// 不出手机；离开手机那一段由 QUIC 加密。
-  Future<Uri> _resolveWsUri(String endpoint, String token) async {
+  Future<Uri> _resolveWsUri(
+    String endpoint,
+    String token, {
+    required bool restartIroh,
+  }) async {
     final parsed = Uri.parse(endpoint);
     if (parsed.scheme != PairingConfig.irohScheme) {
       return _gatewayUri(endpoint, token);
@@ -258,6 +276,9 @@ class GatewayService {
       throw const FormatException(
         'The iroh pairing is missing its relay address',
       );
+    }
+    if (restartIroh) {
+      await irohTunnelStopper().timeout(connectTimeout);
     }
     final port = await irohTunnelOpener(
       parsed.host,
@@ -534,7 +555,7 @@ class GatewayService {
       _channel = null;
       _setState(WsState.reconnecting);
       _reconnectTimer?.cancel();
-      _reconnectTimer = Timer(const Duration(seconds: 2), () {
+      _reconnectTimer = Timer(reconnectDelay, () {
         if (_state == WsState.reconnecting) {
           connect(_endpoint!, _token!);
         }
