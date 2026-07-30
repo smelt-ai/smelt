@@ -4417,7 +4417,7 @@ fn start_acp_event_drain(
 fn acp_relaunch(
     slot: &Arc<AcpSlot<AcpSession>>,
     id: &str,
-    launch: smelt_core::agent_kind::AcpLaunchSpec,
+    mut launch: smelt_core::agent_kind::AcpLaunchSpec,
     resume_id: Option<String>,
     spawn_gate: Arc<RwLock<()>>,
     subscribers: &Subscribers,
@@ -4428,6 +4428,11 @@ fn acp_relaunch(
         smelt_core::acp_session::reset_for_restart(&mut reduced);
         reduced.history_session_id = resume_id.clone();
     }
+    // 旧存档可能还留着退役的 Codex 原生 app-server driver 命令；自动改回
+    // 现在的 ACP 默认值，不然这些会话重开会直接连不上。
+    if launch.command.trim() == "codex app-server" {
+        launch.command = smelt_core::agent_kind::default_acp_codex_cmd();
+    }
     let needs_check = sess.agent_needs_transcript_check;
     let app_launch = smelt_core::acp_conn::AcpLaunch {
         launch: launch.clone(),
@@ -4436,15 +4441,7 @@ fn acp_relaunch(
         resume_session_id: resume_id.map(agent_client_protocol::schema::v1::SessionId::new),
         resume_needs_transcript_check: needs_check,
     };
-    let is_codex_app_server = launch
-        .command
-        .split_whitespace()
-        .any(|part| part == "app-server");
-    let handle = if is_codex_app_server {
-        smelt_core::codex_app_server::spawn_codex_app_server(app_launch, Some(spawn_gate))
-    } else {
-        smelt_core::acp_conn::spawn_acp(app_launch, Some(spawn_gate))
-    };
+    let handle = smelt_core::acp_conn::spawn_acp(app_launch, Some(spawn_gate));
     let event_rx = handle.event_rx.clone();
     *sess.handle.lock().unwrap() = Some(handle);
     sess.state.lock().unwrap().launch = Some(launch.command.clone());

@@ -897,8 +897,17 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::claude_memory::MemoryEntry;
-use crate::usage_stats::format_count;
 use crate::{Workspace, placeholder_view};
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 /// 历史会话「时间」文案：有明显跨度（>1 分钟）就顺带标一下这个会话跑了多久，
 /// 纯单条消息的会话就只显示时间点，不必画蛇添足展示"0 分钟"。

@@ -55,9 +55,18 @@ fn config_value_label(config_id: &str, value: &str, fallback: &str) -> String {
 /// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
 pub use smelt_core::acp_chat::{
-    AcpEntry, AcpImage, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart, diff_line_stats,
-    diff_lines, is_interrupt_marker, strip_code_fence,
+    AcpEntry, AcpImage, DiffLine, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart,
+    compact_diff_lines, diff_lines, is_interrupt_marker, strip_code_fence,
 };
+
+#[derive(Clone)]
+struct CachedDiff {
+    old_fingerprint: (usize, u64),
+    new_fingerprint: (usize, u64),
+    lines: std::rc::Rc<Vec<DiffLine>>,
+    added: usize,
+    removed: usize,
+}
 
 /// `@` / `/` 补全弹层的状态。回合态，不落盘。
 struct CompletionPopup {
@@ -109,6 +118,8 @@ pub struct AcpView {
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
     /// 已发送消息的解码图片缓存，避免流式输出或 spinner 重绘时反复解码 base64。
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
+    /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
+    rendered_diffs: std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
     /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
     /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
     supports_image: bool,
@@ -261,6 +272,7 @@ impl AcpView {
         let auto_resume_pending = true;
         let initial_entry_count = entries.len();
         let rendered_images = decode_entry_images(&entries, 0);
+        let rendered_diffs = build_diff_cache(&entries);
         let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
         list_state.set_follow_mode(FollowMode::Tail);
         let view = cx.entity().downgrade();
@@ -270,8 +282,10 @@ impl AcpView {
             // list 正在可变借用自己的状态，延后通知外层重新判断 sticky 提问。
             cx.defer(move |cx| {
                 let _ = view.update(cx, |this, cx| {
-                    this.viewing_history = viewing_history;
-                    cx.notify();
+                    if this.viewing_history != viewing_history {
+                        this.viewing_history = viewing_history;
+                        cx.notify();
+                    }
                 });
             });
         });
@@ -294,6 +308,7 @@ impl AcpView {
             agent,
             pending_images: Vec::new(),
             rendered_images,
+            rendered_diffs,
             supports_image: true,
             paste_hint: None,
             completion: None,
@@ -834,12 +849,22 @@ impl AcpView {
             &self.entries[entries_offset..],
             entries_offset,
         ));
+        refresh_diff_cache(&self.entries, entries_offset, &mut self.rendered_diffs);
         let new_entries_len = self.entries.len();
         if snap.entries_offset <= old_entries_len {
+            // splice 会把落在被替换 item 内部的滚动锚点重置到该 item 顶部。
+            // 流式正文持续替换最后一项时，用户若正在这项里向上浏览，就会每个
+            // chunk 被拉回一次，形成明显抖动。离开尾随态后保留逻辑锚点；正文
+            // 只在锚点下方增长，原 offset 仍然代表同一块可见内容。
+            let scroll_anchor = (!self.list_state.is_following_tail())
+                .then(|| self.list_state.logical_scroll_top());
             self.list_state.splice(
                 snap.entries_offset..old_entries_len,
                 new_entries_len - snap.entries_offset,
             );
+            if let Some(anchor) = scroll_anchor {
+                self.list_state.scroll_to(anchor);
+            }
         } else {
             self.list_state.reset(new_entries_len);
         }
@@ -1475,14 +1500,6 @@ impl Render for AcpView {
                             .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                             .child(
                                 div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .font_medium()
-                                    .text_color(gpui::rgb(ui_theme::accent()))
-                                    .child("本轮提问"),
-                            )
-                            .child(
-                                div()
                                     .min_w_0()
                                     .flex_1()
                                     .truncate()
@@ -1791,16 +1808,13 @@ impl Render for AcpView {
 
                         // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
                         // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
-                        let diff_totals: Vec<(usize, usize)> = output
-                            .iter()
-                            .filter_map(|p| match p {
-                                ToolOutputPart::Diff {
-                                    old_text, new_text, ..
-                                } => Some(diff_line_stats(
-                                    old_text.as_deref().unwrap_or(""),
-                                    new_text,
-                                )),
-                                _ => None,
+                        let diff_totals: Vec<(usize, usize)> = this
+                            .rendered_diffs
+                            .get(id)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|cached| {
+                                cached.as_ref().map(|diff| (diff.added, diff.removed))
                             })
                             .collect();
                         let has_diff = !diff_totals.is_empty();
@@ -1900,12 +1914,13 @@ impl Render for AcpView {
                             let mut rendered_output_part = false;
                             for (part_ix, part) in output.iter().enumerate() {
                                 card = match part {
-                                    ToolOutputPart::Diff {
-                                        path,
-                                        old_text,
-                                        new_text,
-                                    } => {
+                                    ToolOutputPart::Diff { path, .. } => {
                                         rendered_output_part = true;
+                                        let cached = this
+                                            .rendered_diffs
+                                            .get(id)
+                                            .and_then(|parts| parts.get(part_ix))
+                                            .and_then(Option::as_ref);
                                         card.child(
                                             v_flex()
                                                 .px_4()
@@ -1917,13 +1932,14 @@ impl Render for AcpView {
                                                         .text_color(muted)
                                                         .child(path.clone()),
                                                 )
-                                                .child(render_diff_lines(
-                                                    old_text.as_deref().unwrap_or(""),
-                                                    new_text,
-                                                    (i, part_ix),
-                                                    t.border,
-                                                    t.muted_foreground,
-                                                )),
+                                                .children(cached.map(|diff| {
+                                                    render_diff_lines(
+                                                        &diff.lines,
+                                                        (i, part_ix),
+                                                        t.border,
+                                                        t.muted_foreground,
+                                                    )
+                                                })),
                                         )
                                     }
                                     ToolOutputPart::Text(text) if !text.trim().is_empty() => {
@@ -3018,6 +3034,112 @@ fn decode_entry_images(
         .collect()
 }
 
+fn build_diff_cache(
+    entries: &[AcpEntry],
+) -> std::collections::HashMap<String, Vec<Option<CachedDiff>>> {
+    let mut cache = std::collections::HashMap::new();
+    for entry in entries {
+        let AcpEntry::ToolCall { id, output, .. } = entry else {
+            continue;
+        };
+        let parts = output
+            .iter()
+            .map(|part| match part {
+                ToolOutputPart::Diff {
+                    old_text, new_text, ..
+                } => {
+                    let old = old_text.as_deref().unwrap_or("");
+                    let full = diff_lines(old, new_text);
+                    let added = full
+                        .iter()
+                        .filter(|line| line.tag == DiffLineTag::Added)
+                        .count();
+                    let removed = full
+                        .iter()
+                        .filter(|line| line.tag == DiffLineTag::Removed)
+                        .count();
+                    Some(CachedDiff {
+                        old_fingerprint: text_fingerprint(old),
+                        new_fingerprint: text_fingerprint(new_text),
+                        lines: std::rc::Rc::new(compact_diff_lines(&full, 3)),
+                        added,
+                        removed,
+                    })
+                }
+                ToolOutputPart::Text(_) => None,
+            })
+            .collect();
+        cache.insert(id.clone(), parts);
+    }
+    cache
+}
+
+fn refresh_diff_cache(
+    entries: &[AcpEntry],
+    entries_offset: usize,
+    cache: &mut std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+) {
+    let live_ids: std::collections::HashSet<&str> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            AcpEntry::ToolCall { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    cache.retain(|id, _| live_ids.contains(id.as_str()));
+
+    for entry in entries.iter().skip(entries_offset) {
+        let AcpEntry::ToolCall { id, output, .. } = entry else {
+            continue;
+        };
+        let old_parts = cache.remove(id).unwrap_or_default();
+        let parts = output
+            .iter()
+            .enumerate()
+            .map(|(part_ix, part)| match part {
+                ToolOutputPart::Diff {
+                    old_text, new_text, ..
+                } => {
+                    let old = old_text.as_deref().unwrap_or("");
+                    let old_fingerprint = text_fingerprint(old);
+                    let new_fingerprint = text_fingerprint(new_text);
+                    if let Some(Some(cached)) = old_parts.get(part_ix)
+                        && cached.old_fingerprint == old_fingerprint
+                        && cached.new_fingerprint == new_fingerprint
+                    {
+                        return Some(cached.clone());
+                    }
+                    let full = diff_lines(old, new_text);
+                    let added = full
+                        .iter()
+                        .filter(|line| line.tag == DiffLineTag::Added)
+                        .count();
+                    let removed = full
+                        .iter()
+                        .filter(|line| line.tag == DiffLineTag::Removed)
+                        .count();
+                    Some(CachedDiff {
+                        old_fingerprint,
+                        new_fingerprint,
+                        lines: std::rc::Rc::new(compact_diff_lines(&full, 3)),
+                        added,
+                        removed,
+                    })
+                }
+                ToolOutputPart::Text(_) => None,
+            })
+            .collect();
+        cache.insert(id.clone(), parts);
+    }
+}
+
+fn text_fingerprint(text: &str) -> (usize, u64) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    (text.len(), hasher.finish())
+}
+
 fn is_user_entry(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
 }
@@ -3177,6 +3299,18 @@ fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
         return None;
     }
     let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
+    // Agent 引用文件常写成 grep/编译器诊断那种 `path:行号` 或 `path:行号:列号`
+    // 格式（不是 `#L行号` 片段）。这种没有 `#` 片段时，才尝试从冒号后缀里抠
+    // 行号出来——不然会把 `:2765` 当成文件名的一部分拼进路径，读不到文件时
+    // 还误报“可能是二进制文件”。
+    let (path, fragment) = if fragment.is_empty() {
+        match extract_trailing_line_number(path) {
+            Some((base, line)) => (base, format!("L{line}")),
+            None => (path, String::new()),
+        }
+    } else {
+        (path, fragment.to_string())
+    };
     let path = std::path::Path::new(path);
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -3185,12 +3319,35 @@ fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
     };
     let mut url = url::Url::from_file_path(absolute).ok()?;
     if !fragment.is_empty() {
-        url.set_fragment(Some(fragment));
+        url.set_fragment(Some(&fragment));
     }
     // `Url::set_scheme` 会把自定义 scheme 序列化成 `smelt-file:/path`
     // （单斜杠），而 macOS URL scheme 与主进程解析器都按 authority 形式接收。
     // 从标准 file URL 替换前缀可稳定保留 `smelt-file:///absolute/path`。
     Some(url.to_string().replacen("file://", "smelt-file://", 1))
+}
+
+/// 从 `path:行号` / `path:行号:列号` 里拆出末尾的行号：从右往左数，只要是纯
+/// 数字的 segment 就一直往前吞（列号可选，最多吞两段），吞到的最后一个数字
+/// segment 就是行号；一段数字都没吃到就说明不是这种格式，返回 None 原样处理
+/// （比如 Windows 盘符 `C:\...`，虽然本 app 只跑 macOS，多判一下无妨）。
+fn extract_trailing_line_number(path: &str) -> Option<(&str, u32)> {
+    let mut rest = path;
+    let mut line = None;
+    for _ in 0..2 {
+        let Some((head, tail)) = rest.rsplit_once(':') else {
+            break;
+        };
+        if head.is_empty() {
+            break;
+        }
+        let Ok(n) = tail.parse::<u32>() else {
+            break;
+        };
+        line = Some(n);
+        rest = head;
+    }
+    line.map(|n| (rest, n))
 }
 
 /// 审批请求按收到顺序串行展示和处理，不能越过队首回应后续 responder。
@@ -3274,8 +3431,7 @@ fn tool_kind_icon(kind: &ToolKind) -> IconName {
 /// 块各自有唯一 element id。行数据来自 `smelt_core::acp_chat::diff_lines`——
 /// 跟头部「+N -M」摘要（`diff_line_stats`）共用同一次计算结果，数字不会对不上。
 fn render_diff_lines(
-    old: &str,
-    new: &str,
+    lines: &[DiffLine],
     key: (usize, usize),
     border_color: gpui::Hsla,
     muted_color: gpui::Hsla,
@@ -3289,7 +3445,7 @@ fn render_diff_lines(
         .border_color(border_color)
         .font_family("monospace")
         .text_xs();
-    for line in diff_lines(old, new) {
+    for line in lines {
         let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
             DiffLineTag::Removed => (
                 Some(smelt_ui::ui_theme::tint(smelt_ui::ui_theme::red(), 0x22).into()),
@@ -3315,7 +3471,13 @@ fn render_diff_lines(
                     .text_color(fg)
                     .child(prefix.to_string()),
             )
-            .child(div().flex_1().min_w_0().text_color(fg).child(line.text)),
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(fg)
+                    .child(line.text.clone()),
+            ),
         );
     }
     rows.into_any_element()
@@ -3346,6 +3508,27 @@ mod tests {
         assert!(rendered.contains("[workspace.md](smelt-file:///tmp/project/docs/workspace.md)"));
         assert!(rendered.contains("[源码](smelt-file:///tmp/source.rs#L42)"));
         assert!(rendered.contains("[官网](https://example.com)"));
+    }
+
+    /// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能
+    /// 拆出行号——原来只认 `#`，`:2765` 会整段被当成文件名拼进路径，导致读不到
+    /// 文件、误报“可能是二进制文件”（见用户反馈：点 ACP 对话里的文件引用链接）。
+    #[test]
+    fn markdown_colon_line_refs_resolve_to_fragment() {
+        let rendered = markdown_text_for_cwd(
+            "见 [acp_view.rs](crates/smelt-acp-view/src/acp_view.rs:2765)",
+            Some("/tmp/project"),
+        );
+        assert!(rendered.contains(
+            "[acp_view.rs](smelt-file:///tmp/project/crates/smelt-acp-view/src/acp_view.rs#L2765)"
+        ));
+    }
+
+    /// `path:行号:列号` 形式（列号可选的第二段）也只取行号，列号丢弃。
+    #[test]
+    fn markdown_colon_line_col_refs_take_line_not_col() {
+        let rendered = markdown_text_for_cwd("见 [x](src/main.rs:10:5)", Some("/tmp/project"));
+        assert!(rendered.contains("[x](smelt-file:///tmp/project/src/main.rs#L10)"));
     }
 
     #[test]
