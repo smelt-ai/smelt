@@ -648,9 +648,11 @@ impl Workspace {
                     .flatten();
                 let hint_before = self.sess_drop_hint == Some((entity_id, true));
                 let hint_after = self.sess_drop_hint == Some((entity_id, false));
+                let is_acp = matches!(self.sessions[ix].kind, SessionKind::Acp(_));
                 let e_act = this.clone();
                 let e_close = this.clone();
                 let e_rename = this.clone();
+                let e_restart = this.clone();
                 let e_drop = this.clone();
                 let drag_title: SharedString = title.clone().into();
                 // 分屏组（无父行）要复用「拖拽排序」，但标题会被下面父行的 on_drag
@@ -882,27 +884,41 @@ impl Workspace {
                     .context_menu(move |menu, _window, _cx| {
                         let e_rename = e_rename.clone();
                         let e_task = e_rename.clone();
+                        let e_restart = e_restart.clone();
                         let sess_ix = ix;
-                        menu.item(PopupMenuItem::new("新建任务").on_click(
-                            move |_ev, window, cx| {
-                                e_task.update(cx, |ws, cx| {
-                                    if let Some(pane) = ws
-                                        .sessions
-                                        .get(sess_ix)
-                                        .and_then(|s| s.active_term().cloned())
-                                    {
-                                        ws.open_new_task_for_terminal(&pane, window, cx);
-                                    }
-                                });
-                            },
-                        ))
-                        .item(
-                            PopupMenuItem::new("重命名").on_click(move |_ev, window, cx| {
-                                e_rename.update(cx, |ws, cx| {
-                                    ws.start_rename(RenameTarget::Session(ix), window, cx)
-                                });
-                            }),
-                        )
+                        let mut menu = menu
+                            .item(PopupMenuItem::new("新建任务").on_click(
+                                move |_ev, window, cx| {
+                                    e_task.update(cx, |ws, cx| {
+                                        if let Some(pane) = ws
+                                            .sessions
+                                            .get(sess_ix)
+                                            .and_then(|s| s.active_term().cloned())
+                                        {
+                                            ws.open_new_task_for_terminal(&pane, window, cx);
+                                        }
+                                    });
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("重命名").on_click(move |_ev, window, cx| {
+                                    e_rename.update(cx, |ws, cx| {
+                                        ws.start_rename(RenameTarget::Session(ix), window, cx)
+                                    });
+                                }),
+                            );
+                        // 只有 ACP 对话会话才需要「强制重启」：卡在工具调用里、
+                        // 「停止」按钮打不断时的兜底，见 `force_restart_acp_session`。
+                        if is_acp {
+                            menu = menu.item(PopupMenuItem::new("强制重启").on_click(
+                                move |_ev, _window, cx| {
+                                    e_restart.update(cx, |ws, cx| {
+                                        ws.force_restart_acp_session(sess_ix, cx)
+                                    });
+                                },
+                            ));
+                        }
+                        menu
                     })
                     .when(dragging, |row| {
                         // 拖拽进行中才渲染整行 drop 接收层：上半段插到目标前、下半段插到后。
