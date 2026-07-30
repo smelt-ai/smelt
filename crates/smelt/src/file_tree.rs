@@ -661,9 +661,26 @@ fn editor_language_for_path(path: &str) -> String {
     }
 }
 
+/// 内置文件查看器可以直接预览的图片格式。ICNS 不在 GPUI 的图片解码格式里，
+/// 仍按二进制文件处理，避免显示一个加载失败的空白画布。
+fn is_previewable_image(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "svg")
+    )
+}
+
 /// 文件内容查看/编辑面板：直接用 gpui-component 的 Editor（InputState code_editor
 /// 模式），自带语法高亮、行号、搜索、大文件下的增量编辑，不用再自己管虚拟滚动。
-pub fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspace>) -> Div {
+pub fn file_content_pane(
+    open_file: &Option<OpenFile>,
+    roots: &[String],
+    cx: &mut Context<Workspace>,
+) -> Div {
     let (muted, fg, border, warning, accent) = {
         let t = cx.theme();
         (
@@ -677,16 +694,55 @@ pub fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspac
     match open_file {
         None => placeholder_view("← 从左侧选择文件查看内容", muted),
         Some(of) => {
-            let name = of
-                .path
-                .rsplit('/')
-                .next()
-                .unwrap_or(of.path.as_str())
-                .to_string();
-            let dirty = of.editor.read(cx).value().to_string() != *of.saved_content;
+            // 面包屑：项目名（根目录名）> 中间目录 > 文件名，参考 Codex App——
+            // 光看文件名分不清「这是哪个项目/哪层目录下的文件」，尤其多根工作区。
+            let breadcrumb_segs: Vec<String> = roots
+                .iter()
+                .find(|r| of.path == **r || of.path.starts_with(&format!("{r}/")))
+                .map(|root| {
+                    let root_name = root
+                        .rsplit('/')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(root.as_str());
+                    let rel = of.path.strip_prefix(root.as_str()).unwrap_or(&of.path);
+                    let mut segs = vec![root_name.to_string()];
+                    segs.extend(rel.trim_start_matches('/').split('/').map(str::to_string));
+                    segs
+                })
+                .unwrap_or_else(|| {
+                    // 没有匹配到任何工作区根（罕见）：退回只显示文件名。
+                    vec![
+                        of.path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(of.path.as_str())
+                            .to_string(),
+                    ]
+                });
+            let is_image = is_previewable_image(&of.path);
+            let dirty = !is_image && of.editor.read(cx).value().to_string() != *of.saved_content;
             // 只有 markdown 才给「编辑 / 预览」切换，其它文件类型没有预览这一说。
             let is_md = editor_language_for_path(&of.path) == "md";
             let preview = of.preview && is_md;
+            let last_idx = breadcrumb_segs.len().saturating_sub(1);
+            let breadcrumb = h_flex().items_center().gap_1().children(
+                breadcrumb_segs
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, seg)| {
+                        let is_last = i == last_idx;
+                        let seg_el = div()
+                            .text_sm()
+                            .when(is_last, |el| el.text_color(fg).font_semibold())
+                            .when(!is_last, |el| el.text_color(muted))
+                            .child(seg.clone());
+                        let sep = (!is_last)
+                            .then(|| div().text_sm().text_color(muted).child(">"));
+                        std::iter::once(seg_el.into_any_element())
+                            .chain(sep.map(|s| s.into_any_element()))
+                    }),
+            );
             let header = h_flex()
                 .items_center()
                 .justify_between()
@@ -699,7 +755,7 @@ pub fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspac
                     h_flex()
                         .items_center()
                         .gap_2()
-                        .child(div().text_sm().text_color(muted).child(name))
+                        .child(breadcrumb)
                         // 未保存改动：文件名后一个小圆点，Cmd+S 保存后消失。
                         .when(dirty, |el| {
                             el.child(div().size(px(6.)).rounded_full().bg(warning))
@@ -737,7 +793,24 @@ pub fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspac
                             .child(seg("预览", preview, true)),
                     )
                 });
-            let body: AnyElement = if preview {
+            let body: AnyElement = if is_image {
+                div()
+                    .id("image-file-preview")
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .p_4()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(crate::ui_theme::bg_panel()))
+                    .child(
+                        img(std::path::PathBuf::from(&of.path))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .into_any_element()
+            } else if preview {
                 div()
                     .id("md-preview")
                     .flex_1()
@@ -764,6 +837,9 @@ pub fn file_content_pane(open_file: &Option<OpenFile>, cx: &mut Context<Workspac
                         // 来控制 disabled，牺牲一点「没选中时置灰」的观感换取不崩。
                         Input::new(&of.editor)
                             .h_full()
+                            // code editor 自带行号 gutter；清掉 Input 尺寸预设额外加的
+                            // 横向 padding，避免窄侧栏里行号左边再空出一截。
+                            .px_0()
                             .context_menu(move |menu, _window, cx| {
                                 let has_paste = cx.read_from_clipboard().is_some();
                                 menu.menu("剪切", Box::new(gpui_component::input::Cut))
@@ -1086,10 +1162,20 @@ impl Workspace {
         use gpui_component::input::{InputState, Position};
 
         self.reveal_in_file_tree(&path, cx);
-        // 点文件 = 舞台只出文件内容，树留在右侧停靠面板里（不在左边再复制一份）。
-        // 已经在「文件树 + 内容」双栏全宽里点的，保持双栏别塌成详情。
-        if self.stage_override != Some(crate::MainView::Files) {
-            self.stage_override = Some(crate::MainView::FileDetail);
+        // 点文件不再抢占舞台：停靠面板（inspector 的 FILES tab）自己就能分
+        // 左右两栏显示内容 + 树，中间舞台的终端/ACP 对话完全不受影响。只有
+        // 已经把 Files 提升到舞台全宽（双栏）时，才保持那个双栏视图跟着切换
+        // 显示的文件（不触碰 stage_override，本来就是 Some(Files) 不用改）。
+        //
+        // 停靠面板默认 344px 分给树 + 内容太挤，第一次在这个面板里开文件时
+        // 顺手把面板拉宽一些（参考 Codex App 点文件自动展开面板），后续用户
+        // 拖宽/拖窄的手动结果不再覆盖。
+        if self.inspector_open
+            && matches!(self.inspector_tab, crate::inspector::InspectorTab::Files)
+            && !self.inspector_panel_promoted()
+            && self.inspector_w < 640.
+        {
+            self.inspector_w = 640.;
         }
 
         self.file_gen = self.file_gen.wrapping_add(1);
@@ -1115,6 +1201,12 @@ impl Workspace {
             preview: false,
         });
         cx.notify();
+
+        // 图片由 GPUI 的 img 元素直接从路径异步解码；不要再走 read_to_string，
+        // 否则会短暂或永久显示“可能是二进制文件”的错误占位。
+        if is_previewable_image(&path) {
+            return;
+        }
 
         cx.spawn(async move |this, cx| {
             let p = path.clone();
@@ -1165,6 +1257,9 @@ impl Workspace {
     /// 文件；保存失败或起冲突则放弃这次切换，留在当前文件上让用户处理。
     pub fn save_open_file(&mut self, cx: &mut Context<Self>) {
         let Some(of) = &self.open_file else { return };
+        if is_previewable_image(&of.path) {
+            return;
+        }
         if !of.readable {
             if let Some(of) = self.open_file.as_mut() {
                 of.save_error = Some("此文件未能正常读取为文本，不支持保存".to_string());

@@ -1,11 +1,12 @@
-//! inspector：窗口右侧的图标条（56px 常驻）+ 面板（344px 可整体隐藏）。
-//! FILES / GIT / TASKS / SKILL 四个 tab，点击图标切换或收合；面板头
+//! inspector：面板内横向 tabs + 右侧面板（默认 344px，可整体隐藏）。
+//! FILES / GIT / TASKS / SKILL 四个 tab，点击切换或收合；面板头
 //! 带「展开」把对应的旧全屏页盖到会话舞台上（stage_override），功能零删除。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::*;
 
 use crate::tasks::TaskStore;
@@ -26,6 +27,12 @@ pub(crate) enum InspectorTab {
     Git,
     Tasks,
     Skills,
+}
+
+impl Default for InspectorTab {
+    fn default() -> Self {
+        Self::Files
+    }
 }
 
 impl InspectorTab {
@@ -70,6 +77,25 @@ impl Workspace {
             // 点的就是当前占着舞台的那个 → 等价于 ⤡ 收回停靠
             self.set_stage_override(None, window, cx);
             self.inspector_open = true;
+            self.save_state(cx);
+            return;
+        }
+        if self.inspector_panel_promoted() {
+            // 展开态下点了别的 tab：FILES / GIT / TASKS 展开都跟横条共用一份停靠
+            // UI（只是变宽，见 main.rs 舞台分派），能直接切过去、继续保持展开态；
+            // 只有 SKILL 没有展开形态（stage_view() = None），这时才退回停靠。
+            if let Some(view) = tab.stage_view() {
+                self.set_stage_override(Some(view), window, cx);
+                self.inspector_tab = tab;
+                self.save_state(cx);
+                cx.notify();
+                return;
+            }
+            self.set_stage_override(None, window, cx);
+            self.inspector_tab = tab;
+            self.inspector_open = true;
+            self.save_state(cx);
+            cx.notify();
             return;
         }
         if self.inspector_tab == tab && self.inspector_open {
@@ -78,10 +104,11 @@ impl Workspace {
             self.inspector_tab = tab;
             self.inspector_open = true;
         }
+        self.save_state(cx);
         cx.notify();
     }
 
-    /// 56px 图标条（最右，常驻）。
+    /// inspector 面板顶部的横向 tabs，避免常驻 56px 竖轨挤占会话宽度。
     pub(crate) fn render_inspector_rail(&mut self, cx: &mut Context<Self>) -> Div {
         let this = cx.entity();
         // GIT 角标：当前项目改动文件数（读 git status 缓存，没有就不显示）。
@@ -96,20 +123,20 @@ impl Workspace {
             div()
                 .id(tab.label())
                 .relative()
-                .w_full()
+                .h_full()
+                .px_2()
                 .flex()
-                .flex_col()
+                .flex_row()
                 .items_center()
                 .gap_1()
-                .py_3()
                 .cursor_pointer()
                 .map(|d| {
                     if active {
                         d.bg(ui_theme::tint(ui_theme::accent(), 0x14))
-                            .border_l_2()
+                            .border_b_2()
                             .border_color(rgb(ui_theme::accent()))
                     } else {
-                        d.border_l_2()
+                        d.border_b_2()
                             .border_color(gpui::transparent_black())
                             .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
                     }
@@ -133,9 +160,6 @@ impl Workspace {
                 .when(badge > 0, |d| {
                     d.child(
                         div()
-                            .absolute()
-                            .top(px(6.))
-                            .right(px(7.))
                             .px(px(4.))
                             .rounded(px(8.))
                             .bg(rgb(ui_theme::accent()))
@@ -145,6 +169,7 @@ impl Workspace {
                             .child(badge.to_string()),
                     )
                 })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_ev, window, cx| {
                     this.update(cx, |ws, cx| ws.toggle_inspector_tab(tab, window, cx));
                 })
@@ -153,14 +178,13 @@ impl Workspace {
         let cur = self.inspector_tab;
         let open = self.inspector_open;
         div()
-            .w(px(56.))
-            .flex_shrink_0()
-            .h_full()
+            .w_full()
+            .h(px(34.))
+            .flex_none()
             .flex()
-            .flex_col()
-            .pt_1()
-            .bg(rgb(ui_theme::bg_rail()))
-            .border_l_1()
+            .flex_row()
+            .items_center()
+            .border_b_1()
             .border_color(rgb(ui_theme::border_dim()))
             .child(item(
                 InspectorTab::Files,
@@ -184,19 +208,59 @@ impl Workspace {
                 InspectorTab::Skills,
                 0,
                 open && cur == InspectorTab::Skills,
-                this,
+                this.clone(),
             ))
             .child(div().flex_1())
+            .children(open.then(|| cur.stage_view()).flatten().map(|view| {
+                // 已经展开到舞台（这条横条本身正是展开态的头）→ 图标/文案/点击
+                // 都换成「收起」，回到停靠态；没展开就是平时的「展开」。
+                let promoted = self.inspector_panel_promoted();
+                div()
+                    .id("inspector-expand")
+                    .mr_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_6()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(rgb(ui_theme::text_faint()))
+                    .hover(|d| {
+                        d.bg(rgb(ui_theme::bg_hover()))
+                            .text_color(rgb(ui_theme::text_mid()))
+                    })
+                    .child(
+                        Icon::new(if promoted {
+                            IconName::Minimize
+                        } else {
+                            IconName::Maximize
+                        })
+                        .size(px(13.)),
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if promoted {
+                            "收起面板"
+                        } else {
+                            "展开面板"
+                        })
+                        .build(window, cx)
+                    })
+                    .on_click(move |_ev, window, cx| {
+                        this.update(cx, |ws, cx| {
+                            if promoted {
+                                ws.set_stage_override(None, window, cx);
+                                ws.inspector_open = true;
+                            } else {
+                                ws.set_stage_override(Some(view), window, cx);
+                            }
+                        });
+                    })
+            }))
     }
 
-    /// 面板统一头：36px，标题 + 可选「展开」（盖到舞台）按钮 + 自定义右侧内容。
-    pub(crate) fn inspector_header(
-        &self,
-        title: &'static str,
-        tab: InspectorTab,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let this = cx.entity();
+    /// 面板统一头：36px，标题 + 自定义右侧内容。「展开」（盖到舞台）按钮已挪到
+    /// 上面的 tab 横条右端，四个面板共用同一个图标按钮，不必每个面板头各摆一份。
+    pub(crate) fn inspector_header(&self, title: &'static str, _cx: &mut Context<Self>) -> Div {
         div()
             .h(px(36.))
             .flex_shrink_0()
@@ -213,18 +277,6 @@ impl Workspace {
                     .text_color(rgb(ui_theme::text_muted()))
                     .child(title),
             )
-            .children(tab.stage_view().map(|view| {
-                div()
-                    .id(("inspector-expand", tab as usize))
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                    .child("展开 ⤢")
-                    .on_click(move |_ev, window, cx| {
-                        this.update(cx, |ws, cx| ws.set_stage_override(Some(view), window, cx));
-                    })
-            }))
     }
 
     /// 344px 面板本体：按当前 tab 分派。
@@ -233,6 +285,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let tabs = self.render_inspector_rail(cx);
         let body: AnyElement = match self.inspector_tab {
             InspectorTab::Files => self.render_inspector_files(window, cx),
             InspectorTab::Git => self.render_inspector_git(window, cx),
@@ -240,7 +293,7 @@ impl Workspace {
             InspectorTab::Skills => self.render_inspector_skills(cx),
         };
         div()
-            .w(px(344.))
+            .w_full()
             .flex_shrink_0()
             .h_full()
             .flex()
@@ -249,6 +302,7 @@ impl Workspace {
             .bg(rgb(ui_theme::bg_elev()))
             .border_l_1()
             .border_color(rgb(ui_theme::border_dim()))
+            .child(tabs)
             .child(body)
     }
 
@@ -260,21 +314,19 @@ impl Workspace {
         let count = tasks.len();
 
         let e_new = this.clone();
-        let header = self
-            .inspector_header("TASKS", InspectorTab::Tasks, cx)
-            .child(
-                div()
-                    .id("inspector-task-new")
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(rgb(ui_theme::accent()))
-                    .cursor_pointer()
-                    .hover(|d| d.opacity(0.8))
-                    .child(format!("+ 新建 · {count}"))
-                    .on_click(move |_ev, window, cx| {
-                        e_new.update(cx, |ws, cx| ws.open_new_task_modal(window, cx));
-                    }),
-            );
+        let header = self.inspector_header("TASKS", cx).child(
+            div()
+                .id("inspector-task-new")
+                .text_xs()
+                .font_semibold()
+                .text_color(rgb(ui_theme::accent()))
+                .cursor_pointer()
+                .hover(|d| d.opacity(0.8))
+                .child(format!("+ 新建 · {count}"))
+                .on_click(move |_ev, window, cx| {
+                    e_new.update(cx, |ws, cx| ws.open_new_task_modal(window, cx));
+                }),
+        );
 
         let mut list = div()
             .id("inspector-task-list")
@@ -439,39 +491,130 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// FILES 面板：文件树（复用全屏页的 file_tree 组件）。点文件不替换本面板，
-    /// 而是把「文件树 + 内容」双栏提升到舞台（见 open_file_now），树在这儿一直在。
-    fn render_inspector_files(
+    /// FILES 面板：文件树（复用全屏页的 file_tree 组件）。点文件不再提升到舞台
+    /// （见 open_file_now），而是本面板自己分左右两栏：内容在左、树常驻右侧，
+    /// 参考 Codex App 的「开启档案」面板——中间舞台的终端/ACP 对话完全不受影响。
+    /// `pub(crate)`：舞台展开态（`MainView::Files`）跟停靠态共用这份 UI，见 main.rs。
+    pub(crate) fn render_inspector_files(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let header = self.inspector_header("EXPLORER", InspectorTab::Files, cx);
-        self.try_flush_file_tree_reveal(cx);
+        // 「EXPLORER」标题行去掉：上面已经有 FILES tab 高亮，这行纯属多余的重复标签。
+        // 有查询串 → 显示搜索结果；否则显示文件树（跟旧全屏页行为一致，
+        // file_filter/search_results 已在 main.rs 的 render 顶部懒创建 + 刷新）。
+        let has_query = self
+            .file_filter
+            .as_ref()
+            .is_some_and(|s| !s.read(cx).value().trim().is_empty());
+        if !has_query {
+            self.try_flush_file_tree_reveal(cx);
+        }
         let open_path = self.open_file.as_ref().map(|of| of.path.as_str());
         let selected = self.file_tree_selected.as_deref();
         // 多根工作区：inspector 的 EXPLORER 也把所有项目根一起挂出来（跟全屏 Files 页
         // 同一套 workspace_roots / collapsed_roots，行为一致）。
         let roots = self.workspace_roots(cx);
-        let tree = crate::file_tree::file_tree(
-            &roots,
-            &self.expanded,
-            &self.collapsed_roots,
-            &self.dir_cache,
-            &self.file_tree_scroll,
-            open_path,
-            selected,
-            344.,
-            &self.git_status,
-            cx,
-        );
+        let has_open_file = self.open_file.is_some();
+        // 打开文件后的目录宽度随 inspector 一起缩放，避免外层面板较窄时
+        // “详情最小宽度 + 固定目录宽度”超过容器并向右溢出。
+        let tree_w = if has_open_file {
+            (self.inspector_w * 0.36).clamp(120., 240.)
+        } else {
+            344.
+        };
+        let tree = if has_query {
+            match &self.search_results {
+                Some(state) => {
+                    crate::file_tree::search_results_view(state, &self.file_tree_scroll, cx)
+                }
+                // ensure_search 已在 render 顶部同步置位，通常到不了这里。
+                None => div().flex_1().into_any_element(),
+            }
+        } else {
+            crate::file_tree::file_tree(
+                &roots,
+                &self.expanded,
+                &self.collapsed_roots,
+                &self.dir_cache,
+                &self.file_tree_scroll,
+                open_path,
+                selected,
+                tree_w,
+                &self.git_status,
+                cx,
+            )
+        };
+        // 顶部搜索框（file_filter 已在 render 顶部懒创建）。
+        let search_box = self.file_filter.as_ref().map(|state| {
+            div()
+                .px_2()
+                .py(px(6.))
+                .border_b_1()
+                .border_color(rgb(ui_theme::border_dim()))
+                .child(gpui_component::input::Input::new(state).small())
+        });
+        let tree = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .children(search_box)
+            .child(tree)
+            .into_any_element();
+        let body: AnyElement = if has_open_file {
+            let content = crate::file_tree::file_content_pane(&self.open_file, &roots, cx);
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    h_resizable("inspector-files-split")
+                        .child(
+                            resizable_panel()
+                                .size_range(px(140.)..Pixels::MAX)
+                                .min_w_0()
+                                .min_h_0()
+                                .flex()
+                                .child(content),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(tree_w))
+                                .size_range(px(120.)..Pixels::MAX)
+                                .flex_none()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex()
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .min_h_0()
+                                        .flex()
+                                        .flex_col()
+                                        .border_l_1()
+                                        .border_color(rgb(ui_theme::border_dim()))
+                                        .child(tree),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(tree)
+                .into_any_element()
+        };
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(header)
-            .child(div().flex_1().min_h_0().flex().flex_col().child(tree))
+            .child(body)
             .into_any_element()
     }
 
@@ -608,9 +751,11 @@ impl Workspace {
                     let e_del = this.clone();
                     let e_reveal = this.clone();
                     let e_adopt = this.clone();
+                    let e_resolve = this.clone();
                     let sk_edit = sk.clone();
                     let sk_del = sk.clone();
                     let sk_adopt = sk.clone();
+                    let sk_resolve = sk.clone();
                     let reveal_path = sk.dir.to_string_lossy().into_owned();
                     let hover_bar = div()
                         .flex()
@@ -664,22 +809,54 @@ impl Workspace {
                                         });
                                     }),
                             )
-                            .child(
+                            .when(sk.duplicates.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .id(("inspector-skill-adopt", six))
+                                        .px_1()
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .hover(|s| s.text_color(rgb(ui_theme::accent())))
+                                        .child("应用到其他工具")
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_ev, _window, cx| {
+                                            let sk = sk_adopt.clone();
+                                            e_adopt.update(cx, |ws, cx| {
+                                                ws.open_skill_link_modal(&sk, cx)
+                                            });
+                                        }),
+                                )
+                            })
+                        })
+                        .when(!sk.duplicates.is_empty(), |d| {
+                            d.child(
                                 div()
-                                    .id(("inspector-skill-adopt", six))
+                                    .id(("inspector-skill-resolve", six))
                                     .px_1()
                                     .text_xs()
                                     .cursor_pointer()
-                                    .text_color(rgb(ui_theme::text_faint()))
-                                    .hover(|s| s.text_color(rgb(ui_theme::accent())))
-                                    .child("应用到其他工具")
+                                    .text_color(rgb(ui_theme::yellow()))
+                                    .hover(|s| s.opacity(0.8))
+                                    .child(if sk.managed {
+                                        "一键清理"
+                                    } else {
+                                        "处理副本"
+                                    })
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
                                     .on_click(move |_ev, _window, cx| {
-                                        let sk = sk_adopt.clone();
-                                        e_adopt
-                                            .update(cx, |ws, cx| ws.open_skill_link_modal(&sk, cx));
+                                        let sk = sk_resolve.clone();
+                                        e_resolve.update(cx, |ws, cx| {
+                                            if sk.managed {
+                                                ws.cleanup_managed_skill_duplicates(&sk, cx)
+                                            } else {
+                                                ws.open_skill_link_modal(&sk, cx)
+                                            }
+                                        });
                                     }),
                             )
                         })
@@ -744,6 +921,21 @@ impl Workspace {
                                                 .text_size(px(9.))
                                                 .text_color(rgb(ui_theme::text_faint()))
                                                 .child(sk.source_agent.unwrap_or("旧")),
+                                        )
+                                    })
+                                    .when(!sk.duplicates.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px_1()
+                                                .rounded_xs()
+                                                .bg(crate::ui_theme::tint(ui_theme::yellow(), 0x20))
+                                                .text_size(px(9.))
+                                                .text_color(rgb(ui_theme::yellow()))
+                                                .child(format!(
+                                                    "{} 个副本",
+                                                    sk.duplicates.len() + 1
+                                                )),
                                         )
                                     })
                                     .child(hover_bar),

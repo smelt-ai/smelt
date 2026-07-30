@@ -19,6 +19,7 @@ use gpui_component::*;
 
 use crate::git_panel::main_repo_root_from_common_dir;
 use crate::settings::{AcpAgentKind, active_launch_entries, icon_for_launch_command};
+use crate::updater;
 use crate::{
     AgentStatus, MainView, RenameTarget, SessionDrag, SessionKind, SidebarGrouping, Workspace,
     pane_status, pane_title, ui_theme,
@@ -47,99 +48,6 @@ fn status_text(status: AgentStatus) -> &'static str {
         AgentStatus::Done => "已完成",
         AgentStatus::Idle => "空闲",
     }
-}
-
-fn quota_color(percent: f64) -> u32 {
-    if percent >= 90.0 {
-        ui_theme::red()
-    } else if percent >= 75.0 {
-        ui_theme::yellow()
-    } else {
-        ui_theme::text_muted()
-    }
-}
-
-fn quota_reset_text(window: &crate::rate_limits::RateLimitWindow) -> Option<String> {
-    let dt = chrono::DateTime::from_timestamp(window.resets_at?, 0)?;
-    Some(
-        dt.with_timezone(&chrono::Local)
-            .format("%m/%d %H:%M")
-            .to_string(),
-    )
-}
-
-fn quota_remaining_text(window: &crate::rate_limits::RateLimitWindow) -> Option<String> {
-    let seconds = window.resets_at? - chrono::Utc::now().timestamp();
-    if seconds <= 0 {
-        return Some("即将重置".to_string());
-    }
-    let days = seconds / 86_400;
-    let hours = (seconds % 86_400) / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    Some(if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{}m", minutes.max(1))
-    })
-}
-
-fn quota_row(
-    label: &'static str,
-    limits: &crate::rate_limits::ProviderRateLimits,
-) -> Stateful<Div> {
-    let session = limits.session.as_ref().map(|w| {
-        (
-            format!(
-                "{:.0}% {}",
-                w.used_percent,
-                quota_remaining_text(w).unwrap_or_else(|| "5h".to_string())
-            ),
-            quota_color(w.used_percent),
-        )
-    });
-    let weekly = limits.weekly.as_ref().map(|w| {
-        (
-            format!(
-                "{:.0}% {}",
-                w.used_percent,
-                quota_remaining_text(w).unwrap_or_else(|| "7d".to_string())
-            ),
-            quota_color(w.used_percent),
-        )
-    });
-    let mut reset_parts = Vec::new();
-    if let Some(reset) = limits.session.as_ref().and_then(quota_reset_text) {
-        reset_parts.push(format!("5h 重置：{reset}"));
-    }
-    if let Some(reset) = limits.weekly.as_ref().and_then(quota_reset_text) {
-        reset_parts.push(format!("7d 重置：{reset}"));
-    }
-    let tooltip = reset_parts.join(" · ");
-
-    h_flex()
-        .id(label)
-        .h(px(22.))
-        .px_3()
-        .gap_2()
-        .items_center()
-        .text_xs()
-        .child(
-            div()
-                .w(px(48.))
-                .font_family("monospace")
-                .text_color(rgb(ui_theme::text_mid()))
-                .child(label),
-        )
-        .child(div().text_color(rgb(ui_theme::text_muted())).child("已用"))
-        .children(session.map(|(text, color)| div().text_color(rgb(color)).child(text)))
-        .children(weekly.map(|(text, color)| div().text_color(rgb(color)).child(text)))
-        .when(!tooltip.is_empty(), |row| {
-            row.tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-            })
-        })
 }
 
 impl Workspace {
@@ -1309,24 +1217,14 @@ impl Workspace {
         // ---- 底部：打开项目 / 临时终端（原项目 rail 底部的「+」）----
         let e_open = this.clone();
         let e_scratch = this.clone();
-        let quota_footer = {
-            let codex = self.rate_limits.codex.as_ref();
-            let claude = self.rate_limits.claude.as_ref();
-            (codex.is_some() || claude.is_some()).then(|| {
-                v_flex()
-                    .flex_shrink_0()
-                    .py_1()
-                    .border_t_1()
-                    .border_color(rgb(ui_theme::border_dim()))
-                    .children(codex.map(|limits| quota_row("Codex", limits)))
-                    .children(claude.map(|limits| quota_row("Claude", limits)))
-            })
-        };
+        let e_settings = this.clone();
+        let has_update = self.update_available();
+        let settings_needs_attention = has_update || self.daemon_outdated == Some(true);
         let footer = div()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap_3()
+            .gap_1()
             .px_3()
             .py_1p5()
             .border_t_1()
@@ -1334,6 +1232,7 @@ impl Workspace {
             .child(
                 div()
                     .id("open-project")
+                    .mr_2()
                     .text_xs()
                     .text_color(rgb(ui_theme::text_muted()))
                     .cursor_pointer()
@@ -1360,10 +1259,97 @@ impl Workspace {
                     .on_click(move |_ev, _window, cx| {
                         e_scratch.update(cx, |ws, cx| ws.new_scratch_session(cx));
                     }),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("sidebar-settings-entry")
+                    .relative()
+                    .child(
+                        Button::new("sidebar-settings-btn")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Settings)
+                            .tooltip("设置  ⌘,")
+                            .dropdown_menu(move |menu, _window, _cx| {
+                                let e_settings = e_settings.clone();
+                                let e_check_update = e_settings.clone();
+                                menu.item(
+                                    PopupMenuItem::label(concat!("v", env!("CARGO_PKG_VERSION")))
+                                        .disabled(true),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("帮助文档")
+                                        .icon(IconName::BookOpen)
+                                        .on_click(|_ev, _window, cx| {
+                                            cx.open_url("https://smelt.onoo.io/");
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("反馈问题")
+                                        .icon(IconName::Info)
+                                        .on_click(|_ev, _window, cx| {
+                                            cx.open_url(
+                                            "https://github.com/smelt-ai/smelt/issues/new/choose",
+                                        );
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("检查更新...")
+                                        .icon(IconName::LoaderCircle)
+                                        .on_click(move |_ev, window, cx| {
+                                            e_check_update.update(cx, |ws, cx| {
+                                                if ws.llm_inputs.is_none() {
+                                                    ws.init_llm_inputs(window, cx);
+                                                }
+                                                if !matches!(
+                                                    ws.update_status,
+                                                    updater::UpdateStatus::Checking
+                                                        | updater::UpdateStatus::Downloading { .. }
+                                                        | updater::UpdateStatus::Installing { .. }
+                                                ) {
+                                                    ws.check_for_update(false, cx);
+                                                }
+                                                ws.settings_page_ix = crate::SETTINGS_PAGE_UPDATE;
+                                                ws.settings_page_nonce += 1;
+                                                ws.open_settings_window(cx);
+                                            });
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("设置...")
+                                        .icon(IconName::Settings)
+                                        .on_click(move |_ev, window, cx| {
+                                            e_settings.update(cx, |ws, cx| {
+                                                ws.check_daemon_outdated(cx);
+                                                if ws.llm_inputs.is_none() {
+                                                    ws.init_llm_inputs(window, cx);
+                                                }
+                                                ws.settings_page_ix =
+                                                    crate::SETTINGS_PAGE_APPEARANCE;
+                                                ws.open_settings_window(cx);
+                                            });
+                                        }),
+                                )
+                            }),
+                    )
+                    .when(settings_needs_attention, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(2.))
+                                .right(px(2.))
+                                .size(px(5.))
+                                .rounded_full()
+                                .bg(rgb(ui_theme::red())),
+                        )
+                    }),
             );
 
         div()
-            .w(px(280.))
+            .w_full()
             .flex_shrink_0()
             .h_full()
             .flex()
@@ -1374,6 +1360,5 @@ impl Workspace {
             .child(header)
             .child(rows)
             .child(footer)
-            .children(quota_footer)
     }
 }

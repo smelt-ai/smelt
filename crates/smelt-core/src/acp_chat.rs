@@ -137,6 +137,56 @@ pub fn diff_line_stats(old: &str, new: &str) -> (usize, usize) {
     (added, removed)
 }
 
+/// 把完整逐行 diff 压成适合卡片预览的 unified diff：每个变更块只保留前后
+/// `context` 行，长段未变化内容折成一条提示。这样大文件的小改动不会在 UI 中
+/// 创建几千个不可见行元素。
+pub fn compact_diff_lines(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let changed: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, line)| (line.tag != DiffLineTag::Context).then_some(ix))
+        .collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for ix in changed {
+        let start = ix.saturating_sub(context);
+        let end = (ix + context + 1).min(lines.len());
+        if let Some((_, last_end)) = ranges.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+        } else {
+            ranges.push((start, end));
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut previous_end = 0;
+    for (start, end) in ranges {
+        if start > previous_end {
+            out.push(DiffLine {
+                tag: DiffLineTag::Context,
+                text: format!("... 省略 {} 行未修改内容 ...", start - previous_end),
+            });
+        }
+        out.extend(lines[start..end].iter().cloned());
+        previous_end = end;
+    }
+    if previous_end < lines.len() {
+        out.push(DiffLine {
+            tag: DiffLineTag::Context,
+            text: format!("... 省略 {} 行未修改内容 ...", lines.len() - previous_end),
+        });
+    }
+    out
+}
+
 /// 剥掉整段被 markdown 围栏包住的工具输出（```lang\n…\n```）。只在「整段就是
 /// 一个围栏块」时剥——正文里穿插的代码块交给 markdown 渲染器，别在这里瞎切。
 pub fn strip_code_fence(text: &str) -> &str {
@@ -230,6 +280,25 @@ mod tests {
                 .iter()
                 .filter(|l| l.tag == DiffLineTag::Removed)
                 .count()
+        );
+    }
+
+    #[test]
+    fn compact_diff_omits_long_unchanged_regions() {
+        let old = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        let new = old.replace("line 50\n", "changed\n");
+        let full = diff_lines(&old, &new);
+        let compact = compact_diff_lines(&full, 3);
+
+        assert!(compact.len() < 12);
+        assert!(compact.iter().any(|line| line.text == "changed"));
+        assert!(compact.iter().any(|line| line.text.contains("省略")));
+        assert_eq!(
+            compact
+                .iter()
+                .filter(|line| line.tag == DiffLineTag::Added)
+                .count(),
+            1
         );
     }
 

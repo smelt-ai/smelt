@@ -18,7 +18,6 @@
 
 use gpui::AppContext;
 use gpui_component::input::Input;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -94,6 +93,17 @@ pub struct SkillEntry {
     /// ——托管 skill 真身在 `.smelt`，这里始终是 `None`。UI 靠它告诉用户
     /// 「这条到底是谁的」，而不是一个笼统看不出来源的「旧」。
     pub source_agent: Option<&'static str>,
+    /// 同一 scope 下其它 agent 目录里发现的同名实体副本。过去这些副本会被
+    /// 静默去重；现在保留下来交给 UI 明示冲突并让用户选择真身。
+    pub duplicates: Vec<SkillDuplicate>,
+}
+
+#[derive(Clone)]
+pub struct SkillDuplicate {
+    pub dir: PathBuf,
+    pub description: String,
+    pub source_agent: Option<&'static str>,
+    pub managed: bool,
 }
 
 /// 扫描用户级 + 项目级 skills（阻塞读盘，调用方放后台线程）。
@@ -120,16 +130,8 @@ pub fn scan_skills(project_cwd: Option<&str>) -> Vec<SkillEntry> {
 /// 真实目录当 legacy 收进来。
 fn collect_scope(base: &Path, project_scope: bool, out: &mut Vec<SkillEntry>) {
     let canonical_root = base.join(".smelt/skills");
-    let mut managed_names: HashSet<String> = HashSet::new();
-    collect_dir(
-        &canonical_root,
-        project_scope,
-        base,
-        true,
-        None,
-        &mut managed_names,
-        out,
-    );
+    let mut found = Vec::new();
+    collect_dir(&canonical_root, project_scope, base, true, None, &mut found);
     for t in AGENT_TARGETS {
         collect_dir(
             &base.join(t.rel_dir(project_scope)),
@@ -137,10 +139,26 @@ fn collect_scope(base: &Path, project_scope: bool, out: &mut Vec<SkillEntry>) {
             base,
             false,
             Some(t.label),
-            &mut managed_names,
-            out,
+            &mut found,
         );
     }
+
+    // `.smelt` 真身先扫描，因此同名存在托管版本时它自然成为主记录；其余
+    // 实体目录作为冲突副本挂在同一张卡上，不再静默消失。
+    let mut merged: Vec<SkillEntry> = Vec::new();
+    for entry in found {
+        if let Some(primary) = merged.iter_mut().find(|item| item.name == entry.name) {
+            primary.duplicates.push(SkillDuplicate {
+                dir: entry.dir,
+                description: entry.description,
+                source_agent: entry.source_agent,
+                managed: entry.managed,
+            });
+        } else {
+            merged.push(entry);
+        }
+    }
+    out.extend(merged);
 }
 
 fn collect_dir(
@@ -149,10 +167,11 @@ fn collect_dir(
     base: &Path,
     managed: bool,
     source_label: Option<&'static str>,
-    managed_names: &mut HashSet<String>,
     out: &mut Vec<SkillEntry>,
 ) {
     let canonical_root = base.join(".smelt/skills");
+    let canonical_root_resolved =
+        std::fs::canonicalize(&canonical_root).unwrap_or_else(|_| canonical_root.clone());
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -170,7 +189,7 @@ fn collect_dir(
                 .unwrap_or(false);
             if is_symlink {
                 if let Ok(target) = std::fs::canonicalize(&path) {
-                    if target.starts_with(&canonical_root) {
+                    if target.starts_with(&canonical_root_resolved) {
                         continue;
                     }
                 }
@@ -190,14 +209,6 @@ fn collect_dir(
         if name.is_empty() {
             continue;
         }
-        if !managed && managed_names.contains(&name) {
-            // 同名已经出现过——要么是托管 skill 的重名冲突，要么是同名的
-            // legacy skill 在多个 agent 目录里各放了一份（如 `.claude/skills`
-            // 和 `.codex/skills` 都有一个 `commit-work`）。托管的/先遇到的
-            // 那份才展示，避免同名重复出现在列表里。
-            continue;
-        }
-        managed_names.insert(name.clone());
         let linked_agents = if managed {
             linked_targets(base, project_scope, &name, &path)
         } else {
@@ -212,6 +223,7 @@ fn collect_dir(
             managed,
             linked_agents,
             source_agent: source_label,
+            duplicates: Vec::new(),
         });
     }
 }
@@ -460,6 +472,86 @@ pub fn adopt_skill_selected(
                 &entry.name,
                 &canonical_dir,
                 t,
+            );
+        }
+    }
+    Ok(canonical_dir)
+}
+
+/// 把同名实体副本统一成 `.smelt` 真身。`source_index=0` 代表卡片主记录，后续
+/// 下标依次对应 `duplicates`。先完整复制到同文件系统临时目录，再替换真身；
+/// 只有新真身就位后才移除其余副本并重建 agent 链接。
+pub fn consolidate_skill_copies(
+    entry: &SkillEntry,
+    source_index: usize,
+    selected_labels: &[&'static str],
+) -> Result<PathBuf, String> {
+    if entry.duplicates.is_empty() {
+        return Err("没有需要处理的同名副本".into());
+    }
+    let source = if source_index == 0 {
+        &entry.dir
+    } else {
+        &entry
+            .duplicates
+            .get(source_index - 1)
+            .ok_or_else(|| "选择的副本不存在".to_string())?
+            .dir
+    };
+    if !source.join("SKILL.md").is_file() {
+        return Err(format!("所选目录缺少 SKILL.md：{}", source.display()));
+    }
+
+    let canonical_root = entry.base.join(".smelt/skills");
+    std::fs::create_dir_all(&canonical_root).map_err(|e| format!("创建托管目录失败：{e}"))?;
+    let canonical_dir = canonical_root.join(&entry.name);
+    let temp_dir = canonical_root.join(format!(
+        ".{}-consolidating-{}",
+        entry.name,
+        std::process::id()
+    ));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).map_err(|e| format!("清理临时目录失败：{e}"))?;
+    }
+    if let Err(e) = copy_dir_recursive(source, &temp_dir) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(format!("复制所选副本失败：{e}"));
+    }
+
+    let backup_dir = canonical_root.join(format!(".{}-backup-{}", entry.name, std::process::id()));
+    if backup_dir.exists() {
+        std::fs::remove_dir_all(&backup_dir).map_err(|e| format!("清理备份目录失败：{e}"))?;
+    }
+    if canonical_dir.exists() {
+        std::fs::rename(&canonical_dir, &backup_dir).map_err(|e| format!("备份原真身失败：{e}"))?;
+    }
+    if let Err(e) = std::fs::rename(&temp_dir, &canonical_dir) {
+        if backup_dir.exists() {
+            let _ = std::fs::rename(&backup_dir, &canonical_dir);
+        }
+        return Err(format!("启用新真身失败：{e}"));
+    }
+
+    unlink_from_agents(&entry.base, entry.project_scope, &entry.name);
+    let mut old_dirs = vec![entry.dir.clone()];
+    old_dirs.extend(entry.duplicates.iter().map(|copy| copy.dir.clone()));
+    for dir in old_dirs {
+        if dir != canonical_dir && dir != backup_dir && dir.join("SKILL.md").is_file() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| format!("移除旧副本 {} 失败：{e}", dir.display()))?;
+        }
+    }
+    if backup_dir.exists() {
+        std::fs::remove_dir_all(&backup_dir).map_err(|e| format!("移除旧真身失败：{e}"))?;
+    }
+    for target in AGENT_TARGETS {
+        if selected_labels.contains(&target.label) {
+            link_one_agent(
+                &entry.base,
+                entry.project_scope,
+                &entry.name,
+                &canonical_dir,
+                target,
             );
         }
     }
@@ -863,7 +955,26 @@ impl crate::Workspace {
         self.skill_link_modal = Some(SkillLinkModalState {
             entry: entry.clone(),
             selected: vec![true; AGENT_TARGETS.len()],
+            source_index: 0,
         });
+        cx.notify();
+    }
+
+    /// 托管 skill 出现同名实体副本时，以 `.smelt` 真身为准一键清理，并把
+    /// 所有已知 Agent 位置恢复成链接。无需让用户在本应唯一的数据源之间选择。
+    pub(crate) fn cleanup_managed_skill_duplicates(
+        &mut self,
+        entry: &SkillEntry,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if !entry.managed || entry.duplicates.is_empty() {
+            return;
+        }
+        let labels: Vec<&'static str> = AGENT_TARGETS.iter().map(|t| t.label).collect();
+        if let Err(e) = consolidate_skill_copies(entry, 0, &labels) {
+            eprintln!("[skills] {} 清理同名副本失败：{e}", entry.name);
+        }
+        self.skills_cache = None;
         cx.notify();
     }
 
@@ -913,6 +1024,16 @@ impl crate::Workspace {
         }
     }
 
+    pub(crate) fn select_skill_copy(&mut self, idx: usize, cx: &mut gpui::Context<Self>) {
+        let Some(modal) = self.skill_link_modal.as_mut() else {
+            return;
+        };
+        if idx <= modal.entry.duplicates.len() {
+            modal.source_index = idx;
+            cx.notify();
+        }
+    }
+
     /// 确认「管理链接」弹窗：托管 skill 按勾选结果增删 symlink；非托管
     /// skill 按勾选结果收编进 `.smelt` 并链接。失败只打日志，跟其它「尽力
     /// 而为」的操作一致。
@@ -926,7 +1047,9 @@ impl crate::Workspace {
             .filter(|(_, sel)| **sel)
             .map(|(t, _)| t.label)
             .collect();
-        let result = if modal.entry.managed {
+        let result = if !modal.entry.duplicates.is_empty() {
+            consolidate_skill_copies(&modal.entry, modal.source_index, &labels).map(|_| ())
+        } else if modal.entry.managed {
             set_agent_links(&modal.entry, &labels)
         } else {
             adopt_skill_selected(&modal.entry, &labels).map(|_| ())
@@ -940,6 +1063,7 @@ impl crate::Workspace {
 
     /// 「管理链接」弹窗：一个 skill + 每个已知 agent 一个勾选框。
     pub(crate) fn render_skill_link_modal(&self, cx: &mut gpui::Context<Self>) -> gpui::Div {
+        use gpui::prelude::FluentBuilder;
         use gpui::*;
         use gpui_component::checkbox::Checkbox;
         use gpui_component::*;
@@ -952,20 +1076,111 @@ impl crate::Workspace {
         };
         let (neutral_bg, neutral_hover, tint, hover, accent_text) =
             crate::Workspace::modal_accent_colors(false);
-        let title = if modal.entry.managed {
+        let title = if !modal.entry.duplicates.is_empty() {
+            "处理同名副本"
+        } else if modal.entry.managed {
             "管理链接"
         } else {
             "应用到其他工具"
         };
 
-        let mut content = v_flex()
-            .child(div().font_bold().text_color(fg).text_lg().child(title))
-            .child(
+        let mut content =
+            v_flex()
+                .gap_3()
+                .child(div().font_bold().text_color(fg).text_lg().child(title))
+                .child(div().text_sm().text_color(muted).child(
+                    if modal.entry.duplicates.is_empty() {
+                        format!("勾选要同步「{}」的 agent：", modal.entry.name)
+                    } else {
+                        format!(
+                            "发现 {} 份同名内容。选择一份作为 .smelt 真身，其余副本将替换为链接。",
+                            modal.entry.duplicates.len() + 1
+                        )
+                    },
+                ));
+
+        if !modal.entry.duplicates.is_empty() {
+            let mut copies = vec![(
+                modal.entry.dir.clone(),
+                modal.entry.description.clone(),
+                modal.entry.source_agent,
+                modal.entry.managed,
+            )];
+            copies.extend(modal.entry.duplicates.iter().map(|copy| {
+                (
+                    copy.dir.clone(),
+                    copy.description.clone(),
+                    copy.source_agent,
+                    copy.managed,
+                )
+            }));
+            content = content.child(
+                v_flex()
+                    .gap_1()
+                    .children(copies.into_iter().enumerate().map(
+                        |(idx, (path, description, source_agent, managed))| {
+                            let selected = modal.source_index == idx;
+                            div()
+                                .id(("skill-copy-source", idx))
+                                .p_2()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(if selected { tint } else { neutral_bg })
+                                .cursor_pointer()
+                                .hover(move |d| d.bg(neutral_hover))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_skill_copy(idx, cx)
+                                }))
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .child(div().text_sm().font_semibold().child(if managed {
+                                            ".smelt 真身"
+                                        } else {
+                                            source_agent.unwrap_or("其它来源")
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if selected {
+                                                    accent_text
+                                                } else {
+                                                    muted
+                                                })
+                                                .child(if selected {
+                                                    "将保留"
+                                                } else {
+                                                    "选择"
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_family("monospace")
+                                        .text_color(muted)
+                                        .truncate()
+                                        .child(path.to_string_lossy().into_owned()),
+                                )
+                                .when(!description.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .truncate()
+                                            .child(description),
+                                    )
+                                })
+                        },
+                    )),
+            );
+            content = content.child(
                 div()
                     .text_sm()
                     .text_color(muted)
-                    .child(format!("勾选要同步「{}」的 agent：", modal.entry.name)),
+                    .child("启用到以下 Agent："),
             );
+        }
 
         for (i, t) in AGENT_TARGETS.iter().enumerate() {
             let checked = modal.selected.get(i).copied().unwrap_or(false);
@@ -1238,6 +1453,7 @@ pub(crate) struct SkillModalState {
 pub(crate) struct SkillLinkModalState {
     pub entry: SkillEntry,
     pub selected: Vec<bool>,
+    pub source_index: usize,
 }
 
 #[cfg(test)]
@@ -1480,6 +1696,64 @@ mod tests {
         assert_eq!(scanned.len(), 1);
         assert!(scanned[0].managed);
         assert_eq!(scanned[0].linked_agents.len(), super::AGENT_TARGETS.len());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn managed_skill_reports_and_cleans_duplicate_agent_copies() {
+        let tmp = std::env::temp_dir().join(format!(
+            "smelt-skill-duplicate-cleanup-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cwd = tmp.to_string_lossy().into_owned();
+        let canonical = super::create_skill(Some(&cwd), true, "shared", "canonical").unwrap();
+        std::fs::write(canonical.join("body.txt"), "keep me").unwrap();
+
+        for rel in [".claude/skills/shared", ".codex/skills/shared"] {
+            let dir = tmp.join(rel);
+            std::fs::remove_file(&dir).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                "---\nname: shared\ndescription: stale copy\n---\n",
+            )
+            .unwrap();
+        }
+
+        let entry = super::scan_skills(Some(&cwd))
+            .into_iter()
+            .find(|skill| skill.project_scope && skill.name == "shared")
+            .unwrap();
+        assert!(entry.managed);
+        assert_eq!(entry.duplicates.len(), 2);
+
+        let labels: Vec<_> = super::AGENT_TARGETS.iter().map(|t| t.label).collect();
+        super::consolidate_skill_copies(&entry, 0, &labels).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("body.txt")).unwrap(),
+            "keep me"
+        );
+        for rel in [
+            ".claude/skills/shared",
+            ".codex/skills/shared",
+            ".github/skills/shared",
+            ".grok/skills/shared",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(tmp.join(rel))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        let rescanned = super::scan_skills(Some(&cwd))
+            .into_iter()
+            .find(|skill| skill.project_scope && skill.name == "shared")
+            .unwrap();
+        assert!(rescanned.duplicates.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
