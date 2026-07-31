@@ -258,8 +258,12 @@ pub fn kill_acp_session(id: &str) {
 pub fn restart_acp_session(id: &str) -> Result<(), String> {
     let mut s = UnixStream::connect(crate::daemon_state::smeltd_sock_path())
         .map_err(|e| format!("连不上 smeltd：{e}"))?;
-    writeln!(s, "{}", serde_json::json!({ "op": "acp_restart", "id": id }))
-        .map_err(|e| format!("写请求失败：{e}"))?;
+    writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": "acp_restart", "id": id })
+    )
+    .map_err(|e| format!("写请求失败：{e}"))?;
     let mut resp = String::new();
     BufReader::new(s)
         .read_line(&mut resp)

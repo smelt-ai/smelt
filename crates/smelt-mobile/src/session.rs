@@ -6,7 +6,9 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::api::{AcpEntry, ApprovalKind, ApprovalMenu, ApprovalOption, SessionSummary, ToolKind, ToolStatus};
+use crate::api::{
+    AcpEntry, ApprovalKind, ApprovalMenu, ApprovalOption, SessionSummary, ToolKind, ToolStatus,
+};
 
 /// 全局会话存储
 static SESSIONS: once_cell::sync::Lazy<RwLock<HashMap<String, SessionState>>> =
@@ -235,17 +237,16 @@ fn handle_snapshot(msg: &serde_json::Value) {
         .and_then(|s| s.as_str())
         .unwrap_or_default();
 
-    let snapshot = msg.get("snapshot").cloned().unwrap_or(serde_json::json!({}));
+    let snapshot = msg
+        .get("snapshot")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     // 解析 entries
     let entries: Vec<AcpEntry> = snapshot
         .get("entries")
         .and_then(|e| e.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| parse_entry(entry))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|entry| parse_entry(entry)).collect())
         .unwrap_or_default();
 
     // 解析 phase
@@ -287,7 +288,10 @@ fn parse_entry(entry: &serde_json::Value) -> Option<AcpEntry> {
             let data = entry.get("data")?;
             Some(AcpEntry::Assistant {
                 text: data.get("text")?.as_str()?.to_string(),
-                thought: data.get("thought").and_then(|t| t.as_bool()).unwrap_or(false),
+                thought: data
+                    .get("thought")
+                    .and_then(|t| t.as_bool())
+                    .unwrap_or(false),
             })
         }
         "ToolCall" => {
@@ -315,7 +319,11 @@ fn parse_entry(entry: &serde_json::Value) -> Option<AcpEntry> {
                 output: data
                     .get("output")
                     .and_then(|o| o.as_array())
-                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             })
         }

@@ -22,7 +22,7 @@ use crate::settings::{AcpAgentKind, active_launch_entries, icon_for_launch_comma
 use crate::updater;
 use crate::{
     AgentStatus, MainView, RenameTarget, SessionDrag, SessionKind, SidebarGrouping, Workspace,
-    pane_status, pane_title, ui_theme,
+    WorkspaceRoute, pane_status, pane_title, ui_theme,
 };
 
 /// 会话行 hover group 名：行 `.group()` + 右端操作条 `.group_hover()` 配对，
@@ -107,6 +107,64 @@ impl Workspace {
             &statuses,
             self.sessions.len(),
         );
+
+        // ---- 一级导航：任务（独立于项目/会话，放在 WORKSPACES 之上）----
+        let tasks_active = self.primary_route == WorkspaceRoute::Tasks;
+        let e_tasks = this.clone();
+        let e_new_task = this.clone();
+        let tasks_entry = div()
+            .id("sidebar-tasks")
+            .mx_2()
+            .mb_1()
+            .h(px(34.))
+            .px_2()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .when(tasks_active, |d| d.bg(rgb(ui_theme::bg_selected())))
+            .when(!tasks_active, |d| {
+                d.hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
+            })
+            .child(
+                Icon::new(IconName::Inbox)
+                    .size(px(14.))
+                    .text_color(rgb(if tasks_active {
+                        ui_theme::accent()
+                    } else {
+                        ui_theme::text_muted()
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(rgb(if tasks_active {
+                        ui_theme::text_bright()
+                    } else {
+                        ui_theme::text_mid()
+                    }))
+                    .child("任务"),
+            )
+            .child(
+                Button::new("sidebar-new-task")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip("新建任务")
+                    .on_click(move |_ev, window, cx| {
+                        cx.stop_propagation();
+                        e_new_task.update(cx, |ws, cx| ws.open_new_task_modal(window, cx));
+                    }),
+            )
+            .on_click(move |_ev, window, cx| {
+                e_tasks.update(cx, |ws, cx| {
+                    ws.activate_tasks_route(window, cx);
+                });
+            });
 
         // ---- 头部：工作区标题 + 分组设置 ----
         // 新建入口全撤：建会话一律走「项目行 hover 出的 +」（落到那个项目），不属于任何
@@ -331,9 +389,7 @@ impl Workspace {
                             // 「+」新建下拉：在本项目里新建（终端通道 / 对话通道）。
                             // absolute 浮在行右端，平时不占位（会话数因此贴到最右、无留白），
                             // hover 整行才淡入、盖在会话数上。背景取 bg_row_hover（= 项目行
-                            // hover 底），无缝把下面的数字盖住。图标本身常态就以弱化透明度
-                            // 露一点形——非空项目上完全没有「怎么新建会话」的常态提示，
-                            // 新用户找不到入口，得留一条常态可见的线索，hover 再提到全不透明。
+                            // hover 底），无缝把下面的数字盖住。图标常态完全透明，hover 才现形。
                             div()
                                 .when(!is_project_group, |d| d.hidden())
                                 .absolute()
@@ -349,7 +405,7 @@ impl Workspace {
                                 })
                                 .child(
                                     Button::new(("proj-new", pix))
-                                        .opacity(0.35)
+                                        .opacity(0.0)
                                         .group_hover(PROJ_HEADER_GROUP, |s| s.opacity(1.0))
                                         .ghost()
                                         .small()
@@ -1234,9 +1290,8 @@ impl Workspace {
             rows = rows.child(group_body);
         }
 
-        // ---- 底部：打开项目 / 临时终端（原项目 rail 底部的「+」）----
+        // ---- 底部操作条：打开项目 + 设置 ----
         let e_open = this.clone();
-        let e_scratch = this.clone();
         let e_settings = this.clone();
         let has_update = self.update_available();
         let settings_needs_attention = has_update || self.daemon_outdated == Some(true);
@@ -1245,42 +1300,38 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .px_3()
-            .py_1p5()
+            .px_2()
+            .py_2()
             .border_t_1()
             .border_color(rgb(ui_theme::border_dim()))
             .child(
                 div()
                     .id("open-project")
-                    .mr_2()
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_muted()))
+                    .h(px(32.))
+                    .flex_1()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(6.))
                     .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                    .child("+ 打开项目")
+                    .text_sm()
+                    .font_medium()
+                    .text_color(rgb(ui_theme::text_mid()))
+                    .hover(|d| {
+                        d.bg(rgb(ui_theme::bg_row_hover()))
+                            .text_color(rgb(ui_theme::text_bright()))
+                    })
+                    .child(
+                        Icon::new(IconName::FolderOpen)
+                            .size(px(14.))
+                            .text_color(rgb(ui_theme::text_muted())),
+                    )
+                    .child("打开项目")
                     .on_click(move |_ev, _window, cx| {
                         e_open.update(cx, |ws, cx| ws.open_project(cx));
                     }),
             )
-            .child(
-                // 不属于任何项目的裸终端（iTerm 式随手开个 shell）。跟「打开项目」并排
-                // 归在底部——都是「不针对某个已有项目」的全局动作。
-                div()
-                    .id("scratch-terminal")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                    .child(Icon::new(IconName::SquareTerminal).size(px(12.)))
-                    .child("终端")
-                    .on_click(move |_ev, _window, cx| {
-                        e_scratch.update(cx, |ws, cx| ws.new_scratch_session(cx));
-                    }),
-            )
-            .child(div().flex_1())
             .child(
                 div()
                     .id("sidebar-settings-entry")
@@ -1288,7 +1339,6 @@ impl Workspace {
                     .child(
                         Button::new("sidebar-settings-btn")
                             .ghost()
-                            .xsmall()
                             .icon(IconName::Settings)
                             .tooltip("设置  ⌘,")
                             .dropdown_menu(move |menu, _window, _cx| {
@@ -1359,8 +1409,8 @@ impl Workspace {
                         d.child(
                             div()
                                 .absolute()
-                                .top(px(2.))
-                                .right(px(2.))
+                                .top(px(4.))
+                                .right(px(4.))
                                 .size(px(5.))
                                 .rounded_full()
                                 .bg(rgb(ui_theme::red())),
@@ -1374,9 +1424,10 @@ impl Workspace {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(ui_theme::bg_elev()))
-            .border_r_1()
-            .border_color(rgb(ui_theme::border_dim()))
+            // 外层工作区负责玻璃表面、描边与裁切；列表自身保持透明，才能让
+            // vibrancy / 半透明底贯穿整个面板而不是只透出四角。
+            .bg(gpui::transparent_black())
+            .child(tasks_entry)
             .child(header)
             .child(rows)
             .child(footer)

@@ -1519,7 +1519,42 @@ mod menubar {
     }
 }
 
+/// 尽早把本进程的 fd 软上限提到硬上限：macOS 默认软上限只有 256，一个 PTY 会话
+/// 至少占掉「主 fd + 子进程 stdin/stdout/stderr」好几个，同时开十几个终端/ACP
+/// 会话（这台机器实测常驻会话就有大几十个）很容易顶到上限——顶到之后 spawn
+/// 新会话、accept 新连接会静默 EMFILE 失败，界面上只会看到「新建终端没反应」，
+/// 排查起来毫无头绪。只调软上限，不碰硬上限；拿不到/调不了就静默放弃，不阻塞启动
+/// （极端受限的沙箱环境里 setrlimit 可能被拒绝，那也不该是守护进程启动失败的理由）。
+#[cfg(unix)]
+fn raise_fd_limit() {
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        // 部分 macOS 环境把硬上限报成 RLIM_INFINITY，直接照报的数申请反而会被拒绝
+        // （内核对 NOFILE 另有一个不通过 rlimit 暴露的绝对上限），封顶到一个够用的数。
+        let target = if lim.rlim_max == libc::RLIM_INFINITY {
+            65536
+        } else {
+            lim.rlim_max.min(65536)
+        };
+        if target > lim.rlim_cur {
+            lim.rlim_cur = target;
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
+
 fn main() {
+    // 尽早提 fd 上限：晚了的话，前面已经开的 fd 会先一步顶到旧上限。
+    raise_fd_limit();
     // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
     started_at();
     // 无缝升级交接：上一代进程 exec 本二进制前写好交接文件并把路径放在环境变量里。
@@ -1977,9 +2012,9 @@ fn resume_handoff(
         // 无缝升级交接只带了拼好的 cmd 字符串，没有结构化 env；用它兜底重建一份
         // launch_spec——env 丢了没关系，`acp_restart` 大概率也用不上这条兜底
         // 分支（正常场景很快会有一次真正的 acp_relaunch 把它覆盖成完整版本）。
-        let launch_spec = Mutex::new(Some(
-            smelt_core::agent_kind::AcpLaunchSpec::from_command(cmd),
-        ));
+        let launch_spec = Mutex::new(Some(smelt_core::agent_kind::AcpLaunchSpec::from_command(
+            cmd,
+        )));
         let (slot, created) = acp_sessions.reserve_with(&id, || AcpSession {
             reduced: Mutex::new(reduced),
             snapshot_revision: AtomicU64::new(snapshot_revision),

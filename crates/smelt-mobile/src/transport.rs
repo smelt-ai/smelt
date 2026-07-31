@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::api::{ConnectionState, HostConfig};
-use crate::crypto::{decrypt, derive_shared_key, encrypt, public_key_from_b64, secret_key_from_b64};
+use crate::crypto::{
+    decrypt, derive_shared_key, encrypt, public_key_from_b64, secret_key_from_b64,
+};
 
 /// 全局连接状态
 static CONNECTION_STATE: AtomicU8 = AtomicU8::new(0); // 0 = Disconnected
@@ -94,7 +96,9 @@ pub async fn connect(host: &HostConfig, device_token: &str) -> Result<()> {
                 set_state(ConnectionState::AuthFailed);
                 return Err(anyhow!(
                     "Handshake failed: {}",
-                    resp.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")
+                    resp.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown")
                 ));
             }
         }
