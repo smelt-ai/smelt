@@ -105,6 +105,10 @@
 //! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
 //! 默认关闭、绑回环，见 collaboration.md 的安全底线。
 //!
+//! 网关运行期间在 macOS 持有 `PreventUserIdleSystemSleep` 电源断言：屏幕仍可按系统设置
+//! 正常熄灭，但整机不会因空闲睡眠而把网关和 iroh 挂起。`RemoteGateway` 销毁即释放，
+//! 所以关闭远程、守护升级和退出都不会留下常驻断言。
+//!
 //! ## iroh 隧道（`iroh_start`/`iroh_stop`/`iroh_status`）
 //!
 //! 解决「内嵌远程网关默认绑回环，手机切到蜂窝网络就连不上」这个问题：iroh 优先
@@ -158,6 +162,7 @@ use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -963,6 +968,68 @@ struct RemoteGateway {
     addr: std::net::SocketAddr,
     write: bool,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    _sleep_assertion: Option<SystemSleepAssertion>,
+}
+
+#[cfg(target_os = "macos")]
+struct SystemSleepAssertion {
+    id: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl SystemSleepAssertion {
+    fn acquire() -> Result<Self, i32> {
+        use core_foundation::base::TCFType as _;
+        use core_foundation::string::{CFString, CFStringRef};
+
+        #[link(name = "IOKit", kind = "framework")]
+        unsafe extern "C" {
+            fn IOPMAssertionCreateWithName(
+                assertion_type: CFStringRef,
+                assertion_level: u32,
+                assertion_name: CFStringRef,
+                assertion_id: *mut u32,
+            ) -> i32;
+        }
+
+        let assertion_type = CFString::new("PreventUserIdleSystemSleep");
+        let reason = CFString::new("Smelt remote access is enabled");
+        let mut id = 0;
+        let result = unsafe {
+            IOPMAssertionCreateWithName(
+                assertion_type.as_concrete_TypeRef(),
+                255,
+                reason.as_concrete_TypeRef(),
+                &mut id,
+            )
+        };
+        if result == 0 { Ok(Self { id }) } else { Err(result) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SystemSleepAssertion {
+    fn drop(&mut self) {
+        #[link(name = "IOKit", kind = "framework")]
+        unsafe extern "C" {
+            fn IOPMAssertionRelease(assertion_id: u32) -> i32;
+        }
+
+        let result = unsafe { IOPMAssertionRelease(self.id) };
+        if result != 0 {
+            dlog(&format!("释放远程电源断言失败：IOKit {result}"));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct SystemSleepAssertion;
+
+#[cfg(not(target_os = "macos"))]
+impl SystemSleepAssertion {
+    fn acquire() -> Result<Self, i32> {
+        Ok(Self)
+    }
 }
 
 type RemoteState = Arc<Mutex<Option<RemoteGateway>>>;
@@ -1035,11 +1102,19 @@ fn start_remote_gateway(
 
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => {
+            let sleep_assertion = match SystemSleepAssertion::acquire() {
+                Ok(assertion) => Some(assertion),
+                Err(code) => {
+                    dlog(&format!("远程服务无法阻止系统空闲睡眠：IOKit {code}"));
+                    None
+                }
+            };
             *guard = Some(RemoteGateway {
                 token: token.clone(),
                 addr,
                 write,
                 shutdown_tx,
+                _sleep_assertion: sleep_assertion,
             });
             Ok((token, addr, write))
         }
@@ -1247,6 +1322,16 @@ mod ensure_remote_gateway_write_tests {
         let (token, _addr, write) = ensure_remote_gateway_with_write(&state, true).expect("start");
         assert!(write, "应烤进 write=true");
         assert!(!token.is_empty());
+        #[cfg(target_os = "macos")]
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|gateway| gateway._sleep_assertion.as_ref())
+                .is_some(),
+            "远程网关运行时必须持有系统防休眠断言"
+        );
         // 现状一致：再要一次可写必须复用同一 token，不能偷偷再起一个
         let (token2, _, write2) = ensure_remote_gateway_with_write(&state, true).expect("reuse");
         assert_eq!(token, token2);
@@ -1880,6 +1965,7 @@ fn resume_handoff(
             pending_raw_line,
         } = validated;
         let supports_image = snapshot.supports_image;
+        let snapshot_revision = snapshot.snapshot_revision;
         let reduced = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
 
         let state = Arc::new(Mutex::new(SessionState {
@@ -1896,6 +1982,7 @@ fn resume_handoff(
         ));
         let (slot, created) = acp_sessions.reserve_with(&id, || AcpSession {
             reduced: Mutex::new(reduced),
+            snapshot_revision: AtomicU64::new(snapshot_revision),
             handle: Mutex::new(None),
             cwd,
             agent_needs_transcript_check,
@@ -3247,6 +3334,7 @@ fn handle_conn(
         Some("subscribe") => handle_subscribe(conn, &sessions, &acp_sessions, &subscribers),
         Some("acp_open") => handle_acp_open(conn, reader, &v, acp_sessions, subscribers),
         Some("acp_watch") => handle_acp_watch(conn, reader, &v, acp_sessions),
+        Some("acp_snapshot") => handle_acp_snapshot(conn, &v, &acp_sessions),
         Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &subscribers),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
         Some("acp_restart") => handle_acp_restart(conn, &v, &acp_sessions, &subscribers),
@@ -3955,6 +4043,7 @@ struct AcpOut {
 
 struct AcpSession {
     reduced: Mutex<smelt_core::acp_session::AcpSessionState>,
+    snapshot_revision: AtomicU64,
     handle: Mutex<Option<smelt_core::acp_conn::AcpHandle>>,
     cwd: Option<String>,
     /// 旧 handoff 格式兼容字段；当前恢复路径不再读取 agent 私有 transcript。
@@ -4091,7 +4180,9 @@ fn push_acp_snapshot_since(sess: &AcpSession, should_persist: bool, entries_offs
     let snap = {
         let reduced = sess.reduced.lock().unwrap();
         let offset = entries_offset.unwrap_or(reduced.entries.len());
-        reduced.to_snapshot_since(should_persist, offset)
+        let mut snapshot = reduced.to_snapshot_since(should_persist, offset);
+        snapshot.snapshot_revision = sess.snapshot_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        snapshot
     };
     let payload = serde_json::json!({ "snapshot": snap }).to_string();
     let mut out = sess.out.lock().unwrap();
@@ -4193,6 +4284,7 @@ fn make_acp_session(
 ) -> AcpSession {
     AcpSession {
         reduced: Mutex::new(smelt_core::acp_session::AcpSessionState::default()),
+        snapshot_revision: AtomicU64::new(0),
         handle: Mutex::new(None),
         cwd: cwd.clone(),
         agent_needs_transcript_check,
@@ -4495,7 +4587,30 @@ fn handle_acp_watch(
         let Ok(mut c) = conn.try_clone() else { return };
         let fd = c.as_raw_fd();
         let _ = c.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
-        let snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
+        let reduced = sess.reduced.lock().unwrap();
+        let entries_total = reduced.entries.len();
+        let current_history_id = reduced
+            .history_session_id
+            .as_deref()
+            .or(reduced.acp_session_id.as_deref());
+        let history_matches = v["history_session_id"]
+            .as_str()
+            .zip(current_history_id)
+            .is_some_and(|(known, current)| known == current);
+        let known_entries = v["known_entries"].as_u64().map(|n| n as usize);
+        let tail_limit = v["tail_limit"].as_u64().map(|n| n as usize);
+        let revision_matches =
+            v["snapshot_revision"].as_u64() == Some(sess.snapshot_revision.load(Ordering::SeqCst));
+        let offset = if history_matches && revision_matches {
+            known_entries.unwrap_or(0).min(entries_total)
+        } else if let Some(limit) = tail_limit {
+            entries_total.saturating_sub(limit)
+        } else {
+            0
+        };
+        let mut snapshot = reduced.to_snapshot_since(false, offset);
+        snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
+        drop(reduced);
         if writeln!(c, "{}", serde_json::json!({ "snapshot": snapshot })).is_err() {
             return;
         }
@@ -4509,6 +4624,30 @@ fn handle_acp_watch(
         .unwrap()
         .watchers
         .retain(|w| w.as_raw_fd() != attached_fd);
+}
+
+/// One-shot bounded history read used by mobile upward pagination. Unlike `acp_watch`,
+/// this does not register a watcher and therefore cannot leak a long-lived connection.
+fn handle_acp_snapshot(mut conn: UnixStream, v: &serde_json::Value, acp_sessions: &AcpSessions) {
+    let id = v["id"].as_str().unwrap_or_default();
+    let Some(slot) = acp_sessions.get(id) else {
+        return;
+    };
+    let before = v["before"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or(usize::MAX);
+    let limit = v["limit"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let reduced = slot.value.reduced.lock().unwrap();
+    let end = before.min(reduced.entries.len());
+    let start = end.saturating_sub(limit);
+    let mut snapshot = reduced.to_snapshot_range(false, start, end);
+    snapshot.snapshot_revision = slot.value.snapshot_revision.load(Ordering::SeqCst);
+    let _ = writeln!(conn, "{}", serde_json::json!({ "snapshot": snapshot }));
 }
 
 /// 杀会话：子进程、连接、旁观者全部收尾，从表里摘掉。跟终端 `kill` 是同一种
@@ -6170,6 +6309,7 @@ mod acp_tests {
     fn make_acp_session_value(id: &str, reduced: AcpSessionState) -> AcpSession {
         AcpSession {
             reduced: Mutex::new(reduced),
+            snapshot_revision: AtomicU64::new(0),
             handle: Mutex::new(None),
             cwd: None,
             agent_needs_transcript_check: true,
@@ -6387,6 +6527,38 @@ mod acp_tests {
         drop(br);
         drop(client);
         h.join().unwrap();
+    }
+
+    #[test]
+    fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
+        let mut reduced = AcpSessionState::default();
+        for index in 0..5 {
+            reduced
+                .entries
+                .push(AcpEntry::User(format!("message-{index}")));
+        }
+        let acp_sessions = new_acp_sessions();
+        acp_sessions.reserve_with("acp-history", || {
+            make_acp_session_value("acp-history", reduced)
+        });
+
+        let (server, client) = UnixStream::pair().unwrap();
+        handle_acp_snapshot(
+            server,
+            &serde_json::json!({
+                "id": "acp-history",
+                "before": 3,
+                "limit": 2,
+            }),
+            &acp_sessions,
+        );
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["snapshot"]["entries_offset"], 1);
+        assert_eq!(response["snapshot"]["entries_total"], 5);
+        assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
     }
 
     #[test]

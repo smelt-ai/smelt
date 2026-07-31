@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use once_cell::sync::Lazy;
@@ -52,6 +52,12 @@ struct Shared {
     conn: Mutex<Option<Connection>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TunnelPathStatus {
+    pub kind: String,
+    pub rtt_ms: u32,
+}
+
 impl Shared {
     /// 取一条可用的 QUIC 连接，必要时重拨。
     ///
@@ -85,6 +91,34 @@ impl Shared {
             .is_some_and(|current| current.stable_id() == failed.stable_id())
         {
             *slot = None;
+        }
+    }
+
+    async fn path_status(&self) -> Option<TunnelPathStatus> {
+        let conn = self.conn.lock().await.as_ref()?.clone();
+        if conn.close_reason().is_some() {
+            return None;
+        }
+        let paths = conn.paths();
+        let path = paths.iter().find(|path| path.is_selected())?;
+        let kind = match path.remote_addr() {
+            iroh::TransportAddr::Ip(address) if is_private_ip(address.ip()) => "lan",
+            iroh::TransportAddr::Ip(_) => "p2p",
+            iroh::TransportAddr::Relay(_) => "relay",
+            _ => "p2p",
+        };
+        Some(TunnelPathStatus {
+            kind: kind.to_string(),
+            rtt_ms: path.rtt().as_millis().min(u32::MAX as u128) as u32,
+        })
+    }
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.is_unicast_link_local() || (ip.segments()[0] & 0xfe00) == 0xfc00
         }
     }
 }
@@ -187,6 +221,18 @@ pub async fn port() -> Option<u16> {
         .map(|t| t.port)
 }
 
+/// 当前实际承载业务数据的 iroh 路径。网络迁移后再次调用会返回新路径。
+pub async fn path_status() -> Option<TunnelPathStatus> {
+    let shared = {
+        let guard = TUNNEL.lock().await;
+        guard
+            .as_ref()
+            .filter(|t| !t.accept_task.is_finished())
+            .map(|t| t.shared.clone())?
+    };
+    shared.path_status().await
+}
+
 fn shutdown(tunnel: Tunnel) {
     tunnel.accept_task.abort();
     let shared = tunnel.shared;
@@ -247,6 +293,13 @@ mod tests {
     fn port_is_none_before_start() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         assert_eq!(rt.block_on(port()), None);
+    }
+
+    #[test]
+    fn classifies_private_and_public_ips() {
+        assert!(is_private_ip("192.168.1.20".parse().unwrap()));
+        assert!(is_private_ip("fd00::1".parse().unwrap()));
+        assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
     }
 
     /// 端到端：需要一个活着的宿主。

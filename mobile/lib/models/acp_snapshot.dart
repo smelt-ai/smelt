@@ -3,6 +3,8 @@
 /// ACP 会话快照
 class AcpSnapshot {
   final int entriesOffset;
+  final int entriesTotal;
+  final int snapshotRevision;
   final List<AcpEntry> entries;
   final AcpPhase phase;
   final List<PendingPermission> pendingPermissions;
@@ -23,6 +25,8 @@ class AcpSnapshot {
 
   AcpSnapshot({
     this.entriesOffset = 0,
+    int? entriesTotal,
+    this.snapshotRevision = 0,
     required this.entries,
     required this.phase,
     this.pendingPermissions = const [],
@@ -40,7 +44,11 @@ class AcpSnapshot {
     this.lastTurnDurationMs,
     this.completedUnread = false,
     this.shouldPersist = false,
-  });
+  }) : entriesTotal = entriesTotal ?? entriesOffset + entries.length;
+
+  int get entriesEnd => entriesOffset + entries.length;
+  bool get hasMoreBefore => entriesOffset > 0;
+  String? get stableHistoryId => historySessionId ?? acpSessionId;
 
   factory AcpSnapshot.fromJson(Map<String, dynamic> json) {
     // smeltd 返回格式: {"snapshot": {...}}
@@ -48,6 +56,11 @@ class AcpSnapshot {
 
     return AcpSnapshot(
       entriesOffset: data['entries_offset'] as int? ?? 0,
+      entriesTotal:
+          data['entries_total'] as int? ??
+          (data['entries_offset'] as int? ?? 0) +
+              ((data['entries'] as List<dynamic>?)?.length ?? 0),
+      snapshotRevision: (data['snapshot_revision'] as num?)?.toInt() ?? 0,
       entries:
           (data['entries'] as List<dynamic>?)
               ?.map((e) => AcpEntry.fromJson(e))
@@ -97,29 +110,84 @@ class AcpSnapshot {
 
   /// Apply smeltd's tail snapshot to the previously rendered projection.
   AcpSnapshot merge(AcpSnapshot next) {
-    if (next.entriesOffset == 0) return next;
-    final mergedEntries = next.entriesOffset <= entries.length
-        ? [...entries.take(next.entriesOffset), ...next.entries]
-        : next.entries;
+    final currentHistory = stableHistoryId;
+    final nextHistory = next.stableHistoryId;
+    if (currentHistory != null &&
+        nextHistory != null &&
+        currentHistory != nextHistory) {
+      return next;
+    }
+
+    final currentStart = entriesOffset;
+    final currentEnd = entriesEnd;
+    final nextStart = next.entriesOffset;
+    final nextEnd = next.entriesEnd;
+    final metadata = next.snapshotRevision >= snapshotRevision ? next : this;
+
+    // Windows must overlap or touch. A disjoint latest tail is authoritative;
+    // an isolated older page is ignored because rendering it would create a gap.
+    if (nextEnd < currentStart || nextStart > currentEnd) {
+      return nextEnd == next.entriesTotal ? next : _withWindowFrom(metadata);
+    }
+
+    late final int mergedStart;
+    late final List<AcpEntry> mergedEntries;
+    if (nextStart <= currentStart) {
+      mergedStart = nextStart;
+      final oldSuffix = (nextEnd - currentStart).clamp(0, entries.length);
+      mergedEntries = [...next.entries, ...entries.skip(oldSuffix)];
+    } else {
+      mergedStart = currentStart;
+      final prefixLength = (nextStart - currentStart).clamp(0, entries.length);
+      final suffixOffset = (nextEnd - currentStart).clamp(0, entries.length);
+      mergedEntries = [
+        ...entries.take(prefixLength),
+        ...next.entries,
+        ...entries.skip(suffixOffset),
+      ];
+    }
+    final allowedLength = (metadata.entriesTotal - mergedStart).clamp(
+      0,
+      mergedEntries.length,
+    );
+    return metadata._withEntries(
+      mergedStart,
+      mergedEntries.take(allowedLength).toList(growable: false),
+    );
+  }
+
+  AcpSnapshot _withWindowFrom(AcpSnapshot metadata) => metadata._withEntries(
+    entriesOffset,
+    entries,
+    entriesTotalOverride: metadata.entriesTotal,
+  );
+
+  AcpSnapshot _withEntries(
+    int offset,
+    List<AcpEntry> value, {
+    int? entriesTotalOverride,
+  }) {
     return AcpSnapshot(
-      entriesOffset: 0,
-      entries: mergedEntries,
-      phase: next.phase,
-      pendingPermissions: next.pendingPermissions,
-      pendingElicitation: next.pendingElicitation,
-      statusLine: next.statusLine,
-      acpSessionId: next.acpSessionId,
-      historySessionId: next.historySessionId,
-      supportsImage: next.supportsImage,
-      availableCommands: next.availableCommands,
-      usage: next.usage,
-      plan: next.plan,
-      model: next.model,
-      configOptions: next.configOptions,
-      turnStartedAtMs: next.turnStartedAtMs,
-      lastTurnDurationMs: next.lastTurnDurationMs,
-      completedUnread: next.completedUnread,
-      shouldPersist: next.shouldPersist,
+      entriesOffset: offset,
+      entriesTotal: entriesTotalOverride ?? entriesTotal,
+      snapshotRevision: snapshotRevision,
+      entries: value,
+      phase: phase,
+      pendingPermissions: pendingPermissions,
+      pendingElicitation: pendingElicitation,
+      statusLine: statusLine,
+      acpSessionId: acpSessionId,
+      historySessionId: historySessionId,
+      supportsImage: supportsImage,
+      availableCommands: availableCommands,
+      usage: usage,
+      plan: plan,
+      model: model,
+      configOptions: configOptions,
+      turnStartedAtMs: turnStartedAtMs,
+      lastTurnDurationMs: lastTurnDurationMs,
+      completedUnread: completedUnread,
+      shouldPersist: shouldPersist,
     );
   }
 }
@@ -152,6 +220,8 @@ sealed class AcpPhase {
       this is AcpPhaseRunning ||
       this is AcpPhaseAwaitingApproval ||
       this is AcpPhaseAwaitingChoice;
+
+  bool get acceptsPrompt => this is AcpPhaseIdle || this is AcpPhaseRunning;
 }
 
 class AcpPhaseStarting extends AcpPhase {

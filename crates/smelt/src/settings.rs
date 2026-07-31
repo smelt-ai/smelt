@@ -858,16 +858,6 @@ pub fn uninstall_agent_hooks() -> Result<(), String> {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub enabled: bool,
-    /// iroh P2P 隧道（见 smeltd.rs「iroh 隧道」）：手机 App 的唯一公网通路。
-    /// 配对码由落盘私钥决定、**重启不变**，扫一次能长期用。
-    /// `#[serde(default)]`：这个字段比 `enabled` 晚加，旧的 collab.json 里没有
-    /// 这个键，缺省按关闭处理。
-    ///
-    /// 早先还有 `tunnel_enabled`（Cloudflare）和 `webrtc_enabled`/`signal_http`
-    /// 两组键，随那两条路一起删了。serde 默认忽略未知字段，所以老配置照样读得进来，
-    /// 只是那几个键从此没人理会。
-    #[serde(default)]
-    pub iroh_enabled: bool,
     /// 用户自己的 iroh relay。空值表示未配置，不会回退到公共 relay。
     #[serde(default)]
     pub iroh_relay: String,
@@ -886,7 +876,6 @@ impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            iroh_enabled: false,
             iroh_relay: String::new(),
             iroh_relay_token: String::new(),
             write_enabled: false,
@@ -909,35 +898,19 @@ fn save_remote_config(c: &RemoteConfig) {
     crate::json_store::save_json_private(remote_config_path(), c)
 }
 
-/// 内嵌远程网关的运行时状态（不落盘，纯展示用）：token/绑定地址是当次 remote_start
-/// 成功后守护回的实际值；error 是启动失败时的原因（比如端口被占）。
+/// 内嵌远程网关的运行时状态（不落盘，纯展示用）。网关只作为 iroh 的本机落点，
+/// 因而 UI 只需要保留启动错误；token 和绑定地址不再单独展示。
 #[derive(Clone, Default)]
 pub struct RemoteRuntimeState {
-    pub token: Option<String>,
-    pub addr: Option<String>,
     pub error: Option<String>,
-    /// 当前这条链接是否可写——来自守护对 `remote_start`/`remote_status` 的实际
-    /// 回执，不是直接照抄 [`RemoteConfig::write_enabled`]（写权限是烤进 token
-    /// 里的，配置改了但网关还没重开时，这里应该继续显示"旧链接"的真实权限）。
-    pub write: bool,
 }
 
 impl Global for RemoteRuntimeState {}
 
 fn set_remote_from_start_result(result: Result<terminal::RemoteStatus, String>, cx: &mut App) {
     match result {
-        Ok(s) => cx.set_global(RemoteRuntimeState {
-            token: s.token,
-            addr: s.addr,
-            write: s.write,
-            error: None,
-        }),
-        Err(e) => cx.set_global(RemoteRuntimeState {
-            token: None,
-            addr: None,
-            write: false,
-            error: Some(e),
-        }),
+        Ok(_) => cx.set_global(RemoteRuntimeState::default()),
+        Err(e) => cx.set_global(RemoteRuntimeState { error: Some(e) }),
     }
 }
 
@@ -999,12 +972,7 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
             .await;
         let _ = cx.update(|cx| {
             if remote.running {
-                cx.set_global(RemoteRuntimeState {
-                    token: remote.token.clone(),
-                    addr: remote.addr.clone(),
-                    write: remote.write,
-                    error: None,
-                });
+                cx.set_global(RemoteRuntimeState::default());
             }
             let rt = match result {
                 Ok(s) => {
@@ -1058,7 +1026,7 @@ fn apply_iroh_relay_value(value: SharedString, token: bool, cx: &mut App) {
     } else {
         config.iroh_relay = value.trim().to_string();
     }
-    let was_enabled = config.iroh_enabled;
+    let was_enabled = config.enabled;
     save_remote_config(&config);
     cx.set_global(config);
     if was_enabled {
@@ -1071,42 +1039,25 @@ fn apply_iroh_relay_value(value: SharedString, token: bool, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// 开关「P2P 直连（iroh）」：只改配置 + 异步拉隧道，不在 UI 线程阻塞。
-pub fn apply_iroh_toggle(enabled: bool, cx: &mut App) {
-    let mut c = cx.global::<RemoteConfig>().clone();
-    c.iroh_enabled = enabled;
-    if enabled {
-        // 隧道要转发给本机网关，顺手把「远程」总开关也打开，跟 tunnel 一致。
-        c.enabled = true;
-    }
-    let write = c.write_enabled;
-    save_remote_config(&c);
-    cx.set_global(c);
-
-    if enabled {
-        spawn_iroh_start(write, cx);
-    } else {
-        terminal::iroh_stop();
-        cx.set_global(IrohRuntimeState::default());
-    }
-    cx.refresh_windows();
+fn random_relay_access_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
-/// 总开关：开启远程。关掉时自动拆掉 iroh 隧道，用户不必先关外网再关远程。
+/// 唯一远程开关：本机网关只作为 iroh 的 loopback 落点，不单独对用户暴露。
 pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
     if enabled {
         let c = cx.global::<RemoteConfig>().clone();
         let write = c.write_enabled;
-        let want_iroh = c.iroh_enabled;
         set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = true;
         save_remote_config(&c);
         cx.set_global(c);
-        // 若用户是点「手机」间接打开的，want_iroh 已是 true，这里补上隧道。
-        if want_iroh {
-            spawn_iroh_start(write, cx);
-        }
+        spawn_iroh_start(write, cx);
     } else {
         // iroh 要赶在网关之前停，理由同 smeltd 的 cleanup：反过来正在转发的流
         // 会撞上已死端口，手机侧看到的是连接被拒而非干净关闭。
@@ -1116,9 +1067,6 @@ pub fn apply_remote_toggle(enabled: bool, cx: &mut App) {
         cx.set_global(IrohRuntimeState::default());
         let mut c = cx.global::<RemoteConfig>().clone();
         c.enabled = false;
-        // 总开关关掉 = 停止分享。外网开关一并熄灭，避免「远程关了但手机访问还亮着」
-        // 的误解；写入偏好保留，下次再开远程仍按原权限。
-        c.iroh_enabled = false;
         save_remote_config(&c);
         cx.set_global(c);
     }
@@ -1215,39 +1163,25 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
     }
 
     // iroh 必须重来一遍：endpoint_id 不变，但配对码里的 token 那一半会随网关重开失效。
-    if c.iroh_enabled {
-        terminal::iroh_stop();
-    }
+    terminal::iroh_stop();
     terminal::remote_stop();
     set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
-    if c.iroh_enabled {
-        spawn_iroh_start(enabled, cx);
-    }
+    spawn_iroh_start(enabled, cx);
 }
 
 /// 分享卡片上的「重试」：按当前配置把网关与 iroh 隧道重新拉齐。
 pub fn retry_remote_setup(cx: &mut App) {
-    let mut c = cx.global::<RemoteConfig>().clone();
-    if !c.enabled && !c.iroh_enabled {
+    let c = cx.global::<RemoteConfig>().clone();
+    if !c.enabled {
         return;
-    }
-    // iroh 开着时确保总开关也开着（依赖由这里消化）
-    if c.iroh_enabled {
-        c.enabled = true;
-        save_remote_config(&c);
-        cx.set_global(c.clone());
     }
     let write = c.write_enabled;
 
-    if c.iroh_enabled {
-        terminal::iroh_stop();
-    }
+    terminal::iroh_stop();
     // 网关先停再起，让 token/端口与 iroh 配对码对齐
     terminal::remote_stop();
     set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
-    if c.iroh_enabled {
-        spawn_iroh_start(write, cx);
-    }
+    spawn_iroh_start(write, cx);
 }
 
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
@@ -2948,7 +2882,9 @@ impl Workspace {
                         |v: bool, cx: &mut App| apply_remote_toggle(v, cx),
                     ),
                 )
-                .description("打开后生成本机分享能力（手机配对依赖它）。关掉会停止所有分享。"),
+                .description(
+                    "打开后启用 iroh：优先打洞直连，打不通自动使用配置的 relay。关掉会停止分享。",
+                ),
                 SettingItem::new(
                     "Relay 地址",
                     SettingField::input(
@@ -2961,22 +2897,70 @@ impl Workspace {
                 ),
                 SettingItem::new(
                     "Relay 访问令牌",
-                    SettingField::input(
-                        |cx: &App| cx.global::<RemoteConfig>().iroh_relay_token.clone().into(),
-                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, true, cx),
-                    ),
-                )
-                .description("relay 未开启共享令牌鉴权时可留空。令牌随配对码进入手机安全存储。"),
-                SettingItem::new(
-                    "P2P 直连（iroh）",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<RemoteConfig>().iroh_enabled,
-                        |v: bool, cx: &mut App| apply_iroh_toggle(v, cx),
-                    ),
+                    SettingField::render(move |_, _window, cx: &mut App| {
+                        let token = cx.global::<RemoteConfig>().iroh_relay_token.clone();
+                        let configured = !token.is_empty();
+                        let token_copy = token.clone();
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(if configured { "已配置" } else { "未配置" }),
+                            )
+                            .child(
+                                btn(
+                                    "generate-relay-token",
+                                    if configured { "重新生成" } else { "随机生成" }.into(),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    |_, window, cx: &mut App| {
+                                        let token = random_relay_access_token();
+                                        apply_iroh_relay_value(token.clone().into(), true, cx);
+                                        copy_with_feedback(
+                                            token,
+                                            "generate-relay-token",
+                                            "新令牌已生成并复制；请同步到 Relay 服务端",
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                            )
+                            .when(configured, |row| {
+                                row.child(
+                                    btn(
+                                        "copy-relay-token",
+                                        copy_btn_label("copy-relay-token", "复制令牌", cx),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |_, window, cx: &mut App| {
+                                            copy_with_feedback(
+                                                token_copy.clone(),
+                                                "copy-relay-token",
+                                                "已复制 Relay 令牌",
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ),
+                                )
+                                .child(btn("clear-relay-token", "清除".into()).on_mouse_down(
+                                    MouseButton::Left,
+                                    |_, _window, cx: &mut App| {
+                                        apply_iroh_relay_value("".into(), true, cx);
+                                    },
+                                ))
+                            })
+                            .into_any_element()
+                    }),
                 )
                 .description(
-                    "手机 App 的唯一公网通路：配对码重启不变，扫一次长期有效。\
-                     优先打洞直连，打不通自动走用户配置的 relay。",
+                    "随机生成后会自动复制；需将同一令牌配置到 Relay 服务端。令牌会随配对码进入手机安全存储。",
                 ),
                 SettingItem::new(
                     "允许远程写入",
@@ -2989,7 +2973,7 @@ impl Workspace {
                     "配对码持有者可在手机上输入、批准/拒绝权限。分享即授权。\
                      切换后会自动换一条新配对码（旧的失效）。",
                 ),
-                // 分享卡片：iroh 配对码优先，没有才退回本机链接
+                // 分享卡片只展示 iroh 配对码；loopback 网关是内部实现，不对用户暴露。
                 SettingItem::render(move |_, _, cx: &mut App| {
                     let cfg = cx.global::<RemoteConfig>().clone();
                     let remote = cx.global::<RemoteRuntimeState>().clone();
@@ -3001,32 +2985,20 @@ impl Workspace {
                     let muted = cx.theme().muted_foreground;
                     let fg = cx.theme().foreground;
 
-                    if !cfg.enabled && !cfg.iroh_enabled {
+                    if !cfg.enabled {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("打开「开启远程」或「P2P 直连（iroh）」后，这里出现配对码与二维码.")
+                            .child("打开「开启远程」后，这里出现配对码与二维码。")
                             .into_any_element();
                     }
 
                     // iroh 准备中（绑定要连接用户配置的 relay）
-                    if cfg.iroh_enabled && iroh.connecting {
+                    if iroh.connecting {
                         return div()
                             .text_xs()
                             .text_color(muted)
-                            .child("正在建立 P2P 通道…（连接 relay + 打洞）")
-                            .into_any_element();
-                    }
-
-                    let preparing = cfg.enabled
-                        && !cfg.iroh_enabled
-                        && remote.error.is_none()
-                        && !remote.token.as_ref().is_some_and(|t| !t.is_empty());
-                    if preparing {
-                        return div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("正在准备分享链接…")
+                            .child("正在建立 iroh 通道…（连接 relay + 打洞）")
                             .into_any_element();
                     }
 
@@ -3048,14 +3020,7 @@ impl Workspace {
                             .into_any_element();
                     }
 
-                    let iroh_uri = iroh.pairing_uri.clone().filter(|_| cfg.iroh_enabled);
-                    let token = remote.token.clone().filter(|t| !t.is_empty());
-                    let local = remote
-                        .addr
-                        .as_ref()
-                        .and_then(|a| token.as_ref().map(|t| format!("http://{a}/?token={t}")));
-
-                    let Some(primary) = iroh_uri.clone().or_else(|| local.clone()) else {
+                    let Some(primary) = iroh.pairing_uri.clone() else {
                         return v_flex()
                             .gap_2()
                             .child(
@@ -3073,30 +3038,12 @@ impl Workspace {
                             .into_any_element();
                     };
 
-                    let (scope, mode) = if iroh_uri.is_some() {
-                        (
-                            "P2P 直连 iroh（配对码长期有效）",
-                            if iroh.write { "可写入" } else { "只读" },
-                        )
-                    } else {
-                        (
-                            // 网关只绑 127.0.0.1（见 remote_start 的调用点），
-                            // 别写成「局域网」——同 Wi-Fi 的手机也够不着，写错了
-                            // 用户会以为能扫码配对。
-                            "仅本机（手机配对需开 P2P 直连）",
-                            if remote.write { "可写入" } else { "只读" },
-                        )
-                    };
+                    let scope = "iroh（优先直连，必要时中继）";
+                    let mode = if iroh.write { "可写入" } else { "只读" };
 
                     let primary_copy = primary.clone();
                     // 仅展示后台预生成的二维码（绝不在 UI 线程现算 QR）。
-                    // 本机 loopback 链接故意不出二维码：`http://127.0.0.1:port`
-                    // 扫到手机上指向的是手机自己，扫了也连不上。
-                    let qr_png = if iroh_uri.is_some() {
-                        iroh.qr_png.clone()
-                    } else {
-                        None
-                    };
+                    let qr_png = iroh.qr_png.clone();
 
                     let mut card = v_flex().gap_2();
                     let mut row = h_flex().items_start().gap_3();
@@ -3169,47 +3116,6 @@ impl Workspace {
                             ),
                     );
                     card = card.child(row);
-
-                    // 次要：iroh 开着时仍可看本机链接（在同一台 Mac 上调试用）
-                    if iroh_uri.is_some() {
-                        if let Some(local_link) = local.clone() {
-                            let local_copy = local_link.clone();
-                            card = card.child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .max_w(px(260.))
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis_middle()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(format!("本机：{local_link}")),
-                                    )
-                                    .child(
-                                        btn(
-                                            "copy-local-link",
-                                            copy_btn_label("copy-local-link", "复制本机", cx),
-                                        )
-                                        .flex_shrink_0()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |_, window, cx: &mut App| {
-                                                copy_with_feedback(
-                                                    local_copy.clone(),
-                                                    "copy-local-link",
-                                                    "已复制本机链接",
-                                                    window,
-                                                    cx,
-                                                );
-                                            },
-                                        ),
-                                    ),
-                            );
-                        }
-                    }
 
                     card.into_any_element()
                 }),
@@ -3372,19 +3278,24 @@ impl Workspace {
 
 #[cfg(test)]
 mod iroh_pairing_tests {
-    use super::{RemoteConfig, qr_png_for_url};
+    use super::{RemoteConfig, qr_png_for_url, random_relay_access_token};
     use smelt_core::pairing::iroh_pairing_uri;
 
     #[test]
-    fn old_config_without_iroh_field_still_loads() {
-        // 线上已有的 collab.json 没有 iroh_enabled 这个键。少了 serde(default)
-        // 会让整份配置解析失败、静默回退成全默认（远程被关掉），用户会以为设置丢了。
-        let json = r#"{"enabled":true,"tunnel_enabled":false,"webrtc_enabled":true,
+    fn old_config_with_retired_remote_fields_still_loads() {
+        // serde 默认忽略旧版的多通路开关；升级后 enabled 是唯一远程开关。
+        let json = r#"{"enabled":true,"iroh_enabled":true,"tunnel_enabled":false,"webrtc_enabled":true,
                        "signal_http":"https://s.example.com","write_enabled":true}"#;
         let c: RemoteConfig = serde_json::from_str(json).expect("旧配置必须还能解析");
         assert!(c.enabled);
         assert!(c.write_enabled);
-        assert!(!c.iroh_enabled, "旧配置缺省应按关闭处理");
+    }
+
+    #[test]
+    fn generated_relay_access_token_is_64_char_hex() {
+        let token = random_relay_access_token();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]

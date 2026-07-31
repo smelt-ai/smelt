@@ -195,7 +195,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 |------|------|
 | `crates/smelt-iroh` | 隧道本体：ALPN `smelt/tunnel/1`，iroh 双向流 ⟷ 本机网关 TCP，逐字节转发 |
 | smeltd 的 `iroh_start/stop/status` | 守护侧起停隧道；私钥落 `~/.smelt/iroh-secret`，与命令行 `smelt-iroh-host` 共用同一把 |
-| GUI 设置页「P2P 直连（iroh）」 | 开关 + 配对二维码，格式 `smelt+iroh://<endpoint_id>/?token=<token>`（定义在 `smelt-core::pairing`） |
+| GUI 设置页「开启远程」 | 唯一远程开关 + iroh 配对二维码，格式 `smelt+iroh://<endpoint_id>/?token=<token>`（定义在 `smelt-core::pairing`） |
 | `crates/smelt-mobile` + `mobile/` | 手机侧在本地开一个端口转发进 iroh 流，Dart 照常连本地端口，鉴权/重连逻辑一行没改 |
 
 **明确不做：**
