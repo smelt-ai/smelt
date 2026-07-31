@@ -544,19 +544,7 @@ impl AcpView {
     /// 从首条用户消息生成稳定的会话标题。Codex app-server 不会主动把 thread name
     /// 推给客户端；左侧会话列表和完成通知至少应能说明这轮对话在做什么。
     pub fn auto_title(&self) -> Option<String> {
-        let prompt = self.entries.iter().find_map(|entry| match entry {
-            AcpEntry::User(text) if !text.trim().is_empty() => Some(text.trim()),
-            AcpEntry::UserWithImages { text, .. } if !text.trim().is_empty() => Some(text.trim()),
-            _ => None,
-        })?;
-        let single_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut chars = single_line.chars();
-        let title: String = chars.by_ref().take(36).collect();
-        Some(if chars.next().is_some() {
-            format!("{title}...")
-        } else {
-            title
-        })
+        smelt_core::acp_chat::auto_title(&self.entries)
     }
 
     /// 存档快照：写进 AcpSaved.history_session_id，GUI 重开后「重新开始」

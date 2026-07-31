@@ -159,6 +159,26 @@ token（重开网关、拨「允许远程写入」）才需要重新扫。
 **局域网直连：不支持。** 网关只绑回环地址，同一个 Wi-Fi 下的另一台设备也连不上；跨设备
 访问只有 iroh 这一条路（它在同网段本来就会直连，不绕公网）。
 
+### 部署自建 Relay
+
+Relay 需要一台有公网 IP 和域名的 Linux 云主机，并放行 `80/TCP`、`443/TCP`、
+`7842/UDP`。先在 Smelt 的「设置 → 远程」中随机生成令牌，然后在本机仓库执行：
+
+```bash
+./scripts/deploy-iroh-relay.sh \
+  --ssh ubuntu@203.0.113.10 \
+  --domain relay.example.com \
+  --email admin@example.com \
+  --prompt-token
+```
+
+脚本会在本机下载并校验 iroh 官方二进制后上传，不要求云主机能够访问 GitHub；随后配置
+Let's Encrypt、共享令牌、QUIC 地址发现和 systemd 自启。它不会修改 Nginx、WireGuard、
+UFW 或其他服务，发现端口被占用会直接退出。
+
+完整的 DNS/安全组准备、国内网络下载方案、验证、升级和已有 Nginx 场景见
+[`docs/iroh-relay-deployment.md`](https://github.com/smelt-ai/smelt/blob/main/docs/iroh-relay-deployment.md)。
+
 ### 手机上能做什么
 
 - 会话列表按 项目 → 会话 分组，跟 Mac 侧栏一致
@@ -194,14 +214,14 @@ token（重开网关、拨「允许远程写入」）才需要重新扫。
   diff」「跑挂了没人管的会话」这些**等人处理的条目**都收进一个收件箱，谁有空谁点「我来」
 - **IM 卡片**：agent 一进入等审批就往飞书推一张卡片，直接在 IM 里点允许 / 拒绝
 - **会话移交**：把正在跑的活会话交接给别人（oncall 换班那种）
-- **App 上架 / 自建 iroh relay**：现在 App 要自己构建，中继用的是 iroh 的公共设施
+- **App 上架**：现在 App 仍需自己构建；自建 iroh Relay 已有部署脚本和运维说明
 
 出处：[远程操作 Roadmap](https://github.com/smelt-ai/smelt/blob/main/docs/remote-ops-roadmap.md)
 与 [collaboration.md](https://github.com/smelt-ai/smelt/blob/main/docs/collaboration.md)——
 后者标题里就写着「设计讨论，未动工」，里面的观战席 / 求助广播 / 作战地图都还只是设想。
 
 明确**不打算**做的：在飞书里内嵌完整终端、自建 WebRTC 信令或 WireGuard 中转（跨网只用
-iroh P2P，不自己运营任何公网中转服务）、重新做浏览器面板、把主 GUI 换成 Electron、
+iroh，不再维护独立信令/TURN 协议栈）、重新做浏览器面板、把主 GUI 换成 Electron、
 做成一个完整的项目管理工具。
 
 ## 设置窗口

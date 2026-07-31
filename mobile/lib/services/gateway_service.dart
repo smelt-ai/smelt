@@ -187,6 +187,8 @@ class GatewayService {
   /// 回到断开态让用户改，而不是无限自动重连。
   bool _everConnected = false;
   int _connectionGeneration = 0;
+  int _reconnectAttempts = 0;
+  bool _outageErrorReported = false;
   bool _writeEnabled = false;
   ConnectionMetrics _metrics = const ConnectionMetrics();
   bool _pingSupported = true;
@@ -263,6 +265,8 @@ class GatewayService {
     } else {
       _teardownSocket();
       _everConnected = false;
+      _reconnectAttempts = 0;
+      _outageErrorReported = false;
       _clearSnapshotCache();
     }
 
@@ -276,7 +280,7 @@ class GatewayService {
     _connectWatchdog?.cancel();
     _connectWatchdog = Timer(connectTimeout, () {
       if (_state != WsState.connecting) return;
-      _errorController.add('连接超时：$target 没有响应');
+      _reportConnectionFailure('连接超时：$target 没有响应');
       _failConnection();
     });
 
@@ -308,7 +312,7 @@ class GatewayService {
       await channel.ready.timeout(connectTimeout);
     } catch (e) {
       if (generation != _connectionGeneration) return;
-      _errorController.add('连接失败: $e');
+      _reportConnectionFailure('连接失败: $e');
       _failConnection();
     }
   }
@@ -366,6 +370,8 @@ class GatewayService {
   /// 断开连接
   void disconnect() {
     _manuallyDisconnected = true;
+    _reconnectAttempts = 0;
+    _outageErrorReported = false;
     _teardownSocket();
     _setState(WsState.disconnected);
   }
@@ -557,6 +563,8 @@ class GatewayService {
       _connectWatchdog?.cancel();
       _connectWatchdog = null;
       _everConnected = true;
+      _reconnectAttempts = 0;
+      _outageErrorReported = false;
       _startMetrics();
     } else {
       _metricsTimer?.cancel();
@@ -780,7 +788,7 @@ class GatewayService {
   }
 
   void _onError(dynamic error) {
-    _errorController.add('WebSocket 错误: $error');
+    _reportConnectionFailure('WebSocket 错误: $error');
     _failConnection();
   }
 
@@ -790,12 +798,11 @@ class GatewayService {
 
   void _scheduleReconnect() {
     if (!_manuallyDisconnected && _endpoint != null && _token != null) {
-      _channelSubscription?.cancel();
-      _channelSubscription = null;
-      _channel = null;
+      _teardownSocket();
       _setState(WsState.reconnecting);
-      _reconnectTimer?.cancel();
-      _reconnectTimer = Timer(reconnectDelay, () {
+      final delay = _nextReconnectDelay();
+      _reconnectAttempts++;
+      _reconnectTimer = Timer(delay, () {
         if (_state == WsState.reconnecting) {
           connect(_endpoint!, _token!);
         }
@@ -803,6 +810,23 @@ class GatewayService {
     } else {
       _setState(WsState.disconnected);
     }
+  }
+
+  Duration _nextReconnectDelay() {
+    final shift = _reconnectAttempts.clamp(0, 4);
+    final milliseconds = reconnectDelay.inMilliseconds * (1 << shift);
+    return Duration(milliseconds: milliseconds.clamp(0, 30000));
+  }
+
+  void _reportConnectionFailure(String message) {
+    if (_manuallyDisconnected) return;
+    if (_everConnected) {
+      if (_outageErrorReported) return;
+      _outageErrorReported = true;
+      _errorController.add('$message；正在自动重连');
+      return;
+    }
+    _errorController.add(message);
   }
 
   void dispose() {

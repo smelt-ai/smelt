@@ -26,6 +26,16 @@ bool shouldAutoFollowSnapshot({
   required bool wasAtBottom,
 }) => initialLoad || wasAtBottom;
 
+String sessionListTitle(SessionSummary session) {
+  final title = session.title.trim();
+  return title.isEmpty ? 'ACP conversation' : title;
+}
+
+String? sessionListSubtitle(SessionSummary session) {
+  final detail = session.detail?.trim();
+  return detail == null || detail.isEmpty ? null : detail;
+}
+
 class TurnElapsedLabel extends StatefulWidget {
   const TurnElapsedLabel({
     super.key,
@@ -207,6 +217,7 @@ class _HomePageState extends State<HomePage> {
   bool _restoringPairing = true;
   bool _hasSavedPairing = false;
   bool _showPairingCode = false;
+  bool _acceptConnectionNotifications = true;
 
   final _pairingCodeController = TextEditingController();
 
@@ -226,14 +237,14 @@ class _HomePageState extends State<HomePage> {
       setState(() => _sessions = sessions);
     });
     _attentionSubscription = gatewayService.attentionStream.listen((item) {
-      if (!mounted) return;
+      if (!mounted || !_acceptConnectionNotifications) return;
       final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
       if (isCurrent && !item.requiresAction) return;
       final session = _sessions
           .where((candidate) => candidate.id == item.sessionId)
           .firstOrNull;
       final messenger = ScaffoldMessenger.of(context);
-      messenger.hideCurrentSnackBar();
+      messenger.clearSnackBars();
       _shownAttentionSessionId = item.sessionId;
       messenger
           .showSnackBar(
@@ -261,10 +272,10 @@ class _HomePageState extends State<HomePage> {
           ScaffoldMessenger.of(context).hideCurrentSnackBar();
         });
     _errorSubscription = gatewayService.errorStream.listen((error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error)));
+      if (!mounted || !_acceptConnectionNotifications) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.clearSnackBars();
+      messenger.showSnackBar(SnackBar(content: Text(error)));
     });
     unawaited(_restorePairing());
   }
@@ -319,7 +330,7 @@ class _HomePageState extends State<HomePage> {
           if (_connectionState != WsState.disconnected)
             IconButton(
               icon: const Icon(Icons.logout),
-              onPressed: () => gatewayService.disconnect(),
+              onPressed: _disconnect,
               tooltip: 'Disconnect',
             ),
         ],
@@ -439,25 +450,18 @@ class _HomePageState extends State<HomePage> {
                       leading: const Icon(Icons.folder_outlined),
                       title: Text(projectTitle),
                       subtitle: Text(
-                        '${sessions.length} agent${sessions.length == 1 ? '' : 's'}',
+                        '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
                       ),
                       children: sessions.map((session) {
-                        final sessionTitle = session.title.trim();
-                        final showTitle =
-                            sessionTitle.isNotEmpty &&
-                            sessionTitle != projectTitle;
+                        final subtitle = sessionListSubtitle(session);
                         return ListTile(
                           contentPadding: const EdgeInsets.only(
                             left: 32,
                             right: 16,
                           ),
-                          leading: _getAgentIcon(session.agent),
-                          title: Text(_agentLabel(session.agent)),
-                          subtitle: Text(
-                            session.detail?.trim().isNotEmpty == true
-                                ? session.detail!
-                                : (showTitle ? sessionTitle : session.phase),
-                          ),
+                          leading: const Icon(Icons.chat_bubble_outline),
+                          title: Text(sessionListTitle(session)),
+                          subtitle: subtitle == null ? null : Text(subtitle),
                           trailing: Badge(
                             isLabelVisible: session.unread,
                             child: _getStatusChip(session.status),
@@ -495,16 +499,6 @@ class _HomePageState extends State<HomePage> {
     return session.title.isNotEmpty ? session.title : session.id;
   }
 
-  String _agentLabel(String agent) {
-    return switch (agent.toLowerCase()) {
-      'claude' => 'Claude',
-      'codex' => 'Codex',
-      'copilot' => 'Copilot',
-      'grok' => 'Grok',
-      _ => 'Agent',
-    };
-  }
-
   Widget _buildConnectingView() {
     return Center(
       child: Column(
@@ -515,7 +509,7 @@ class _HomePageState extends State<HomePage> {
           const Text('Connecting...', textAlign: TextAlign.center),
           const SizedBox(height: 16),
           TextButton.icon(
-            onPressed: gatewayService.disconnect,
+            onPressed: _disconnect,
             icon: const Icon(Icons.close),
             label: const Text('Cancel'),
           ),
@@ -534,24 +528,13 @@ class _HomePageState extends State<HomePage> {
           const Text("Reconnecting..."),
           const SizedBox(height: 16),
           TextButton.icon(
-            onPressed: gatewayService.disconnect,
+            onPressed: _disconnect,
             icon: const Icon(Icons.link_off),
             label: const Text("Change pairing"),
           ),
         ],
       ),
     );
-  }
-
-  Widget _getAgentIcon(String agent) {
-    final (color, letter) = switch (agent.toLowerCase()) {
-      'claude' => (Colors.orange, 'C'),
-      'codex' => (Colors.green, 'X'),
-      'copilot' => (Colors.blue, 'P'),
-      'grok' => (Colors.purple, 'G'),
-      _ => (Colors.grey, '?'),
-    };
-    return CircleAvatar(backgroundColor: color, child: Text(letter));
   }
 
   Widget _getStatusChip(String status) {
@@ -591,6 +574,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _connect(PairingConfig pairing, {bool saveWhenConnected = true}) {
+    _acceptConnectionNotifications = true;
+    ScaffoldMessenger.of(context).clearSnackBars();
     _pendingPairing = saveWhenConnected ? pairing : null;
     gatewayService.connect(pairing.endpoint, pairing.token);
     // 重扫同一台桌面时 connect() 是幂等空操作，不会再有 connected 状态变化来
@@ -598,6 +583,14 @@ class _HomePageState extends State<HomePage> {
     if (saveWhenConnected && gatewayService.state == WsState.connected) {
       unawaited(_savePendingPairing());
     }
+  }
+
+  void _disconnect() {
+    _acceptConnectionNotifications = false;
+    _pendingPairing = null;
+    _shownAttentionSessionId = null;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    gatewayService.disconnect();
   }
 
   Future<void> _forgetPairing() async {
