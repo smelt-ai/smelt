@@ -111,7 +111,7 @@ impl Workspace {
     pub(crate) fn render_stage_header(
         &mut self,
         corner_guard: bool,
-        right_reserve: Pixels,
+        right_edge: bool,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let ix = self.active_session;
