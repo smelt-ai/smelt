@@ -1651,17 +1651,6 @@ pub(crate) fn load_session_detail_for(agent: AcpAgentKind, path: &Path) -> Optio
 }
 
 impl Workspace {
-    /// 终端会话舞台头的 token 数：复用历史会话列表缓存，取该项目下 Claude Code
-    /// 最近一次活跃会话的累计 token 数（`summarize_session` 里按 usage 字段累加，
-    /// 口径同「用量」页）。这是近似值——终端里跑的不一定是 Claude，也可能这份
-    /// 缓存还没扫过（None，先不画）；只读缓存，不在这触发扫描，扫描交给调用方
-    /// 先 `ensure_session_list` 一次。
-    pub(crate) fn claude_session_tokens(&self, cwd: &str) -> Option<u64> {
-        let key = session_list_key(crate::settings::AcpAgentKind::Claude, None, cwd);
-        let sessions = self.session_list.get(&key).map(|(_, d)| d)?;
-        sessions.first().map(|s| s.total_tokens)
-    }
-
     /// 历史会话页：确保当前 agent（+ 可能选中的 workspace profile）+ 项目的会话
     /// 列表缓存新鲜（>10s 或缺失就后台重新扫描）。总览卡片那边固定传
     /// `(AcpAgentKind::Claude, None)`，跟历史页的 tab 切换共用同一份缓存/同一套

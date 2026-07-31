@@ -45,6 +45,9 @@ impl Workspace {
         let this = cx.entity();
         workspace_frame::top_bar()
             .h(px(32.))
+            // 同 render_stage_header：不写 w_full() 这行只会缩到内容宽度，
+            // 标题后面一大截舞台宽度就晾着。
+            .w_full()
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -115,7 +118,6 @@ impl Workspace {
         let ix = self.active_session;
         let sess = self.sessions.get(ix)?;
         let title = sess.title(cx);
-        let is_term = matches!(sess.kind, SessionKind::Term { .. });
         // 状态胶囊：ACP 直接问视图要相位（它有自己的相位机，经五态映射会把
         // 「启动中 / 已结束」都塌成「空闲」）；终端仍走 AgentStatus 那套。
         let (phase_label, phase_color) = match &sess.kind {
@@ -157,22 +159,10 @@ impl Workspace {
                     )
                 })
             });
-        // 终端会话没有实时用量上报，退而求其次：复用历史会话缓存，取该项目下
-        // Claude Code 最近一次活跃会话的累计 token 数（近似值——终端里跑的不一定
-        // 是 Claude，也可能缓存还没扫到，两种情况都直接不显示，不瞎猜）。
-        let token_count = if is_term {
-            cwd.as_ref().and_then(|c| {
-                self.ensure_session_list(
-                    crate::settings::AcpAgentKind::Claude,
-                    None,
-                    c.clone(),
-                    cx,
-                );
-                self.claude_session_tokens(c)
-            })
-        } else {
-            acp_tokens
-        };
+        // 只有 ACP 会话有实时用量上报，直接用它；终端会话没有精确来源
+        // （历史缓存只是近似值，容易跟"当前上下文"这个语义对不上，索性
+        // 不显示，不瞎猜）。
+        let token_count = acp_tokens;
         let this = cx.entity();
 
         // 次要信息（模型 / token / 项目目录）统一降级成纯文字，用 "·" 分隔，
@@ -242,6 +232,10 @@ impl Workspace {
                 // 侧栏收起时又正好跟红绿灯（`TitleBar::title_bar_options()` 里
                 // 固定的 traffic_light_position）对上同一条水平线。
                 .h(px(34.))
+                // 显式撑满：这层是 flex_col 舞台的第一个子项，不写 w_full() 的话
+                // 只会缩到内容本身的宽度（标题一截断就跟着变窄），右边一大截
+                // 舞台宽度就晾在那——标题的 flex_1 只在“行本身够宽”时才有意义。
+                .w_full()
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -257,6 +251,7 @@ impl Workspace {
                 .pr(right_reserve)
                 .child(
                     div()
+                        .id("stage-title")
                         // 收窄到极限也至少留够几个字——之前是 0，pane 一变窄就先塌成
                         // 纯省略号「…」，标题（这行最该保住的信息）反而完全看不见。
                         // 该让步的是下面 info_cluster 那串「随时能查」的次要信息。
@@ -270,7 +265,13 @@ impl Workspace {
                         .font_semibold()
                         .text_color(rgb(ui_theme::text_bright()))
                         .truncate()
-                        .child(title),
+                        .child(title.clone())
+                        // 标题本身可能是完整路径（比如终端会话直接拿 cwd 当标题），
+                        // 窄屏下省略号截得只剩前缀，鼠标搁上去至少能看到全文，
+                        // 不用手动拉宽窗口/侧栏。
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+                        }),
                 )
                 .child(
                     // 状态胶囊：头栏里唯一保留卡片底+边框的元素，用颜色/边框把

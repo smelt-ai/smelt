@@ -1741,8 +1741,17 @@ impl Render for AcpView {
                         ),
                 )
         });
+        let current_turn_active = matches!(
+            self.phase,
+            AcpPhase::Running | AcpPhase::AwaitingApproval | AcpPhase::AwaitingChoice
+        );
+        let conversation_layout = std::rc::Rc::new(build_conversation_layout(
+            &self.entries,
+            current_turn_active,
+        ));
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
+            let conversation_layout = conversation_layout.clone();
             view.update(app, |this, cx| {
                 let t = cx.theme();
                 let muted = t.muted_foreground;
@@ -1755,8 +1764,9 @@ impl Render for AcpView {
                         matches!(entry, AcpEntry::Assistant { thought: false, .. })
                     })
                 });
-                let final_answer = is_turn_final_answer(&this.entries, i);
-                let process_group = process_group_for_entry(&this.entries, i);
+                let presentation = conversation_layout.get(i).copied().unwrap_or_default();
+                let final_answer = presentation.final_answer;
+                let process_group = presentation.process_group;
                 let process_expanded = process_group
                     .is_some_and(|group| this.expanded_process_groups.contains(&group.first));
                 if process_group.is_some_and(|group| group.first != i) && !process_expanded {
@@ -2076,6 +2086,64 @@ impl Render for AcpView {
                             ToolCallStatus::Failed => (gpui::rgb(ui_theme::red()).into(), "失败"),
                         };
 
+                        let has_pending_permission = active_permission_tool_id == Some(id.as_str());
+                        let card_expanded =
+                            this.tool_card_is_expanded(id, *status, has_pending_permission);
+                        let compact_in_process = process_expanded
+                            && process_group.is_some()
+                            && !card_expanded
+                            && tool_uses_compact_process_row(*status, has_pending_permission);
+
+                        // 已完成工具在展开的过程组里占绝大多数。提前返回紧凑行，
+                        // 避免再扫描 diff 缓存或构建随后会被丢弃的完整卡片。
+                        if compact_in_process {
+                            let id_for_compact_toggle = id.clone();
+                            let status_for_toggle = *status;
+                            h_flex()
+                                .id(("acp-tool-compact", i))
+                                .w_full()
+                                .min_h(px(30.))
+                                .px_2()
+                                .gap_2()
+                                .items_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
+                                .child(div().size_1p5().rounded_full().bg(bar_color))
+                                .child(
+                                    Icon::new(tool_kind_icon(kind))
+                                        .size(px(12.))
+                                        .text_color(accent),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(42.))
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .font_medium()
+                                        .text_color(accent)
+                                        .child(tool_kind_label(kind)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(title.clone()),
+                                )
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    this.toggle_tool_card(
+                                        id_for_compact_toggle.clone(),
+                                        status_for_toggle,
+                                        has_pending_permission,
+                                        cx,
+                                    );
+                                }))
+                                .into_any_element()
+                        } else {
+
                         // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
                         // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
                         let diff_totals: Vec<(usize, usize)> = this
@@ -2091,10 +2159,6 @@ impl Render for AcpView {
                         let (total_added, total_removed) = diff_totals
                             .iter()
                             .fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
-                        let has_pending_permission = active_permission_tool_id == Some(id.as_str());
-                        let card_expanded =
-                            this.tool_card_is_expanded(id, *status, has_pending_permission);
-
                         // diff / 状态角标都改成 Discord 那种圆角软底色小药丸，
                         // 而不是裸文字——同样的信息，胶囊比平铺文字更有「标签」的
                         // 活泼感，也跟下面的工具名药丸呼应成一套视觉语言。
@@ -2165,33 +2229,16 @@ impl Render for AcpView {
                         let id_for_toggle = id.clone();
                         let status_for_toggle = *status;
                         let mut card = v_flex()
-                            .relative()
                             .w_full()
                             .overflow_hidden()
                             .rounded_lg()
                             .border_1()
-                            // 左边框跟下面的彩色色条挤在同一条边上：灰线会从色条
-                            // 两端露出一小截，看着像镶了道多余的灰边。色条本身已经
-                            // 把左边这条线的视觉职责接管了，这里直接去掉。
-                            .border_l_0()
                             .border_color(t.border)
                             .bg(ui_theme::glass_card())
                             .hover(|card| {
                                 card.border_color(ui_theme::tint(bar_u32, 0x66))
                                     .shadow_md()
                             })
-                            .child(
-                                // 工具卡左侧色条：跟标题/图标同一套 accent 色，一眼
-                                // 就能在一长串卡片里扫出「这是执行/读/改/查」,不用
-                                // 逐条读文字。失败态额外加粗一点，异常更抓眼。
-                                div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_0()
-                                    .bottom_0()
-                                    .w(px(if failed { 3. } else { 2. }))
-                                    .bg(bar_color),
-                            )
                             .child(
                                 h_flex()
                                     .id(("acp-tool-card-toggle", i))
@@ -2254,16 +2301,14 @@ impl Render for AcpView {
                                             .font_family("monospace")
                                             .text_color(muted)
                                             .truncate()
-                                            .child(strip_kind_prefix(title, kind).to_string()),
+                                            .child(title.clone()),
                                     )
                                     .child(header_right),
                             );
                         if card_expanded {
-                            let mut rendered_output_part = false;
                             for (part_ix, part) in output.iter().enumerate() {
                                 card = match part {
                                     ToolOutputPart::Diff { path, .. } => {
-                                        rendered_output_part = true;
                                         let cached = this
                                             .rendered_diffs
                                             .get(id)
@@ -2291,7 +2336,6 @@ impl Render for AcpView {
                                         )
                                     }
                                     ToolOutputPart::Text(text) if !text.trim().is_empty() => {
-                                        rendered_output_part = true;
                                         // adapter 把工具输出包在 markdown 围栏里（```console…```），
                                         // 当纯文本渲染会把 ``` 直接显示出来。剥掉再展示。
                                         let body = strip_code_fence(text);
@@ -2319,6 +2363,8 @@ impl Render for AcpView {
                                                     ("acp-tool-output-md", i * 100 + part_ix),
                                                     shown,
                                                 )
+                                                .text_xs()
+                                                .text_color(muted)
                                                 .into_any_element()
                                             } else {
                                                 div()
@@ -2371,18 +2417,9 @@ impl Render for AcpView {
                                     ToolOutputPart::Text(_) => card,
                                 };
                             }
-                            if !rendered_output_part {
-                                card = card.child(
-                                    div()
-                                        .px_4()
-                                        .pb_3()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child("无可展示输出"),
-                                );
-                            }
                         }
                         card.into_any_element()
+                        }
                     }
                     AcpEntry::Divider(label) => h_flex()
                         .w_full()
@@ -3747,28 +3784,19 @@ fn build_handoff_prompt(
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 
-/// 工具卡片首次出现一律折叠，避免运行过程中的大量输出撑高消息流。
+/// 已完成工具默认折叠；进行中、失败和待审批项展开，让当前动作与异常保持可见。
 /// 用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards` 覆盖这个默认值。
-fn tool_card_default_expanded(_status: ToolCallStatus, _has_pending_permission: bool) -> bool {
-    false
+fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bool) -> bool {
+    has_pending_permission || !matches!(status, ToolCallStatus::Completed)
 }
 
-/// 一轮里最后一段非思考正文才是最终回答。工具调用和思考可以夹在正文之间，
-/// 下一条用户消息或会话分隔符才开始新一轮。
-fn is_turn_final_answer(entries: &[AcpEntry], index: usize) -> bool {
-    if !matches!(
-        entries.get(index),
-        Some(AcpEntry::Assistant { thought: false, .. })
-    ) {
-        return false;
-    }
-    !entries[index + 1..]
-        .iter()
-        .take_while(|entry| !is_user_entry(entry) && !matches!(entry, AcpEntry::Divider(_)))
-        .any(|entry| matches!(entry, AcpEntry::Assistant { thought: false, .. }))
+/// 展开“执行过程”时，所有已完成且无需用户授权的工具使用相同的紧凑轨迹行。
+/// 执行中、失败和待授权状态保留完整卡片，让正在发生的动作和异常保持可见。
+fn tool_uses_compact_process_row(status: ToolCallStatus, has_pending_permission: bool) -> bool {
+    !has_pending_permission && matches!(status, ToolCallStatus::Completed)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct ProcessGroupInfo {
     first: usize,
     steps: usize,
@@ -3776,64 +3804,72 @@ struct ProcessGroupInfo {
     failed: usize,
 }
 
-/// 返回某条 entry 所属的“执行过程”组。每轮最后一段正式回答之外的 assistant
-/// 内容与工具调用都属于过程；用户消息、分隔符和最终回答本身不属于。
-fn process_group_for_entry(entries: &[AcpEntry], index: usize) -> Option<ProcessGroupInfo> {
-    if index >= entries.len()
-        || is_user_entry(&entries[index])
-        || matches!(entries[index], AcpEntry::Divider(_))
-        || is_turn_final_answer(entries, index)
-    {
-        return None;
+#[derive(Clone, Copy, Default)]
+struct EntryPresentation {
+    final_answer: bool,
+    process_group: Option<ProcessGroupInfo>,
+}
+
+/// 把协议 entries 一次归约成渲染布局。已结束回合的最后一段正式正文是最终回答；
+/// 活跃回合没有最终回答，避免流式过程中最新正文反复在“过程/结论”之间跳动。
+/// 最终正文之后迟到的工具通知仍属于同一过程组，不能散落成独立卡片。
+fn build_conversation_layout(
+    entries: &[AcpEntry],
+    current_turn_active: bool,
+) -> Vec<EntryPresentation> {
+    let mut layout = vec![EntryPresentation::default(); entries.len()];
+    let mut start = 0;
+    while start < entries.len() {
+        if is_user_entry(&entries[start]) || matches!(entries[start], AcpEntry::Divider(_)) {
+            start += 1;
+            continue;
+        }
+        let end = entries[start..]
+            .iter()
+            .position(|entry| is_user_entry(entry) || matches!(entry, AcpEntry::Divider(_)))
+            .map_or(entries.len(), |offset| start + offset);
+        let closed = end < entries.len() || !current_turn_active;
+        let final_ix = closed
+            .then(|| {
+                (start..end)
+                    .rev()
+                    .find(|ix| matches!(entries[*ix], AcpEntry::Assistant { thought: false, .. }))
+            })
+            .flatten();
+        if let Some(final_ix) = final_ix {
+            layout[final_ix].final_answer = true;
+        }
+        let process_indices: Vec<usize> = (start..end).filter(|ix| Some(*ix) != final_ix).collect();
+        if let Some(&first) = process_indices.first() {
+            let tools = process_indices
+                .iter()
+                .filter(|ix| matches!(entries[**ix], AcpEntry::ToolCall { .. }))
+                .count();
+            let failed = process_indices
+                .iter()
+                .filter(|ix| {
+                    matches!(
+                        entries[**ix],
+                        AcpEntry::ToolCall {
+                            status: ToolCallStatus::Failed,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            let group = ProcessGroupInfo {
+                first,
+                steps: process_indices.len(),
+                tools,
+                failed,
+            };
+            for ix in process_indices {
+                layout[ix].process_group = Some(group);
+            }
+        }
+        start = end;
     }
-    let turn_start = entries[..index]
-        .iter()
-        .rposition(|entry| is_user_entry(entry) || matches!(entry, AcpEntry::Divider(_)))
-        .map_or(0, |ix| ix + 1);
-    let turn_end = entries[index..]
-        .iter()
-        .position(|entry| is_user_entry(entry) || matches!(entry, AcpEntry::Divider(_)))
-        .map_or(entries.len(), |offset| index + offset);
-    let final_ix = (turn_start..turn_end)
-        .rev()
-        .find(|ix| is_turn_final_answer(entries, *ix));
-    let process_end = final_ix.unwrap_or(turn_end);
-    if index >= process_end {
-        return None;
-    }
-    let process_indices: Vec<usize> = (turn_start..process_end)
-        .filter(|ix| {
-            !is_user_entry(&entries[*ix])
-                && !matches!(entries[*ix], AcpEntry::Divider(_))
-                && !is_turn_final_answer(entries, *ix)
-        })
-        .collect();
-    let first = *process_indices.first()?;
-    if !process_indices.contains(&index) {
-        return None;
-    }
-    let tools = process_indices
-        .iter()
-        .filter(|ix| matches!(entries[**ix], AcpEntry::ToolCall { .. }))
-        .count();
-    let failed = process_indices
-        .iter()
-        .filter(|ix| {
-            matches!(
-                entries[**ix],
-                AcpEntry::ToolCall {
-                    status: ToolCallStatus::Failed,
-                    ..
-                }
-            )
-        })
-        .count();
-    Some(ProcessGroupInfo {
-        first,
-        steps: process_indices.len(),
-        tools,
-        failed,
-    })
+    layout
 }
 
 fn format_duration(milliseconds: u64) -> String {
@@ -3965,17 +4001,6 @@ fn is_active_permission_selection(
     })
 }
 
-/// 工具标题里去掉与 kind 标签重复的前缀：adapter 常把标题写成
-/// `Read crates/foo.rs`，而卡片左边已经有一个 `Read` 标签了。
-fn strip_kind_prefix<'a>(title: &'a str, kind: &ToolKind) -> &'a str {
-    let label = tool_kind_label(kind);
-    title
-        .strip_prefix(label)
-        .map(|r| r.trim_start())
-        .filter(|r| !r.is_empty())
-        .unwrap_or(title)
-}
-
 /// ToolKind → 强调色：读类蓝、改类橙、执行类绿，一眼区分工具在干什么类型的事。
 /// 原始 u32 色值——`tint()` 要的是这个，不是转换过的 `Rgba`，所以跟
 /// `tool_accent_color` 分开放：后者给文字/图标上色，前者给徽章调透明度。
@@ -4098,9 +4123,9 @@ fn render_diff_lines(
 #[cfg(test)]
 mod tests {
     use super::{
-        HANDOFF_MAX_CHARS, build_handoff_prompt, is_active_permission_selection,
-        is_turn_final_answer, markdown_text_for_cwd, process_group_for_entry,
-        resolve_restart_launch, tool_card_default_expanded,
+        HANDOFF_MAX_CHARS, build_conversation_layout, build_handoff_prompt,
+        is_active_permission_selection, markdown_text_for_cwd, resolve_restart_launch,
+        tool_card_default_expanded, tool_uses_compact_process_row,
     };
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
     use smelt_core::acp_session::{
@@ -4166,16 +4191,66 @@ mod tests {
                 thought: false,
             },
         ];
-        assert!(!is_turn_final_answer(&entries, 1));
-        assert!(is_turn_final_answer(&entries, 3));
-        assert!(is_turn_final_answer(&entries, 5));
+        let layout = build_conversation_layout(&entries, false);
+        assert!(!layout[1].final_answer);
+        assert!(layout[3].final_answer);
+        assert!(layout[5].final_answer);
 
-        let group = process_group_for_entry(&entries, 1).expect("过程正文应进入执行过程组");
+        let group = layout[1].process_group.expect("过程正文应进入执行过程组");
         assert_eq!(group.first, 1);
         assert_eq!(group.steps, 2);
         assert_eq!(group.tools, 1);
-        assert!(process_group_for_entry(&entries, 2).is_some());
-        assert!(process_group_for_entry(&entries, 3).is_none());
+        assert!(layout[2].process_group.is_some());
+        assert!(layout[3].process_group.is_none());
+    }
+
+    #[test]
+    fn active_turn_has_no_provisional_final_answer() {
+        let entries = vec![
+            AcpEntry::User("修一下".into()),
+            AcpEntry::Assistant {
+                text: "正在检查".into(),
+                thought: false,
+            },
+        ];
+
+        let layout = build_conversation_layout(&entries, true);
+
+        assert!(!layout[1].final_answer);
+        assert!(layout[1].process_group.is_some());
+    }
+
+    #[test]
+    fn late_tool_after_final_answer_stays_in_the_same_process_group() {
+        let entries = vec![
+            AcpEntry::User("修一下".into()),
+            AcpEntry::ToolCall {
+                id: "edit".into(),
+                title: "Edit file".into(),
+                kind: ToolKind::Edit,
+                status: ToolCallStatus::Completed,
+                output: Vec::new(),
+            },
+            AcpEntry::Assistant {
+                text: "已经修好".into(),
+                thought: false,
+            },
+            AcpEntry::ToolCall {
+                id: "done".into(),
+                title: "task_complete".into(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::Completed,
+                output: Vec::new(),
+            },
+        ];
+
+        let layout = build_conversation_layout(&entries, false);
+
+        assert!(layout[2].final_answer);
+        let before = layout[1].process_group.expect("编辑应在过程组");
+        let late = layout[3].process_group.expect("迟到工具仍应在过程组");
+        assert_eq!(before.first, late.first);
+        assert_eq!(before.tools, 2);
     }
 
     #[test]
@@ -4315,18 +4390,38 @@ mod tests {
     }
 
     #[test]
-    fn tool_cards_are_collapsed_by_default_for_every_state() {
+    fn tool_cards_expand_by_default_only_when_actionable() {
         assert!(!tool_card_default_expanded(
             ToolCallStatus::Completed,
             false
         ));
-        assert!(!tool_card_default_expanded(ToolCallStatus::Completed, true));
-        assert!(!tool_card_default_expanded(ToolCallStatus::Pending, false));
-        assert!(!tool_card_default_expanded(
+        assert!(tool_card_default_expanded(ToolCallStatus::Completed, true));
+        assert!(tool_card_default_expanded(ToolCallStatus::Pending, false));
+        assert!(tool_card_default_expanded(
             ToolCallStatus::InProgress,
             false
         ));
-        assert!(!tool_card_default_expanded(ToolCallStatus::Failed, false));
+        assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
+    }
+
+    #[test]
+    fn compact_process_rows_cover_all_completed_tools() {
+        assert!(tool_uses_compact_process_row(
+            ToolCallStatus::Completed,
+            false
+        ));
+        assert!(!tool_uses_compact_process_row(
+            ToolCallStatus::Failed,
+            false
+        ));
+        assert!(!tool_uses_compact_process_row(
+            ToolCallStatus::InProgress,
+            false
+        ));
+        assert!(!tool_uses_compact_process_row(
+            ToolCallStatus::Completed,
+            true
+        ));
     }
 
     #[test]

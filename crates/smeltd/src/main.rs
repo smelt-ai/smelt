@@ -23,7 +23,8 @@
 //!   {"op":"version"}                                         → 回 {"version":"..","exe_mtime":123} 后关闭
 //!   {"op":"shutdown"}                                        → 回 {"ok":true} 后进程退出（杀掉所有会话！）
 //!   {"op":"upgrade"}                                         → 回 {"ok":true} 后 exec 磁盘上的新二进制，
-//!                                                              PTY fd 原地交接，**所有会话不中断**（见下）
+//!                                                              PTY/静默 ACP fd 原地交接；ACP 有活跃 RPC
+//!                                                              时回 {"ok":false,"busy":true}（见下）
 //!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，但 exec 指定路径（装 DMG 时先
 //!                                                              handoff 到暂存包，再替换 .app，避免
 //!                                                              整包覆盖把旧守护 SIGKILL、会话全灭）
@@ -79,6 +80,7 @@
 //! 1. 先拿 SPAWN_GATE 独占锁挡住新 shell/ACP 子进程的 fork，再短暂持 sessions 锁
 //!    克隆一份 Arc 列表后放开——避免 open/list/kill/version 长期卡在 sessions 锁上，
 //!    同时保证任何已 fork 的 ACP 都先把 pid/fd 发布完，才开始收集交接快照；
+//!    随后检查 ACP 静默屏障，存在活跃回合/审批/outstanding RPC 就返回 busy，不执行 exec；
 //! 2. 逐会话拿 ctl/out 锁做快照（master fd / shell pid / 尺寸 / **Term 可视区 keyframe**）
 //!    ——out 锁在 handle_open 里配了写超时（CLIENT_WRITE_TIMEOUT），泵线程不会无限期攥着；
 //! 3. 给 master fd 和监听 socket fd 清掉 CLOEXEC，快照写入交接文件（fd 号 + grid ANSI，
@@ -1854,6 +1856,11 @@ struct ValidatedAcpHandoff {
     pending_raw_line: Option<String>,
 }
 
+fn snapshot_has_active_turn(snapshot: &smelt_core::acp_session::AcpSnapshot) -> bool {
+    matches!(snapshot.phase, smelt_core::acp_session::AcpPhase::Running)
+        && snapshot.turn_started_at_ms.is_some()
+}
+
 enum AcpHandoffItemValidation {
     SkipUnowned,
     CloseDescriptors { stdin_fd: RawFd, stdout_fd: RawFd },
@@ -2152,8 +2159,9 @@ fn resume_handoff(
         } = validated;
         let supports_image = snapshot.supports_image;
         let snapshot_revision = snapshot.snapshot_revision;
-        let recover_running_turn =
-            matches!(snapshot.phase, smelt_core::acp_session::AcpPhase::Running);
+        // phase=Running 但没有开始时间是旧版被迟到 ACP 更新复活的僵尸相位，
+        // 不能在无缝升级后继续把下一条 prompt response 误当成它的收尾。
+        let recover_running_turn = snapshot_has_active_turn(&snapshot);
         let reduced = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
 
         let state = Arc::new(Mutex::new(SessionState {
@@ -2576,6 +2584,17 @@ mod resume_handoff_tests {
         );
         state.acp_session_id = Some(acp_session_id.to_string());
         state.to_snapshot(false)
+    }
+
+    #[test]
+    fn handoff_only_recovers_a_running_turn_with_an_active_start_marker() {
+        let mut snapshot = sample_snapshot("sid");
+        snapshot.phase = smelt_core::acp_session::AcpPhase::Running;
+        snapshot.turn_started_at_ms = None;
+        assert!(!snapshot_has_active_turn(&snapshot));
+
+        snapshot.turn_started_at_ms = Some(123);
+        assert!(snapshot_has_active_turn(&snapshot));
     }
 
     #[test]
@@ -4230,15 +4249,12 @@ fn handle_subscribe(
 // 断开 acp_open 连接（切标签/关标签/App 退出）只摘连接，不杀会话——这正是
 // 这层要解决的问题（GUI 退出不该带走 ACP 对话）。真要杀走 acp_kill。
 //
-// 「无缝升级」交接：agent 子进程的 stdin/stdout fd 跟 PTY master fd 同一招
-// 裸传过 exec()，快照数据（entries/phase/model 等）随交接文件走。真正的
-// 难点不在 fd 本身（管道 fd 天然能存活 exec()），而在 JSON-RPC 是有状态协议
-// ——升级那一刻如果正卡着一张权限/选择题卡片，那个请求的 Rust responder
-// 对象没法序列化过 exec()。解法：`smelt_core::acp_conn` 的 `with_debug`
-// 捕获每条请求的原始 JSON-RPC 行文本一起交接，新进程接上继承来的 fd 后先
-// 把这行「回放」一遍，让 SDK 重新解析出绑定同一个原始请求 id 的等价
-// responder，见 `resume_acp_from_fds`。没连上/已经 Ended 的会话没有 fd 可
-// 传，交接不了的会在升级前主动关掉，不静默留孤儿子进程。
+// 「无缝升级」只交接处于协议静默边界的 ACP 会话：agent 子进程的 stdin/stdout
+// fd 跟 PTY master fd 同样裸传过 exec()，快照数据随交接文件走。JSON-RPC 的
+// outstanding request callback / responder 是 SDK 进程内状态，不能靠 fd 恢复；
+// 只要任一会话仍有活跃回合、审批或未完成 RPC，upgrade 就返回 busy，等待调用方
+// 在回合结束后重试。旧交接格式的 raw request 回放只保留作向后兼容，不再作为
+// 活跃回合跨 exec 的正确性机制。
 
 struct AcpOut {
     client: Option<UnixStream>,
@@ -4421,6 +4437,13 @@ fn start_acp_event_drain(
         let sess = &slot.value;
         smol::block_on(async {
             while let Ok(ev) = event_rx.recv().await {
+                if matches!(&ev, smelt_core::acp_conn::AcpEvent::TurnEnded(_))
+                    && let Some(handle) = sess.handle.lock().unwrap().as_ref()
+                {
+                    // 兼容从旧版 active-fd handoff 恢复的会话：孤儿 response 由
+                    // 原始行解析器直接补 TurnEnded，不经过 drive_session 的计数归零。
+                    handle.in_flight_rpc.store(0, Ordering::SeqCst);
+                }
                 let outcome = {
                     let mut st = sess.reduced.lock().unwrap();
                     smelt_core::acp_session::apply_event(&mut st, ev)
@@ -4528,17 +4551,18 @@ fn apply_acp_user_action(
     use smelt_core::acp_session::AcpUserAction;
     match action {
         AcpUserAction::Prompt { text, images } => {
-            let cmd_tx = sess
+            let handle = sess
                 .handle
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|h| h.cmd_tx.clone());
-            let Some(cmd_tx) = cmd_tx else {
+                .map(|h| (h.cmd_tx.clone(), Arc::clone(&h.in_flight_rpc)));
+            let Some((cmd_tx, in_flight_rpc)) = handle else {
                 return Err("ACP session is not running");
             };
             let shown_images = images.clone();
             let shown_text = text.clone();
+            in_flight_rpc.fetch_add(1, Ordering::SeqCst);
             if cmd_tx.try_send(AcpCommand::Prompt { text, images }).is_ok() {
                 smelt_core::acp_session::note_prompt_sent(
                     &mut sess.reduced.lock().unwrap(),
@@ -4549,6 +4573,7 @@ fn apply_acp_user_action(
                 update_acp_daemon_state(sess, subscribers);
                 Ok(())
             } else {
+                in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
                 Err("ACP command channel is busy or closed")
             }
         }
@@ -4569,12 +4594,18 @@ fn apply_acp_user_action(
             let Some(h) = handle.as_ref() else {
                 return Err("ACP session is not running");
             };
-            h.cmd_tx
+            h.in_flight_rpc.fetch_add(1, Ordering::SeqCst);
+            let result = h
+                .cmd_tx
                 .try_send(AcpCommand::SetConfigOption {
                     config_id,
                     value_id,
                 })
-                .map_err(|_| "ACP command channel is busy or closed")
+                .map_err(|_| "ACP command channel is busy or closed");
+            if result.is_err() {
+                h.in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
+            }
+            result
         }
         AcpUserAction::PermissionSelect {
             tool_call_id,
@@ -5031,6 +5062,29 @@ fn collect_acp_handoff(acp_sessions: &AcpSessions) -> (Vec<serde_json::Value>, V
     (acp_items, acp_fds)
 }
 
+fn acp_upgrade_blockers(acp_sessions: &AcpSessions) -> Vec<String> {
+    use smelt_core::acp_session::AcpPhase;
+
+    acp_sessions
+        .snapshot()
+        .into_iter()
+        .filter_map(|(id, slot)| {
+            let phase_is_quiescent = matches!(
+                slot.value.reduced.lock().unwrap().phase,
+                AcpPhase::Idle | AcpPhase::Ended(_)
+            );
+            let in_flight = slot
+                .value
+                .handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|handle| handle.in_flight_rpc.load(Ordering::SeqCst) != 0);
+            (!phase_is_quiescent || in_flight).then_some(id)
+        })
+        .collect()
+}
+
 /// 无缝升级：快照会话表 → 写交接文件 → exec 磁盘上的新二进制（流程见文件头注释）。
 ///
 /// 锁策略：只短暂持 sessions 锁拿一份 Arc 列表就放掉——不像早期版本那样一直攥到
@@ -5081,12 +5135,28 @@ fn handle_upgrade(
     // 发布到 AcpHandle.stdio 的 ACP 子进程。
     let _spawn_gate = acquire_upgrade_spawn_gate(&SPAWN_GATE);
 
+    // SDK 的 outstanding request callback 是进程内状态，不能随 stdin/stdout fd
+    // 穿过 exec。只在所有 ACP 会话都处于协议静默边界时升级；调用方可在当前
+    // 回合结束后重试，绝不能把 Running 快照和一条已丢 callback 的连接交出去。
+    let blockers = acp_upgrade_blockers(acp_sessions);
+    if !blockers.is_empty() {
+        let _ = writeln!(
+            c,
+            "{}",
+            serde_json::json!({
+                "ok": false,
+                "busy": true,
+                "err": "ACP 会话仍有未完成请求，请在当前回合结束后重试",
+                "sessions": blockers,
+            })
+        );
+        return;
+    }
+
     // ACP 会话的 fd 裸传：跟 PTY master fd 同一招（dup + 清 CLOEXEC 活过
-    // exec()），另外还带上快照数据（entries/phase/model 等，纯数据，序列化
-    // 没有问题）和"如果正卡着一张审批/选择题卡片，那条原始请求的原文"——
-    // 新进程接上继承来的 fd 后，见 resume_acp_from_fds，先回放这行原文再
-    // 接实时字节，SDK 会重新解析出一个绑定同一个原始请求 id 的等价
-    // responder，不会丢这张卡，见 acp_conn.rs 里那条注释。
+    // exec()），另外带上 entries/phase/model 等纯数据快照。上面的静默屏障
+    // 保证这里不会交接任何 outstanding callback；raw request 字段仅用于读取
+    // 旧版本留下的 handoff 文件。
     //
     // 只有还活着（有 handle 且已经拿到 pid/fd——刚发起 spawn、还没跑到那一步
     // 的极窄窗口除外）的会话才能参与；已经 Ended 的没有 fd 可传，交接后就是
@@ -6600,6 +6670,7 @@ mod acp_tests {
             cmd_tx,
             event_rx,
             stdio: Arc::new(Mutex::new(None)),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
 
         let (server, client) = UnixStream::pair().unwrap();
@@ -6643,6 +6714,7 @@ mod acp_tests {
             cmd_tx,
             event_rx,
             stdio: Arc::new(Mutex::new(None)),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
 
         let (control_server, _control_client) = UnixStream::pair().unwrap();
@@ -7179,6 +7251,7 @@ mod acp_tests {
                     stdin_fd: stdin_fd_owner.as_raw_fd(),
                     stdout_fd: stdout_fd_owner.as_raw_fd(),
                 }))),
+                in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             });
             sess
         });
@@ -7200,6 +7273,68 @@ mod acp_tests {
             &acp_sessions.get("acp-handoff").unwrap(),
             &slot
         ));
+    }
+
+    #[test]
+    fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
+        let acp_sessions = new_acp_sessions();
+
+        let mut idle = AcpSessionState::default();
+        idle.phase = AcpPhase::Idle;
+        let (idle_slot, _) = acp_sessions.reserve_with("acp-idle", || {
+            make_acp_session_value("acp-idle", idle)
+        });
+        let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        *idle_slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::AcpHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(Mutex::new(None)),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
+
+        idle_slot.value.reduced.lock().unwrap().phase = AcpPhase::Running;
+        assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
+
+        idle_slot.value.reduced.lock().unwrap().phase = AcpPhase::Idle;
+        idle_slot
+            .value
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .in_flight_rpc
+            .store(1, Ordering::SeqCst);
+        assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
+    }
+
+    #[test]
+    fn upgrade_returns_busy_before_touching_handoff_for_active_acp_turn() {
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+        let acp_sessions = new_acp_sessions();
+        let mut running = AcpSessionState::default();
+        running.phase = AcpPhase::Running;
+        acp_sessions.reserve_with("acp-running", || {
+            make_acp_session_value("acp-running", running)
+        });
+
+        let (server, client) = UnixStream::pair().unwrap();
+        handle_upgrade(
+            server,
+            &serde_json::json!({"op": "upgrade"}),
+            &sessions,
+            &acp_sessions,
+            -1,
+        );
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["busy"], true);
+        assert_eq!(response["sessions"], serde_json::json!(["acp-running"]));
     }
 
     #[test]

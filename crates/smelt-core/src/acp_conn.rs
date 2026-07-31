@@ -11,6 +11,7 @@
 //!   通道出来，`spawn_acp` 本身永不阻塞、永不 panic 调用方。
 
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use std::collections::BTreeMap;
@@ -427,6 +428,9 @@ pub struct AcpHandle {
     /// PTY master fd 同一招），见 `resume_acp_from_fds`。GUI 直连路径用不上，
     /// 多存三个整数不加负担。
     pub stdio: Arc<Mutex<Option<AcpStdio>>>,
+    /// 已发出但尚未收到最终 JSON-RPC response 的请求数。热升级不得跨越这些
+    /// callback；fd 能交接字节流，但不能交接 SDK 内存里的 request callback。
+    pub in_flight_rpc: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -456,6 +460,8 @@ pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpH
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
     let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
     let stdio: Arc<Mutex<Option<AcpStdio>>> = Arc::new(Mutex::new(None));
+    let in_flight_rpc = Arc::new(AtomicUsize::new(0));
+    let in_flight_rpc_for_thread = Arc::clone(&in_flight_rpc);
     let stdio_for_thread = Arc::clone(&stdio);
     let thread_name = format!("smelt-acp-{}", &launch.sid[..launch.sid.len().min(12)]);
     std::thread::Builder::new()
@@ -501,6 +507,7 @@ pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpH
                 stderr_tail.clone(),
                 stdio_for_thread,
                 spawn_gate,
+                in_flight_rpc_for_thread,
             ));
             if let Err(e) = result {
                 let tail = stderr_tail.lock().unwrap().join("\n");
@@ -518,6 +525,7 @@ pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpH
         cmd_tx,
         event_rx,
         stdio,
+        in_flight_rpc,
     }
 }
 
@@ -694,6 +702,7 @@ async fn run_connection(
     stderr_tail: Arc<Mutex<Vec<String>>>,
     stdio_out: Arc<Mutex<Option<AcpStdio>>>,
     spawn_gate: Option<Arc<RwLock<()>>>,
+    in_flight_rpc: Arc<AtomicUsize>,
 ) -> Result<(), agent_client_protocol::Error> {
     let agent = build_agent(&launch.launch)?;
     let (child_stdin, child_stdout, child_stderr, child) =
@@ -862,6 +871,7 @@ async fn run_connection(
                                 event_tx,
                                 ReadyKind::ResumedWithReplay,
                                 supports_image,
+                                in_flight_rpc,
                             )
                             .await;
                         }
@@ -884,7 +894,15 @@ async fn run_connection(
                 .await?;
             publish_config_options(created.config_options.as_deref(), &event_tx);
             let session = connection.attach_session(created, Default::default())?;
-            drive_session(session, cmd_rx, event_tx, ReadyKind::Fresh, supports_image).await
+            drive_session(
+                session,
+                cmd_rx,
+                event_tx,
+                ReadyKind::Fresh,
+                supports_image,
+                in_flight_rpc,
+            )
+            .await
         })
         .await
 }
@@ -910,6 +928,8 @@ pub fn resume_acp_from_fds(
         stdin_fd,
         stdout_fd,
     })));
+    let in_flight_rpc = Arc::new(AtomicUsize::new(usize::from(recover_running_turn)));
+    let in_flight_rpc_for_thread = Arc::clone(&in_flight_rpc);
     let thread_name = format!("smelt-acp-r-{}", &sid[..sid.len().min(10)]);
     std::thread::Builder::new()
         .name(thread_name)
@@ -924,6 +944,7 @@ pub fn resume_acp_from_fds(
                 recover_running_turn,
                 cmd_rx,
                 event_tx.clone(),
+                in_flight_rpc_for_thread,
             ));
             if let Err(e) = result {
                 let _ = event_tx.try_send(AcpEvent::Fatal(format!("{e}")));
@@ -935,6 +956,7 @@ pub fn resume_acp_from_fds(
         cmd_tx,
         event_rx,
         stdio,
+        in_flight_rpc,
     }
 }
 
@@ -954,6 +976,7 @@ async fn run_resumed_connection(
     recover_running_turn: bool,
     cmd_rx: smol::channel::Receiver<AcpCommand>,
     event_tx: smol::channel::Sender<AcpEvent>,
+    in_flight_rpc: Arc<AtomicUsize>,
 ) -> Result<(), agent_client_protocol::Error> {
     // `unsafe`：这两个 fd 是 smeltd 从上一代进程 dup 过来、清了 CLOEXEC 活过
     // exec() 的，调用方保证此刻整个进程里没有别的代码持有/关闭过它们
@@ -1056,6 +1079,7 @@ async fn run_resumed_connection(
                 event_tx,
                 ReadyKind::ResumedKeepHistory,
                 supports_image,
+                in_flight_rpc,
             )
             .await
         })
@@ -1071,6 +1095,7 @@ async fn drive_session<'r>(
     ready_kind: ReadyKind,
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
+    in_flight_rpc: Arc<AtomicUsize>,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = event_tx.try_send(AcpEvent::Ready {
         session_id: session.session_id().clone(),
@@ -1101,7 +1126,10 @@ async fn drive_session<'r>(
                 if images.is_empty() {
                     // 纯文本走 SDK 的 send_prompt：它顺带把 StopReason 塞回
                     // read_update 流，TurnEnded 由 translate_update 发。
-                    session.send_prompt(text)?;
+                    if let Err(error) = session.send_prompt(text) {
+                        finish_rpc(&in_flight_rpc);
+                        return Err(error);
+                    }
                 } else {
                     // 带图就得自己拼 ContentBlock——SDK 的 send_prompt 只收
                     // 一个 ToString，塞不进 Image block。代价是 StopReason 不
@@ -1116,10 +1144,12 @@ async fn drive_session<'r>(
                         blocks.push(ContentBlock::Image(ImageContent::new(im.data_b64, im.mime)));
                     }
                     let tx = event_tx.clone();
+                    let rpc = Arc::clone(&in_flight_rpc);
                     session
                         .connection()
                         .send_request(PromptRequest::new(session.session_id().clone(), blocks))
                         .on_receiving_result(async move |result| {
+                            let _guard = RpcCompletionGuard(rpc);
                             let PromptResponse { stop_reason, .. } = result?;
                             let _ = tx.try_send(AcpEvent::TurnEnded(stop_reason));
                             Ok(())
@@ -1135,6 +1165,7 @@ async fn drive_session<'r>(
                 config_id,
                 value_id,
             })) => {
+                let _guard = RpcCompletionGuard(Arc::clone(&in_flight_rpc));
                 let req = SetSessionConfigOptionRequest::new(
                     session.session_id().clone(),
                     SessionConfigId::new(config_id),
@@ -1152,10 +1183,27 @@ async fn drive_session<'r>(
                 }
             }
             Next::Update(update) => {
-                translate_update(update?, &event_tx).await?;
+                let update = update?;
+                let completes_prompt = matches!(&update, SessionMessage::StopReason(_));
+                translate_update(update, &event_tx).await?;
+                if completes_prompt {
+                    finish_rpc(&in_flight_rpc);
+                }
             }
         }
     }
+}
+
+struct RpcCompletionGuard(Arc<AtomicUsize>);
+
+impl Drop for RpcCompletionGuard {
+    fn drop(&mut self) {
+        finish_rpc(&self.0);
+    }
+}
+
+fn finish_rpc(in_flight_rpc: &AtomicUsize) {
+    let _ = in_flight_rpc.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 /// 把 agent 的一条更新翻译成 AcpEvent（不认识的一律忽略——协议会长新枝）。

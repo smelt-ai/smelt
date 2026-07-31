@@ -4699,8 +4699,18 @@ impl Workspace {
         self.daemon_upgrade_msg = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let outcome =
-                cx.background_executor().spawn(async { terminal::upgrade_daemon() }).await;
+            let outcome = cx
+                .background_executor()
+                .spawn(async {
+                    loop {
+                        let outcome = terminal::upgrade_daemon();
+                        if outcome != terminal::UpgradeOutcome::Busy {
+                            break outcome;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                })
+                .await;
             // exec 换代后 PID / 启动时刻都变了，跟版本一起重新问一遍。
             let (outdated, info) = cx
                 .background_executor()
@@ -4721,6 +4731,10 @@ impl Workspace {
                         // 守护完全没认这个 op，控制连接以外的东西没被碰过，各 pane
                         // 的流式连接照常连着，不需要重连。
                         "正在跑的守护版本过旧，不支持无缝升级；请用「重启守护进程」（会断开会话）。"
+                            .to_string()
+                    }
+                    terminal::UpgradeOutcome::Busy => {
+                        "有 Agent 回合仍在运行；本次未升级，请在回合结束后重试。"
                             .to_string()
                     }
                     terminal::UpgradeOutcome::Failed => {
@@ -6707,8 +6721,12 @@ impl Render for Workspace {
                             // 贴到卡片圆角上。改成 8(shell 外边距)+10(离卡片边缘的
                             // 呼吸间距)=18px，跟红绿灯 `x=18` 对称。
                             .pr(px(18.))
-                            .child({
+                            // 「⤢ 展开」只对已经在停靠/全屏显示的右侧面板有意义——
+                            // 右侧栏收起时点它会凭空拉出一个从没显示过的面板全屏，
+                            // 反而让人困惑，所以跟 inspector_open（或已全屏）绑定可见性。
+                            .children({
                                 let promoted = self.inspector_panel_promoted();
+                                (self.inspector_open || promoted).then(|| {
                                 div()
                                     .id("inspector-fullscreen-toggle")
                                     .flex()
@@ -6752,6 +6770,7 @@ impl Render for Workspace {
                                             cx.notify();
                                         }),
                                     )
+                                })
                             })
                             .child({
                                 // 底部抽屉（快捷终端）开关：跟右侧面板开关同一排，
