@@ -492,8 +492,12 @@ async fn acp_sessions_handler(
 #[derive(serde::Deserialize)]
 #[serde(tag = "method")]
 enum AcpWsRequest {
+    #[serde(rename = "ping")]
+    Ping { params: PingParams },
     #[serde(rename = "subscribe")]
     Subscribe { params: SubscribeParams },
+    #[serde(rename = "loadHistory")]
+    LoadHistory { params: LoadHistoryParams },
     #[serde(rename = "unsubscribe")]
     Unsubscribe,
     #[serde(rename = "sendMessage")]
@@ -522,9 +526,37 @@ enum AcpWsRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct PingParams {
+    #[serde(rename = "sentAtMs")]
+    sent_at_ms: i64,
+}
+
+#[derive(serde::Deserialize)]
 struct SubscribeParams {
     #[serde(rename = "sessionId")]
     session_id: String,
+    #[serde(default, rename = "historySessionId")]
+    history_session_id: Option<String>,
+    #[serde(default, rename = "knownEntries")]
+    known_entries: Option<usize>,
+    #[serde(default, rename = "snapshotRevision")]
+    snapshot_revision: Option<u64>,
+    #[serde(default = "default_mobile_tail_limit", rename = "tailLimit")]
+    tail_limit: usize,
+}
+
+fn default_mobile_tail_limit() -> usize {
+    100
+}
+
+#[derive(serde::Deserialize)]
+struct LoadHistoryParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "beforeOffset")]
+    before_offset: usize,
+    #[serde(default = "default_mobile_tail_limit")]
+    limit: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -656,6 +688,13 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                 };
 
                 match req {
+                    AcpWsRequest::Ping { params } => {
+                        let resp = serde_json::json!({
+                            "type": "pong",
+                            "sentAtMs": params.sent_at_ms,
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
                     AcpWsRequest::ListSessions => {
                         let sessions = state.mobile_lifecycle.summaries();
                         let resp = serde_json::json!({
@@ -673,11 +712,23 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
 
                         // 启动新的订阅
                         let session_id = params.session_id.clone();
+                        let history_session_id = params.history_session_id.clone();
+                        let known_entries = params.known_entries;
+                        let snapshot_revision = params.snapshot_revision;
+                        let tail_limit = params.tail_limit.clamp(1, 500);
                         let tx = daemon_tx.clone();
                         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
                         let handle = tokio::task::spawn_blocking(move || {
-                            acp_watch_loop(&session_id, tx, stop_rx);
+                            acp_watch_loop(
+                                &session_id,
+                                history_session_id.as_deref(),
+                                known_entries,
+                                snapshot_revision,
+                                tail_limit,
+                                tx,
+                                stop_rx,
+                            );
                         });
 
                         current_subscription =
@@ -688,6 +739,24 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                             "sessionId": params.session_id,
                         });
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::LoadHistory { params } => {
+                        let result = tokio::task::spawn_blocking(move || {
+                            read_acp_history(
+                                &params.session_id,
+                                params.before_offset,
+                                params.limit.clamp(1, 500),
+                            )
+                        }).await;
+                        let response = match result {
+                            Ok(Ok(line)) => line,
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}).to_string(),
+                            Err(error) => serde_json::json!({
+                                "type": "error",
+                                "error": format!("failed to load history: {error}"),
+                            }).to_string(),
+                        };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(response.into())).await;
                     }
                     AcpWsRequest::Unsubscribe => {
                         if let Some((_, stop_tx, handle)) = current_subscription.take() {
@@ -901,6 +970,10 @@ async fn dispatch_mobile_action(
 /// 后台任务：监听 smeltd 的 acp_watch 推送
 fn acp_watch_loop(
     session_id: &str,
+    history_session_id: Option<&str>,
+    known_entries: Option<usize>,
+    snapshot_revision: Option<u64>,
+    tail_limit: usize,
     tx: tokio::sync::mpsc::Sender<String>,
     stop: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -913,6 +986,10 @@ fn acp_watch_loop(
     let req = serde_json::json!({
         "op": "acp_watch",
         "id": session_id,
+        "history_session_id": history_session_id,
+        "known_entries": known_entries,
+        "snapshot_revision": snapshot_revision,
+        "tail_limit": tail_limit,
     });
     if writeln!(stream, "{}", req).is_err() {
         return;
@@ -934,7 +1011,10 @@ fn acp_watch_loop(
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
                     // 发送到 WebSocket 任务
-                    if tx.blocking_send(trimmed.to_string()).is_err() {
+                    if tx
+                        .blocking_send(tag_snapshot_line(trimmed, session_id))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -946,6 +1026,47 @@ fn acp_watch_loop(
             Err(_) => break,
         }
     }
+}
+
+fn read_acp_history(
+    session_id: &str,
+    before_offset: usize,
+    limit: usize,
+) -> Result<String, String> {
+    let mut stream =
+        UnixStream::connect(sock_path()).map_err(|e| format!("connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| format!("set timeout failed: {e}"))?;
+    let request = serde_json::json!({
+        "op": "acp_snapshot",
+        "id": session_id,
+        "before": before_offset,
+        "limit": limit,
+    });
+    writeln!(stream, "{request}").map_err(|e| format!("write failed: {e}"))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|e| format!("read failed: {e}"))?;
+    if response.trim().is_empty() {
+        Err("session not found".to_string())
+    } else {
+        Ok(tag_snapshot_line(response.trim(), session_id))
+    }
+}
+
+fn tag_snapshot_line(line: &str, session_id: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return line.to_string();
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+    }
+    value.to_string()
 }
 
 fn send_acp_action(session_id: &str, action: serde_json::Value) -> Result<(), String> {
@@ -1019,6 +1140,37 @@ mod tests {
 
     #[test]
     fn mobile_requests_preserve_images_and_session_controls() {
+        let ping: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "ping",
+            "params": {"sentAtMs": 12345}
+        }))
+        .unwrap();
+        match ping {
+            AcpWsRequest::Ping { params } => assert_eq!(params.sent_at_ms, 12345),
+            _ => panic!("expected ping"),
+        }
+
+        let subscribe: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "subscribe",
+            "params": {
+                "sessionId": "session-1",
+                "historySessionId": "history-1",
+                "knownEntries": 240,
+                "snapshotRevision": 9,
+                "tailLimit": 80
+            }
+        }))
+        .unwrap();
+        match subscribe {
+            AcpWsRequest::Subscribe { params } => {
+                assert_eq!(params.history_session_id.as_deref(), Some("history-1"));
+                assert_eq!(params.known_entries, Some(240));
+                assert_eq!(params.snapshot_revision, Some(9));
+                assert_eq!(params.tail_limit, 80);
+            }
+            _ => panic!("expected subscribe"),
+        }
+
         let request: AcpWsRequest = serde_json::from_value(serde_json::json!({
             "method": "sendMessage",
             "params": {

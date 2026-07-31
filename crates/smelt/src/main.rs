@@ -6202,9 +6202,6 @@ fn main() {
         // UI 会拼出 `?token=` 的死链。
         let remote_config = settings::load_remote_config();
         let want_remote = remote_config.enabled;
-        // iroh 隧道依赖本机网关；配置里 iroh_enabled=true 时 enabled 理应也是 true
-        // （apply_iroh_toggle 存盘时就是这么同步的），但独立判断一次更保险。
-        let want_iroh = remote_config.iroh_enabled;
         let want_write = remote_config.write_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
@@ -6212,9 +6209,9 @@ fn main() {
         // （见 smelt_core::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
         // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。
         // iroh 隧道同理跑在 smeltd 里，GUI 退出不影响手机端连接。
-        if want_remote || want_iroh {
+        if want_remote {
             cx.spawn(async move |cx| {
-                let (remote_rt, want_iroh) = cx
+                let remote_rt = cx
                     .background_executor()
                     .spawn(async move {
                         terminal::ensure_daemon_running();
@@ -6225,38 +6222,21 @@ fn main() {
                         let remote_rt = if existing.running
                             && existing.token.as_ref().is_some_and(|t| !t.is_empty())
                         {
-                            settings::RemoteRuntimeState {
-                                token: existing.token,
-                                addr: existing.addr,
-                                write: existing.write,
-                                error: None,
-                            }
+                            settings::RemoteRuntimeState { error: None }
                         } else {
                             match terminal::remote_start("127.0.0.1", want_write) {
-                                Ok(s) => settings::RemoteRuntimeState {
-                                    token: s.token,
-                                    addr: s.addr,
-                                    write: s.write,
-                                    error: None,
-                                },
-                                Err(e) => settings::RemoteRuntimeState {
-                                    token: None,
-                                    addr: None,
-                                    write: false,
-                                    error: Some(e),
-                                },
+                                Ok(_) => settings::RemoteRuntimeState { error: None },
+                                Err(e) => settings::RemoteRuntimeState { error: Some(e) },
                             }
                         };
 
-                        (remote_rt, want_iroh)
+                        remote_rt
                     })
                     .await;
                 let _ = cx.update(|cx| {
                     cx.set_global(remote_rt);
                     // 网关 token 就绪后再拉 iroh：配对码要把 token 拼进去，早拉会拿到空的
-                    if want_iroh {
-                        settings::spawn_iroh_start_public(cx);
-                    }
+                    settings::spawn_iroh_start_public(cx);
                 });
             })
             .detach();

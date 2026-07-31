@@ -171,6 +171,109 @@ void main() {
     await firstServer.close(force: true);
     await secondServer.close(force: true);
   });
+
+  test('reports the selected iroh path and end-to-end latency', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final socketReady = Completer<WebSocket>();
+    final listenerReady = Completer<StreamSubscription<dynamic>>();
+    var pingCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socketReady.complete(socket);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      listenerReady.complete(
+        socket.listen((data) {
+          final message = jsonDecode(data as String) as Map<String, dynamic>;
+          if (message['method'] != 'ping') return;
+          pingCount++;
+          final params = message['params'] as Map<String, dynamic>;
+          socket.add(
+            jsonEncode({'type': 'pong', 'sentAtMs': params['sentAtMs']}),
+          );
+        }),
+      );
+    });
+
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      metricsInterval: const Duration(milliseconds: 50),
+      irohTunnelOpener: (_, _, _) async => server.port,
+      irohPathProbe: () async =>
+          const IrohPathSample(kind: ConnectionPathKind.p2p, rttMs: 17),
+    );
+
+    await service.connect(
+      'smelt+iroh://peer?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
+    final socket = await socketReady.future;
+    await _waitFor(
+      () =>
+          service.metrics.kind == ConnectionPathKind.p2p &&
+          service.metrics.latencyMs != null &&
+          pingCount > 0,
+    );
+
+    expect(service.metrics.kind, ConnectionPathKind.p2p);
+    expect(service.metrics.latencyMs, greaterThanOrEqualTo(0));
+
+    service.disconnect();
+    await (await listenerReady.future).cancel();
+    await socket.close();
+    await server.close(force: true);
+  });
+
+  test('old gateways fall back to QUIC RTT without showing an error', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final socketReady = Completer<WebSocket>();
+    final listenerReady = Completer<StreamSubscription<dynamic>>();
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socketReady.complete(socket);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      listenerReady.complete(
+        socket.listen((data) {
+          final message = jsonDecode(data as String) as Map<String, dynamic>;
+          if (message['method'] == 'ping') {
+            socket.add(
+              jsonEncode({'type': 'error', 'error': 'invalid request'}),
+            );
+          }
+        }),
+      );
+    });
+
+    final errors = <String>[];
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      metricsInterval: const Duration(milliseconds: 50),
+      irohTunnelOpener: (_, _, _) async => server.port,
+      irohPathProbe: () async =>
+          const IrohPathSample(kind: ConnectionPathKind.lan, rttMs: 17),
+    );
+    final errorSub = service.errorStream.listen(errors.add);
+
+    await service.connect(
+      'smelt+iroh://peer?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
+    final socket = await socketReady.future;
+    await _waitFor(
+      () =>
+          service.metrics.kind == ConnectionPathKind.lan &&
+          service.metrics.latencyMs == 17,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    expect(errors, isEmpty);
+    expect(service.metrics.latencyMs, 17);
+
+    service.disconnect();
+    await errorSub.cancel();
+    await (await listenerReady.future).cancel();
+    await socket.close();
+    await server.close(force: true);
+  });
 }
 
 Future<void> _waitFor(bool Function() predicate) async {

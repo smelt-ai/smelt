@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 204024798;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1394003773;
 
 // Section: executor
 
@@ -61,6 +61,29 @@ fn wire__crate__api_iroh__init_app_impl(port_: flutter_rust_bridge::for_generate
                     })?;
                     Ok(output_ok)
                 })())
+            }
+        },
+    )
+}
+fn wire__crate__api_iroh__iroh_tunnel_path_status_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "iroh_tunnel_path_status",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            move |context| async move {
+                transform_result_dco::<_, _, ()>(
+                    (move || async move {
+                        let output_ok =
+                            Result::<_, ()>::Ok(crate::api_iroh::iroh_tunnel_path_status().await)?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
             }
         },
     )
@@ -205,6 +228,18 @@ impl SseDecode for crate::api_iroh::IrohPairing {
     }
 }
 
+impl SseDecode for crate::api_iroh::IrohPathStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <String>::sse_decode(deserializer);
+        let mut var_rttMs = <u32>::sse_decode(deserializer);
+        return crate::api_iroh::IrohPathStatus {
+            kind: var_kind,
+            rtt_ms: var_rttMs,
+        };
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -214,6 +249,17 @@ impl SseDecode for Vec<u8> {
             ans_.push(<u8>::sse_decode(deserializer));
         }
         return ans_;
+    }
+}
+
+impl SseDecode for Option<crate::api_iroh::IrohPathStatus> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api_iroh::IrohPathStatus>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
     }
 }
 
@@ -308,6 +354,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api_iroh::IrohPairing>
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api_iroh::IrohPathStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.rtt_ms.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api_iroh::IrohPathStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api_iroh::IrohPathStatus>
+    for crate::api_iroh::IrohPathStatus
+{
+    fn into_into_dart(self) -> crate::api_iroh::IrohPathStatus {
+        self
+    }
+}
 
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -326,12 +393,30 @@ impl SseEncode for crate::api_iroh::IrohPairing {
     }
 }
 
+impl SseEncode for crate::api_iroh::IrohPathStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.kind, serializer);
+        <u32>::sse_encode(self.rtt_ms, serializer);
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api_iroh::IrohPathStatus> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api_iroh::IrohPathStatus>::sse_encode(value, serializer);
         }
     }
 }
@@ -406,6 +491,13 @@ mod io {
             String::from_utf8(vec).unwrap()
         }
     }
+    impl CstDecode<crate::api_iroh::IrohPathStatus> for *mut wire_cst_iroh_path_status {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api_iroh::IrohPathStatus {
+            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
+            CstDecode::<crate::api_iroh::IrohPathStatus>::cst_decode(*wrap).into()
+        }
+    }
     impl CstDecode<u32> for *mut u32 {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> u32 {
@@ -420,6 +512,15 @@ mod io {
                 token: self.token.cst_decode(),
                 relay_url: self.relay_url.cst_decode(),
                 relay_token: self.relay_token.cst_decode(),
+            }
+        }
+    }
+    impl CstDecode<crate::api_iroh::IrohPathStatus> for wire_cst_iroh_path_status {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api_iroh::IrohPathStatus {
+            crate::api_iroh::IrohPathStatus {
+                kind: self.kind.cst_decode(),
+                rtt_ms: self.rtt_ms.cst_decode(),
             }
         }
     }
@@ -447,10 +548,30 @@ mod io {
             Self::new_with_null_ptr()
         }
     }
+    impl NewWithNullPtr for wire_cst_iroh_path_status {
+        fn new_with_null_ptr() -> Self {
+            Self {
+                kind: core::ptr::null_mut(),
+                rtt_ms: Default::default(),
+            }
+        }
+    }
+    impl Default for wire_cst_iroh_path_status {
+        fn default() -> Self {
+            Self::new_with_null_ptr()
+        }
+    }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__init_app(port_: i64) {
         wire__crate__api_iroh__init_app_impl(port_)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_path_status(
+        port_: i64,
+    ) {
+        wire__crate__api_iroh__iroh_tunnel_path_status_impl(port_)
     }
 
     #[unsafe(no_mangle)]
@@ -482,6 +603,14 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_smelt_mobile_cst_new_box_autoadd_iroh_path_status(
+    ) -> *mut wire_cst_iroh_path_status {
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(
+            wire_cst_iroh_path_status::new_with_null_ptr(),
+        )
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_smelt_mobile_cst_new_box_autoadd_u_32(value: u32) -> *mut u32 {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(value)
     }
@@ -504,6 +633,12 @@ mod io {
         token: *mut wire_cst_list_prim_u_8_strict,
         relay_url: *mut wire_cst_list_prim_u_8_strict,
         relay_token: *mut wire_cst_list_prim_u_8_strict,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_iroh_path_status {
+        kind: *mut wire_cst_list_prim_u_8_strict,
+        rtt_ms: u32,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -566,6 +701,26 @@ mod web {
             }
         }
     }
+    impl CstDecode<crate::api_iroh::IrohPathStatus>
+        for flutter_rust_bridge::for_generated::wasm_bindgen::JsValue
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api_iroh::IrohPathStatus {
+            let self_ = self
+                .dyn_into::<flutter_rust_bridge::for_generated::js_sys::Array>()
+                .unwrap();
+            assert_eq!(
+                self_.length(),
+                2,
+                "Expected 2 elements, got {}",
+                self_.length()
+            );
+            crate::api_iroh::IrohPathStatus {
+                kind: self_.get(0).cst_decode(),
+                rtt_ms: self_.get(1).cst_decode(),
+            }
+        }
+    }
     impl CstDecode<Vec<u8>> for Box<[u8]> {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<u8> {
@@ -602,6 +757,13 @@ mod web {
     #[wasm_bindgen]
     pub fn wire__crate__api_iroh__init_app(port_: flutter_rust_bridge::for_generated::MessagePort) {
         wire__crate__api_iroh__init_app_impl(port_)
+    }
+
+    #[wasm_bindgen]
+    pub fn wire__crate__api_iroh__iroh_tunnel_path_status(
+        port_: flutter_rust_bridge::for_generated::MessagePort,
+    ) {
+        wire__crate__api_iroh__iroh_tunnel_path_status_impl(port_)
     }
 
     #[wasm_bindgen]

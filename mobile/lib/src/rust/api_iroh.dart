@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`
 
 /// 启动到指定 EndpointId 的 iroh 隧道，返回手机本地入口端口。
 ///
@@ -31,6 +31,9 @@ Future<void> irohTunnelStop() =>
 /// 当前隧道的本地端口，没有则返回 `None`。
 Future<int?> irohTunnelPort() =>
     RustLib.instance.api.crateApiIrohIrohTunnelPort();
+
+Future<IrohPathStatus?> irohTunnelPathStatus() =>
+    RustLib.instance.api.crateApiIrohIrohTunnelPathStatus();
 
 /// 解析 `smelt+iroh://` 配对码。
 ///
@@ -71,4 +74,24 @@ class IrohPairing {
           token == other.token &&
           relayUrl == other.relayUrl &&
           relayToken == other.relayToken;
+}
+
+/// iroh 当前选中的实际传输路径和 QUIC RTT。
+class IrohPathStatus {
+  /// `lan`、`p2p` 或 `relay`。
+  final String kind;
+  final int rttMs;
+
+  const IrohPathStatus({required this.kind, required this.rttMs});
+
+  @override
+  int get hashCode => kind.hashCode ^ rttMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is IrohPathStatus &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          rttMs == other.rttMs;
 }
