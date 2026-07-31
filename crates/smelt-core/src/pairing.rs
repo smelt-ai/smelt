@@ -12,18 +12,10 @@
 /// `endpoint_id` 放在 host 位而不是 path，因为它就是「连谁」，语义等价于主机名。
 ///
 /// 注意两半缺一不可：`endpoint_id` 只让人连得上网关，能不能操作由 token 决定。
-pub fn iroh_pairing_uri(
-    endpoint_id: &str,
-    token: &str,
-    relay_url: &str,
-    relay_token: &str,
-) -> String {
+pub fn iroh_pairing_uri(endpoint_id: &str, token: &str, relay_url: &str) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     query.append_pair("token", token);
     query.append_pair("relay", relay_url);
-    if !relay_token.is_empty() {
-        query.append_pair("relay_token", relay_token);
-    }
     format!("smelt+iroh://{endpoint_id}/?{}", query.finish())
 }
 
@@ -36,7 +28,6 @@ pub struct IrohPairing {
     pub endpoint_id: String,
     pub token: String,
     pub relay_url: String,
-    pub relay_token: String,
 }
 
 /// 解析 `smelt+iroh://` 配对码。relay 是必填项；没有它就不得使用任何默认服务。
@@ -81,7 +72,6 @@ pub fn parse_iroh_pairing_uri(uri: &str) -> Result<IrohPairing, String> {
         endpoint_id: endpoint_id.to_string(),
         token: token.to_string(),
         relay_url: relay_url.to_string(),
-        relay_token: fields.get("relay_token").cloned().unwrap_or_default(),
     })
 }
 
@@ -91,12 +81,7 @@ mod tests {
 
     #[test]
     fn carries_both_halves() {
-        let uri = iroh_pairing_uri(
-            "abc123",
-            "tok456",
-            "https://relay.example.test",
-            "relay-secret",
-        );
+        let uri = iroh_pairing_uri("abc123", "tok456", "https://relay.example.test");
         assert!(uri.starts_with("smelt+iroh://"), "{uri}");
         assert!(uri.contains("abc123"), "{uri}");
         assert!(uri.contains("token=tok456"), "{uri}");
@@ -104,30 +89,24 @@ mod tests {
             uri.contains("relay=https%3A%2F%2Frelay.example.test"),
             "{uri}"
         );
-        assert!(uri.contains("relay_token=relay-secret"), "{uri}");
+        assert!(!uri.contains("relay_token"), "{uri}");
     }
 
     #[test]
     fn scheme_matches_generated_uri() {
         // 两个常量各写各的迟早对不上，这里钉住。
-        let uri = iroh_pairing_uri("id", "t", "https://relay.test", "");
+        let uri = iroh_pairing_uri("id", "t", "https://relay.test");
         assert!(uri.starts_with(&format!("{IROH_PAIRING_SCHEME}://")));
     }
 
     #[test]
     fn parse_round_trips_generated_uri() {
         // 生成与解析必须互逆，否则桌面出的码手机认不出来。
-        let uri = iroh_pairing_uri(
-            "abc123",
-            "tok456",
-            "https://relay.example.test:8443",
-            "relay&secret",
-        );
+        let uri = iroh_pairing_uri("abc123", "tok456", "https://relay.example.test:8443");
         let parsed = parse_iroh_pairing_uri(&uri).expect("应能解析自己生成的码");
         assert_eq!(parsed.endpoint_id, "abc123");
         assert_eq!(parsed.token, "tok456");
         assert_eq!(parsed.relay_url, "https://relay.example.test:8443");
-        assert_eq!(parsed.relay_token, "relay&secret");
     }
 
     #[test]

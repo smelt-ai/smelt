@@ -127,11 +127,11 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 ///
 /// 幂等：对同一个 `endpoint_id` 重复调用会直接返回已有端口，不会重开监听。
 /// 换了 `endpoint_id` 则先停掉旧的 —— 让两条隧道并存只会让上层分不清端口归属。
-pub async fn start(endpoint_id: &str, relay_address: &str, relay_token: &str) -> Result<u16> {
+pub async fn start(endpoint_id: &str, relay_address: &str) -> Result<u16> {
     let peer: EndpointId = endpoint_id
         .parse()
         .map_err(|_| anyhow!("不是合法的 EndpointId：{endpoint_id}"))?;
-    let relay = smelt_iroh::RelaySettings::parse(relay_address, relay_token)?;
+    let relay = smelt_iroh::RelaySettings::parse(relay_address)?;
 
     let mut guard = TUNNEL.lock().await;
     if let Some(existing) = guard.as_ref() {
@@ -281,7 +281,7 @@ mod tests {
         // 打错的配对码要在 start 就报错，而不是等 WebSocket 连不上才浮现。
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt
-            .block_on(start("not-an-endpoint-id", "https://relay.invalid", ""))
+            .block_on(start("not-an-endpoint-id", "https://relay.invalid"))
             .unwrap_err();
         assert!(
             err.to_string().contains("EndpointId"),
@@ -316,15 +316,12 @@ mod tests {
             .expect("请设置 SMELT_IROH_TEST_PEER=<EndpointId>");
         let relay = std::env::var("SMELT_IROH_TEST_RELAY")
             .expect("请设置 SMELT_IROH_TEST_RELAY=<Relay URL>");
-        let relay_token = std::env::var("SMELT_IROH_TEST_RELAY_TOKEN").unwrap_or_default();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let p = start(&peer, &relay, &relay_token)
-                .await
-                .expect("隧道应能建立");
+            let p = start(&peer, &relay).await.expect("隧道应能建立");
             assert_eq!(port().await, Some(p), "port() 应报告刚建立的隧道");
             // 幂等：同一个 peer 再来一次不该换端口。
-            assert_eq!(start(&peer, &relay, &relay_token).await.unwrap(), p);
+            assert_eq!(start(&peer, &relay).await.unwrap(), p);
 
             let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", p))
                 .await

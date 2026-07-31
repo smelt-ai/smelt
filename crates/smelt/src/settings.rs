@@ -847,17 +847,13 @@ pub fn uninstall_agent_hooks() -> Result<(), String> {
 // ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
 
 /// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。网关运行时
-/// token/绑定地址不落盘（见 [`RemoteRuntimeState`]）；用户填写的 relay 地址和可选
-/// relay 访问令牌会持久化，文件按私密配置保存。
+/// token/绑定地址不落盘（见 [`RemoteRuntimeState`]）；用户填写的 relay 地址会持久化。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub enabled: bool,
     /// 用户自己的 iroh relay。空值表示未配置，不会回退到公共 relay。
     #[serde(default)]
     pub iroh_relay: String,
-    /// 自建 relay 的可选共享访问令牌。
-    #[serde(default)]
-    pub iroh_relay_token: String,
     /// 这条链接是否允许 approve/deny/reply（Phase 6，见 smeltd.rs「远程操控」）。
     /// `#[serde(default)]`：比 `enabled` 更晚加，旧配置缺省按只读处理——不能让
     /// 老用户的配置在升级后突然变成可写。链接分享出去本身就是授权，这里没有
@@ -871,7 +867,6 @@ impl Default for RemoteConfig {
         Self {
             enabled: false,
             iroh_relay: String::new(),
-            iroh_relay_token: String::new(),
             write_enabled: false,
         }
     }
@@ -929,7 +924,6 @@ impl Global for IrohRuntimeState {}
 fn spawn_iroh_start(write: bool, cx: &mut App) {
     let config = cx.global::<RemoteConfig>().clone();
     let relay = config.iroh_relay;
-    let relay_token = config.iroh_relay_token;
     cx.set_global(IrohRuntimeState {
         connecting: true,
         ..Default::default()
@@ -938,7 +932,7 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
         let (result, remote, qr_png) = cx
             .background_executor()
             .spawn(async move {
-                let result = terminal::iroh_start(write, &relay, &relay_token);
+                let result = terminal::iroh_start(write, &relay);
                 // iroh_start 可能顺带把网关也开了（守护侧的 ensure_remote_gateway），
                 // 所以要回读一次网关现状，否则 UI 上「本机链接」那块会一直是空的。
                 let remote = terminal::remote_status();
@@ -950,12 +944,7 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
                         s.relay.as_deref(),
                     ) {
                         (Some(id), Some(tok), Some(relay)) if !tok.is_empty() => {
-                            qr_png_for_url(&smelt_core::pairing::iroh_pairing_uri(
-                                id,
-                                tok,
-                                relay,
-                                s.relay_token.as_deref().unwrap_or_default(),
-                            ))
+                            qr_png_for_url(&smelt_core::pairing::iroh_pairing_uri(id, tok, relay))
                         }
                         _ => None,
                     },
@@ -976,12 +965,7 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
                         s.relay.as_deref(),
                     ) {
                         (Some(id), Some(tok), Some(relay)) if !tok.is_empty() => {
-                            Some(smelt_core::pairing::iroh_pairing_uri(
-                                id,
-                                tok,
-                                relay,
-                                s.relay_token.as_deref().unwrap_or_default(),
-                            ))
+                            Some(smelt_core::pairing::iroh_pairing_uri(id, tok, relay))
                         }
                         _ => None,
                     };
@@ -1013,13 +997,9 @@ fn spawn_iroh_start(write: bool, cx: &mut App) {
     .detach();
 }
 
-fn apply_iroh_relay_value(value: SharedString, token: bool, cx: &mut App) {
+fn apply_iroh_relay_value(value: SharedString, cx: &mut App) {
     let mut config = cx.global::<RemoteConfig>().clone();
-    if token {
-        config.iroh_relay_token = value.trim().to_string();
-    } else {
-        config.iroh_relay = value.trim().to_string();
-    }
+    config.iroh_relay = value.trim().to_string();
     let was_enabled = config.enabled;
     save_remote_config(&config);
     cx.set_global(config);
@@ -1031,14 +1011,6 @@ fn apply_iroh_relay_value(value: SharedString, token: bool, cx: &mut App) {
         });
     }
     cx.refresh_windows();
-}
-
-fn random_relay_access_token() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
 }
 
 /// 唯一远程开关：本机网关只作为 iroh 的 loopback 落点，不单独对用户暴露。
@@ -2972,78 +2944,11 @@ impl Workspace {
                     "Relay 地址",
                     SettingField::input(
                         |cx: &App| cx.global::<RemoteConfig>().iroh_relay.clone().into(),
-                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, false, cx),
+                        |v: SharedString, cx: &mut App| apply_iroh_relay_value(v, cx),
                     ),
                 )
                 .description(
                     "填写自建 relay 的域名、IP 或完整 URL；省略协议时使用 https://。留空不会使用公共 relay。",
-                ),
-                SettingItem::new(
-                    "Relay 访问令牌",
-                    SettingField::render(move |_, _window, cx: &mut App| {
-                        let token = cx.global::<RemoteConfig>().iroh_relay_token.clone();
-                        let configured = !token.is_empty();
-                        let token_copy = token.clone();
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(if configured { "已配置" } else { "未配置" }),
-                            )
-                            .child(
-                                btn(
-                                    "generate-relay-token",
-                                    if configured { "重新生成" } else { "随机生成" }.into(),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    |_, window, cx: &mut App| {
-                                        let token = random_relay_access_token();
-                                        apply_iroh_relay_value(token.clone().into(), true, cx);
-                                        copy_with_feedback(
-                                            token,
-                                            "generate-relay-token",
-                                            "新令牌已生成并复制；请同步到 Relay 服务端",
-                                            window,
-                                            cx,
-                                        );
-                                    },
-                                ),
-                            )
-                            .when(configured, |row| {
-                                row.child(
-                                    btn(
-                                        "copy-relay-token",
-                                        copy_btn_label("copy-relay-token", "复制令牌", cx),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        move |_, window, cx: &mut App| {
-                                            copy_with_feedback(
-                                                token_copy.clone(),
-                                                "copy-relay-token",
-                                                "已复制 Relay 令牌",
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ),
-                                )
-                                .child(btn("clear-relay-token", "清除".into()).on_mouse_down(
-                                    MouseButton::Left,
-                                    |_, _window, cx: &mut App| {
-                                        apply_iroh_relay_value("".into(), true, cx);
-                                    },
-                                ))
-                            })
-                            .into_any_element()
-                    }),
-                )
-                .description(
-                    "随机生成后会自动复制；需将同一令牌配置到 Relay 服务端。令牌会随配对码进入手机安全存储。",
                 ),
                 SettingItem::new(
                     "允许远程写入",
@@ -3362,7 +3267,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod iroh_pairing_tests {
-    use super::{RemoteConfig, qr_png_for_url, random_relay_access_token};
+    use super::{RemoteConfig, qr_png_for_url};
     use smelt_core::pairing::iroh_pairing_uri;
 
     #[test]
@@ -3376,13 +3281,6 @@ mod iroh_pairing_tests {
     }
 
     #[test]
-    fn generated_relay_access_token_is_64_char_hex() {
-        let token = random_relay_access_token();
-        assert_eq!(token.len(), 64);
-        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    }
-
-    #[test]
     fn pairing_uri_renders_to_a_qr() {
         // 配对码比 http 链接长（endpoint_id 是 64 个十六进制字符），
         // 这里钉住「它确实能编成二维码」——超长内容会让 QrCode::new 失败。
@@ -3390,7 +3288,6 @@ mod iroh_pairing_tests {
             &"a".repeat(64),
             &"b".repeat(32),
             "https://relay.example.test",
-            "relay-token",
         );
         let png = qr_png_for_url(&uri).expect("配对码必须能生成二维码");
         assert!(!png.is_empty());

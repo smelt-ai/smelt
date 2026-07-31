@@ -31,11 +31,6 @@ class PairingConfig {
     return value.isEmpty ? null : value;
   }
 
-  String get irohRelayToken {
-    if (!isIroh) return '';
-    return Uri.parse(endpoint).queryParameters['relay_token']?.trim() ?? '';
-  }
-
   factory PairingConfig.fromFields(String endpoint, String token) {
     final trimmedEndpoint = endpoint.trim();
     final trimmedToken = token.trim();
@@ -87,15 +82,11 @@ class PairingConfig {
         'Pairing code is missing its relay address. Generate a new code on the Mac.',
       );
     }
-    final relayToken = uri.queryParameters['relay_token']?.trim() ?? '';
     // 网关 token 单独存；relay 配置保留在稳定 endpoint 中，供每次重建隧道使用。
     final endpoint = Uri(
       scheme: irohScheme,
       host: endpointId,
-      queryParameters: {
-        'relay': relayUrl,
-        if (relayToken.isNotEmpty) 'relay_token': relayToken,
-      },
+      queryParameters: {'relay': relayUrl},
     );
     return PairingConfig(endpoint: endpoint.toString(), token: resolvedToken);
   }

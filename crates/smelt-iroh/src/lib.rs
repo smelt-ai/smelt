@@ -31,12 +31,11 @@ pub const ALPN: &[u8] = b"smelt/tunnel/1";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelaySettings {
     pub url: RelayUrl,
-    pub token: Option<String>,
 }
 
 impl RelaySettings {
     /// 接受域名、IP 或完整 URL；省略 scheme 时按生产 relay 补成 HTTPS。
-    pub fn parse(address: &str, token: &str) -> Result<Self> {
+    pub fn parse(address: &str) -> Result<Self> {
         let address = address.trim();
         anyhow::ensure!(!address.is_empty(), "请先填写 iroh relay 地址");
         let normalized = if address.contains("://") {
@@ -47,20 +46,11 @@ impl RelaySettings {
         let url: RelayUrl = normalized
             .parse()
             .with_context(|| format!("不是合法的 iroh relay 地址：{address}"))?;
-        let token = token.trim();
-        Ok(Self {
-            url,
-            token: (!token.is_empty()).then(|| token.to_string()),
-        })
+        Ok(Self { url })
     }
 
     fn relay_map(&self) -> RelayMap {
-        let config = RelayConfig::from(self.url.clone());
-        let config = match &self.token {
-            Some(token) => config.with_auth_token(token.clone()),
-            None => config,
-        };
-        config.into()
+        RelayConfig::from(self.url.clone()).into()
     }
 }
 
@@ -338,18 +328,16 @@ mod tests {
 
     #[test]
     fn relay_settings_adds_https_to_domain_or_ip() {
-        let domain = RelaySettings::parse("relay.example.test", " token ").unwrap();
+        let domain = RelaySettings::parse("relay.example.test").unwrap();
         assert_eq!(domain.url.to_string(), "https://relay.example.test/");
-        assert_eq!(domain.token.as_deref(), Some("token"));
 
-        let ip = RelaySettings::parse("192.0.2.10:8443", "").unwrap();
+        let ip = RelaySettings::parse("192.0.2.10:8443").unwrap();
         assert_eq!(ip.url.to_string(), "https://192.0.2.10:8443/");
-        assert_eq!(ip.token, None);
     }
 
     #[test]
     fn relay_settings_rejects_empty_address() {
-        assert!(RelaySettings::parse("  ", "token").is_err());
+        assert!(RelaySettings::parse("  ").is_err());
     }
 
     #[test]

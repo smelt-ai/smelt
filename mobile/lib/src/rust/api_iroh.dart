@@ -17,11 +17,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<int> irohTunnelStart({
   required String endpointId,
   required String relayUrl,
-  required String relayToken,
 }) => RustLib.instance.api.crateApiIrohIrohTunnelStart(
   endpointId: endpointId,
   relayUrl: relayUrl,
-  relayToken: relayToken,
 );
 
 /// 停止 iroh 隧道。没有隧道时是 no-op。
@@ -49,21 +47,15 @@ class IrohPairing {
   final String endpointId;
   final String token;
   final String relayUrl;
-  final String relayToken;
 
   const IrohPairing({
     required this.endpointId,
     required this.token,
     required this.relayUrl,
-    required this.relayToken,
   });
 
   @override
-  int get hashCode =>
-      endpointId.hashCode ^
-      token.hashCode ^
-      relayUrl.hashCode ^
-      relayToken.hashCode;
+  int get hashCode => endpointId.hashCode ^ token.hashCode ^ relayUrl.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -72,8 +64,7 @@ class IrohPairing {
           runtimeType == other.runtimeType &&
           endpointId == other.endpointId &&
           token == other.token &&
-          relayUrl == other.relayUrl &&
-          relayToken == other.relayToken;
+          relayUrl == other.relayUrl;
 }
 
 /// iroh 当前选中的实际传输路径和 QUIC RTT。

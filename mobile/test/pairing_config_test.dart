@@ -123,7 +123,7 @@ void main() {
       expect(pairing.irohEndpointId, 'k7d3ffb1c9a24e5f');
       expect(pairing.token, 'secret-token');
       expect(pairing.irohRelayUrl, 'https://relay.example.test');
-      expect(pairing.irohRelayToken, 'relay-secret');
+      expect(pairing.endpoint, isNot(contains('relay_token')));
       expect(
         pairing.endpoint,
         contains('relay=https%3A%2F%2Frelay.example.test'),

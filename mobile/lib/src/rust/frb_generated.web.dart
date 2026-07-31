@@ -121,7 +121,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       cst_encode_String(raw.endpointId),
       cst_encode_String(raw.token),
       cst_encode_String(raw.relayUrl),
-      cst_encode_String(raw.relayToken),
     ].jsify()!;
   }
 
@@ -228,12 +227,10 @@ class RustLibWire implements BaseWire {
     NativePortType port_,
     String endpoint_id,
     String relay_url,
-    String relay_token,
   ) => wasmModule.wire__crate__api_iroh__iroh_tunnel_start(
     port_,
     endpoint_id,
     relay_url,
-    relay_token,
   );
 
   void wire__crate__api_iroh__iroh_tunnel_stop(NativePortType port_) =>
@@ -263,7 +260,6 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
     NativePortType port_,
     String endpoint_id,
     String relay_url,
-    String relay_token,
   );
 
   external void wire__crate__api_iroh__iroh_tunnel_stop(NativePortType port_);
