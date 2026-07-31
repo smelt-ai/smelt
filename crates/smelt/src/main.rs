@@ -40,6 +40,7 @@ mod storage_cleanup;
 mod tasks;
 mod terminal;
 mod terminal_view;
+mod workspace_frame;
 
 mod updater;
 
@@ -5792,9 +5793,6 @@ impl Render for Workspace {
         let shell_surface: Hsla = ui_theme::tint(ui_theme::bg_rail(), 0xf4).into();
         let sidebar_surface: Hsla = ui_theme::tint(ui_theme::bg_elev(), 0xf0).into();
         let stage_surface: Hsla = ui_theme::tint(ui_theme::bg_panel(), 0xf0).into();
-        let glass_border: Rgba = gpui::transparent_black().into();
-        // 左栏、舞台、Inspector 是同一级的三张外壳卡片，圆角必须共用一处。
-        let workspace_card_radius = px(8.);
 
         let sidebar_motion = self.sidebar_transition.frame();
         if sidebar_motion.animating {
@@ -5811,6 +5809,10 @@ impl Render for Workspace {
         }
         let inspector_panel_el = (inspector_motion.mounted && !self.inspector_panel_promoted())
             .then(|| self.render_inspector_panel(window, cx));
+        // inspector 没停靠在旁边时，舞台/返回条/展开的 inspector rail 都会变成
+        // 贴着窗口右边缘那一块，得给右上角浮着的全屏/终端抽屉/侧边面板 3 颗
+        // 图标让位置；停靠时那颗图标条自己在右边接管，这几处就不用多留。
+        let right_edge = inspector_panel_el.is_none();
         // 底部抽屉（快捷终端）同一套挂载过渡；具体高度交给下面真正的
         // v_resizable/resizable_panel 组件去管（拖拽 + 动画期间的程序化改宽度
         // 都走那一套，不再自己手算 opacity/height）。
@@ -5835,7 +5837,7 @@ impl Render for Workspace {
         // 需 .flex()，否则单 pane 的叶子 flex_1 不生效、塌缩到内容高度（边框不到底）。
         // 旧右侧「结构面板」已被 inspector + 舞台头承接，不再渲染。
         let content = if self.sessions.get(self.active_session).is_some() {
-            let stage_header = self.render_stage_header(!self.sidebar_open, cx);
+            let stage_header = self.render_stage_header(!self.sidebar_open, right_edge, cx);
             div()
                 .flex_1()
                 .min_w_0()
@@ -5912,7 +5914,7 @@ impl Render for Workspace {
                 Some(MainView::Files) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(!self.sidebar_open, cx))
+                    .child(self.render_inspector_rail(!self.sidebar_open, right_edge, cx))
                     .child(self.render_inspector_files(window, cx))
                     .into_any_element(),
                 // GIT 同理：展开只是复用停靠面板（rail + git_narrow_panel）铺满
@@ -5921,19 +5923,19 @@ impl Render for Workspace {
                 Some(MainView::Git) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(!self.sidebar_open, cx))
+                    .child(self.render_inspector_rail(!self.sidebar_open, right_edge, cx))
                     .child(self.git_narrow_panel(window, cx))
                     .into_any_element(),
                 Some(MainView::Skills) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(!self.sidebar_open, cx))
+                    .child(self.render_inspector_rail(!self.sidebar_open, right_edge, cx))
                     .child(self.render_inspector_skills(cx))
                     .into_any_element(),
                 Some(v) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_stage_back_bar(v, !self.sidebar_open, cx))
+                    .child(self.render_stage_back_bar(v, !self.sidebar_open, right_edge, cx))
                     .child(self.render_stage_override(v, window, cx))
                     .into_any_element(),
                 None => content.into_any_element(),
@@ -5969,16 +5971,7 @@ impl Render for Workspace {
                     .flex_none()
                     .pr(sidebar_gap)
                     .child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .relative()
-                            .overflow_hidden()
-                            .rounded(workspace_card_radius)
-                            .border_1()
-                            .border_color(glass_border)
-                            .bg(sidebar_surface)
-                            .shadow_sm()
+                        workspace_frame::card(sidebar_surface)
                             // 内容避开浮在玻璃上的 macOS 交通灯；面板背景本身继续
                             // 延伸到窗口顶边，形成参考应用的一体化侧栏。
                             .pt(px(34.))
@@ -5986,13 +5979,12 @@ impl Render for Workspace {
                                 // 交通灯安全区也使用标题栏表面；否则只有左栏圆角里
                                 // 露出较暗的侧栏底色，跟舞台/Inspector 的亮顶栏形成
                                 // 不同的内轮廓，看起来就像三块用了不同半径。
-                                div()
+                                workspace_frame::top_bar()
                                     .absolute()
                                     .top_0()
                                     .left_0()
                                     .right_0()
-                                    .h(px(34.))
-                                    .bg(rgb(ui_theme::bg_bar())),
+                                    .h(px(34.)),
                             )
                             .opacity(sidebar_motion.progress.max(0.01))
                             .child(list_el),
@@ -6010,17 +6002,7 @@ impl Render for Workspace {
         // 平白多出一截空白——之前踩过），而是交给舞台头/返回条/inspector 横条
         // 自己按 corner_guard 在同一行左边让出交通灯宽度，见 stage.rs /
         // inspector.rs 里 corner_guard 参数的用法。
-        let stage_card = div()
-            .size_full()
-            .flex()
-            .relative()
-            .overflow_hidden()
-            .rounded(workspace_card_radius)
-            .border_1()
-            .border_color(glass_border)
-            .bg(stage_surface)
-            .shadow_sm()
-            .child(stage);
+        let stage_card = workspace_frame::card(stage_surface).child(stage);
 
         // 舞台 + inspector 用自己独立的一层 h_resizable（stage_inspector_resize），
         // 跟外层 sidebar|右侧区 的 workspace_resize 是两棵分开的树。这样底部抽屉
@@ -6035,16 +6017,7 @@ impl Render for Workspace {
                 px(280.)
             };
 
-            let inspector_card = div()
-                .size_full()
-                .flex()
-                .relative()
-                .overflow_hidden()
-                .rounded(workspace_card_radius)
-                .border_1()
-                .border_color(glass_border)
-                .bg(sidebar_surface)
-                .shadow_sm()
+            let inspector_card = workspace_frame::card(sidebar_surface)
                 // 同 stage_card：不再预留交通灯安全区，tab 横条直接顶到卡片顶边。
                 .opacity(progress.max(0.01))
                 .child(inspector);
