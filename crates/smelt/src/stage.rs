@@ -1,4 +1,4 @@
-//! 会话舞台的头部（44px：会话名 + 状态胶囊 + 次要信息 + split）
+//! 会话舞台的头部（34px：会话名 + 状态胶囊 + 次要信息）
 //! 终端与 ACP 会话共用这一层，避免在终端底部重复展示状态和快捷键。
 //! 头栏里只有状态胶囊保留卡片底+边框，是唯一该抢视线的颜色；模型/token/
 //! cwd/git 统一降级成 "·" 分隔的纯文字，避免所有信息一样重导致扫不出重点。
@@ -226,7 +226,11 @@ impl Workspace {
         let e_git = this.clone();
         Some(
             div()
-                .h(px(44.))
+                // 统一 34px：跟侧栏顶部导航行、拖拽悬浮层、inspector rail 同一个
+                // 基准，不管侧栏开合都是这个高度——开合时舞台头只变宽不变高，
+                // 侧栏收起时又正好跟红绿灯（`TitleBar::title_bar_options()` 里
+                // 固定的 traffic_light_position）对上同一条水平线。
+                .h(px(34.))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -245,6 +249,9 @@ impl Workspace {
                         // 纯省略号「…」，标题（这行最该保住的信息）反而完全看不见。
                         // 该让步的是下面 info_cluster 那串「随时能查」的次要信息。
                         .min_w(px(56.))
+                        // 标题吃掉头栏真正剩余的宽度；末尾不再放另一个 flex_1
+                        // 空白跟它平分空间，否则明明右侧空着，标题仍会先缩成省略号。
+                        .flex_1()
                         .flex_shrink(1.)
                         .overflow_hidden()
                         .text_sm()
@@ -323,8 +330,7 @@ impl Workspace {
                                 cx.notify();
                             });
                         })
-                }))
-                .child(div().flex_1()),
+                })),
         )
     }
 }

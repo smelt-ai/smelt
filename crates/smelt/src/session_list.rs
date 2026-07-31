@@ -1290,7 +1290,7 @@ impl Workspace {
             rows = rows.child(group_body);
         }
 
-        // ---- 底部：打开项目（原项目 rail 底部的「+」）----
+        // ---- 底部操作条：打开项目 + 设置 ----
         let e_open = this.clone();
         let e_settings = this.clone();
         let has_update = self.update_available();
@@ -1300,24 +1300,38 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .px_3()
-            .py_1p5()
+            .px_2()
+            .py_2()
             .border_t_1()
             .border_color(rgb(ui_theme::border_dim()))
             .child(
                 div()
                     .id("open-project")
-                    .mr_2()
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_muted()))
+                    .h(px(32.))
+                    .flex_1()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(6.))
                     .cursor_pointer()
-                    .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                    .child("+ 打开项目")
+                    .text_sm()
+                    .font_medium()
+                    .text_color(rgb(ui_theme::text_mid()))
+                    .hover(|d| {
+                        d.bg(rgb(ui_theme::bg_row_hover()))
+                            .text_color(rgb(ui_theme::text_bright()))
+                    })
+                    .child(
+                        Icon::new(IconName::FolderOpen)
+                            .size(px(14.))
+                            .text_color(rgb(ui_theme::text_muted())),
+                    )
+                    .child("打开项目")
                     .on_click(move |_ev, _window, cx| {
                         e_open.update(cx, |ws, cx| ws.open_project(cx));
                     }),
             )
-            .child(div().flex_1())
             .child(
                 div()
                     .id("sidebar-settings-entry")
@@ -1325,7 +1339,6 @@ impl Workspace {
                     .child(
                         Button::new("sidebar-settings-btn")
                             .ghost()
-                            .xsmall()
                             .icon(IconName::Settings)
                             .tooltip("设置  ⌘,")
                             .dropdown_menu(move |menu, _window, _cx| {
@@ -1396,8 +1409,8 @@ impl Workspace {
                         d.child(
                             div()
                                 .absolute()
-                                .top(px(2.))
-                                .right(px(2.))
+                                .top(px(4.))
+                                .right(px(4.))
                                 .size(px(5.))
                                 .rounded_full()
                                 .bg(rgb(ui_theme::red())),
