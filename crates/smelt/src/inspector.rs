@@ -11,7 +11,7 @@ use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
-use crate::{MainView, Workspace, ui_theme};
+use crate::{MainView, Workspace, ui_theme, workspace_frame};
 
 /// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
 /// `.group_hover()`）。
@@ -117,6 +117,7 @@ impl Workspace {
     pub(crate) fn render_inspector_rail(
         &mut self,
         corner_guard: bool,
+        right_edge: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         // GIT 角标：当前项目改动文件数（读 git status 缓存，没有就不显示）。
@@ -156,7 +157,7 @@ impl Workspace {
             b
         };
 
-        div()
+        workspace_frame::top_bar()
             .w_full()
             .h(px(34.))
             .flex_none()
@@ -165,13 +166,15 @@ impl Workspace {
             .items_center()
             // tab 横条独立成 bg_bar 表面：跟下面的列表/面板体（bg_elev）拉开一档，
             // 读起来像一条工具栏而不是列表的第一行。
-            .bg(rgb(ui_theme::bg_bar()))
-            .border_b_1()
-            .border_color(rgb(ui_theme::border_dim()))
             // 128px：同 stage.rs corner_guard 注释——要避开的不只是交通灯，
             // 还有 main.rs 顶部拖拽层里常驻绝对定位的「切换左侧栏」图标
             // （left 92px + 24px 宽）。
             .when(corner_guard, |d| d.pl(px(128.)))
+            // 停靠态 / 展开态都贴着窗口右边缘，右上角浮着全屏/终端抽屉/
+            // 侧边面板 3 颗图标（main.rs 那个 h_flex），tab 横条不留够空间
+            // FILES/GIT/SKILL 和下划线会直接怼上图标，见 render_stage_header
+            // 同款注释。
+            .when(right_edge, |d| d.pr(px(100.)))
             .child(
                 {
                     let mut bar = TabBar::new("inspector-rail")
@@ -221,8 +224,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        // 停靠 Inspector 永远在窗口右侧，不会碰到左上角交通灯。
-        let tabs = self.render_inspector_rail(false, cx);
+        // 停靠 Inspector 永远在窗口右侧，不会碰到左上角交通灯；但它自己就是
+        // 贴着窗口右边缘的那张卡，得让 tab 横条给右上角浮着的图标留位置。
+        let tabs = self.render_inspector_rail(false, true, cx);
         let body: AnyElement = match self.inspector_tab {
             InspectorTab::Files => self.render_inspector_files(window, cx),
             InspectorTab::Git => self.render_inspector_git(window, cx),

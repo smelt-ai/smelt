@@ -10,7 +10,9 @@ use gpui::*;
 use gpui_component::*;
 
 use crate::inspector::InspectorTab;
-use crate::{AgentStatus, MainView, SessionKind, Workspace, session_history, ui_theme};
+use crate::{
+    AgentStatus, MainView, SessionKind, Workspace, session_history, ui_theme, workspace_frame,
+};
 
 /// 状态胶囊文案（与会话列表副标题同一套口径）。
 fn phase_text(status: AgentStatus) -> &'static str {
@@ -30,6 +32,7 @@ impl Workspace {
         &self,
         v: MainView,
         corner_guard: bool,
+        right_edge: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         // match 保持穷尽，非 History 变体若误走到这里应尽早暴露调用错误。
@@ -40,7 +43,7 @@ impl Workspace {
             }
         };
         let this = cx.entity();
-        div()
+        workspace_frame::top_bar()
             .h(px(32.))
             .flex_shrink_0()
             .flex()
@@ -52,13 +55,15 @@ impl Workspace {
             // 128px 不是随手拍的：main.rs 顶部拖拽层里的「切换左侧栏」图标固定
             // 绝对定位在 left(92px)、size_6（24px），92+24=116 再加一点间距——
             // 之前给 92px 只避开了交通灯，没避开这颗常驻图标，标题文字被它糊住。
-            .when(corner_guard, |d| d.pl(px(128.)).pr_3())
-            .when(!corner_guard, |d| d.px_3())
+            .when(corner_guard, |d| d.pl(px(128.)))
+            // 右边同理：这条横条贴着窗口右边缘时，右上角浮着全屏/终端抽屉/
+            // 侧边面板 3 颗 size_6 图标（main.rs 那个 h_flex：3*24 + 2*4 gap +
+            // 10 右边距 ≈ 90px），不留够空间标题/内容会被糊住。
+            .when(right_edge, |d| d.pr(px(100.)))
+            .when(!right_edge, |d| d.pr_3())
+            .when(!corner_guard, |d| d.pl_3())
             // 跟 44px 舞台头统一用 bg_bar：这条返回条现在紧挨着同样刷成 bg_bar
             // 的顶部安全区，两截颜色对不上就又会露出一条突兀的分界。
-            .bg(rgb(ui_theme::bg_bar()))
-            .border_b_1()
-            .border_color(rgb(ui_theme::border_dim()))
             .child(
                 div()
                     .id("stage-back")
@@ -106,6 +111,7 @@ impl Workspace {
     pub(crate) fn render_stage_header(
         &mut self,
         corner_guard: bool,
+        right_reserve: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let ix = self.active_session;
@@ -225,7 +231,7 @@ impl Workspace {
 
         let e_git = this.clone();
         Some(
-            div()
+            workspace_frame::top_bar()
                 // 统一 34px：跟侧栏顶部导航行、拖拽悬浮层、inspector rail 同一个
                 // 基准，不管侧栏开合都是这个高度——开合时舞台头只变宽不变高，
                 // 侧栏收起时又正好跟红绿灯（`TitleBar::title_bar_options()` 里
@@ -235,14 +241,16 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .when(corner_guard, |d| d.pl(px(128.)).pr_4())
-                .when(!corner_guard, |d| d.px_4())
+                .when(corner_guard, |d| d.pl(px(128.)))
+                .when(!corner_guard, |d| d.pl_4())
+                // 右边贴窗口边缘时（inspector 没停靠在旁边）要避开右上角浮着的
+                // 全屏/终端抽屉/侧边面板 3 颗图标，见 render_stage_back_bar 同款
+                // 注释；inspector 停靠时它在旁边接管右边缘，这里就不用多留。
+                .when(right_edge, |d| d.pr(px(100.)))
+                .when(!right_edge, |d| d.pr_4())
                 // 舞台头独立成 bg_bar 表面：跟下面终端/消息流的 bg_panel 拉开层次，
                 // 呼应参考应用「聊天头栏 vs 消息区」的色阶差，不再是同一块底上
                 // 光靠一条描边分隔。
-                .bg(rgb(ui_theme::bg_bar()))
-                .border_b_1()
-                .border_color(rgb(ui_theme::border_dim()))
                 .child(
                     div()
                         // 收窄到极限也至少留够几个字——之前是 0，pane 一变窄就先塌成
