@@ -300,6 +300,16 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     c.accent_foreground = rgb(p.text_bright).into();
     c.danger = rgb(p.red).into();
     c.danger_foreground = rgb(p.on_accent).into();
+    // Tab（inspector.rs 的 FILES/GIT/SKILL 用的 gpui_component::tab::TabBar）：
+    // 库自带的 tab_foreground/tab_active_foreground 是内置深色主题的固定值，
+    // 不跟着上面这些 palette 覆写走，跟其余全用 ui_theme 色板的界面挨在一起
+    // 会有点"格格不入"（灰阶、字重都对不上）。这里收敛成跟舞台头标题同一套
+    // text_muted/text_bright。
+    c.tab_foreground = rgb(p.text_muted).into();
+    c.tab_active_foreground = rgb(p.text_bright).into();
+    c.tab_bar = c.background;
+    c.tab = transparent_black().into();
+    c.tab_active = transparent_black().into();
 
     // 列表 / 侧栏：会话列表与文件树都在这一层，必须跟自绘的行底同色。
     c.list = rgb(p.bg_elev).into();
