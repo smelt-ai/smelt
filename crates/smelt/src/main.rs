@@ -6065,17 +6065,6 @@ impl Render for Workspace {
                             // 内容避开浮在玻璃上的 macOS 交通灯；面板背景本身继续
                             // 延伸到窗口顶边，形成参考应用的一体化侧栏。
                             .pt(px(34.))
-                            .child(
-                                // 交通灯安全区也使用标题栏表面；否则只有左栏圆角里
-                                // 露出较暗的侧栏底色，跟舞台/Inspector 的亮顶栏形成
-                                // 不同的内轮廓，看起来就像三块用了不同半径。
-                                workspace_frame::top_bar()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .right_0()
-                                    .h(px(34.)),
-                            )
                             .opacity(sidebar_motion.progress.max(0.01))
                             .child(list_el),
                     ),
