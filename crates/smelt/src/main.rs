@@ -6639,17 +6639,16 @@ impl Render for Workspace {
                                     .when(drawer_open, |s| s.bg(ui_theme::overlay(0x18)))
                                     .hover(|s| s.bg(ui_theme::overlay(0x18)))
                                     .child(
-                                        // panel-bottom.svg 没有箭头，只有一根贴着按钮
-                                        // 自身圆角边框的横线，16px 下几乎看不出来
-                                        // （之前"展开后 icon 消失"就是这个）。统一用
-                                        // 带箭头的 panel-bottom-open 图标，展开时把箭头
-                                        // 转 180°变成朝下（收起提示），跟右侧面板开关的
-                                        // 双图标一样全程都有清晰可辨的箭头。
-                                        Icon::new(IconName::PanelBottomOpen)
-                                            .size_4()
-                                            .when(drawer_open, |icon| {
-                                                icon.rotate(gpui::Radians(std::f32::consts::PI))
-                                            }),
+                                        // 简洁分栏风格：关闭态用 bundled 的 panel-bottom
+                                        // 细线图标，展开态换成右侧自带实心色块的
+                                        // panel-bottom-filled——靠色块区分开合，不用
+                                        // 带箭头的 -open 变体（对齐 Codex 工具栏风格）。
+                                        if drawer_open {
+                                            Icon::empty().path("smelt-icons/panel-bottom-filled.svg")
+                                        } else {
+                                            Icon::new(IconName::PanelBottom)
+                                        }
+                                        .size_4(),
                                     )
                                     .tooltip(|window, cx| {
                                         gpui_component::tooltip::Tooltip::new("终端面板")
@@ -6680,11 +6679,14 @@ impl Render for Workspace {
                                     .when(panel_visible, |s| s.bg(ui_theme::overlay(0x18)))
                                     .hover(|s| s.bg(ui_theme::overlay(0x18)))
                                     .child(
-                                        Icon::new(if panel_visible {
-                                            IconName::PanelRightClose
+                                        // 同上：关闭态用细线 PanelRight，展开态换成
+                                        // panel-right-filled 的实心色块，不用带箭头的
+                                        // -open/-close 变体。
+                                        if panel_visible {
+                                            Icon::empty().path("smelt-icons/panel-right-filled.svg")
                                         } else {
-                                            IconName::PanelRightOpen
-                                        })
+                                            Icon::new(IconName::PanelRight)
+                                        }
                                         .size_4(),
                                     )
                                     .tooltip(|window, cx| {
