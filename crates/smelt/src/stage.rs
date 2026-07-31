@@ -223,7 +223,6 @@ impl Workspace {
             info_cluster = info_cluster.child(seg);
         }
 
-        let e_split = this.clone();
         let e_git = this.clone();
         Some(
             div()
@@ -325,20 +324,7 @@ impl Workspace {
                             });
                         })
                 }))
-                .child(div().flex_1())
-                .children(is_term.then(|| {
-                    div()
-                        .id("stage-split")
-                        .text_xs()
-                        .font_family("monospace")
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(rgb(ui_theme::text_mid())))
-                        .child("split ⌘D")
-                        .on_click(move |_ev, _window, cx| {
-                            e_split.update(cx, |ws, cx| ws.split_active(Axis::Horizontal, cx));
-                        })
-                })),
+                .child(div().flex_1()),
         )
     }
 }
