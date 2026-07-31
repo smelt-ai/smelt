@@ -1003,7 +1003,11 @@ impl SystemSleepAssertion {
                 &mut id,
             )
         };
-        if result == 0 { Ok(Self { id }) } else { Err(result) }
+        if result == 0 {
+            Ok(Self { id })
+        } else {
+            Err(result)
+        }
     }
 }
 
@@ -4181,11 +4185,12 @@ fn acp_pending_question(reduced: &smelt_core::acp_session::AcpSessionState) -> O
 /// 把归约状态里的相位/待办问句同步进四色 `SessionState` 并广播。跟旧版 GUI
 /// `AcpView::sync_daemon_state` 是同一件事，只是现在算在 smeltd 侧。
 fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
-    let (phase, pending_question) = {
+    let (phase, pending_question, title) = {
         let reduced = sess.reduced.lock().unwrap();
         (
             compute_acp_daemon_phase(&reduced),
             acp_pending_question(&reduced),
+            smelt_core::acp_chat::auto_title(&reduced.entries),
         )
     };
     let now = std::time::SystemTime::now()
@@ -4199,6 +4204,7 @@ fn update_acp_daemon_state(sess: &AcpSession, subscribers: &Subscribers) {
         }
         st.phase = phase;
         st.pending_question = pending_question;
+        st.title = title;
         st.updated_at = now;
         st.clone()
     };

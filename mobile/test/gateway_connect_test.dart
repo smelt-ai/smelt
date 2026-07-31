@@ -172,6 +172,51 @@ void main() {
     await secondServer.close(force: true);
   });
 
+  test('reconnect errors are coalesced and cancel stops retry loop', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final socketReady = Completer<WebSocket>();
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socketReady.complete(socket);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+    });
+
+    var openCount = 0;
+    final errors = <String>[];
+    final service = GatewayService(
+      connectTimeout: const Duration(milliseconds: 200),
+      reconnectDelay: const Duration(milliseconds: 10),
+      irohTunnelOpener: (_, _, _) async {
+        openCount++;
+        if (openCount == 1) return server.port;
+        throw StateError('desktop is offline');
+      },
+    );
+    final errorSub = service.errorStream.listen(errors.add);
+
+    await service.connect(
+      'smelt+iroh://peer?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
+    final socket = await socketReady.future;
+    await _waitFor(() => service.state == WsState.connected);
+    await socket.close();
+    await _waitFor(() => openCount >= 4);
+
+    expect(errors, hasLength(1));
+    expect(errors.single, contains('正在自动重连'));
+
+    service.disconnect();
+    final attemptsAfterCancel = openCount;
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(service.state, WsState.disconnected);
+    expect(openCount, attemptsAfterCancel);
+    expect(errors, hasLength(1));
+
+    await errorSub.cancel();
+    await server.close(force: true);
+  });
+
   test('reports the selected iroh path and end-to-end latency', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final socketReady = Completer<WebSocket>();
