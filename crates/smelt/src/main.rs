@@ -1123,6 +1123,9 @@ struct WsState {
     /// 旧存档没有这个字段 → 启动时从各会话 cwd 反推一份（见 Workspace::new）。
     #[serde(default)]
     projects: Vec<String>,
+    /// PC 侧栏的跨端纯数据投影。移动端直接消费并过滤 ACP，不再重新推导菜单。
+    #[serde(default)]
+    menu: smelt_core::workspace_menu::WorkspaceMenuSnapshot,
     /// 当前活动会话索引。
     #[serde(default)]
     active_session: usize,
@@ -3294,6 +3297,7 @@ impl Workspace {
     /// workspace.json（失败静默忽略）。
     fn save_state(&self, cx: &mut Context<Self>) {
         let Some(path) = ws_state_path() else { return };
+        let menu = self.workspace_menu_snapshot(cx);
         let mut sessions: Vec<SessionState> = self
             .sessions
             .iter()
@@ -3381,6 +3385,7 @@ impl Workspace {
         let state = WsState {
             sessions,
             projects: self.projects.clone(),
+            menu,
             active_session: persisted_active_position(
                 self.active_session,
                 &self.restore_orphans,
@@ -3404,6 +3409,77 @@ impl Workspace {
             }
             let _ = std::fs::write(&path, json);
         }
+    }
+
+    /// 把 PC 当前真实侧栏投影成无 UI 的共享菜单。项目标签使用 project_groups 的
+    /// 消歧结果，会话标题直接使用 Session::title，因此移动端无需复制任何显示规则。
+    fn workspace_menu_snapshot(
+        &self,
+        cx: &App,
+    ) -> smelt_core::workspace_menu::WorkspaceMenuSnapshot {
+        use smelt_core::workspace_menu::{
+            WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
+            WorkspaceMenuSnapshot,
+        };
+
+        let groups = self.project_groups(cx);
+        let projects = groups
+            .iter()
+            .enumerate()
+            .map(|(order, group)| WorkspaceMenuProject {
+                root: group.root.clone(),
+                title: group.label.clone(),
+                order: order.min(u32::MAX as usize) as u32,
+            })
+            .collect();
+        let mut membership = vec![None; self.sessions.len()];
+        for (project_order, group) in groups.iter().enumerate() {
+            for &session_index in &group.sessions {
+                if let Some(slot) = membership.get_mut(session_index) {
+                    *slot = Some((project_order, group));
+                }
+            }
+        }
+
+        let sessions = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(session_order, session)| {
+                let (id, kind, agent) = match &session.kind {
+                    SessionKind::Term { active, .. } => (
+                        active.read(cx).session_id().to_string(),
+                        WorkspaceMenuSessionKind::Terminal,
+                        None,
+                    ),
+                    SessionKind::Acp(view) => {
+                        let view = view.read(cx);
+                        (
+                            view.session_id().to_string(),
+                            WorkspaceMenuSessionKind::Acp,
+                            Some(view.agent_kind().id().to_string()),
+                        )
+                    }
+                };
+                let project = membership.get(session_order).and_then(|value| *value);
+                Some(WorkspaceMenuSession {
+                    id,
+                    kind,
+                    title: session.title(cx),
+                    custom_title: session.custom_title.is_some(),
+                    cwd: session.cwd(cx),
+                    project_root: project.map(|(_, group)| group.root.clone()),
+                    project_title: project.map(|(_, group)| group.label.clone()),
+                    project_order: project
+                        .map(|(order, _)| order.min(u32::MAX as usize) as u32)
+                        .unwrap_or(u32::MAX),
+                    session_order: session_order.min(u32::MAX as usize) as u32,
+                    agent,
+                })
+            })
+            .collect();
+
+        WorkspaceMenuSnapshot::current(projects, sessions)
     }
 
     /// 「+」新建会话：继承当前会话活动终端的目录。
@@ -7543,6 +7619,9 @@ mod pane_state_tests {
 #[cfg(test)]
 mod workspace_state_tests {
     use super::{SidebarGrouping, WsState};
+    use smelt_core::workspace_menu::{
+        WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
+    };
 
     #[test]
     fn collapsed_projects_roundtrip() {
@@ -7555,6 +7634,32 @@ mod workspace_state_tests {
         let restored: WsState = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.collapsed_projects, state.collapsed_projects);
+    }
+
+    #[test]
+    fn shared_workspace_menu_roundtrips() {
+        let state = WsState {
+            menu: WorkspaceMenuSnapshot::current(
+                vec![],
+                vec![WorkspaceMenuSession {
+                    id: "acp-stable".into(),
+                    kind: WorkspaceMenuSessionKind::Acp,
+                    title: "会话文本".into(),
+                    custom_title: true,
+                    cwd: Some("/repo".into()),
+                    project_root: Some("/repo".into()),
+                    project_title: Some("repo".into()),
+                    project_order: 0,
+                    session_order: 0,
+                    agent: Some("codex".into()),
+                }],
+            ),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: WsState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.menu, state.menu);
     }
 
     #[cfg(test)]
