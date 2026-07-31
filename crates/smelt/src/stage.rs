@@ -148,7 +148,14 @@ impl Workspace {
             .and_then(|cwd| self.git_status.get(cwd))
             .and_then(|(_, status)| {
                 let branch = status.branch_name();
-                (!branch.is_empty()).then(|| (branch.to_string(), status.files.len()))
+                (!branch.is_empty()).then(|| {
+                    (
+                        branch.to_string(),
+                        status.files.len(),
+                        status.ahead_behind(),
+                        status.insertions_deletions(),
+                    )
+                })
             });
         // 终端会话没有实时用量上报，退而求其次：复用历史会话缓存，取该项目下
         // Claude Code 最近一次活跃会话的累计 token 数（近似值——终端里跑的不一定
@@ -285,7 +292,7 @@ impl Workspace {
                         .child(phase_label),
                 )
                 .child(info_cluster)
-                .children(git_summary.map(|(branch, changes)| {
+                .children(git_summary.map(|(branch, changes, (ahead, behind), (insertions, deletions))| {
                     div()
                         .id("stage-git-status")
                         .flex()
@@ -303,8 +310,28 @@ impl Workspace {
                             d.bg(rgb(ui_theme::bg_hover()))
                                 .text_color(rgb(ui_theme::text_bright()))
                         })
-                        .child(Icon::new(IconName::Github).size(px(12.)))
+                        .child(Icon::empty().path("smelt-icons/git-branch.svg").size(px(12.)))
                         .child(branch)
+                        .when(ahead > 0, |d| {
+                            d.child(format!("↑{ahead}"))
+                        })
+                        .when(behind > 0, |d| {
+                            d.child(format!("↓{behind}"))
+                        })
+                        .when(insertions > 0, |d| {
+                            d.child(
+                                div()
+                                    .text_color(rgb(ui_theme::diff_add_fg()))
+                                    .child(format!("+{insertions}")),
+                            )
+                        })
+                        .when(deletions > 0, |d| {
+                            d.child(
+                                div()
+                                    .text_color(rgb(ui_theme::diff_del_fg()))
+                                    .child(format!("-{deletions}")),
+                            )
+                        })
                         .when(changes > 0, |d| {
                             d.child(
                                 div()
