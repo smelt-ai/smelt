@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/main.dart';
 import 'package:smelt_mobile/models/pairing_config.dart';
+import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/pairing_storage.dart';
 
 class MemoryPairingStorage implements PairingStorage {
@@ -18,6 +19,35 @@ class MemoryPairingStorage implements PairingStorage {
 }
 
 void main() {
+  test(
+    'session list uses ACP conversation text instead of agent CLI label',
+    () {
+      const session = SessionSummary(
+        id: 'acp-1',
+        title: '修复移动端项目列表',
+        phase: 'idle',
+        agent: 'codex',
+        detail: '  正在检查列表数据  ',
+      );
+
+      expect(sessionListTitle(session), '修复移动端项目列表');
+      expect(sessionListSubtitle(session), '正在检查列表数据');
+    },
+  );
+
+  test('session list omits empty detail and has an ACP fallback title', () {
+    const session = SessionSummary(
+      id: 'acp-2',
+      title: '  ',
+      phase: 'idle',
+      agent: 'other',
+      detail: ' ',
+    );
+
+    expect(sessionListTitle(session), 'ACP conversation');
+    expect(sessionListSubtitle(session), isNull);
+  });
+
   test('message auto-follow only continues at the bottom', () {
     expect(isNearMessageBottom(0, 0), isTrue);
     expect(isNearMessageBottom(48, 0), isTrue);

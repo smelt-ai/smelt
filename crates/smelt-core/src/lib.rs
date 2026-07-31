@@ -24,4 +24,5 @@ pub mod pairing;
 pub mod remote_gateway;
 pub mod term_text;
 pub mod title_spinner;
+pub mod workspace_menu;
 pub mod workspace_override;

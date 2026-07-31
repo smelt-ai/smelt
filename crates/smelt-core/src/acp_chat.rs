@@ -35,6 +35,24 @@ pub enum AcpEntry {
     Divider(String),
 }
 
+/// 从首条用户消息生成稳定的会话标题。桌面侧栏、守护状态广播和移动端列表
+/// 共用这一份规则，避免同一会话在不同端显示成不同名字。
+pub fn auto_title(entries: &[AcpEntry]) -> Option<String> {
+    let prompt = entries.iter().find_map(|entry| match entry {
+        AcpEntry::User(text) if !text.trim().is_empty() => Some(text.trim()),
+        AcpEntry::UserWithImages { text, .. } if !text.trim().is_empty() => Some(text.trim()),
+        _ => None,
+    })?;
+    let single_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = single_line.chars();
+    let title: String = chars.by_ref().take(36).collect();
+    Some(if chars.next().is_some() {
+        format!("{title}...")
+    } else {
+        title
+    })
+}
+
 /// ACP/app-server 图片的传输与热升级快照表示。长期历史仍以 agent
 /// 自己的 transcript 为准，Smelt 不把图片重复写入 workspace.json。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,6 +280,32 @@ mod tests {
                     && images[0].mime == "image/png"
                     && images[0].data_b64 == "QUJD"
         ));
+    }
+
+    #[test]
+    fn auto_title_uses_first_non_empty_user_message() {
+        let entries = vec![
+            AcpEntry::Assistant {
+                text: "ignored".into(),
+                thought: false,
+            },
+            AcpEntry::User("  第一行\n  第二行  ".into()),
+            AcpEntry::User("later".into()),
+        ];
+        assert_eq!(auto_title(&entries).as_deref(), Some("第一行 第二行"));
+    }
+
+    #[test]
+    fn auto_title_supports_images_and_truncates_by_character() {
+        let text = "一".repeat(40);
+        let entries = vec![AcpEntry::UserWithImages {
+            text,
+            images: vec![],
+        }];
+        assert_eq!(
+            auto_title(&entries),
+            Some(format!("{}...", "一".repeat(36)))
+        );
     }
 
     #[test]

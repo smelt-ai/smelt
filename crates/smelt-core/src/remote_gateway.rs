@@ -28,6 +28,9 @@ use std::time::{Duration, Instant};
 use crate::agent_status::AgentStatus;
 use crate::attention::{AttentionItem, AttentionStore, apply_daemon_transition};
 use crate::daemon_state::{DaemonPhase, DaemonSessionState};
+use crate::workspace_menu::{
+    WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
+};
 
 pub fn sock_path() -> std::path::PathBuf {
     let dir = dirs::home_dir()
@@ -94,86 +97,111 @@ fn workspace_json_path() -> std::path::PathBuf {
         .join("workspace.json")
 }
 
-fn load_gui_acp_titles() -> std::collections::HashMap<String, String> {
+fn load_workspace_menu() -> WorkspaceMenuSnapshot {
     let Ok(raw) = std::fs::read_to_string(workspace_json_path()) else {
-        return std::collections::HashMap::new();
+        return WorkspaceMenuSnapshot::default();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return std::collections::HashMap::new();
+        return WorkspaceMenuSnapshot::default();
     };
-    value["sessions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|session| {
-            let id = session["acp"]["sid"].as_str()?;
-            let title = session["custom_title"].as_str()?.trim();
-            (!title.is_empty()).then(|| (id.to_string(), title.to_string()))
-        })
-        .collect()
+    workspace_menu_from_value(&value)
 }
 
-#[derive(Default)]
-struct MobileWorkspaceOrder {
-    projects: Vec<String>,
-    sessions: std::collections::HashMap<String, (usize, usize)>,
+fn workspace_menu_from_value(value: &serde_json::Value) -> WorkspaceMenuSnapshot {
+    if let Some(menu) = value.get("menu")
+        && let Ok(snapshot) = serde_json::from_value::<WorkspaceMenuSnapshot>(menu.clone())
+        && snapshot.version > 0
+    {
+        return snapshot;
+    }
+    legacy_workspace_menu_from_value(value)
 }
 
-fn mobile_workspace_order_from_value(value: &serde_json::Value) -> MobileWorkspaceOrder {
-    let projects = value["projects"]
+/// 兼容尚未写入共享 menu 快照的旧 workspace.json。这里只负责一次性读旧结构；
+/// 新版 PC 下一次 save_state 后，移动端就完全消费共享快照。
+fn legacy_workspace_menu_from_value(value: &serde_json::Value) -> WorkspaceMenuSnapshot {
+    let project_roots: Vec<String> = value["projects"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|project| project.as_str().map(String::from))
         .collect();
-    let mut sessions = std::collections::HashMap::new();
+    let projects = project_roots
+        .iter()
+        .enumerate()
+        .map(|(order, root)| WorkspaceMenuProject {
+            root: root.clone(),
+            title: path_title(root),
+            order: order.min(u32::MAX as usize) as u32,
+        })
+        .collect::<Vec<_>>();
+    let mut sessions = Vec::new();
     for (session_order, session) in value["sessions"]
         .as_array()
         .into_iter()
         .flatten()
         .enumerate()
     {
-        if let Some(sid) = session["acp"]["sid"].as_str() {
-            sessions.insert(sid.to_string(), (session_order, 0));
-        }
-        let Some(layout) = session.get("layout") else {
+        let Some(acp) = session.get("acp").filter(|acp| !acp.is_null()) else {
             continue;
         };
-        let mut leaf_order = 0;
-        fn collect_ordered_leaf_ids(
-            pane: &serde_json::Value,
-            session_order: usize,
-            leaf_order: &mut usize,
-            out: &mut std::collections::HashMap<String, (usize, usize)>,
-        ) {
-            if let Some(leaf) = pane.get("Leaf") {
-                if let Some(id) = leaf["id"].as_str() {
-                    out.insert(id.to_string(), (session_order, *leaf_order));
-                }
-                *leaf_order += 1;
-            } else if let Some(children) = pane
-                .get("Split")
-                .and_then(|split| split.get("children"))
-                .and_then(|children| children.as_array())
-            {
-                for child in children {
-                    collect_ordered_leaf_ids(child, session_order, leaf_order, out);
-                }
-            }
-        }
-        collect_ordered_leaf_ids(layout, session_order, &mut leaf_order, &mut sessions);
+        let Some(id) = acp.get("sid").and_then(|sid| sid.as_str()) else {
+            continue;
+        };
+        let cwd = acp
+            .get("cwd")
+            .and_then(|cwd| cwd.as_str())
+            .map(String::from);
+        let project_root = cwd
+            .as_deref()
+            .and_then(|cwd| mobile_project_root(&project_roots, cwd));
+        let project_order = project_root
+            .as_deref()
+            .and_then(|root| {
+                project_roots
+                    .iter()
+                    .position(|candidate| candidate.trim_end_matches('/') == root)
+            })
+            .unwrap_or_else(|| project_roots.len().saturating_add(session_order));
+        let project_title = project_root.as_deref().map(path_title);
+        let title = session
+            .get("custom_title")
+            .and_then(|title| title.as_str())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(String::from)
+            .or_else(|| cwd.as_deref().map(path_title))
+            .unwrap_or_else(|| id.to_string());
+        let custom_title = session
+            .get("custom_title")
+            .and_then(|title| title.as_str())
+            .is_some_and(|title| !title.trim().is_empty());
+        sessions.push(WorkspaceMenuSession {
+            id: id.to_string(),
+            kind: WorkspaceMenuSessionKind::Acp,
+            title,
+            custom_title,
+            cwd,
+            project_root,
+            project_title,
+            project_order: project_order.min(u32::MAX as usize) as u32,
+            session_order: session_order.min(u32::MAX as usize) as u32,
+            agent: acp
+                .get("agent")
+                .and_then(|agent| agent.as_str())
+                .map(String::from),
+        });
     }
-    MobileWorkspaceOrder { projects, sessions }
+    WorkspaceMenuSnapshot::current(projects, sessions)
 }
 
-fn load_mobile_workspace_order() -> MobileWorkspaceOrder {
-    let Ok(raw) = std::fs::read_to_string(workspace_json_path()) else {
-        return MobileWorkspaceOrder::default();
-    };
-    let Ok(value) = serde_json::from_str(&raw) else {
-        return MobileWorkspaceOrder::default();
-    };
-    mobile_workspace_order_from_value(&value)
+fn path_title(path: &str) -> String {
+    std::path::Path::new(path.trim_end_matches('/'))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn mobile_project_root(projects: &[String], cwd: &str) -> Option<String> {
@@ -276,15 +304,16 @@ impl MobileLifecycleHub {
     }
 
     fn summaries(&self) -> Vec<AcpSessionSummary> {
-        let gui_titles = load_gui_acp_titles();
-        let workspace_order = load_mobile_workspace_order();
+        let menu = load_workspace_menu();
+        self.summaries_with_menu(&menu)
+    }
+
+    fn summaries_with_menu(&self, menu: &WorkspaceMenuSnapshot) -> Vec<AcpSessionSummary> {
         let state = self.state.lock().unwrap();
         let mut summaries: Vec<_> = state
             .sessions
             .values()
-            .filter_map(|session| {
-                acp_summary_from_daemon(session, &gui_titles, &workspace_order, &state.attention)
-            })
+            .filter_map(|session| acp_summary_from_daemon(session, &menu, &state.attention))
             .collect();
         summaries.sort_by(|a, b| {
             a.project_order
@@ -405,61 +434,44 @@ fn agent_from_launch(launch: &str) -> &'static str {
 
 fn acp_summary_from_daemon(
     session: &DaemonSessionState,
-    gui_titles: &std::collections::HashMap<String, String>,
-    workspace_order: &MobileWorkspaceOrder,
+    menu: &WorkspaceMenuSnapshot,
     attention_store: &AttentionStore,
 ) -> Option<AcpSessionSummary> {
-    let launch = session.launch.as_deref()?;
+    // 会话类型来自 PC 的共享菜单快照，不再根据 id 前缀或启动命令猜测。
+    let menu_session = menu.acp_session(&session.id)?;
     let attention = attention_store.unread(&session.id).cloned();
     let unread = attention.is_some();
-    let title = gui_titles
-        .get(&session.id)
-        .cloned()
-        .or_else(|| session.title.clone().filter(|title| !title.is_empty()))
+    let agent = menu_session
+        .agent
+        .clone()
         .or_else(|| {
             session
-                .cwd
-                .as_ref()
-                .and_then(|path| std::path::Path::new(path).file_name())
-                .and_then(|name| name.to_str())
-                .map(String::from)
+                .launch
+                .as_deref()
+                .map(|launch| agent_from_launch(launch).to_string())
         })
-        .unwrap_or_else(|| session.id.clone());
-    let (session_order, leaf_order) = workspace_order
-        .sessions
-        .get(&session.id)
-        .copied()
-        .unwrap_or((usize::MAX, usize::MAX));
-    let project_root = session.cwd.as_deref().and_then(|cwd| {
-        mobile_project_root(&workspace_order.projects, cwd)
-            .or_else(|| Some(cwd.trim_end_matches('/').to_string()))
-    });
-    let project_order = project_root
-        .as_deref()
-        .and_then(|root| {
-            workspace_order
-                .projects
-                .iter()
-                .position(|project| project.trim_end_matches('/') == root)
-        })
-        .unwrap_or_else(|| workspace_order.projects.len().saturating_add(session_order));
-    let project_title = project_root
-        .as_deref()
-        .and_then(|root| std::path::Path::new(root).file_name())
-        .and_then(|name| name.to_str())
-        .map(String::from);
+        .unwrap_or_else(|| "other".to_string());
+    let title = if !menu_session.custom_title && agent == "codex" {
+        session
+            .title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| menu_session.title.clone())
+    } else {
+        menu_session.title.clone()
+    };
     Some(AcpSessionSummary {
         id: session.id.clone(),
         title,
         phase: daemon_phase_name(session.phase).to_string(),
         status: mobile_status_name(session.phase, unread).to_string(),
-        agent: agent_from_launch(launch).to_string(),
-        cwd: session.cwd.clone(),
-        project_root,
-        project_title,
-        project_order: project_order.min(u32::MAX as usize) as u32,
-        session_order: session_order.min(u32::MAX as usize) as u32,
-        leaf_order: leaf_order.min(u32::MAX as usize) as u32,
+        agent,
+        cwd: menu_session.cwd.clone().or_else(|| session.cwd.clone()),
+        project_root: menu_session.project_root.clone(),
+        project_title: menu_session.project_title.clone(),
+        project_order: menu_session.project_order,
+        session_order: menu_session.session_order,
+        leaf_order: 0,
         updated_at: session.updated_at.min(i64::MAX as u64) as i64,
         detail: session.detail_line(),
         unread,
@@ -1216,15 +1228,72 @@ mod tests {
 
     fn mobile_daemon_state(phase: DaemonPhase) -> DaemonSessionState {
         DaemonSessionState {
-            id: "session-mobile".into(),
+            id: "acp-session-mobile".into(),
             phase,
-            title: Some("Mobile agent".into()),
+            title: Some("修复移动端项目列表".into()),
             launch: Some("codex app-server".into()),
             cwd: Some("/tmp/mobile-project".into()),
             updated_at: 42,
             structured_events: true,
             ..Default::default()
         }
+    }
+
+    fn mobile_menu_for_test() -> WorkspaceMenuSnapshot {
+        WorkspaceMenuSnapshot::current(
+            vec![WorkspaceMenuProject {
+                root: "/tmp/mobile-project".into(),
+                title: "mobile-project".into(),
+                order: 0,
+            }],
+            vec![WorkspaceMenuSession {
+                id: "acp-session-mobile".into(),
+                kind: WorkspaceMenuSessionKind::Acp,
+                title: "修复移动端项目列表".into(),
+                custom_title: false,
+                cwd: Some("/tmp/mobile-project".into()),
+                project_root: Some("/tmp/mobile-project".into()),
+                project_title: Some("mobile-project".into()),
+                project_order: 0,
+                session_order: 2,
+                agent: Some("codex".into()),
+            }],
+        )
+    }
+
+    #[test]
+    fn mobile_summary_excludes_terminal_agent_cli_sessions() {
+        let attention = AttentionStore::default();
+        let mut session = mobile_daemon_state(DaemonPhase::Thinking);
+        session.id = "terminal-codex-cli".into();
+        let menu = WorkspaceMenuSnapshot::current(
+            vec![],
+            vec![WorkspaceMenuSession {
+                id: session.id.clone(),
+                kind: WorkspaceMenuSessionKind::Terminal,
+                title: "Codex CLI".into(),
+                custom_title: false,
+                cwd: session.cwd.clone(),
+                project_root: None,
+                project_title: None,
+                project_order: 0,
+                session_order: 0,
+                agent: Some("codex".into()),
+            }],
+        );
+
+        assert!(acp_summary_from_daemon(&session, &menu, &attention).is_none());
+    }
+
+    #[test]
+    fn mobile_summary_preserves_pc_manual_title() {
+        let mut menu = mobile_menu_for_test();
+        menu.sessions[0].title = "用户重命名".into();
+        menu.sessions[0].custom_title = true;
+        let session = mobile_daemon_state(DaemonPhase::Idle);
+
+        let summary = acp_summary_from_daemon(&session, &menu, &AttentionStore::default()).unwrap();
+        assert_eq!(summary.title, "用户重命名");
     }
 
     fn mobile_lifecycle_hub_for_test() -> MobileLifecycleHub {
@@ -1236,34 +1305,32 @@ mod tests {
     }
 
     #[test]
-    fn mobile_workspace_order_uses_pc_project_and_session_order() {
+    fn mobile_workspace_menu_uses_pc_snapshot_verbatim() {
         let value = serde_json::json!({
-            "projects": ["/repo/two", "/repo/one"],
-            "sessions": [
-                {
-                    "layout": {"Leaf": {"id": "terminal-first"}},
-                    "acp": null
-                },
-                {
-                    "layout": {
-                        "Split": {
-                            "children": [
-                                {"Leaf": {"id": "terminal-a"}},
-                                {"Leaf": {"id": "terminal-b"}}
-                            ]
-                        }
-                    },
-                    "acp": {"sid": "acp-second"}
-                }
-            ]
+            "projects": ["legacy-is-ignored"],
+            "menu": {
+                "version": 1,
+                "projects": [{"root": "/repo/two", "title": "repo · two", "order": 0}],
+                "sessions": [{
+                    "id": "stable-acp-id",
+                    "kind": "acp",
+                    "title": "PC display title",
+                    "custom_title": true,
+                    "cwd": "/repo/two",
+                    "project_root": "/repo/two",
+                    "project_title": "repo · two",
+                    "project_order": 0,
+                    "session_order": 3,
+                    "agent": "codex"
+                }]
+            }
         });
 
-        let order = mobile_workspace_order_from_value(&value);
-        assert_eq!(order.projects, vec!["/repo/two", "/repo/one"]);
-        assert_eq!(order.sessions["terminal-first"], (0, 0));
-        assert_eq!(order.sessions["acp-second"], (1, 0));
-        assert_eq!(order.sessions["terminal-a"], (1, 0));
-        assert_eq!(order.sessions["terminal-b"], (1, 1));
+        let menu = workspace_menu_from_value(&value);
+        let session = menu.acp_session("stable-acp-id").unwrap();
+        assert_eq!(session.title, "PC display title");
+        assert_eq!(session.project_title.as_deref(), Some("repo · two"));
+        assert_eq!(session.session_order, 3);
     }
 
     #[test]
@@ -1282,7 +1349,10 @@ mod tests {
         hub.apply_snapshot(vec![mobile_daemon_state(DaemonPhase::Thinking)]);
         hub.apply_update(mobile_daemon_state(DaemonPhase::Succeeded));
 
-        let before = hub.summaries().pop().unwrap();
+        let before = hub
+            .summaries_with_menu(&mobile_menu_for_test())
+            .pop()
+            .unwrap();
         assert_eq!(before.phase, "succeeded");
         assert_eq!(before.status, "done");
         assert!(before.unread);
@@ -1291,8 +1361,11 @@ mod tests {
             crate::attention::AttentionKind::Success
         );
 
-        assert!(hub.mark_read("session-mobile"));
-        let after = hub.summaries().pop().unwrap();
+        assert!(hub.mark_read("acp-session-mobile"));
+        let after = hub
+            .summaries_with_menu(&mobile_menu_for_test())
+            .pop()
+            .unwrap();
         assert_eq!(after.phase, "succeeded");
         assert_eq!(after.status, "idle");
         assert!(!after.unread);
@@ -1305,8 +1378,11 @@ mod tests {
         hub.apply_snapshot(vec![mobile_daemon_state(DaemonPhase::Thinking)]);
         hub.apply_update(mobile_daemon_state(DaemonPhase::AwaitingApproval));
 
-        assert!(hub.mark_read("session-mobile"));
-        let summary = hub.summaries().pop().unwrap();
+        assert!(hub.mark_read("acp-session-mobile"));
+        let summary = hub
+            .summaries_with_menu(&mobile_menu_for_test())
+            .pop()
+            .unwrap();
         assert_eq!(summary.status, "waiting_approval");
         assert!(!summary.unread);
     }
@@ -1325,6 +1401,6 @@ mod tests {
                 resolved.push(session_id);
             }
         }
-        assert_eq!(resolved, vec!["session-mobile"]);
+        assert_eq!(resolved, vec!["acp-session-mobile"]);
     }
 }
