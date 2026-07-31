@@ -79,7 +79,10 @@ mod tests {
 
         save_json_private(Some(path.clone()), &serde_json::json!({"token": "secret"}));
 
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
                 .unwrap()["token"],

@@ -152,8 +152,8 @@ pub fn parse_pairing_qr(qr_data: &str) -> Result<HostConfig> {
         name: Option<String>,
     }
 
-    let payload: QrPayload = serde_json::from_str(qr_data)
-        .map_err(|e| anyhow!("Invalid QR code format: {}", e))?;
+    let payload: QrPayload =
+        serde_json::from_str(qr_data).map_err(|e| anyhow!("Invalid QR code format: {}", e))?;
 
     // 验证公钥格式
     let _ = public_key_from_b64(&payload.public_key)?;

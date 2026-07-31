@@ -1,31 +1,28 @@
 //! inspector：面板内横向 tabs + 右侧面板（默认 344px，可整体隐藏）。
-//! FILES / GIT / TASKS / SKILL 四个 tab，点击切换或收合；面板头
+//! FILES / GIT / SKILL 三个 tab，点击切换或收合；面板头
 //! 带「展开」把对应的旧全屏页盖到会话舞台上（stage_override），功能零删除。
+//! （TASKS 已经升格成一级导航，见 session_list.rs 的「任务」入口，不再是这里的 tab。）
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::resizable::{h_resizable, resizable_panel};
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
-use crate::tasks::TaskStore;
 use crate::{MainView, Workspace, ui_theme};
-
-/// 侧栏任务卡片的 hover group 名：卡片 `.group()` + 操作条 `.group_hover()` 配对，
-/// 鼠标移到卡片才显形「编辑 / 删除」。名字全卡共享，靠 DOM 祖先关系就近生效。
-const TASK_CARD_GROUP: &str = "insp-task-card";
 
 /// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
 /// `.group_hover()`）。
 const SKILL_CARD_GROUP: &str = "insp-skill-card";
 
 /// inspector 面板的四个 tab。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum InspectorTab {
     Files,
     Git,
-    Tasks,
     Skills,
 }
 
@@ -40,19 +37,16 @@ impl InspectorTab {
         match self {
             Self::Files => "FILES",
             Self::Git => "GIT",
-            Self::Tasks => "TASKS",
             Self::Skills => "SKILL",
         }
     }
 
-    /// 面板头「⤢ 展开」对应的舞台全宽视图；None = 头上不放展开按钮。
-    /// Files → 「文件树 + 内容」双栏，Git → 「变更列表 + diff」双栏。
-    fn stage_view(self) -> Option<MainView> {
+    /// 面板头「⤢ 展开」对应的舞台全宽视图。
+    pub(crate) fn stage_view(self) -> Option<MainView> {
         match self {
             Self::Files => Some(MainView::Files),
             Self::Git => Some(MainView::Git),
-            Self::Tasks => Some(MainView::Tasks),
-            Self::Skills => None,
+            Self::Skills => Some(MainView::Skills),
         }
     }
 }
@@ -63,6 +57,12 @@ impl Workspace {
     /// 左右各渲染一遍，看着像出了两个面板。
     pub(crate) fn inspector_panel_promoted(&self) -> bool {
         self.stage_override.is_some() && self.inspector_tab.stage_view() == self.stage_override
+    }
+
+    /// 唯一改 `inspector_open` 的入口：持久状态与可复用过渡状态同步更新。
+    pub(crate) fn set_inspector_open(&mut self, open: bool) {
+        self.inspector_transition.set_open(open);
+        self.inspector_open = open;
     }
 
     /// 图标条点击：已提升到舞台 → 收回停靠；同 tab 再点 → 收合/展开面板；
@@ -76,12 +76,12 @@ impl Workspace {
         if self.inspector_tab == tab && self.inspector_panel_promoted() {
             // 点的就是当前占着舞台的那个 → 等价于 ⤡ 收回停靠
             self.set_stage_override(None, window, cx);
-            self.inspector_open = true;
+            self.set_inspector_open(true);
             self.save_state(cx);
             return;
         }
         if self.inspector_panel_promoted() {
-            // 展开态下点了别的 tab：FILES / GIT / TASKS 展开都跟横条共用一份停靠
+            // 展开态下点了别的 tab：FILES / GIT 展开都跟横条共用一份停靠
             // UI（只是变宽，见 main.rs 舞台分派），能直接切过去、继续保持展开态；
             // 只有 SKILL 没有展开形态（stage_view() = None），这时才退回停靠。
             if let Some(view) = tab.stage_view() {
@@ -93,24 +93,32 @@ impl Workspace {
             }
             self.set_stage_override(None, window, cx);
             self.inspector_tab = tab;
-            self.inspector_open = true;
+            self.set_inspector_open(true);
             self.save_state(cx);
             cx.notify();
             return;
         }
         if self.inspector_tab == tab && self.inspector_open {
-            self.inspector_open = false;
+            self.set_inspector_open(false);
         } else {
             self.inspector_tab = tab;
-            self.inspector_open = true;
+            self.set_inspector_open(true);
         }
         self.save_state(cx);
         cx.notify();
     }
 
     /// inspector 面板顶部的横向 tabs，避免常驻 56px 竖轨挤占会话宽度。
-    pub(crate) fn render_inspector_rail(&mut self, cx: &mut Context<Self>) -> Div {
-        let this = cx.entity();
+    ///
+    /// `corner_guard`：见 stage.rs::render_stage_header 同名参数——这条横条被
+    /// Files/Git 展开态复用为舞台第一行时，sidebar 收起会让它变成贴着窗口左边
+    /// 缘那块，真交通灯浮在它上面，需要在左边多让出交通灯宽度；平时停靠在右侧
+    /// inspector 卡片里就永远不是最左边那块，传 `false`。
+    pub(crate) fn render_inspector_rail(
+        &mut self,
+        corner_guard: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         // GIT 角标：当前项目改动文件数（读 git status 缓存，没有就不显示）。
         let git_changes = self
             .cur()
@@ -119,147 +127,72 @@ impl Workspace {
             .map(|(_, d)| d.files.len())
             .unwrap_or(0);
 
-        let item = |tab: InspectorTab, badge: usize, active: bool, this: Entity<Workspace>| {
-            div()
-                .id(tab.label())
-                .relative()
-                .h_full()
-                .px_2()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .cursor_pointer()
-                .map(|d| {
-                    if active {
-                        d.bg(ui_theme::tint(ui_theme::accent(), 0x14))
-                            .border_b_2()
-                            .border_color(rgb(ui_theme::accent()))
-                    } else {
-                        d.border_b_2()
-                            .border_color(gpui::transparent_black())
-                            .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                    }
-                })
-                .child(div().size(px(7.)).rounded_xs().bg(if active {
-                    rgb(ui_theme::accent())
-                } else {
-                    rgb(ui_theme::border_focus())
-                }))
-                .child(
-                    div()
-                        .text_size(px(9.))
-                        .font_semibold()
-                        .text_color(if active {
-                            rgb(ui_theme::text_bright())
-                        } else {
-                            rgb(ui_theme::text_faint())
-                        })
-                        .child(tab.label()),
-                )
-                .when(badge > 0, |d| {
-                    d.child(
-                        div()
-                            .px(px(4.))
-                            .rounded(px(8.))
-                            .bg(rgb(ui_theme::accent()))
-                            .text_size(px(8.))
-                            .font_semibold()
-                            .text_color(rgb(ui_theme::on_accent()))
-                            .child(badge.to_string()),
-                    )
-                })
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_ev, window, cx| {
-                    this.update(cx, |ws, cx| ws.toggle_inspector_tab(tab, window, cx));
-                })
-        };
-
+        const TABS: [InspectorTab; 3] = [
+            InspectorTab::Files,
+            InspectorTab::Git,
+            InspectorTab::Skills,
+        ];
         let cur = self.inspector_tab;
         let open = self.inspector_open;
+        // 面板已展开且落在这个 tab 上才算「选中」——跟旧实现一致：收合时无高亮。
+        let selected_index = open
+            .then(|| TABS.iter().position(|t| *t == cur))
+            .flatten();
+
+        let tab = |t: InspectorTab, badge: usize| {
+            let mut b = Tab::new().label(t.label());
+            if badge > 0 {
+                b = b.suffix(
+                    div()
+                        .px(px(4.))
+                        .rounded(px(8.))
+                        .bg(rgb(ui_theme::accent()))
+                        .text_size(px(8.))
+                        .font_semibold()
+                        .text_color(rgb(ui_theme::on_accent()))
+                        .child(badge.to_string()),
+                );
+            }
+            b
+        };
+
         div()
             .w_full()
-            .h(px(34.))
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
+            // tab 横条独立成 bg_bar 表面：跟下面的列表/面板体（bg_elev）拉开一档，
+            // 读起来像一条工具栏而不是列表的第一行。
+            .bg(rgb(ui_theme::bg_bar()))
             .border_b_1()
             .border_color(rgb(ui_theme::border_dim()))
-            .child(item(
-                InspectorTab::Files,
-                0,
-                open && cur == InspectorTab::Files,
-                this.clone(),
-            ))
-            .child(item(
-                InspectorTab::Git,
-                git_changes,
-                open && cur == InspectorTab::Git,
-                this.clone(),
-            ))
-            .child(item(
-                InspectorTab::Tasks,
-                0,
-                open && cur == InspectorTab::Tasks,
-                this.clone(),
-            ))
-            .child(item(
-                InspectorTab::Skills,
-                0,
-                open && cur == InspectorTab::Skills,
-                this.clone(),
-            ))
-            .child(div().flex_1())
-            .children(open.then(|| cur.stage_view()).flatten().map(|view| {
-                // 已经展开到舞台（这条横条本身正是展开态的头）→ 图标/文案/点击
-                // 都换成「收起」，回到停靠态；没展开就是平时的「展开」。
-                let promoted = self.inspector_panel_promoted();
-                div()
-                    .id("inspector-expand")
-                    .mr_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size_6()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .hover(|d| {
-                        d.bg(rgb(ui_theme::bg_hover()))
-                            .text_color(rgb(ui_theme::text_mid()))
-                    })
-                    .child(
-                        Icon::new(if promoted {
-                            IconName::Minimize
-                        } else {
-                            IconName::Maximize
-                        })
-                        .size(px(13.)),
-                    )
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(if promoted {
-                            "收起面板"
-                        } else {
-                            "展开面板"
-                        })
-                        .build(window, cx)
-                    })
-                    .on_click(move |_ev, window, cx| {
-                        this.update(cx, |ws, cx| {
-                            if promoted {
-                                ws.set_stage_override(None, window, cx);
-                                ws.inspector_open = true;
-                            } else {
-                                ws.set_stage_override(Some(view), window, cx);
+            // 128px：同 stage.rs corner_guard 注释——要避开的不只是交通灯，
+            // 还有 main.rs 顶部拖拽层里常驻绝对定位的「切换左侧栏」图标
+            // （left 92px + 24px 宽）。
+            .when(corner_guard, |d| d.pl(px(128.)))
+            .child(
+                {
+                    let mut bar = TabBar::new("inspector-rail")
+                        .underline()
+                        .flex_1()
+                        .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
+                            if let Some(tab) = TABS.get(*ix).copied() {
+                                ws.toggle_inspector_tab(tab, window, cx);
                             }
-                        });
-                    })
-            }))
+                        }));
+                    if let Some(ix) = selected_index {
+                        bar = bar.selected_index(ix);
+                    }
+                    bar.child(tab(InspectorTab::Files, 0))
+                        .child(tab(InspectorTab::Git, git_changes))
+                        .child(tab(InspectorTab::Skills, 0))
+                },
+            )
     }
 
-    /// 面板统一头：36px，标题 + 自定义右侧内容。「展开」（盖到舞台）按钮已挪到
-    /// 上面的 tab 横条右端，四个面板共用同一个图标按钮，不必每个面板头各摆一份。
+    /// 面板统一头：36px，标题 + 自定义右侧内容。全屏入口统一放在窗口标题栏，
+    /// 避免停靠/全屏时面板内部再出现一颗重复按钮。
     pub(crate) fn inspector_header(&self, title: &'static str, _cx: &mut Context<Self>) -> Div {
         div()
             .h(px(36.))
@@ -268,6 +201,8 @@ impl Workspace {
             .items_center()
             .justify_between()
             .px_3()
+            // 同 render_inspector_rail：面板头独立表面，跟面板体分层。
+            .bg(rgb(ui_theme::bg_bar()))
             .border_b_1()
             .border_color(rgb(ui_theme::border_dim()))
             .child(
@@ -285,11 +220,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let tabs = self.render_inspector_rail(cx);
+        // 停靠 Inspector 永远在窗口右侧，不会碰到左上角交通灯。
+        let tabs = self.render_inspector_rail(false, cx);
         let body: AnyElement = match self.inspector_tab {
             InspectorTab::Files => self.render_inspector_files(window, cx),
             InspectorTab::Git => self.render_inspector_git(window, cx),
-            InspectorTab::Tasks => self.render_inspector_tasks(cx),
             InspectorTab::Skills => self.render_inspector_skills(cx),
         };
         div()
@@ -299,196 +234,10 @@ impl Workspace {
             .flex()
             .flex_col()
             .min_h_0()
-            .bg(rgb(ui_theme::bg_elev()))
-            .border_l_1()
-            .border_color(rgb(ui_theme::border_dim()))
+            // 面板的玻璃底和外描边由 Workspace 统一提供，避免左右边线叠成 2px。
+            .bg(gpui::transparent_black())
             .child(tabs)
             .child(body)
-    }
-
-    /// TASKS 面板：任务卡片列表（复用 TaskStore；卡片行动 = focus_or_run_task）。
-    fn render_inspector_tasks(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let this = cx.entity();
-        let mut tasks = TaskStore::load().tasks;
-        tasks.sort_by_key(|t| t.column.sidebar_rank());
-        let count = tasks.len();
-
-        let e_new = this.clone();
-        let header = self.inspector_header("TASKS", cx).child(
-            div()
-                .id("inspector-task-new")
-                .text_xs()
-                .font_semibold()
-                .text_color(rgb(ui_theme::accent()))
-                .cursor_pointer()
-                .hover(|d| d.opacity(0.8))
-                .child(format!("+ 新建 · {count}"))
-                .on_click(move |_ev, window, cx| {
-                    e_new.update(cx, |ws, cx| ws.open_new_task_modal(window, cx));
-                }),
-        );
-
-        let mut list = div()
-            .id("inspector-task-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_2p5();
-        if tasks.is_empty() {
-            list = list.child(
-                div()
-                    .pt_8()
-                    .flex()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child("还没有任务"),
-            );
-        }
-        for (tix, t) in tasks.into_iter().enumerate() {
-            let done = t.column == crate::tasks::TaskColumn::Done;
-            let color = rgb(t.column.color());
-            let has_session = t.session_id.is_some();
-            let action_label = if has_session {
-                "打开 →"
-            } else if t.column.is_todo() {
-                "运行 →"
-            } else {
-                ""
-            };
-            let tid = t.id.clone();
-            let e_act = this.clone();
-            // 平时透明、鼠标移到卡片才显形的操作条（编辑 / 删除）。stop_propagation
-            // 拦住 mouse_down，避免同时触发整卡的 focus_or_run。group 名见卡片 `.group()`。
-            let e_edit = this.clone();
-            let e_del = this.clone();
-            let tid_edit = t.id.clone();
-            let tid_del = t.id.clone();
-            let hover_bar = div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .flex_shrink_0()
-                .opacity(0.0)
-                .group_hover(TASK_CARD_GROUP, |s| s.opacity(1.0))
-                .child(
-                    div()
-                        .id(("inspector-task-edit", tix))
-                        .px_1()
-                        .text_xs()
-                        .cursor_pointer()
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .hover(|s| s.text_color(rgb(ui_theme::accent())))
-                        .child("编辑")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_ev, window, cx| {
-                            let tid = tid_edit.clone();
-                            e_edit.update(cx, |ws, cx| ws.open_edit_task_modal(&tid, window, cx));
-                        }),
-                )
-                .child(
-                    div()
-                        .id(("inspector-task-del", tix))
-                        .px_1()
-                        .text_xs()
-                        .cursor_pointer()
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .hover(|s| s.text_color(rgb(ui_theme::red())))
-                        .child("删除")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_ev, _window, cx| {
-                            let tid = tid_del.clone();
-                            e_del.update(cx, |ws, cx| ws.delete_task(&tid, cx));
-                        }),
-                );
-            // 结构：外层横排 = 左侧 3px 状态色竖条 + 内容列（GPUI 边框色是单值，
-            // 左边框异色做不到，用嵌套竖条实现设计稿的左色条）。
-            let card = div()
-                .id(("inspector-task", tix))
-                .group(TASK_CARD_GROUP)
-                .rounded(px(9.))
-                .border_1()
-                .border_color(rgb(ui_theme::border_mid()))
-                .bg(if done {
-                    rgb(ui_theme::bg_panel())
-                } else {
-                    rgb(ui_theme::bg_card())
-                })
-                .when(done, |d| d.opacity(0.55))
-                .overflow_hidden()
-                .flex()
-                .cursor_pointer()
-                .child(div().w(px(3.)).flex_shrink_0().bg(color))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .text_color(rgb(ui_theme::text_bright()))
-                                        .child(if t.title.is_empty() {
-                                            "（未命名任务）".to_string()
-                                        } else {
-                                            t.title.clone()
-                                        }),
-                                )
-                                .child(hover_bar),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().size(px(6.)).rounded_full().bg(color))
-                                .child(div().text_xs().text_color(color).child(t.column.label()))
-                                .child(div().flex_1())
-                                .when(!action_label.is_empty(), |d| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .font_semibold()
-                                            .text_color(if has_session {
-                                                rgb(ui_theme::purple())
-                                            } else {
-                                                rgb(ui_theme::green())
-                                            })
-                                            .child(action_label),
-                                    )
-                                }),
-                        ),
-                )
-                .on_click(move |_ev, window, cx| {
-                    let tid = tid.clone();
-                    e_act.update(cx, |ws, cx| ws.focus_or_run_task(&tid, window, cx));
-                });
-            list = list.child(card);
-        }
-
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(list)
-            .into_any_element()
     }
 
     /// FILES 面板：文件树（复用全屏页的 file_tree 组件）。点文件不再提升到舞台
@@ -629,7 +378,7 @@ impl Workspace {
     ///
     /// 不做「启用/停用」开关：Claude Code 侧没有对应机制（settings.json 的
     /// `enabledPlugins` 管插件不管 skill），拨了不生效的开关比没有更糟。
-    fn render_inspector_skills(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_inspector_skills(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let cwd = self.cur().and_then(|s| s.cwd(cx));
         self.ensure_skills(cwd.clone(), cx);
         let this = cx.entity();
@@ -818,7 +567,7 @@ impl Workspace {
                                         .cursor_pointer()
                                         .text_color(rgb(ui_theme::text_faint()))
                                         .hover(|s| s.text_color(rgb(ui_theme::accent())))
-                                        .child("应用到其他工具")
+                                        .child("迁移到 .smelt")
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
                                         })
@@ -879,10 +628,10 @@ impl Workspace {
                         div()
                             .id(("inspector-skill", six))
                             .group(SKILL_CARD_GROUP)
-                            .rounded(px(8.))
+                            .rounded(ui_theme::card_radius())
                             .border_1()
                             .border_color(rgb(ui_theme::border_mid()))
-                            .bg(rgb(ui_theme::bg_card()))
+                            .bg(ui_theme::glass_card())
                             .px_2p5()
                             .py_2()
                             .flex()
@@ -907,22 +656,6 @@ impl Workspace {
                                             .truncate()
                                             .child(sk.name.clone()),
                                     )
-                                    .when(!sk.managed, |d| {
-                                        // 非托管 skill：不用笼统的「旧」，直接
-                                        // 标出它实际躺在哪个 agent 的目录里，
-                                        // 免得用户看着一堆卡片分不清归属。
-                                        d.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .px_1()
-                                                .rounded_xs()
-                                                .border_1()
-                                                .border_color(rgb(ui_theme::border_dim()))
-                                                .text_size(px(9.))
-                                                .text_color(rgb(ui_theme::text_faint()))
-                                                .child(sk.source_agent.unwrap_or("旧")),
-                                        )
-                                    })
                                     .when(!sk.duplicates.is_empty(), |d| {
                                         d.child(
                                             div()
@@ -950,6 +683,23 @@ impl Workspace {
                                         .max_h(px(28.))
                                         .overflow_hidden()
                                         .child(sk.description.clone()),
+                                )
+                            })
+                            .when(!sk.managed, |d| {
+                                // 非托管 skill：不用笼统的「旧」，直接标出它实际躺在哪个
+                                // agent 的目录里。挪到底部跟托管卡片的工具行同一个位置，
+                                // 免得「工具标签有的在标题行、有的在底部」看着不是一套
+                                // 卡片规范——标题行只留名字本身，工具归属统一放底部。
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .rounded_xs()
+                                        .border_1()
+                                        .border_color(rgb(ui_theme::border_dim()))
+                                        .text_size(px(9.))
+                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .child(sk.source_agent.unwrap_or("旧")),
                                 )
                             })
                             .when(sk.managed, |d| {

@@ -186,7 +186,8 @@ impl RepoInfo {
 /// 分这三档是因为「暂存块」这个动作本质上是把**工作区相对索引**的差异写进索引，
 /// 而 `git diff HEAD` 给的是工作区相对 HEAD——文件一旦部分暂存过，两者就不是一回
 /// 事，拿后者的 hunk 去 apply --cached 会直接报 does not apply。
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiffScope {
     /// `git diff HEAD`：暂存 + 未暂存合起来看，默认。
     All,
@@ -3072,7 +3073,7 @@ impl Workspace {
             self.commit_msg_input = Some(state);
         }
 
-        // 「改动 / 日志 / 热力图」子标签：原来是舞台全屏页独有的三个视图，现收进
+        // 「改动 / 日志」子标签：原来是舞台全屏页独有的视图，现收进
         // 停靠面板——展开态直接复用这份 UI（见 main.rs 的 stage_override 特判），
         // 不再是另一套全屏组件，头部不会因为展开就变了个样。
         let sub_tabs = {
@@ -3087,12 +3088,7 @@ impl Workspace {
                 .border_b_1()
                 .border_color(rgb(ui_theme::border_dim()))
                 .children(
-                    [
-                        (GitTab::Changes, "改动"),
-                        (GitTab::Log, "日志"),
-                        (GitTab::Hotspot, "热力图"),
-                    ]
-                    .map(|(tab, label)| {
+                    [(GitTab::Changes, "改动"), (GitTab::Log, "日志")].map(|(tab, label)| {
                         let on = self.git_tab == tab;
                         div()
                             .id(label)
@@ -3122,16 +3118,6 @@ impl Workspace {
                 .child(self.render_git_log_tab(root.clone(), cx))
                 .into_any_element();
         }
-        if self.git_tab == GitTab::Hotspot {
-            return v_flex()
-                .flex_1()
-                .min_h_0()
-                .child(header)
-                .child(sub_tabs)
-                .child(self.render_git_hotspot_tab(root.clone(), cx))
-                .into_any_element();
-        }
-
         // 点了改动文件要看 diff：评论输入框懒创建，跟全屏页同一套逻辑
         // （diff 内嵌显示在改动页里，不再提升到舞台，见 open_diff 的改动）。
         if self.git_diff.is_some() && self.diff_comment_input.is_none() {
@@ -3303,48 +3289,51 @@ impl Workspace {
                             });
                         // 右键菜单：丢弃改动 / 复制路径 / 在 Finder 中显示（跟以前全屏
                         // Git 页那份一致，不再是「展开了才有、停靠时没有」）。
-                        col = col.child(
-                            row_el
-                                .context_menu(move |menu, _window, _cx| {
-                                    let (ws_d, r_d, p_d) =
-                                        (ws_menu.clone(), root_menu.clone(), path_menu.clone());
-                                    let (ws_c, p_c) = (ws_menu.clone(), file_path.clone());
-                                    let (ws_f, p_f) = (ws_menu.clone(), file_path.clone());
-                                    menu.item(
-                                        PopupMenuItem::new(if untracked {
-                                            "删除文件"
-                                        } else {
-                                            "丢弃改动"
-                                        })
-                                        .on_click(move |_ev, _window, cx| {
-                                            ws_d.update(cx, |ws, cx| {
-                                                ws.start_discard_file(
-                                                    r_d.clone(),
-                                                    p_d.clone(),
-                                                    untracked,
-                                                    cx,
-                                                )
-                                            });
-                                        }),
-                                    )
-                                    .separator()
-                                    .item(PopupMenuItem::new("复制文件路径").on_click(
-                                        move |_ev, _window, cx| {
-                                            ws_c.update(cx, |ws, cx| {
-                                                ws.copy_file_path_to_clipboard(p_c.clone(), cx)
-                                            });
-                                        },
-                                    ))
-                                    .item(PopupMenuItem::new("在 Finder 中显示").on_click(
-                                        move |_ev, _window, cx| {
-                                            ws_f.update(cx, |ws, cx| {
-                                                ws.reveal_path_in_finder(p_f.clone(), cx)
-                                            });
-                                        },
-                                    ))
-                                })
-                                .into_any_element(),
-                        );
+                        col =
+                            col.child(
+                                row_el
+                                    .context_menu(move |menu, _window, _cx| {
+                                        let (ws_d, r_d, p_d) =
+                                            (ws_menu.clone(), root_menu.clone(), path_menu.clone());
+                                        let (ws_c, p_c) = (ws_menu.clone(), file_path.clone());
+                                        let (ws_f, p_f) = (ws_menu.clone(), file_path.clone());
+                                        menu.item(
+                                            PopupMenuItem::new(if untracked {
+                                                "删除文件"
+                                            } else {
+                                                "丢弃改动"
+                                            })
+                                            .on_click(move |_ev, _window, cx| {
+                                                ws_d.update(cx, |ws, cx| {
+                                                    ws.start_discard_file(
+                                                        r_d.clone(),
+                                                        p_d.clone(),
+                                                        untracked,
+                                                        cx,
+                                                    )
+                                                });
+                                            }),
+                                        )
+                                        .separator()
+                                        .item(PopupMenuItem::new("复制文件路径").on_click(
+                                            move |_ev, _window, cx| {
+                                                ws_c.update(cx, |ws, cx| {
+                                                    ws.copy_file_path_to_clipboard(p_c.clone(), cx)
+                                                });
+                                            },
+                                        ))
+                                        .item(
+                                            PopupMenuItem::new("在 Finder 中显示").on_click(
+                                                move |_ev, _window, cx| {
+                                                    ws_f.update(cx, |ws, cx| {
+                                                        ws.reveal_path_in_finder(p_f.clone(), cx)
+                                                    });
+                                                },
+                                            ),
+                                        )
+                                    })
+                                    .into_any_element(),
+                            );
                     }
                 }
             }
@@ -3600,80 +3589,76 @@ impl Workspace {
         let border = rgb(crate::ui_theme::border_dim());
         // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死宽度的话中间的提交
         // 列表会被挤得没法看。
-        div().flex_1().min_h_0().flex().child(
-            h_resizable("git-log-split")
-                .with_state(&self.git_log_resize)
-                // 左：分支树
-                .child(
-                    resizable_panel()
-                        .size(px(200.))
-                        .size_range(px(140.)..Pixels::MAX)
-                        .child(
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(
+                h_resizable("git-log-split")
+                    .with_state(&self.git_log_resize)
+                    // 左：分支树
+                    .child(
+                        resizable_panel()
+                            .size(px(200.))
+                            .size_range(px(140.)..Pixels::MAX)
+                            .child(
+                                div()
+                                    .size_full()
+                                    .min_h_0()
+                                    .border_r_1()
+                                    .border_color(border)
+                                    .child(crate::git_log_view::branch_tree(
+                                        Some(root.clone()),
+                                        branches,
+                                        &self.git_log.scope,
+                                        head_branch.clone(),
+                                        cx,
+                                    )),
+                            ),
+                    )
+                    // 中：分支图 + 提交列表
+                    // wrapper 必须 .flex()：div 默认 Block，里面 flex_1 根节点会
+                    // 高度塌 0（同 Git 改动页 diff 面板的坑）。
+                    .child(
+                        resizable_panel().child(
                             div()
                                 .size_full()
+                                .flex()
+                                .min_w_0()
                                 .min_h_0()
                                 .border_r_1()
                                 .border_color(border)
-                                .child(crate::git_log_view::branch_tree(
+                                .child(crate::git_log_view::git_log_view(
                                     Some(root.clone()),
-                                    branches,
-                                    &self.git_log.scope,
-                                    head_branch.clone(),
+                                    &self.git_log,
+                                    head_branch,
                                     cx,
                                 )),
                         ),
-                )
-                // 中：分支图 + 提交列表
-                // wrapper 必须 .flex()：div 默认 Block，里面 flex_1 根节点会
-                // 高度塌 0（同 Git 改动页 diff 面板的坑）。
-                .child(
-                    resizable_panel().child(
-                        div()
-                            .size_full()
-                            .flex()
-                            .min_w_0()
-                            .min_h_0()
-                            .border_r_1()
-                            .border_color(border)
-                            .child(crate::git_log_view::git_log_view(
-                                Some(root.clone()),
-                                &self.git_log,
-                                head_branch,
-                                cx,
+                    )
+                    // 右：提交详情
+                    .child(
+                        resizable_panel()
+                            .size(px(380.))
+                            .size_range(px(240.)..Pixels::MAX)
+                            .child(div().size_full().flex().min_w_0().min_h_0().child(
+                                crate::git_log_view::commit_detail_pane(
+                                    Some(root),
+                                    &self.git_log,
+                                    cx,
+                                ),
                             )),
                     ),
-                )
-                // 右：提交详情
-                .child(
-                    resizable_panel()
-                        .size(px(380.))
-                        .size_range(px(240.)..Pixels::MAX)
-                        .child(div().size_full().flex().min_w_0().min_h_0().child(
-                            crate::git_log_view::commit_detail_pane(Some(root), &self.git_log, cx),
-                        )),
-                ),
-        )
-        .into_any_element()
-    }
-
-    /// GIT 面板「热力图」子标签：改动热力（原舞台独立页，见 MainView::Hotspot
-    /// 的历史注释），停靠 / 舞台展开态共用。
-    pub(crate) fn render_git_hotspot_tab(
-        &mut self,
-        root: String,
-        cx: &mut Context<Workspace>,
-    ) -> AnyElement {
-        self.ensure_hotspot(root.clone(), cx);
-        let data = self.hotspot_data.get(&root).map(|(_, d)| d.clone());
-        crate::hotspot::hotspot_view(Some(root), data, cx).into_any_element()
+            )
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
     // 不用 `use super::*;`：本文件顶部有 gpui/gpui_component 的 glob 导入，带进测试
-    // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩（hotspot.rs 的
-    // 测试模块踩过，那边留了同样的注释）。只导入真正用到的名字。
+    // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩。只导入真正
+    // 用到的名字。
     use super::{DiffKind, build_git_tree, hunk_patch, parse_diff, run_git, run_git_stdin};
 
     fn files(paths: &[&str]) -> Vec<(String, String)> {
