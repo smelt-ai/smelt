@@ -103,6 +103,8 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> AcpSnapshot {
         // 断线只是 GUI 与 smeltd 的传输终止，不代表 daemon 中的会话历史消失。
         // 用已接收长度作为增量偏移，AcpView 会保留现有 entries，只更新终态。
         entries_offset,
+        entries_total: entries_offset,
+        snapshot_revision: 0,
         entries: Vec::new(),
         phase: AcpPhase::Ended(reason.to_string()),
         pending_permissions: Vec::new(),
