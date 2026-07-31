@@ -6557,14 +6557,25 @@ impl Render for Workspace {
                     )
                     .child(
                         // 右侧：面板入口与侧边面板开关。stop_propagation 避免触发拖拽。
+                        // 跟 sidebar-toggle 同一套竖直基准：卡片顶边比窗口顶边低 8px
+                        // （shell 的 `.p(px(8.))`），头栏行本身 34px 高，居中线在
+                        // 卡片顶边往下 17px——即窗口顶边往下 8+17=25px。这层挂在
+                        // 42px 高的拖拽层里，若直接 `h_full().items_center()` 会居中
+                        // 在 42/2=21px，比头栏文字整体高了 4px，跟 FILES/GIT/SKILL
+                        // 那一侧对不齐；改成显式 `mt(8px)+h(34px)` 复刻同一条基准线。
                         h_flex()
-                            .h_full()
+                            .mt(px(8.))
+                            .h(px(34.))
                             .items_center()
                             .gap_1()
-                            // 留出右侧呼吸间距，别让按钮贴到窗口边缘。跟左边红绿灯
-                            // 同一套「离卡片边缘 10px」的间距（卡片边缘=8px shell
-                            // 外边距，紧贴 8px 会显得太靠边），原来的 8px 太紧。
-                            .pr(px(10.))
+                            // 留出右侧呼吸间距。这层拖拽层是 `right_0()` 贴到*窗口*
+                            // 右边缘的，不是贴卡片右边缘——卡片右边缘因为 shell 的
+                            // `.p(px(8.))` 比窗口边缘还要再往里收 8px。之前直接照抄
+                            // 红绿灯那侧「离卡片边缘 10px」的视觉间距、但忘了减掉这
+                            // 8px 差价，`pr(px(10.))` 实际只留出 10-8=2px，图标几乎
+                            // 贴到卡片圆角上。改成 8(shell 外边距)+10(离卡片边缘的
+                            // 呼吸间距)=18px，跟红绿灯 `x=18` 对称。
+                            .pr(px(18.))
                             .child({
                                 let promoted = self.inspector_panel_promoted();
                                 div()
