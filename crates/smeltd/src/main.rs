@@ -1971,9 +1971,15 @@ fn resume_handoff(
         let state = Arc::new(Mutex::new(SessionState {
             id: id.clone(),
             cwd: cwd.clone(),
-            launch: Some(cmd),
+            launch: Some(cmd.clone()),
             ..Default::default()
         }));
+        // 无缝升级交接只带了拼好的 cmd 字符串，没有结构化 env；用它兜底重建一份
+        // launch_spec——env 丢了没关系，`acp_restart` 大概率也用不上这条兜底
+        // 分支（正常场景很快会有一次真正的 acp_relaunch 把它覆盖成完整版本）。
+        let launch_spec = Mutex::new(Some(
+            smelt_core::agent_kind::AcpLaunchSpec::from_command(cmd),
+        ));
         let (slot, created) = acp_sessions.reserve_with(&id, || AcpSession {
             reduced: Mutex::new(reduced),
             snapshot_revision: AtomicU64::new(snapshot_revision),
@@ -1985,6 +1991,7 @@ fn resume_handoff(
                 client: None,
                 watchers: Vec::new(),
             }),
+            launch_spec,
         });
         if !created {
             cleanup_rejected_acp_handoff(owned);
@@ -3330,6 +3337,7 @@ fn handle_conn(
         Some("acp_snapshot") => handle_acp_snapshot(conn, &v, &acp_sessions),
         Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &subscribers),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
+        Some("acp_restart") => handle_acp_restart(conn, &v, &acp_sessions, &subscribers),
         Some("list") => {
             let (mut ids, mut states): (Vec<String>, Vec<SessionState>) = sessions
                 .lock()
@@ -4043,6 +4051,10 @@ struct AcpSession {
     /// 四色状态，跟终端会话共用同一个类型/同一套广播机制。
     state: Arc<Mutex<SessionState>>,
     out: Mutex<AcpOut>,
+    /// 最近一次真正 open/relaunch 用过的完整启动规格（含 env），供 `acp_restart`
+    /// 重启时复用——`state.launch` 只存了命令字符串给状态展示用，重启需要
+    /// 完整结构化的 `AcpLaunchSpec`（env 可能带空格，不能靠字符串拼回去）。
+    launch_spec: Mutex<Option<smelt_core::agent_kind::AcpLaunchSpec>>,
 }
 
 type AcpSessions = Arc<AcpRegistry<AcpSession>>;
@@ -4246,6 +4258,9 @@ fn acp_relaunch(
         launch.command = smelt_core::agent_kind::default_acp_codex_cmd();
     }
     let needs_check = sess.agent_needs_transcript_check;
+    // 记住这次真正用过的完整启动规格，`acp_restart` 卡死重启时不必依赖 GUI
+    // 重新把 launch 传一遍（GUI 那条 acp_open 连接可能压根没断，不会重新握手）。
+    *sess.launch_spec.lock().unwrap() = Some(launch.clone());
     let app_launch = smelt_core::acp_conn::AcpLaunch {
         launch: launch.clone(),
         cwd: sess.cwd.clone(),
@@ -4293,6 +4308,7 @@ fn make_acp_session(
             client: None,
             watchers: Vec::new(),
         }),
+        launch_spec: Mutex::new(None),
     }
 }
 
@@ -4658,6 +4674,58 @@ fn handle_acp_kill(conn: UnixStream, v: &serde_json::Value, acp_sessions: &AcpSe
     }
     let mut c = conn;
     let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+}
+
+/// 强制重启：agent 子进程失联/卡死（比如 `session/cancel` 打不断正在跑的工具
+/// 调用）时的兜底——跟 `acp_kill` 共享"杀进程组"这一步，但**不**摘表、不断开
+/// GUI 连接、不清 watchers：会话本体（entries/id/GUI 那条 acp_open 连接）
+/// 全部原样留着，只是换一个新的子进程，带着 resume_session_id 去 `session/load`
+/// 接回同一份历史，对用户来说是同一个标签、同一段对话，只是"服务端"心跳重启了。
+fn handle_acp_restart(
+    conn: UnixStream,
+    v: &serde_json::Value,
+    acp_sessions: &AcpSessions,
+    subscribers: &Subscribers,
+) {
+    let id = v["id"].as_str().unwrap_or_default();
+    let result = (|| -> Result<(), &'static str> {
+        let slot = acp_sessions.get(id).ok_or("ACP session not found")?;
+        let _lifecycle = slot.lifecycle.lock().unwrap();
+        let sess = &slot.value;
+        let Some(launch) = sess.launch_spec.lock().unwrap().clone() else {
+            return Err("no launch spec recorded for this session yet");
+        };
+        let resume_id = {
+            let reduced = sess.reduced.lock().unwrap();
+            reduced
+                .history_session_id
+                .clone()
+                .or_else(|| reduced.acp_session_id.clone())
+        };
+        // 先礼貌地跟旧进程说 Shutdown（drive_session 收到就退出循环，栈展开时
+        // KillProcessGroupOnDrop 对整个进程组 SIGKILL——跟 acp_kill 同一条路），
+        // 不等它真收尾就立刻起新的：新旧进程组不同，互不干扰。
+        if let Some(h) = sess.handle.lock().unwrap().take() {
+            let _ = h
+                .cmd_tx
+                .try_send(smelt_core::acp_conn::AcpCommand::Shutdown);
+        }
+        acp_relaunch(
+            &slot,
+            id,
+            launch,
+            resume_id,
+            acp_sessions.spawn_gate(),
+            subscribers,
+        );
+        Ok(())
+    })();
+    let response = match result {
+        Ok(()) => serde_json::json!({"ok": true}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    };
+    let mut c = conn;
+    let _ = writeln!(c, "{}", response);
 }
 
 fn collect_acp_handoff(acp_sessions: &AcpSessions) -> (Vec<serde_json::Value>, Vec<RawFd>) {
@@ -6253,6 +6321,7 @@ mod acp_tests {
                 client: None,
                 watchers: Vec::new(),
             }),
+            launch_spec: Mutex::new(None),
         }
     }
 

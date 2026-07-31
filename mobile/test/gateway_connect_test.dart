@@ -175,20 +175,23 @@ void main() {
   test('reports the selected iroh path and end-to-end latency', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final socketReady = Completer<WebSocket>();
+    final listenerReady = Completer<StreamSubscription<dynamic>>();
     var pingCount = 0;
     server.listen((request) async {
       final socket = await WebSocketTransformer.upgrade(request);
       socketReady.complete(socket);
       socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-      socket.listen((data) {
-        final message = jsonDecode(data as String) as Map<String, dynamic>;
-        if (message['method'] != 'ping') return;
-        pingCount++;
-        final params = message['params'] as Map<String, dynamic>;
-        socket.add(
-          jsonEncode({'type': 'pong', 'sentAtMs': params['sentAtMs']}),
-        );
-      });
+      listenerReady.complete(
+        socket.listen((data) {
+          final message = jsonDecode(data as String) as Map<String, dynamic>;
+          if (message['method'] != 'ping') return;
+          pingCount++;
+          final params = message['params'] as Map<String, dynamic>;
+          socket.add(
+            jsonEncode({'type': 'pong', 'sentAtMs': params['sentAtMs']}),
+          );
+        }),
+      );
     });
 
     final service = GatewayService(
@@ -215,6 +218,7 @@ void main() {
     expect(service.metrics.latencyMs, greaterThanOrEqualTo(0));
 
     service.disconnect();
+    await (await listenerReady.future).cancel();
     await socket.close();
     await server.close(force: true);
   });
@@ -222,16 +226,21 @@ void main() {
   test('old gateways fall back to QUIC RTT without showing an error', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final socketReady = Completer<WebSocket>();
+    final listenerReady = Completer<StreamSubscription<dynamic>>();
     server.listen((request) async {
       final socket = await WebSocketTransformer.upgrade(request);
       socketReady.complete(socket);
       socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-      socket.listen((data) {
-        final message = jsonDecode(data as String) as Map<String, dynamic>;
-        if (message['method'] == 'ping') {
-          socket.add(jsonEncode({'type': 'error', 'error': 'invalid request'}));
-        }
-      });
+      listenerReady.complete(
+        socket.listen((data) {
+          final message = jsonDecode(data as String) as Map<String, dynamic>;
+          if (message['method'] == 'ping') {
+            socket.add(
+              jsonEncode({'type': 'error', 'error': 'invalid request'}),
+            );
+          }
+        }),
+      );
     });
 
     final errors = <String>[];
@@ -261,6 +270,7 @@ void main() {
 
     service.disconnect();
     await errorSub.cancel();
+    await (await listenerReady.future).cancel();
     await socket.close();
     await server.close(force: true);
   });

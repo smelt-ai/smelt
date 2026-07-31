@@ -8370,6 +8370,7 @@ dependencies = [
  "base64",
  "gpui",
  "gpui-component",
+ "serde",
  "smelt-core",
  "smelt-ui",
  "smol",

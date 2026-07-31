@@ -433,6 +433,15 @@ impl Session {
         }
     }
 
+    /// ACP 会话的视图；终端会话返回 None（跟 `active_term` 反过来，供侧栏右键
+    /// 的「强制重启」这类 ACP 专属操作用）。
+    fn active_acp(&self) -> Option<&Entity<acp_view::AcpView>> {
+        match &self.kind {
+            SessionKind::Term { .. } => None,
+            SessionKind::Acp(view) => Some(view),
+        }
+    }
+
     /// 切换终端会话的活动 pane；非终端会话是 no-op。
     fn set_active_term(&mut self, view: Entity<TerminalView>) {
         match &mut self.kind {
@@ -840,6 +849,8 @@ struct AcpSaved {
     /// 存档则保留原 launch，避免把旧 profile 覆盖掉。旧存档无此字段 → false。
     #[serde(default)]
     refresh_launch_from_settings: bool,
+    #[serde(default)]
+    fork_origin: Option<acp_view::AcpForkOrigin>,
 }
 
 #[derive(serde::Deserialize)]
@@ -863,6 +874,8 @@ struct AcpSavedWire {
     sid: Option<String>,
     #[serde(default)]
     refresh_launch_from_settings: Option<bool>,
+    #[serde(default)]
+    fork_origin: Option<acp_view::AcpForkOrigin>,
 }
 
 impl<'de> serde::Deserialize<'de> for AcpSaved {
@@ -885,6 +898,7 @@ impl<'de> serde::Deserialize<'de> for AcpSaved {
             history_session_id: wire.history_session_id,
             sid: wire.sid,
             refresh_launch_from_settings,
+            fork_origin: wire.fork_origin,
         })
     }
 }
@@ -2072,7 +2086,7 @@ impl Workspace {
                 return;
             }
             if this
-                .update_in(cx, |this, _window, cx| {
+                .update_in(cx, |this, window, cx| {
                     for (original_index, ss) in acp_saved {
                         if restore_path_is_cancelled(
                             session_state_cwd(&ss).as_deref(),
@@ -2090,6 +2104,7 @@ impl Workspace {
                             .and_then(settings::AcpAgentKind::from_id)
                             .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
                         let refresh_launch_from_settings = saved.refresh_launch_from_settings();
+                        let fork_origin = saved.fork_origin.clone();
                         let view = cx.new(|cx| {
                             acp_view::AcpView::placeholder(
                                 cx,
@@ -2104,7 +2119,8 @@ impl Workspace {
                                 saved.sid,
                             )
                         });
-                        let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, cx));
+                        view.update(cx, |view, _cx| view.set_fork_origin(fork_origin));
+                        let _acp_persist_sub = Some(this.subscribe_acp_persist(&view, window, cx));
                         if this.session_list_revision != restore_revision {
                             restore_order_intact = false;
                         }
@@ -2528,18 +2544,57 @@ impl Workspace {
     fn subscribe_acp_persist(
         &mut self,
         view: &Entity<acp_view::AcpView>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Subscription {
-        cx.subscribe(
+        cx.subscribe_in(
             view,
-            |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, cx| match ev {
+            window,
+            |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => this.save_state(cx),
                 acp_view::AcpViewEvent::PreviewImage(image) => {
                     this.acp_image_preview = Some(image.clone());
                     cx.notify();
                 }
+                acp_view::AcpViewEvent::ContinueInNewSession(request) => {
+                    this.add_acp_handoff_session(request.clone(), window, cx);
+                }
+                acp_view::AcpViewEvent::NavigateToSession(session_id) => {
+                    if let Some(ix) = this
+                        .sessions
+                        .iter()
+                        .position(|session| match &session.kind {
+                            SessionKind::Acp(view) => view.read(cx).session_id() == session_id,
+                            SessionKind::Term { .. } => false,
+                        })
+                    {
+                        this.activate(ix, window, cx);
+                    }
+                }
             },
         )
+    }
+
+    fn add_acp_handoff_session(
+        &mut self,
+        request: acp_view::AcpHandoffRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_session_project(request.cwd.as_deref());
+        let title = format!("继续：{}", request.source.title);
+        let view = cx.new(|cx| acp_view::AcpView::start_with_handoff(window, cx, request));
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
+        self.sessions.push(Session {
+            kind: SessionKind::Acp(view),
+            custom_title: Some(title),
+            _acp_persist_sub,
+        });
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
+        self.active_session = self.sessions.len() - 1;
+        self.stage_override = None;
+        self.save_state(cx);
+        cx.notify();
     }
 
     /// 「+」菜单「对话 · smelt 原生界面」下那几项：新建 ACP 会话（第二种会话类型，
@@ -2561,7 +2616,7 @@ impl Workspace {
         });
         let view =
             cx.new(|cx| acp_view::AcpView::start(window, cx, agent, launch, profile_id, cwd));
-        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             kind: SessionKind::Acp(view),
             custom_title: None,
@@ -2642,7 +2697,7 @@ impl Workspace {
                 None,
             )
         });
-        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, cx));
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             kind: SessionKind::Acp(view),
             custom_title: None,
@@ -2839,6 +2894,7 @@ impl Workspace {
                             history_session_id: v.history_session_id_for_save(),
                             sid: Some(v.session_id().to_string()),
                             refresh_launch_from_settings: v.refresh_launch_from_settings(),
+                            fork_origin: v.fork_origin(),
                         }),
                     }
                 }
@@ -3426,6 +3482,16 @@ impl Workspace {
         let n = self.sessions.len();
         if n > 0 {
             self.activate((self.active_session + 1) % n, window, cx);
+        }
+    }
+
+    /// 侧栏右键「强制重启」：ACP 会话卡死（`session/cancel` 打不断正在跑的
+    /// 工具调用）时的兜底，见 `AcpView::force_restart` 注释。非 ACP 会话
+    /// （`active_acp` 返回 None）是 no-op，调用方（右键菜单）也只在 ACP
+    /// 会话上才显示这一项。
+    pub(crate) fn force_restart_acp_session(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(view) = self.sessions.get(ix).and_then(|s| s.active_acp()).cloned() {
+            view.update(cx, |v, cx| v.force_restart(cx));
         }
     }
 
@@ -6480,6 +6546,7 @@ mod project_tests {
                 history_session_id: None,
                 sid: None,
                 refresh_launch_from_settings: false,
+                fork_origin: None,
             }),
         };
         assert_eq!(session_state_cwd(&ss).as_deref(), Some("/a/acp-proj"));
@@ -6653,6 +6720,7 @@ mod workspace_state_tests {
                     history_session_id: None,
                     sid: Some(format!("sid-{name}")),
                     refresh_launch_from_settings: false,
+                    fork_origin: None,
                 }),
             }
         }
@@ -6802,6 +6870,7 @@ mod acp_agent_tests {
             )),
             sid: Some("acp-1".into()),
             refresh_launch_from_settings: false,
+            fork_origin: None,
         };
 
         let value = serde_json::to_value(&saved).unwrap();
