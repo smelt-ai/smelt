@@ -2002,6 +2002,8 @@ fn resume_handoff(
         } = validated;
         let supports_image = snapshot.supports_image;
         let snapshot_revision = snapshot.snapshot_revision;
+        let recover_running_turn =
+            matches!(snapshot.phase, smelt_core::acp_session::AcpPhase::Running);
         let reduced = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
 
         let state = Arc::new(Mutex::new(SessionState {
@@ -2051,6 +2053,7 @@ fn resume_handoff(
                 acp_session_id,
                 supports_image,
                 pending_raw_line,
+                recover_running_turn,
             );
             let event_rx = handle.event_rx.clone();
             *slot.value.handle.lock().unwrap() = Some(handle);

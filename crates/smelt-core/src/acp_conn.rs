@@ -585,16 +585,28 @@ fn make_resume_incoming_lines<R>(
     reader: R,
     pending_raw_line: Option<String>,
     last_stdout_line: Arc<Mutex<Option<String>>>,
+    orphaned_turn_tx: Option<smol::channel::Sender<AcpEvent>>,
 ) -> std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<String>> + Send>>
 where
     R: futures::AsyncRead + Send + Unpin + 'static,
 {
     let last_stdout_line_for_replay = Arc::clone(&last_stdout_line);
+    let mut orphaned_turn_tx = orphaned_turn_tx;
     let live = futures::io::BufReader::new(reader)
         .lines()
         .inspect(move |res| {
             if let Ok(line) = res {
                 *last_stdout_line.lock().unwrap() = Some(line.clone());
+                // `send_prompt` 把完成响应绑定在旧进程内存里的 request callback 上。
+                // exec 交接后 callback 不复存在，新连接仍会读到响应，但 SDK 不会再
+                // 产出 StopReason。只为交接时确实 Running 的那一轮补发一次；随后
+                // 新进程发起的 prompt 仍走 SDK 自己的正常完成路径。
+                if let Some(tx) = orphaned_turn_tx.as_ref()
+                    && let Some(reason) = prompt_stop_reason_from_response(line)
+                {
+                    let _ = tx.try_send(AcpEvent::TurnEnded(reason));
+                    orphaned_turn_tx = None;
+                }
             }
         });
     match pending_raw_line {
@@ -604,6 +616,16 @@ where
         }
         None => Box::pin(live),
     }
+}
+
+fn prompt_stop_reason_from_response(line: &str) -> Option<StopReason> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("method").is_some() || value.get("id").is_none() {
+        return None;
+    }
+    serde_json::from_value::<PromptResponse>(value.get("result")?.clone())
+        .ok()
+        .map(|response| response.stop_reason)
 }
 
 /// 子进程 stderr 逐行收进尾巴（原来挂在 `AcpAgent::with_debug` 的
@@ -879,6 +901,7 @@ pub fn resume_acp_from_fds(
     acp_session_id: String,
     supports_image: bool,
     pending_raw_line: Option<String>,
+    recover_running_turn: bool,
 ) -> AcpHandle {
     let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
     let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
@@ -898,6 +921,7 @@ pub fn resume_acp_from_fds(
                 acp_session_id,
                 supports_image,
                 pending_raw_line,
+                recover_running_turn,
                 cmd_rx,
                 event_tx.clone(),
             ));
@@ -927,6 +951,7 @@ async fn run_resumed_connection(
     acp_session_id: String,
     supports_image: bool,
     pending_raw_line: Option<String>,
+    recover_running_turn: bool,
     cmd_rx: smol::channel::Receiver<AcpCommand>,
     event_tx: smol::channel::Sender<AcpEvent>,
 ) -> Result<(), agent_client_protocol::Error> {
@@ -948,6 +973,7 @@ async fn run_resumed_connection(
         stdout_async,
         pending_raw_line,
         Arc::clone(&last_stdout_line),
+        recover_running_turn.then(|| event_tx.clone()),
     );
     let transport = Lines::new(outgoing, incoming);
 
@@ -2133,7 +2159,7 @@ mod image_block_tests {
 
 #[cfg(test)]
 mod resume_incoming_lines_tests {
-    use super::make_resume_incoming_lines;
+    use super::{AcpEvent, make_resume_incoming_lines, prompt_stop_reason_from_response};
     use crate::acp_session::{AcpSessionState, LivePermission};
     use futures::StreamExt;
     use std::sync::{Arc, Mutex};
@@ -2152,6 +2178,7 @@ mod resume_incoming_lines_tests {
             reader,
             Some("replayed-request-line".to_string()),
             Arc::clone(&last_stdout_line),
+            None,
         );
 
         smol::block_on(async {
@@ -2179,7 +2206,8 @@ mod resume_incoming_lines_tests {
     fn no_pending_line_still_tracks_live_lines() {
         let reader = futures::io::Cursor::new(b"only-live-line\n".to_vec());
         let last_stdout_line: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let mut stream = make_resume_incoming_lines(reader, None, Arc::clone(&last_stdout_line));
+        let mut stream =
+            make_resume_incoming_lines(reader, None, Arc::clone(&last_stdout_line), None);
 
         smol::block_on(async {
             let line = stream.next().await.unwrap().unwrap();
@@ -2201,6 +2229,7 @@ mod resume_incoming_lines_tests {
             reader,
             Some(replayed.to_string()),
             Arc::clone(&last_stdout_line),
+            None,
         );
 
         let pending_raw_line = smol::block_on(async {
@@ -2229,6 +2258,7 @@ mod resume_incoming_lines_tests {
             futures::io::Cursor::new(Vec::<u8>::new()),
             Some(pending_raw_line.clone()),
             Arc::new(Mutex::new(None)),
+            None,
         );
         let replayed_again = smol::block_on(async { second_resume.next().await.unwrap().unwrap() });
 
@@ -2237,6 +2267,46 @@ mod resume_incoming_lines_tests {
             serde_json::from_str::<serde_json::Value>(&replayed_again).unwrap()["id"],
             42
         );
+    }
+
+    #[test]
+    fn recognizes_only_prompt_completion_responses() {
+        let completed = r#"{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}"#;
+        assert!(prompt_stop_reason_from_response(completed).is_some());
+        assert!(
+            prompt_stop_reason_from_response(
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"stopReason":"end_turn"}}"#
+            )
+            .is_none()
+        );
+        assert!(
+            prompt_stop_reason_from_response(
+                r#"{"jsonrpc":"2.0","id":8,"result":{"configOptions":[]}}"#
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resumed_running_turn_emits_one_completion_for_orphaned_response() {
+        let lines = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"stopReason\":\"end_turn\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"stopReason\":\"cancelled\"}}\n"
+        );
+        let (tx, rx) = smol::channel::unbounded();
+        let mut stream = make_resume_incoming_lines(
+            futures::io::Cursor::new(lines.as_bytes().to_vec()),
+            None,
+            Arc::new(Mutex::new(None)),
+            Some(tx),
+        );
+
+        smol::block_on(async {
+            assert!(stream.next().await.is_some());
+            assert!(stream.next().await.is_some());
+        });
+        assert!(matches!(rx.try_recv(), Ok(AcpEvent::TurnEnded(_))));
+        assert!(rx.try_recv().is_err(), "交接遗失的回调只能补发一次");
     }
 }
 
