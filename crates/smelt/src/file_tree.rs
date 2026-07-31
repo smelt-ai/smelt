@@ -727,21 +727,17 @@ pub fn file_content_pane(
             let preview = of.preview && is_md;
             let last_idx = breadcrumb_segs.len().saturating_sub(1);
             let breadcrumb = h_flex().items_center().gap_1().children(
-                breadcrumb_segs
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, seg)| {
-                        let is_last = i == last_idx;
-                        let seg_el = div()
-                            .text_sm()
-                            .when(is_last, |el| el.text_color(fg).font_semibold())
-                            .when(!is_last, |el| el.text_color(muted))
-                            .child(seg.clone());
-                        let sep = (!is_last)
-                            .then(|| div().text_sm().text_color(muted).child(">"));
-                        std::iter::once(seg_el.into_any_element())
-                            .chain(sep.map(|s| s.into_any_element()))
-                    }),
+                breadcrumb_segs.iter().enumerate().flat_map(|(i, seg)| {
+                    let is_last = i == last_idx;
+                    let seg_el = div()
+                        .text_sm()
+                        .when(is_last, |el| el.text_color(fg).font_semibold())
+                        .when(!is_last, |el| el.text_color(muted))
+                        .child(seg.clone());
+                    let sep = (!is_last).then(|| div().text_sm().text_color(muted).child(">"));
+                    std::iter::once(seg_el.into_any_element())
+                        .chain(sep.map(|s| s.into_any_element()))
+                }),
             );
             let header = h_flex()
                 .items_center()

@@ -1158,6 +1158,12 @@ impl AcpView {
         self.model.as_ref().map(|m| m.current_name.clone())
     }
 
+    /// 当前上下文已用 token 数（舞台头显示用）；None = agent 没上报过用量。
+    /// 跟输入栏「上下文 %」胶囊同一个数据源，只是这里要精确数字而非百分比。
+    pub fn context_tokens_used(&self) -> Option<u64> {
+        self.usage.map(|(used, _)| used)
+    }
+
     /// 写回 agent 上报的会话配置。四个 agent 共用 ACP 的标准接口。
     fn set_config_option(&mut self, config_id: String, value_id: String) {
         if let Some(h) = &self.handle {
@@ -1444,6 +1450,7 @@ impl Render for AcpView {
         }
         let t = cx.theme();
         let muted = t.muted_foreground;
+        let acp_surface: gpui::Hsla = gpui::transparent_black().into();
 
         // 相位横幅：启动中 / 已结束（含失败原因）时显示；正常运行不占空间。
         let banner: Option<gpui::AnyElement> = match &self.phase {
@@ -1686,7 +1693,7 @@ impl Render for AcpView {
                             .items_center()
                             .border_b_1()
                             .border_color(t.border)
-                            .bg(gpui::rgb(ui_theme::bg_bar()))
+                            .bg(ui_theme::glass_floating())
                             .cursor_pointer()
                             .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                             .child(
@@ -1722,7 +1729,7 @@ impl Render for AcpView {
                         .rounded_lg()
                         .border_1()
                         .border_color(t.border)
-                        .bg(gpui::rgb(ui_theme::bg_card()))
+                        .bg(ui_theme::glass_floating())
                         .shadow_sm()
                         .cursor_pointer()
                         .hover(|button| button.bg(gpui::rgb(ui_theme::bg_hover())))
@@ -2180,7 +2187,7 @@ impl Render for AcpView {
                             // 把左边这条线的视觉职责接管了，这里直接去掉。
                             .border_l_0()
                             .border_color(t.border)
-                            .bg(t.muted)
+                            .bg(ui_theme::glass_card())
                             .hover(|card| {
                                 card.border_color(ui_theme::tint(bar_u32, 0x66))
                                     .shadow_md()
@@ -2594,9 +2601,9 @@ impl Render for AcpView {
                                                 .bg(gpui::rgb(ui_theme::yellow()))
                                                 .with_animation(
                                                     "acp-permission-ping",
-                                                    Animation::new(std::time::Duration::from_millis(
-                                                        1600,
-                                                    ))
+                                                    Animation::new(
+                                                        std::time::Duration::from_millis(1600),
+                                                    )
                                                     .repeat(),
                                                     |this, delta| {
                                                         let scale = 1.0 + delta * 1.6;
@@ -2834,7 +2841,7 @@ impl Render for AcpView {
                 .rounded_lg()
                 .border_1()
                 .border_color(t.border)
-                .bg(t.background)
+                .bg(ui_theme::glass_floating())
                 .shadow_lg();
             for (ix, item) in popup.items.iter().enumerate() {
                 let selected = ix == popup.selected;
@@ -3017,9 +3024,7 @@ impl Render for AcpView {
                                 let config_id = config_id.clone();
                                 let this = this.clone();
                                 menu = menu.item(
-                                    PopupMenuItem::new(name.clone())
-                                    .checked(is_cur)
-                                    .on_click(
+                                    PopupMenuItem::new(name.clone()).checked(is_cur).on_click(
                                         move |_ev, _window, cx| {
                                             let value = value.clone();
                                             let config_id = config_id.clone();
@@ -3041,7 +3046,7 @@ impl Render for AcpView {
                 .rounded_xl()
                 .border_1()
                 .border_color(t.border)
-                .bg(t.background)
+                .bg(ui_theme::glass_input())
                 .child(
                     div()
                         .px_4()
@@ -3310,10 +3315,10 @@ impl Render for AcpView {
                                 .gap_2()
                                 .child(Spinner::new().xsmall().color(muted))
                                 .child(
-                                    div().text_sm().text_color(muted).child(format!(
-                                        "{} 正在思考",
-                                        self.agent.short_label()
-                                    )),
+                                    div()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child(format!("{} 正在思考", self.agent.short_label())),
                                 )
                                 .child(
                                     // Discord「对方正在输入」经典三连跳点：比死气沉沉的
@@ -3337,8 +3342,9 @@ impl Render for AcpView {
                                                     .repeat(),
                                                     move |this, delta| {
                                                         let t = (delta + phase).fract();
-                                                        let lift =
-                                                            (t * std::f32::consts::TAU).sin().max(0.0);
+                                                        let lift = (t * std::f32::consts::TAU)
+                                                            .sin()
+                                                            .max(0.0);
                                                         this.top(px(-lift * 4.))
                                                     },
                                                 )
@@ -3467,7 +3473,7 @@ impl Render for AcpView {
                     cx.stop_propagation();
                 }
             }))
-            .bg(t.background)
+            .bg(acp_surface)
             .children(banner)
             .children(fork_banner)
             .children(plan_bar)
@@ -3681,7 +3687,9 @@ fn is_user_entry(entry: &AcpEntry) -> bool {
 /// 前后都包着同一种标记时才剥掉，避免误伤正文里本来就有的单个星号。
 fn strip_thought_heading_markers(line: &str) -> &str {
     for wrapper in ["**", "__"] {
-        if let Some(inner) = line.strip_prefix(wrapper).and_then(|s| s.strip_suffix(wrapper))
+        if let Some(inner) = line
+            .strip_prefix(wrapper)
+            .and_then(|s| s.strip_suffix(wrapper))
             && !inner.is_empty()
         {
             return inner;

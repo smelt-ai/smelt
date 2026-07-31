@@ -53,7 +53,7 @@ pub struct Appearance {
     pub bg_image: Option<String>,
     /// 不透明度 0.3–1.0；<1 时窗口转透明/模糊，桌面透出。
     pub opacity: f32,
-    /// 毛玻璃模糊（macOS vibrancy，配合透明使用）。
+    /// 旧配置兼容字段；液态玻璃现已始终启用。
     pub blur: bool,
     /// 明暗主题模式。
     #[serde(default = "default_theme_mode")]
@@ -73,7 +73,7 @@ impl Default for Appearance {
             bg_color: DEFAULT_BG_COLOR,
             bg_image: None,
             opacity: 1.0,
-            blur: false,
+            blur: true,
             theme_mode: ThemeMode::Dark,
             font_px: default_font_px(),
             font_family: String::new(),
@@ -86,13 +86,7 @@ impl Global for Appearance {}
 impl Appearance {
     /// 据当前设置推导窗口背景外观。
     pub fn window_bg(&self) -> WindowBackgroundAppearance {
-        if self.blur {
-            WindowBackgroundAppearance::Blurred
-        } else if self.opacity < 1.0 {
-            WindowBackgroundAppearance::Transparent
-        } else {
-            WindowBackgroundAppearance::Opaque
-        }
+        WindowBackgroundAppearance::Blurred
     }
 
     /// `bg_color` 是否还是没被用户碰过的出厂值。是的话终端背景层该跟主题模式自动
@@ -1103,6 +1097,16 @@ struct CopyFlash {
 
 impl Global for CopyFlash {}
 
+/// 「存储」设置页的扫描结果 + 上一次清理的提示文案（点按钮时同步刷新，扫描很快
+/// 不值得像更新检查那样搞异步状态机）。
+#[derive(Clone, Default)]
+struct CleanupState {
+    scan: Option<crate::storage_cleanup::CleanupScan>,
+    message: Option<SharedString>,
+}
+
+impl Global for CleanupState {}
+
 fn copy_btn_label(id: &str, idle: &str, cx: &App) -> String {
     if let Some(f) = cx.try_global::<CopyFlash>() {
         if f.id == id {
@@ -1958,17 +1962,6 @@ impl Workspace {
                             .children(opacity_slider.as_ref().map(Slider::new))
                     }),
                 ),
-                SettingItem::new(
-                    "背景模糊",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<Appearance>().blur,
-                        |v: bool, cx: &mut App| {
-                            apply_appearance(|a| a.blur = v, cx);
-                            cx.refresh_windows();
-                        },
-                    )
-                    .default_value(false),
-                ),
             ]));
 
         // —— 桌面宠物 ——
@@ -2469,6 +2462,96 @@ impl Workspace {
                                 .text_xs()
                                 .text_color(muted)
                                 .child("「重启守护进程」会断开并终止当前所有终端会话（含正在跑的 agent）；若只是版本落后，优先用会话不中断的「无缝升级」。"),
+                        )
+                })),
+        );
+
+        // —— 存储：`~/.smelt` 下的历史残留（老 schema / 老实现留下的孤儿文件）扫描与清理 ——
+        let storage_page = SettingPage::new("存储").resettable(false).group(
+            SettingGroup::new()
+                .title("残留数据清理")
+                .description(
+                    "smelt 迭代过程中换过任务存储格式、worktree 检出方式，\
+                     旧版本留下的文件不会再被读写，纯占地方。这里可以扫一遍并一键清掉。",
+                )
+                .item(SettingItem::render(move |_, _, cx: &mut App| {
+                    let state = cx.default_global::<CleanupState>().clone();
+
+                    let summary_text = match &state.scan {
+                        None => "还没扫描".to_string(),
+                        Some(s) if s.is_empty() => "没有发现残留数据".to_string(),
+                        Some(s) => format!(
+                            "发现 {} 处残留：孤儿 prompt 文件 {} 个、旧版任务文件 {} 个、\
+                             旧版 worktree 目录 {} 个",
+                            s.total_items(),
+                            s.orphan_prompts.len(),
+                            s.legacy_task_files.len(),
+                            s.legacy_worktree_dirs.len(),
+                        ),
+                    };
+
+                    let has_findings = state.scan.as_ref().is_some_and(|s| !s.is_empty());
+
+                    let scan_btn = btn("storage-scan", "扫描残留数据".into()).on_mouse_down(
+                        MouseButton::Left,
+                        move |_, _window, cx: &mut App| {
+                            let scan = crate::storage_cleanup::scan();
+                            cx.set_global(CleanupState {
+                                scan: Some(scan),
+                                message: None,
+                            });
+                        },
+                    );
+
+                    let clean_btn = has_findings.then(|| {
+                        btn_hover(
+                            "storage-clean",
+                            "清理".into(),
+                            Hsla::from(crate::ui_theme::tint(crate::ui_theme::blue(), 0x40)),
+                        )
+                        .text_color(rgb(crate::ui_theme::blue()))
+                        .bg(Hsla::from(crate::ui_theme::tint(
+                            crate::ui_theme::blue(),
+                            0x24,
+                        )))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_, _window, cx: &mut App| {
+                                let Some(scan) = cx.default_global::<CleanupState>().scan.clone()
+                                else {
+                                    return;
+                                };
+                                let removed = crate::storage_cleanup::clean(&scan);
+                                cx.set_global(CleanupState {
+                                    scan: Some(crate::storage_cleanup::scan()),
+                                    message: Some(format!("已清理 {removed} 项").into()),
+                                });
+                            },
+                        )
+                    });
+
+                    v_flex()
+                        .w_full()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .items_center()
+                                .child(div().text_sm().text_color(fg).child("~/.smelt 历史残留"))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(scan_btn)
+                                        .children(clean_btn),
+                                ),
+                        )
+                        .child(div().text_xs().text_color(muted).child(summary_text))
+                        .children(
+                            state
+                                .message
+                                .map(|m| div().text_xs().text_color(muted).child(m)),
                         )
                 })),
         );
@@ -3224,6 +3307,7 @@ impl Workspace {
                     launch_page,
                     agent_page,
                     update_page,
+                    storage_page,
                     remote_page,
                     shortcuts_page,
                 ]),
