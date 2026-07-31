@@ -558,7 +558,14 @@ fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
         return UpgradeOutcome::Failed;
     }
 
-    match upgrade_daemon_exe(Some(&target)) {
+    let outcome = loop {
+        let outcome = upgrade_daemon_exe(Some(&target));
+        if outcome != UpgradeOutcome::Busy {
+            break outcome;
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    match outcome {
         UpgradeOutcome::Upgraded => {
             thread::sleep(Duration::from_millis(250));
             if target != managed {
@@ -959,6 +966,8 @@ pub enum UpgradeOutcome {
     Upgraded,
     /// 正在跑的守护太旧，不认识 "upgrade" op（静默断连），只能走硬重启。
     Unsupported,
+    /// ACP 仍有未完成 RPC；守护未执行 exec，现有连接完全未受影响。
+    Busy,
     /// 守护接了单但升级没生效（exec 失败等），版本还是旧的。
     Failed,
 }
@@ -1009,8 +1018,14 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
         Ok(_) => {}
         Err(_) => return UpgradeOutcome::Failed,
     }
-    let acked = serde_json::from_str::<serde_json::Value>(resp.trim())
-        .is_ok_and(|v| v["ok"].as_bool() == Some(true));
+    let parsed = serde_json::from_str::<serde_json::Value>(resp.trim()).ok();
+    if parsed
+        .as_ref()
+        .is_some_and(|v| v["busy"].as_bool() == Some(true))
+    {
+        return UpgradeOutcome::Busy;
+    }
+    let acked = parsed.is_some_and(|v| v["ok"].as_bool() == Some(true));
     if !acked {
         return UpgradeOutcome::Failed;
     }
@@ -1070,6 +1085,7 @@ pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::
             UpgradeOutcome::Upgraded => {
                 thread::sleep(Duration::from_millis(300));
             }
+        UpgradeOutcome::Busy => unreachable!("busy outcomes are retried above"),
             UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
                 eprintln!(
                     "[workspace] 装包前 handoff→managed 未成功，继续替换 .app（会话可能丢失）"

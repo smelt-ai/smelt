@@ -330,9 +330,18 @@ impl AcpSessionState {
     /// 走一遍正常的 `apply_event(Permission/Elicitation)`，到时候会自然把
     /// `permission`/`elicitation` 填回去——不需要（也没法）在这里预置。
     pub fn from_snapshot(snap: AcpSnapshot) -> Self {
+        // Running 必须有对应的活跃回合。旧版可能先收到 TurnEnded、再收到 SDK
+        // 迟交付的工具通知，把 phase 重新写成 Running，却已经清掉了开始时间。
+        // 无缝升级时在边界上修复这种非法组合，避免把僵尸回合继续带进新进程。
+        let phase = if matches!(snap.phase, AcpPhase::Running) && snap.turn_started_at_ms.is_none()
+        {
+            AcpPhase::Idle
+        } else {
+            snap.phase.clone()
+        };
         Self {
             entries: snap.entries,
-            phase: snap.phase,
+            phase,
             permissions: Vec::new(),
             elicitation: None,
             completed_unread: snap.completed_unread,
@@ -594,7 +603,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                     state.entries.push(AcpEntry::Assistant { text, thought });
                 }
             }
-            if !state.replaying_history {
+            if !state.replaying_history && state.turn_started_at_ms.is_some() {
                 state.phase = AcpPhase::Running;
             }
         }
@@ -612,7 +621,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 state.elicitation = Some(elicitation);
                 state.phase = AcpPhase::AwaitingChoice;
             } else {
-                if !state.replaying_history {
+                if !state.replaying_history && state.turn_started_at_ms.is_some() {
                     state.phase = AcpPhase::Running;
                 }
             }
@@ -670,7 +679,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 status: crate::acp_chat::ToolCallStatus::InProgress,
                 output: Vec::new(),
             });
-            if !state.replaying_history {
+            if !state.replaying_history && state.turn_started_at_ms.is_some() {
                 state.phase = AcpPhase::Running;
             }
         }
@@ -712,7 +721,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         }
         AcpEvent::Plan(p) => {
             state.plan = Some(plan_view_from_acp(&p));
-            if !state.replaying_history {
+            if !state.replaying_history && state.turn_started_at_ms.is_some() {
                 state.phase = AcpPhase::Running;
             }
         }
@@ -753,14 +762,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             outcome.notify = Some(("等你选择".to_string(), message, false));
         }
         AcpEvent::TurnEnded(reason) => {
-            state.permissions.clear();
-            state.elicitation = None;
-            state.phase = AcpPhase::Idle;
-            state.completed_unread = true;
-            state.last_turn_duration_ms = state
-                .turn_started_at_ms
-                .take()
-                .map(|started| unix_time_ms().saturating_sub(started));
+            finish_turn(state);
             let _ = reason;
         }
         AcpEvent::Fatal(msg) => {
@@ -772,6 +774,16 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
 
     outcome.should_persist = !skip_persist;
     outcome
+}
+
+fn finish_turn(state: &mut AcpSessionState) {
+    state.permissions.clear();
+    state.elicitation = None;
+    state.phase = AcpPhase::Idle;
+    state.completed_unread = true;
+    if let Some(started) = state.turn_started_at_ms.take() {
+        state.last_turn_duration_ms = Some(unix_time_ms().saturating_sub(started));
+    }
 }
 
 /// Some agents replay an unfinished AskUserQuestion as a pending tool call but do not recreate
@@ -1084,6 +1096,7 @@ mod tests {
     #[test]
     fn agent_chunk_appends_and_merges_consecutive_same_kind() {
         let mut s = fresh_state();
+        note_prompt_sent(&mut s, "hi".into(), Vec::new());
         apply_event(
             &mut s,
             AcpEvent::AgentChunk {
@@ -1098,9 +1111,9 @@ mod tests {
                 text: "llo".into(),
             },
         );
-        assert_eq!(s.entries.len(), 1);
+        assert_eq!(s.entries.len(), 2);
         assert!(
-            matches!(&s.entries[0], AcpEntry::Assistant { text, thought: false } if text == "hello")
+            matches!(&s.entries[1], AcpEntry::Assistant { text, thought: false } if text == "hello")
         );
         assert!(matches!(s.phase, AcpPhase::Running));
     }
@@ -1297,6 +1310,65 @@ mod tests {
         apply_event(&mut s, AcpEvent::TurnEnded(StopReason::EndTurn));
         assert!(matches!(s.phase, AcpPhase::Idle));
         assert!(s.completed_unread);
+    }
+
+    #[test]
+    fn late_task_complete_after_turn_ended_does_not_reopen_turn() {
+        let mut s = fresh_state();
+        note_prompt_sent(&mut s, "do it".into(), Vec::new());
+        apply_event(&mut s, AcpEvent::TurnEnded(StopReason::EndTurn));
+        assert!(matches!(s.phase, AcpPhase::Idle));
+
+        apply_event(
+            &mut s,
+            AcpEvent::ToolCall(
+                agent_client_protocol::schema::v1::ToolCall::new("done", "task_complete")
+                    .kind(agent_client_protocol::schema::v1::ToolKind::Other)
+                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+            ),
+        );
+
+        assert!(matches!(s.phase, AcpPhase::Idle));
+        assert!(s.completed_unread);
+    }
+
+    #[test]
+    fn ordinary_tool_during_active_turn_keeps_turn_running() {
+        let mut s = fresh_state();
+        note_prompt_sent(&mut s, "read it".into(), Vec::new());
+        apply_event(
+            &mut s,
+            AcpEvent::ToolStarted {
+                id: "read".into(),
+                title: "read_file".into(),
+                kind: ToolKind::Read,
+            },
+        );
+
+        apply_event(
+            &mut s,
+            AcpEvent::ToolFinished {
+                id: "read".into(),
+                status: ToolCallStatus::Completed,
+                output: Vec::new(),
+            },
+        );
+
+        assert!(matches!(s.phase, AcpPhase::Running));
+        assert!(!s.completed_unread);
+    }
+
+    #[test]
+    fn snapshot_restore_repairs_running_without_an_active_turn() {
+        let mut s = fresh_state();
+        s.phase = AcpPhase::Running;
+        s.turn_started_at_ms = None;
+        s.completed_unread = true;
+
+        let restored = AcpSessionState::from_snapshot(s.to_snapshot(false));
+
+        assert!(matches!(restored.phase, AcpPhase::Idle));
+        assert!(restored.completed_unread);
     }
 
     #[test]

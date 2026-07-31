@@ -11,7 +11,7 @@ use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
-use crate::{MainView, Workspace, ui_theme, workspace_frame};
+use crate::{MainView, Workspace, placeholder_view, ui_theme, workspace_frame};
 
 /// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
 /// `.group_hover()`）。
@@ -278,13 +278,11 @@ impl Workspace {
         // 同一套 workspace_roots / collapsed_roots，行为一致）。
         let roots = self.workspace_roots(cx);
         let has_open_file = self.open_file.is_some();
-        // 打开文件后的目录宽度随 inspector 一起缩放，避免外层面板较窄时
-        // “详情最小宽度 + 固定目录宽度”超过容器并向右溢出。
-        let tree_w = if has_open_file {
-            (self.inspector_w * 0.36).clamp(120., 240.)
-        } else {
-            344.
-        };
+        // 目录宽度不再按「是否已打开文件」二选一（之前无文件时占满 344，一打开文件
+        // 骤降到按比例算出的窄宽度，视觉上会有明显的一下跳变/抖动）。参考 Code 类
+        // 编辑器：目录栏宽度恒定，打开文件只是替换左侧内容区，栏宽本身纹丝不动。
+        // 随 inspector 整体宽度缩放，避免外层面板较窄时溢出。
+        let tree_w = (self.inspector_w * 0.36).clamp(120., 240.);
         let tree = if has_query {
             match &self.search_results {
                 Some(state) => {
@@ -324,53 +322,50 @@ impl Workspace {
             .children(search_box)
             .child(tree)
             .into_any_element();
-        let body: AnyElement = if has_open_file {
-            let content = crate::file_tree::file_content_pane(&self.open_file, &roots, cx);
-            div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .overflow_hidden()
-                .child(
-                    h_resizable("inspector-files-split")
-                        .child(
-                            resizable_panel()
-                                .size_range(px(140.)..Pixels::MAX)
-                                .min_w_0()
-                                .min_h_0()
-                                .flex()
-                                .child(content),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(tree_w))
-                                .size_range(px(120.)..Pixels::MAX)
-                                .flex_none()
-                                .min_w_0()
-                                .min_h_0()
-                                .flex()
-                                .child(
-                                    div()
-                                        .size_full()
-                                        .min_h_0()
-                                        .flex()
-                                        .flex_col()
-                                        .border_l_1()
-                                        .border_color(rgb(ui_theme::border_dim()))
-                                        .child(tree),
-                                ),
-                        ),
-                )
-                .into_any_element()
+        // 左侧内容区：打开了文件显示内容面板，否则显示空态占位（跟参考应用一致：
+        // 目录树右侧栏常驻不变，「打开文件」只是替换掉这一块内容，不改变整体结构）。
+        let content = if has_open_file {
+            crate::file_tree::file_content_pane(&self.open_file, &roots, cx).into_any_element()
         } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(tree)
+            placeholder_view("从工作区树状目录中选取文件", cx.theme().muted_foreground)
                 .into_any_element()
         };
+        let body = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(
+                h_resizable("inspector-files-split")
+                    .child(
+                        resizable_panel()
+                            .size_range(px(140.)..Pixels::MAX)
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .child(content),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(tree_w))
+                            .size_range(px(120.)..Pixels::MAX)
+                            .flex_none()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .child(
+                                div()
+                                    .size_full()
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .border_l_1()
+                                    .border_color(rgb(ui_theme::border_dim()))
+                                    .child(tree),
+                            ),
+                    ),
+            )
+            .into_any_element();
         div()
             .flex_1()
             .min_h_0()
