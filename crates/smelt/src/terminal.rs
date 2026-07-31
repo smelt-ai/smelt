@@ -38,11 +38,9 @@ pub fn is_dark() -> bool {
     DARK_MODE.load(Ordering::Relaxed)
 }
 
-/// 默认前景 / 背景色：深色取 iTerm2 风格灰白正文，浅色取近白底 + 深灰正文。
+/// 默认前景色：深色取 iTerm2 风格灰白正文，浅色取近白底 + 深灰正文。
 const DEFAULT_FG_DARK: u32 = 0x00d8_d8d8;
-const DEFAULT_BG_DARK: u32 = 0x001a_1b26;
 const DEFAULT_FG_LIGHT: u32 = 0x0024_292e;
-const DEFAULT_BG_LIGHT: u32 = 0x00f6_f8fa;
 
 pub fn default_fg() -> u32 {
     if is_dark() {
@@ -52,12 +50,12 @@ pub fn default_fg() -> u32 {
     }
 }
 
+/// 默认背景色：跟卡片本体同色系（`ui_theme::bg_panel`），不再是独立的 Tokyo
+/// Night 深蓝黑——终端面板紧贴在舞台头下面，两者用不同色系时，标题栏透明后
+/// 反而更显眼地露出一条界缝。ANSI 16 色板（下面 PALETTE_DARK/LIGHT）仍保留
+/// Tokyo Night 配色，只有「没手动设置背景色」时兜底的这个默认底色跟着卡片走。
 pub fn default_bg() -> u32 {
-    if is_dark() {
-        DEFAULT_BG_DARK
-    } else {
-        DEFAULT_BG_LIGHT
-    }
+    crate::ui_theme::bg_panel()
 }
 
 /// 16 色 ANSI 调色板：深色沿用 Tokyo Night（白/亮白改为灰白/纯白，iTerm2 风格）；
