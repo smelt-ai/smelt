@@ -1121,7 +1121,10 @@ impl Render for TerminalView {
                     .object_fit(ObjectFit::Cover),
             );
         }
-        let bg_layer = bg_layer.opacity(ap.opacity);
+        // 液态玻璃模式下终端也必须给窗口 vibrancy 留出通道。否则终端这块最大的
+        // 实色矩形会把外层玻璃全部盖住，视觉上只剩几条圆角边线。
+        let surface_opacity = ap.opacity.min(0.68);
+        let bg_layer = bg_layer.opacity(surface_opacity);
 
         let menu_sid = self.session_id.clone();
         let menu_cwd = self.cwd.clone();

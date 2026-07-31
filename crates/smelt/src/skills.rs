@@ -1081,7 +1081,7 @@ impl crate::Workspace {
         } else if modal.entry.managed {
             "管理链接"
         } else {
-            "应用到其他工具"
+            "迁移到 .smelt"
         };
 
         let mut content =
@@ -1090,7 +1090,15 @@ impl crate::Workspace {
                 .child(div().font_bold().text_color(fg).text_lg().child(title))
                 .child(div().text_sm().text_color(muted).child(
                     if modal.entry.duplicates.is_empty() {
-                        format!("勾选要同步「{}」的 agent：", modal.entry.name)
+                        if modal.entry.managed {
+                            format!("勾选要同步「{}」的 agent：", modal.entry.name)
+                        } else {
+                            format!(
+                                "把「{}」收编进 .smelt 统一管理：原目录会被删除，改为在勾选的 \
+                                 agent 里创建指回 .smelt 真身的链接，一处改、处处生效。",
+                                modal.entry.name
+                            )
+                        }
                     } else {
                         format!(
                             "发现 {} 份同名内容。选择一份作为 .smelt 真身，其余副本将替换为链接。",

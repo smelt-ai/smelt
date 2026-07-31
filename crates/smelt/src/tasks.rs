@@ -406,6 +406,11 @@ impl TaskStore {
         file.tasks.retain(|t| t.id != id);
         file.runs.retain(|run| run.task_id != id);
         Self::save(&file);
+        // 任务删了，落盘的首包 prompt 文件也得一起删，不然 `tasks/prompts/` 里
+        // 会一直攒孤儿文件（历史上就是这么攒出来的）。
+        if let Some(dir) = tasks_dir() {
+            let _ = std::fs::remove_file(dir.join("prompts").join(format!("{id}.txt")));
+        }
     }
 
     pub fn get(id: &str) -> Option<Task> {
@@ -1931,9 +1936,8 @@ impl Workspace {
             TaskStore::update(id, |t| t.session_id = Some(sid.to_string()));
         }
 
-        self.active_session = ix;
+        self.activate(ix, window, cx);
         self.sessions[ix].set_active_term(leaf.clone());
-        self.stage_override = None;
 
         if inject && !prompt.is_empty() {
             leaf.update(cx, |tv, cx| {
@@ -1955,8 +1959,7 @@ impl Workspace {
         for i in 0..self.sessions.len() {
             for leaf in self.sessions[i].term_leaves() {
                 if leaf.read(cx).session_id() == sid {
-                    self.active_session = i;
-                    self.stage_override = None;
+                    self.activate(i, window, cx);
                     self.sessions[i].set_active_term(leaf);
                     self.focus_active(window, cx);
                     cx.notify();
@@ -1985,27 +1988,6 @@ impl Workspace {
         // 执行中但会话已丢 → 再新开
         if task.column.is_active() {
             self.run_task_in_terminal(id, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// 侧栏快捷：有会话则聚焦，待办/无会话则开跑。
-    pub fn focus_or_run_task(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.task_selected = Some(id.to_string());
-        let Some(task) = TaskStore::get(id) else {
-            return;
-        };
-        if let Some(sid) = task.session_id.as_ref() {
-            if !task.column.is_todo() && self.focus_session_by_id(sid, window, cx) {
-                return;
-            }
-        }
-        if task.column.is_todo() || task.column.is_active() || task.column == TaskColumn::Failed {
-            self.run_task(id, window, cx);
-            return;
-        }
-        if let Some(sid) = task.session_id.as_ref() {
-            let _ = self.focus_session_by_id(sid, window, cx);
         }
         cx.notify();
     }
@@ -2095,7 +2077,6 @@ impl Workspace {
         });
         self.sessions.push(crate::Session::single(view.clone()));
         self.active_session = self.sessions.len() - 1;
-        self.stage_override = None;
         // 存 base（不含 prompt 拼接），再跑时重新拼首包；执行现场归 TaskRun。
         TaskStore::update(id, |t| {
             t.launch = Some(base_launch);

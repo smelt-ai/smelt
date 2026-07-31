@@ -21,7 +21,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::{Anchor, Rgba, rgb, rgba};
+use gpui::{Anchor, Pixels, Rgba, px, rgb, rgba, transparent_black};
 
 use smelt_core::agent_status::AgentStatus;
 
@@ -274,7 +274,7 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
 
     c.background = rgb(p.bg_panel).into();
     c.foreground = rgb(p.text).into();
-    c.border = rgb(p.border_mid).into();
+    c.border = transparent_black().into();
     c.muted = rgb(p.bg_card).into();
     c.muted_foreground = rgb(p.text_muted).into();
     c.popover = rgb(p.bg_card).into();
@@ -397,6 +397,37 @@ slots!(
 /// `alpha` 0–255；`tint(accent(), 0x22)` ≈ 设计稿的 rgba(217,138,79,.13)。
 pub fn tint(color: u32, alpha: u8) -> Rgba {
     rgba((color << 8) | alpha as u32)
+}
+
+/// 液态玻璃的浮层材质。
+pub fn glass_floating() -> Rgba {
+    tint(bg_card(), 0xdc)
+}
+
+/// 内容卡片材质：比浮层更通透，适合工具调用、消息附件等重复表面。
+pub fn glass_card() -> Rgba {
+    tint(bg_card(), 0xb8)
+}
+
+/// 卡片圆角统一出处（任务卡 / skill 卡 / 通知卡等重复出现的小卡片）。
+/// 之前各处各写各的（7px/8px/9px），一眼看不出是不是同一层级。
+pub fn card_radius() -> Pixels {
+    px(9.)
+}
+
+/// 卡片内边距统一出处，配合 `card_radius` 一起用，让重复出现的卡片手感一致。
+pub fn card_padding() -> Pixels {
+    px(10.)
+}
+
+/// 输入区域材质：透明度介于浮层和内容卡片之间，保证编辑文字对比度。
+pub fn glass_input() -> Rgba {
+    tint(bg_panel(), 0xcc)
+}
+
+/// 浮层背后的压暗层。低风险弹层只轻压，高风险确认仍保持明确打断。
+pub fn glass_scrim(heavy: bool) -> Rgba {
+    rgba(if heavy { 0x00000088 } else { 0x00000020 })
 }
 
 /// 「在底色上压一层薄纱」——深色下是白纱，浅色下是黑纱。
