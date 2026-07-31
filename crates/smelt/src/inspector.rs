@@ -181,6 +181,12 @@ impl Workspace {
                 {
                     let mut bar = TabBar::new("inspector-rail")
                         .underline()
+                        // Underline 默认（Medium）内建行高 36px、字号 text_sm(14px)，
+                        // 比这一行固定的 34px 容器高，还跟旁边侧栏/搜索框的次级文字
+                        // 比显得偏大。XSmall 的行高是 26px（塞进 34px 绰绰有余），
+                        // 字号也降到 text_xs(12px)，跟 FILES/GIT/SKILL 该有的「次级
+                        // 导航」分量更配。
+                        .with_size(gpui_component::Size::XSmall)
                         .flex_1()
                         .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
                             if let Some(tab) = TABS.get(*ix).copied() {
