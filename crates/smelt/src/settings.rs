@@ -846,8 +846,8 @@ pub fn uninstall_agent_hooks() -> Result<(), String> {
 
 // ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
 
-/// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。网关运行时
-/// token/绑定地址不落盘（见 [`RemoteRuntimeState`]）；用户填写的 relay 地址会持久化。
+/// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。用户填写的
+/// relay 地址会持久化；设备配对 token 由 smeltd 单独保存在 owner-only 文件中。
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub enabled: bool,
@@ -907,8 +907,8 @@ fn set_remote_from_start_result(result: Result<terminal::RemoteStatus, String>, 
 
 /// iroh 隧道运行时（不落盘）：配对 URI + 二维码 PNG。
 ///
-/// 存的是 `smelt+iroh://` 配对 URI，由 `endpoint_id`（重启不变）+ token 组成，
-/// 所以只有换过 token（重开网关）才需要重新扫码。
+/// 存的是 `smelt+iroh://` 配对 URI，由持久化的 `endpoint_id` + token 组成。
+/// 两者重启都不变，只有用户手动刷新 token 才需要重新扫码。
 #[derive(Clone, Default)]
 pub struct IrohRuntimeState {
     pub connecting: bool,
@@ -1138,7 +1138,8 @@ pub fn apply_write_toggle(enabled: bool, cx: &mut App) {
         return;
     }
 
-    // iroh 必须重来一遍：endpoint_id 不变，但配对码里的 token 那一半会随网关重开失效。
+    // 写权限是服务端策略，重启网关与隧道应用新值即可；持久化 token 保持不变，
+    // 已配对手机不应因为权限切换被迫重新扫码。
     terminal::iroh_stop();
     terminal::remote_stop();
     set_remote_from_start_result(terminal::remote_start("127.0.0.1", enabled), cx);
@@ -1154,10 +1155,45 @@ pub fn retry_remote_setup(cx: &mut App) {
     let write = c.write_enabled;
 
     terminal::iroh_stop();
-    // 网关先停再起，让 token/端口与 iroh 配对码对齐
+    // 网关先停再起，让端口与 iroh 转发目标对齐；持久化 token 保持不变。
     terminal::remote_stop();
     set_remote_from_start_result(terminal::remote_start("127.0.0.1", write), cx);
     spawn_iroh_start(write, cx);
+}
+
+/// 用户主动刷新设备凭证。普通重试、服务重启、电脑重启和写权限切换都不会调用它。
+pub fn refresh_remote_token(window: &mut Window, cx: &mut App) {
+    let config = cx.global::<RemoteConfig>().clone();
+    if !config.enabled {
+        return;
+    }
+    cx.set_global(IrohRuntimeState {
+        connecting: true,
+        ..Default::default()
+    });
+    match terminal::remote_rotate_token()
+        .and_then(|()| terminal::remote_start("127.0.0.1", config.write_enabled))
+    {
+        Ok(_) => {
+            cx.set_global(RemoteRuntimeState::default());
+            spawn_iroh_start(config.write_enabled, cx);
+            window.push_notification(
+                Notification::success("配对 Token 已刷新；旧配对已失效，请重新扫码"),
+                cx,
+            );
+        }
+        Err(error) => {
+            cx.set_global(RemoteRuntimeState {
+                error: Some(error.clone()),
+            });
+            cx.set_global(IrohRuntimeState {
+                error: Some(error.clone()),
+                ..Default::default()
+            });
+            window.push_notification(Notification::error(error), cx);
+        }
+    }
+    cx.refresh_windows();
 }
 
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
@@ -2959,7 +2995,7 @@ impl Workspace {
                 )
                 .description(
                     "配对码持有者可在手机上输入、批准/拒绝权限。分享即授权。\
-                     切换后会自动换一条新配对码（旧的失效）。",
+                     切换权限不会改变配对 Token，已配对手机继续有效。",
                 ),
                 // 分享卡片只展示 iroh 配对码；loopback 网关是内部实现，不对用户暴露。
                 SettingItem::render(move |_, _, cx: &mut App| {
@@ -3071,7 +3107,9 @@ impl Workspace {
                                     .child(primary.clone()),
                             )
                             .child(
-                                h_flex().gap_2().child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
                                     btn(
                                         "copy-share-link",
                                         copy_btn_label("copy-share-link", "复制配对码", cx),
@@ -3088,7 +3126,16 @@ impl Workspace {
                                             );
                                         },
                                     ),
-                                ),
+                                    )
+                                    .child(
+                                        btn("refresh-remote-token", "刷新 Token".into())
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                |_, window, cx: &mut App| {
+                                                    refresh_remote_token(window, cx)
+                                                },
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
@@ -3100,7 +3147,9 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child("用 smelt 手机 App 扫码配对。"),
+                                    .child(
+                                        "用 smelt 手机 App 扫码配对。电脑或服务重启不会改变 Token；手动刷新会使旧配对失效。",
+                                    ),
                             ),
                     );
                     card = card.child(row);

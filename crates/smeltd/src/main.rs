@@ -31,6 +31,7 @@
 //!                                                              见下「内嵌远程网关」（bind/port/write 都可省，
 //!                                                              默认回环随机口 + 只读）
 //!   {"op":"remote_stop"}                                     → 回 {"ok":true} 后关闭
+//!   {"op":"remote_rotate_token"}                              → 停止远程服务、持久化新 token，旧配对失效
 //!   {"op":"remote_status"}                                   → 回 {"running":bool,"token":"..","addr":"..","write":bool} 后关闭
 //!   {"op":"iroh_start","write":false}                         → 回 {"ok":true,"endpoint_id":"..","token":"..",
 //!                                                              "addr":"..","write":bool}，把远程网关经 iroh
@@ -99,8 +100,9 @@
 //! `main()` 整个改成 async；`remote_start` 只是另起一条 OS 线程，在那条线程里私自建
 //! 一个 tokio runtime 跑 axum server，跟守护主循环完全隔离，互不影响。
 //!
-//! 幂等：已经开着时 `remote_start` 直接回现有的 token/addr，不重启、不换 token；
-//! 想要新 token 得先 `remote_stop` 再 `remote_start`。**不**参与无缝升级交接——
+//! 幂等：已经开着时 `remote_start` 直接回现有的 token/addr，不重启、不换 token。
+//! token 单独保存在 `~/.smelt/remote-token`（0600），冷启动和无缝升级都复用；只有
+//! `remote_rotate_token` 会轮换并让旧配对失效。网关运行态本身**不**参与无缝升级交接：
 //! `upgrade` 之后如果之前开着远程网关，会随旧进程退出而关闭，新进程里默认是关的
 //! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
 //! 默认关闭、绑回环，见 collaboration.md 的安全底线。
@@ -1036,7 +1038,108 @@ impl SystemSleepAssertion {
     }
 }
 
-type RemoteState = Arc<Mutex<Option<RemoteGateway>>>;
+struct RemoteStateData {
+    gateway: Option<RemoteGateway>,
+    /// 持久化的设备凭证。`None` 只存在于冷启动尚未开启远程时；第一次启动网关
+    /// 会从磁盘读取或创建，之后重启网关、切换写权限都复用它。
+    token: Option<String>,
+}
+
+type RemoteState = Arc<Mutex<RemoteStateData>>;
+
+fn new_remote_state(token: Option<String>) -> RemoteState {
+    Arc::new(Mutex::new(RemoteStateData {
+        gateway: None,
+        token,
+    }))
+}
+
+fn remote_token_path() -> Result<std::path::PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".smelt").join("remote-token"))
+        .ok_or_else(|| "找不到用户目录，无法保存远程配对 Token".to_string())
+}
+
+fn valid_remote_token(token: &str) -> bool {
+    token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn persist_remote_token(path: &std::path::Path, token: &str) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| "远程配对 Token 路径没有父目录".to_string())?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+    let staged = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let write_result = (|| -> Result<(), String> {
+        let mut file = options
+            .open(&staged)
+            .map_err(|error| format!("写入 {} 失败：{error}", staged.display()))?;
+        file.write_all(token.as_bytes())
+            .map_err(|error| format!("写入 {} 失败：{error}", staged.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("同步 {} 失败：{error}", staged.display()))?;
+        std::fs::rename(&staged, path)
+            .map_err(|error| format!("替换 {} 失败：{error}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("收紧 {} 权限失败：{error}", path.display()))?;
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(staged);
+    }
+    write_result
+}
+
+fn load_or_create_remote_token() -> Result<String, String> {
+    load_or_create_remote_token_at(&remote_token_path()?)
+}
+
+fn load_or_create_remote_token_at(path: &std::path::Path) -> Result<String, String> {
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        let token = raw.trim();
+        if valid_remote_token(token) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| format!("收紧 {} 权限失败：{error}", path.display()))?;
+            }
+            return Ok(token.to_string());
+        }
+    }
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    persist_remote_token(&path, &token)?;
+    Ok(token)
+}
+
+fn rotate_remote_token(state: &RemoteState) -> Result<String, String> {
+    rotate_remote_token_at(state, &remote_token_path()?)
+}
+
+fn rotate_remote_token_at(state: &RemoteState, path: &std::path::Path) -> Result<String, String> {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let mut guard = state.lock().unwrap();
+    if let Some(gateway) = guard.gateway.take() {
+        let _ = gateway.shutdown_tx.send(());
+    }
+    persist_remote_token(path, &token)?;
+    guard.token = Some(token.clone());
+    Ok(token)
+}
 
 /// 幂等：已经开着直接回现有 token/addr/write，不重启、不换 token——包括 `write`
 /// 参数：想改写权限得先 `remote_stop` 再 `remote_start`，不支持热切换（跟其余
@@ -1052,9 +1155,18 @@ fn start_remote_gateway(
     write: bool,
 ) -> Result<(String, std::net::SocketAddr, bool), String> {
     let mut guard = state.lock().unwrap();
-    if let Some(g) = guard.as_ref() {
+    if let Some(g) = guard.gateway.as_ref() {
         return Ok((g.token.clone(), g.addr, g.write));
     }
+
+    let token = match guard.token.clone() {
+        Some(token) => token,
+        None => {
+            let token = load_or_create_remote_token()?;
+            guard.token = Some(token.clone());
+            token
+        }
+    };
 
     let ip: std::net::IpAddr = bind
         .parse()
@@ -1066,7 +1178,6 @@ fn start_remote_gateway(
         .map_err(|e| e.to_string())?;
     let addr = std_listener.local_addr().map_err(|e| e.to_string())?;
 
-    let token = uuid::Uuid::new_v4().simple().to_string();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     // 子线程认领 listener / 建 runtime 成功才算 ready；失败则本函数 Err 且不写 state。
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -1113,7 +1224,7 @@ fn start_remote_gateway(
                     None
                 }
             };
-            *guard = Some(RemoteGateway {
+            guard.gateway = Some(RemoteGateway {
                 token: token.clone(),
                 addr,
                 write,
@@ -1128,7 +1239,7 @@ fn start_remote_gateway(
 }
 
 fn stop_remote_gateway(state: &RemoteState) {
-    if let Some(g) = state.lock().unwrap().take() {
+    if let Some(g) = state.lock().unwrap().gateway.take() {
         let _ = g.shutdown_tx.send(());
     }
 }
@@ -1169,7 +1280,7 @@ fn start_iroh(
         }
         let (token, addr, effective_write) = {
             let guard = remote_state.lock().unwrap();
-            match guard.as_ref() {
+            match guard.gateway.as_ref() {
                 Some(g) => (g.token.clone(), g.addr, g.write),
                 // 网关被单独停掉了：报错而不是回一个通往虚空的配对码。
                 None => return Err("iroh 隧道开着但本机网关已停，请先 iroh_stop".into()),
@@ -1303,7 +1414,7 @@ fn ensure_remote_gateway_with_write(
 ) -> Result<(String, std::net::SocketAddr, bool), String> {
     {
         let guard = state.lock().unwrap();
-        if let Some(g) = guard.as_ref() {
+        if let Some(g) = guard.gateway.as_ref() {
             if g.write == write {
                 return Ok((g.token.clone(), g.addr, g.write));
             }
@@ -1319,7 +1430,7 @@ mod ensure_remote_gateway_write_tests {
 
     #[test]
     fn starts_with_requested_write_when_down() {
-        let state: RemoteState = Arc::new(Mutex::new(None));
+        let state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let (token, _addr, write) = ensure_remote_gateway_with_write(&state, true).expect("start");
         assert!(write, "应烤进 write=true");
         assert!(!token.is_empty());
@@ -1328,6 +1439,7 @@ mod ensure_remote_gateway_write_tests {
             state
                 .lock()
                 .unwrap()
+                .gateway
                 .as_ref()
                 .and_then(|gateway| gateway._sleep_assertion.as_ref())
                 .is_some(),
@@ -1341,8 +1453,8 @@ mod ensure_remote_gateway_write_tests {
     }
 
     #[test]
-    fn restarts_and_rotates_token_when_write_changes() {
-        let state: RemoteState = Arc::new(Mutex::new(None));
+    fn restarts_and_reuses_token_when_write_changes() {
+        let state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let (token_ro, _, write_ro) =
             ensure_remote_gateway_with_write(&state, false).expect("start ro");
         assert!(!write_ro);
@@ -1352,20 +1464,58 @@ mod ensure_remote_gateway_write_tests {
         let (token_rw, _, write_rw) =
             ensure_remote_gateway_with_write(&state, true).expect("upgrade to rw");
         assert!(write_rw, "write 切换后必须变成可写");
-        assert_ne!(token_ro, token_rw, "写权限变了必须换新 token，旧链接失效");
+        assert_eq!(token_ro, token_rw, "写权限切换不应让已配对手机失效");
 
         let (token_ro2, _, write_ro2) =
             ensure_remote_gateway_with_write(&state, false).expect("downgrade to ro");
         assert!(!write_ro2);
-        assert_ne!(token_rw, token_ro2);
+        assert_eq!(token_rw, token_ro2);
         stop_remote_gateway(&state);
+    }
+
+    #[test]
+    fn token_persists_until_explicit_rotation() {
+        let dir = std::env::temp_dir().join(format!(
+            "smeltd-remote-token-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("remote-token");
+        let first = load_or_create_remote_token_at(&path).expect("create token");
+        let after_restart = load_or_create_remote_token_at(&path).expect("reload token");
+        assert_eq!(first, after_restart);
+
+        let state = new_remote_state(Some(first.clone()));
+        let rotated = rotate_remote_token_at(&state, &path).expect("rotate token");
+        assert_ne!(first, rotated);
+        assert_eq!(
+            load_or_create_remote_token_at(&path).expect("reload rotated token"),
+            rotated
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("token metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            state.lock().unwrap().token.as_deref(),
+            Some(rotated.as_str())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn plain_start_remote_gateway_is_still_idempotent_on_write() {
         // 对照：裸 start_remote_gateway 的旧语义还在——已开时忽略 write 参数。
         // ensure 才是"按 write 对齐"的入口；别把两个行为搞混。
-        let state: RemoteState = Arc::new(Mutex::new(None));
+        let state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let (t1, _, w1) = start_remote_gateway(&state, "127.0.0.1", 0, false).expect("ro");
         assert!(!w1);
         let (t2, _, w2) = start_remote_gateway(&state, "127.0.0.1", 0, true).expect("idempotent");
@@ -1622,7 +1772,7 @@ fn main() {
     let exe_mtime = exe_mtime_secs();
     // 不参与无缝升级交接：每次进程启动（含 upgrade 后的新进程）都是全新的 None，
     // 见 RemoteGateway / IrohTunnel 定义处注释。
-    let remote_state: RemoteState = Arc::new(Mutex::new(None));
+    let remote_state = new_remote_state(None);
     let iroh_state: IrohState = Arc::new(Mutex::new(None));
     // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
     // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
@@ -3122,7 +3272,7 @@ mod action_integration_tests {
     /// 请求-响应，不像 watch/open 那样要开线程陪它跑一辈子。
     fn call_action(sessions: &Sessions, id: &str, kind: &str) -> serde_json::Value {
         let (server, client) = UnixStream::pair().unwrap();
-        let remote_state: RemoteState = Arc::new(Mutex::new(None));
+        let remote_state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let iroh_state: IrohState = Arc::new(Mutex::new(None));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let mut client = client;
@@ -3257,7 +3407,7 @@ mod input_integration_tests {
 
     fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
         let (server, client) = UnixStream::pair().unwrap();
-        let remote_state: RemoteState = Arc::new(Mutex::new(None));
+        let remote_state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let iroh_state: IrohState = Arc::new(Mutex::new(None));
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let mut client = client;
@@ -3474,9 +3624,24 @@ fn handle_conn(
             let mut c = conn;
             let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
         }
+        Some("remote_rotate_token") => {
+            // Token 是设备凭证；只有这条显式操作会轮换。先停隧道和网关，确保
+            // 旧连接立即失效，调用方随后按原配置重新拉起服务。
+            stop_iroh(&iroh_state);
+            let mut c = conn;
+            match rotate_remote_token(&remote_state) {
+                Ok(_) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+                }
+                Err(error) => {
+                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": error }));
+                }
+            }
+        }
         Some("remote_status") => {
             let mut c = conn;
-            let body = match remote_state.lock().unwrap().as_ref() {
+            let guard = remote_state.lock().unwrap();
+            let body = match guard.gateway.as_ref() {
                 Some(g) => serde_json::json!({
                     "running": true, "token": g.token, "addr": g.addr.to_string(), "write": g.write
                 }),
@@ -3519,6 +3684,7 @@ fn handle_conn(
                     let (token, write) = remote_state
                         .lock()
                         .unwrap()
+                        .gateway
                         .as_ref()
                         .map(|g| (g.token.clone(), g.write))
                         .unwrap_or_default();
@@ -6322,7 +6488,7 @@ mod watch_tests {
                         new_acp_sessions(),
                         0,
                         -1,
-                        Arc::new(Mutex::new(None)),
+                        new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string())),
                         Arc::new(Mutex::new(None)),
                         Arc::clone(&subscribers),
                     );
