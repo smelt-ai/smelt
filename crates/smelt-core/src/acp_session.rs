@@ -181,6 +181,13 @@ pub struct AcpSnapshot {
     /// `entries` 应替换本地历史的起始下标。0 表示完整快照；大于 0 表示增量尾片。
     #[serde(default)]
     pub entries_offset: usize,
+    /// 生成快照时服务端持有的完整历史长度。旧快照缺少该字段时由客户端根据
+    /// `entries_offset + entries.len()` 推导。
+    #[serde(default)]
+    pub entries_total: usize,
+    /// Monotonic version assigned by smeltd whenever it publishes this session.
+    #[serde(default)]
+    pub snapshot_revision: u64,
     pub entries: Vec<AcpEntry>,
     pub phase: AcpPhase,
     #[serde(default)]
@@ -369,10 +376,23 @@ impl AcpSessionState {
     }
 
     pub fn to_snapshot_since(&self, should_persist: bool, entries_offset: usize) -> AcpSnapshot {
-        let entries_offset = entries_offset.min(self.entries.len());
+        self.to_snapshot_range(should_persist, entries_offset, self.entries.len())
+    }
+
+    pub fn to_snapshot_range(
+        &self,
+        should_persist: bool,
+        entries_offset: usize,
+        entries_end: usize,
+    ) -> AcpSnapshot {
+        let entries_total = self.entries.len();
+        let entries_end = entries_end.min(entries_total);
+        let entries_offset = entries_offset.min(entries_end);
         AcpSnapshot {
             entries_offset,
-            entries: self.entries[entries_offset..].to_vec(),
+            entries_total,
+            snapshot_revision: 0,
+            entries: self.entries[entries_offset..entries_end].to_vec(),
             phase: self.phase.clone(),
             pending_permissions: self
                 .permissions

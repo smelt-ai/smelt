@@ -35,6 +35,23 @@ pub async fn iroh_tunnel_port() -> Option<u32> {
     crate::iroh_tunnel::port().await.map(|p| p as u32)
 }
 
+/// iroh 当前选中的实际传输路径和 QUIC RTT。
+#[derive(Clone, Debug)]
+pub struct IrohPathStatus {
+    /// `lan`、`p2p` 或 `relay`。
+    pub kind: String,
+    pub rtt_ms: u32,
+}
+
+pub async fn iroh_tunnel_path_status() -> Option<IrohPathStatus> {
+    crate::iroh_tunnel::path_status()
+        .await
+        .map(|status| IrohPathStatus {
+            kind: status.kind,
+            rtt_ms: status.rtt_ms,
+        })
+}
+
 /// `smelt+iroh://` 配对码的两半。缺一不可：EndpointId 决定连得上谁，
 /// token 决定连上之后能不能操作。
 #[derive(Clone, Debug)]

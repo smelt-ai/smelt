@@ -26,6 +26,96 @@ bool shouldAutoFollowSnapshot({
   required bool wasAtBottom,
 }) => initialLoad || wasAtBottom;
 
+class TurnElapsedLabel extends StatefulWidget {
+  const TurnElapsedLabel({
+    super.key,
+    required this.label,
+    required this.startedAtMs,
+    required this.color,
+  });
+
+  final String label;
+  final int startedAtMs;
+  final Color color;
+
+  @override
+  State<TurnElapsedLabel> createState() => _TurnElapsedLabelState();
+}
+
+class _TurnElapsedLabelState extends State<TurnElapsedLabel> {
+  late final Timer _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final elapsed = DateTime.now().millisecondsSinceEpoch - widget.startedAtMs;
+    return Text(
+      '${widget.label} · ${_formatElapsed(elapsed)}',
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(color: widget.color, fontSize: 12),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+}
+
+class ConnectionStatusBar extends StatelessWidget {
+  const ConnectionStatusBar({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<ConnectionMetrics>(
+      stream: gatewayService.metricsStream,
+      initialData: gatewayService.metrics,
+      builder: (context, snapshot) {
+        final metrics = snapshot.data ?? const ConnectionMetrics();
+        final (icon, label) = switch (metrics.kind) {
+          ConnectionPathKind.lan => (Icons.lan_outlined, 'LAN'),
+          ConnectionPathKind.p2p => (Icons.swap_horiz, 'P2P'),
+          ConnectionPathKind.relay => (Icons.cloud_outlined, 'Relay'),
+          ConnectionPathKind.direct => (Icons.public, 'Direct'),
+          ConnectionPathKind.unknown => (
+            Icons.route_outlined,
+            'Detecting path',
+          ),
+        };
+        final latency = metrics.latencyMs == null
+            ? '--'
+            : '${metrics.latencyMs} ms';
+        final colors = Theme.of(context).colorScheme;
+        return Container(
+          width: double.infinity,
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          color: colors.surfaceContainer,
+          child: Row(
+            children: [
+              Icon(icon, size: 16, color: colors.onSurfaceVariant),
+              const SizedBox(width: 7),
+              Text(
+                '$label · $latency',
+                style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 bool _isInterruptMarker(String text) {
   final value = text.trim();
   return value.startsWith('[Request interrupted by user') &&
@@ -59,6 +149,17 @@ Future<void> main() async {
         relayToken: relayToken,
       );
   gatewayService.irohTunnelStopper = irohTunnelStop;
+  gatewayService.irohPathProbe = () async {
+    final status = await irohTunnelPathStatus();
+    if (status == null) return null;
+    final kind = switch (status.kind) {
+      'lan' => ConnectionPathKind.lan,
+      'p2p' => ConnectionPathKind.p2p,
+      'relay' => ConnectionPathKind.relay,
+      _ => ConnectionPathKind.unknown,
+    };
+    return IrohPathSample(kind: kind, rttMs: status.rttMs);
+  };
   runApp(const SmeltApp());
 }
 
@@ -317,10 +418,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildSessionList() {
-    if (_sessions.isEmpty) {
-      return const Center(child: Text('No active sessions'));
-    }
-
     final orderedSessions = List<SessionSummary>.of(_sessions)
       ..sort(compareSessionMenuOrder);
     final projects = <String, List<SessionSummary>>{};
@@ -328,38 +425,51 @@ class _HomePageState extends State<HomePage> {
       projects.putIfAbsent(_projectKey(session), () => []).add(session);
     }
 
-    return ListView(
-      children: projects.entries.map((entry) {
-        final sessions = entry.value;
-        final projectTitle = _projectName(sessions.first);
-        return ExpansionTile(
-          leading: const Icon(Icons.folder_outlined),
-          title: Text(projectTitle),
-          subtitle: Text(
-            '${sessions.length} agent${sessions.length == 1 ? '' : 's'}',
-          ),
-          children: sessions.map((session) {
-            final sessionTitle = session.title.trim();
-            final showTitle =
-                sessionTitle.isNotEmpty && sessionTitle != projectTitle;
-            return ListTile(
-              contentPadding: const EdgeInsets.only(left: 32, right: 16),
-              leading: _getAgentIcon(session.agent),
-              title: Text(_agentLabel(session.agent)),
-              subtitle: Text(
-                session.detail?.trim().isNotEmpty == true
-                    ? session.detail!
-                    : (showTitle ? sessionTitle : session.phase),
-              ),
-              trailing: Badge(
-                isLabelVisible: session.unread,
-                child: _getStatusChip(session.status),
-              ),
-              onTap: () => _openSession(session),
-            );
-          }).toList(),
-        );
-      }).toList(),
+    return Column(
+      children: [
+        const ConnectionStatusBar(),
+        Expanded(
+          child: _sessions.isEmpty
+              ? const Center(child: Text('No active sessions'))
+              : ListView(
+                  children: projects.entries.map((entry) {
+                    final sessions = entry.value;
+                    final projectTitle = _projectName(sessions.first);
+                    return ExpansionTile(
+                      leading: const Icon(Icons.folder_outlined),
+                      title: Text(projectTitle),
+                      subtitle: Text(
+                        '${sessions.length} agent${sessions.length == 1 ? '' : 's'}',
+                      ),
+                      children: sessions.map((session) {
+                        final sessionTitle = session.title.trim();
+                        final showTitle =
+                            sessionTitle.isNotEmpty &&
+                            sessionTitle != projectTitle;
+                        return ListTile(
+                          contentPadding: const EdgeInsets.only(
+                            left: 32,
+                            right: 16,
+                          ),
+                          leading: _getAgentIcon(session.agent),
+                          title: Text(_agentLabel(session.agent)),
+                          subtitle: Text(
+                            session.detail?.trim().isNotEmpty == true
+                                ? session.detail!
+                                : (showTitle ? sessionTitle : session.phase),
+                          ),
+                          trailing: Badge(
+                            isLabelVisible: session.unread,
+                            child: _getStatusChip(session.status),
+                          ),
+                          onTap: () => _openSession(session),
+                        );
+                      }).toList(),
+                    );
+                  }).toList(),
+                ),
+        ),
+      ],
     );
   }
 
@@ -544,21 +654,21 @@ class _SessionPageState extends State<SessionPage> {
   AcpSnapshot? _snapshot;
   bool _loading = true;
   bool _isAtBottom = true;
+  bool _loadingOlder = false;
   bool _isMessageFocused = false;
   String? _permissionSubmittingToolId;
   final List<AcpImageData> _pendingImages = [];
   final Map<int, String> _elicitationTextValues = {};
-  late final Timer _turnTicker;
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
 
   @override
   void initState() {
     super.initState();
+    _snapshot = gatewayService.cachedSnapshot(widget.session.id);
+    _loading = _snapshot == null;
+    _syncSnapshotControls();
     _messageFocusNode.addListener(_handleMessageFocus);
-    _turnTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && _snapshot?.phase is AcpPhaseRunning) setState(() {});
-    });
     _scrollController.addListener(_handleScrollPosition);
     _attentionResolvedSubscription = gatewayService.attentionResolvedStream
         .listen((sessionId) {
@@ -583,8 +693,35 @@ class _SessionPageState extends State<SessionPage> {
       position.pixels,
       position.minScrollExtent,
     );
-    if (isAtBottom == _isAtBottom || !mounted) return;
-    setState(() => _isAtBottom = isAtBottom);
+    if (!mounted) return;
+    if (isAtBottom != _isAtBottom) {
+      setState(() => _isAtBottom = isAtBottom);
+    }
+    _maybeLoadOlder();
+  }
+
+  void _maybeLoadOlder() {
+    if (!mounted || !_scrollController.hasClients || _loadingOlder) return;
+    final position = _scrollController.position;
+    if (position.maxScrollExtent - position.pixels > 240) return;
+    if (gatewayService.loadOlder(widget.session.id)) {
+      setState(() => _loadingOlder = true);
+    }
+  }
+
+  void _syncSnapshotControls() {
+    final activePermission = _snapshot?.pendingPermissions.firstOrNull;
+    if (activePermission?.toolCallId != _permissionSubmittingToolId) {
+      _permissionSubmittingToolId = null;
+    }
+    final elicitation = _snapshot?.pendingElicitation;
+    if (elicitation == null) {
+      _elicitationTextValues.clear();
+    } else {
+      for (final entry in elicitation.textValues.entries) {
+        _elicitationTextValues.putIfAbsent(entry.key, () => entry.value);
+      }
+    }
   }
 
   void _subscribeSession() {
@@ -593,23 +730,18 @@ class _SessionPageState extends State<SessionPage> {
         return;
       }
       final initialLoad = _snapshot == null;
+      final previousOffset = _snapshot?.entriesOffset;
       final shouldFollowLatest = shouldAutoFollowSnapshot(
         initialLoad: initialLoad,
         wasAtBottom: _isAtBottom,
       );
       setState(() {
-        _snapshot = _snapshot?.merge(snapshot) ?? snapshot;
-        final activePermission = _snapshot?.pendingPermissions.firstOrNull;
-        if (activePermission?.toolCallId != _permissionSubmittingToolId) {
-          _permissionSubmittingToolId = null;
-        }
-        final elicitation = _snapshot?.pendingElicitation;
-        if (elicitation == null) {
-          _elicitationTextValues.clear();
-        } else {
-          for (final entry in elicitation.textValues.entries) {
-            _elicitationTextValues.putIfAbsent(entry.key, () => entry.value);
-          }
+        _snapshot = snapshot;
+        _syncSnapshotControls();
+        if (previousOffset == null ||
+            snapshot.entriesOffset < previousOffset ||
+            !snapshot.hasMoreBefore) {
+          _loadingOlder = false;
         }
         _loading = false;
       });
@@ -656,6 +788,7 @@ class _SessionPageState extends State<SessionPage> {
       ),
       body: Column(
         children: [
+          const ConnectionStatusBar(),
           if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
           if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
           if (_snapshot?.pendingPermissions
@@ -749,9 +882,6 @@ class _SessionPageState extends State<SessionPage> {
       ),
       _ => (Icons.info_outline, '', colors.onSurfaceVariant),
     };
-    final elapsed = phase is AcpPhaseRunning && snapshot.turnStartedAtMs != null
-        ? DateTime.now().millisecondsSinceEpoch - snapshot.turnStartedAtMs!
-        : null;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -768,12 +898,18 @@ class _SessionPageState extends State<SessionPage> {
             Icon(icon, size: 18, color: color),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              elapsed == null ? label : '$label · ${_formatElapsed(elapsed)}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: color, fontSize: 12),
-            ),
+            child: phase is AcpPhaseRunning && snapshot.turnStartedAtMs != null
+                ? TurnElapsedLabel(
+                    label: label,
+                    startedAtMs: snapshot.turnStartedAtMs!,
+                    color: color,
+                  )
+                : Text(
+                    label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: color, fontSize: 12),
+                  ),
           ),
           if (phase is AcpPhaseRunning && gatewayService.writeEnabled)
             IconButton(
@@ -1093,8 +1229,26 @@ class _SessionPageState extends State<SessionPage> {
       controller: _scrollController,
       reverse: true,
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      itemCount: entries.length,
+      itemCount: entries.length + (_snapshot!.hasMoreBefore ? 1 : 0),
       itemBuilder: (context, index) {
+        if (index == entries.length) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: _loadingOlder
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : TextButton.icon(
+                      onPressed: _maybeLoadOlder,
+                      icon: const Icon(Icons.history, size: 18),
+                      label: const Text('Load earlier messages'),
+                    ),
+            ),
+          );
+        }
         final entryIndex = entries.length - 1 - index;
         return _buildEntry(entryIndex, entries[entryIndex]);
       },
@@ -1210,12 +1364,15 @@ class _SessionPageState extends State<SessionPage> {
 
   Widget _buildInputBar() {
     final hasSnapshot = _snapshot != null;
-    final isIdle = _snapshot?.phase is AcpPhaseIdle;
+    final acceptsPrompt = _snapshot?.phase.acceptsPrompt ?? false;
     final canCompose = gatewayService.writeEnabled;
     final hasContent =
         _messageController.text.trim().isNotEmpty || _pendingImages.isNotEmpty;
     final canSend =
-        hasSnapshot && isIdle && gatewayService.writeEnabled && hasContent;
+        hasSnapshot &&
+        acceptsPrompt &&
+        gatewayService.writeEnabled &&
+        hasContent;
 
     return Container(
       padding: const EdgeInsets.all(8),
@@ -1281,9 +1438,9 @@ class _SessionPageState extends State<SessionPage> {
                         ? 'Desktop connection is read-only'
                         : !hasSnapshot
                         ? 'Loading session...'
-                        : isIdle
+                        : acceptsPrompt
                         ? 'Message the agent...'
-                        : 'Draft while the agent is running...',
+                        : 'Finish the pending action first...',
                     border: const OutlineInputBorder(),
                     suffixIcon: _isMessageFocused
                         ? IconButton(
@@ -1475,7 +1632,6 @@ class _SessionPageState extends State<SessionPage> {
   void dispose() {
     _snapshotSubscription.cancel();
     _attentionResolvedSubscription.cancel();
-    _turnTicker.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {
       gatewayService.unsubscribe();
     }

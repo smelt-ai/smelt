@@ -1,10 +1,16 @@
 // WebSocket client for the gateway /acp/ws endpoint.
 
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/acp_snapshot.dart';
 import '../models/pairing_config.dart';
+
+Map<String, dynamic> _decodeGatewayJson(String data) =>
+    jsonDecode(data) as Map<String, dynamic>;
 
 class LifecycleAttention {
   final String sessionId;
@@ -110,6 +116,25 @@ int compareSessionMenuOrder(SessionSummary a, SessionSummary b) {
 /// WebSocket 连接状态
 enum WsState { disconnected, connecting, connected, reconnecting }
 
+enum ConnectionPathKind { lan, p2p, relay, direct, unknown }
+
+class IrohPathSample {
+  final ConnectionPathKind kind;
+  final int rttMs;
+
+  const IrohPathSample({required this.kind, required this.rttMs});
+}
+
+class ConnectionMetrics {
+  final ConnectionPathKind kind;
+  final int? latencyMs;
+
+  const ConnectionMetrics({
+    this.kind = ConnectionPathKind.unknown,
+    this.latencyMs,
+  });
+}
+
 /// 启动 iroh 隧道并返回手机本地入口端口。
 ///
 /// 做成可注入的函数而不是直接调 FFI，是为了让 `GatewayService` 的测试
@@ -117,34 +142,42 @@ enum WsState { disconnected, connecting, connected, reconnecting }
 typedef IrohTunnelOpener =
     Future<int> Function(String endpointId, String relayUrl, String relayToken);
 typedef IrohTunnelStopper = Future<void> Function();
+typedef IrohPathProbe = Future<IrohPathSample?> Function();
 
 /// Gateway WebSocket 服务
 class GatewayService {
   GatewayService({
     this.connectTimeout = const Duration(seconds: 10),
     this.reconnectDelay = const Duration(seconds: 2),
+    this.metricsInterval = const Duration(seconds: 3),
     IrohTunnelOpener? irohTunnelOpener,
     IrohTunnelStopper? irohTunnelStopper,
+    IrohPathProbe? irohPathProbe,
   }) : irohTunnelOpener = irohTunnelOpener ?? _irohUnavailable,
-       irohTunnelStopper = irohTunnelStopper ?? _noopIrohStop;
+       irohTunnelStopper = irohTunnelStopper ?? _noopIrohStop,
+       irohPathProbe = irohPathProbe ?? _noIrohPath;
 
   /// 从发起连接到收到服务端 `connected` 的整体上限。
   final Duration connectTimeout;
   final Duration reconnectDelay;
+  final Duration metricsInterval;
 
   /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
   /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
   IrohTunnelOpener irohTunnelOpener;
   IrohTunnelStopper irohTunnelStopper;
+  IrohPathProbe irohPathProbe;
 
   static Future<int> _irohUnavailable(String _, String _, String _) =>
       Future.error(StateError('本版本未编入 iroh 隧道支持'));
   static Future<void> _noopIrohStop() async {}
+  static Future<IrohPathSample?> _noIrohPath() async => null;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _channelSubscription;
   Timer? _reconnectTimer;
   Timer? _connectWatchdog;
+  Timer? _metricsTimer;
   WsState _state = WsState.disconnected;
   String? _endpoint;
   String? _token;
@@ -155,6 +188,17 @@ class GatewayService {
   bool _everConnected = false;
   int _connectionGeneration = 0;
   bool _writeEnabled = false;
+  ConnectionMetrics _metrics = const ConnectionMetrics();
+  bool _pingSupported = true;
+  bool _hasPongLatency = false;
+  int? _pendingPingSentAt;
+  Future<void> _messageQueue = Future.value();
+
+  static const int _maxCachedSessions = 5;
+  static const int _maxCacheBytes = 32 * 1024 * 1024;
+  static const int _initialTailLimit = 100;
+  final LinkedHashMap<String, AcpSnapshot> _snapshotCache = LinkedHashMap();
+  final Set<String> _historyLoads = {};
 
   final _stateController = StreamController<WsState>.broadcast();
   final _sessionsController =
@@ -163,6 +207,7 @@ class GatewayService {
   final _attentionController = StreamController<LifecycleAttention>.broadcast();
   final _attentionResolvedController = StreamController<String>.broadcast();
   final _errorController = StreamController<String>.broadcast();
+  final _metricsController = StreamController<ConnectionMetrics>.broadcast();
 
   String? _subscribedSessionId;
 
@@ -185,14 +230,25 @@ class GatewayService {
   /// 错误流
   Stream<String> get errorStream => _errorController.stream;
 
+  Stream<ConnectionMetrics> get metricsStream => _metricsController.stream;
+
   /// 当前状态
   WsState get state => _state;
+
+  ConnectionMetrics get metrics => _metrics;
 
   /// Whether the desktop gateway allows prompts and approval responses.
   bool get writeEnabled => _writeEnabled;
 
   /// 当前订阅的会话 ID
   String? get subscribedSessionId => _subscribedSessionId;
+
+  /// Returns and promotes a cached session snapshot in the LRU.
+  AcpSnapshot? cachedSnapshot(String sessionId) {
+    final snapshot = _snapshotCache.remove(sessionId);
+    if (snapshot != null) _snapshotCache[sessionId] = snapshot;
+    return snapshot;
+  }
 
   /// 连接到 gateway
   Future<void> connect(String endpoint, String token) async {
@@ -207,6 +263,7 @@ class GatewayService {
     } else {
       _teardownSocket();
       _everConnected = false;
+      _clearSnapshotCache();
     }
 
     _endpoint = target;
@@ -235,7 +292,9 @@ class GatewayService {
       _channel = channel;
       _channelSubscription = channel.stream.listen(
         (data) {
-          if (generation == _connectionGeneration) _onMessage(data);
+          if (generation == _connectionGeneration) {
+            _enqueueMessage(data, generation);
+          }
         },
         onError: (error) {
           if (generation == _connectionGeneration) _onError(error);
@@ -322,6 +381,11 @@ class GatewayService {
     _reconnectTimer = null;
     _connectWatchdog?.cancel();
     _connectWatchdog = null;
+    _metricsTimer?.cancel();
+    _metricsTimer = null;
+    _updateMetrics(const ConnectionMetrics());
+    _pendingPingSentAt = null;
+    _hasPongLatency = false;
     _subscribedSessionId = null;
     _writeEnabled = false;
     _channelSubscription?.cancel();
@@ -338,10 +402,42 @@ class GatewayService {
   /// 订阅会话
   void subscribe(String sessionId) {
     _subscribedSessionId = sessionId;
+    final cached = cachedSnapshot(sessionId);
+    final historyId = cached?.stableHistoryId;
+    final knownEntries =
+        cached != null && cached.entriesEnd == cached.entriesTotal
+        ? cached.entriesTotal
+        : null;
     _send({
       'method': 'subscribe',
-      'params': {'sessionId': sessionId},
+      'params': {
+        'sessionId': sessionId,
+        'historySessionId': ?historyId,
+        'knownEntries': ?knownEntries,
+        'snapshotRevision': ?cached?.snapshotRevision,
+        'tailLimit': _initialTailLimit,
+      },
     });
+  }
+
+  /// Requests the page immediately preceding the cached window.
+  bool loadOlder(String sessionId) {
+    final cached = _snapshotCache[sessionId];
+    if (_state != WsState.connected ||
+        cached == null ||
+        !cached.hasMoreBefore ||
+        !_historyLoads.add(sessionId)) {
+      return false;
+    }
+    _send({
+      'method': 'loadHistory',
+      'params': {
+        'sessionId': sessionId,
+        'beforeOffset': cached.entriesOffset,
+        'limit': _initialTailLimit,
+      },
+    });
+    return true;
   }
 
   /// 取消订阅
@@ -461,9 +557,79 @@ class GatewayService {
       _connectWatchdog?.cancel();
       _connectWatchdog = null;
       _everConnected = true;
+      _startMetrics();
+    } else {
+      _metricsTimer?.cancel();
+      _metricsTimer = null;
+      _updateMetrics(const ConnectionMetrics());
     }
     _state = newState;
     _stateController.add(newState);
+  }
+
+  void _startMetrics() {
+    _metricsTimer?.cancel();
+    _pingSupported = true;
+    _hasPongLatency = false;
+    _pendingPingSentAt = null;
+    _sampleMetrics();
+    _metricsTimer = Timer.periodic(metricsInterval, (_) => _sampleMetrics());
+  }
+
+  void _sampleMetrics() {
+    if (_state != WsState.connected) return;
+    if (_pingSupported && _pendingPingSentAt == null) {
+      final sentAt = DateTime.now().millisecondsSinceEpoch;
+      _pendingPingSentAt = sentAt;
+      _send({
+        'method': 'ping',
+        'params': {'sentAtMs': sentAt},
+      });
+    }
+
+    final endpoint = _endpoint;
+    if (endpoint == null) return;
+    final uri = Uri.tryParse(endpoint);
+    if (uri?.scheme == PairingConfig.irohScheme) {
+      final generation = _connectionGeneration;
+      unawaited(_sampleIrohPath(generation));
+      return;
+    }
+    _updateMetrics(
+      ConnectionMetrics(
+        kind: _isLanHost(uri?.host)
+            ? ConnectionPathKind.lan
+            : ConnectionPathKind.direct,
+        latencyMs: _metrics.latencyMs,
+      ),
+    );
+  }
+
+  Future<void> _sampleIrohPath(int generation) async {
+    try {
+      final sample = await irohPathProbe();
+      if (sample == null ||
+          generation != _connectionGeneration ||
+          _state != WsState.connected) {
+        return;
+      }
+      _updateMetrics(
+        ConnectionMetrics(
+          kind: sample.kind,
+          latencyMs: _hasPongLatency ? _metrics.latencyMs : sample.rttMs,
+        ),
+      );
+    } catch (_) {
+      // Path observation is diagnostic only and must never affect the session.
+    }
+  }
+
+  void _updateMetrics(ConnectionMetrics next) {
+    if (_metrics.kind == next.kind && _metrics.latencyMs == next.latencyMs) {
+      return;
+    }
+    _metrics = next;
+    _metricsController.add(next);
   }
 
   /// 一次连接尝试失败后的收尾：从没连通过的地址直接回断开态（让用户改地址），
@@ -477,9 +643,17 @@ class GatewayService {
     _setState(WsState.disconnected);
   }
 
-  void _onMessage(dynamic data) {
+  void _enqueueMessage(dynamic data, int generation) {
+    if (data is! String) return;
+    _messageQueue = _messageQueue.then((_) => _onMessage(data, generation));
+  }
+
+  Future<void> _onMessage(String data, int generation) async {
     try {
-      final json = jsonDecode(data as String) as Map<String, dynamic>;
+      final json = data.length >= 32 * 1024
+          ? await compute(_decodeGatewayJson, data)
+          : _decodeGatewayJson(data);
+      if (generation != _connectionGeneration) return;
       final type = json['type'] as String?;
 
       switch (type) {
@@ -489,6 +663,19 @@ class GatewayService {
           listSessions();
           final sessionId = _subscribedSessionId;
           if (sessionId != null) subscribe(sessionId);
+
+        case 'pong':
+          final sentAt = json['sentAtMs'] as int?;
+          if (sentAt != null) {
+            if (_pendingPingSentAt == sentAt) _pendingPingSentAt = null;
+            final latency = DateTime.now().millisecondsSinceEpoch - sentAt;
+            if (latency >= 0 && latency < 60000) {
+              _hasPongLatency = true;
+              _updateMetrics(
+                ConnectionMetrics(kind: _metrics.kind, latencyMs: latency),
+              );
+            }
+          }
 
         case 'sessions':
           final sessions =
@@ -505,12 +692,16 @@ class GatewayService {
           break;
 
         case 'unsubscribed':
-          _subscribedSessionId = null;
+          // Local state is cleared when sending unsubscribe. A delayed ack for
+          // session A must not erase a newer subscription to session B.
+          break;
 
         case 'snapshot':
           // 旧格式兼容
-          final snapshot = AcpSnapshot.fromJson(json);
-          _snapshotController.add(snapshot);
+          _publishSnapshot(
+            AcpSnapshot.fromJson(json),
+            sessionId: json['sessionId'] as String?,
+          );
 
         case 'attention':
           final item = json['item'];
@@ -525,18 +716,67 @@ class GatewayService {
           }
 
         case 'error':
-          _errorController.add(json['error'] as String? ?? 'Gateway 请求失败');
+          final error = json['error'] as String? ?? 'Gateway 请求失败';
+          if (error == 'invalid request' && _pendingPingSentAt != null) {
+            // Older desktop builds do not know the diagnostic ping method.
+            // Keep the iroh QUIC RTT and do not surface a protocol-version
+            // mismatch as a user-facing session error.
+            _pingSupported = false;
+            _pendingPingSentAt = null;
+            _hasPongLatency = false;
+            break;
+          }
+          final sessionId = _subscribedSessionId;
+          if (sessionId != null) _historyLoads.remove(sessionId);
+          _errorController.add(error);
 
         default:
           // 可能是原始 smeltd 格式: {"snapshot": {...}}
           if (json.containsKey('snapshot')) {
-            final snapshot = AcpSnapshot.fromJson(json);
-            _snapshotController.add(snapshot);
+            _publishSnapshot(
+              AcpSnapshot.fromJson(json),
+              sessionId: json['sessionId'] as String?,
+            );
           }
       }
     } catch (e) {
       _errorController.add('解析消息失败: $e');
     }
+  }
+
+  void _publishSnapshot(AcpSnapshot incoming, {String? sessionId}) {
+    sessionId ??= _subscribedSessionId;
+    if (sessionId == null) return;
+    final previous = _snapshotCache.remove(sessionId);
+    final merged = previous?.merge(incoming) ?? incoming;
+    _snapshotCache[sessionId] = merged;
+    if (incoming.entriesOffset <
+        (previous?.entriesOffset ?? incoming.entriesOffset + 1)) {
+      _historyLoads.remove(sessionId);
+    }
+    _trimSnapshotCache();
+    if (_subscribedSessionId == sessionId) {
+      _snapshotController.add(merged);
+    }
+  }
+
+  void _trimSnapshotCache() {
+    var bytes = _snapshotCache.values.fold<int>(
+      0,
+      (total, snapshot) => total + _estimateSnapshotBytes(snapshot),
+    );
+    while (_snapshotCache.length > _maxCachedSessions ||
+        (bytes > _maxCacheBytes && _snapshotCache.length > 1)) {
+      final oldest = _snapshotCache.keys.first;
+      final removed = _snapshotCache.remove(oldest)!;
+      _historyLoads.remove(oldest);
+      bytes -= _estimateSnapshotBytes(removed);
+    }
+  }
+
+  void _clearSnapshotCache() {
+    _snapshotCache.clear();
+    _historyLoads.clear();
   }
 
   void _onError(dynamic error) {
@@ -573,8 +813,59 @@ class GatewayService {
     _attentionController.close();
     _attentionResolvedController.close();
     _errorController.close();
+    _metricsController.close();
   }
 }
+
+bool _isLanHost(String? host) {
+  if (host == null || host.isEmpty) return false;
+  if (host == 'localhost') return true;
+  final address = InternetAddress.tryParse(host);
+  if (address == null) return false;
+  if (address.isLoopback || address.isLinkLocal) return true;
+  final bytes = address.rawAddress;
+  if (address.type == InternetAddressType.IPv4) {
+    return bytes[0] == 10 ||
+        (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+        (bytes[0] == 192 && bytes[1] == 168);
+  }
+  return (bytes[0] & 0xfe) == 0xfc;
+}
+
+int _estimateSnapshotBytes(AcpSnapshot snapshot) {
+  var bytes = 2048;
+  for (final entry in snapshot.entries) {
+    bytes += switch (entry) {
+      AcpEntryUser(text: final text) => text.length * 2 + 64,
+      AcpEntryUserWithImages(text: final text, images: final images) =>
+        text.length * 2 +
+            images.fold<int>(0, (sum, image) => sum + image.base64.length) +
+            128,
+      AcpEntryAssistant(text: final text) => text.length * 2 + 64,
+      AcpEntryToolCall(title: final title, output: final output) =>
+        title.length * 2 +
+            output.fold<int>(
+              0,
+              (sum, part) => sum + _estimateOutputBytes(part),
+            ) +
+            192,
+      AcpEntryDivider(label: final label) => label.length * 2 + 32,
+      AcpEntryUnknown() => 16,
+    };
+  }
+  return bytes;
+}
+
+int _estimateOutputBytes(ToolOutputPart part) => switch (part) {
+  ToolOutputText(text: final text) => text.length * 2 + 32,
+  ToolOutputDiff(
+    path: final path,
+    oldText: final oldText,
+    newText: final newText,
+  ) =>
+    (path.length + (oldText?.length ?? 0) + newText.length) * 2 + 64,
+  ToolOutputImage(base64: final base64) => base64.length + 64,
+};
 
 /// 全局单例
 final gatewayService = GatewayService();

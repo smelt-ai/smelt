@@ -3,6 +3,15 @@ import 'package:smelt_mobile/models/acp_snapshot.dart';
 
 void main() {
   group('AcpSnapshot', () {
+    test('accepts prompts while idle or running', () {
+      expect(const AcpPhaseIdle().acceptsPrompt, isTrue);
+      expect(const AcpPhaseRunning().acceptsPrompt, isTrue);
+      expect(const AcpPhaseStarting().acceptsPrompt, isFalse);
+      expect(const AcpPhaseAwaitingApproval().acceptsPrompt, isFalse);
+      expect(const AcpPhaseAwaitingChoice().acceptsPrompt, isFalse);
+      expect(const AcpPhaseEnded(reason: '').acceptsPrompt, isFalse);
+    });
+
     test('parses the current smeltd snapshot schema', () {
       final snapshot = AcpSnapshot.fromJson({
         'snapshot': {
@@ -143,6 +152,116 @@ void main() {
 
       expect(merged.entries, hasLength(1));
       expect((merged.entries.single as AcpEntryAssistant).text, 'server entry');
+    });
+
+    test('prepends an adjacent older history page', () {
+      final current = AcpSnapshot(
+        entriesOffset: 2,
+        entriesTotal: 4,
+        entries: const [
+          AcpEntryUser(text: 'third'),
+          AcpEntryAssistant(text: 'fourth'),
+        ],
+        phase: const AcpPhaseIdle(),
+        historySessionId: 'history-1',
+      );
+      final older = AcpSnapshot(
+        entriesOffset: 0,
+        entriesTotal: 4,
+        entries: const [
+          AcpEntryUser(text: 'first'),
+          AcpEntryAssistant(text: 'second'),
+        ],
+        phase: const AcpPhaseIdle(),
+        historySessionId: 'history-1',
+      );
+
+      final merged = current.merge(older);
+
+      expect(merged.entriesOffset, 0);
+      expect(merged.entriesTotal, 4);
+      expect(merged.entries, hasLength(4));
+      expect((merged.entries.first as AcpEntryUser).text, 'first');
+      expect(merged.hasMoreBefore, isFalse);
+    });
+
+    test('keeps the cached window for an empty up-to-date tail', () {
+      final current = AcpSnapshot(
+        entriesOffset: 10,
+        entriesTotal: 12,
+        entries: const [
+          AcpEntryUser(text: 'cached'),
+          AcpEntryAssistant(text: 'answer'),
+        ],
+        phase: const AcpPhaseRunning(),
+        historySessionId: 'history-1',
+      );
+      final metadata = AcpSnapshot(
+        entriesOffset: 12,
+        entriesTotal: 12,
+        entries: const [],
+        phase: const AcpPhaseIdle(),
+        historySessionId: 'history-1',
+      );
+
+      final merged = current.merge(metadata);
+
+      expect(merged.entriesOffset, 10);
+      expect(merged.entries, hasLength(2));
+      expect(merged.phase, isA<AcpPhaseIdle>());
+    });
+
+    test('resets the cache when canonical history identity changes', () {
+      final current = AcpSnapshot(
+        entries: const [AcpEntryUser(text: 'old')],
+        phase: const AcpPhaseIdle(),
+        historySessionId: 'history-old',
+      );
+      final replacement = AcpSnapshot(
+        entriesOffset: 5,
+        entriesTotal: 6,
+        entries: const [AcpEntryUser(text: 'new')],
+        phase: const AcpPhaseIdle(),
+        historySessionId: 'history-new',
+      );
+
+      final merged = current.merge(replacement);
+
+      expect(merged.entriesOffset, 5);
+      expect((merged.entries.single as AcpEntryUser).text, 'new');
+    });
+
+    test('an older history response cannot regress newer live metadata', () {
+      final live = AcpSnapshot(
+        entriesOffset: 2,
+        entriesTotal: 5,
+        snapshotRevision: 8,
+        entries: const [
+          AcpEntryUser(text: 'third'),
+          AcpEntryAssistant(text: 'fourth'),
+          AcpEntryAssistant(text: 'new live tail'),
+        ],
+        phase: const AcpPhaseRunning(),
+        historySessionId: 'history-1',
+      );
+      final olderPage = AcpSnapshot(
+        entriesOffset: 0,
+        entriesTotal: 4,
+        snapshotRevision: 7,
+        entries: const [
+          AcpEntryUser(text: 'first'),
+          AcpEntryAssistant(text: 'second'),
+        ],
+        phase: const AcpPhaseIdle(),
+        historySessionId: 'history-1',
+      );
+
+      final merged = live.merge(olderPage);
+
+      expect(merged.entries, hasLength(5));
+      expect(merged.entriesTotal, 5);
+      expect(merged.snapshotRevision, 8);
+      expect(merged.phase, isA<AcpPhaseRunning>());
     });
 
     test('parses elicitation fields and selected options', () {
