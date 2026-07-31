@@ -158,6 +158,7 @@ impl Workspace {
 
         div()
             .w_full()
+            .h(px(34.))
             .flex_none()
             .flex()
             .flex_row()

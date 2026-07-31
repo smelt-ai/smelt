@@ -5793,7 +5793,8 @@ impl Render for Workspace {
         let sidebar_surface: Hsla = ui_theme::tint(ui_theme::bg_elev(), 0xf0).into();
         let stage_surface: Hsla = ui_theme::tint(ui_theme::bg_panel(), 0xf0).into();
         let glass_border: Rgba = gpui::transparent_black().into();
-        let glass_highlight = ui_theme::tint(ui_theme::text_bright(), 0x38);
+        // 左栏、舞台、Inspector 是同一级的三张外壳卡片，圆角必须共用一处。
+        let workspace_card_radius = px(8.);
 
         let sidebar_motion = self.sidebar_transition.frame();
         if sidebar_motion.animating {
@@ -5973,7 +5974,7 @@ impl Render for Workspace {
                             .flex()
                             .relative()
                             .overflow_hidden()
-                            .rounded(px(8.))
+                            .rounded(workspace_card_radius)
                             .border_1()
                             .border_color(glass_border)
                             .bg(sidebar_surface)
@@ -5982,13 +5983,16 @@ impl Render for Workspace {
                             // 延伸到窗口顶边，形成参考应用的一体化侧栏。
                             .pt(px(34.))
                             .child(
+                                // 交通灯安全区也使用标题栏表面；否则只有左栏圆角里
+                                // 露出较暗的侧栏底色，跟舞台/Inspector 的亮顶栏形成
+                                // 不同的内轮廓，看起来就像三块用了不同半径。
                                 div()
                                     .absolute()
                                     .top_0()
-                                    .left(px(8.))
-                                    .right(px(8.))
-                                    .h(px(1.))
-                                    .bg(glass_highlight),
+                                    .left_0()
+                                    .right_0()
+                                    .h(px(34.))
+                                    .bg(rgb(ui_theme::bg_bar())),
                             )
                             .opacity(sidebar_motion.progress.max(0.01))
                             .child(list_el),
@@ -6011,20 +6015,11 @@ impl Render for Workspace {
             .flex()
             .relative()
             .overflow_hidden()
-            .rounded(px(8.))
+            .rounded(workspace_card_radius)
             .border_1()
             .border_color(glass_border)
             .bg(stage_surface)
             .shadow_sm()
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(8.))
-                    .right(px(8.))
-                    .h(px(1.))
-                    .bg(glass_highlight),
-            )
             .child(stage);
 
         // 舞台 + inspector 用自己独立的一层 h_resizable（stage_inspector_resize），
@@ -6045,22 +6040,13 @@ impl Render for Workspace {
                 .flex()
                 .relative()
                 .overflow_hidden()
-                .rounded(px(8.))
+                .rounded(workspace_card_radius)
                 .border_1()
                 .border_color(glass_border)
                 .bg(sidebar_surface)
                 .shadow_sm()
                 // 同 stage_card：不再预留交通灯安全区，tab 横条直接顶到卡片顶边。
                 .opacity(progress.max(0.01))
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(px(8.))
-                        .right(px(8.))
-                        .h(px(1.))
-                        .bg(glass_highlight),
-                )
                 .child(inspector);
 
             // 真正把中间区推走的一步：programmatically 顶宽，而不是只改这块自己
@@ -6435,8 +6421,7 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .px(px(8.))
-                    .pb(px(8.))
+                    .p(px(8.))
                     .bg(shell_surface)
                     .child(
                         div()
@@ -6449,16 +6434,18 @@ impl Render for Workspace {
                             .child(workspace_columns),
                     ),
             )
-            // 无独立标题栏：透明拖拽层浮在三栏玻璃上，不参与纵向布局。
-            // 红绿灯由 macOS 原生绘制；右侧按钮仍位于这层，面板内容通过顶部
-            // 34px safe area 避让。视觉上三栏从窗口顶边开始，不再多一根横条。
+            // 无独立标题栏：透明拖拽层浮在三栏玻璃卡片上。红绿灯由 macOS 原生绘制，
+            // 位置在 open_workspace_window 里配置；外层整体加了 8px 顶部外边距
+            // （四周对称，见上面 shell 的 `.p(px(8.))`），卡片顶边比窗口顶边低了
+            // 8px，这层悬浮层跟着往下多留 8px（34→42），红绿灯/图标才能继续落在
+            // 卡片里同一个相对位置，而不是飘进新让出来的外边距空白里。
             .child(
                 div()
                     .absolute()
                     .top_0()
                     .left_0()
                     .right_0()
-                    .h(px(34.))
+                    .h(px(42.))
                     .pl(px(80.))
                     .flex()
                     .items_center()
@@ -6467,6 +6454,11 @@ impl Render for Workspace {
                     .on_mouse_down(MouseButton::Left, |event, window, _| {
                         if event.click_count == 2 {
                             window.titlebar_double_click();
+                        } else {
+                            // `window_control_area(Drag)` 只是给平台一个提示，实际拖动
+                            // 还是得手动起一个原生窗口移动会话（同 gpui_component::TitleBar
+                            // 的做法），不然按住鼠标完全不会动窗口。
+                            window.start_window_move();
                         }
                     })
                     .bg(gpui::transparent_black())
@@ -6475,7 +6467,11 @@ impl Render for Workspace {
                             .id("sidebar-toggle")
                             .absolute()
                             .left(px(92.))
-                            .top(px(5.))
+                            // 侧栏展开时悬浮在 session_list 的 34px 顶部导航行上；
+                            // 收起时悬浮在 stage 头上——两种状态现在都是 34px 高，
+                            // 5px 本来就居中；卡片整体下移了 8px（见上面注释），
+                            // 这里跟着 +8。
+                            .top(px(13.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -6513,8 +6509,10 @@ impl Render for Workspace {
                             .h_full()
                             .items_center()
                             .gap_1()
-                            // 留出右侧呼吸间距，别让按钮贴到窗口边缘。
-                            .pr_2()
+                            // 留出右侧呼吸间距，别让按钮贴到窗口边缘。跟左边红绿灯
+                            // 同一套「离卡片边缘 10px」的间距（卡片边缘=8px shell
+                            // 外边距，紧贴 8px 会显得太靠边），原来的 8px 太紧。
+                            .pr(px(10.))
                             .child({
                                 let promoted = self.inspector_panel_promoted();
                                 div()
@@ -6903,7 +6901,16 @@ fn open_workspace_window(
 ) -> WeakEntity<Workspace> {
     let window_options = WindowOptions {
         // 透明标题栏：红绿灯浮在内容上，拖拽 / 双击最大化由自定义 TitleBar 接管。
-        titlebar: Some(TitleBar::title_bar_options()),
+        // 不直接用 TitleBar::title_bar_options()（它的 traffic_light_position
+        // 是 (9, 9)，假设卡片贴着窗口顶边、且左边距很窄）——我们整体加了 8px
+        // 顶部外边距后卡片下移了 8px，红绿灯跟着往下挪 8px；同时把 x 从 9
+        // 加大到 18，让它在卡片左边缘有跟侧栏内容（mx_2 + px_2 = 16px）
+        // 相近的留白，别紧贴卡片边框显得太靠左。
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(18.0), px(17.0))),
+        }),
         // 透明/模糊背景（跟随外观设置；终端底色带 alpha 时桌面透出）。
         window_background: window_bg,
         ..Default::default()
