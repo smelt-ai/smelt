@@ -5888,7 +5888,21 @@ impl Render for Workspace {
         // inspector 没停靠在旁边时，舞台/返回条/展开的 inspector rail 都会变成
         // 贴着窗口右边缘那一块，得给右上角浮着的全屏/终端抽屉/侧边面板 3 颗
         // 图标让位置；停靠时那颗图标条自己在右边接管，这几处就不用多留。
+        // `right_edge` 给「提升到舞台」的 3 个 inspector rail 用——那几处
+        // inspector_panel_el 永远是 None（`inspector_panel_promoted` 保证的），
+        // 不存在中途开合动画，直接给个常量布尔就够。
         let right_edge = inspector_panel_el.is_none();
+        // `right_reserve` 给舞台头/返回条用：inspector 停靠面板本身有挂载/收起
+        // 动画（inspector_motion.progress 从 0→1 或反过来），如果这里用上面那种
+        // 布尔一刀切，`mounted` 在动画刚开始（progress 还是 0）就先变 true，
+        // 右边距瞬间从 100px 掉到 16px，标题栏内容会先冲到最右边，
+        // 再被展开中的面板挤回来——这就是「先到最右边再反弹回来」的原因。
+        // 改成跟 progress 同步插值，不留档突变的那一刻。
+        let right_reserve = if self.inspector_panel_promoted() {
+            px(100.)
+        } else {
+            px(100. - (100. - 16.) * inspector_motion.progress.clamp(0., 1.))
+        };
         // 底部抽屉（快捷终端）同一套挂载过渡；具体高度交给下面真正的
         // v_resizable/resizable_panel 组件去管（拖拽 + 动画期间的程序化改宽度
         // 都走那一套，不再自己手算 opacity/height）。
@@ -5913,7 +5927,7 @@ impl Render for Workspace {
         // 需 .flex()，否则单 pane 的叶子 flex_1 不生效、塌缩到内容高度（边框不到底）。
         // 旧右侧「结构面板」已被 inspector + 舞台头承接，不再渲染。
         let content = if self.sessions.get(self.active_session).is_some() {
-            let stage_header = self.render_stage_header(!self.sidebar_open, right_edge, cx);
+            let stage_header = self.render_stage_header(!self.sidebar_open, right_reserve, cx);
             div()
                 .flex_1()
                 .min_w_0()
@@ -6011,7 +6025,7 @@ impl Render for Workspace {
                 Some(v) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_stage_back_bar(v, !self.sidebar_open, right_edge, cx))
+                    .child(self.render_stage_back_bar(v, !self.sidebar_open, right_reserve, cx))
                     .child(self.render_stage_override(v, window, cx))
                     .into_any_element(),
                 None => content.into_any_element(),
