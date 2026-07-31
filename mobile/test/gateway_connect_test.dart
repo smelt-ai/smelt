@@ -60,9 +60,9 @@ void main() {
 
     final service = GatewayService(
       connectTimeout: const Duration(seconds: 5),
-      irohTunnelOpener: (endpointId, relayUrl, relayToken) async {
+      irohTunnelOpener: (endpointId, relayUrl) async {
         requestedEndpoints.add(endpointId);
-        requestedRelays.add('$relayUrl|$relayToken');
+        requestedRelays.add(relayUrl);
         return server.port;
       },
     );
@@ -74,7 +74,7 @@ void main() {
     await _waitFor(() => requestedPaths.isNotEmpty);
 
     expect(requestedEndpoints, ['k7d3ffb1c9a24e5f']);
-    expect(requestedRelays, ['https://relay.test|secret']);
+    expect(requestedRelays, ['https://relay.test']);
     expect(requestedPaths.single, '/acp/ws?token=tok');
 
     service.disconnect();
@@ -87,7 +87,7 @@ void main() {
       // 打错的 EndpointId 表现为拨号一直不返回，界面必须能自己退出加载态。
       final service = GatewayService(
         connectTimeout: const Duration(milliseconds: 300),
-        irohTunnelOpener: (_, _, _) => Completer<int>().future,
+        irohTunnelOpener: (_, _) => Completer<int>().future,
       );
       final errors = <String>[];
       final errorSub = service.errorStream.listen(errors.add);
@@ -143,7 +143,7 @@ void main() {
     final service = GatewayService(
       connectTimeout: const Duration(seconds: 2),
       reconnectDelay: const Duration(milliseconds: 20),
-      irohTunnelOpener: (_, _, _) async {
+      irohTunnelOpener: (_, _) async {
         openedPorts.add(tunnelPort);
         return tunnelPort;
       },
@@ -186,7 +186,7 @@ void main() {
     final service = GatewayService(
       connectTimeout: const Duration(milliseconds: 200),
       reconnectDelay: const Duration(milliseconds: 10),
-      irohTunnelOpener: (_, _, _) async {
+      irohTunnelOpener: (_, _) async {
         openCount++;
         if (openCount == 1) return server.port;
         throw StateError('desktop is offline');
@@ -242,7 +242,7 @@ void main() {
     final service = GatewayService(
       connectTimeout: const Duration(seconds: 2),
       metricsInterval: const Duration(milliseconds: 50),
-      irohTunnelOpener: (_, _, _) async => server.port,
+      irohTunnelOpener: (_, _) async => server.port,
       irohPathProbe: () async =>
           const IrohPathSample(kind: ConnectionPathKind.p2p, rttMs: 17),
     );
@@ -292,7 +292,7 @@ void main() {
     final service = GatewayService(
       connectTimeout: const Duration(seconds: 2),
       metricsInterval: const Duration(milliseconds: 50),
-      irohTunnelOpener: (_, _, _) async => server.port,
+      irohTunnelOpener: (_, _) async => server.port,
       irohPathProbe: () async =>
           const IrohPathSample(kind: ConnectionPathKind.lan, rttMs: 17),
     );

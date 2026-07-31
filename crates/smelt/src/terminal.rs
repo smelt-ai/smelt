@@ -1343,13 +1343,12 @@ pub struct IrohStatus {
     /// 所以配对码必须两者一起给。
     pub token: Option<String>,
     pub relay: Option<String>,
-    pub relay_token: Option<String>,
     pub write: bool,
 }
 
 /// 让守护开启 iroh 隧道（幂等）。绑定要连接用户配置的 relay，**可能耗时数秒**，
 /// 跟 `tunnel_start` 一样必须扔进后台任务，别在 UI 线程同步调。
-pub fn iroh_start(write: bool, relay: &str, relay_token: &str) -> Result<IrohStatus, String> {
+pub fn iroh_start(write: bool, relay: &str) -> Result<IrohStatus, String> {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         return Err("连不上守护".to_string());
     };
@@ -1358,7 +1357,7 @@ pub fn iroh_start(write: bool, relay: &str, relay_token: &str) -> Result<IrohSta
         "{}",
         serde_json::json!({
             "op": "iroh_start", "write": write,
-            "relay": relay, "relay_token": relay_token
+            "relay": relay
         })
     )
     .is_err()
@@ -1377,7 +1376,6 @@ pub fn iroh_start(write: bool, relay: &str, relay_token: &str) -> Result<IrohSta
             endpoint_id: v["endpoint_id"].as_str().map(String::from),
             token: v["token"].as_str().map(String::from),
             relay: v["relay"].as_str().map(String::from),
-            relay_token: v["relay_token"].as_str().map(String::from),
             write: v["write"].as_bool().unwrap_or(false),
         })
     } else {

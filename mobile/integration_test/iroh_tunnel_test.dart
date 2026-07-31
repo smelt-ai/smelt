@@ -22,7 +22,6 @@ import 'package:smelt_mobile/src/rust/api_iroh.dart';
 
 const _peer = String.fromEnvironment('SMELT_IROH_TEST_PEER');
 const _relay = String.fromEnvironment('SMELT_IROH_TEST_RELAY');
-const _relayToken = String.fromEnvironment('SMELT_IROH_TEST_RELAY_TOKEN');
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -40,7 +39,6 @@ void main() {
       irohTunnelStart(
         endpointId: 'definitely-not-an-endpoint-id',
         relayUrl: _relay,
-        relayToken: _relayToken,
       ),
       throwsA(anything),
     );
@@ -49,21 +47,10 @@ void main() {
   test(
     '隧道能把 HTTP 请求送到 Mac 上的宿主',
     () async {
-      final port = await irohTunnelStart(
-        endpointId: _peer,
-        relayUrl: _relay,
-        relayToken: _relayToken,
-      );
+      final port = await irohTunnelStart(endpointId: _peer, relayUrl: _relay);
       expect(port, greaterThan(0));
       // 幂等：同一个 peer 不该换端口，否则上层重连会打到旧端口。
-      expect(
-        await irohTunnelStart(
-          endpointId: _peer,
-          relayUrl: _relay,
-          relayToken: _relayToken,
-        ),
-        port,
-      );
+      expect(await irohTunnelStart(endpointId: _peer, relayUrl: _relay), port);
       expect(await irohTunnelPort(), port);
 
       final client = HttpClient();
@@ -87,11 +74,8 @@ void main() {
       // 把生产用的接线也跑一遍：main() 里就是这么接的。
       final service =
           GatewayService(connectTimeout: const Duration(seconds: 20))
-            ..irohTunnelOpener = (id, relay, relayToken) => irohTunnelStart(
-              endpointId: id,
-              relayUrl: relay,
-              relayToken: relayToken,
-            );
+            ..irohTunnelOpener = (id, relay) =>
+                irohTunnelStart(endpointId: id, relayUrl: relay);
       final errors = <String>[];
       final sub = service.errorStream.listen(errors.add);
 
@@ -100,10 +84,7 @@ void main() {
       final endpoint = Uri(
         scheme: PairingConfig.irohScheme,
         host: _peer,
-        queryParameters: {
-          'relay': _relay,
-          if (_relayToken.isNotEmpty) 'relay_token': _relayToken,
-        },
+        queryParameters: {'relay': _relay},
       );
       await service.connect(endpoint.toString(), 'irrelevant-token');
       await Future<void>.delayed(const Duration(seconds: 3));

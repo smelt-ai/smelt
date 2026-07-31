@@ -87,7 +87,6 @@ abstract class RustLibApi extends BaseApi {
   Future<int> crateApiIrohIrohTunnelStart({
     required String endpointId,
     required String relayUrl,
-    required String relayToken,
   });
 
   Future<void> crateApiIrohIrohTunnelStop();
@@ -170,19 +169,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<int> crateApiIrohIrohTunnelStart({
     required String endpointId,
     required String relayUrl,
-    required String relayToken,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           var arg0 = cst_encode_String(endpointId);
           var arg1 = cst_encode_String(relayUrl);
-          var arg2 = cst_encode_String(relayToken);
           return wire.wire__crate__api_iroh__iroh_tunnel_start(
             port_,
             arg0,
             arg1,
-            arg2,
           );
         },
         codec: DcoCodec(
@@ -190,7 +186,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: dco_decode_String,
         ),
         constMeta: kCrateApiIrohIrohTunnelStartConstMeta,
-        argValues: [endpointId, relayUrl, relayToken],
+        argValues: [endpointId, relayUrl],
         apiImpl: this,
       ),
     );
@@ -199,7 +195,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiIrohIrohTunnelStartConstMeta =>
       const TaskConstMeta(
         debugName: "iroh_tunnel_start",
-        argNames: ["endpointId", "relayUrl", "relayToken"],
+        argNames: ["endpointId", "relayUrl"],
       );
 
   @override
@@ -273,13 +269,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   IrohPairing dco_decode_iroh_pairing(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return IrohPairing(
       endpointId: dco_decode_String(arr[0]),
       token: dco_decode_String(arr[1]),
       relayUrl: dco_decode_String(arr[2]),
-      relayToken: dco_decode_String(arr[3]),
     );
   }
 
@@ -358,12 +353,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_endpointId = sse_decode_String(deserializer);
     var var_token = sse_decode_String(deserializer);
     var var_relayUrl = sse_decode_String(deserializer);
-    var var_relayToken = sse_decode_String(deserializer);
     return IrohPairing(
       endpointId: var_endpointId,
       token: var_token,
       relayUrl: var_relayUrl,
-      relayToken: var_relayToken,
     );
   }
 
@@ -480,7 +473,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.endpointId, serializer);
     sse_encode_String(self.token, serializer);
     sse_encode_String(self.relayUrl, serializer);
-    sse_encode_String(self.relayToken, serializer);
   }
 
   @protected

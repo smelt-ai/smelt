@@ -1160,9 +1160,8 @@ fn start_iroh(
     remote_state: &RemoteState,
     write: bool,
     relay_address: &str,
-    relay_token: &str,
-) -> Result<(String, String, std::net::SocketAddr, bool, String, String), String> {
-    let relay = smelt_iroh::RelaySettings::parse(relay_address, relay_token)
+) -> Result<(String, String, std::net::SocketAddr, bool, String), String> {
+    let relay = smelt_iroh::RelaySettings::parse(relay_address)
         .map_err(|e| format!("iroh relay 配置无效：{e:#}"))?;
     if let Some(t) = iroh_state.lock().unwrap().as_ref() {
         if t.relay != relay {
@@ -1182,7 +1181,6 @@ fn start_iroh(
             addr,
             effective_write,
             t.relay.url.to_string(),
-            t.relay.token.clone().unwrap_or_default(),
         ));
     }
 
@@ -1259,7 +1257,6 @@ fn start_iroh(
                 addr,
                 effective_write,
                 relay.url.to_string(),
-                relay.token.clone().unwrap_or_default(),
             ))
         }
         Ok(Err(e)) => Err(e),
@@ -3486,10 +3483,9 @@ fn handle_conn(
         Some("iroh_start") => {
             let write = v["write"].as_bool().unwrap_or(false);
             let relay = v["relay"].as_str().unwrap_or_default();
-            let relay_token = v["relay_token"].as_str().unwrap_or_default();
             let mut c = conn;
-            match start_iroh(&iroh_state, &remote_state, write, relay, relay_token) {
-                Ok((endpoint_id, token, addr, write, relay, relay_token)) => {
+            match start_iroh(&iroh_state, &remote_state, write, relay) {
+                Ok((endpoint_id, token, addr, write, relay)) => {
                     // token 一并回：配对码 = endpoint_id + token，缺一不可
                     // （隧道只负责把字节送到，鉴权仍归网关）。
                     let _ = writeln!(
@@ -3498,7 +3494,7 @@ fn handle_conn(
                         serde_json::json!({
                             "ok": true, "endpoint_id": endpoint_id, "token": token,
                             "addr": addr.to_string(), "write": write,
-                            "relay": relay, "relay_token": relay_token
+                            "relay": relay
                         })
                     );
                 }
@@ -3525,8 +3521,7 @@ fn handle_conn(
                     serde_json::json!({
                         "running": true, "endpoint_id": endpoint_id,
                         "token": token, "write": write,
-                        "relay": relay.url.to_string(),
-                        "relay_token": relay.token.unwrap_or_default()
+                        "relay": relay.url.to_string()
                     })
                 }
                 None => serde_json::json!({ "running": false }),

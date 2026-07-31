@@ -156,7 +156,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     wireObj.endpoint_id = cst_encode_String(apiObj.endpointId);
     wireObj.token = cst_encode_String(apiObj.token);
     wireObj.relay_url = cst_encode_String(apiObj.relayUrl);
-    wireObj.relay_token = cst_encode_String(apiObj.relayToken);
   }
 
   @protected
@@ -305,13 +304,11 @@ class RustLibWire implements BaseWire {
     int port_,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> endpoint_id,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_url,
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_token,
   ) {
     return _wire__crate__api_iroh__iroh_tunnel_start(
       port_,
       endpoint_id,
       relay_url,
-      relay_token,
     );
   }
 
@@ -322,7 +319,6 @@ class RustLibWire implements BaseWire {
             ffi.Int64,
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
           )
         >
       >('frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_start');
@@ -331,7 +327,6 @@ class RustLibWire implements BaseWire {
           .asFunction<
             void Function(
               int,
-              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
               ffi.Pointer<wire_cst_list_prim_u_8_strict>,
               ffi.Pointer<wire_cst_list_prim_u_8_strict>,
             )
@@ -451,6 +446,4 @@ final class wire_cst_iroh_pairing extends ffi.Struct {
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> token;
 
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_url;
-
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_token;
 }
