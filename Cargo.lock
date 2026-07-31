@@ -8398,6 +8398,7 @@ dependencies = [
  "smol",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -101,6 +101,90 @@ class SessionSummary {
   }
 }
 
+class WorkspaceProject {
+  final String root;
+  final String title;
+  final int order;
+
+  const WorkspaceProject({
+    required this.root,
+    required this.title,
+    required this.order,
+  });
+
+  factory WorkspaceProject.fromJson(Map<String, dynamic> json) =>
+      WorkspaceProject(
+        root: json['root'] as String? ?? '',
+        title: json['title'] as String? ?? '',
+        order: json['order'] as int? ?? SessionSummary.unknownOrder,
+      );
+}
+
+class AcpAgentOption {
+  final String id;
+  final String kind;
+  final String label;
+  final bool profile;
+
+  const AcpAgentOption({
+    required this.id,
+    required this.kind,
+    required this.label,
+    required this.profile,
+  });
+
+  factory AcpAgentOption.fromJson(Map<String, dynamic> json) => AcpAgentOption(
+    id: json['id'] as String? ?? '',
+    kind: json['kind'] as String? ?? '',
+    label: json['label'] as String? ?? '',
+    profile: json['profile'] as bool? ?? false,
+  );
+}
+
+class WorkspaceCatalog {
+  final List<WorkspaceProject> projects;
+  final List<AcpAgentOption> agents;
+
+  const WorkspaceCatalog({required this.projects, required this.agents});
+}
+
+class HistorySessionSummary {
+  final String resumeId;
+  final String title;
+  final DateTime? startedAt;
+  final DateTime? lastActiveAt;
+  final int messageCount;
+
+  const HistorySessionSummary({
+    required this.resumeId,
+    required this.title,
+    required this.startedAt,
+    required this.lastActiveAt,
+    required this.messageCount,
+  });
+
+  factory HistorySessionSummary.fromJson(Map<String, dynamic> json) =>
+      HistorySessionSummary(
+        resumeId: json['resumeId'] as String? ?? '',
+        title: json['title'] as String? ?? '',
+        startedAt: DateTime.tryParse(json['startedAt'] as String? ?? ''),
+        lastActiveAt: DateTime.tryParse(json['lastActiveAt'] as String? ?? ''),
+        messageCount: json['messageCount'] as int? ?? 0,
+      );
+}
+
+class SessionHistoryResult {
+  final String projectRoot;
+  final String agentOptionId;
+  final List<HistorySessionSummary> sessions;
+
+  const SessionHistoryResult({
+    required this.projectRoot,
+    required this.agentOptionId,
+    required this.sessions,
+  });
+}
+
 int compareSessionMenuOrder(SessionSummary a, SessionSummary b) {
   var compared = a.projectOrder.compareTo(b.projectOrder);
   if (compared != 0) return compared;
@@ -205,6 +289,11 @@ class GatewayService {
   final _stateController = StreamController<WsState>.broadcast();
   final _sessionsController =
       StreamController<List<SessionSummary>>.broadcast();
+  final _workspaceController = StreamController<WorkspaceCatalog>.broadcast();
+  final _sessionHistoryController =
+      StreamController<SessionHistoryResult>.broadcast();
+  final _sessionCreatedController = StreamController<String>.broadcast();
+  final _sessionDeletedController = StreamController<String>.broadcast();
   final _snapshotController = StreamController<AcpSnapshot>.broadcast();
   final _attentionController = StreamController<LifecycleAttention>.broadcast();
   final _attentionResolvedController = StreamController<String>.broadcast();
@@ -218,6 +307,15 @@ class GatewayService {
 
   /// 会话列表流
   Stream<List<SessionSummary>> get sessionsStream => _sessionsController.stream;
+
+  Stream<WorkspaceCatalog> get workspaceStream => _workspaceController.stream;
+
+  Stream<SessionHistoryResult> get sessionHistoryStream =>
+      _sessionHistoryController.stream;
+
+  Stream<String> get sessionCreatedStream => _sessionCreatedController.stream;
+
+  Stream<String> get sessionDeletedStream => _sessionDeletedController.stream;
 
   /// 当前订阅会话的快照流
   Stream<AcpSnapshot> get snapshotStream => _snapshotController.stream;
@@ -401,6 +499,39 @@ class GatewayService {
   /// 请求会话列表
   void listSessions() {
     _send({'method': 'listSessions'});
+  }
+
+  void listWorkspace() {
+    _send({'method': 'listWorkspace'});
+  }
+
+  void listSessionHistory(String projectRoot, String agentOptionId) {
+    _send({
+      'method': 'listSessionHistory',
+      'params': {'projectRoot': projectRoot, 'agentOptionId': agentOptionId},
+    });
+  }
+
+  void createSession(
+    String projectRoot,
+    String agentOptionId, {
+    String? resumeId,
+  }) {
+    _send({
+      'method': 'createSession',
+      'params': {
+        'projectRoot': projectRoot,
+        'agentOptionId': agentOptionId,
+        if (resumeId != null) 'resumeId': resumeId,
+      },
+    });
+  }
+
+  void deleteSession(String sessionId) {
+    _send({
+      'method': 'deleteSession',
+      'params': {'sessionId': sessionId},
+    });
   }
 
   /// 订阅会话
@@ -667,6 +798,7 @@ class GatewayService {
           _writeEnabled = json['writeEnabled'] as bool? ?? false;
           _setState(WsState.connected);
           listSessions();
+          listWorkspace();
           final sessionId = _subscribedSessionId;
           if (sessionId != null) subscribe(sessionId);
 
@@ -692,6 +824,48 @@ class GatewayService {
                   .toList() ??
               [];
           _sessionsController.add(sessions);
+
+        case 'workspace':
+          final projects =
+              (json['projects'] as List<dynamic>? ?? const [])
+                  .whereType<Map<String, dynamic>>()
+                  .map(WorkspaceProject.fromJson)
+                  .toList()
+                ..sort((a, b) => a.order.compareTo(b.order));
+          final agents = (json['agents'] as List<dynamic>? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(AcpAgentOption.fromJson)
+              .toList();
+          _workspaceController.add(
+            WorkspaceCatalog(projects: projects, agents: agents),
+          );
+
+        case 'sessionHistory':
+          _sessionHistoryController.add(
+            SessionHistoryResult(
+              projectRoot: json['projectRoot'] as String? ?? '',
+              agentOptionId: json['agentOptionId'] as String? ?? '',
+              sessions: (json['sessions'] as List<dynamic>? ?? const [])
+                  .whereType<Map<String, dynamic>>()
+                  .map(HistorySessionSummary.fromJson)
+                  .toList(),
+            ),
+          );
+
+        case 'sessionCreated':
+          final sessionId = json['sessionId'] as String?;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _sessionCreatedController.add(sessionId);
+            listSessions();
+          }
+
+        case 'sessionDeleted':
+          final sessionId = json['sessionId'] as String?;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _snapshotCache.remove(sessionId);
+            _sessionDeletedController.add(sessionId);
+            listSessions();
+          }
 
         case 'subscribed':
           // 订阅确认
@@ -831,6 +1005,10 @@ class GatewayService {
     disconnect();
     _stateController.close();
     _sessionsController.close();
+    _workspaceController.close();
+    _sessionHistoryController.close();
+    _sessionCreatedController.close();
+    _sessionDeletedController.close();
     _snapshotController.close();
     _attentionController.close();
     _attentionResolvedController.close();

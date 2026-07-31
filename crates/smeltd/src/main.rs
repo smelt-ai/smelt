@@ -3372,6 +3372,7 @@ fn handle_conn(
         Some("watch") => handle_watch(conn, reader, &v, sessions),
         Some("subscribe") => handle_subscribe(conn, &sessions, &acp_sessions, &subscribers),
         Some("acp_open") => handle_acp_open(conn, reader, &v, acp_sessions, subscribers),
+        Some("acp_create") => handle_acp_create(conn, &v, &acp_sessions, &subscribers),
         Some("acp_watch") => handle_acp_watch(conn, reader, &v, acp_sessions),
         Some("acp_snapshot") => handle_acp_snapshot(conn, &v, &acp_sessions),
         Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &subscribers),
@@ -4100,6 +4101,7 @@ fn new_acp_sessions() -> AcpSessions {
     Arc::new(AcpRegistry::new(Arc::clone(&SPAWN_GATE)))
 }
 
+#[derive(Clone)]
 struct AcpOpenRequest {
     id: String,
     cwd: Option<String>,
@@ -4523,49 +4525,25 @@ fn handle_acp_open(
     let Some(req) = parse_acp_open_request(v) else {
         return;
     };
-    let AcpOpenRequest {
-        id,
-        cwd,
-        launch,
-        agent_needs_transcript_check: needs_check,
-        resume_id: req_resume_id,
-    } = req;
-
-    let (slot, attached_fd) = loop {
-        let (slot, created) =
-            acp_sessions.reserve_with(&id, || make_acp_session(&id, cwd.clone(), needs_check));
+    let id = req.id.clone();
+    let Some(mut slot) = ensure_acp_session(&req, &acp_sessions, &subscribers) else {
+        return;
+    };
+    let attached_fd = loop {
         let lifecycle = slot.lifecycle.lock().unwrap();
         let still_current = acp_sessions
             .get(&id)
             .is_some_and(|current| Arc::ptr_eq(&current, &slot));
         if !still_current {
             drop(lifecycle);
+            let Some(current) = ensure_acp_session(&req, &acp_sessions, &subscribers) else {
+                return;
+            };
+            slot = current;
             continue;
         }
 
         let sess = &slot.value;
-        let alive = sess.handle.lock().unwrap().is_some();
-        if acp_open_needs_relaunch(created, alive, !launch.command.is_empty()) {
-            // 已经 Ended（或还没真正连接过）：这次 open 等于「重新开始」。
-            // GUI 请求携带的是持久化的 canonical history id，必须优先于 daemon
-            // 中可能由空恢复产生的 runtime id。只有请求缺失时才回退服务端历史 id。
-            let known_history = {
-                let reduced = sess.reduced.lock().unwrap();
-                reduced
-                    .history_session_id
-                    .clone()
-                    .or_else(|| reduced.acp_session_id.clone())
-            };
-            acp_relaunch(
-                &slot,
-                &id,
-                launch.clone(),
-                select_resume_id(req_resume_id.clone(), known_history),
-                acp_sessions.spawn_gate(),
-                &subscribers,
-            );
-        }
-
         let attached_fd = {
             let Ok(mut c) = conn.try_clone() else { return };
             let fd = c.as_raw_fd();
@@ -4582,7 +4560,7 @@ fn handle_acp_open(
             fd
         };
         drop(lifecycle);
-        break (slot, attached_fd);
+        break attached_fd;
     };
     let sess = &slot.value;
 
@@ -4604,6 +4582,67 @@ fn handle_acp_open(
     if out.client.as_ref().map(|c| c.as_raw_fd()) == Some(attached_fd) {
         out.client = None;
     }
+}
+
+/// Ensure an ACP runtime exists without attaching a controlling client. Both desktop
+/// `acp_open` and mobile `acp_create` use this path, so launch/resume semantics cannot drift.
+fn ensure_acp_session(
+    req: &AcpOpenRequest,
+    acp_sessions: &AcpSessions,
+    subscribers: &Subscribers,
+) -> Option<Arc<AcpSlot<AcpSession>>> {
+    loop {
+        let (slot, created) = acp_sessions.reserve_with(&req.id, || {
+            make_acp_session(
+                &req.id,
+                req.cwd.clone(),
+                req.agent_needs_transcript_check,
+            )
+        });
+        let lifecycle = slot.lifecycle.lock().unwrap();
+        let still_current = acp_sessions
+            .get(&req.id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &slot));
+        if !still_current {
+            drop(lifecycle);
+            continue;
+        }
+        let alive = slot.value.handle.lock().unwrap().is_some();
+        if acp_open_needs_relaunch(created, alive, !req.launch.command.is_empty()) {
+            let known_history = {
+                let reduced = slot.value.reduced.lock().unwrap();
+                reduced
+                    .history_session_id
+                    .clone()
+                    .or_else(|| reduced.acp_session_id.clone())
+            };
+            acp_relaunch(
+                &slot,
+                &req.id,
+                req.launch.clone(),
+                select_resume_id(req.resume_id.clone(), known_history),
+                acp_sessions.spawn_gate(),
+                subscribers,
+            );
+        }
+        drop(lifecycle);
+        return Some(slot);
+    }
+}
+
+fn handle_acp_create(
+    mut conn: UnixStream,
+    v: &serde_json::Value,
+    acp_sessions: &AcpSessions,
+    subscribers: &Subscribers,
+) {
+    let response = match parse_acp_open_request(v)
+        .and_then(|request| ensure_acp_session(&request, acp_sessions, subscribers))
+    {
+        Some(_) => serde_json::json!({"ok": true}),
+        None => serde_json::json!({"ok": false, "error": "invalid ACP create request"}),
+    };
+    let _ = writeln!(conn, "{response}");
 }
 
 /// 只读旁观：会话必须已存在（没有 ACP 版本的「不存在就兜底 spawn」——旁观一个

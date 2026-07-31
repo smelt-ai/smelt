@@ -31,3 +31,4 @@ async-process = "2"
 libc = "0.2"
 base64 = "0.22"
 url = "2"
+uuid = { version = "1", features = ["v4"] }

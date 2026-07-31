@@ -12,6 +12,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+#[cfg(test)]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +20,9 @@ use std::path::{Path, PathBuf};
 // claude_paths（ACP 连接层挪进 smelt-core 后，续接可行性预检也要用同一份规则，
 // 不能这边一份那边一份）。这里整段 re-export，本文件里原有的裸函数名用法
 // 不用改。
-pub(crate) use smelt_core::claude_paths::{memory_dir, project_dir, projects_root};
+pub(crate) use smelt_core::claude_paths::memory_dir;
+#[cfg(test)]
+pub(crate) use smelt_core::claude_paths::{project_dir, projects_root};
 
 fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
@@ -66,6 +69,7 @@ pub struct SessionDetail {
 /// `override_dir`：多 workspace 场景下手动添加的 profile 显式指定的
 /// `CLAUDE_CONFIG_DIR`（见 `smelt_core::claude_paths::projects_root`），
 /// `None` 就是默认 workspace，行为不变。
+#[cfg(test)]
 pub fn list_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     let dir = projects_root(override_dir).join(project_dir(cwd));
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -127,6 +131,7 @@ fn claude_user_text(content: &Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+#[cfg(test)]
 fn summarize_session(path: &Path) -> Option<SessionSummary> {
     let text = std::fs::read_to_string(path).ok()?;
     let session_id = path
@@ -314,6 +319,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 // 只能按日期分区遍历、逐份看第一行 session_meta 里的 cwd 是否匹配——文件多的话
 // 比 Claude 那版慢，调用方本来就放后台线程跑，可以接受。
 
+#[cfg(test)]
 fn codex_sessions_root(override_dir: Option<&str>) -> PathBuf {
     codex_home(override_dir).join("sessions")
 }
@@ -321,6 +327,7 @@ fn codex_sessions_root(override_dir: Option<&str>) -> PathBuf {
 /// `CODEX_HOME` 设了就整段替换默认的 `~/.codex`（同 claude_paths.rs 的
 /// `CLAUDE_CONFIG_DIR` 处理，走同一份 `smelt_core::login_env` 探测）。
 /// `override_dir` 优先于全局探测——多 workspace profile 的显式指定。
+#[cfg(test)]
 fn codex_home(override_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = override_dir {
         return PathBuf::from(dir);
@@ -333,6 +340,7 @@ fn codex_home(override_dir: Option<&str>) -> PathBuf {
         .join(".codex")
 }
 
+#[cfg(test)]
 pub fn list_codex_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     let root = codex_sessions_root(override_dir);
     let mut out = Vec::new();
@@ -354,6 +362,7 @@ pub fn list_codex_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<Session
     out
 }
 
+#[cfg(test)]
 fn read_dir_ok(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|it| it.flatten().map(|e| e.path()).collect())
@@ -371,6 +380,7 @@ fn is_synthetic_codex_text(text: &str) -> bool {
     t.starts_with('<') || t.starts_with("# Context from")
 }
 
+#[cfg(test)]
 fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
@@ -542,11 +552,13 @@ pub fn load_codex_session_detail(path: &Path) -> Option<SessionDetail> {
 // 时间/消息数（不用像 Claude/Codex 那样扫整份 transcript 才能拿到概览，列表这块
 // 反而是四家里最快的），`chat_history.jsonl` 才是完整对话内容。
 
+#[cfg(test)]
 fn grok_sessions_root(override_dir: Option<&str>) -> PathBuf {
     grok_home(override_dir).join("sessions")
 }
 
 /// `GROK_HOME` 设了就整段替换默认的 `~/.grok`。`override_dir` 同上，优先级最高。
+#[cfg(test)]
 fn grok_home(override_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = override_dir {
         return PathBuf::from(dir);
@@ -559,6 +571,7 @@ fn grok_home(override_dir: Option<&str>) -> PathBuf {
         .join(".grok")
 }
 
+#[cfg(test)]
 pub fn list_grok_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     let root = grok_sessions_root(override_dir);
     let mut out = Vec::new();
@@ -576,6 +589,7 @@ pub fn list_grok_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionS
     out
 }
 
+#[cfg(test)]
 fn summarize_grok_session(session_dir: &Path, want_cwd: &str) -> Option<SessionSummary> {
     let summary_path = session_dir.join("summary.json");
     let text = std::fs::read_to_string(&summary_path).ok()?;
@@ -731,6 +745,7 @@ pub fn load_grok_session_detail(session_dir: &Path) -> Option<SessionDetail> {
 // `key: value`，没有嵌套/列表，手写小解析器就够，不为这一个文件引入 yaml 依赖）
 // 给 cwd/标题/时间，`events.jsonl` 才是完整对话内容。
 
+#[cfg(test)]
 fn copilot_sessions_root(override_dir: Option<&str>) -> PathBuf {
     copilot_home(override_dir).join("session-state")
 }
@@ -739,6 +754,7 @@ fn copilot_sessions_root(override_dir: Option<&str>) -> PathBuf {
 /// `XDG_CONFIG_HOME`（这种情况下基准目录是 `$XDG_CONFIG_HOME/copilot`），
 /// 都没设才落到默认位置。`override_dir`（多 workspace profile）优先级最高，
 /// 直接就是完整的 Copilot 数据目录（不用再拼 `/copilot` 子目录）。
+#[cfg(test)]
 fn copilot_home(override_dir: Option<&str>) -> PathBuf {
     if let Some(dir) = override_dir {
         return PathBuf::from(dir);
@@ -756,6 +772,7 @@ fn copilot_home(override_dir: Option<&str>) -> PathBuf {
 
 /// 只认得住扁平 `key: value` 这一种形状——Copilot 目前这个文件就是这样（实测），
 /// 真出现嵌套/列表会直接读不到对应字段，调用方本来就都用 `Option`/回退处理。
+#[cfg(test)]
 fn parse_flat_yaml(text: &str) -> std::collections::HashMap<String, String> {
     text.lines()
         .filter_map(|line| line.split_once(": "))
@@ -763,6 +780,7 @@ fn parse_flat_yaml(text: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn list_copilot_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     let root = copilot_sessions_root(override_dir);
     let mut out = Vec::new();
@@ -775,6 +793,7 @@ pub fn list_copilot_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<Sessi
     out
 }
 
+#[cfg(test)]
 fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<SessionSummary> {
     let yaml_text = std::fs::read_to_string(session_dir.join("workspace.yaml")).ok()?;
     let fields = parse_flat_yaml(&yaml_text);
@@ -1608,12 +1627,18 @@ fn list_sessions_for(
     override_dir: Option<&str>,
     cwd: &str,
 ) -> Vec<SessionSummary> {
-    match agent {
-        AcpAgentKind::Claude => list_sessions(cwd, override_dir),
-        AcpAgentKind::Codex => list_codex_sessions(cwd, override_dir),
-        AcpAgentKind::Grok => list_grok_sessions(cwd, override_dir),
-        AcpAgentKind::Copilot => list_copilot_sessions(cwd, override_dir),
-    }
+    smelt_core::session_control::list_history_for(agent, cwd, override_dir)
+        .into_iter()
+        .map(|session| SessionSummary {
+            path: session.path,
+            title: session.title,
+            resume_id: session.resume_id,
+            started_at: session.started_at,
+            last_active_at: session.last_active_at,
+            message_count: session.message_count,
+            total_tokens: session.total_tokens,
+        })
+        .collect()
 }
 
 pub(crate) fn load_session_detail_for(agent: AcpAgentKind, path: &Path) -> Option<SessionDetail> {
