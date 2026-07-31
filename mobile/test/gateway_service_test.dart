@@ -70,4 +70,31 @@ void main() {
 
     expect(attention.requiresAction, isTrue);
   });
+
+  test('workspace and history models parse server-owned session metadata', () {
+    final project = WorkspaceProject.fromJson({
+      'root': '/repo/smelt',
+      'title': 'smelt',
+      'order': 2,
+    });
+    final agent = AcpAgentOption.fromJson({
+      'id': 'profile:quant',
+      'kind': 'claude',
+      'label': 'Claude Quant',
+      'profile': true,
+    });
+    final history = HistorySessionSummary.fromJson({
+      'resumeId': 'history-1',
+      'title': 'Fix mobile history',
+      'lastActiveAt': '2026-07-31T12:00:00Z',
+      'messageCount': 8,
+    });
+
+    expect(project.root, '/repo/smelt');
+    expect(agent.profile, isTrue);
+    expect(agent.kind, 'claude');
+    expect(history.resumeId, 'history-1');
+    expect(history.lastActiveAt?.toUtc().hour, 12);
+    expect(history.messageCount, 8);
+  });
 }

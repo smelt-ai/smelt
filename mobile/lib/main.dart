@@ -202,8 +202,14 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   WsState _connectionState = WsState.disconnected;
   List<SessionSummary> _sessions = [];
+  WorkspaceCatalog _workspace = const WorkspaceCatalog(
+    projects: [],
+    agents: [],
+  );
   late final StreamSubscription<WsState> _stateSubscription;
   late final StreamSubscription<List<SessionSummary>> _sessionsSubscription;
+  late final StreamSubscription<WorkspaceCatalog> _workspaceSubscription;
+  late final StreamSubscription<String> _sessionCreatedSubscription;
   late final StreamSubscription<LifecycleAttention> _attentionSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
@@ -214,6 +220,7 @@ class _HomePageState extends State<HomePage> {
   bool _hasSavedPairing = false;
   bool _showPairingCode = false;
   bool _acceptConnectionNotifications = true;
+  String? _pendingOpenSessionId;
 
   final _pairingCodeController = TextEditingController();
 
@@ -231,6 +238,26 @@ class _HomePageState extends State<HomePage> {
     _sessionsSubscription = gatewayService.sessionsStream.listen((sessions) {
       if (!mounted) return;
       setState(() => _sessions = sessions);
+      final pendingId = _pendingOpenSessionId;
+      final created = pendingId == null
+          ? null
+          : sessions.where((session) => session.id == pendingId).firstOrNull;
+      if (created != null) {
+        _pendingOpenSessionId = null;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _openSession(created);
+        });
+      }
+    });
+    _workspaceSubscription = gatewayService.workspaceStream.listen((workspace) {
+      if (!mounted) return;
+      setState(() => _workspace = workspace);
+    });
+    _sessionCreatedSubscription = gatewayService.sessionCreatedStream.listen((
+      id,
+    ) {
+      if (!mounted) return;
+      _pendingOpenSessionId = id;
     });
     _attentionSubscription = gatewayService.attentionStream.listen((item) {
       if (!mounted || !_acceptConnectionNotifications) return;
@@ -334,7 +361,10 @@ class _HomePageState extends State<HomePage> {
       body: _buildBody(),
       floatingActionButton: _connectionState == WsState.connected
           ? FloatingActionButton(
-              onPressed: () => gatewayService.listSessions(),
+              onPressed: () {
+                gatewayService.listSessions();
+                gatewayService.listWorkspace();
+              },
               child: const Icon(Icons.refresh),
             )
           : null,
@@ -427,26 +457,63 @@ class _HomePageState extends State<HomePage> {
   Widget _buildSessionList() {
     final orderedSessions = List<SessionSummary>.of(_sessions)
       ..sort(compareSessionMenuOrder);
-    final projects = <String, List<SessionSummary>>{};
+    final projects =
+        <String, ({WorkspaceProject project, List<SessionSummary> sessions})>{};
+    for (final project in _workspace.projects) {
+      projects[project.root] = (project: project, sessions: []);
+    }
     for (final session in orderedSessions) {
-      projects.putIfAbsent(_projectKey(session), () => []).add(session);
+      final key = _projectKey(session);
+      final group = projects.putIfAbsent(
+        key,
+        () => (
+          project: WorkspaceProject(
+            root: key,
+            title: _projectName(session),
+            order: session.projectOrder,
+          ),
+          sessions: <SessionSummary>[],
+        ),
+      );
+      group.sessions.add(session);
     }
 
     return Column(
       children: [
         const ConnectionStatusBar(),
         Expanded(
-          child: _sessions.isEmpty
-              ? const Center(child: Text('No active sessions'))
+          child: projects.isEmpty
+              ? const Center(child: Text('No projects'))
               : ListView(
                   children: projects.entries.map((entry) {
-                    final sessions = entry.value;
-                    final projectTitle = _projectName(sessions.first);
+                    final project = entry.value.project;
+                    final sessions = entry.value.sessions;
                     return ExpansionTile(
-                      leading: const Icon(Icons.folder_outlined),
-                      title: Text(projectTitle),
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: Text(project.title),
                       subtitle: Text(
                         '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.history),
+                            tooltip: 'Conversation history',
+                            onPressed: _workspace.agents.isEmpty
+                                ? null
+                                : () => _openHistory(project),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.add),
+                            tooltip: 'New conversation',
+                            onPressed:
+                                !gatewayService.writeEnabled ||
+                                    _workspace.agents.isEmpty
+                                ? null
+                                : () => _createSession(project),
+                          ),
+                        ],
                       ),
                       children: sessions.map((session) {
                         final subtitle = sessionListSubtitle(session);
@@ -458,9 +525,33 @@ class _HomePageState extends State<HomePage> {
                           leading: const Icon(Icons.chat_bubble_outline),
                           title: Text(sessionListTitle(session)),
                           subtitle: subtitle == null ? null : Text(subtitle),
-                          trailing: Badge(
-                            isLabelVisible: session.unread,
-                            child: _getStatusChip(session.status),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Badge(
+                                isLabelVisible: session.unread,
+                                child: _getStatusChip(session.status),
+                              ),
+                              PopupMenuButton<String>(
+                                tooltip: 'Conversation actions',
+                                onSelected: (action) {
+                                  if (action == 'delete') {
+                                    _deleteSession(session);
+                                  }
+                                },
+                                itemBuilder: (context) => [
+                                  PopupMenuItem(
+                                    value: 'delete',
+                                    enabled: gatewayService.writeEnabled,
+                                    child: const ListTile(
+                                      contentPadding: EdgeInsets.zero,
+                                      leading: Icon(Icons.delete_outline),
+                                      title: Text('Delete'),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
                           ),
                           onTap: () => _openSession(session),
                         );
@@ -471,6 +562,75 @@ class _HomePageState extends State<HomePage> {
         ),
       ],
     );
+  }
+
+  Future<AcpAgentOption?> _chooseAgent({String title = 'New conversation'}) {
+    return showModalBottomSheet<AcpAgentOption>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+          ),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(title: Text(title)),
+              ..._workspace.agents.map(
+                (agent) => ListTile(
+                  leading: const Icon(Icons.smart_toy_outlined),
+                  title: Text(agent.label),
+                  subtitle: agent.profile
+                      ? const Text('Custom workspace')
+                      : null,
+                  onTap: () => Navigator.pop(context, agent),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _createSession(WorkspaceProject project) async {
+    final agent = await _chooseAgent();
+    if (!mounted || agent == null) return;
+    gatewayService.createSession(project.root, agent.id);
+  }
+
+  Future<void> _openHistory(WorkspaceProject project) async {
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            SessionHistoryPage(project: project, agents: _workspace.agents),
+      ),
+    );
+  }
+
+  Future<void> _deleteSession(SessionSummary session) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete conversation?'),
+        content: Text(
+          'This stops ${sessionListTitle(session)} and removes it from the active list. The agent transcript remains available in History.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) gatewayService.deleteSession(session.id);
   }
 
   String _projectName(SessionSummary session) {
@@ -618,10 +778,154 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _stateSubscription.cancel();
     _sessionsSubscription.cancel();
+    _workspaceSubscription.cancel();
+    _sessionCreatedSubscription.cancel();
     _attentionSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     _errorSubscription.cancel();
     _pairingCodeController.dispose();
+    super.dispose();
+  }
+}
+
+class SessionHistoryPage extends StatefulWidget {
+  const SessionHistoryPage({
+    super.key,
+    required this.project,
+    required this.agents,
+  });
+
+  final WorkspaceProject project;
+  final List<AcpAgentOption> agents;
+
+  @override
+  State<SessionHistoryPage> createState() => _SessionHistoryPageState();
+}
+
+class _SessionHistoryPageState extends State<SessionHistoryPage> {
+  late AcpAgentOption _agent;
+  List<HistorySessionSummary> _sessions = const [];
+  bool _loading = true;
+  late final StreamSubscription<SessionHistoryResult> _historySubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _agent = widget.agents.first;
+    _historySubscription = gatewayService.sessionHistoryStream.listen((result) {
+      if (!mounted ||
+          result.projectRoot != widget.project.root ||
+          result.agentOptionId != _agent.id) {
+        return;
+      }
+      setState(() {
+        _sessions = result.sessions;
+        _loading = false;
+      });
+    });
+    _load();
+  }
+
+  void _load() {
+    setState(() {
+      _loading = true;
+      _sessions = const [];
+    });
+    gatewayService.listSessionHistory(widget.project.root, _agent.id);
+  }
+
+  String _historySubtitle(HistorySessionSummary session) {
+    final active = session.lastActiveAt?.toLocal();
+    final date = active == null
+        ? null
+        : '${active.month.toString().padLeft(2, '0')}-${active.day.toString().padLeft(2, '0')} '
+              '${active.hour.toString().padLeft(2, '0')}:${active.minute.toString().padLeft(2, '0')}';
+    final messages =
+        '${session.messageCount} message${session.messageCount == 1 ? '' : 's'}';
+    return date == null ? messages : '$date · $messages';
+  }
+
+  void _resume(HistorySessionSummary session) {
+    gatewayService.createSession(
+      widget.project.root,
+      _agent.id,
+      resumeId: session.resumeId,
+    );
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('${widget.project.title} history')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: DropdownButtonFormField<String>(
+              initialValue: _agent.id,
+              decoration: const InputDecoration(
+                labelText: 'Agent',
+                border: OutlineInputBorder(),
+              ),
+              items: widget.agents
+                  .map(
+                    (agent) => DropdownMenuItem(
+                      value: agent.id,
+                      child: Text(agent.label),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (id) {
+                if (id == null) return;
+                _agent = widget.agents.firstWhere((agent) => agent.id == id);
+                _load();
+              },
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _sessions.isEmpty
+                ? const Center(child: Text('No resumable conversations'))
+                : RefreshIndicator(
+                    onRefresh: () async => _load(),
+                    child: ListView.separated(
+                      itemCount: _sessions.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final session = _sessions[index];
+                        return ListTile(
+                          leading: const Icon(Icons.history),
+                          title: Text(
+                            session.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(_historySubtitle(session)),
+                          trailing: IconButton(
+                            tooltip: 'Resume conversation',
+                            icon: const Icon(Icons.play_arrow),
+                            onPressed: gatewayService.writeEnabled
+                                ? () => _resume(session)
+                                : null,
+                          ),
+                          onTap: gatewayService.writeEnabled
+                              ? () => _resume(session)
+                              : null,
+                        );
+                      },
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _historySubscription.cancel();
     super.dispose();
   }
 }

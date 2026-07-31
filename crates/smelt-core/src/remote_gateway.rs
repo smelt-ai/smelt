@@ -32,6 +32,47 @@ use crate::workspace_menu::{
     WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
 };
 
+fn mobile_workspace_menu() -> WorkspaceMenuSnapshot {
+    let mut menu = load_workspace_menu();
+    let remote_sessions = crate::session_control::load_remote_sessions();
+    for remote in remote_sessions {
+        let project_order = menu
+            .projects
+            .iter()
+            .position(|project| project.root == remote.cwd)
+            .unwrap_or_else(|| {
+                let order = menu.projects.len();
+                menu.projects.push(WorkspaceMenuProject {
+                    root: remote.cwd.clone(),
+                    title: path_title(&remote.cwd),
+                    order: order.min(u32::MAX as usize) as u32,
+                });
+                order
+            });
+        if menu.sessions.iter().any(|session| session.id == remote.id) {
+            continue;
+        }
+        let project = &menu.projects[project_order];
+        menu.sessions.push(WorkspaceMenuSession {
+            id: remote.id,
+            kind: WorkspaceMenuSessionKind::Acp,
+            title: if remote.title.trim().is_empty() {
+                format!("{} conversation", remote.agent)
+            } else {
+                remote.title
+            },
+            custom_title: false,
+            cwd: Some(remote.cwd),
+            project_root: Some(project.root.clone()),
+            project_title: Some(project.title.clone()),
+            project_order: project.order,
+            session_order: menu.sessions.len().min(u32::MAX as usize) as u32,
+            agent: Some(remote.agent),
+        });
+    }
+    menu
+}
+
 pub fn sock_path() -> std::path::PathBuf {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| "/tmp".into())
@@ -304,8 +345,16 @@ impl MobileLifecycleHub {
     }
 
     fn summaries(&self) -> Vec<AcpSessionSummary> {
-        let menu = load_workspace_menu();
+        let menu = mobile_workspace_menu();
         self.summaries_with_menu(&menu)
+    }
+
+    fn remove_session(&self, id: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.sessions.remove(id);
+        state.attention.remove_session(id);
+        drop(state);
+        let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
     }
 
     fn summaries_with_menu(&self, menu: &WorkspaceMenuSnapshot) -> Vec<AcpSessionSummary> {
@@ -530,11 +579,78 @@ enum AcpWsRequest {
     DismissElicitation { params: SessionActionParams },
     #[serde(rename = "listSessions")]
     ListSessions,
+    #[serde(rename = "listWorkspace")]
+    ListWorkspace,
+    #[serde(rename = "listSessionHistory")]
+    ListSessionHistory { params: SessionHistoryParams },
+    #[serde(rename = "createSession")]
+    CreateSession { params: CreateSessionParams },
+    #[serde(rename = "deleteSession")]
+    DeleteSession { params: SessionActionParams },
     #[serde(rename = "markRead")]
     MarkRead {
         #[allow(dead_code)]
         params: MarkReadParams,
     },
+}
+
+#[derive(serde::Deserialize)]
+struct SessionHistoryParams {
+    #[serde(rename = "projectRoot")]
+    project_root: String,
+    #[serde(rename = "agentOptionId")]
+    agent_option_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateSessionParams {
+    #[serde(rename = "projectRoot")]
+    project_root: String,
+    #[serde(rename = "agentOptionId")]
+    agent_option_id: String,
+    #[serde(default, rename = "resumeId")]
+    resume_id: Option<String>,
+}
+
+fn create_mobile_session(params: CreateSessionParams) -> Result<String, String> {
+    let menu = mobile_workspace_menu();
+    let project = menu
+        .projects
+        .iter()
+        .find(|project| project.root == params.project_root)
+        .ok_or_else(|| "project is not in the Smelt workspace".to_string())?;
+    let option = crate::session_control::find_agent_option(&params.agent_option_id)
+        .ok_or_else(|| "unknown ACP agent or profile".to_string())?;
+    let resume_id = params.resume_id.filter(|id| !id.trim().is_empty());
+    let title = resume_id
+        .as_deref()
+        .and_then(|resume_id| {
+            crate::session_control::list_history(&option, &project.root)
+                .into_iter()
+                .find(|session| session.resume_id == resume_id)
+                .map(|session| session.title)
+        })
+        .unwrap_or_else(|| format!("{} conversation", option.label));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0);
+    let session = crate::session_control::RemoteAcpSession {
+        id: format!("acp-{}", uuid::Uuid::new_v4()),
+        cwd: project.root.clone(),
+        title,
+        agent_option_id: option.id,
+        agent: option.kind,
+        launch: option.launch,
+        resume_id,
+        created_at: now,
+    };
+    crate::session_control::remember_remote_session(session.clone());
+    if let Err(error) = crate::session_control::create_acp_session(&session) {
+        crate::session_control::forget_remote_session(&session.id);
+        return Err(error);
+    }
+    Ok(session.id)
 }
 
 #[derive(serde::Deserialize)]
@@ -713,6 +829,70 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                             "type": "sessions",
                             "sessions": sessions,
                         });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::ListWorkspace => {
+                        let menu = mobile_workspace_menu();
+                        let resp = serde_json::json!({
+                            "type": "workspace",
+                            "projects": crate::session_control::workspace_projects(&menu),
+                            "agents": crate::session_control::agent_options(),
+                        });
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::ListSessionHistory { params } => {
+                        let response = tokio::task::spawn_blocking(move || {
+                            let menu = mobile_workspace_menu();
+                            if !menu.projects.iter().any(|project| project.root == params.project_root) {
+                                return Err("project is not in the Smelt workspace".to_string());
+                            }
+                            let option = crate::session_control::find_agent_option(&params.agent_option_id)
+                                .ok_or_else(|| "unknown ACP agent or profile".to_string())?;
+                            Ok((params.project_root.clone(), params.agent_option_id.clone(), crate::session_control::list_history(&option, &params.project_root)))
+                        }).await;
+                        let resp = match response {
+                            Ok(Ok((project_root, agent_option_id, sessions))) => serde_json::json!({
+                                "type": "sessionHistory",
+                                "projectRoot": project_root,
+                                "agentOptionId": agent_option_id,
+                                "sessions": sessions,
+                            }),
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Err(error) => serde_json::json!({"type": "error", "error": format!("failed to scan session history: {error}")}),
+                        };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::CreateSession { params } => {
+                        if !write_enabled {
+                            let resp = serde_json::json!({"type": "error", "error": "write not enabled"});
+                            let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                            continue;
+                        }
+                        let response = tokio::task::spawn_blocking(move || create_mobile_session(params)).await;
+                        let resp = match response {
+                            Ok(Ok(id)) => serde_json::json!({"type": "sessionCreated", "sessionId": id}),
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Err(error) => serde_json::json!({"type": "error", "error": format!("failed to create session: {error}")}),
+                        };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::DeleteSession { params } => {
+                        if !write_enabled {
+                            let resp = serde_json::json!({"type": "error", "error": "write not enabled"});
+                            let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                            continue;
+                        }
+                        let id = params.session_id;
+                        let delete_id = id.clone();
+                        let response = tokio::task::spawn_blocking(move || crate::session_control::delete_acp_session(&delete_id)).await;
+                        let resp = match response {
+                            Ok(Ok(())) => {
+                                state.mobile_lifecycle.remove_session(&id);
+                                serde_json::json!({"type": "sessionDeleted", "sessionId": id})
+                            }
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Err(error) => serde_json::json!({"type": "error", "error": format!("failed to delete session: {error}")}),
+                        };
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::Subscribe { params } => {
@@ -1224,6 +1404,46 @@ mod tests {
             }
             _ => panic!("expected setConfigOption"),
         }
+
+        let history: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "listSessionHistory",
+            "params": {
+                "projectRoot": "/repo/smelt",
+                "agentOptionId": "profile:quant"
+            }
+        }))
+        .unwrap();
+        match history {
+            AcpWsRequest::ListSessionHistory { params } => {
+                assert_eq!(params.project_root, "/repo/smelt");
+                assert_eq!(params.agent_option_id, "profile:quant");
+            }
+            _ => panic!("expected listSessionHistory"),
+        }
+
+        let create: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "createSession",
+            "params": {
+                "projectRoot": "/repo/smelt",
+                "agentOptionId": "codex",
+                "resumeId": "history-1"
+            }
+        }))
+        .unwrap();
+        match create {
+            AcpWsRequest::CreateSession { params } => {
+                assert_eq!(params.agent_option_id, "codex");
+                assert_eq!(params.resume_id.as_deref(), Some("history-1"));
+            }
+            _ => panic!("expected createSession"),
+        }
+
+        let delete: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "deleteSession",
+            "params": {"sessionId": "acp-1"}
+        }))
+        .unwrap();
+        assert!(matches!(delete, AcpWsRequest::DeleteSession { .. }));
     }
 
     fn mobile_daemon_state(phase: DaemonPhase) -> DaemonSessionState {

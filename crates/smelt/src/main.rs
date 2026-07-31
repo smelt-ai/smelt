@@ -623,6 +623,9 @@ struct Session {
     kind: SessionKind,
     /// 用户手动改过的会话名（侧栏右键「重命名」）；None = 用下面 title() 的自动推导。
     custom_title: Option<String>,
+    /// 由移动端创建、以 `remote_acp_sessions.json` 为权威目录的会话。PC 只投影到
+    /// 当前 UI，不重复写进 workspace sessions，避免两个持久化源互相覆盖。
+    remote_owned: bool,
     /// ACP 会话内容变化（AcpViewEvent::Changed）→ save_state 的订阅；Term 会话
     /// 没有（终端内容不经这条通道持久化，走 daemon session id 就够）。
     _acp_persist_sub: Option<gpui::Subscription>,
@@ -640,6 +643,7 @@ impl Session {
                 active: view,
             },
             custom_title: None,
+            remote_owned: false,
             _acp_persist_sub: None,
             ui_state: SessionUiState::default(),
         }
@@ -2429,7 +2433,123 @@ impl Workspace {
         } else {
             ws.check_daemon_outdated(cx);
         }
+        ws.start_remote_session_sync(window, cx);
         ws
+    }
+
+    /// Mirror mobile-created ACP sessions into the running desktop workspace. The catalog and
+    /// daemon lifecycle remain UI-independent in smelt-core; this method only owns GPUI entities.
+    fn start_remote_session_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (tx, rx) = smol::channel::bounded(1);
+        thread::Builder::new()
+            .name("smelt-remote-session-sync".into())
+            .spawn(move || {
+                loop {
+                    let sessions = smelt_core::session_control::load_remote_sessions();
+                    if tx.send_blocking(sessions).is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+            })
+            .expect("spawn remote session sync thread");
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(records) = rx.recv().await {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.reconcile_remote_sessions(records, window, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn reconcile_remote_sessions(
+        &mut self,
+        records: Vec<smelt_core::session_control::RemoteAcpSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<HashSet<_>>();
+        let stale = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, session)| {
+                if !session.remote_owned {
+                    return None;
+                }
+                let SessionKind::Acp(view) = &session.kind else {
+                    return None;
+                };
+                (!ids.contains(view.read(cx).session_id())).then_some(ix)
+            })
+            .collect::<Vec<_>>();
+        for ix in stale.into_iter().rev() {
+            self.close_session(ix, cx);
+        }
+
+        let existing = self
+            .sessions
+            .iter()
+            .filter_map(|session| match &session.kind {
+                SessionKind::Acp(view) => Some(view.read(cx).session_id().to_string()),
+                SessionKind::Term { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut changed = false;
+        for record in records {
+            if existing.contains(&record.id) {
+                continue;
+            }
+            let agent = settings::AcpAgentKind::from_id(&record.agent)
+                .unwrap_or(settings::AcpAgentKind::Claude);
+            let profile_id = record
+                .agent_option_id
+                .strip_prefix("profile:")
+                .map(String::from);
+            let resume_id = record
+                .resume_id
+                .map(agent_client_protocol::schema::v1::SessionId::new);
+            let cwd = Some(record.cwd.clone());
+            self.remember_session_project(cwd.as_deref());
+            let view = cx.new(|cx| {
+                acp_view::AcpView::placeholder(
+                    cx,
+                    agent,
+                    record.launch,
+                    false,
+                    profile_id,
+                    cwd,
+                    "正在连接移动端创建的会话…".to_string(),
+                    Vec::new(),
+                    resume_id,
+                    Some(record.id),
+                )
+            });
+            let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
+            self.sessions.push(Session {
+                ui_id: next_session_ui_id(),
+                kind: SessionKind::Acp(view),
+                custom_title: (!record.title.trim().is_empty()).then_some(record.title),
+                remote_owned: true,
+                _acp_persist_sub,
+                ui_state: SessionUiState::default(),
+            });
+            changed = true;
+        }
+        if changed {
+            self.session_list_revision = self.session_list_revision.wrapping_add(1);
+            self.save_state(cx);
+            cx.notify();
+        }
     }
 
     /// 冷启动：专用 OS 线程里 **先 ensure managed 守护，再 reattach 全部会话**。
@@ -2555,6 +2675,7 @@ impl Workspace {
                                 ui_id: next_session_ui_id(),
                                 kind: SessionKind::Acp(view),
                                 custom_title: ss.custom_title,
+                                remote_owned: false,
                                 _acp_persist_sub,
                                 ui_state: ss
                                     .route
@@ -2635,6 +2756,7 @@ impl Workspace {
                             ui_id: next_session_ui_id(),
                             kind: SessionKind::Term { layout, active },
                             custom_title: ss.custom_title,
+                            remote_owned: false,
                             _acp_persist_sub: None,
                             ui_state: ss
                                 .route
@@ -3029,6 +3151,7 @@ impl Workspace {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
             custom_title: Some(title),
+            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -3062,6 +3185,7 @@ impl Workspace {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
             custom_title: None,
+            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -3144,6 +3268,7 @@ impl Workspace {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
             custom_title: None,
+            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -3302,6 +3427,7 @@ impl Workspace {
         let mut sessions: Vec<SessionState> = self
             .sessions
             .iter()
+            .filter(|session| !session.remote_owned)
             .map(|s| {
                 let route = if self.ui_session_id == Some(s.ui_id) {
                     &self.right_route
@@ -4024,6 +4150,11 @@ impl Workspace {
     fn close_session(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.sessions.len() {
             return;
+        }
+        if self.sessions[ix].remote_owned
+            && let SessionKind::Acp(view) = &self.sessions[ix].kind
+        {
+            smelt_core::session_control::forget_remote_session(view.read(cx).session_id());
         }
         // 兼容旧存档/旧创建路径留下的隐式项目：在移除最后一个能提供 cwd 的会话前，
         // 先把它对应的项目实体化。这样“关闭会话”和“关闭项目”始终是两件事。
