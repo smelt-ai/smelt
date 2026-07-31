@@ -1267,14 +1267,11 @@ pub fn list_daemon_sessions() -> Vec<DaemonSessionState> {
         .unwrap_or_default()
 }
 
-/// 内嵌远程网关（见 smeltd.rs「内嵌远程网关」一节）的运行状态，供设置页「远程」
-/// 标签页展示用。
+/// 内嵌远程网关（见 smeltd.rs「内嵌远程网关」一节）的最小运行状态。
 #[derive(Clone, Debug, Default)]
 pub struct RemoteStatus {
     pub running: bool,
     pub token: Option<String>,
-    pub addr: Option<String>,
-    pub write: bool,
 }
 
 /// 让守护开启内嵌远程网关（幂等：已经开着直接回现状原 token/write，不重启不换
@@ -1302,8 +1299,6 @@ pub fn remote_start(bind: &str, write: bool) -> Result<RemoteStatus, String> {
         Ok(RemoteStatus {
             running: true,
             token: v["token"].as_str().map(String::from),
-            addr: v["addr"].as_str().map(String::from),
-            write: v["write"].as_bool().unwrap_or(false),
         })
     } else {
         Err(v["err"].as_str().unwrap_or("未知错误").to_string())
@@ -1337,8 +1332,6 @@ pub fn remote_status() -> RemoteStatus {
     RemoteStatus {
         running: v["running"].as_bool().unwrap_or(false),
         token: v["token"].as_str().map(String::from),
-        addr: v["addr"].as_str().map(String::from),
-        write: v["write"].as_bool().unwrap_or(false),
     }
 }
 
