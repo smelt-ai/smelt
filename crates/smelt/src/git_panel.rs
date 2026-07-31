@@ -133,6 +133,10 @@ pub struct GitStatusData {
     pub files: Vec<(String, String)>,
     /// stash 条数（`git stash list` 行数）：决定「恢复暂存」可用性 + 显示条数。
     stash_count: u32,
+    /// 工作区相对 HEAD 的累计增删行数（`git diff HEAD --shortstat`，覆盖已暂存 +
+    /// 未暂存，不含未跟踪文件——那些没有「相对旧版本」的行级 diff 可言）。
+    insertions: u32,
+    deletions: u32,
 }
 
 /// 一次 `git for-each-ref` 探测的分支列表，给 Git 页头部的分支切换下拉用。
@@ -149,6 +153,16 @@ impl GitStatusData {
     /// 当前分支名，给「日志」页标注 HEAD 用。
     pub fn branch_name(&self) -> &str {
         &self.branch
+    }
+
+    /// 领先/落后上游的提交数，舞台头 git 胶囊的悬浮提示用。
+    pub fn ahead_behind(&self) -> (u32, u32) {
+        (self.ahead, self.behind)
+    }
+
+    /// 工作区相对 HEAD 的累计增删行数。
+    pub fn insertions_deletions(&self) -> (u32, u32) {
+        (self.insertions, self.deletions)
     }
 }
 
@@ -654,6 +668,37 @@ fn stash_count(root: &str) -> u32 {
                 .count() as u32
         })
         .unwrap_or(0)
+}
+
+/// 工作区相对 HEAD 的累计增删行数（`git diff HEAD --shortstat`，暂存 + 未暂存
+/// 一起算，未跟踪文件没有旧版本可比，不计入）。shortstat 输出形如
+/// ` 3 files changed, 12 insertions(+), 4 deletions(-)`，没有改动时是空字符串，
+/// 单侧为 0 时对应的 "N insertions/deletions" 短语会被 git 整段省略。
+fn diff_shortstat(root: &str) -> (u32, u32) {
+    let Some(out) = run_git(root, &["diff", "HEAD", "--shortstat"])
+        .ok()
+        .filter(|o| o.status.success())
+    else {
+        return (0, 0);
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut insertions = 0u32;
+    let mut deletions = 0u32;
+    for part in text.trim().split(',') {
+        let part = part.trim();
+        if let Some(n) = part
+            .strip_suffix("insertion(+)")
+            .or_else(|| part.strip_suffix("insertions(+)"))
+        {
+            insertions = n.trim().parse().unwrap_or(0);
+        } else if let Some(n) = part
+            .strip_suffix("deletion(-)")
+            .or_else(|| part.strip_suffix("deletions(-)"))
+        {
+            deletions = n.trim().parse().unwrap_or(0);
+        }
+    }
+    (insertions, deletions)
 }
 
 /// 丢弃工作区**全部**改动：已跟踪的还原成 HEAD（暂存 + 工作区一起），未跟踪的删掉。
@@ -2107,6 +2152,9 @@ impl Workspace {
                         if o.status.success() {
                             d.ok = true;
                             d.stash_count = stash_count(&r);
+                            let (ins, del) = diff_shortstat(&r);
+                            d.insertions = ins;
+                            d.deletions = del;
                             let text = String::from_utf8_lossy(&o.stdout);
                             for line in text.lines() {
                                 if let Some(b) = line.strip_prefix("## ") {

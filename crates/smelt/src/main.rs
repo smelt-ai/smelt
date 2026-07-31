@@ -6994,9 +6994,45 @@ fn open_workspace_window(
     workspace.expect("回调里一定会设置 workspace").downgrade()
 }
 
+/// gpui-component 自带的图标集里没有「当前分支」这类专属 git 图标（只有品牌向的
+/// github.svg），舞台头 git 状态胶囊之前借用 github 图标凑数，看着像「这是个 GitHub
+/// 仓库」而不是「当前分支状态」。这里把 gpui-component 的图标资源跟 smelt 自带的一枚
+/// git-branch.svg（Lucide 同款线条风格，跟其余图标一致）拼起来，多出的图标走
+/// `smelt-icons/` 前缀，不会跟组件库以后新增的资源撞名。
+struct SmeltAssets;
+
+impl gpui::AssetSource for SmeltAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "smelt-icons/git-branch.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/git-branch.svg").as_slice(),
+            )));
+        }
+        // panel-bottom-filled / panel-right-filled：bundled 的 panel-bottom /
+        // panel-right 只是一根细分隔线，18px 图标下开合两态区分度太低；这两枚在
+        // 分隔线的另一侧加了实心色块，开启态一眼可辨，跟 Codex 工具栏那种「大色块
+        // 表示已展开」的简洁风格对齐，不用带箭头的 -open/-close 变体。
+        if path == "smelt-icons/panel-bottom-filled.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-bottom-filled.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/panel-right-filled.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-right-filled.svg").as_slice(),
+            )));
+        }
+        gpui_component_assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        gpui_component_assets::Assets.list(path)
+    }
+}
+
 fn main() {
-    // with_assets 注册组件库图标资源，Sidebar 的 IconName svg 才能渲染。
-    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    // with_assets 注册图标资源，Sidebar 的 IconName svg 才能渲染；见上面 SmeltAssets。
+    let app = gpui_platform::application().with_assets(SmeltAssets);
     // Dock / Finder「打开」投递的 file:// URL（拖文件夹到 Dock 图标、右键用 Smelt 打开）。
     // 回调里没有 cx，经 channel 转发；unbounded 会缓存首启动时窗口建好前到达的 URL。
     let (url_tx, url_rx) = smol::channel::unbounded::<Vec<String>>();
