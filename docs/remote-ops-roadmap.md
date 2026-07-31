@@ -200,7 +200,8 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 
 **明确不做：**
 - 自己实现 WebRTC 信令服务器 / ICE 状态机（上面第 1、2 点已经说明原因）
-- 自己运营任何公网中转/协调服务（不管信令、TURN 还是 iroh relay；自建 relay 见 M5，可选）
+- 维护 Smelt 专有的信令、TURN 或 Relay 协议；自建服务直接使用上游 iroh-relay，部署见
+  [`docs/iroh-relay-deployment.md`](iroh-relay-deployment.md)
 - 浏览器接入。跨网只服务手机 App，`remote-web` 已删除。
 
 **验收（已通过）：** 手机关掉 Wi-Fi、纯用蜂窝数据，扫码即可连上本机 agent 会话；
