@@ -190,7 +190,7 @@ pub struct AcpView {
     list_state: ListState,
     /// 用户是否已滚离消息尾部；由 ListScrollEvent 更新。
     viewing_history: bool,
-    /// 「强制重启」请求正在路上：期间按钮显示处理中、防止重复点击。跟
+    /// 「强制重启」请求正在路上：用于阻止侧栏菜单重复触发。跟
     /// `AcpPhase::Starting` 不是一回事——那是新进程握手阶段，这个是"旧进程
     /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
     /// Starting 快照之间有个网络往返）。
@@ -3194,41 +3194,6 @@ impl Render for AcpView {
                                     .on_click(
                                         cx.listener(|this, _ev, _window, _cx| this.cancel_turn()),
                                     ),
-                            )
-                            .child(
-                                // 「停止」发出去但 agent 卡在工具调用里不理会时的兜底：
-                                // 直接杀掉整个 agent 进程组换一个新的接着跑（见
-                                // `force_restart` 注释）。跟"停止"分开放，不做成
-                                // 二次点击升级——卡没卡住只有用户自己看得出来，不能
-                                // 靠猜时间自动升级，误杀一个只是运行慢、没真卡死的
-                                // 回合代价太大。
-                                div()
-                                    .id("acp-force-restart")
-                                    .flex_shrink_0()
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(t.border)
-                                    .text_xs()
-                                    .text_color(if self.restarting {
-                                        muted
-                                    } else {
-                                        gpui::rgb(ui_theme::red()).into()
-                                    })
-                                    .when(!self.restarting, |d| {
-                                        d.cursor_pointer().hover(|d| d.opacity(0.8))
-                                    })
-                                    .child(if self.restarting {
-                                        "重启中…"
-                                    } else {
-                                        "强制重启"
-                                    })
-                                    .when(!self.restarting, |d| {
-                                        d.on_click(cx.listener(|this, _ev, _window, cx| {
-                                            this.force_restart(cx);
-                                        }))
-                                    }),
                             )
                         })
                         .children(self.restart_error.as_ref().map(|err| {
