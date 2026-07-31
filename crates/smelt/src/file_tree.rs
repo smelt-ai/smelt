@@ -49,7 +49,7 @@ pub struct OpenFile {
     /// 再按一次 Cmd+S 会跳过冲突检查强制覆盖——用"再按一次"当作用户已确认覆盖。
     conflict_pending: bool,
     /// markdown 文件的「预览」开关（仅 .md 生效，见 file_content_pane）；切换打开的
-    /// 文件不带过去，open_file_now 每次都重置为 false（默认进编辑视图）。
+    /// 文件不带过去，open_file_now 每次按文件类型重置（Markdown 默认进预览）。
     preview: bool,
 }
 
@@ -681,15 +681,9 @@ pub fn file_content_pane(
     roots: &[String],
     cx: &mut Context<Workspace>,
 ) -> Div {
-    let (muted, fg, border, warning, accent) = {
+    let (muted, fg, border, warning) = {
         let t = cx.theme();
-        (
-            t.muted_foreground,
-            t.foreground,
-            t.border,
-            t.warning,
-            t.accent,
-        )
+        (t.muted_foreground, t.foreground, t.border, t.warning)
     };
     match open_file {
         None => placeholder_view("← 从左侧选择文件查看内容", muted),
@@ -722,7 +716,7 @@ pub fn file_content_pane(
                 });
             let is_image = is_previewable_image(&of.path);
             let dirty = !is_image && of.editor.read(cx).value().to_string() != *of.saved_content;
-            // 只有 markdown 才给「编辑 / 预览」切换，其它文件类型没有预览这一说。
+            // Markdown 用一个动作切换源码/预览，其它文件类型没有预览这一说。
             let is_md = editor_language_for_path(&of.path) == "md";
             let preview = of.preview && is_md;
             let last_idx = breadcrumb_segs.len().saturating_sub(1);
@@ -764,29 +758,22 @@ pub fn file_content_pane(
                         ),
                 )
                 .when(is_md, |el| {
-                    let seg = |label: &'static str, active: bool, target: bool| {
-                        div()
-                            .id(label)
-                            .px_2()
-                            .py(px(2.))
-                            .rounded(px(6.))
-                            .text_xs()
-                            .cursor_pointer()
-                            .when(active, |el| el.bg(accent.opacity(0.15)).text_color(fg))
-                            .when(!active, |el| el.text_color(muted))
-                            .child(label)
-                            .on_click(cx.listener(move |ws, _ev, _window, cx| {
-                                ws.set_file_preview(target, cx)
-                            }))
-                    };
                     el.child(
-                        h_flex()
-                            .gap_1()
-                            .p(px(2.))
-                            .rounded(px(8.))
-                            .bg(border.opacity(0.3))
-                            .child(seg("编辑", !preview, false))
-                            .child(seg("预览", preview, true)),
+                        div()
+                            .id("markdown-view-toggle")
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(fg)
+                            .cursor_pointer()
+                            .hover(|el| el.opacity(0.75))
+                            .child(if preview {
+                                "查看原始码"
+                            } else {
+                                "查看预览"
+                            })
+                            .on_click(cx.listener(move |ws, _ev, _window, cx| {
+                                ws.set_file_preview(!preview, cx)
+                            })),
                     )
                 });
             let body: AnyElement = if is_image {
@@ -868,7 +855,7 @@ pub fn file_content_pane(
 // ===================== Workspace 方法 =====================
 
 impl Workspace {
-    /// 文件内容面板右上角「编辑 / 预览」切换（仅 markdown 生效）。
+    /// 文件内容面板右上角源码 / 预览切换（仅 markdown 生效）。
     fn set_file_preview(&mut self, preview: bool, cx: &mut Context<Self>) {
         if let Some(of) = self.open_file.as_mut() {
             of.preview = preview;
@@ -1178,6 +1165,7 @@ impl Workspace {
         let r#gen = self.file_gen;
 
         let language = editor_language_for_path(&path);
+        let is_markdown = language == "md";
         let editor = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -1194,7 +1182,7 @@ impl Workspace {
             save_error: None,
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
-            preview: false,
+            preview: is_markdown,
         });
         cx.notify();
 
