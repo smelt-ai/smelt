@@ -1313,6 +1313,31 @@ pub fn remote_stop() {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
+/// 显式轮换持久化的远程配对 Token。守护会先停止 iroh 和本机网关，保证旧配对
+/// 立即失效；调用方成功后需按当前配置重新启动两者。
+pub fn remote_rotate_token() -> Result<(), String> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return Err("连不上守护".to_string());
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "remote_rotate_token" })).is_err() {
+        return Err("发送请求失败".to_string());
+    }
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Err("守护没有响应".to_string());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(resp.trim()).map_err(|error| error.to_string())?;
+    if value["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(value["err"]
+            .as_str()
+            .unwrap_or("刷新远程配对 Token 失败")
+            .to_string())
+    }
+}
+
 /// 查当前内嵌远程网关的状态——GUI 刚启动时用它对齐"设置里记的开关"和"守护实际
 /// 是不是真开着"（比如上次异常退出、守护单独重启过）。
 pub fn remote_status() -> RemoteStatus {
