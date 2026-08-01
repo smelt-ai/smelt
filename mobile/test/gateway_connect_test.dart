@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/services/session_cache_store.dart';
 
 void main() {
   test('a message attempted while disconnected fails immediately', () async {
@@ -79,6 +80,41 @@ void main() {
       await errorSub.cancel();
     },
   );
+
+  test('restores saved sessions before an offline desktop times out', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'smelt-gateway-cache-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final store = FileSessionCacheStore(
+      directoryProvider: () async => directory,
+    );
+    const endpoint = 'ws://192.0.2.1:9877';
+    const token = 'cached-token';
+    final namespace = store.namespaceFor(endpoint, token);
+    await store.saveSessions(namespace, const [
+      SessionSummary(
+        id: 'cached-session',
+        title: 'Offline task',
+        phase: 'idle',
+        agent: 'codex',
+      ),
+    ]);
+    final service = GatewayService(
+      connectTimeout: const Duration(milliseconds: 200),
+      cacheStore: store,
+    );
+    final restored = service.sessionsStream.firstWhere(
+      (sessions) => sessions.isNotEmpty,
+    );
+
+    await service.connect(endpoint, token);
+
+    expect((await restored).single.id, 'cached-session');
+    expect(service.lastSessions.single.id, 'cached-session');
+    expect(service.sessionsAreCached, isTrue);
+    expect(service.state, WsState.disconnected);
+  });
 
   test('cancelling while connecting returns to disconnected', () async {
     final service = GatewayService(connectTimeout: const Duration(seconds: 30));
@@ -172,16 +208,30 @@ void main() {
     final secondServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final firstSocketReady = Completer<WebSocket>();
     final secondSocketReady = Completer<WebSocket>();
+    final firstSubscribed = Completer<void>();
+    final secondSubscribed = Completer<void>();
 
     firstServer.listen((request) async {
       final socket = await WebSocketTransformer.upgrade(request);
       firstSocketReady.complete(socket);
       socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'subscribe' && !firstSubscribed.isCompleted) {
+          firstSubscribed.complete();
+        }
+      });
     });
     secondServer.listen((request) async {
       final socket = await WebSocketTransformer.upgrade(request);
       secondSocketReady.complete(socket);
       socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'subscribe' && !secondSubscribed.isCompleted) {
+          secondSubscribed.complete();
+        }
+      });
     });
 
     var tunnelPort = firstServer.port;
@@ -206,10 +256,13 @@ void main() {
     );
     final firstSocket = await firstSocketReady.future;
     await _waitFor(() => service.state == WsState.connected);
+    service.subscribe('session-1');
+    await firstSubscribed.future;
 
     await firstSocket.close();
     await secondSocketReady.future;
     await _waitFor(() => service.state == WsState.connected);
+    await secondSubscribed.future;
 
     expect(stopCount, 1);
     expect(openedPorts, [firstServer.port, secondServer.port]);
