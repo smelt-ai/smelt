@@ -3,11 +3,13 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/acp_snapshot.dart';
 import '../models/pairing_config.dart';
+import 'session_cache_store.dart';
 
 Map<String, dynamic> _decodeGatewayJson(String data) =>
     jsonDecode(data) as Map<String, dynamic>;
@@ -36,6 +38,13 @@ class LifecycleAttention {
       kind: json['kind'] as String? ?? 'notice',
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'sessionId': sessionId,
+    'title': title,
+    'message': message,
+    'kind': kind,
+  };
 }
 
 /// 会话摘要（列表用）
@@ -99,6 +108,24 @@ class SessionSummary {
           : null,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'title': title,
+    'phase': phase,
+    'status': status,
+    'agent': agent,
+    if (cwd != null) 'cwd': cwd,
+    if (projectRoot != null) 'project_root': projectRoot,
+    if (projectTitle != null) 'project_title': projectTitle,
+    'project_order': projectOrder,
+    'session_order': sessionOrder,
+    'leaf_order': leafOrder,
+    'updated_at': updatedAt,
+    if (detail != null) 'detail': detail,
+    'unread': unread,
+    if (attention != null) 'attention': attention!.toJson(),
+  };
 }
 
 class WorkspaceProject {
@@ -219,6 +246,18 @@ class ConnectionMetrics {
   });
 }
 
+class MessageSendResult {
+  final String requestId;
+  final bool ok;
+  final String? error;
+
+  const MessageSendResult({
+    required this.requestId,
+    required this.ok,
+    this.error,
+  });
+}
+
 /// 启动 iroh 隧道并返回手机本地入口端口。
 ///
 /// 做成可注入的函数而不是直接调 FFI，是为了让 `GatewayService` 的测试
@@ -234,6 +273,8 @@ class GatewayService {
     this.connectTimeout = const Duration(seconds: 10),
     this.reconnectDelay = const Duration(seconds: 2),
     this.metricsInterval = const Duration(seconds: 3),
+    this.messageAckTimeout = const Duration(seconds: 20),
+    this.cacheStore,
     IrohTunnelOpener? irohTunnelOpener,
     IrohTunnelStopper? irohTunnelStopper,
     IrohPathProbe? irohPathProbe,
@@ -245,6 +286,8 @@ class GatewayService {
   final Duration connectTimeout;
   final Duration reconnectDelay;
   final Duration metricsInterval;
+  final Duration messageAckTimeout;
+  final SessionCacheStore? cacheStore;
 
   /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
   /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
@@ -285,6 +328,13 @@ class GatewayService {
   static const int _initialTailLimit = 100;
   final LinkedHashMap<String, AcpSnapshot> _snapshotCache = LinkedHashMap();
   final Set<String> _historyLoads = {};
+  final Set<String> _cachedSnapshotIds = {};
+  final Map<String, Timer> _snapshotCacheTimers = {};
+  String? _cacheNamespace;
+  int _cacheLoadGeneration = 0;
+  List<SessionSummary> _lastSessions = const [];
+  DateTime? _cachedAt;
+  bool _sessionsAreCached = false;
 
   final _stateController = StreamController<WsState>.broadcast();
   final _sessionsController =
@@ -299,6 +349,10 @@ class GatewayService {
   final _attentionResolvedController = StreamController<String>.broadcast();
   final _errorController = StreamController<String>.broadcast();
   final _metricsController = StreamController<ConnectionMetrics>.broadcast();
+  final _messageSendController =
+      StreamController<MessageSendResult>.broadcast();
+  final LinkedHashSet<String> _pendingMessageRequests = LinkedHashSet();
+  final Map<String, Timer> _messageAckTimers = {};
 
   String? _subscribedSessionId;
 
@@ -332,6 +386,9 @@ class GatewayService {
 
   Stream<ConnectionMetrics> get metricsStream => _metricsController.stream;
 
+  Stream<MessageSendResult> get messageSendStream =>
+      _messageSendController.stream;
+
   /// 当前状态
   WsState get state => _state;
 
@@ -339,6 +396,15 @@ class GatewayService {
 
   /// Whether the desktop gateway allows prompts and approval responses.
   bool get writeEnabled => _writeEnabled;
+
+  List<SessionSummary> get lastSessions => _lastSessions;
+
+  DateTime? get cachedAt => _cachedAt;
+
+  bool get sessionsAreCached => _sessionsAreCached;
+
+  bool snapshotIsCached(String sessionId) =>
+      _cachedSnapshotIds.contains(sessionId);
 
   /// 当前订阅的会话 ID
   String? get subscribedSessionId => _subscribedSessionId;
@@ -353,12 +419,13 @@ class GatewayService {
   /// 连接到 gateway
   Future<void> connect(String endpoint, String token) async {
     final target = endpoint.trim();
+    final sameTarget = matchesTarget(target, token);
     final restartIroh =
         _state == WsState.reconnecting &&
         Uri.tryParse(target)?.scheme == PairingConfig.irohScheme;
     // 同一目标已连/在连 → 幂等返回；换了目标 → 拆掉旧连接改连新的，否则扫码切换
     // 桌面会被静默忽略（UI 显示新地址、实际连着旧的）。
-    if (matchesTarget(target, token)) {
+    if (sameTarget) {
       if (_state == WsState.connected || _state == WsState.connecting) return;
     } else {
       _teardownSocket();
@@ -366,6 +433,8 @@ class GatewayService {
       _reconnectAttempts = 0;
       _outageErrorReported = false;
       _clearSnapshotCache();
+      _lastSessions = const [];
+      _sessionsController.add(_lastSessions);
     }
 
     _endpoint = target;
@@ -373,6 +442,10 @@ class GatewayService {
     _manuallyDisconnected = false;
     _reconnectTimer?.cancel();
     _setState(WsState.connecting);
+    if (!sameTarget) {
+      await _restoreTargetCache(target, token);
+      if (!matchesTarget(target, token) || _manuallyDisconnected) return;
+    }
     // 不可达但可路由的地址（打错 IP）不会立刻报错，`ready` 会一直挂着；握手成功
     // 但服务端不发 `connected` 同样会卡住。用一个看门狗兜住整段握手。
     _connectWatchdog?.cancel();
@@ -412,6 +485,33 @@ class GatewayService {
       if (generation != _connectionGeneration) return;
       _reportConnectionFailure('连接失败: $e');
       _failConnection();
+    }
+  }
+
+  Future<void> _restoreTargetCache(String endpoint, String token) async {
+    final store = cacheStore;
+    if (store == null) return;
+    final generation = ++_cacheLoadGeneration;
+    final namespace = store.namespaceFor(endpoint, token);
+    try {
+      final cached = await store.load(namespace);
+      if (generation != _cacheLoadGeneration ||
+          !matchesTarget(endpoint, token)) {
+        return;
+      }
+      _cacheNamespace = namespace;
+      _lastSessions = cached.sessions;
+      _cachedAt = cached.updatedAt;
+      _sessionsAreCached = cached.sessions.isNotEmpty;
+      for (final entry in cached.snapshots.entries) {
+        _snapshotCache[entry.key] = entry.value;
+        _cachedSnapshotIds.add(entry.key);
+      }
+      _trimSnapshotCache();
+      _sessionsController.add(_lastSessions);
+    } catch (_) {
+      // Cache is an optimization. Connection setup must remain independent.
+      if (generation == _cacheLoadGeneration) _cacheNamespace = namespace;
     }
   }
 
@@ -476,8 +576,17 @@ class GatewayService {
   bool matchesTarget(String endpoint, String token) =>
       _endpoint == endpoint.trim() && _token == token;
 
+  Future<void> retryCurrentConnection() async {
+    final endpoint = _endpoint;
+    final token = _token;
+    if (endpoint == null || token == null || _state != WsState.disconnected) {
+      return;
+    }
+    await connect(endpoint, token);
+  }
+
   /// 关闭底层通道并作废旧连接的回调，不改变对外状态。
-  void _teardownSocket() {
+  void _teardownSocket({bool preserveSubscription = false}) {
     _connectionGeneration++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -488,8 +597,25 @@ class GatewayService {
     _updateMetrics(const ConnectionMetrics());
     _pendingPingSentAt = null;
     _hasPongLatency = false;
-    _subscribedSessionId = null;
+    if (!preserveSubscription) _subscribedSessionId = null;
     _writeEnabled = false;
+    if (_pendingMessageRequests.isNotEmpty) {
+      final pending = _pendingMessageRequests.toList();
+      _pendingMessageRequests.clear();
+      for (final requestId in pending) {
+        _messageSendController.add(
+          MessageSendResult(
+            requestId: requestId,
+            ok: false,
+            error: 'Connection closed before delivery was confirmed',
+          ),
+        );
+      }
+    }
+    for (final timer in _messageAckTimers.values) {
+      timer.cancel();
+    }
+    _messageAckTimers.clear();
     _channelSubscription?.cancel();
     _channelSubscription = null;
     _channel?.sink.close();
@@ -587,19 +713,53 @@ class GatewayService {
   }
 
   /// 发送消息
-  void sendMessage(
+  String sendMessage(
     String sessionId,
     String content, {
     List<AcpImageData> images = const [],
+    String? requestId,
   }) {
+    requestId ??= createMessageRequestId();
+    if (_channel == null || _state != WsState.connected) {
+      _messageSendController.add(
+        MessageSendResult(
+          requestId: requestId,
+          ok: false,
+          error: 'Desktop is not connected',
+        ),
+      );
+      return requestId;
+    }
+    _pendingMessageRequests.add(requestId);
+    _messageAckTimers[requestId]?.cancel();
+    _messageAckTimers[requestId] = Timer(messageAckTimeout, () {
+      _messageAckTimers.remove(requestId);
+      if (_pendingMessageRequests.remove(requestId)) {
+        _messageSendController.add(
+          MessageSendResult(
+            requestId: requestId!,
+            ok: false,
+            error: 'Desktop did not confirm delivery in time',
+          ),
+        );
+      }
+    });
     _send({
       'method': 'sendMessage',
       'params': {
         'sessionId': sessionId,
+        'requestId': requestId,
         'content': content,
         'images': images.map((image) => image.toJson()).toList(),
       },
     });
+    return requestId;
+  }
+
+  String createMessageRequestId() {
+    final random = Random.secure();
+    final entropy = List<int>.generate(16, (_) => random.nextInt(256));
+    return base64UrlEncode(entropy).replaceAll('=', '');
   }
 
   void cancelTurn(String sessionId) {
@@ -823,7 +983,14 @@ class GatewayService {
                   )
                   .toList() ??
               [];
+          _lastSessions = sessions;
+          _cachedAt = DateTime.now();
+          _sessionsAreCached = false;
           _sessionsController.add(sessions);
+          final namespace = _cacheNamespace;
+          if (namespace != null) {
+            _ignoreCacheFailure(cacheStore?.saveSessions(namespace, sessions));
+          }
 
         case 'workspace':
           final projects =
@@ -863,8 +1030,27 @@ class GatewayService {
           final sessionId = json['sessionId'] as String?;
           if (sessionId != null && sessionId.isNotEmpty) {
             _snapshotCache.remove(sessionId);
+            _cachedSnapshotIds.remove(sessionId);
+            _snapshotCacheTimers.remove(sessionId)?.cancel();
+            final namespace = _cacheNamespace;
+            if (namespace != null) {
+              _ignoreCacheFailure(
+                cacheStore?.deleteSnapshot(namespace, sessionId),
+              );
+            }
             _sessionDeletedController.add(sessionId);
             listSessions();
+          }
+
+        case 'messageSent':
+          final requestId = _takeMessageRequest(
+            json['requestId'] as String?,
+            allowSingleFallback: true,
+          );
+          if (requestId != null) {
+            _messageSendController.add(
+              MessageSendResult(requestId: requestId, ok: true),
+            );
           }
 
         case 'subscribed':
@@ -897,6 +1083,13 @@ class GatewayService {
 
         case 'error':
           final error = json['error'] as String? ?? 'Gateway 请求失败';
+          final requestId = _takeMessageRequest(json['requestId'] as String?);
+          if (requestId != null) {
+            _messageSendController.add(
+              MessageSendResult(requestId: requestId, ok: false, error: error),
+            );
+            break;
+          }
           if (error == 'invalid request' && _pendingPingSentAt != null) {
             // Older desktop builds do not know the diagnostic ping method.
             // Keep the iroh QUIC RTT and do not surface a protocol-version
@@ -924,20 +1117,60 @@ class GatewayService {
     }
   }
 
+  String? _takeMessageRequest(
+    String? requestId, {
+    bool allowSingleFallback = false,
+  }) {
+    if (requestId != null && requestId.isNotEmpty) {
+      if (!_pendingMessageRequests.remove(requestId)) return null;
+      _messageAckTimers.remove(requestId)?.cancel();
+      return requestId;
+    }
+    if (allowSingleFallback && _pendingMessageRequests.length == 1) {
+      final only = _pendingMessageRequests.first;
+      _pendingMessageRequests.remove(only);
+      _messageAckTimers.remove(only)?.cancel();
+      return only;
+    }
+    return null;
+  }
+
   void _publishSnapshot(AcpSnapshot incoming, {String? sessionId}) {
     sessionId ??= _subscribedSessionId;
     if (sessionId == null) return;
     final previous = _snapshotCache.remove(sessionId);
     final merged = previous?.merge(incoming) ?? incoming;
     _snapshotCache[sessionId] = merged;
+    _cachedSnapshotIds.remove(sessionId);
     if (incoming.entriesOffset <
         (previous?.entriesOffset ?? incoming.entriesOffset + 1)) {
       _historyLoads.remove(sessionId);
     }
     _trimSnapshotCache();
+    _scheduleSnapshotPersistence(sessionId, merged);
     if (_subscribedSessionId == sessionId) {
       _snapshotController.add(merged);
     }
+  }
+
+  void _scheduleSnapshotPersistence(String sessionId, AcpSnapshot snapshot) {
+    final namespace = _cacheNamespace;
+    if (namespace == null || cacheStore == null) return;
+    _snapshotCacheTimers.remove(sessionId)?.cancel();
+    _snapshotCacheTimers[sessionId] = Timer(
+      const Duration(milliseconds: 500),
+      () {
+        _snapshotCacheTimers.remove(sessionId);
+        _ignoreCacheFailure(
+          cacheStore!.saveSnapshot(namespace, sessionId, snapshot),
+        );
+      },
+    );
+  }
+
+  void _ignoreCacheFailure(Future<void>? operation) {
+    if (operation == null) return;
+    unawaited(operation.catchError((_) {}));
   }
 
   void _trimSnapshotCache() {
@@ -955,7 +1188,12 @@ class GatewayService {
   }
 
   void _clearSnapshotCache() {
+    for (final timer in _snapshotCacheTimers.values) {
+      timer.cancel();
+    }
+    _snapshotCacheTimers.clear();
     _snapshotCache.clear();
+    _cachedSnapshotIds.clear();
     _historyLoads.clear();
   }
 
@@ -970,7 +1208,7 @@ class GatewayService {
 
   void _scheduleReconnect() {
     if (!_manuallyDisconnected && _endpoint != null && _token != null) {
-      _teardownSocket();
+      _teardownSocket(preserveSubscription: true);
       _setState(WsState.reconnecting);
       final delay = _nextReconnectDelay();
       _reconnectAttempts++;
@@ -1014,6 +1252,7 @@ class GatewayService {
     _attentionResolvedController.close();
     _errorController.close();
     _metricsController.close();
+    _messageSendController.close();
   }
 }
 
@@ -1068,4 +1307,4 @@ int _estimateOutputBytes(ToolOutputPart part) => switch (part) {
 };
 
 /// 全局单例
-final gatewayService = GatewayService();
+final gatewayService = GatewayService(cacheStore: FileSessionCacheStore());

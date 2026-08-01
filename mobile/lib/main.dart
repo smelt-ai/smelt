@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'models/pairing_config.dart';
+import 'models/saved_desktop.dart';
 import 'pages/qr_scanner_page.dart';
 import 'services/gateway_service.dart';
+import 'services/message_draft_store.dart';
 import 'models/acp_snapshot.dart';
 import 'services/pairing_storage.dart';
 import 'rust_lib.dart';
@@ -34,6 +36,124 @@ String sessionListTitle(SessionSummary session) {
 String? sessionListSubtitle(SessionSummary session) {
   final detail = session.detail?.trim();
   return detail == null || detail.isEmpty ? null : detail;
+}
+
+enum SessionListFilter { attention, running, all }
+
+bool sessionNeedsAction(SessionSummary session) {
+  if (session.attention?.requiresAction == true) return true;
+  return switch (session.status.toLowerCase()) {
+    'waiting_approval' || 'needs_attention' => true,
+    _ => false,
+  };
+}
+
+bool sessionIsRunning(SessionSummary session) {
+  if (session.status.toLowerCase() == 'running') return true;
+  return switch (session.phase.toLowerCase()) {
+    'starting' || 'running' => true,
+    _ => false,
+  };
+}
+
+List<SessionSummary> filterSessions(
+  Iterable<SessionSummary> sessions,
+  SessionListFilter filter,
+) => switch (filter) {
+  SessionListFilter.attention => sessions.where(sessionNeedsAction).toList(),
+  SessionListFilter.running => sessions.where(sessionIsRunning).toList(),
+  SessionListFilter.all => sessions.toList(),
+};
+
+Future<String?> showDesktopRenameDialog(
+  BuildContext context,
+  String initialName,
+) {
+  var editedName = initialName;
+  return showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Rename desktop'),
+      content: TextFormField(
+        initialValue: initialName,
+        autofocus: true,
+        textInputAction: TextInputAction.done,
+        onChanged: (value) => editedName = value,
+        onFieldSubmitted: (value) => Navigator.pop(dialogContext, value),
+        decoration: const InputDecoration(
+          labelText: 'Name',
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, editedName),
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+}
+
+class SessionFilterBar extends StatelessWidget {
+  const SessionFilterBar({
+    super.key,
+    required this.selected,
+    required this.attentionCount,
+    required this.runningCount,
+    required this.allCount,
+    required this.onChanged,
+  });
+
+  final SessionListFilter selected;
+  final int attentionCount;
+  final int runningCount;
+  final int allCount;
+  final ValueChanged<SessionListFilter> onChanged;
+
+  String _count(int value) => value > 99 ? '99+' : '$value';
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final showIcons = constraints.maxWidth >= 360;
+        return SizedBox(
+          width: double.infinity,
+          child: SegmentedButton<SessionListFilter>(
+            showSelectedIcon: false,
+            segments: [
+              ButtonSegment(
+                value: SessionListFilter.attention,
+                icon: showIcons
+                    ? const Icon(Icons.priority_high, size: 17)
+                    : null,
+                label: Text('Action ${_count(attentionCount)}'),
+              ),
+              ButtonSegment(
+                value: SessionListFilter.running,
+                icon: showIcons ? const Icon(Icons.autorenew, size: 17) : null,
+                label: Text('Running ${_count(runningCount)}'),
+              ),
+              ButtonSegment(
+                value: SessionListFilter.all,
+                icon: showIcons
+                    ? const Icon(Icons.forum_outlined, size: 17)
+                    : null,
+                label: Text('All ${_count(allCount)}'),
+              ),
+            ],
+            selected: {selected},
+            onSelectionChanged: (selection) => onChanged(selection.single),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class TurnElapsedLabel extends StatefulWidget {
@@ -126,6 +246,61 @@ class ConnectionStatusBar extends StatelessWidget {
   }
 }
 
+class CachedConnectionBar extends StatelessWidget {
+  const CachedConnectionBar({super.key, required this.state, this.cachedAt});
+
+  final WsState state;
+  final DateTime? cachedAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final label = switch (state) {
+      WsState.reconnecting => 'Reconnecting',
+      WsState.connecting => 'Connecting',
+      WsState.connected => 'Refreshing',
+      WsState.disconnected => 'Offline',
+    };
+    final age = cachedAt == null ? null : _formatCacheAge(cachedAt!);
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(minHeight: 36),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: colors.tertiaryContainer,
+      child: Row(
+        children: [
+          SizedBox.square(
+            dimension: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: colors.onTertiaryContainer,
+            ),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              age == null
+                  ? '$label · Showing saved data'
+                  : '$label · Saved $age',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: colors.onTertiaryContainer, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatCacheAge(DateTime cachedAt) {
+  final age = DateTime.now().difference(cachedAt);
+  if (age.inSeconds < 60) return 'just now';
+  if (age.inMinutes < 60) return '${age.inMinutes}m ago';
+  if (age.inHours < 24) return '${age.inHours}h ago';
+  return '${age.inDays}d ago';
+}
+
 bool _isInterruptMarker(String text) {
   final value = text.trim();
   return value.startsWith('[Request interrupted by user') &&
@@ -170,9 +345,10 @@ Future<void> main() async {
 }
 
 class SmeltApp extends StatelessWidget {
-  const SmeltApp({super.key, this.pairingStorage});
+  const SmeltApp({super.key, this.pairingStorage, this.messageDraftStore});
 
   final PairingStorage? pairingStorage;
+  final MessageDraftStore? messageDraftStore;
 
   @override
   Widget build(BuildContext context) {
@@ -185,15 +361,19 @@ class SmeltApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: HomePage(pairingStorage: pairingStorage),
+      home: HomePage(
+        pairingStorage: pairingStorage,
+        messageDraftStore: messageDraftStore,
+      ),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.pairingStorage});
+  const HomePage({super.key, this.pairingStorage, this.messageDraftStore});
 
   final PairingStorage? pairingStorage;
+  final MessageDraftStore? messageDraftStore;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -214,11 +394,13 @@ class _HomePageState extends State<HomePage> {
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
   late final PairingStorage _pairingStorage;
+  late final MessageDraftStore _messageDraftStore;
   String? _shownAttentionSessionId;
   PairingConfig? _pendingPairing;
   bool _restoringPairing = true;
-  bool _hasSavedPairing = false;
+  SavedDesktopCollection _savedDesktops = const SavedDesktopCollection();
   bool _showPairingCode = false;
+  SessionListFilter _sessionFilter = SessionListFilter.all;
   bool _acceptConnectionNotifications = true;
   String? _pendingOpenSessionId;
 
@@ -228,6 +410,7 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _pairingStorage = widget.pairingStorage ?? SecurePairingStorage();
+    _messageDraftStore = widget.messageDraftStore ?? FileMessageDraftStore();
     _stateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
@@ -261,6 +444,7 @@ class _HomePageState extends State<HomePage> {
     });
     _attentionSubscription = gatewayService.attentionStream.listen((item) {
       if (!mounted || !_acceptConnectionNotifications) return;
+      gatewayService.listSessions();
       final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
       if (isCurrent && !item.requiresAction) return;
       final session = _sessions
@@ -290,6 +474,7 @@ class _HomePageState extends State<HomePage> {
     });
     _attentionResolvedSubscription = gatewayService.attentionResolvedStream
         .listen((sessionId) {
+          gatewayService.listSessions();
           if (!mounted || _shownAttentionSessionId != sessionId) return;
           _shownAttentionSessionId = null;
           ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -305,13 +490,16 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _restorePairing() async {
     try {
-      final pairing = await _pairingStorage.load();
+      final savedDesktops = await _pairingStorage.load();
       if (!mounted) return;
       setState(() {
         _restoringPairing = false;
-        _hasSavedPairing = pairing != null;
+        _savedDesktops = savedDesktops;
       });
-      if (pairing != null) _connect(pairing, saveWhenConnected: false);
+      final active = savedDesktops.activeDesktop;
+      if (active != null) {
+        _connect(active.pairing, saveWhenConnected: false);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _restoringPairing = false);
@@ -329,8 +517,8 @@ class _HomePageState extends State<HomePage> {
     if (!gatewayService.matchesTarget(pairing.endpoint, pairing.token)) return;
     _pendingPairing = null;
     try {
-      await _pairingStorage.save(pairing);
-      if (mounted) setState(() => _hasSavedPairing = true);
+      final savedDesktops = await _pairingStorage.save(pairing);
+      if (mounted) setState(() => _savedDesktops = savedDesktops);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -345,6 +533,16 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('Smelt'),
         actions: [
+          if (_savedDesktops.desktops.isNotEmpty)
+            IconButton(
+              icon: Badge.count(
+                count: _savedDesktops.desktops.length,
+                isLabelVisible: _savedDesktops.desktops.length > 1,
+                child: const Icon(Icons.desktop_mac_outlined),
+              ),
+              onPressed: _showDesktopSwitcher,
+              tooltip: 'Desktops',
+            ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
             onPressed: _scanQrCode,
@@ -367,6 +565,12 @@ class _HomePageState extends State<HomePage> {
               },
               child: const Icon(Icons.refresh),
             )
+          : _connectionState == WsState.disconnected && _sessions.isNotEmpty
+          ? FloatingActionButton(
+              tooltip: 'Retry connection',
+              onPressed: gatewayService.retryCurrentConnection,
+              child: const Icon(Icons.sync),
+            )
           : null,
     );
   }
@@ -377,13 +581,17 @@ class _HomePageState extends State<HomePage> {
     }
     switch (_connectionState) {
       case WsState.disconnected:
-        return _buildDisconnectedView();
+        return _sessions.isEmpty
+            ? _buildDisconnectedView()
+            : _buildSessionList();
       case WsState.connecting:
-        return _buildConnectingView();
+        return _sessions.isEmpty ? _buildConnectingView() : _buildSessionList();
       case WsState.connected:
         return _buildSessionList();
       case WsState.reconnecting:
-        return _buildReconnectingView();
+        return _sessions.isEmpty
+            ? _buildReconnectingView()
+            : _buildSessionList();
     }
   }
 
@@ -396,6 +604,22 @@ class _HomePageState extends State<HomePage> {
           const Icon(Icons.link_off, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
           const Text('Not connected', textAlign: TextAlign.center),
+          if (_savedDesktops.activeDesktop case final active?) ...[
+            const SizedBox(height: 8),
+            Text(
+              active.name,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: gatewayService.retryCurrentConnection,
+              icon: const Icon(Icons.sync),
+              label: const Text('Retry saved desktop'),
+            ),
+          ],
           const SizedBox(height: 24),
 
           TextField(
@@ -441,12 +665,12 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.qr_code_scanner),
             label: const Text('Scan QR Code to Pair'),
           ),
-          if (_hasSavedPairing) ...[
+          if (_savedDesktops.desktops.isNotEmpty) ...[
             const SizedBox(height: 12),
             TextButton.icon(
-              onPressed: _forgetPairing,
-              icon: const Icon(Icons.delete_outline),
-              label: const Text('Forget saved pairing'),
+              onPressed: _showDesktopSwitcher,
+              icon: const Icon(Icons.desktop_mac_outlined),
+              label: const Text('Manage saved desktops'),
             ),
           ],
         ],
@@ -457,6 +681,42 @@ class _HomePageState extends State<HomePage> {
   Widget _buildSessionList() {
     final orderedSessions = List<SessionSummary>.of(_sessions)
       ..sort(compareSessionMenuOrder);
+    final visibleSessions = filterSessions(orderedSessions, _sessionFilter);
+    final attentionCount = orderedSessions.where(sessionNeedsAction).length;
+    final runningCount = orderedSessions.where(sessionIsRunning).length;
+
+    return Column(
+      children: [
+        if (_connectionState == WsState.connected &&
+            !gatewayService.sessionsAreCached)
+          const ConnectionStatusBar()
+        else
+          CachedConnectionBar(
+            state: _connectionState,
+            cachedAt: gatewayService.cachedAt,
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+          child: SessionFilterBar(
+            selected: _sessionFilter,
+            attentionCount: attentionCount,
+            runningCount: runningCount,
+            allCount: orderedSessions.length,
+            onChanged: (filter) {
+              setState(() => _sessionFilter = filter);
+            },
+          ),
+        ),
+        Expanded(
+          child: _sessionFilter == SessionListFilter.all
+              ? _buildProjectSessionList(orderedSessions)
+              : _buildFocusedSessionList(visibleSessions),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProjectSessionList(List<SessionSummary> orderedSessions) {
     final projects =
         <String, ({WorkspaceProject project, List<SessionSummary> sessions})>{};
     for (final project in _workspace.projects) {
@@ -478,89 +738,150 @@ class _HomePageState extends State<HomePage> {
       group.sessions.add(session);
     }
 
-    return Column(
-      children: [
-        const ConnectionStatusBar(),
-        Expanded(
-          child: projects.isEmpty
-              ? const Center(child: Text('No projects'))
-              : ListView(
-                  children: projects.entries.map((entry) {
-                    final project = entry.value.project;
-                    final sessions = entry.value.sessions;
-                    return ExpansionTile(
-                      controlAffinity: ListTileControlAffinity.leading,
-                      title: Text(project.title),
-                      subtitle: Text(
-                        '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.history),
-                            tooltip: 'Conversation history',
-                            onPressed: _workspace.agents.isEmpty
-                                ? null
-                                : () => _openHistory(project),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.add),
-                            tooltip: 'New conversation',
-                            onPressed:
-                                !gatewayService.writeEnabled ||
-                                    _workspace.agents.isEmpty
-                                ? null
-                                : () => _createSession(project),
-                          ),
-                        ],
-                      ),
-                      children: sessions.map((session) {
-                        final subtitle = sessionListSubtitle(session);
-                        return ListTile(
-                          contentPadding: const EdgeInsets.only(
-                            left: 32,
-                            right: 16,
-                          ),
-                          leading: const Icon(Icons.chat_bubble_outline),
-                          title: Text(sessionListTitle(session)),
-                          subtitle: subtitle == null ? null : Text(subtitle),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Badge(
-                                isLabelVisible: session.unread,
-                                child: _getStatusChip(session.status),
-                              ),
-                              PopupMenuButton<String>(
-                                tooltip: 'Conversation actions',
-                                onSelected: (action) {
-                                  if (action == 'delete') {
-                                    _deleteSession(session);
-                                  }
-                                },
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    enabled: gatewayService.writeEnabled,
-                                    child: const ListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      leading: Icon(Icons.delete_outline),
-                                      title: Text('Delete'),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                          onTap: () => _openSession(session),
-                        );
-                      }).toList(),
-                    );
-                  }).toList(),
+    if (projects.isEmpty) {
+      return _buildEmptySessions(
+        icon: Icons.folder_off_outlined,
+        title: 'No projects',
+      );
+    }
+    return ListView(
+      children: projects.entries.map((entry) {
+        final project = entry.value.project;
+        final sessions = entry.value.sessions;
+        return ExpansionTile(
+          controlAffinity: ListTileControlAffinity.leading,
+          title: Text(project.title),
+          subtitle: Text(
+            '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.history),
+                tooltip: 'Conversation history',
+                onPressed: _workspace.agents.isEmpty
+                    ? null
+                    : () => _openHistory(project),
+              ),
+              IconButton(
+                icon: const Icon(Icons.add),
+                tooltip: 'New conversation',
+                onPressed:
+                    !gatewayService.writeEnabled || _workspace.agents.isEmpty
+                    ? null
+                    : () => _createSession(project),
+              ),
+            ],
+          ),
+          children: sessions
+              .map(
+                (session) => _buildSessionTile(
+                  session,
+                  contentPadding: const EdgeInsets.only(left: 32, right: 16),
+                  showActions: true,
                 ),
-        ),
-      ],
+              )
+              .toList(),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildFocusedSessionList(List<SessionSummary> sessions) {
+    if (sessions.isEmpty) {
+      return _buildEmptySessions(
+        icon: _sessionFilter == SessionListFilter.attention
+            ? Icons.check_circle_outline
+            : Icons.pause_circle_outline,
+        title: _sessionFilter == SessionListFilter.attention
+            ? 'Nothing needs attention'
+            : 'No conversations are running',
+      );
+    }
+    return ListView.separated(
+      itemCount: sessions.length,
+      separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
+      itemBuilder: (context, index) {
+        final session = sessions[index];
+        final project = _projectName(session);
+        final detail = _sessionFilter == SessionListFilter.attention
+            ? session.attention?.message.trim()
+            : sessionListSubtitle(session);
+        final subtitle = detail == null || detail.isEmpty
+            ? project
+            : '$project · $detail';
+        return _buildSessionTile(
+          session,
+          subtitle: subtitle,
+          showActions: true,
+          attentionStyle: _sessionFilter == SessionListFilter.attention,
+        );
+      },
+    );
+  }
+
+  Widget _buildSessionTile(
+    SessionSummary session, {
+    EdgeInsetsGeometry? contentPadding,
+    String? subtitle,
+    bool showActions = false,
+    bool attentionStyle = false,
+  }) {
+    subtitle ??= sessionListSubtitle(session);
+    return ListTile(
+      contentPadding: contentPadding,
+      leading: Icon(
+        attentionStyle
+            ? Icons.notification_important_outlined
+            : Icons.chat_bubble_outline,
+      ),
+      title: Text(sessionListTitle(session)),
+      subtitle: subtitle == null
+          ? null
+          : Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Badge(
+            isLabelVisible: session.unread,
+            child: _getStatusChip(session.status),
+          ),
+          if (showActions)
+            PopupMenuButton<String>(
+              tooltip: 'Conversation actions',
+              onSelected: (action) {
+                if (action == 'delete') _deleteSession(session);
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'delete',
+                  enabled: gatewayService.writeEnabled,
+                  child: const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.delete_outline),
+                    title: Text('Delete'),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+      onTap: () => _openSession(session),
+    );
+  }
+
+  Widget _buildEmptySessions({required IconData icon, required String title}) {
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 42, color: colors.onSurfaceVariant),
+          const SizedBox(height: 12),
+          Text(title, style: TextStyle(color: colors.onSurfaceVariant)),
+        ],
+      ),
     );
   }
 
@@ -747,21 +1068,167 @@ class _HomePageState extends State<HomePage> {
     _shownAttentionSessionId = null;
     ScaffoldMessenger.of(context).clearSnackBars();
     gatewayService.disconnect();
+    setState(() => _sessions = const []);
   }
 
-  Future<void> _forgetPairing() async {
+  Future<void> _showDesktopSwitcher() async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final activeId = _savedDesktops.activeDesktopId;
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.72,
+            ),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const ListTile(
+                  title: Text('Desktops'),
+                  subtitle: Text('Switch or manage paired computers'),
+                ),
+                ..._savedDesktops.desktops.map(
+                  (desktop) => ListTile(
+                    leading: Icon(
+                      desktop.id == activeId
+                          ? Icons.desktop_windows
+                          : Icons.desktop_windows_outlined,
+                    ),
+                    title: Text(desktop.name),
+                    subtitle: Text(
+                      desktop.pairing.isIroh ? 'Remote via iroh' : 'Local',
+                    ),
+                    selected: desktop.id == activeId,
+                    onTap: () => Navigator.pop(sheetContext, desktop.id),
+                    trailing: PopupMenuButton<String>(
+                      tooltip: 'Desktop actions',
+                      onSelected: (action) {
+                        Navigator.pop(sheetContext);
+                        if (action == 'rename') {
+                          unawaited(_renameDesktop(desktop));
+                        } else if (action == 'remove') {
+                          unawaited(_removeDesktop(desktop));
+                        }
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'rename',
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.edit_outlined),
+                            title: Text('Rename'),
+                          ),
+                        ),
+                        PopupMenuItem(
+                          value: 'remove',
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.delete_outline),
+                            title: Text('Forget'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.qr_code_scanner),
+                  title: const Text('Pair another desktop'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_scanQrCode());
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted || selected == null) return;
+    await _switchDesktop(selected);
+  }
+
+  Future<void> _switchDesktop(String desktopId) async {
     try {
-      await _pairingStorage.clear();
+      final savedDesktops = await _pairingStorage.setActive(desktopId);
       if (!mounted) return;
+      final active = savedDesktops.activeDesktop;
       setState(() {
-        _hasSavedPairing = false;
+        _savedDesktops = savedDesktops;
         _pendingPairing = null;
         _pairingCodeController.clear();
       });
+      if (active != null) {
+        _connect(active.pairing, saveWhenConnected: false);
+      }
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not remove pairing: $error')),
+        SnackBar(content: Text('Could not switch desktop: $error')),
+      );
+    }
+  }
+
+  Future<void> _renameDesktop(SavedDesktop desktop) async {
+    final name = await showDesktopRenameDialog(context, desktop.name);
+    if (!mounted || name == null || name.trim().isEmpty) return;
+    try {
+      final savedDesktops = await _pairingStorage.rename(desktop.id, name);
+      if (mounted) setState(() => _savedDesktops = savedDesktops);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not rename desktop: $error')),
+      );
+    }
+  }
+
+  Future<void> _removeDesktop(SavedDesktop desktop) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Forget desktop?'),
+        content: Text(
+          '${desktop.name} will be removed from this phone. You can pair it again later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Forget'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+
+    try {
+      final wasActive = _savedDesktops.activeDesktopId == desktop.id;
+      final savedDesktops = await _pairingStorage.remove(desktop.id);
+      if (!mounted) return;
+      setState(() {
+        _savedDesktops = savedDesktops;
+        _pendingPairing = null;
+        _pairingCodeController.clear();
+      });
+      if (!wasActive) return;
+      final next = savedDesktops.activeDesktop;
+      if (next == null) {
+        _disconnect();
+      } else {
+        _connect(next.pairing, saveWhenConnected: false);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not forget desktop: $error')),
       );
     }
   }
@@ -770,7 +1237,12 @@ class _HomePageState extends State<HomePage> {
     gatewayService.markRead(session.id);
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (context) => SessionPage(session: session)),
+      MaterialPageRoute(
+        builder: (context) => SessionPage(
+          session: session,
+          messageDraftStore: _messageDraftStore,
+        ),
+      ),
     );
   }
 
@@ -932,8 +1404,13 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
 
 class SessionPage extends StatefulWidget {
   final SessionSummary session;
+  final MessageDraftStore messageDraftStore;
 
-  const SessionPage({super.key, required this.session});
+  const SessionPage({
+    super.key,
+    required this.session,
+    required this.messageDraftStore,
+  });
 
   @override
   State<SessionPage> createState() => _SessionPageState();
@@ -949,11 +1426,19 @@ class _SessionPageState extends State<SessionPage> {
   bool _isAtBottom = true;
   bool _loadingOlder = false;
   bool _isMessageFocused = false;
+  bool _restoringDraft = true;
+  bool _sendingMessage = false;
+  WsState _connectionState = gatewayService.state;
+  String? _sendRequestId;
+  String? _sendError;
   String? _permissionSubmittingToolId;
   final List<AcpImageData> _pendingImages = [];
   final Map<int, String> _elicitationTextValues = {};
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
+  late final StreamSubscription<MessageSendResult> _messageSendSubscription;
+  late final StreamSubscription<WsState> _connectionStateSubscription;
+  Timer? _draftSaveTimer;
 
   @override
   void initState() {
@@ -961,6 +1446,7 @@ class _SessionPageState extends State<SessionPage> {
     _snapshot = gatewayService.cachedSnapshot(widget.session.id);
     _loading = _snapshot == null;
     _syncSnapshotControls();
+    _messageController.addListener(_handleMessageChanged);
     _messageFocusNode.addListener(_handleMessageFocus);
     _scrollController.addListener(_handleScrollPosition);
     _attentionResolvedSubscription = gatewayService.attentionResolvedStream
@@ -969,7 +1455,106 @@ class _SessionPageState extends State<SessionPage> {
           // 重新挂载 watcher 获取完整权威快照，避免本地根据 phase 猜哪张卡已解决。
           gatewayService.subscribe(widget.session.id);
         });
+    _messageSendSubscription = gatewayService.messageSendStream.listen(
+      (result) => unawaited(_handleMessageSendResult(result)),
+    );
+    _connectionStateSubscription = gatewayService.stateStream.listen((state) {
+      if (!mounted) return;
+      setState(() => _connectionState = state);
+    });
     _subscribeSession();
+    unawaited(_restoreDraft());
+  }
+
+  Future<void> _restoreDraft() async {
+    var draft = await widget.messageDraftStore.load(widget.session.id);
+    final unconfirmedRequestId = draft?.requestId;
+    var recoveredUnconfirmed = false;
+    if (unconfirmedRequestId != null) {
+      final recovered = await widget.messageDraftStore.resolveRequest(
+        widget.session.id,
+        unconfirmedRequestId,
+        succeeded: false,
+      );
+      if (!recovered) {
+        draft = await widget.messageDraftStore.load(widget.session.id);
+      } else {
+        recoveredUnconfirmed = true;
+        draft = draft!.copyWith(clearRequestId: true);
+      }
+    }
+    if (!mounted) return;
+    _restoringDraft = true;
+    if (draft != null) {
+      _messageController.text = draft.content;
+      _pendingImages
+        ..clear()
+        ..addAll(draft.images);
+      if (recoveredUnconfirmed) {
+        _sendError = 'Delivery was not confirmed. Review and retry.';
+      }
+    }
+    _restoringDraft = false;
+    if (mounted) setState(() {});
+  }
+
+  void _handleMessageChanged() {
+    if (!mounted || _restoringDraft) return;
+    setState(() => _sendError = null);
+    _scheduleDraftSave();
+  }
+
+  void _scheduleDraftSave() {
+    if (_restoringDraft || _sendingMessage) return;
+    _draftSaveTimer?.cancel();
+    _draftSaveTimer = Timer(
+      const Duration(milliseconds: 300),
+      () => unawaited(_saveDraft()),
+    );
+  }
+
+  Future<void> _saveDraft({String? requestId}) {
+    return widget.messageDraftStore.save(
+      widget.session.id,
+      MessageDraft(
+        content: _messageController.text,
+        images: List<AcpImageData>.of(_pendingImages),
+        requestId: requestId,
+      ),
+    );
+  }
+
+  Future<void> _handleMessageSendResult(MessageSendResult result) async {
+    if (result.requestId != _sendRequestId) return;
+    final resolved = await widget.messageDraftStore.resolveRequest(
+      widget.session.id,
+      result.requestId,
+      succeeded: result.ok,
+    );
+    if (!mounted) {
+      await _messageSendSubscription.cancel();
+      return;
+    }
+    if (!resolved) {
+      setState(() {
+        _sendingMessage = false;
+        _sendRequestId = null;
+      });
+      return;
+    }
+    _restoringDraft = true;
+    setState(() {
+      _sendingMessage = false;
+      _sendRequestId = null;
+      if (result.ok) {
+        _messageController.clear();
+        _pendingImages.clear();
+        _sendError = null;
+      } else {
+        _sendError = result.error ?? 'Message could not be sent';
+      }
+    });
+    _restoringDraft = false;
   }
 
   void _handleMessageFocus() {
@@ -1081,7 +1666,14 @@ class _SessionPageState extends State<SessionPage> {
       ),
       body: Column(
         children: [
-          const ConnectionStatusBar(),
+          if (_connectionState == WsState.connected &&
+              !gatewayService.snapshotIsCached(widget.session.id))
+            const ConnectionStatusBar()
+          else
+            CachedConnectionBar(
+              state: _connectionState,
+              cachedAt: gatewayService.cachedAt,
+            ),
           if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
           if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
           if (_snapshot?.pendingPermissions
@@ -1658,13 +2250,14 @@ class _SessionPageState extends State<SessionPage> {
   Widget _buildInputBar() {
     final hasSnapshot = _snapshot != null;
     final acceptsPrompt = _snapshot?.phase.acceptsPrompt ?? false;
-    final canCompose = gatewayService.writeEnabled;
+    final canCompose = gatewayService.writeEnabled && !_sendingMessage;
     final hasContent =
         _messageController.text.trim().isNotEmpty || _pendingImages.isNotEmpty;
     final canSend =
         hasSnapshot &&
         acceptsPrompt &&
         gatewayService.writeEnabled &&
+        !_sendingMessage &&
         hasContent;
 
     return Container(
@@ -1678,6 +2271,17 @@ class _SessionPageState extends State<SessionPage> {
         children: [
           if (_snapshot case final snapshot?) _buildComposerMetadata(snapshot),
           if (_pendingImages.isNotEmpty) _buildPendingImages(),
+          if (_sendError case final error?)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                error,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 12,
+                ),
+              ),
+            ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -1728,7 +2332,11 @@ class _SessionPageState extends State<SessionPage> {
                   onTapOutside: (_) => _dismissKeyboard(),
                   decoration: InputDecoration(
                     hintText: !gatewayService.writeEnabled
-                        ? 'Desktop connection is read-only'
+                        ? _connectionState == WsState.connected
+                              ? 'Desktop connection is read-only'
+                              : 'Reconnect to send a message'
+                        : _sendingMessage
+                        ? 'Waiting for desktop confirmation...'
                         : !hasSnapshot
                         ? 'Loading session...'
                         : acceptsPrompt
@@ -1743,14 +2351,18 @@ class _SessionPageState extends State<SessionPage> {
                           )
                         : null,
                   ),
-                  onChanged: (_) => setState(() {}),
                 ),
               ),
               const SizedBox(width: 4),
               IconButton.filled(
                 tooltip: 'Send message',
                 onPressed: canSend ? _sendMessage : null,
-                icon: const Icon(Icons.send),
+                icon: _sendingMessage
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.send),
               ),
             ],
           ),
@@ -1847,7 +2459,10 @@ class _SessionPageState extends State<SessionPage> {
               child: IconButton.filled(
                 visualDensity: VisualDensity.compact,
                 tooltip: 'Remove image',
-                onPressed: () => setState(() => _pendingImages.removeAt(index)),
+                onPressed: () {
+                  setState(() => _pendingImages.removeAt(index));
+                  _scheduleDraftSave();
+                },
                 icon: const Icon(Icons.close, size: 14),
               ),
             ),
@@ -1892,6 +2507,7 @@ class _SessionPageState extends State<SessionPage> {
       }
       if (!mounted) return;
       setState(() => _pendingImages.addAll(images));
+      _scheduleDraftSave();
       if (skipped > 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('$skipped image(s) exceeded the 5 MB limit')),
@@ -1905,14 +2521,37 @@ class _SessionPageState extends State<SessionPage> {
     }
   }
 
-  void _sendMessage() {
+  Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty && _pendingImages.isEmpty) return;
+    if (_sendingMessage || (text.isEmpty && _pendingImages.isEmpty)) return;
 
-    _messageController.clear();
+    _draftSaveTimer?.cancel();
     final images = List<AcpImageData>.of(_pendingImages);
-    setState(_pendingImages.clear);
-    gatewayService.sendMessage(widget.session.id, text, images: images);
+    final requestId = gatewayService.createMessageRequestId();
+    setState(() {
+      _sendingMessage = true;
+      _sendRequestId = requestId;
+      _sendError = null;
+    });
+    try {
+      await _saveDraft(requestId: requestId);
+      gatewayService.sendMessage(
+        widget.session.id,
+        text,
+        images: images,
+        requestId: requestId,
+      );
+    } catch (error) {
+      if (!mounted) {
+        await _messageSendSubscription.cancel();
+        return;
+      }
+      setState(() {
+        _sendingMessage = false;
+        _sendRequestId = null;
+        _sendError = 'Could not save the draft: $error';
+      });
+    }
   }
 
   void _respondApproval(String toolCallId, String optionKey) {
@@ -1923,6 +2562,9 @@ class _SessionPageState extends State<SessionPage> {
 
   @override
   void dispose() {
+    _draftSaveTimer?.cancel();
+    if (!_sendingMessage) _messageSendSubscription.cancel();
+    _connectionStateSubscription.cancel();
     _snapshotSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {

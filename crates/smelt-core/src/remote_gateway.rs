@@ -691,6 +691,8 @@ struct LoadHistoryParams {
 struct SendMessageParams {
     #[serde(rename = "sessionId")]
     session_id: String,
+    #[serde(default, rename = "requestId")]
+    request_id: Option<String>,
     content: String,
     #[serde(default)]
     images: Vec<crate::acp_chat::AcpImage>,
@@ -959,8 +961,13 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::SendMessage { params } => {
+                        let request_id = params.request_id.clone();
                         if !write_enabled {
-                            let err = serde_json::json!({"type": "error", "error": "write not enabled"});
+                            let err = serde_json::json!({
+                                "type": "error",
+                                "error": "write not enabled",
+                                "requestId": request_id,
+                            });
                             let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(err.to_string().into())).await;
                             continue;
                         }
@@ -973,11 +980,20 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         }).await;
 
                         let resp = match result {
-                            Ok(Ok(())) => serde_json::json!({"type": "messageSent", "ok": true}),
-                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Ok(Ok(())) => serde_json::json!({
+                                "type": "messageSent",
+                                "ok": true,
+                                "requestId": request_id,
+                            }),
+                            Ok(Err(error)) => serde_json::json!({
+                                "type": "error",
+                                "error": error,
+                                "requestId": request_id,
+                            }),
                             Err(error) => serde_json::json!({
                                 "type": "error",
                                 "error": format!("failed to dispatch message: {error}"),
+                                "requestId": request_id,
                             }),
                         };
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
@@ -1367,6 +1383,7 @@ mod tests {
             "method": "sendMessage",
             "params": {
                 "sessionId": "session-1",
+                "requestId": "request-1",
                 "content": "inspect this",
                 "images": [{"mime": "image/png", "data_b64": "aW1hZ2U="}]
             }
@@ -1375,6 +1392,7 @@ mod tests {
         match request {
             AcpWsRequest::SendMessage { params } => {
                 assert_eq!(params.session_id, "session-1");
+                assert_eq!(params.request_id.as_deref(), Some("request-1"));
                 assert_eq!(params.images.len(), 1);
                 assert_eq!(params.images[0].mime, "image/png");
             }
