@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'models/pairing_config.dart';
 import 'pages/qr_scanner_page.dart';
 import 'services/gateway_service.dart';
+import 'services/message_draft_store.dart';
 import 'models/acp_snapshot.dart';
 import 'services/pairing_storage.dart';
 import 'rust_lib.dart';
@@ -170,9 +171,10 @@ Future<void> main() async {
 }
 
 class SmeltApp extends StatelessWidget {
-  const SmeltApp({super.key, this.pairingStorage});
+  const SmeltApp({super.key, this.pairingStorage, this.messageDraftStore});
 
   final PairingStorage? pairingStorage;
+  final MessageDraftStore? messageDraftStore;
 
   @override
   Widget build(BuildContext context) {
@@ -185,15 +187,19 @@ class SmeltApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: HomePage(pairingStorage: pairingStorage),
+      home: HomePage(
+        pairingStorage: pairingStorage,
+        messageDraftStore: messageDraftStore,
+      ),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.pairingStorage});
+  const HomePage({super.key, this.pairingStorage, this.messageDraftStore});
 
   final PairingStorage? pairingStorage;
+  final MessageDraftStore? messageDraftStore;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -214,6 +220,7 @@ class _HomePageState extends State<HomePage> {
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
   late final PairingStorage _pairingStorage;
+  late final MessageDraftStore _messageDraftStore;
   String? _shownAttentionSessionId;
   PairingConfig? _pendingPairing;
   bool _restoringPairing = true;
@@ -228,6 +235,7 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _pairingStorage = widget.pairingStorage ?? SecurePairingStorage();
+    _messageDraftStore = widget.messageDraftStore ?? FileMessageDraftStore();
     _stateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
@@ -770,7 +778,12 @@ class _HomePageState extends State<HomePage> {
     gatewayService.markRead(session.id);
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (context) => SessionPage(session: session)),
+      MaterialPageRoute(
+        builder: (context) => SessionPage(
+          session: session,
+          messageDraftStore: _messageDraftStore,
+        ),
+      ),
     );
   }
 
@@ -932,8 +945,13 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
 
 class SessionPage extends StatefulWidget {
   final SessionSummary session;
+  final MessageDraftStore messageDraftStore;
 
-  const SessionPage({super.key, required this.session});
+  const SessionPage({
+    super.key,
+    required this.session,
+    required this.messageDraftStore,
+  });
 
   @override
   State<SessionPage> createState() => _SessionPageState();
@@ -949,11 +967,17 @@ class _SessionPageState extends State<SessionPage> {
   bool _isAtBottom = true;
   bool _loadingOlder = false;
   bool _isMessageFocused = false;
+  bool _restoringDraft = true;
+  bool _sendingMessage = false;
+  String? _sendRequestId;
+  String? _sendError;
   String? _permissionSubmittingToolId;
   final List<AcpImageData> _pendingImages = [];
   final Map<int, String> _elicitationTextValues = {};
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
+  late final StreamSubscription<MessageSendResult> _messageSendSubscription;
+  Timer? _draftSaveTimer;
 
   @override
   void initState() {
@@ -961,6 +985,7 @@ class _SessionPageState extends State<SessionPage> {
     _snapshot = gatewayService.cachedSnapshot(widget.session.id);
     _loading = _snapshot == null;
     _syncSnapshotControls();
+    _messageController.addListener(_handleMessageChanged);
     _messageFocusNode.addListener(_handleMessageFocus);
     _scrollController.addListener(_handleScrollPosition);
     _attentionResolvedSubscription = gatewayService.attentionResolvedStream
@@ -969,7 +994,102 @@ class _SessionPageState extends State<SessionPage> {
           // 重新挂载 watcher 获取完整权威快照，避免本地根据 phase 猜哪张卡已解决。
           gatewayService.subscribe(widget.session.id);
         });
+    _messageSendSubscription = gatewayService.messageSendStream.listen(
+      (result) => unawaited(_handleMessageSendResult(result)),
+    );
     _subscribeSession();
+    unawaited(_restoreDraft());
+  }
+
+  Future<void> _restoreDraft() async {
+    var draft = await widget.messageDraftStore.load(widget.session.id);
+    final unconfirmedRequestId = draft?.requestId;
+    var recoveredUnconfirmed = false;
+    if (unconfirmedRequestId != null) {
+      final recovered = await widget.messageDraftStore.resolveRequest(
+        widget.session.id,
+        unconfirmedRequestId,
+        succeeded: false,
+      );
+      if (!recovered) {
+        draft = await widget.messageDraftStore.load(widget.session.id);
+      } else {
+        recoveredUnconfirmed = true;
+        draft = draft!.copyWith(clearRequestId: true);
+      }
+    }
+    if (!mounted) return;
+    _restoringDraft = true;
+    if (draft != null) {
+      _messageController.text = draft.content;
+      _pendingImages
+        ..clear()
+        ..addAll(draft.images);
+      if (recoveredUnconfirmed) {
+        _sendError = 'Delivery was not confirmed. Review and retry.';
+      }
+    }
+    _restoringDraft = false;
+    if (mounted) setState(() {});
+  }
+
+  void _handleMessageChanged() {
+    if (!mounted || _restoringDraft) return;
+    setState(() => _sendError = null);
+    _scheduleDraftSave();
+  }
+
+  void _scheduleDraftSave() {
+    if (_restoringDraft || _sendingMessage) return;
+    _draftSaveTimer?.cancel();
+    _draftSaveTimer = Timer(
+      const Duration(milliseconds: 300),
+      () => unawaited(_saveDraft()),
+    );
+  }
+
+  Future<void> _saveDraft({String? requestId}) {
+    return widget.messageDraftStore.save(
+      widget.session.id,
+      MessageDraft(
+        content: _messageController.text,
+        images: List<AcpImageData>.of(_pendingImages),
+        requestId: requestId,
+      ),
+    );
+  }
+
+  Future<void> _handleMessageSendResult(MessageSendResult result) async {
+    if (result.requestId != _sendRequestId) return;
+    final resolved = await widget.messageDraftStore.resolveRequest(
+      widget.session.id,
+      result.requestId,
+      succeeded: result.ok,
+    );
+    if (!mounted) {
+      await _messageSendSubscription.cancel();
+      return;
+    }
+    if (!resolved) {
+      setState(() {
+        _sendingMessage = false;
+        _sendRequestId = null;
+      });
+      return;
+    }
+    _restoringDraft = true;
+    setState(() {
+      _sendingMessage = false;
+      _sendRequestId = null;
+      if (result.ok) {
+        _messageController.clear();
+        _pendingImages.clear();
+        _sendError = null;
+      } else {
+        _sendError = result.error ?? 'Message could not be sent';
+      }
+    });
+    _restoringDraft = false;
   }
 
   void _handleMessageFocus() {
@@ -1658,13 +1778,14 @@ class _SessionPageState extends State<SessionPage> {
   Widget _buildInputBar() {
     final hasSnapshot = _snapshot != null;
     final acceptsPrompt = _snapshot?.phase.acceptsPrompt ?? false;
-    final canCompose = gatewayService.writeEnabled;
+    final canCompose = gatewayService.writeEnabled && !_sendingMessage;
     final hasContent =
         _messageController.text.trim().isNotEmpty || _pendingImages.isNotEmpty;
     final canSend =
         hasSnapshot &&
         acceptsPrompt &&
         gatewayService.writeEnabled &&
+        !_sendingMessage &&
         hasContent;
 
     return Container(
@@ -1678,6 +1799,17 @@ class _SessionPageState extends State<SessionPage> {
         children: [
           if (_snapshot case final snapshot?) _buildComposerMetadata(snapshot),
           if (_pendingImages.isNotEmpty) _buildPendingImages(),
+          if (_sendError case final error?)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                error,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 12,
+                ),
+              ),
+            ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -1729,6 +1861,8 @@ class _SessionPageState extends State<SessionPage> {
                   decoration: InputDecoration(
                     hintText: !gatewayService.writeEnabled
                         ? 'Desktop connection is read-only'
+                        : _sendingMessage
+                        ? 'Waiting for desktop confirmation...'
                         : !hasSnapshot
                         ? 'Loading session...'
                         : acceptsPrompt
@@ -1743,14 +1877,18 @@ class _SessionPageState extends State<SessionPage> {
                           )
                         : null,
                   ),
-                  onChanged: (_) => setState(() {}),
                 ),
               ),
               const SizedBox(width: 4),
               IconButton.filled(
                 tooltip: 'Send message',
                 onPressed: canSend ? _sendMessage : null,
-                icon: const Icon(Icons.send),
+                icon: _sendingMessage
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.send),
               ),
             ],
           ),
@@ -1847,7 +1985,10 @@ class _SessionPageState extends State<SessionPage> {
               child: IconButton.filled(
                 visualDensity: VisualDensity.compact,
                 tooltip: 'Remove image',
-                onPressed: () => setState(() => _pendingImages.removeAt(index)),
+                onPressed: () {
+                  setState(() => _pendingImages.removeAt(index));
+                  _scheduleDraftSave();
+                },
                 icon: const Icon(Icons.close, size: 14),
               ),
             ),
@@ -1892,6 +2033,7 @@ class _SessionPageState extends State<SessionPage> {
       }
       if (!mounted) return;
       setState(() => _pendingImages.addAll(images));
+      _scheduleDraftSave();
       if (skipped > 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('$skipped image(s) exceeded the 5 MB limit')),
@@ -1905,14 +2047,37 @@ class _SessionPageState extends State<SessionPage> {
     }
   }
 
-  void _sendMessage() {
+  Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty && _pendingImages.isEmpty) return;
+    if (_sendingMessage || (text.isEmpty && _pendingImages.isEmpty)) return;
 
-    _messageController.clear();
+    _draftSaveTimer?.cancel();
     final images = List<AcpImageData>.of(_pendingImages);
-    setState(_pendingImages.clear);
-    gatewayService.sendMessage(widget.session.id, text, images: images);
+    final requestId = gatewayService.createMessageRequestId();
+    setState(() {
+      _sendingMessage = true;
+      _sendRequestId = requestId;
+      _sendError = null;
+    });
+    try {
+      await _saveDraft(requestId: requestId);
+      gatewayService.sendMessage(
+        widget.session.id,
+        text,
+        images: images,
+        requestId: requestId,
+      );
+    } catch (error) {
+      if (!mounted) {
+        await _messageSendSubscription.cancel();
+        return;
+      }
+      setState(() {
+        _sendingMessage = false;
+        _sendRequestId = null;
+        _sendError = 'Could not save the draft: $error';
+      });
+    }
   }
 
   void _respondApproval(String toolCallId, String optionKey) {
@@ -1923,6 +2088,8 @@ class _SessionPageState extends State<SessionPage> {
 
   @override
   void dispose() {
+    _draftSaveTimer?.cancel();
+    if (!_sendingMessage) _messageSendSubscription.cancel();
     _snapshotSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {

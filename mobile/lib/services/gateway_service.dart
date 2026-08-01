@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -219,6 +220,18 @@ class ConnectionMetrics {
   });
 }
 
+class MessageSendResult {
+  final String requestId;
+  final bool ok;
+  final String? error;
+
+  const MessageSendResult({
+    required this.requestId,
+    required this.ok,
+    this.error,
+  });
+}
+
 /// 启动 iroh 隧道并返回手机本地入口端口。
 ///
 /// 做成可注入的函数而不是直接调 FFI，是为了让 `GatewayService` 的测试
@@ -234,6 +247,7 @@ class GatewayService {
     this.connectTimeout = const Duration(seconds: 10),
     this.reconnectDelay = const Duration(seconds: 2),
     this.metricsInterval = const Duration(seconds: 3),
+    this.messageAckTimeout = const Duration(seconds: 20),
     IrohTunnelOpener? irohTunnelOpener,
     IrohTunnelStopper? irohTunnelStopper,
     IrohPathProbe? irohPathProbe,
@@ -245,6 +259,7 @@ class GatewayService {
   final Duration connectTimeout;
   final Duration reconnectDelay;
   final Duration metricsInterval;
+  final Duration messageAckTimeout;
 
   /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
   /// 在 RustLib 初始化之后注入，这样本文件保持纯 Dart，单测不必依赖动态库。
@@ -299,6 +314,10 @@ class GatewayService {
   final _attentionResolvedController = StreamController<String>.broadcast();
   final _errorController = StreamController<String>.broadcast();
   final _metricsController = StreamController<ConnectionMetrics>.broadcast();
+  final _messageSendController =
+      StreamController<MessageSendResult>.broadcast();
+  final LinkedHashSet<String> _pendingMessageRequests = LinkedHashSet();
+  final Map<String, Timer> _messageAckTimers = {};
 
   String? _subscribedSessionId;
 
@@ -331,6 +350,9 @@ class GatewayService {
   Stream<String> get errorStream => _errorController.stream;
 
   Stream<ConnectionMetrics> get metricsStream => _metricsController.stream;
+
+  Stream<MessageSendResult> get messageSendStream =>
+      _messageSendController.stream;
 
   /// 当前状态
   WsState get state => _state;
@@ -490,6 +512,23 @@ class GatewayService {
     _hasPongLatency = false;
     _subscribedSessionId = null;
     _writeEnabled = false;
+    if (_pendingMessageRequests.isNotEmpty) {
+      final pending = _pendingMessageRequests.toList();
+      _pendingMessageRequests.clear();
+      for (final requestId in pending) {
+        _messageSendController.add(
+          MessageSendResult(
+            requestId: requestId,
+            ok: false,
+            error: 'Connection closed before delivery was confirmed',
+          ),
+        );
+      }
+    }
+    for (final timer in _messageAckTimers.values) {
+      timer.cancel();
+    }
+    _messageAckTimers.clear();
     _channelSubscription?.cancel();
     _channelSubscription = null;
     _channel?.sink.close();
@@ -587,19 +626,53 @@ class GatewayService {
   }
 
   /// 发送消息
-  void sendMessage(
+  String sendMessage(
     String sessionId,
     String content, {
     List<AcpImageData> images = const [],
+    String? requestId,
   }) {
+    requestId ??= createMessageRequestId();
+    if (_channel == null || _state != WsState.connected) {
+      _messageSendController.add(
+        MessageSendResult(
+          requestId: requestId,
+          ok: false,
+          error: 'Desktop is not connected',
+        ),
+      );
+      return requestId;
+    }
+    _pendingMessageRequests.add(requestId);
+    _messageAckTimers[requestId]?.cancel();
+    _messageAckTimers[requestId] = Timer(messageAckTimeout, () {
+      _messageAckTimers.remove(requestId);
+      if (_pendingMessageRequests.remove(requestId)) {
+        _messageSendController.add(
+          MessageSendResult(
+            requestId: requestId!,
+            ok: false,
+            error: 'Desktop did not confirm delivery in time',
+          ),
+        );
+      }
+    });
     _send({
       'method': 'sendMessage',
       'params': {
         'sessionId': sessionId,
+        'requestId': requestId,
         'content': content,
         'images': images.map((image) => image.toJson()).toList(),
       },
     });
+    return requestId;
+  }
+
+  String createMessageRequestId() {
+    final random = Random.secure();
+    final entropy = List<int>.generate(16, (_) => random.nextInt(256));
+    return base64UrlEncode(entropy).replaceAll('=', '');
   }
 
   void cancelTurn(String sessionId) {
@@ -867,6 +940,17 @@ class GatewayService {
             listSessions();
           }
 
+        case 'messageSent':
+          final requestId = _takeMessageRequest(
+            json['requestId'] as String?,
+            allowSingleFallback: true,
+          );
+          if (requestId != null) {
+            _messageSendController.add(
+              MessageSendResult(requestId: requestId, ok: true),
+            );
+          }
+
         case 'subscribed':
           // 订阅确认
           break;
@@ -897,6 +981,13 @@ class GatewayService {
 
         case 'error':
           final error = json['error'] as String? ?? 'Gateway 请求失败';
+          final requestId = _takeMessageRequest(json['requestId'] as String?);
+          if (requestId != null) {
+            _messageSendController.add(
+              MessageSendResult(requestId: requestId, ok: false, error: error),
+            );
+            break;
+          }
           if (error == 'invalid request' && _pendingPingSentAt != null) {
             // Older desktop builds do not know the diagnostic ping method.
             // Keep the iroh QUIC RTT and do not surface a protocol-version
@@ -922,6 +1013,24 @@ class GatewayService {
     } catch (e) {
       _errorController.add('解析消息失败: $e');
     }
+  }
+
+  String? _takeMessageRequest(
+    String? requestId, {
+    bool allowSingleFallback = false,
+  }) {
+    if (requestId != null && requestId.isNotEmpty) {
+      if (!_pendingMessageRequests.remove(requestId)) return null;
+      _messageAckTimers.remove(requestId)?.cancel();
+      return requestId;
+    }
+    if (allowSingleFallback && _pendingMessageRequests.length == 1) {
+      final only = _pendingMessageRequests.first;
+      _pendingMessageRequests.remove(only);
+      _messageAckTimers.remove(only)?.cancel();
+      return only;
+    }
+    return null;
   }
 
   void _publishSnapshot(AcpSnapshot incoming, {String? sessionId}) {
@@ -1014,6 +1123,7 @@ class GatewayService {
     _attentionResolvedController.close();
     _errorController.close();
     _metricsController.close();
+    _messageSendController.close();
   }
 }
 

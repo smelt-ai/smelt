@@ -6,6 +6,53 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
 
 void main() {
+  test('a message attempted while disconnected fails immediately', () async {
+    final service = GatewayService();
+    final result = service.messageSendStream.first;
+
+    final requestId = service.sendMessage('session-1', 'hello');
+
+    final failure = await result;
+    expect(failure.requestId, requestId);
+    expect(failure.ok, isFalse);
+    expect(failure.error, contains('not connected'));
+  });
+
+  test('correlates a sent message with the desktop acknowledgement', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final received = Completer<Map<String, dynamic>>();
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] != 'sendMessage') return;
+        received.complete(message);
+        final params = message['params'] as Map<String, dynamic>;
+        socket.add(
+          jsonEncode({
+            'type': 'messageSent',
+            'ok': true,
+            'requestId': params['requestId'],
+          }),
+        );
+      });
+    });
+    final service = GatewayService();
+    final result = service.messageSendStream.first;
+
+    await service.connect('http://127.0.0.1:${server.port}', 'token');
+    await _waitFor(() => service.state == WsState.connected);
+    final requestId = service.sendMessage('session-1', 'hello');
+
+    final request = await received.future;
+    expect(request['params'], containsPair('requestId', requestId));
+    expect((await result).requestId, requestId);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
   test(
     'an unreachable gateway gives up instead of hanging on connecting',
     () async {
