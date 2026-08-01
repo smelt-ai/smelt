@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'models/pairing_config.dart';
+import 'models/saved_desktop.dart';
 import 'pages/qr_scanner_page.dart';
 import 'services/gateway_service.dart';
 import 'services/message_draft_store.dart';
@@ -63,6 +64,40 @@ List<SessionSummary> filterSessions(
   SessionListFilter.running => sessions.where(sessionIsRunning).toList(),
   SessionListFilter.all => sessions.toList(),
 };
+
+Future<String?> showDesktopRenameDialog(
+  BuildContext context,
+  String initialName,
+) {
+  var editedName = initialName;
+  return showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Rename desktop'),
+      content: TextFormField(
+        initialValue: initialName,
+        autofocus: true,
+        textInputAction: TextInputAction.done,
+        onChanged: (value) => editedName = value,
+        onFieldSubmitted: (value) => Navigator.pop(dialogContext, value),
+        decoration: const InputDecoration(
+          labelText: 'Name',
+          border: OutlineInputBorder(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, editedName),
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+}
 
 class SessionFilterBar extends StatelessWidget {
   const SessionFilterBar({
@@ -363,7 +398,7 @@ class _HomePageState extends State<HomePage> {
   String? _shownAttentionSessionId;
   PairingConfig? _pendingPairing;
   bool _restoringPairing = true;
-  bool _hasSavedPairing = false;
+  SavedDesktopCollection _savedDesktops = const SavedDesktopCollection();
   bool _showPairingCode = false;
   SessionListFilter _sessionFilter = SessionListFilter.all;
   bool _acceptConnectionNotifications = true;
@@ -455,13 +490,16 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _restorePairing() async {
     try {
-      final pairing = await _pairingStorage.load();
+      final savedDesktops = await _pairingStorage.load();
       if (!mounted) return;
       setState(() {
         _restoringPairing = false;
-        _hasSavedPairing = pairing != null;
+        _savedDesktops = savedDesktops;
       });
-      if (pairing != null) _connect(pairing, saveWhenConnected: false);
+      final active = savedDesktops.activeDesktop;
+      if (active != null) {
+        _connect(active.pairing, saveWhenConnected: false);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _restoringPairing = false);
@@ -479,8 +517,8 @@ class _HomePageState extends State<HomePage> {
     if (!gatewayService.matchesTarget(pairing.endpoint, pairing.token)) return;
     _pendingPairing = null;
     try {
-      await _pairingStorage.save(pairing);
-      if (mounted) setState(() => _hasSavedPairing = true);
+      final savedDesktops = await _pairingStorage.save(pairing);
+      if (mounted) setState(() => _savedDesktops = savedDesktops);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -495,6 +533,16 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('Smelt'),
         actions: [
+          if (_savedDesktops.desktops.isNotEmpty)
+            IconButton(
+              icon: Badge.count(
+                count: _savedDesktops.desktops.length,
+                isLabelVisible: _savedDesktops.desktops.length > 1,
+                child: const Icon(Icons.desktop_mac_outlined),
+              ),
+              onPressed: _showDesktopSwitcher,
+              tooltip: 'Desktops',
+            ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
             onPressed: _scanQrCode,
@@ -556,6 +604,22 @@ class _HomePageState extends State<HomePage> {
           const Icon(Icons.link_off, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
           const Text('Not connected', textAlign: TextAlign.center),
+          if (_savedDesktops.activeDesktop case final active?) ...[
+            const SizedBox(height: 8),
+            Text(
+              active.name,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: gatewayService.retryCurrentConnection,
+              icon: const Icon(Icons.sync),
+              label: const Text('Retry saved desktop'),
+            ),
+          ],
           const SizedBox(height: 24),
 
           TextField(
@@ -601,12 +665,12 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.qr_code_scanner),
             label: const Text('Scan QR Code to Pair'),
           ),
-          if (_hasSavedPairing) ...[
+          if (_savedDesktops.desktops.isNotEmpty) ...[
             const SizedBox(height: 12),
             TextButton.icon(
-              onPressed: _forgetPairing,
-              icon: const Icon(Icons.delete_outline),
-              label: const Text('Forget saved pairing'),
+              onPressed: _showDesktopSwitcher,
+              icon: const Icon(Icons.desktop_mac_outlined),
+              label: const Text('Manage saved desktops'),
             ),
           ],
         ],
@@ -1007,19 +1071,164 @@ class _HomePageState extends State<HomePage> {
     setState(() => _sessions = const []);
   }
 
-  Future<void> _forgetPairing() async {
+  Future<void> _showDesktopSwitcher() async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final activeId = _savedDesktops.activeDesktopId;
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.72,
+            ),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const ListTile(
+                  title: Text('Desktops'),
+                  subtitle: Text('Switch or manage paired computers'),
+                ),
+                ..._savedDesktops.desktops.map(
+                  (desktop) => ListTile(
+                    leading: Icon(
+                      desktop.id == activeId
+                          ? Icons.desktop_windows
+                          : Icons.desktop_windows_outlined,
+                    ),
+                    title: Text(desktop.name),
+                    subtitle: Text(
+                      desktop.pairing.isIroh ? 'Remote via iroh' : 'Local',
+                    ),
+                    selected: desktop.id == activeId,
+                    onTap: () => Navigator.pop(sheetContext, desktop.id),
+                    trailing: PopupMenuButton<String>(
+                      tooltip: 'Desktop actions',
+                      onSelected: (action) {
+                        Navigator.pop(sheetContext);
+                        if (action == 'rename') {
+                          unawaited(_renameDesktop(desktop));
+                        } else if (action == 'remove') {
+                          unawaited(_removeDesktop(desktop));
+                        }
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(
+                          value: 'rename',
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.edit_outlined),
+                            title: Text('Rename'),
+                          ),
+                        ),
+                        PopupMenuItem(
+                          value: 'remove',
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(Icons.delete_outline),
+                            title: Text('Forget'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.qr_code_scanner),
+                  title: const Text('Pair another desktop'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_scanQrCode());
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted || selected == null) return;
+    await _switchDesktop(selected);
+  }
+
+  Future<void> _switchDesktop(String desktopId) async {
     try {
-      await _pairingStorage.clear();
+      final savedDesktops = await _pairingStorage.setActive(desktopId);
       if (!mounted) return;
+      final active = savedDesktops.activeDesktop;
       setState(() {
-        _hasSavedPairing = false;
+        _savedDesktops = savedDesktops;
         _pendingPairing = null;
         _pairingCodeController.clear();
       });
+      if (active != null) {
+        _connect(active.pairing, saveWhenConnected: false);
+      }
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not remove pairing: $error')),
+        SnackBar(content: Text('Could not switch desktop: $error')),
+      );
+    }
+  }
+
+  Future<void> _renameDesktop(SavedDesktop desktop) async {
+    final name = await showDesktopRenameDialog(context, desktop.name);
+    if (!mounted || name == null || name.trim().isEmpty) return;
+    try {
+      final savedDesktops = await _pairingStorage.rename(desktop.id, name);
+      if (mounted) setState(() => _savedDesktops = savedDesktops);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not rename desktop: $error')),
+      );
+    }
+  }
+
+  Future<void> _removeDesktop(SavedDesktop desktop) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Forget desktop?'),
+        content: Text(
+          '${desktop.name} will be removed from this phone. You can pair it again later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Forget'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+
+    try {
+      final wasActive = _savedDesktops.activeDesktopId == desktop.id;
+      final savedDesktops = await _pairingStorage.remove(desktop.id);
+      if (!mounted) return;
+      setState(() {
+        _savedDesktops = savedDesktops;
+        _pendingPairing = null;
+        _pairingCodeController.clear();
+      });
+      if (!wasActive) return;
+      final next = savedDesktops.activeDesktop;
+      if (next == null) {
+        _disconnect();
+      } else {
+        _connect(next.pairing, saveWhenConnected: false);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not forget desktop: $error')),
       );
     }
   }
