@@ -293,77 +293,80 @@ impl Workspace {
                         .child(phase_label),
                 )
                 .child(info_cluster)
-                .children(git_summary.map(|(branch, changes, (ahead, behind), (insertions, deletions))| {
-                    div()
-                        .id("stage-git-status")
-                        .flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py(px(2.))
-                        .rounded(px(6.))
-                        .text_xs()
-                        .font_family("monospace")
-                        .text_color(rgb(ui_theme::text_mid()))
-                        .cursor_pointer()
-                        .hover(|d| {
-                            d.bg(rgb(ui_theme::bg_hover()))
-                                .text_color(rgb(ui_theme::text_bright()))
-                        })
-                        .child(Icon::empty().path("smelt-icons/git-branch.svg").size(px(12.)))
-                        .child(branch)
-                        .when(ahead > 0, |d| {
-                            d.child(format!("↑{ahead}"))
-                        })
-                        .when(behind > 0, |d| {
-                            d.child(format!("↓{behind}"))
-                        })
-                        .when(insertions > 0, |d| {
-                            d.child(
-                                div()
-                                    .text_color(rgb(ui_theme::diff_add_fg()))
-                                    .child(format!("+{insertions}")),
+                .children(git_summary.map(
+                    |(branch, changes, (ahead, behind), (insertions, deletions))| {
+                        div()
+                            .id("stage-git-status")
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .py(px(2.))
+                            .rounded(px(6.))
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(rgb(ui_theme::text_mid()))
+                            .cursor_pointer()
+                            .hover(|d| {
+                                d.bg(rgb(ui_theme::bg_hover()))
+                                    .text_color(rgb(ui_theme::text_bright()))
+                            })
+                            .child(
+                                Icon::empty()
+                                    .path("smelt-icons/git-branch.svg")
+                                    .size(px(12.)),
                             )
-                        })
-                        .when(deletions > 0, |d| {
-                            d.child(
-                                div()
-                                    .text_color(rgb(ui_theme::diff_del_fg()))
-                                    .child(format!("-{deletions}")),
-                            )
-                        })
-                        .when(changes > 0, |d| {
-                            d.child(
-                                div()
-                                    .min_w(px(16.))
-                                    .h(px(16.))
-                                    .px(px(4.))
-                                    .rounded(px(8.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(rgb(ui_theme::accent()))
-                                    .text_color(rgb(ui_theme::on_accent()))
-                                    .text_size(px(9.))
-                                    .font_semibold()
-                                    .child(changes.to_string()),
-                            )
-                        })
-                        .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new("打开 Git 面板").build(window, cx)
-                        })
-                        .on_click(move |_ev, window, cx| {
-                            e_git.update(cx, |ws, cx| {
-                                if ws.inspector_panel_promoted() {
-                                    ws.set_stage_override(None, window, cx);
-                                }
-                                ws.inspector_tab = InspectorTab::Git;
-                                ws.set_inspector_open(true);
-                                cx.notify();
-                            });
-                        })
-                })),
+                            .child(branch)
+                            .when(ahead > 0, |d| d.child(format!("↑{ahead}")))
+                            .when(behind > 0, |d| d.child(format!("↓{behind}")))
+                            .when(insertions > 0, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(rgb(ui_theme::diff_add_fg()))
+                                        .child(format!("+{insertions}")),
+                                )
+                            })
+                            .when(deletions > 0, |d| {
+                                d.child(
+                                    div()
+                                        .text_color(rgb(ui_theme::diff_del_fg()))
+                                        .child(format!("-{deletions}")),
+                                )
+                            })
+                            .when(changes > 0, |d| {
+                                d.child(
+                                    div()
+                                        .min_w(px(16.))
+                                        .h(px(16.))
+                                        .px(px(4.))
+                                        .rounded(px(8.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(rgb(ui_theme::accent()))
+                                        .text_color(rgb(ui_theme::on_accent()))
+                                        .text_size(px(9.))
+                                        .font_semibold()
+                                        .child(changes.to_string()),
+                                )
+                            })
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("打开 Git 面板")
+                                    .build(window, cx)
+                            })
+                            .on_click(move |_ev, window, cx| {
+                                e_git.update(cx, |ws, cx| {
+                                    if ws.inspector_panel_promoted() {
+                                        ws.set_stage_override(None, window, cx);
+                                    }
+                                    ws.inspector_tab = InspectorTab::Git;
+                                    ws.set_inspector_open(true);
+                                    cx.notify();
+                                });
+                            })
+                    },
+                )),
         )
     }
 }

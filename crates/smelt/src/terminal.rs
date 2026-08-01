@@ -1085,7 +1085,7 @@ pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::
             UpgradeOutcome::Upgraded => {
                 thread::sleep(Duration::from_millis(300));
             }
-        UpgradeOutcome::Busy => unreachable!("busy outcomes are retried above"),
+            UpgradeOutcome::Busy => unreachable!("busy outcomes are retried above"),
             UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
                 eprintln!(
                     "[workspace] 装包前 handoff→managed 未成功，继续替换 .app（会话可能丢失）"
