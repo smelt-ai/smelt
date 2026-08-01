@@ -1,4 +1,4 @@
-//! inspector：面板内横向 tabs + 右侧面板（默认 344px，可整体隐藏）。
+//! inspector：面板内横向 tabs + 右侧面板（默认 320px，可整体隐藏）。
 //! FILES / GIT / SKILL 三个 tab，点击切换或收合；面板头
 //! 带「展开」把对应的旧全屏页盖到会话舞台上（stage_override），功能零删除。
 //! （TASKS 已经升格成一级导航，见 session_list.rs 的「任务」入口，不再是这里的 tab。）
@@ -7,17 +7,20 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
-use crate::{MainView, Workspace, placeholder_view, ui_theme, workspace_frame};
+use crate::{MainView, Workspace, ui_theme, workspace_frame};
 
 /// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
 /// `.group_hover()`）。
 const SKILL_CARD_GROUP: &str = "insp-skill-card";
+pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
+/// 文件树是导航区而不是主内容区；限制最大值既能修正早期“按比例保存”留下的异常
+/// 宽度，也能保证编辑器至少保有可读空间。该值只在恢复或拖树自身分隔条时变化。
+pub(crate) const MAX_FILE_TREE_WIDTH: f32 = 320.0;
 
-/// inspector 面板的四个 tab。
+/// inspector 面板的三个 tab。
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum InspectorTab {
@@ -52,6 +55,79 @@ impl InspectorTab {
 }
 
 impl Workspace {
+    /// Files 与 Git 右侧树列的固定像素分隔条。父 Inspector 改宽时，普通 flex 布局
+    /// 只会让左侧内容区伸缩；树列的 `.w(file_tree_w).flex_none()` 不会被重新分配。
+    /// 拖动条本身才修改这个会话保存的宽度。
+    pub(crate) fn file_tree_resize_handle(
+        &mut self,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .w(px(6.))
+            .h_full()
+            .flex_none()
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.file_tree_drag_start = Some((
+                        f32::from(event.position.x),
+                        this.file_tree_w
+                            .clamp(MIN_FILE_TREE_WIDTH, MAX_FILE_TREE_WIDTH),
+                    ));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// 窗口级监听保证拖动指针越过 6px 分隔条后仍持续生效；组件级 mouse move
+    /// 只在命中元素时触发，不能用于 resize。
+    pub(crate) fn file_tree_resize_listener(&self, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
+        canvas(
+            |_, _, _| {},
+            move |_bounds, _, window, _cx| {
+                let move_view = view.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                    if !phase.bubble() || event.pressed_button != Some(MouseButton::Left) {
+                        return;
+                    }
+                    move_view.update(cx, |this, cx| {
+                        let Some((start_x, start_w)) = this.file_tree_drag_start else {
+                            return;
+                        };
+                        let width = (start_w + start_x - f32::from(event.position.x))
+                            .clamp(MIN_FILE_TREE_WIDTH, MAX_FILE_TREE_WIDTH);
+                        if (this.file_tree_w - width).abs() > 0.5 {
+                            this.file_tree_w = width;
+                            cx.notify();
+                        }
+                    });
+                });
+
+                let up_view = view.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, cx| {
+                    if !phase.bubble() {
+                        return;
+                    }
+                    up_view.update(cx, |this, cx| {
+                        if this.file_tree_drag_start.take().is_some() {
+                            this.save_state(cx);
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
     /// 当前 tab 是不是已经「提升到舞台」（⤢ 展开）。
     /// 提升后本体在舞台上，右侧就别再停靠一份——否则同一个文件树 / 变更列表
     /// 左右各渲染一遍，看着像出了两个面板。
@@ -128,17 +204,12 @@ impl Workspace {
             .map(|(_, d)| d.files.len())
             .unwrap_or(0);
 
-        const TABS: [InspectorTab; 3] = [
-            InspectorTab::Files,
-            InspectorTab::Git,
-            InspectorTab::Skills,
-        ];
+        const TABS: [InspectorTab; 3] =
+            [InspectorTab::Files, InspectorTab::Git, InspectorTab::Skills];
         let cur = self.inspector_tab;
         let open = self.inspector_open;
         // 面板已展开且落在这个 tab 上才算「选中」——跟旧实现一致：收合时无高亮。
-        let selected_index = open
-            .then(|| TABS.iter().position(|t| *t == cur))
-            .flatten();
+        let selected_index = open.then(|| TABS.iter().position(|t| *t == cur)).flatten();
 
         let tab = |t: InspectorTab, badge: usize| {
             let mut b = Tab::new().label(t.label());
@@ -177,30 +248,28 @@ impl Workspace {
             // FILES/GIT/SKILL 和下划线会直接怼上图标，见 render_stage_header
             // 同款注释。
             .when(right_edge, |d| d.pr(px(100.)))
-            .child(
-                {
-                    let mut bar = TabBar::new("inspector-rail")
-                        .underline()
-                        // Underline 默认（Medium）内建行高 36px、字号 text_sm(14px)，
-                        // 比这一行固定的 34px 容器高，还跟旁边侧栏/搜索框的次级文字
-                        // 比显得偏大。XSmall 的行高是 26px（塞进 34px 绰绰有余），
-                        // 字号也降到 text_xs(12px)，跟 FILES/GIT/SKILL 该有的「次级
-                        // 导航」分量更配。
-                        .with_size(gpui_component::Size::XSmall)
-                        .flex_1()
-                        .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
-                            if let Some(tab) = TABS.get(*ix).copied() {
-                                ws.toggle_inspector_tab(tab, window, cx);
-                            }
-                        }));
-                    if let Some(ix) = selected_index {
-                        bar = bar.selected_index(ix);
-                    }
-                    bar.child(tab(InspectorTab::Files, 0))
-                        .child(tab(InspectorTab::Git, git_changes))
-                        .child(tab(InspectorTab::Skills, 0))
-                },
-            )
+            .child({
+                let mut bar = TabBar::new("inspector-rail")
+                    .underline()
+                    // Underline 默认（Medium）内建行高 36px、字号 text_sm(14px)，
+                    // 比这一行固定的 34px 容器高，还跟旁边侧栏/搜索框的次级文字
+                    // 比显得偏大。XSmall 的行高是 26px（塞进 34px 绰绰有余），
+                    // 字号也降到 text_xs(12px)，跟 FILES/GIT/SKILL 该有的「次级
+                    // 导航」分量更配。
+                    .with_size(gpui_component::Size::XSmall)
+                    .flex_1()
+                    .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
+                        if let Some(tab) = TABS.get(*ix).copied() {
+                            ws.toggle_inspector_tab(tab, window, cx);
+                        }
+                    }));
+                if let Some(ix) = selected_index {
+                    bar = bar.selected_index(ix);
+                }
+                bar.child(tab(InspectorTab::Files, 0))
+                    .child(tab(InspectorTab::Git, git_changes))
+                    .child(tab(InspectorTab::Skills, 0))
+            })
     }
 
     /// 面板统一头：36px，标题 + 自定义右侧内容。全屏入口统一放在窗口标题栏，
@@ -277,12 +346,11 @@ impl Workspace {
         // 多根工作区：inspector 的 EXPLORER 也把所有项目根一起挂出来（跟全屏 Files 页
         // 同一套 workspace_roots / collapsed_roots，行为一致）。
         let roots = self.workspace_roots(cx);
-        let has_open_file = self.open_file.is_some();
-        // 目录宽度不再按「是否已打开文件」二选一（之前无文件时占满 344，一打开文件
-        // 骤降到按比例算出的窄宽度，视觉上会有明显的一下跳变/抖动）。参考 Code 类
-        // 编辑器：目录栏宽度恒定，打开文件只是替换左侧内容区，栏宽本身纹丝不动。
-        // 随 inspector 整体宽度缩放，避免外层面板较窄时溢出。
-        let tree_w = (self.inspector_w * 0.36).clamp(120., 240.);
+        // 文件树宽度是独立的、按会话保存的用户偏好。不能跟 Inspector 总宽度按比例
+        // 重算，否则拖右侧面板时文件树会在没有拖自身分隔线的情况下改变宽度。
+        let tree_w = self
+            .file_tree_w
+            .clamp(MIN_FILE_TREE_WIDTH, MAX_FILE_TREE_WIDTH);
         let tree = if has_query {
             match &self.search_results {
                 Some(state) => {
@@ -322,37 +390,41 @@ impl Workspace {
             .children(search_box)
             .child(tree)
             .into_any_element();
-        // 左侧内容区：打开了文件显示内容面板，否则显示空态占位（跟参考应用一致：
-        // 目录树右侧栏常驻不变，「打开文件」只是替换掉这一块内容，不改变整体结构）。
-        let content = if has_open_file {
-            crate::file_tree::file_content_pane(&self.open_file, &roots, cx).into_any_element()
-        } else {
-            placeholder_view("从工作区树状目录中选取文件", cx.theme().muted_foreground)
-                .into_any_element()
-        };
+        // 路径栏横跨整个面板；只有它下方才开始左右分栏。这样路径不被左侧内容区
+        // 裁掉，树内搜索也不会与面包屑抢同一行，结构对齐常见编辑器的文件视图。
+        let content_parts = crate::file_tree::file_content_parts(&self.open_file, &roots, cx);
+        let content_header = content_parts.header;
+        let content = content_parts.body;
         let body = div()
             .flex_1()
+            .relative()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
+            .child(self.file_tree_resize_listener(cx))
             .child(
-                h_resizable("inspector-files-split")
+                div()
+                    .size_full()
+                    .flex()
                     .child(
-                        resizable_panel()
-                            .size_range(px(140.)..Pixels::MAX)
+                        div()
+                            .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .overflow_hidden()
                             .flex()
                             .child(content),
                     )
+                    .child(self.file_tree_resize_handle("inspector-files-split", cx))
                     .child(
-                        resizable_panel()
-                            .size(px(tree_w))
-                            .size_range(px(120.)..Pixels::MAX)
+                        div()
+                            .w(px(tree_w))
                             .flex_none()
                             .min_w_0()
                             .min_h_0()
+                            .overflow_hidden()
                             .flex()
+                            .bg(rgb(ui_theme::bg_panel()))
                             .child(
                                 div()
                                     .size_full()
@@ -371,6 +443,7 @@ impl Workspace {
             .min_h_0()
             .flex()
             .flex_col()
+            .children(content_header)
             .child(body)
             .into_any_element()
     }

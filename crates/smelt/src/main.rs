@@ -74,6 +74,11 @@ use git_panel::{BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoIn
 use session_history::{HistoryListState, HistoryPane, history_view};
 use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
 
+const MIN_SIDEBAR_WIDTH: f32 = 240.0;
+const MIN_INSPECTOR_WIDTH: f32 = 320.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = MIN_SIDEBAR_WIDTH;
+const DEFAULT_INSPECTOR_WIDTH: f32 = MIN_INSPECTOR_WIDTH;
+
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
 gpui::actions!(
     smelt,
@@ -275,7 +280,16 @@ struct SessionUiState {
     collapsed_roots: HashSet<String>,
     git_tab: GitTab,
     git_diff: Option<GitDiff>,
+    /// Diff 审查拖选的起点；用于计算连续选区范围。
+    diff_selection_anchor: Option<usize>,
+    /// 拖选当前指针所在的可评论行；松开后 `+` 显示在这里，而不是起点。
+    diff_selection_cursor: Option<usize>,
+    /// 指针从行号栏按下到松开的短暂状态；不能由 anchor 推断，因为松开后锚点仍要显示。
+    diff_selection_dragging: bool,
     diff_selected: HashSet<usize>,
+    /// 选区和评论器是两步操作：只在点击 `+` 后插入并聚焦评论卡。
+    diff_comment_open: bool,
+    git_collapsed_diff_files: HashSet<String>,
     active_hunk: Option<usize>,
     diff_split: bool,
     git_tree_collapsed: HashSet<String>,
@@ -290,7 +304,7 @@ impl Default for SessionUiState {
             stage_override: None,
             inspector_tab: inspector::InspectorTab::Files,
             inspector_open: true,
-            inspector_w: 344.0,
+            inspector_w: DEFAULT_INSPECTOR_WIDTH,
             bottom_drawer_open: false,
             bottom_drawer_tabs: Vec::new(),
             bottom_drawer_active: 0,
@@ -299,12 +313,17 @@ impl Default for SessionUiState {
             expanded: HashSet::new(),
             file_tree_selected: None,
             open_file: None,
-            file_tree_w: 260.0,
+            file_tree_w: inspector::MIN_FILE_TREE_WIDTH,
             pinned_roots: Vec::new(),
             collapsed_roots: HashSet::new(),
             git_tab: GitTab::Changes,
             git_diff: None,
+            diff_selection_anchor: None,
+            diff_selection_cursor: None,
+            diff_selection_dragging: false,
             diff_selected: HashSet::new(),
+            diff_comment_open: false,
+            git_collapsed_diff_files: HashSet::new(),
             active_hunk: None,
             diff_split: false,
             git_tree_collapsed: HashSet::new(),
@@ -346,7 +365,7 @@ impl Default for SessionRouteArchive {
             stage_override: None,
             inspector_tab: inspector::InspectorTab::Files,
             inspector_open: true,
-            inspector_w: 344.0,
+            inspector_w: DEFAULT_INSPECTOR_WIDTH,
             bottom_drawer_open: false,
             bottom_drawer_tabs: Vec::new(),
             bottom_drawer_active: 0,
@@ -354,7 +373,7 @@ impl Default for SessionRouteArchive {
             expanded: HashSet::new(),
             file_tree_selected: None,
             open_file_path: None,
-            file_tree_w: 260.0,
+            file_tree_w: inspector::MIN_FILE_TREE_WIDTH,
             pinned_roots: Vec::new(),
             collapsed_roots: HashSet::new(),
             git_tab: GitTab::Changes,
@@ -423,7 +442,7 @@ impl SessionUiState {
                 .filter(|view| *view != MainView::Tasks),
             inspector_tab: archive.inspector_tab,
             inspector_open: archive.inspector_open,
-            inspector_w: archive.inspector_w.max(280.0),
+            inspector_w: archive.inspector_w.max(MIN_INSPECTOR_WIDTH),
             bottom_drawer_open: archive.bottom_drawer_open,
             bottom_drawer_next_id: tabs.len() as u64,
             bottom_drawer_tabs: tabs,
@@ -432,12 +451,20 @@ impl SessionUiState {
             expanded: archive.expanded,
             file_tree_selected: archive.file_tree_selected,
             open_file: None,
-            file_tree_w: archive.file_tree_w.max(160.0),
+            file_tree_w: archive.file_tree_w.clamp(
+                inspector::MIN_FILE_TREE_WIDTH,
+                inspector::MAX_FILE_TREE_WIDTH,
+            ),
             pinned_roots: archive.pinned_roots,
             collapsed_roots: archive.collapsed_roots,
             git_tab: archive.git_tab,
             git_diff: None,
+            diff_selection_anchor: None,
+            diff_selection_cursor: None,
+            diff_selection_dragging: false,
             diff_selected: HashSet::new(),
+            diff_comment_open: false,
+            git_collapsed_diff_files: HashSet::new(),
             active_hunk: None,
             diff_split: archive.diff_split,
             git_tree_collapsed: archive.git_tree_collapsed,
@@ -448,6 +475,16 @@ impl SessionUiState {
 
 fn swap_right_route(current: &mut SessionUiState, parked: &mut SessionUiState) {
     std::mem::swap(current, parked);
+    current.inspector_w = current.inspector_w.max(MIN_INSPECTOR_WIDTH);
+    parked.inspector_w = parked.inspector_w.max(MIN_INSPECTOR_WIDTH);
+    current.file_tree_w = current.file_tree_w.clamp(
+        inspector::MIN_FILE_TREE_WIDTH,
+        inspector::MAX_FILE_TREE_WIDTH,
+    );
+    parked.file_tree_w = parked.file_tree_w.clamp(
+        inspector::MIN_FILE_TREE_WIDTH,
+        inspector::MAX_FILE_TREE_WIDTH,
+    );
 }
 
 /// Git 页内部的子页。对标 JetBrains 的 Git 工具窗口——「提交」和「日志」是同一个
@@ -842,8 +879,8 @@ fn next_session_ui_id() -> u64 {
 #[cfg(test)]
 mod session_route_tests {
     use super::{
-        DrawerTab, GitTab, MainView, SessionRouteArchive, SessionUiState, WorkspaceRoute,
-        inspector, swap_right_route,
+        DrawerTab, GitTab, MIN_INSPECTOR_WIDTH, MainView, SessionRouteArchive, SessionUiState,
+        WorkspaceRoute, inspector, swap_right_route,
     };
 
     #[test]
@@ -869,7 +906,7 @@ mod session_route_tests {
         swap_right_route(&mut active, &mut parked);
 
         assert!(matches!(active.stage_override, Some(MainView::Files)));
-        assert_eq!(active.inspector_w, 296.0);
+        assert_eq!(active.inspector_w, MIN_INSPECTOR_WIDTH);
         assert_eq!(active.bottom_drawer_h, 180.0);
         assert!(matches!(parked.stage_override, Some(MainView::Git)));
         assert_eq!(parked.inspector_w, 512.0);
@@ -1913,12 +1950,16 @@ struct Workspace {
     _palette_sub: Option<Subscription>,
     /// 各滚动区的常驻滚动句柄——供 gpui-component Scrollbar 读取位置并绘制。
     /// 必须常驻（每帧新建会丢失滚动位置）。
-    diff_scroll: UniformListScrollHandle,
+    diff_scroll: VirtualListScrollHandle,
+    /// Diff 代码正文专用的横向滚动位置。纵向虚拟列表不能复用它：行号栏和
+    /// 行内评论器是审查轨道，必须始终钉在视口左侧。
+    diff_code_scroll: ScrollHandle,
     /// 文件树列表的滚动句柄（普通滚动，非虚拟滚动——见 file_tree 函数注释）。
     file_tree_scroll: ScrollHandle,
-    /// 文件树列宽拖拽状态（对面板：文件树 + 右侧文件内容）；拖动完通过 save_state
-    /// 落盘到 file_tree_w，重启后从存档恢复。
-    file_tree_resize: Entity<ResizableState>,
+    /// Files / Git 右侧树列正在拖拽时的起点：(鼠标 x，树列宽)。树列不能使用
+    /// `ResizableState`：那个组件会在父容器变宽/变窄时保持百分比，违反“只在拖
+    /// 自己分隔条时改宽”的约定。这个瞬态状态只驱动固定像素宽度的分隔条。
+    file_tree_drag_start: Option<(f32, f32)>,
     /// 文件树顶部的过滤输入框；首次渲染文件树时懒创建（需要 window）。
     file_filter: Option<Entity<gpui_component::input::InputState>>,
     /// 过滤框的变更订阅（键入即重渲染）；随视图存活。
@@ -1956,9 +1997,6 @@ struct Workspace {
     search_results: Option<SearchState>,
     /// 搜索任务自增序号：后台遍历完成时用它丢弃过期结果（期间又改了查询）。
     search_gen: u64,
-    /// 文件树列初始宽度（px）：启动时从存档恢复，作为 resizable_panel 的初始 size。
-    /// 文件树列 resize 事件订阅（拖动完写回存档）；随视图存活。
-    _file_tree_resize_sub: Subscription,
     _workspace_resize_sub: Subscription,
     _stage_inspector_resize_sub: Subscription,
     _bottom_drawer_resize_sub: Subscription,
@@ -2161,16 +2199,27 @@ impl Workspace {
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let saved = load_ws_state();
-        let file_tree_w = saved.as_ref().and_then(|s| s.file_tree_w).unwrap_or(260.);
+        let file_tree_w = saved
+            .as_ref()
+            .and_then(|s| s.file_tree_w)
+            .unwrap_or(inspector::MIN_FILE_TREE_WIDTH)
+            .clamp(
+                inspector::MIN_FILE_TREE_WIDTH,
+                inspector::MAX_FILE_TREE_WIDTH,
+            );
         // 旧版开合动画曾把过渡中的接近零宽度误存为用户偏好；加载时按侧栏
         // 可拖拽下限修复这类状态，避免下一次展开仍以错误宽度为目标。
         let sidebar_w = saved
             .as_ref()
             .and_then(|s| s.sidebar_w)
-            .unwrap_or(280.)
-            .max(200.);
+            .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
+            .max(MIN_SIDEBAR_WIDTH);
         let sidebar_open = saved.as_ref().and_then(|s| s.sidebar_open).unwrap_or(true);
-        let inspector_w = saved.as_ref().and_then(|s| s.inspector_w).unwrap_or(344.);
+        let inspector_w = saved
+            .as_ref()
+            .and_then(|s| s.inspector_w)
+            .unwrap_or(DEFAULT_INSPECTOR_WIDTH)
+            .max(MIN_INSPECTOR_WIDTH);
         let inspector_open = saved
             .as_ref()
             .and_then(|s| s.inspector_open)
@@ -2199,17 +2248,6 @@ impl Workspace {
             }
         };
 
-        // 文件树列 resize：拖动完 emit Resized，写回存档持久化宽度。
-        let file_tree_resize = cx.new(|_| ResizableState::default());
-        let _file_tree_resize_sub = cx.subscribe(
-            &file_tree_resize,
-            |this, state, _e: &ResizablePanelEvent, cx| {
-                if let Some(size) = state.read(cx).sizes().first() {
-                    this.file_tree_w = f32::from(*size);
-                }
-                this.save_state(cx);
-            },
-        );
         // 日志页三栏 resize（不落盘：日志是临时查看，没必要持久化）。
         let git_log_resize = cx.new(|_| ResizableState::default());
         let workspace_resize = cx.new(|_| ResizableState::default());
@@ -2327,9 +2365,10 @@ impl Workspace {
             skill_link_modal: None,
             palette: None,
             _palette_sub: None,
-            diff_scroll: UniformListScrollHandle::new(),
+            diff_scroll: VirtualListScrollHandle::new(),
+            diff_code_scroll: ScrollHandle::new(),
             file_tree_scroll: ScrollHandle::new(),
-            file_tree_resize,
+            file_tree_drag_start: None,
             file_filter: None,
             _file_filter_sub: None,
             task_title_input: None,
@@ -2348,7 +2387,6 @@ impl Workspace {
             task_schedule_started: false,
             search_results: None,
             search_gen: 0,
-            _file_tree_resize_sub,
             _workspace_resize_sub,
             _stage_inspector_resize_sub,
             _bottom_drawer_resize_sub,
@@ -2867,9 +2905,7 @@ impl Workspace {
         self.bottom_drawer_resize.update(cx, |state, cx| {
             state.resize_panel(1, px(self.bottom_drawer_h), window, cx);
         });
-        self.file_tree_resize.update(cx, |state, cx| {
-            state.resize_panel(0, px(self.file_tree_w), window, cx);
-        });
+        self.file_tree_drag_start = None;
         let terminal_ids = self
             .bottom_drawer_tabs
             .iter()
@@ -3502,13 +3538,6 @@ impl Workspace {
             }
         }
 
-        let file_tree_w = self
-            .file_tree_resize
-            .read(cx)
-            .sizes()
-            .first()
-            .copied()
-            .map(f32::from);
         let state = WsState {
             sessions,
             projects: self.projects.clone(),
@@ -3523,7 +3552,7 @@ impl Workspace {
             sidebar_open: Some(self.sidebar_open),
             inspector_w: Some(self.inspector_w),
             inspector_open: Some(self.inspector_open),
-            file_tree_w,
+            file_tree_w: Some(self.file_tree_w),
             pinned_file_tree_roots: self.pinned_roots.clone(),
             collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
             collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
@@ -6195,7 +6224,7 @@ impl Render for Workspace {
         let sidebar_min_w = if sidebar_motion.animating || !self.sidebar_open {
             px(1.)
         } else {
-            px(200.)
+            px(MIN_SIDEBAR_WIDTH)
         };
         let mut workspace_columns = h_resizable("workspace-columns")
             .with_state(&self.workspace_resize)
@@ -6238,7 +6267,7 @@ impl Render for Workspace {
             let min_w = if inspector_motion.animating {
                 px(1.)
             } else {
-                px(280.)
+                px(MIN_INSPECTOR_WIDTH)
             };
 
             let inspector_card = workspace_frame::card(sidebar_surface)
@@ -6727,49 +6756,49 @@ impl Render for Workspace {
                             .children({
                                 let promoted = self.inspector_panel_promoted();
                                 (self.inspector_open || promoted).then(|| {
-                                div()
-                                    .id("inspector-fullscreen-toggle")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size_6()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_color(rgb(ui_theme::text_mid()))
-                                    .when(promoted, |s| s.bg(ui_theme::overlay(0x18)))
-                                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
-                                    .child(
-                                        Icon::new(if promoted {
-                                            IconName::Minimize
-                                        } else {
-                                            IconName::Maximize
+                                    div()
+                                        .id("inspector-fullscreen-toggle")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(rgb(ui_theme::text_mid()))
+                                        .when(promoted, |s| s.bg(ui_theme::overlay(0x18)))
+                                        .hover(|s| s.bg(ui_theme::overlay(0x18)))
+                                        .child(
+                                            Icon::new(if promoted {
+                                                IconName::Minimize
+                                            } else {
+                                                IconName::Maximize
+                                            })
+                                            .size_4(),
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(if promoted {
+                                                "收回右侧面板"
+                                            } else {
+                                                "全屏显示右侧面板"
+                                            })
+                                            .build(window, cx)
                                         })
-                                        .size_4(),
-                                    )
-                                    .tooltip(move |window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(if promoted {
-                                            "收回右侧面板"
-                                        } else {
-                                            "全屏显示右侧面板"
-                                        })
-                                        .build(window, cx)
-                                    })
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            if promoted {
-                                                this.set_stage_override(None, window, cx);
-                                                this.set_inspector_open(true);
-                                            } else if let Some(view) =
-                                                this.inspector_tab.stage_view()
-                                            {
-                                                this.set_stage_override(Some(view), window, cx);
-                                            }
-                                            this.save_state(cx);
-                                            cx.notify();
-                                        }),
-                                    )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                if promoted {
+                                                    this.set_stage_override(None, window, cx);
+                                                    this.set_inspector_open(true);
+                                                } else if let Some(view) =
+                                                    this.inspector_tab.stage_view()
+                                                {
+                                                    this.set_stage_override(Some(view), window, cx);
+                                                }
+                                                this.save_state(cx);
+                                                cx.notify();
+                                            }),
+                                        )
                                 })
                             })
                             .child({
@@ -6794,7 +6823,8 @@ impl Render for Workspace {
                                         // panel-bottom-filled——靠色块区分开合，不用
                                         // 带箭头的 -open 变体（对齐 Codex 工具栏风格）。
                                         if drawer_open {
-                                            Icon::empty().path("smelt-icons/panel-bottom-filled.svg")
+                                            Icon::empty()
+                                                .path("smelt-icons/panel-bottom-filled.svg")
                                         } else {
                                             Icon::new(IconName::PanelBottom)
                                         }
@@ -6942,7 +6972,12 @@ impl Render for Workspace {
                 cx.has_active_drag()
                     && !matches!(
                         cx.active_drag_cursor_style(),
-                        Some(CursorStyle::ResizeColumn | CursorStyle::ResizeLeftRight)
+                        Some(
+                            CursorStyle::ResizeColumn
+                                | CursorStyle::ResizeLeftRight
+                                | CursorStyle::ResizeRow
+                                | CursorStyle::ResizeUpDown
+                        )
                     ),
                 |root| {
                     root.child(
@@ -7011,9 +7046,12 @@ impl Render for Workspace {
 fn placeholder_view(text: &str, muted: Hsla) -> Div {
     div()
         .flex_1()
+        .min_w_0()
+        .overflow_hidden()
         .flex()
         .items_center()
         .justify_center()
+        .truncate()
         .text_color(muted)
         .child(text.to_string())
 }

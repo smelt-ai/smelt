@@ -9,9 +9,9 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui::{InteractiveElement, StatefulInteractiveElement};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
@@ -21,7 +21,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 use notify::{RecursiveMode, Watcher};
 
-use crate::{GitTab, Workspace, agent, placeholder_view, terminal_view};
+use crate::{GitTab, Workspace, agent, placeholder_view};
 
 // ===================== 类型 =====================
 
@@ -43,7 +43,6 @@ pub(crate) enum DiffKind {
     Add,     // 增行（+）
     Del,     // 删行（-）
     Context, // 上下文行（空格）
-    Hunk,    // @@ 段头
     Meta,    // diff/index/+++/--- 等元信息
 }
 
@@ -56,6 +55,30 @@ pub(crate) struct DiffLine {
     pub(crate) kind: DiffKind,
     text: String,
     segments: Option<Vec<(String, bool)>>,
+    file_header: bool,
+}
+
+#[derive(Clone)]
+enum AggregateDiffRow {
+    Header {
+        path: String,
+        adds: usize,
+        dels: usize,
+    },
+    Line(usize),
+}
+
+/// 可变高度虚拟列表的显示行。评论卡片是选区后的真实一行，而非覆盖在底部的
+/// 全局输入框，因此视觉和交互都牢牢锚定在被审查的代码范围上。
+#[derive(Clone)]
+enum DiffReviewRow {
+    Header {
+        path: String,
+        adds: usize,
+        dels: usize,
+    },
+    Line(usize),
+    CommentComposer,
 }
 
 /// diff 里的一个 `@@` 段——按块暂存 / 丢弃的最小单位。
@@ -354,19 +377,11 @@ const FILE_LINE_H: f32 = 20.0;
 /// hunk 头行的 hover 分组名：按钮平时隐藏，鼠标进这一行才显形。
 const HUNK_ROW_GROUP: &str = "hunk-row";
 
-/// `@@ -49,7 +49,7 @@ pub struct Foo {` → `pub struct Foo {`。
-///
-/// 那串坐标是给 `git apply` 看的，人只关心「这块改动在哪个函数/结构体里」——后半
-/// 截正是 git 附送的上下文。坐标仍留在 hunk 的 `raw` 里，拼 patch 用得着。
-/// 没有上下文（文件开头那种）就返回空串，让这行只作视觉分隔和按钮容器。
-fn hunk_context(line: &str) -> &str {
-    line.splitn(3, "@@").nth(2).unwrap_or("").trim()
-}
-
 /// 行号列宽度：按这份 diff 里最大的行号算，别写死。
 ///
-/// 统一视图有旧/新两列，写死 44px 就是白占 88px——大多数文件行号只有两三位，
-/// 代码被硬生生推到右边去。等宽字体下一个数字约 7.5px，左右各留 4px 内边距。
+/// 统一视图只展示一个可评论的行号，宽度必须随最大行号而变。diff 画布使用
+/// `text_sm` 的等宽字体，按约 8.4px/数字并额外预留左右内边距，四位数不会被
+/// 左色条遮住，也不会在小文件里徒增大片空白。
 pub(crate) fn gutter_width(lines: &[DiffLine]) -> f32 {
     let max = lines
         .iter()
@@ -376,7 +391,7 @@ pub(crate) fn gutter_width(lines: &[DiffLine]) -> f32 {
     // 至少留两位，免得开头几行的窄 gutter 和后面宽的对不齐（宽度是整份 diff 统一的，
     // 这里只是给极短文件一个下限）。
     let digits = max.to_string().len().max(2);
-    digits as f32 * 7.5 + 8.0
+    digits as f32 * 8.4 + 12.0
 }
 
 // ===================== git 子进程调用 =====================
@@ -764,12 +779,23 @@ pub fn main_repo_root_from_common_dir(common_dir: &str) -> Option<String> {
 /// 把 git diff 文本解析成结构化的行：从 @@ 段头取起始行号，逐行推进旧/新行号，
 /// 并按前缀判定类型、剥掉 +/-/空格前缀。空 diff 给一句提示。
 pub(crate) fn parse_diff(text: &str) -> ParsedDiff {
+    parse_diff_inner(text, false)
+}
+
+/// “全部改动”预览需要在每份文件的 diff 前保留一个可读标题；单文件查看仍保持
+/// 原来的干净输出，不重复显示文件名。
+fn parse_diff_with_file_headers(text: &str) -> ParsedDiff {
+    parse_diff_inner(text, true)
+}
+
+fn parse_diff_inner(text: &str, show_file_headers: bool) -> ParsedDiff {
     let mk = |old_ln, new_ln, kind, text: &str| DiffLine {
         old_ln,
         new_ln,
         kind,
         text: text.to_string(),
         segments: None,
+        file_header: false,
     };
     if text.trim().is_empty() {
         return ParsedDiff {
@@ -808,8 +834,8 @@ pub(crate) fn parse_diff(text: &str) -> ParsedDiff {
                 // raw 必须是完整原文（含坐标），patch 才合法。
                 raw: format!("{line}\n"),
             });
-            // 渲染只留上下文那截，坐标不给人看。
-            out.push(mk(None, None, DiffKind::Hunk, hunk_context(line)));
+            // `@@` 是 patch 坐标，不是源码行。保留在 hunk.raw 和 range 里用于
+            // 暂存/丢弃整块，但不加入可视代码行；否则会出现无行号的伪代码行。
         } else if line.starts_with("+++")
             || line.starts_with("---")
             || line.starts_with("diff ")
@@ -830,6 +856,16 @@ pub(crate) fn parse_diff(text: &str) -> ParsedDiff {
             // 串哈希更是纯噪音。所以只进 header，不进渲染行（IDEA 同样不显示）。
             // `new file` / `deleted file` / `rename` 留着，它们说明的是这次改动的
             // 性质，不是机械信息。
+            if show_file_headers && line.starts_with("diff --git ") {
+                let path = line
+                    .split_whitespace()
+                    .nth(3)
+                    .and_then(|path| path.strip_prefix("b/"))
+                    .unwrap_or(line);
+                let mut title = mk(None, None, DiffKind::Meta, path);
+                title.file_header = true;
+                out.push(title);
+            }
             let noise = line.starts_with("diff ")
                 || line.starts_with("index ")
                 || line.starts_with("--- ")
@@ -971,14 +1007,14 @@ pub(crate) fn diff_colors(kind: DiffKind) -> (Rgba, Option<Rgba>, Option<Rgba>, 
             rgb(t::diff_del_hl()),
         ),
         DiffKind::Context => (rgb(t::diff_ctx_fg()), None, None, rgb(0)),
-        DiffKind::Hunk => (
-            rgb(t::diff_hunk_fg()),
-            Some(rgb(t::diff_hunk_bg())),
-            None,
-            rgb(0),
-        ),
         DiffKind::Meta => (rgb(t::diff_meta_fg()), None, None, rgb(0)),
     }
+}
+
+/// 审查评论可以覆盖增删行和周边上下文代码；hunk/文件元信息没有稳定代码语义，
+/// 不纳入拖选范围。
+fn is_commentable_diff_line(line: &DiffLine) -> bool {
+    line.kind != DiffKind::Meta
 }
 
 /// 文本区（flex_1）：有 segments 就拆成多段（变化段上深底），否则整行一段。
@@ -1007,6 +1043,40 @@ pub(crate) fn diff_text_area(l: &DiffLine, fg: Rgba, hl: Rgba) -> Div {
                 l.text.clone()
             }),
     }
+}
+
+/// diff 行号栏的共用基础样式：固定宽度、不伸缩、右对齐、次级文字色。
+fn diff_gutter_base(gw: f32) -> Div {
+    div()
+        .w(px(gw))
+        .flex_none()
+        .px_1()
+        .flex()
+        .justify_end()
+        .text_color(rgb(crate::ui_theme::text_faint()))
+}
+
+/// 统一 diff 不换行，内容区必须比最长可见行宽，外层横向滚动条才有可滚动的画布。
+/// 非 ASCII 按两个等宽字符估算，足以覆盖中英文代码和注释；避免为偶发超长单行
+/// 分配无上限的布局宽度。
+fn diff_content_width(lines: &[DiffLine], gutter_w: f32) -> f32 {
+    const MONO_CHAR_WIDTH: f32 = 8.4;
+    const MAX_CANVAS_WIDTH: f32 = 12_000.0;
+    let widest = lines
+        .iter()
+        .map(|line| {
+            line.text
+                .chars()
+                .map(|ch| if ch.is_ascii() { 1usize } else { 2usize })
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or_default() as f32;
+    // 左色条、行号栏（按并排双轨留够余量，统一视图会使画布稍宽）、
+    // 文本内边距，以及 hunk 操作区预留。
+    (2.0 + gutter_w * 2.0 + 92.0 + widest * MONO_CHAR_WIDTH)
+        .max(640.0)
+        .min(MAX_CANVAS_WIDTH)
 }
 
 /// 按块操作按钮渲染要的上下文：仓库根 + 该 diff 能不能拼出合法 patch。
@@ -1086,48 +1156,110 @@ fn hunk_buttons(idx: usize, ctx: &HunkCtx, ws: &Entity<Workspace>) -> Div {
     }
 }
 
-/// 渲染一行 diff：左侧色条 + 旧/新行号槽 + 文本；整行按类型上淡背景。
+/// 渲染一行 diff：左侧色条 + 单一审查行号栏 + 文本；整行按类型上淡背景。
 /// 若有 segments（行内 diff 结果），变化片段再叠一层更深的底色。
-/// 增/删行（i 为 GitDiff.lines 下标）可点选：选中态描边，点击切给 Workspace
-/// 的 toggle_diff_line，配合底部评论框批量发给当前终端。
+/// 只有行号栏支持鼠标拖选连续范围，避免浏览或复制代码时误触发评论。
 fn render_diff_line(
     i: usize,
     l: &DiffLine,
     selected: bool,
+    show_comment_anchor: bool,
     ws: &Entity<Workspace>,
     hunks: &HunkCtx,
     gw: f32,
+    code_scroll: &ScrollHandle,
+    code_w: f32,
 ) -> Stateful<Div> {
     let (fg, bg, bar, hl) = diff_colors(l.kind);
-    let gutter = |n: Option<u32>| {
-        div()
-            .w(px(gw))
-            .px_1()
-            .flex()
-            .justify_end()
-            .text_color(rgb(crate::ui_theme::text_faint()))
-            .child(n.map(|v| v.to_string()).unwrap_or_default())
-    };
+    // 行号栏是整份 diff 共用的固定轨道。不给 flex shrink 的机会，否则
+    // 窄面板时每行会按自身文本宽度压缩，看上去行号像是错位的。
+    let gutter = || diff_gutter_base(gw);
 
+    let extend_ws = ws.clone();
+    let finish_ws = ws.clone();
     let mut row = div()
         .id(("diff-line", i))
         .flex()
         .items_center()
         .h(px(FILE_LINE_H))
-        .whitespace_nowrap();
+        .whitespace_nowrap()
+        // 只能在行号栏开始；开始后整行负责续选和收尾，这样指针移到正文或
+        // 在该行任意位置松开都不会丢失事件。
+        .on_mouse_move(move |_, _window, cx| {
+            extend_ws.update(cx, |this, cx| this.extend_diff_selection(i, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            finish_ws.update(cx, |this, cx| this.finish_diff_selection(window, cx));
+        });
     if let Some(b) = bg {
         row = row.bg(b);
     }
-    if matches!(l.kind, DiffKind::Add | DiffKind::Del) {
-        row = row.cursor_pointer();
-        if selected {
-            row = row.border_2().border_color(rgb(crate::ui_theme::blue()));
-        }
-        let ws = ws.clone();
-        row = row.on_click(move |_ev, _window, cx| {
-            ws.update(cx, |this, cx| this.toggle_diff_line(i, cx));
-        });
+    // 交互只在行号栏触发，但范围本身要铺满整行，才能像代码审查那样一眼识别
+    // “这段代码正在被评论”。选区色覆盖 diff 的红绿底，语义仍由左侧色条保留。
+    if selected {
+        row = row.bg(rgb(crate::ui_theme::bg_hover()));
     }
+    let review_gutter: AnyElement = if is_commentable_diff_line(l) {
+        let begin_ws = ws.clone();
+        gutter()
+            .id(("diff-review-gutter", i))
+            .cursor_pointer()
+            // 选区视觉只落在行号栏：连续范围是一条清楚的审查轨道，不污染代码底色。
+            .when(selected, |g| {
+                g.bg(rgb(crate::ui_theme::bg_hover()))
+                    .border_l_2()
+                    .border_color(rgb(crate::ui_theme::blue()))
+            })
+            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                begin_ws.update(cx, |this, cx| this.begin_diff_selection(i, cx));
+            })
+            .child(if show_comment_anchor {
+                // 和 Codex 一样，`+` 是选区锚点的可见反馈，不是第二套点击行为。
+                // 点击/拖拽仍由整个行号栏接收，因此鼠标可以从这里继续扩选。
+                let open_ws = ws.clone();
+                div()
+                    .id(("diff-comment-anchor", i))
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(rgb(crate::ui_theme::bg_card()))
+                    .border_1()
+                    .border_color(rgb(crate::ui_theme::border()))
+                    .text_lg()
+                    .text_color(rgb(crate::ui_theme::text()))
+                    .child("+")
+                    // `+` 只打开评论器；阻止事件冒泡，避免再次触发行号栏的
+                    // mousedown/mouseup 而重置或提前完成拖选。
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_event, window, cx| {
+                        open_ws.update(cx, |this, cx| this.open_diff_comment(window, cx));
+                    })
+                    .into_any_element()
+            } else {
+                div()
+                    .child(
+                        l.new_ln
+                            .or(l.old_ln)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    )
+                    .into_any_element()
+            })
+            .into_any_element()
+    } else {
+        gutter()
+            .child(
+                l.new_ln
+                    .or(l.old_ln)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            )
+            .into_any_element()
+    };
     let hunk_idx = hunks.idx_at(i);
     // F7 停在这块就描一道边，跳完才看得出落点。
     if hunk_idx.is_some() && hunk_idx == hunks.active {
@@ -1139,20 +1271,37 @@ fn render_diff_line(
     if hunk_idx.is_some() {
         row = row.group(HUNK_ROW_GROUP);
     }
-    let row = row
+    let mut code_canvas = div()
+        .min_w(px(code_w))
+        .h_full()
+        .flex()
+        .child(diff_text_area(l, fg, hl));
+    if let Some(idx) = hunk_idx.filter(|_| hunks.ops != HunkOps::None) {
+        code_canvas = code_canvas.child(hunk_buttons(idx, hunks, ws));
+    }
+    let mut code_viewport = div()
+        .id(("diff-code-scroll", i))
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .overflow_x_scroll()
+        .track_scroll(code_scroll)
+        .child(code_canvas);
+    // GPUI 默认会把纯纵向滚轮映射到仅横滚的子容器，导致代码横滚和
+    // 外层虚拟列表同时竞争手势。限制到 X 轴后，纵向仍交给列表，只有
+    // 触控板横向手势或底部滚动条才会移动代码画布。
+    code_viewport.style().restrict_scroll_to_axis = Some(true);
+
+    row
         // 左侧色条：增/删才有，其它用等宽透明占位保持对齐。
         .child(match bar {
-            Some(c) => div().w(px(2.)).h_full().bg(c),
-            None => div().w(px(2.)).h_full(),
+            Some(c) => div().w(px(2.)).flex_none().h_full().bg(c),
+            None => div().w(px(2.)).flex_none().h_full(),
         })
-        .child(gutter(l.old_ln))
-        .child(gutter(l.new_ln))
-        .child(diff_text_area(l, fg, hl));
-    match hunk_idx {
-        // 不可 patch 的 diff（子模块 / 未跟踪）不给按钮，但上面的高亮照给。
-        Some(idx) if hunks.ops != HunkOps::None => row.child(hunk_buttons(idx, hunks, ws)),
-        _ => row,
-    }
+        .child(review_gutter)
+        // 横向滚动只包住代码画布。色条、行号与评论器属于外层审查轨道，不能
+        // 随长行横移；所有代码行共用一个句柄以保持上下行对齐。
+        .child(code_viewport)
 }
 
 /// 只读的 diff 行渲染，给「日志」页看某次提交的改动用。
@@ -1161,15 +1310,8 @@ fn render_diff_line(
 /// 没有「选中几行发给 agent 去改」的语义。共用同一套配色和行内高亮，两处观感一致。
 pub(crate) fn render_readonly_diff_line(l: &DiffLine, gw: f32) -> Div {
     let (fg, bg, bar, hl) = diff_colors(l.kind);
-    let gutter = |n: Option<u32>| {
-        div()
-            .w(px(gw))
-            .px_1()
-            .flex()
-            .justify_end()
-            .text_color(rgb(crate::ui_theme::text_faint()))
-            .child(n.map(|v| v.to_string()).unwrap_or_default())
-    };
+    let gutter =
+        |n: Option<u32>| diff_gutter_base(gw).child(n.map(|v| v.to_string()).unwrap_or_default());
     let mut row = div()
         .flex()
         .items_center()
@@ -1179,8 +1321,8 @@ pub(crate) fn render_readonly_diff_line(l: &DiffLine, gw: f32) -> Div {
         row = row.bg(b);
     }
     row.child(match bar {
-        Some(c) => div().w(px(2.)).h_full().bg(c),
-        None => div().w(px(2.)).h_full(),
+        Some(c) => div().w(px(2.)).flex_none().h_full().bg(c),
+        None => div().w(px(2.)).flex_none().h_full(),
     })
     .child(gutter(l.old_ln))
     .child(gutter(l.new_ln))
@@ -1195,7 +1337,7 @@ fn build_split_rows(lines: &[DiffLine]) -> Vec<SplitRow> {
     let mut i = 0;
     while i < n {
         match lines[i].kind {
-            DiffKind::Hunk | DiffKind::Meta => {
+            DiffKind::Meta => {
                 rows.push(SplitRow::Full(i));
                 i += 1;
             }
@@ -1236,7 +1378,7 @@ fn build_split_rows(lines: &[DiffLine]) -> Vec<SplitRow> {
 /// 渲染并排的半行（左或右，flex_1）。idx 为 None 时是空侧占位（暗底）。
 /// left=true 用旧行号，否则用新行号。ri 是并排行在 rows 里的下标，只用来拼 id
 /// （idx 本身在 Both(None, Some(i)) 这类情况下左右可能撞号，ri+left 才唯一）。
-/// 增/删行同 render_diff_line 一样可点选，选中态描边。
+/// 可评论代码行同 render_diff_line 一样仅在行号栏支持拖选连续范围。
 fn render_half(
     ri: usize,
     idx: Option<usize>,
@@ -1262,33 +1404,46 @@ fn render_half(
     let l = &lines[i];
     let (fg, bg, bar, hl) = diff_colors(l.kind);
     let ln = if left { l.old_ln } else { l.new_ln };
-    let mut row = base;
+    let extend_ws = ws.clone();
+    let finish_ws = ws.clone();
+    let mut row = base
+        .on_mouse_move(move |_, _window, cx| {
+            extend_ws.update(cx, |this, cx| this.extend_diff_selection(i, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            finish_ws.update(cx, |this, cx| this.finish_diff_selection(window, cx));
+        });
     if let Some(b) = bg {
         row = row.bg(b);
     }
-    if matches!(l.kind, DiffKind::Add | DiffKind::Del) {
-        row = row.cursor_pointer();
-        if selected.contains(&i) {
-            row = row.border_2().border_color(rgb(crate::ui_theme::blue()));
-        }
-        let ws = ws.clone();
-        row = row.on_click(move |_ev, _window, cx| {
-            ws.update(cx, |this, cx| this.toggle_diff_line(i, cx));
-        });
+    if selected.contains(&i) {
+        row = row.bg(rgb(crate::ui_theme::bg_hover()));
     }
+    let review_gutter: AnyElement = if is_commentable_diff_line(l) {
+        let begin_ws = ws.clone();
+        diff_gutter_base(gw)
+            .id(("diff-review-gutter-split", ri * 2 + left as usize))
+            .cursor_pointer()
+            .when(selected.contains(&i), |g| {
+                g.bg(rgb(crate::ui_theme::bg_hover()))
+                    .border_l_2()
+                    .border_color(rgb(crate::ui_theme::blue()))
+            })
+            .child(ln.map(|v| v.to_string()).unwrap_or_default())
+            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                begin_ws.update(cx, |this, cx| this.begin_diff_selection(i, cx));
+            })
+            .into_any_element()
+    } else {
+        diff_gutter_base(gw)
+            .child(ln.map(|v| v.to_string()).unwrap_or_default())
+            .into_any_element()
+    };
     row.child(match bar {
-        Some(c) => div().w(px(2.)).h_full().bg(c),
-        None => div().w(px(2.)).h_full(),
+        Some(c) => div().w(px(2.)).flex_none().h_full().bg(c),
+        None => div().w(px(2.)).flex_none().h_full(),
     })
-    .child(
-        div()
-            .w(px(gw))
-            .px_1()
-            .flex()
-            .justify_end()
-            .text_color(rgb(crate::ui_theme::text_faint()))
-            .child(ln.map(|v| v.to_string()).unwrap_or_default()),
-    )
+    .child(review_gutter)
     .child(diff_text_area(l, fg, hl))
 }
 
@@ -1354,15 +1509,84 @@ fn render_split_row(
 /// Git diff 查看面板：uniform_list 虚拟滚动。split 为 true 时并排（左旧右新），
 /// 否则统一视图。顶部文件名右侧有「统一/并排」切换按钮。改动行（+/-）可点选，
 /// 选中后配合底部评论框「发送到终端」，把反馈批量写进当前激活终端的 PTY。
+fn aggregate_diff_rows(lines: &[DiffLine], collapsed: &HashSet<String>) -> Vec<AggregateDiffRow> {
+    let mut rows = Vec::new();
+    let mut hidden = false;
+    for (ix, line) in lines.iter().enumerate() {
+        if line.file_header {
+            let mut adds = 0;
+            let mut dels = 0;
+            for next in &lines[ix + 1..] {
+                if next.file_header {
+                    break;
+                }
+                adds += usize::from(next.kind == DiffKind::Add);
+                dels += usize::from(next.kind == DiffKind::Del);
+            }
+            hidden = collapsed.contains(&line.text);
+            rows.push(AggregateDiffRow::Header {
+                path: line.text.clone(),
+                adds,
+                dels,
+            });
+        } else if !hidden {
+            rows.push(AggregateDiffRow::Line(ix));
+        }
+    }
+    rows
+}
+
+fn diff_review_rows(
+    lines: &[DiffLine],
+    aggregate: bool,
+    collapsed: &HashSet<String>,
+    selected: &HashSet<usize>,
+    comment_open: bool,
+) -> Vec<DiffReviewRow> {
+    let mut rows = if aggregate {
+        aggregate_diff_rows(lines, collapsed)
+            .into_iter()
+            .map(|row| match row {
+                AggregateDiffRow::Header { path, adds, dels } => {
+                    DiffReviewRow::Header { path, adds, dels }
+                }
+                AggregateDiffRow::Line(index) => DiffReviewRow::Line(index),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        (0..lines.len())
+            .map(DiffReviewRow::Line)
+            .collect::<Vec<_>>()
+    };
+    // 拖拽中列表必须保持同一份高度；只有用户点击锚点 `+` 后才插入评论器。
+    let Some(last_selected) = comment_open
+        .then(|| selected.iter().max().copied())
+        .flatten()
+    else {
+        return rows;
+    };
+    if let Some(insert_at) = rows
+        .iter()
+        .rposition(|row| matches!(row, DiffReviewRow::Line(index) if *index == last_selected))
+    {
+        rows.insert(insert_at + 1, DiffReviewRow::CommentComposer);
+    }
+    rows
+}
+
 fn git_diff_pane(
     root: &str,
     git_diff: &Option<GitDiff>,
     split: bool,
     diff_selected: &HashSet<usize>,
+    diff_selection_cursor: Option<usize>,
+    diff_selection_dragging: bool,
+    diff_comment_open: bool,
     diff_comment_input: Option<&Entity<gpui_component::input::InputState>>,
-    diff_scroll: &UniformListScrollHandle,
+    diff_scroll: &VirtualListScrollHandle,
+    diff_code_scroll: &ScrollHandle,
     active_hunk: Option<usize>,
-    scope: DiffScope,
+    collapsed_diff_files: &HashSet<String>,
     cx: &mut Context<Workspace>,
 ) -> Div {
     let (muted, fg, border, accent) = {
@@ -1382,6 +1606,8 @@ fn git_diff_pane(
             let ws = cx.entity();
             // 行号列宽按整份 diff 的最大行号算一次，所有行共用同一个值才对得齐。
             let gutter_w = gutter_width(&lines);
+            let content_w = diff_content_width(&lines, gutter_w);
+            let code_w = (content_w - 2.0 - gutter_w).max(480.0);
             let hunk_ctx = HunkCtx {
                 root: root.to_string(),
                 ops: d.hunk_ops(),
@@ -1415,38 +1641,168 @@ fn git_diff_pane(
                     });
                 });
 
-            let list = if split {
+            let list: AnyElement = if split {
                 let rows = Rc::new(build_split_rows(&lines));
-                let count = rows.len();
                 let lines2 = lines.clone();
                 let sel2 = diff_selected.clone();
                 let ws2 = ws.clone();
                 let hc = hunk_ctx.clone();
-                uniform_list("git-diff-split", count, move |range, _w, _cx| {
-                    range
-                        .map(|i| render_split_row(i, &rows[i], &lines2, &sel2, &ws2, &hc, gutter_w))
-                        .collect::<Vec<_>>()
-                })
+                let sizes = Rc::new(
+                    rows.iter()
+                        .map(|_| size(px(content_w), px(FILE_LINE_H)))
+                        .collect::<Vec<_>>(),
+                );
+                v_virtual_list(
+                    ws.clone(),
+                    "git-diff-split",
+                    sizes,
+                    move |_, range, _, _| {
+                        range
+                            .map(|i| {
+                                div()
+                                    .min_w(px(content_w))
+                                    .child(render_split_row(
+                                        i, &rows[i], &lines2, &sel2, &ws2, &hc, gutter_w,
+                                    ))
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .track_scroll(diff_scroll)
+                .overflow_x_hidden()
+                .flex_1()
+                .min_h_0()
+                .into_any_element()
             } else {
-                let count = lines.len();
+                let aggregate = d.path == "全部改动";
+                let rows = Rc::new(diff_review_rows(
+                    &lines,
+                    aggregate,
+                    collapsed_diff_files,
+                    diff_selected,
+                    diff_comment_open,
+                ));
                 let sel2 = diff_selected.clone();
                 let ws2 = ws.clone();
                 let hc = hunk_ctx.clone();
-                uniform_list("git-diff", count, move |range, _w, _cx| {
+                let collapsed_files = collapsed_diff_files.clone();
+                let input = diff_comment_input.cloned();
+                let code_scroll = diff_code_scroll.clone();
+                let sizes = Rc::new(
+                    rows.iter()
+                        .map(|row| match row {
+                            DiffReviewRow::Header { .. } => {
+                                size(px(content_w), px(FILE_LINE_H + 8.))
+                            }
+                            DiffReviewRow::Line(_) => size(px(content_w), px(FILE_LINE_H)),
+                            DiffReviewRow::CommentComposer => size(px(content_w), px(188.)),
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                v_virtual_list(ws.clone(), "git-diff", sizes, move |_, range, _, cx| {
                     range
-                        .map(|i| {
-                            render_diff_line(i, &lines[i], sel2.contains(&i), &ws2, &hc, gutter_w)
+                        .map(|i| match &rows[i] {
+                            DiffReviewRow::Header { path, adds, dels } => {
+                                let path = path.clone();
+                                let collapsed = collapsed_files.contains(&path);
+                                let toggle = ws2.clone();
+                                div()
+                                    .id(("aggregate-diff-file", i))
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .h(px(FILE_LINE_H + 8.))
+                                    .px_3()
+                                    .cursor_pointer()
+                                    .bg(rgb(crate::ui_theme::bg_hover()))
+                                    .child(if collapsed { "▸" } else { "▾" })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_semibold()
+                                            .child(path.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(rgb(crate::ui_theme::green()))
+                                            .child(format!("+{adds}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(rgb(crate::ui_theme::red()))
+                                            .child(format!("-{dels}")),
+                                    )
+                                    .on_click(move |_event, _window, cx| {
+                                        toggle.update(cx, |workspace, cx| {
+                                            if !workspace.git_collapsed_diff_files.remove(&path) {
+                                                workspace
+                                                    .git_collapsed_diff_files
+                                                    .insert(path.clone());
+                                            }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .into_any_element()
+                            }
+                            DiffReviewRow::Line(line_ix) => div()
+                                .w_full()
+                                .child(render_diff_line(
+                                    *line_ix,
+                                    &lines[*line_ix],
+                                    sel2.contains(line_ix),
+                                    // `+` 是松开后才出现的确认控件；按住拖拽时只保留
+                                    // 选区高亮，避免它在指针下突然弹出抢走视觉焦点。
+                                    !diff_selection_dragging
+                                        && diff_selection_cursor == Some(*line_ix),
+                                    &ws2,
+                                    &hc,
+                                    gutter_w,
+                                    &code_scroll,
+                                    code_w,
+                                ))
+                                .into_any_element(),
+                            // 评论器不是一条“代码行”。把它放在正文列里，左侧留出与
+                            // diff 色条 + 行号栏等宽的轨道：行号仍可读、范围仍能从
+                            // gutter 拖选，而评论卡和代码正文严格对齐。
+                            DiffReviewRow::CommentComposer => div()
+                                // 虚拟列表会以当前可视宽度布局每一个纵向条目。评论器
+                                // 是固定的阅读/输入界面，不能沿用代码行的超宽画布；否则
+                                // 一旦代码横向滚动，卡片会被撑到数千像素宽。
+                                .w_full()
+                                .flex()
+                                .items_stretch()
+                                .child(
+                                    div()
+                                        .w(px(2. + gutter_w))
+                                        .flex_none()
+                                        .bg(rgb(crate::ui_theme::bg_hover())),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .px_3()
+                                        .py_3()
+                                        // 代码画布可以很宽以容纳横向滚动，但评论是阅读和
+                                        // 输入界面，限制在舒服的行长内，不能被推到画布右端。
+                                        .child(div().w_full().max_w(px(960.)).child(
+                                            diff_comment_bar(&sel2, &lines, input.as_ref(), cx),
+                                        )),
+                                )
+                                .into_any_element(),
                         })
                         .collect::<Vec<_>>()
                 })
-            }
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .py_1()
-            .font_family(terminal_view::font_family())
-            .text_sm()
-            .track_scroll(diff_scroll);
+                .track_scroll(diff_scroll)
+                .overflow_x_hidden()
+                .flex_1()
+                .min_h_0()
+                .into_any_element()
+            };
 
             // 「统一 / 并排」切换按钮。
             let toggle = div()
@@ -1465,39 +1821,17 @@ fn git_diff_pane(
                 }))
                 .child(if split { "并排 ⇄" } else { "统一 ☰" }.to_string());
 
-            // 「全部 / 已暂存 / 未暂存」三档：决定 diff 拉哪一层，也决定 hunk 上
-            // 给什么按钮。分开看才谈得上「取消暂存这一块」——混着看时索引和工作区
-            // 的差异叠在一起，按块操作对不上号。
-            let scope_switch = h_flex().gap_1().children(
-                [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged]
-                    .into_iter()
-                    .map(|s| {
-                        let on = s == scope;
-                        div()
-                            .id(match s {
-                                DiffScope::All => "diff-scope-all",
-                                DiffScope::Staged => "diff-scope-staged",
-                                DiffScope::Unstaged => "diff-scope-unstaged",
-                            })
-                            .px_2()
-                            .py(px(1.0))
-                            .text_xs()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .text_color(if on { fg } else { muted })
-                            .when(on, |d| d.bg(accent))
-                            .hover(|d| d.opacity(0.8))
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_diff_scope(s, cx)))
-                            .child(s.label())
-                    }),
-            );
-
+            let list_finish_ws = ws.clone();
             div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
+                // diff 是代码阅读面，不应继承工作区的正文大字号。字体与行号宽度
+                // 的估算统一为同一套等宽小号字，窄 Inspector 下仍能完整显示行号。
+                .font_family(crate::terminal_view::font_family())
+                .text_sm()
                 .child(
                     div()
                         .flex()
@@ -1510,11 +1844,10 @@ fn git_diff_pane(
                         .border_b_1()
                         .border_color(border)
                         .child(div().flex_1().min_w_0().child(name))
-                        .child(scope_switch)
                         .child(open_full_file)
                         .child(toggle),
                 )
-                // 包一层 relative 容器承载 gpui-component 竖向滚动条（覆盖在 diff 上）。
+                // 可变高度虚拟列表持有唯一滚动句柄；评论卡片插入后仍只渲染可见行。
                 .child(
                     div()
                         .flex_1()
@@ -1522,18 +1855,25 @@ fn git_diff_pane(
                         .relative()
                         .flex()
                         .flex_col()
+                        // 行与行之间、以及滚动区底部的空白也要能结束拖拽；否则
+                        // 用户松开鼠标的位置恰好不在行号格时，状态会悬挂到下一次操作。
+                        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                            list_finish_ws
+                                .update(cx, |this, cx| this.finish_diff_selection(window, cx));
+                        })
                         .child(list)
-                        .vertical_scrollbar(diff_scroll),
+                        .vertical_scrollbar(diff_scroll)
+                        .horizontal_scrollbar(diff_code_scroll),
                 )
-                .child(diff_comment_bar(diff_selected, diff_comment_input, cx))
         }
     }
 }
 
-/// 交互式 diff 底部工具条：已选行数提示 + 评论输入框 + 「发送到终端」按钮，
-/// 发送目标固定是当前激活的终端标签（不跨项目匹配，简单直接）。
+/// 交互式 diff 评论器：选中增删行后在正文列内展开，自动聚焦输入框。
+/// 它由 `DiffReviewRow::CommentComposer` 插到选区末尾，行号轨道不被卡片覆盖。
 fn diff_comment_bar(
     selected: &HashSet<usize>,
+    lines: &[DiffLine],
     input: Option<&Entity<gpui_component::input::InputState>>,
     cx: &mut Context<Workspace>,
 ) -> Div {
@@ -1542,32 +1882,89 @@ fn diff_comment_bar(
         (t.muted_foreground, t.border)
     };
     let n = selected.len();
-    let can_send = n > 0;
-    let hint = if n == 0 {
-        "点选中改动行（+/-），可选写评论，发给当前终端".to_string()
-    } else {
-        format!("已选 {n} 行")
-    };
     let ws = cx.entity();
+    if n == 0 {
+        return div()
+            .flex()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(border)
+            .text_xs()
+            .text_color(muted)
+            .child("点选增删行即可评论；反馈会附带文件和行号发送给当前终端");
+    }
 
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .border_t_1()
+    let clear_ws = ws.clone();
+    let mut line_numbers = selected
+        .iter()
+        .filter_map(|&i| lines.get(i).and_then(|line| line.new_ln.or(line.old_ln)))
+        .collect::<Vec<_>>();
+    line_numbers.sort_unstable();
+    let range_label = match (line_numbers.first(), line_numbers.last()) {
+        (Some(first), Some(last)) if first != last => {
+            format!("对第 L{first} 行至第 L{last} 行发表评论")
+        }
+        (Some(line), _) => format!("对第 L{line} 行发表评论"),
+        _ => format!("对选中 {n} 行发表评论"),
+    };
+    v_flex()
+        .gap_3()
+        .p_4()
+        .bg(rgb(crate::ui_theme::bg_card()))
+        .border_1()
         .border_color(border)
-        .child(div().flex_none().text_xs().text_color(muted).child(hint))
-        .children(input.map(|state| div().flex_1().min_w_0().child(Input::new(state).small())))
+        .rounded_lg()
         .child(
-            Button::new("diff-send")
-                .small()
-                .label("发送到终端")
-                .disabled(!can_send)
-                .on_click(move |_ev, window, cx| {
-                    ws.update(cx, |this, cx| this.send_diff_comments(window, cx));
-                }),
+            h_flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(26.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(rgb(crate::ui_theme::bg_hover()))
+                                .child(Icon::new(IconName::Bot).size(px(15.))),
+                        )
+                        .child(div().text_sm().font_semibold().child("本机留言")),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(range_label),
+                ),
+        )
+        .children(input.map(|state| div().w_full().child(Input::new(state).small())))
+        .child(
+            h_flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("diff-comment-cancel")
+                        .small()
+                        .label("取消")
+                        .on_click(move |_ev, window, cx| {
+                            clear_ws.update(cx, |this, cx| {
+                                this.clear_diff_comment_selection(window, cx)
+                            });
+                        }),
+                )
+                .child(Button::new("diff-send").small().label("发送评论").on_click(
+                    move |_ev, window, cx| {
+                        ws.update(cx, |this, cx| this.send_diff_comments(window, cx));
+                    },
+                )),
         )
 }
 
@@ -2486,7 +2883,11 @@ impl Workspace {
             .map(|d| d.path.clone())
             .and_then(|p| self.cur().and_then(|s| s.cwd(cx)).map(|r| (r, p)))
         {
-            self.open_diff(root, path, false, cx);
+            if path == "全部改动" {
+                self.open_all_diffs(root, cx);
+            } else {
+                self.open_diff(root, path, false, cx);
+            }
         } else {
             cx.notify();
         }
@@ -2595,6 +2996,10 @@ impl Workspace {
             has_staged: false,
         });
         self.diff_selected.clear(); // 换文件/重开 diff：旧的行选区不再对应新内容
+        self.diff_selection_anchor = None;
+        self.diff_selection_cursor = None;
+        self.diff_selection_dragging = false;
+        self.diff_comment_open = false;
         self.active_hunk = None; // 块下标同理，换了文件就不指向原来那块了
         // diff 内嵌显示在改动页里（停靠或展开态用同一份 UI，见 git_narrow_panel），
         // 不再提升到单独的舞台页——跟 Files 点文件不提升到舞台是同一个道理。
@@ -2659,10 +3064,175 @@ impl Workspace {
         .detach();
     }
 
-    /// 点击 diff 行：切换该行（按 GitDiff.lines 下标）是否被选中待评论。
-    fn toggle_diff_line(&mut self, i: usize, cx: &mut Context<Self>) {
-        if !self.diff_selected.remove(&i) {
-            self.diff_selected.insert(i);
+    /// 默认预览工作区的全部改动。聚合视图只读，避免把跨文件的 hunk 误用于
+    /// stage/discard；点右侧某个文件后再进入原有的单文件可操作视图。
+    fn open_all_diffs(&mut self, root: String, cx: &mut Context<Self>) {
+        let scope = self.diff_scope;
+        let untracked_paths = if matches!(scope, DiffScope::All | DiffScope::Unstaged) {
+            self.git_status
+                .get(&root)
+                .map(|(_, status)| {
+                    status
+                        .files
+                        .iter()
+                        .filter(|(code, _)| code == "??")
+                        .map(|(_, path)| path.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.diff_gen = self.diff_gen.wrapping_add(1);
+        let r#gen = self.diff_gen;
+        self.git_diff = Some(GitDiff {
+            path: "全部改动".into(),
+            lines: Rc::new(Vec::new()),
+            header: String::new(),
+            hunks: Rc::new(Vec::new()),
+            patchable: false,
+            scope,
+            has_staged: false,
+        });
+        self.diff_selected.clear();
+        self.diff_selection_anchor = None;
+        self.diff_selection_cursor = None;
+        self.diff_selection_dragging = false;
+        self.diff_comment_open = false;
+        self.active_hunk = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut text = run_git(&r, scope.args())
+                        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+                        .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
+                    for path in untracked_paths {
+                        if let Ok(out) =
+                            run_git(&r, &["diff", "--no-index", "--", "/dev/null", &path])
+                        {
+                            if !text.is_empty() && !text.ends_with('\n') {
+                                text.push('\n');
+                            }
+                            text.push_str(&String::from_utf8_lossy(&out.stdout));
+                        }
+                    }
+                    parse_diff_with_file_headers(&text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.diff_gen == r#gen {
+                    this.git_diff = Some(GitDiff {
+                        path: "全部改动".into(),
+                        lines: Rc::new(result.lines),
+                        header: String::new(),
+                        hunks: Rc::new(Vec::new()),
+                        patchable: false,
+                        scope,
+                        has_staged: false,
+                    });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 开始一次代码审查式拖选。每次新的按下都替换旧选区，语义稳定且不会留下
+    /// 分散的“勾选行”；多段评论可以逐段发送。
+    fn begin_diff_selection(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.diff_selection_anchor = Some(i);
+        self.diff_selection_cursor = Some(i);
+        self.diff_selection_dragging = true;
+        self.diff_selected.clear();
+        self.diff_selected.insert(i);
+        self.diff_comment_open = false;
+        cx.notify();
+    }
+
+    /// 指针拖过新行时，把选区重建为从锚点到当前行的连续范围。只收集可评论的
+    /// 代码行，避免把 @@ hunk 标题或文件元信息混进反馈正文。
+    fn extend_diff_selection(&mut self, i: usize, cx: &mut Context<Self>) {
+        if !self.diff_selection_dragging {
+            return;
+        }
+        let Some(anchor) = self.diff_selection_anchor else {
+            return;
+        };
+        let Some(diff) = self.git_diff.as_ref() else {
+            return;
+        };
+        let (start, end) = if anchor <= i {
+            (anchor, i)
+        } else {
+            (i, anchor)
+        };
+        let selected = (start..=end)
+            .filter(|&ix| diff.lines.get(ix).is_some_and(is_commentable_diff_line))
+            .collect();
+        let cursor_is_commentable = diff.lines.get(i).is_some_and(is_commentable_diff_line);
+        self.diff_selected = selected;
+        if cursor_is_commentable {
+            self.diff_selection_cursor = Some(i);
+        }
+        cx.notify();
+    }
+
+    /// 松开鼠标只完成范围；评论器由锚点 `+` 单独触发，拖拽期间列表不会变高。
+    fn finish_diff_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.diff_selection_dragging {
+            return;
+        }
+        self.diff_selection_dragging = false;
+        cx.notify();
+    }
+
+    /// 窗口级 mouse-up 兜底：diff 行被虚拟列表重建、指针移到正文或空白区时，元素级
+    /// mouse-up 都可能收不到。窗口事件不依赖命中元素，单击后不会留下悬挂的拖拽态。
+    fn diff_selection_listener(&self, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
+        canvas(
+            |_, _, _| {},
+            move |_bounds, _, window, _cx| {
+                let finish_view = view.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                    if !phase.bubble() {
+                        return;
+                    }
+                    finish_view.update(cx, |this, cx| {
+                        this.finish_diff_selection(window, cx);
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
+    /// 点击选区起点的 `+` 后才展开评论卡并聚焦输入框。
+    fn open_diff_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_selected.is_empty() {
+            return;
+        }
+        self.diff_comment_open = true;
+        if let Some(state) = self.diff_comment_input.clone() {
+            state.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn clear_diff_comment_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.diff_selection_anchor = None;
+        self.diff_selection_cursor = None;
+        self.diff_selection_dragging = false;
+        self.diff_selected.clear();
+        self.diff_comment_open = false;
+        if let Some(state) = self.diff_comment_input.clone() {
+            state.update(cx, |state, cx| state.set_value("", window, cx));
         }
         cx.notify();
     }
@@ -2707,6 +3277,10 @@ impl Workspace {
             view.update(cx, |tv, cx| tv.send_text(&msg, cx));
         }
         self.diff_selected.clear();
+        self.diff_selection_anchor = None;
+        self.diff_selection_cursor = None;
+        self.diff_selection_dragging = false;
+        self.diff_comment_open = false;
         if let Some(state) = self.diff_comment_input.clone() {
             state.update(cx, |s, cx| s.set_value("", window, cx));
         }
@@ -3072,6 +3646,11 @@ impl Workspace {
             .unwrap_or((0, 0));
         let stash_n = status.as_ref().map(|d| d.stash_count).unwrap_or(0);
         let has_changes = status.as_ref().is_some_and(|d| !d.files.is_empty());
+        // 默认进入改动页时预览全部文件；用户点文件后 `git_diff` 已有值，就保留
+        // 单文件详情，不在每一帧重新覆盖选择。
+        if self.git_tab == crate::GitTab::Changes && self.git_diff.is_none() && has_changes {
+            self.open_all_diffs(root.clone(), cx);
+        }
         let ws_ops = cx.entity();
         let root_ops = root.clone();
         // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
@@ -3090,24 +3669,93 @@ impl Workspace {
         } else {
             rgb(ui_theme::text_faint())
         };
-        let header = self.inspector_header("SOURCE CONTROL", cx).child(
-            Button::new("git-sync-menu")
-                .ghost()
-                .xsmall()
-                .label(sync_label)
-                .font_family("monospace")
-                .text_color(sync_color)
-                .dropdown_menu(move |menu, _window, _cx| {
-                    git_ops_menu_items(
-                        menu,
-                        ws_ops.clone(),
-                        root_ops.clone(),
-                        behind,
-                        stash_n,
-                        has_changes,
-                    )
+        let (tab_fg, tab_muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        let tab_view = cx.entity();
+        let view_tabs = h_flex().gap(px(2.)).children(
+            [(GitTab::Changes, "改动"), (GitTab::Log, "历史")]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (tab, label))| {
+                    let selected = self.git_tab == tab;
+                    let view = tab_view.clone();
+                    div()
+                        .id(("git-view", ix))
+                        .px_2()
+                        .py(px(2.))
+                        .rounded_sm()
+                        .text_xs()
+                        .cursor_pointer()
+                        .text_color(if selected { tab_fg } else { tab_muted })
+                        .when(selected, |d| d.bg(rgb(ui_theme::bg_hover())))
+                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
+                        .child(label)
+                        .on_click(move |_event, _window, cx| {
+                            view.update(cx, |workspace, cx| {
+                                if workspace.git_tab != tab {
+                                    workspace.git_tab = tab;
+                                    cx.notify();
+                                }
+                            });
+                        })
                 }),
         );
+        let scope_view = cx.entity();
+        let scope_control = Button::new("git-diff-scope")
+            .ghost()
+            .xsmall()
+            .label(format!("{} ▾", self.diff_scope.label()))
+            .text_color(rgb(ui_theme::text_muted()))
+            .dropdown_menu(move |mut menu, _window, _cx| {
+                for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
+                    let view = scope_view.clone();
+                    menu = menu.item(PopupMenuItem::new(scope.label()).on_click(
+                        move |_event, _window, cx| {
+                            view.update(cx, |workspace, cx| {
+                                workspace.set_diff_scope(scope, cx);
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
+        // 改动 / 历史是长期可见的同级视图，不属于操作菜单；与标题合并到同一行，
+        // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。
+        let header = div()
+            .h(px(36.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .bg(rgb(ui_theme::bg_bar()))
+            .border_b_1()
+            .border_color(rgb(ui_theme::border_dim()))
+            .child(view_tabs)
+            .when(self.git_tab == GitTab::Changes, |bar| {
+                bar.child(scope_control)
+            })
+            .child(div().flex_1())
+            .child(
+                Button::new("git-sync-menu")
+                    .ghost()
+                    .xsmall()
+                    .label(sync_label)
+                    .font_family("monospace")
+                    .text_color(sync_color)
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        git_ops_menu_items(
+                            menu,
+                            ws_ops.clone(),
+                            root_ops.clone(),
+                            behind,
+                            stash_n,
+                            has_changes,
+                        )
+                    }),
+            );
 
         // commit message 输入框懒创建（跟全屏 Git 页同一个实体，两处共享草稿）。
         if self.commit_msg_input.is_none() {
@@ -3121,48 +3769,11 @@ impl Workspace {
             self.commit_msg_input = Some(state);
         }
 
-        // 「改动 / 日志」子标签：原来是舞台全屏页独有的视图，现收进
-        // 停靠面板——展开态直接复用这份 UI（见 main.rs 的 stage_override 特判），
-        // 不再是另一套全屏组件，头部不会因为展开就变了个样。
-        let sub_tabs = {
-            let (fg, muted, accent) = {
-                let t = cx.theme();
-                (t.foreground, t.muted_foreground, t.accent)
-            };
-            h_flex()
-                .gap_1()
-                .px_3()
-                .py_1()
-                .border_b_1()
-                .border_color(rgb(ui_theme::border_dim()))
-                .children(
-                    [(GitTab::Changes, "改动"), (GitTab::Log, "日志")].map(|(tab, label)| {
-                        let on = self.git_tab == tab;
-                        div()
-                            .id(label)
-                            .px_2()
-                            .py(px(1.0))
-                            .text_sm()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .text_color(if on { fg } else { muted })
-                            .when(on, |d| d.bg(accent))
-                            .hover(|d| d.opacity(0.8))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.git_tab = tab;
-                                cx.notify();
-                            }))
-                            .child(label)
-                    }),
-                )
-        };
-
         if self.git_tab == GitTab::Log {
             return v_flex()
                 .flex_1()
                 .min_h_0()
                 .child(header)
-                .child(sub_tabs)
                 .child(self.render_git_log_tab(root.clone(), cx))
                 .into_any_element();
         }
@@ -3171,7 +3782,9 @@ impl Workspace {
         if self.git_diff.is_some() && self.diff_comment_input.is_none() {
             use gpui_component::input::InputState;
             let state = cx.new(|cx| {
-                InputState::new(window, cx).placeholder("给选中的行写评论，发送前可以再改改…")
+                InputState::new(window, cx)
+                    .auto_grow(2, 6)
+                    .placeholder("给选中的行写评论，发送前可以再改改…")
             });
             self.diff_comment_input = Some(state);
         }
@@ -3550,41 +4163,46 @@ impl Workspace {
         // 有打开的 diff：内嵌显示（diff 在左占主宽度，改动列表 + commit 框收窄到
         // 右边），跟 Files 面板「内容左、树右」同一个视觉套路——点了改动不再
         // 提升到舞台另开一页（见 open_diff 的改动）。
-        // 右栏宽度跟 inspector_w 联动（同 Files 面板 tree_w 的算法）——停靠态默认
-        // 宽度只有 280px，之前写死 280px 右栏会把 diff 挤到 0 宽，中文按大段
-        // 单字换行导致整个面板视觉错乱（见用户反馈截图）。
-        let list_w = (self.inspector_w * 0.4).clamp(160., 260.);
+        // Git 改动树和 Files 文件树共用一份已持久化的侧树宽度。拖外层 Inspector
+        // 不能按比例重算它；只有拖这份树自身的分隔线时才会改变。
+        let list_w = self.file_tree_w.clamp(
+            crate::inspector::MIN_FILE_TREE_WIDTH,
+            crate::inspector::MAX_FILE_TREE_WIDTH,
+        );
         let changes_body: AnyElement = if self.git_diff.is_some() {
+            let collapsed_diff_files = self.git_collapsed_diff_files.clone();
             let diff_pane = git_diff_pane(
                 &root,
                 &self.git_diff,
                 self.diff_split,
                 &self.diff_selected,
+                self.diff_selection_cursor,
+                self.diff_selection_dragging,
+                self.diff_comment_open,
                 self.diff_comment_input.as_ref(),
                 &self.diff_scroll,
+                &self.diff_code_scroll,
                 self.active_hunk,
-                self.diff_scope,
+                &collapsed_diff_files,
                 cx,
             );
             div()
                 .flex_1()
+                .relative()
                 .min_h_0()
                 .overflow_hidden()
+                .child(self.file_tree_resize_listener(cx))
+                .child(self.diff_selection_listener(cx))
                 .flex()
                 .child(
-                    h_resizable("git-narrow-diff-split")
+                    div()
+                        .size_full()
+                        .flex()
+                        .child(div().flex_1().min_w_0().min_h_0().flex().child(diff_pane))
+                        .child(self.file_tree_resize_handle("git-narrow-diff-split", cx))
                         .child(
-                            resizable_panel()
-                                .size_range(px(200.)..Pixels::MAX)
-                                .min_w_0()
-                                .min_h_0()
-                                .flex()
-                                .child(diff_pane),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(list_w))
-                                .size_range(px(160.)..Pixels::MAX)
+                            div()
+                                .w(px(list_w))
                                 .flex_none()
                                 .min_w_0()
                                 .min_h_0()
@@ -3610,7 +4228,6 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .child(header)
-            .child(sub_tabs)
             .child(changes_body)
             .into_any_element()
     }
@@ -3707,7 +4324,11 @@ mod tests {
     // 不用 `use super::*;`：本文件顶部有 gpui/gpui_component 的 glob 导入，带进测试
     // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩。只导入真正
     // 用到的名字。
-    use super::{DiffKind, build_git_tree, hunk_patch, parse_diff, run_git, run_git_stdin};
+    use super::{
+        AggregateDiffRow, DiffKind, DiffReviewRow, aggregate_diff_rows, build_git_tree,
+        diff_review_rows, hunk_patch, parse_diff, parse_diff_with_file_headers, run_git,
+        run_git_stdin,
+    };
 
     fn files(paths: &[&str]) -> Vec<(String, String)> {
         paths
@@ -3727,6 +4348,30 @@ mod tests {
         assert_eq!(rows[1].name, "main.rs");
         assert_eq!(rows[1].path, "crates/smelt/src/main.rs");
         assert_eq!(rows[1].depth, 1);
+    }
+
+    #[test]
+    fn aggregate_rows_keep_later_files_after_a_collapsed_file() {
+        let raw = concat!(
+            "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
+        );
+        let parsed = parse_diff_with_file_headers(raw);
+        let mut collapsed = std::collections::HashSet::new();
+        collapsed.insert("one.rs".to_string());
+        let rows = aggregate_diff_rows(&parsed.lines, &collapsed);
+        let headers: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                AggregateDiffRow::Header { path, .. } => Some(path.as_str()),
+                AggregateDiffRow::Line(_) => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["one.rs", "two.rs"]);
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, AggregateDiffRow::Line(_)))
+        );
     }
 
     /// 分叉处必须停止压缩，各分支自己成行。
@@ -3816,12 +4461,7 @@ mod tests {
                 || t.starts_with("+++ ")),
             "机械头部不该出现在渲染行里：{texts:?}"
         );
-        // 第一行应该直接是 hunk 头（文本已换成上下文，所以按类型判断）
-        assert!(
-            parsed.lines[0].kind == DiffKind::Hunk,
-            "首行应是 hunk 头，实际文本 {:?}",
-            texts[0]
-        );
+        assert_eq!(texts[0], "old", "hunk 坐标不应占用可视代码行");
 
         // 但 patch 仍然完整：header 四行俱在
         assert!(parsed.header.contains("diff --git a/f.txt b/f.txt"));
@@ -3830,8 +4470,46 @@ mod tests {
         assert!(parsed.header.contains("+++ b/f.txt"));
     }
 
-    /// hunk 行只显示上下文（`pub struct Foo {`），不显示 `@@ -49,7 +49,7 @@` 坐标；
-    /// 但坐标必须原样留在 raw 里，否则 patch 报废。
+    #[test]
+    fn aggregate_diff_keeps_a_heading_for_each_file() {
+        let raw = concat!(
+            "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
+        );
+        let parsed = parse_diff_with_file_headers(raw);
+        let headings: Vec<&str> = parsed
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffKind::Meta)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(headings, vec!["one.rs", "two.rs"]);
+    }
+
+    #[test]
+    fn comment_composer_opens_only_after_anchor_is_activated() {
+        let parsed = parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n");
+        let selected = std::collections::HashSet::from([0usize]);
+        let collapsed = std::collections::HashSet::new();
+
+        let dragging = diff_review_rows(&parsed.lines, false, &collapsed, &selected, false);
+        assert!(
+            !dragging
+                .iter()
+                .any(|row| matches!(row, DiffReviewRow::CommentComposer)),
+            "单纯拖选不能改变虚拟列表高度"
+        );
+
+        let opened = diff_review_rows(&parsed.lines, false, &collapsed, &selected, true);
+        assert!(
+            opened
+                .iter()
+                .any(|row| matches!(row, DiffReviewRow::CommentComposer)),
+            "点击评论锚点后才插入评论器"
+        );
+    }
+
+    /// hunk 坐标不应渲染成无行号的伪代码行；但必须原样留在 raw 里，否则 patch 报废。
     #[test]
     fn hunk_row_shows_context_not_coordinates() {
         let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
@@ -3841,17 +4519,7 @@ mod tests {
                    -a\n+b\n c\n";
         let parsed = parse_diff(raw);
 
-        let hunk_rows: Vec<&str> = parsed
-            .lines
-            .iter()
-            .filter(|l| l.kind == DiffKind::Hunk)
-            .map(|l| l.text.as_str())
-            .collect();
-        assert_eq!(
-            hunk_rows,
-            vec!["pub struct DeleteWorktreeTarget {", ""],
-            "第一块该只剩上下文，第二块没有上下文就留空"
-        );
+        assert_eq!(parsed.lines.len(), 6, "两段 hunk 坐标都不应占用可视行");
         // 坐标仍在 raw 里
         assert!(
             parsed.hunks[0].raw.starts_with("@@ -49,7 +49,7 @@"),
