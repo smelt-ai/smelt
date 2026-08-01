@@ -108,6 +108,41 @@ class AcpSnapshot {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+    'entries_offset': entriesOffset,
+    'entries_total': entriesTotal,
+    'snapshot_revision': snapshotRevision,
+    'entries': entries.map(_entryToJson).toList(),
+    'phase': _phaseToJson(phase),
+    'pending_permissions': pendingPermissions
+        .map((permission) => permission.toJson())
+        .toList(),
+    if (pendingElicitation != null)
+      'pending_elicitation': pendingElicitation!.toJson(),
+    if (statusLine != null) 'status_line': statusLine,
+    if (acpSessionId != null) 'acp_session_id': acpSessionId,
+    if (historySessionId != null) 'history_session_id': historySessionId,
+    'supports_image': supportsImage,
+    'available_commands': availableCommands,
+    if (usage != null) 'usage': usage!.toJson(),
+    if (plan != null) 'plan': plan!.toJson(),
+    if (model != null) 'model': model!.toJson(),
+    'config_options': configOptions.map((option) => option.toJson()).toList(),
+    if (turnStartedAtMs != null) 'turn_started_at_ms': turnStartedAtMs,
+    if (lastTurnDurationMs != null) 'last_turn_duration_ms': lastTurnDurationMs,
+    'completed_unread': completedUnread,
+    'should_persist': shouldPersist,
+  };
+
+  AcpSnapshot cacheTail({int limit = 100}) {
+    if (entries.length <= limit) return this;
+    final skipped = entries.length - limit;
+    return _withEntries(
+      entriesOffset + skipped,
+      entries.skip(skipped).toList(growable: false),
+    );
+  }
+
   /// Apply smeltd's tail snapshot to the previously rendered projection.
   AcpSnapshot merge(AcpSnapshot next) {
     final currentHistory = stableHistoryId;
@@ -388,6 +423,73 @@ class AcpEntryUnknown extends AcpEntry {
   const AcpEntryUnknown();
 }
 
+dynamic _phaseToJson(AcpPhase phase) => switch (phase) {
+  AcpPhaseStarting() => 'Starting',
+  AcpPhaseIdle() => 'Idle',
+  AcpPhaseRunning() => 'Running',
+  AcpPhaseAwaitingApproval() => 'AwaitingApproval',
+  AcpPhaseAwaitingChoice() => 'AwaitingChoice',
+  AcpPhaseEnded(reason: final reason) => {'Ended': reason},
+};
+
+dynamic _entryToJson(AcpEntry entry) => switch (entry) {
+  AcpEntryUser(text: final text) => {'User': text},
+  AcpEntryUserWithImages(text: final text, images: final images) => {
+    'UserWithImages': {
+      'text': text,
+      'images': images.map((image) => image.toJson()).toList(),
+    },
+  },
+  AcpEntryAssistant(text: final text, thought: final thought) => {
+    'Assistant': {'text': text, 'thought': thought},
+  },
+  AcpEntryToolCall(
+    id: final id,
+    title: final title,
+    kind: final kind,
+    status: final status,
+    output: final output,
+  ) =>
+    {
+      'ToolCall': {
+        'id': id,
+        'title': title,
+        'kind': _toolKindToJson(kind),
+        'status': _toolStatusToJson(status),
+        'output': output.map(_toolOutputToJson).toList(),
+      },
+    },
+  AcpEntryDivider(label: final label) => {
+    'Divider': {'label': label},
+  },
+  AcpEntryUnknown() => const <String, dynamic>{},
+};
+
+String _toolKindToJson(ToolKind kind) => switch (kind) {
+  ToolKind.switchMode => 'switch_mode',
+  _ => kind.name,
+};
+
+String _toolStatusToJson(ToolCallStatus status) => switch (status) {
+  ToolCallStatus.inProgress => 'in_progress',
+  _ => status.name,
+};
+
+dynamic _toolOutputToJson(ToolOutputPart output) => switch (output) {
+  ToolOutputText(text: final text) => {'Text': text},
+  ToolOutputDiff(
+    path: final path,
+    oldText: final oldText,
+    newText: final newText,
+  ) =>
+    {
+      'Diff': {'path': path, 'old_text': oldText, 'new_text': newText},
+    },
+  ToolOutputImage(base64: final base64, mimeType: final mimeType) => {
+    'Image': {'base64': base64, 'mime_type': mimeType},
+  },
+};
+
 /// 工具类型
 enum ToolKind {
   read,
@@ -533,7 +635,31 @@ class PendingPermission {
       details: ApprovalDetails.fromJson(json['details']),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'tool_call_id': toolCallId,
+    'question': question,
+    'options': options.map((option) => option.toJson()).toList(),
+    'details': _approvalDetailsToJson(details),
+  };
 }
+
+Map<String, dynamic> _approvalDetailsToJson(ApprovalDetails details) =>
+    switch (details) {
+      ApprovalDetailsCommand(
+        command: final command,
+        cwd: final cwd,
+        reason: final reason,
+      ) =>
+        {'kind': 'command', 'command': command, 'cwd': cwd, 'reason': reason},
+      ApprovalDetailsFileChange(reason: final reason, grantRoot: final root) =>
+        {'kind': 'file_change', 'reason': reason, 'grant_root': root},
+      ApprovalDetailsPermissions(summary: final summary) => {
+        'kind': 'permissions',
+        'summary': summary,
+      },
+      ApprovalDetailsGeneric() => {'kind': 'generic'},
+    };
 
 sealed class ApprovalDetails {
   const ApprovalDetails();
@@ -602,6 +728,12 @@ class PermissionOption {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+    'option_id': optionId,
+    'name': name,
+    'kind': kind,
+  };
+
   bool get isAllow => kind.startsWith('Allow');
   bool get isReject => kind.startsWith('Reject');
   bool get isAlways => kind.endsWith('Always');
@@ -642,6 +774,13 @@ class PendingElicitation {
       ),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'message': message,
+    'fields': fields.map((field) => field.toJson()).toList(),
+    'chosen': chosen.map((key, value) => MapEntry('$key', value)),
+    'text_values': textValues.map((key, value) => MapEntry('$key', value)),
+  };
 }
 
 Map<int, T> _parseIndexMap<T>(
@@ -675,7 +814,29 @@ class ElicitationField {
       kind: ElicitationFieldKind.fromJson(json['kind']),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'key': key,
+    'title': title,
+    'kind': _elicitationKindToJson(kind),
+  };
 }
+
+Map<String, dynamic> _elicitationKindToJson(ElicitationFieldKind kind) =>
+    switch (kind) {
+      ElicitationSelect(options: final options) => {
+        'Select': options.map((option) => {'label': option.label}).toList(),
+      },
+      ElicitationMultiSelect(options: final options) => {
+        'MultiSelect': options
+            .map((option) => {'label': option.label})
+            .toList(),
+      },
+      ElicitationText(secret: final secret) => {
+        'Text': {'secret': secret},
+      },
+      ElicitationExternalUrl(url: final url) => {'ExternalUrl': url},
+    };
 
 sealed class ElicitationFieldKind {
   const ElicitationFieldKind();
@@ -755,6 +916,11 @@ class AcpUsage {
       contextWindow: (json['context_window'] as num?)?.toInt() ?? 0,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'used_tokens': usedTokens,
+    'context_window': contextWindow,
+  };
 }
 
 /// 计划
@@ -772,6 +938,10 @@ class AcpPlan {
           [],
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'entries': steps.map((step) => step.toJson()).toList(),
+  };
 }
 
 class AcpPlanStep {
@@ -786,6 +956,8 @@ class AcpPlanStep {
       status: json['status'] as String? ?? 'pending',
     );
   }
+
+  Map<String, dynamic> toJson() => {'content': title, 'status': status};
 
   bool get isCompleted => status.toLowerCase() == 'completed';
   bool get isInProgress =>
@@ -818,6 +990,12 @@ class AcpModel {
           [],
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'config_id': configId,
+    'current_name': currentName,
+    'options': options,
+  };
 }
 
 class AcpSessionConfig {
@@ -852,4 +1030,12 @@ class AcpSessionConfig {
           [],
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'config_id': configId,
+    'name': name,
+    if (description != null) 'description': description,
+    'current_name': currentName,
+    'options': options,
+  };
 }

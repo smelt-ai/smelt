@@ -119,6 +119,22 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('cached connection bar identifies stale content', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CachedConnectionBar(
+            state: WsState.reconnecting,
+            cachedAt: DateTime.now().subtract(const Duration(minutes: 3)),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Reconnecting · Saved 3m ago'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  });
+
   test('message auto-follow only continues at the bottom', () {
     expect(isNearMessageBottom(0, 0), isTrue);
     expect(isNearMessageBottom(48, 0), isTrue);

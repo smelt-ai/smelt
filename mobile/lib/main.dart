@@ -211,6 +211,61 @@ class ConnectionStatusBar extends StatelessWidget {
   }
 }
 
+class CachedConnectionBar extends StatelessWidget {
+  const CachedConnectionBar({super.key, required this.state, this.cachedAt});
+
+  final WsState state;
+  final DateTime? cachedAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final label = switch (state) {
+      WsState.reconnecting => 'Reconnecting',
+      WsState.connecting => 'Connecting',
+      WsState.connected => 'Refreshing',
+      WsState.disconnected => 'Offline',
+    };
+    final age = cachedAt == null ? null : _formatCacheAge(cachedAt!);
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(minHeight: 36),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: colors.tertiaryContainer,
+      child: Row(
+        children: [
+          SizedBox.square(
+            dimension: 14,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: colors.onTertiaryContainer,
+            ),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              age == null
+                  ? '$label · Showing saved data'
+                  : '$label · Saved $age',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: colors.onTertiaryContainer, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatCacheAge(DateTime cachedAt) {
+  final age = DateTime.now().difference(cachedAt);
+  if (age.inSeconds < 60) return 'just now';
+  if (age.inMinutes < 60) return '${age.inMinutes}m ago';
+  if (age.inHours < 24) return '${age.inHours}h ago';
+  return '${age.inDays}d ago';
+}
+
 bool _isInterruptMarker(String text) {
   final value = text.trim();
   return value.startsWith('[Request interrupted by user') &&
@@ -462,6 +517,12 @@ class _HomePageState extends State<HomePage> {
               },
               child: const Icon(Icons.refresh),
             )
+          : _connectionState == WsState.disconnected && _sessions.isNotEmpty
+          ? FloatingActionButton(
+              tooltip: 'Retry connection',
+              onPressed: gatewayService.retryCurrentConnection,
+              child: const Icon(Icons.sync),
+            )
           : null,
     );
   }
@@ -472,13 +533,17 @@ class _HomePageState extends State<HomePage> {
     }
     switch (_connectionState) {
       case WsState.disconnected:
-        return _buildDisconnectedView();
+        return _sessions.isEmpty
+            ? _buildDisconnectedView()
+            : _buildSessionList();
       case WsState.connecting:
-        return _buildConnectingView();
+        return _sessions.isEmpty ? _buildConnectingView() : _buildSessionList();
       case WsState.connected:
         return _buildSessionList();
       case WsState.reconnecting:
-        return _buildReconnectingView();
+        return _sessions.isEmpty
+            ? _buildReconnectingView()
+            : _buildSessionList();
     }
   }
 
@@ -558,7 +623,14 @@ class _HomePageState extends State<HomePage> {
 
     return Column(
       children: [
-        const ConnectionStatusBar(),
+        if (_connectionState == WsState.connected &&
+            !gatewayService.sessionsAreCached)
+          const ConnectionStatusBar()
+        else
+          CachedConnectionBar(
+            state: _connectionState,
+            cachedAt: gatewayService.cachedAt,
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
           child: SessionFilterBar(
@@ -932,6 +1004,7 @@ class _HomePageState extends State<HomePage> {
     _shownAttentionSessionId = null;
     ScaffoldMessenger.of(context).clearSnackBars();
     gatewayService.disconnect();
+    setState(() => _sessions = const []);
   }
 
   Future<void> _forgetPairing() async {
@@ -1146,6 +1219,7 @@ class _SessionPageState extends State<SessionPage> {
   bool _isMessageFocused = false;
   bool _restoringDraft = true;
   bool _sendingMessage = false;
+  WsState _connectionState = gatewayService.state;
   String? _sendRequestId;
   String? _sendError;
   String? _permissionSubmittingToolId;
@@ -1154,6 +1228,7 @@ class _SessionPageState extends State<SessionPage> {
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<MessageSendResult> _messageSendSubscription;
+  late final StreamSubscription<WsState> _connectionStateSubscription;
   Timer? _draftSaveTimer;
 
   @override
@@ -1174,6 +1249,10 @@ class _SessionPageState extends State<SessionPage> {
     _messageSendSubscription = gatewayService.messageSendStream.listen(
       (result) => unawaited(_handleMessageSendResult(result)),
     );
+    _connectionStateSubscription = gatewayService.stateStream.listen((state) {
+      if (!mounted) return;
+      setState(() => _connectionState = state);
+    });
     _subscribeSession();
     unawaited(_restoreDraft());
   }
@@ -1378,7 +1457,14 @@ class _SessionPageState extends State<SessionPage> {
       ),
       body: Column(
         children: [
-          const ConnectionStatusBar(),
+          if (_connectionState == WsState.connected &&
+              !gatewayService.snapshotIsCached(widget.session.id))
+            const ConnectionStatusBar()
+          else
+            CachedConnectionBar(
+              state: _connectionState,
+              cachedAt: gatewayService.cachedAt,
+            ),
           if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
           if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
           if (_snapshot?.pendingPermissions
@@ -2037,7 +2123,9 @@ class _SessionPageState extends State<SessionPage> {
                   onTapOutside: (_) => _dismissKeyboard(),
                   decoration: InputDecoration(
                     hintText: !gatewayService.writeEnabled
-                        ? 'Desktop connection is read-only'
+                        ? _connectionState == WsState.connected
+                              ? 'Desktop connection is read-only'
+                              : 'Reconnect to send a message'
                         : _sendingMessage
                         ? 'Waiting for desktop confirmation...'
                         : !hasSnapshot
@@ -2267,6 +2355,7 @@ class _SessionPageState extends State<SessionPage> {
   void dispose() {
     _draftSaveTimer?.cancel();
     if (!_sendingMessage) _messageSendSubscription.cancel();
+    _connectionStateSubscription.cancel();
     _snapshotSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {
