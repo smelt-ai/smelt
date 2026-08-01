@@ -37,6 +37,90 @@ String? sessionListSubtitle(SessionSummary session) {
   return detail == null || detail.isEmpty ? null : detail;
 }
 
+enum SessionListFilter { attention, running, all }
+
+bool sessionNeedsAction(SessionSummary session) {
+  if (session.attention?.requiresAction == true) return true;
+  return switch (session.status.toLowerCase()) {
+    'waiting_approval' || 'needs_attention' => true,
+    _ => false,
+  };
+}
+
+bool sessionIsRunning(SessionSummary session) {
+  if (session.status.toLowerCase() == 'running') return true;
+  return switch (session.phase.toLowerCase()) {
+    'starting' || 'running' => true,
+    _ => false,
+  };
+}
+
+List<SessionSummary> filterSessions(
+  Iterable<SessionSummary> sessions,
+  SessionListFilter filter,
+) => switch (filter) {
+  SessionListFilter.attention => sessions.where(sessionNeedsAction).toList(),
+  SessionListFilter.running => sessions.where(sessionIsRunning).toList(),
+  SessionListFilter.all => sessions.toList(),
+};
+
+class SessionFilterBar extends StatelessWidget {
+  const SessionFilterBar({
+    super.key,
+    required this.selected,
+    required this.attentionCount,
+    required this.runningCount,
+    required this.allCount,
+    required this.onChanged,
+  });
+
+  final SessionListFilter selected;
+  final int attentionCount;
+  final int runningCount;
+  final int allCount;
+  final ValueChanged<SessionListFilter> onChanged;
+
+  String _count(int value) => value > 99 ? '99+' : '$value';
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final showIcons = constraints.maxWidth >= 360;
+        return SizedBox(
+          width: double.infinity,
+          child: SegmentedButton<SessionListFilter>(
+            showSelectedIcon: false,
+            segments: [
+              ButtonSegment(
+                value: SessionListFilter.attention,
+                icon: showIcons
+                    ? const Icon(Icons.priority_high, size: 17)
+                    : null,
+                label: Text('Action ${_count(attentionCount)}'),
+              ),
+              ButtonSegment(
+                value: SessionListFilter.running,
+                icon: showIcons ? const Icon(Icons.autorenew, size: 17) : null,
+                label: Text('Running ${_count(runningCount)}'),
+              ),
+              ButtonSegment(
+                value: SessionListFilter.all,
+                icon: showIcons
+                    ? const Icon(Icons.forum_outlined, size: 17)
+                    : null,
+                label: Text('All ${_count(allCount)}'),
+              ),
+            ],
+            selected: {selected},
+            onSelectionChanged: (selection) => onChanged(selection.single),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class TurnElapsedLabel extends StatefulWidget {
   const TurnElapsedLabel({
     super.key,
@@ -226,6 +310,7 @@ class _HomePageState extends State<HomePage> {
   bool _restoringPairing = true;
   bool _hasSavedPairing = false;
   bool _showPairingCode = false;
+  SessionListFilter _sessionFilter = SessionListFilter.all;
   bool _acceptConnectionNotifications = true;
   String? _pendingOpenSessionId;
 
@@ -269,6 +354,7 @@ class _HomePageState extends State<HomePage> {
     });
     _attentionSubscription = gatewayService.attentionStream.listen((item) {
       if (!mounted || !_acceptConnectionNotifications) return;
+      gatewayService.listSessions();
       final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
       if (isCurrent && !item.requiresAction) return;
       final session = _sessions
@@ -298,6 +384,7 @@ class _HomePageState extends State<HomePage> {
     });
     _attentionResolvedSubscription = gatewayService.attentionResolvedStream
         .listen((sessionId) {
+          gatewayService.listSessions();
           if (!mounted || _shownAttentionSessionId != sessionId) return;
           _shownAttentionSessionId = null;
           ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -465,6 +552,35 @@ class _HomePageState extends State<HomePage> {
   Widget _buildSessionList() {
     final orderedSessions = List<SessionSummary>.of(_sessions)
       ..sort(compareSessionMenuOrder);
+    final visibleSessions = filterSessions(orderedSessions, _sessionFilter);
+    final attentionCount = orderedSessions.where(sessionNeedsAction).length;
+    final runningCount = orderedSessions.where(sessionIsRunning).length;
+
+    return Column(
+      children: [
+        const ConnectionStatusBar(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+          child: SessionFilterBar(
+            selected: _sessionFilter,
+            attentionCount: attentionCount,
+            runningCount: runningCount,
+            allCount: orderedSessions.length,
+            onChanged: (filter) {
+              setState(() => _sessionFilter = filter);
+            },
+          ),
+        ),
+        Expanded(
+          child: _sessionFilter == SessionListFilter.all
+              ? _buildProjectSessionList(orderedSessions)
+              : _buildFocusedSessionList(visibleSessions),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProjectSessionList(List<SessionSummary> orderedSessions) {
     final projects =
         <String, ({WorkspaceProject project, List<SessionSummary> sessions})>{};
     for (final project in _workspace.projects) {
@@ -486,89 +602,150 @@ class _HomePageState extends State<HomePage> {
       group.sessions.add(session);
     }
 
-    return Column(
-      children: [
-        const ConnectionStatusBar(),
-        Expanded(
-          child: projects.isEmpty
-              ? const Center(child: Text('No projects'))
-              : ListView(
-                  children: projects.entries.map((entry) {
-                    final project = entry.value.project;
-                    final sessions = entry.value.sessions;
-                    return ExpansionTile(
-                      controlAffinity: ListTileControlAffinity.leading,
-                      title: Text(project.title),
-                      subtitle: Text(
-                        '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.history),
-                            tooltip: 'Conversation history',
-                            onPressed: _workspace.agents.isEmpty
-                                ? null
-                                : () => _openHistory(project),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.add),
-                            tooltip: 'New conversation',
-                            onPressed:
-                                !gatewayService.writeEnabled ||
-                                    _workspace.agents.isEmpty
-                                ? null
-                                : () => _createSession(project),
-                          ),
-                        ],
-                      ),
-                      children: sessions.map((session) {
-                        final subtitle = sessionListSubtitle(session);
-                        return ListTile(
-                          contentPadding: const EdgeInsets.only(
-                            left: 32,
-                            right: 16,
-                          ),
-                          leading: const Icon(Icons.chat_bubble_outline),
-                          title: Text(sessionListTitle(session)),
-                          subtitle: subtitle == null ? null : Text(subtitle),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Badge(
-                                isLabelVisible: session.unread,
-                                child: _getStatusChip(session.status),
-                              ),
-                              PopupMenuButton<String>(
-                                tooltip: 'Conversation actions',
-                                onSelected: (action) {
-                                  if (action == 'delete') {
-                                    _deleteSession(session);
-                                  }
-                                },
-                                itemBuilder: (context) => [
-                                  PopupMenuItem(
-                                    value: 'delete',
-                                    enabled: gatewayService.writeEnabled,
-                                    child: const ListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      leading: Icon(Icons.delete_outline),
-                                      title: Text('Delete'),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                          onTap: () => _openSession(session),
-                        );
-                      }).toList(),
-                    );
-                  }).toList(),
+    if (projects.isEmpty) {
+      return _buildEmptySessions(
+        icon: Icons.folder_off_outlined,
+        title: 'No projects',
+      );
+    }
+    return ListView(
+      children: projects.entries.map((entry) {
+        final project = entry.value.project;
+        final sessions = entry.value.sessions;
+        return ExpansionTile(
+          controlAffinity: ListTileControlAffinity.leading,
+          title: Text(project.title),
+          subtitle: Text(
+            '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.history),
+                tooltip: 'Conversation history',
+                onPressed: _workspace.agents.isEmpty
+                    ? null
+                    : () => _openHistory(project),
+              ),
+              IconButton(
+                icon: const Icon(Icons.add),
+                tooltip: 'New conversation',
+                onPressed:
+                    !gatewayService.writeEnabled || _workspace.agents.isEmpty
+                    ? null
+                    : () => _createSession(project),
+              ),
+            ],
+          ),
+          children: sessions
+              .map(
+                (session) => _buildSessionTile(
+                  session,
+                  contentPadding: const EdgeInsets.only(left: 32, right: 16),
+                  showActions: true,
                 ),
-        ),
-      ],
+              )
+              .toList(),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildFocusedSessionList(List<SessionSummary> sessions) {
+    if (sessions.isEmpty) {
+      return _buildEmptySessions(
+        icon: _sessionFilter == SessionListFilter.attention
+            ? Icons.check_circle_outline
+            : Icons.pause_circle_outline,
+        title: _sessionFilter == SessionListFilter.attention
+            ? 'Nothing needs attention'
+            : 'No conversations are running',
+      );
+    }
+    return ListView.separated(
+      itemCount: sessions.length,
+      separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
+      itemBuilder: (context, index) {
+        final session = sessions[index];
+        final project = _projectName(session);
+        final detail = _sessionFilter == SessionListFilter.attention
+            ? session.attention?.message.trim()
+            : sessionListSubtitle(session);
+        final subtitle = detail == null || detail.isEmpty
+            ? project
+            : '$project · $detail';
+        return _buildSessionTile(
+          session,
+          subtitle: subtitle,
+          showActions: true,
+          attentionStyle: _sessionFilter == SessionListFilter.attention,
+        );
+      },
+    );
+  }
+
+  Widget _buildSessionTile(
+    SessionSummary session, {
+    EdgeInsetsGeometry? contentPadding,
+    String? subtitle,
+    bool showActions = false,
+    bool attentionStyle = false,
+  }) {
+    subtitle ??= sessionListSubtitle(session);
+    return ListTile(
+      contentPadding: contentPadding,
+      leading: Icon(
+        attentionStyle
+            ? Icons.notification_important_outlined
+            : Icons.chat_bubble_outline,
+      ),
+      title: Text(sessionListTitle(session)),
+      subtitle: subtitle == null
+          ? null
+          : Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Badge(
+            isLabelVisible: session.unread,
+            child: _getStatusChip(session.status),
+          ),
+          if (showActions)
+            PopupMenuButton<String>(
+              tooltip: 'Conversation actions',
+              onSelected: (action) {
+                if (action == 'delete') _deleteSession(session);
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'delete',
+                  enabled: gatewayService.writeEnabled,
+                  child: const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.delete_outline),
+                    title: Text('Delete'),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+      onTap: () => _openSession(session),
+    );
+  }
+
+  Widget _buildEmptySessions({required IconData icon, required String title}) {
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 42, color: colors.onSurfaceVariant),
+          const SizedBox(height: 12),
+          Text(title, style: TextStyle(color: colors.onSurfaceVariant)),
+        ],
+      ),
     );
   }
 

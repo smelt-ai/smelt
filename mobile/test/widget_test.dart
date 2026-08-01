@@ -48,6 +48,77 @@ void main() {
     expect(sessionListSubtitle(session), isNull);
   });
 
+  test('session filters separate actionable and running conversations', () {
+    const approval = SessionSummary(
+      id: 'approval',
+      title: 'Approve command',
+      phase: 'awaiting_approval',
+      status: 'waiting_approval',
+      agent: 'codex',
+    );
+    const running = SessionSummary(
+      id: 'running',
+      title: 'Implement feature',
+      phase: 'running',
+      status: 'running',
+      agent: 'codex',
+    );
+    const idle = SessionSummary(
+      id: 'idle',
+      title: 'Finished task',
+      phase: 'idle',
+      agent: 'codex',
+    );
+    const failed = SessionSummary(
+      id: 'failed',
+      title: 'Failed task',
+      phase: 'failed',
+      status: 'done',
+      agent: 'codex',
+      attention: LifecycleAttention(
+        sessionId: 'failed',
+        title: 'Failed',
+        message: 'Agent stopped',
+        kind: 'failure',
+      ),
+    );
+    const sessions = [approval, running, idle, failed];
+
+    expect(
+      filterSessions(sessions, SessionListFilter.attention).map((s) => s.id),
+      ['approval', 'failed'],
+    );
+    expect(
+      filterSessions(sessions, SessionListFilter.running).map((s) => s.id),
+      ['running'],
+    );
+    expect(filterSessions(sessions, SessionListFilter.all), sessions);
+  });
+
+  testWidgets('session filter bar fits a compact phone width', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320, 160));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SessionFilterBar(
+            selected: SessionListFilter.attention,
+            attentionCount: 123,
+            runningCount: 45,
+            allCount: 234,
+            onChanged: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Action 99+'), findsOneWidget);
+    expect(find.text('Running 45'), findsOneWidget);
+    expect(find.text('All 99+'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   test('message auto-follow only continues at the bottom', () {
     expect(isNearMessageBottom(0, 0), isTrue);
     expect(isNearMessageBottom(48, 0), isTrue);
