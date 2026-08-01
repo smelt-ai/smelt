@@ -1341,35 +1341,40 @@ impl Workspace {
                             .ghost()
                             .icon(IconName::Settings)
                             .tooltip("设置  ⌘,")
-                            .dropdown_menu(move |menu, _window, _cx| {
-                                let e_settings = e_settings.clone();
-                                let e_check_update = e_settings.clone();
-                                menu.item(
-                                    PopupMenuItem::label(concat!("v", env!("CARGO_PKG_VERSION")))
+                            .dropdown_menu_with_anchor(
+                                Anchor::BottomLeft,
+                                move |menu, _window, _cx| {
+                                    let e_settings = e_settings.clone();
+                                    let e_check_update = e_settings.clone();
+                                    menu.item(
+                                        PopupMenuItem::label(concat!(
+                                            "v",
+                                            env!("CARGO_PKG_VERSION")
+                                        ))
                                         .disabled(true),
-                                )
-                                .separator()
-                                .item(
-                                    PopupMenuItem::new("帮助文档")
-                                        .icon(IconName::BookOpen)
-                                        .on_click(|_ev, _window, cx| {
-                                            cx.open_url("https://smelt.onoo.io/");
-                                        }),
-                                )
-                                .item(
-                                    PopupMenuItem::new("反馈问题")
-                                        .icon(IconName::Info)
-                                        .on_click(|_ev, _window, cx| {
-                                            cx.open_url(
+                                    )
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new("帮助文档")
+                                            .icon(IconName::BookOpen)
+                                            .on_click(|_ev, _window, cx| {
+                                                cx.open_url("https://smelt.onoo.io/");
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("反馈问题")
+                                            .icon(IconName::Info)
+                                            .on_click(|_ev, _window, cx| {
+                                                cx.open_url(
                                             "https://github.com/smelt-ai/smelt/issues/new/choose",
                                         );
-                                        }),
-                                )
-                                .item(
-                                    PopupMenuItem::new("检查更新...")
-                                        .icon(IconName::LoaderCircle)
-                                        .on_click(move |_ev, window, cx| {
-                                            e_check_update.update(cx, |ws, cx| {
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("检查更新...")
+                                            .icon(IconName::LoaderCircle)
+                                            .on_click(move |_ev, window, cx| {
+                                                e_check_update.update(cx, |ws, cx| {
                                                 if ws.llm_inputs.is_none() {
                                                     ws.init_llm_inputs(window, cx);
                                                 }
@@ -1385,25 +1390,26 @@ impl Workspace {
                                                 ws.settings_page_nonce += 1;
                                                 ws.open_settings_window(cx);
                                             });
-                                        }),
-                                )
-                                .separator()
-                                .item(
-                                    PopupMenuItem::new("设置...")
-                                        .icon(IconName::Settings)
-                                        .on_click(move |_ev, window, cx| {
-                                            e_settings.update(cx, |ws, cx| {
-                                                ws.check_daemon_outdated(cx);
-                                                if ws.llm_inputs.is_none() {
-                                                    ws.init_llm_inputs(window, cx);
-                                                }
-                                                ws.settings_page_ix =
-                                                    crate::SETTINGS_PAGE_APPEARANCE;
-                                                ws.open_settings_window(cx);
-                                            });
-                                        }),
-                                )
-                            }),
+                                            }),
+                                    )
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new("设置...")
+                                            .icon(IconName::Settings)
+                                            .on_click(move |_ev, window, cx| {
+                                                e_settings.update(cx, |ws, cx| {
+                                                    ws.check_daemon_outdated(cx);
+                                                    if ws.llm_inputs.is_none() {
+                                                        ws.init_llm_inputs(window, cx);
+                                                    }
+                                                    ws.settings_page_ix =
+                                                        crate::SETTINGS_PAGE_APPEARANCE;
+                                                    ws.open_settings_window(cx);
+                                                });
+                                            }),
+                                    )
+                                },
+                            ),
                     )
                     .when(settings_needs_attention, |d| {
                         d.child(
