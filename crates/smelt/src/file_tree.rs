@@ -4,7 +4,7 @@
 //! 跟 git_panel.rs 同一个套路：从 main.rs 拆出来的 `impl Workspace` 方法 + 独立
 //! 渲染/搜索函数，字段仍然声明在 main.rs 的 `Workspace` struct 里。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
@@ -48,7 +48,7 @@ pub struct OpenFile {
     /// 上次保存时检测到磁盘内容跟 saved_content 对不上（外部改过）。为 true 时
     /// 再按一次 Cmd+S 会跳过冲突检查强制覆盖——用"再按一次"当作用户已确认覆盖。
     conflict_pending: bool,
-    /// markdown 文件的「预览」开关（仅 .md 生效，见 file_content_pane）；切换打开的
+    /// markdown 文件的「预览」开关（仅 .md 生效，见 file_content_parts）；切换打开的
     /// 文件不带过去，open_file_now 每次按文件类型重置（Markdown 默认进预览）。
     preview: bool,
 }
@@ -177,16 +177,145 @@ fn search_project(root: &str, query: &str) -> (Vec<SearchHit>, bool) {
     (name_hits, truncated)
 }
 
-/// 文件树搜索结果视图：扁平命中列表（替代 query 非空时的树形浏览）。
-/// 每项显示相对路径 + 内容命中行预览，点击用 view_file 打开该文件。
+/// 搜索结果的临时目录树。只含命中文件和它们的祖先目录，不触碰磁盘；索引指向
+/// `SearchState::hits`，因此仍能保留内容命中对应的跳转行号。
+#[derive(Default)]
+struct SearchTreeDir {
+    dirs: BTreeMap<String, SearchTreeDir>,
+    files: Vec<usize>,
+}
+
+fn build_search_tree(hits: &[SearchHit]) -> SearchTreeDir {
+    let mut root = SearchTreeDir::default();
+    for (ix, hit) in hits.iter().enumerate() {
+        let mut parts = hit
+            .rel
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .peekable();
+        let mut dir = &mut root;
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                dir = dir.dirs.entry(part.to_string()).or_default();
+            } else {
+                dir.files.push(ix);
+            }
+        }
+    }
+    root
+}
+
+/// 把只有一个子目录且没有文件的路径压成一行，例如 `smelt-core / src`。这和参考
+/// 文件筛选器一致：保留层级语义，但不会为了单一路径浪费一串空行。
+fn search_tree_rows(
+    dir: &SearchTreeDir,
+    hits: &[SearchHit],
+    depth: usize,
+    row_id: &mut usize,
+    view: Entity<Workspace>,
+    muted: Hsla,
+    fg: Hsla,
+    hover: Hsla,
+) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+
+    for (name, child) in &dir.dirs {
+        let mut label = name.clone();
+        let mut visible_child = child;
+        while visible_child.files.is_empty() && visible_child.dirs.len() == 1 {
+            let (next_name, next_child) = visible_child
+                .dirs
+                .iter()
+                .next()
+                .expect("single child directory must exist");
+            label.push_str(" / ");
+            label.push_str(next_name);
+            visible_child = next_child;
+        }
+
+        let id = *row_id;
+        *row_id += 1;
+        rows.push(
+            div()
+                .id(("search-dir", id))
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl(px(8. + depth as f32 * 16.))
+                .pr_2()
+                .py(px(2.))
+                .text_sm()
+                .text_color(fg)
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .text_color(muted),
+                )
+                .child(Icon::new(IconName::FolderOpen).size(px(16.)).text_color(fg))
+                .child(div().min_w_0().truncate().child(label))
+                .into_any_element(),
+        );
+        rows.extend(search_tree_rows(
+            visible_child,
+            hits,
+            depth + 1,
+            row_id,
+            view.clone(),
+            muted,
+            fg,
+            hover,
+        ));
+    }
+
+    for &ix in &dir.files {
+        let hit = &hits[ix];
+        let name = hit
+            .rel
+            .rsplit('/')
+            .next()
+            .unwrap_or(hit.rel.as_str())
+            .to_string();
+        let path = hit.path.clone();
+        let line = hit.line.as_ref().map(|(line, _)| *line);
+        let id = *row_id;
+        *row_id += 1;
+        let open_view = view.clone();
+        rows.push(
+            div()
+                .id(("search-file", id))
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl(px(8. + depth as f32 * 16. + 14.))
+                .pr_2()
+                .py(px(2.))
+                .text_sm()
+                .text_color(fg)
+                .cursor_pointer()
+                .hover(move |row| row.bg(hover))
+                .child(Icon::new(IconName::File).size(px(16.)).text_color(muted))
+                .child(div().min_w_0().truncate().child(name))
+                .on_click(move |_event, window, cx| {
+                    open_view.update(cx, |workspace, cx| {
+                        workspace.view_file_at(path.clone(), line, window, cx);
+                    });
+                })
+                .into_any_element(),
+        );
+    }
+    rows
+}
+
+/// 文件树搜索结果视图：保留命中文件的目录层级，而不是把相对路径拼成扁平文本。
+/// 点击文件仍会跳到内容命中行。
 pub fn search_results_view(
     state: &SearchState,
     scroll: &ScrollHandle,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let (muted, fg, hover, accent) = {
+    let (muted, fg, hover) = {
         let t = cx.theme();
-        (t.muted_foreground, t.foreground, t.accent, t.primary)
+        (t.muted_foreground, t.foreground, t.accent)
     };
     // 顶栏状态：搜索中 / 无结果 / N 项命中(是否截断)。
     let status = if !state.done {
@@ -199,59 +328,18 @@ pub fn search_results_view(
         format!("命中 {} 项", state.hits.len())
     };
 
-    let this = cx.entity();
-    let rows: Vec<AnyElement> = state
-        .hits
-        .iter()
-        .enumerate()
-        .map(|(i, hit)| {
-            let this = this.clone();
-            let p = hit.path.clone();
-            // 拆出目录前缀与文件名：文件名高亮、目录弱化，便于扫读。
-            let (dir_part, name_part) = match hit.rel.rfind('/') {
-                Some(idx) => (hit.rel[..=idx].to_string(), hit.rel[idx + 1..].to_string()),
-                None => (String::new(), hit.rel.clone()),
-            };
-            let preview = hit.line.clone();
-            let goto_line = preview.as_ref().map(|(no, _)| *no);
-            div()
-                .id(("search-hit", i))
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .px_2()
-                .py(px(2.0))
-                .hover(move |s| s.bg(hover))
-                .on_click(move |_ev, window, cx| {
-                    this.update(cx, |ws, cx| {
-                        ws.view_file_at(p.clone(), goto_line, window, cx);
-                    });
-                })
-                // 第一行：目录（弱）+ 文件名（强）。
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_sm()
-                        .child(Icon::new(IconName::File).size(px(13.)).text_color(muted))
-                        .child(div().text_color(muted).child(dir_part))
-                        .child(div().text_color(fg).child(name_part)),
-                )
-                // 第二行：内容命中的行号 + 行预览（仅内容命中时有）。
-                .children(preview.map(|(no, text)| {
-                    div()
-                        .flex()
-                        .gap_1()
-                        .pl(px(18.))
-                        .text_xs()
-                        .text_color(muted)
-                        .child(div().text_color(accent).child(format!("{no}")))
-                        .child(div().min_w_0().child(text))
-                }))
-                .into_any_element()
-        })
-        .collect();
+    let tree = build_search_tree(&state.hits);
+    let mut row_id = 0;
+    let rows = search_tree_rows(
+        &tree,
+        &state.hits,
+        0,
+        &mut row_id,
+        cx.entity(),
+        muted,
+        fg,
+        hover,
+    );
 
     div()
         .id("search-results")
@@ -632,7 +720,9 @@ pub fn file_tree(
     div()
         .id("file-tree")
         .flex_1()
+        .min_w_0()
         .min_h_0()
+        .overflow_hidden()
         .overflow_y_scroll()
         .flex()
         .flex_col()
@@ -674,19 +764,28 @@ fn is_previewable_image(path: &str) -> bool {
     )
 }
 
-/// 文件内容查看/编辑面板：直接用 gpui-component 的 Editor（InputState code_editor
+/// 打开的文件内容拆成路径栏和内容体，供 Inspector 把路径栏放在文件树分栏上方。
+pub struct FileContentParts {
+    pub header: Option<AnyElement>,
+    pub body: AnyElement,
+}
+
+/// 构建文件路径栏与内容体。直接用 gpui-component 的 Editor（InputState code_editor
 /// 模式），自带语法高亮、行号、搜索、大文件下的增量编辑，不用再自己管虚拟滚动。
-pub fn file_content_pane(
+pub fn file_content_parts(
     open_file: &Option<OpenFile>,
     roots: &[String],
     cx: &mut Context<Workspace>,
-) -> Div {
+) -> FileContentParts {
     let (muted, fg, border, warning) = {
         let t = cx.theme();
         (t.muted_foreground, t.foreground, t.border, t.warning)
     };
     match open_file {
-        None => placeholder_view("← 从左侧选择文件查看内容", muted),
+        None => FileContentParts {
+            header: None,
+            body: placeholder_view("文件", muted).into_any_element(),
+        },
         Some(of) => {
             // 面包屑：项目名（根目录名）> 中间目录 > 文件名，参考 Codex App——
             // 光看文件名分不清「这是哪个项目/哪层目录下的文件」，尤其多根工作区。
@@ -840,14 +939,10 @@ pub fn file_content_pane(
                     )
                     .into_any_element()
             };
-            div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(header)
-                .child(body)
+            FileContentParts {
+                header: Some(header.into_any_element()),
+                body,
+            }
         }
     }
 }
@@ -1576,5 +1671,35 @@ impl Workspace {
         if let Some(view) = self.cur().and_then(|s| s.active_term().cloned()) {
             view.update(cx, |tv, cx| tv.send_text(&msg, cx));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SearchHit, build_search_tree};
+
+    #[test]
+    fn search_tree_keeps_matching_files_under_their_ancestor_directories() {
+        let hits = vec![
+            SearchHit {
+                path: "/repo/crates/smelt-core/src/lib.rs".into(),
+                rel: "crates/smelt-core/src/lib.rs".into(),
+                line: None,
+            },
+            SearchHit {
+                path: "/repo/mobile/lib/pages/qr_scan.dart".into(),
+                rel: "mobile/lib/pages/qr_scan.dart".into(),
+                line: Some((8, "library".into())),
+            },
+        ];
+
+        let tree = build_search_tree(&hits);
+        let crates = tree.dirs.get("crates").expect("crates ancestor exists");
+        let core = crates
+            .dirs
+            .get("smelt-core")
+            .expect("crate ancestor exists");
+        assert_eq!(core.dirs["src"].files, vec![0]);
+        assert_eq!(tree.dirs["mobile"].dirs["lib"].dirs["pages"].files, vec![1]);
     }
 }
