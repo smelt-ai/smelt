@@ -1,98 +1,85 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 <div align="center">
 
 <img src="assets/icon-1024.png" alt="smelt" width="128">
 
 # smelt
 
-**Mac 上的 AI coding 驾驶舱 —— 一个专为「同时指挥多个 CLI coding agent 干活」设计的桌面工作台。**
+**The AI coding cockpit for macOS — a desktop workspace designed to orchestrate multiple CLI coding agents at once.**
 
-基于 [GPUI](https://gpui.rs) 的原生应用，内嵌真终端，多项目 × 多标签。
-Claude Code、Codex、Gemini CLI……凡是跑在终端里的 agent，都能在这里并排看住。
+A native application built with [GPUI](https://gpui.rs), with real embedded terminals, multiple projects, and multiple tabs.
+Claude Code, Codex, Gemini CLI — any agent that runs in a terminal can be monitored side by side.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **状态**：working prototype，持续迭代中。
+> **Status**: working prototype, under active development.
 
 </div>
 
 ---
 
-## 为什么
+## Why
 
-AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agent 能独立跑完读代码、改代码、跑测试、
-提交的整条链路，人的角色就该从「打字的人」变成「看导航、下指令的人」。
+AI plugins make editors smarter, but people are still the ones stuck at the keyboard. When an agent can independently read code, edit code, run tests, and commit changes, the human role should shift from “the person who types” to “the person who navigates and gives direction.”
 
-这时候需要的不是一个更聪明的编辑器，而是一个能同时看住好几个正在跑的 agent 的**驾驶舱**。
-smelt 把终端——agent 真正干活的地方——变成主战场。
+What is needed then is not a smarter editor, but a **cockpit** for keeping an eye on several agents working at the same time. smelt makes the terminal — where agents actually do their work — the primary workspace.
 
-## 安装
+## Installation
 
-从 [Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`，拖进 Applications 即可。
-应用内置在线更新，后续版本会自动检查并静默下载。
+Download `Smelt.dmg` from [Releases](https://github.com/smelt-ai/smelt/releases) and drag it into Applications.
+The app includes in-app updates and will automatically check for and silently download later versions.
 
-> 目前仅支持 **macOS（Apple Silicon）**。
+> Currently supports **macOS (Apple Silicon)** only.
 
-## 功能
+## Features
 
-- **工作台**：多项目 × 多标签内嵌真终端（跑 `claude`/`codex`/`copilot`/`vim`/`htop` 等交互式程序与全屏 TUI），
-  分屏、命令面板（`Cmd+K`）、可自定义的快捷启动
-- **看住 agent**：靠终端标题（OSC 0/2）+ OSC 9/777 通知 + 响铃感知会话状态（等你批准 / 等你输入 /
-  跑着呢 / 有结果可看），需要关注时角标提醒 + 系统通知；不依赖任何一家的私有格式
-- **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、Markdown/Mermaid 渲染
-- **Claude Code 专属**：用量统计、历史会话与记忆浏览（读本地 `~/.claude/projects/**` transcript）
-- **远程访问**（默认关闭）：用 Smelt 手机 App 查看/操控本机 agent 会话，局域网直连，
-  跨网走 iroh P2P（打洞直连，打不通自动回退中继），配对二维码永久有效。
-  **配对码即权限，务必先读
-  [远程访问文档](https://github.com/smelt-ai/smelt/blob/main/website/content/docs.md#远程访问)** 再开
-- **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）、可选接 LLM 大脑的桌面宠物
+- **Workspace**: Multiple projects and tabs with real embedded terminals for interactive programs and full-screen TUIs such as `claude`, `codex`, `copilot`, `vim`, and `htop`; split panes, a command palette (`Cmd+K`), and customizable quick launchers
+- **Keep an eye on agents**: Session state is inferred from terminal titles (OSC 0/2), OSC 9/777 notifications, and bells — waiting for approval, waiting for input, running, or ready with results. Badges and system notifications highlight sessions that need attention, without depending on any vendor-specific private format
+- **Read and edit code**: File tree and search, built-in editor, Git diff view, and Markdown/Mermaid rendering
+- **Claude Code integration**: Usage statistics, historical sessions, and memory browsing by reading local `~/.claude/projects/**` transcripts
+- **Remote access** (off by default): Use the Smelt mobile app to view and control local agent sessions. Connect directly over the LAN, or use iroh P2P across networks with hole punching and automatic relay fallback. Pairing QR codes remain valid permanently.
+  **The pairing code grants access. Read the [remote access documentation](https://github.com/smelt-ai/smelt/blob/main/website/content/docs.md#远程访问) before enabling it.**
+- **More**: Persistent terminal sessions that survive GUI exits and crashes and automatically reattach on restart, plus an optional desktop pet powered by an LLM
 
-完整功能清单、快捷键与架构细节见 [`docs/workspace.md`](docs/workspace.md)；
-产品方向见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
+See [`docs/workspace.md`](docs/workspace.md) for the complete feature list, keyboard shortcuts, and architecture details.
+See [`docs/product-roadmap.md`](docs/product-roadmap.md) for the product direction.
 
-## 从源码构建
+## Build from source
 
-需要 Rust stable 与 macOS。**无需安装完整 Xcode**——项目通过 `gpui_platform` 的
-`runtime_shaders` feature 把 Metal 着色器改到运行时编译，只装 Command Line Tools 即可。
+Rust stable and macOS are required. **A full Xcode installation is not needed** — the project uses the `runtime_shaders` feature in `gpui_platform` to compile Metal shaders at runtime, so Command Line Tools are sufficient.
 
-打包 DMG 的 `make dist-build` 需要 **Python 3.10+**（Command Line Tools 自带的
-`/usr/bin/python3` 可能仍是 3.9，版本不够可 `brew install python` 或用
-`SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build` 指定解释器）。
+The `make dist-build` target requires **Python 3.10+** to package a DMG. The `/usr/bin/python3` included with Command Line Tools may still be Python 3.9; if needed, run `brew install python` or set the interpreter explicitly with `SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build`.
 
 ```sh
-cargo run --bin smelt       # 开发模式直接跑 GUI
-make dist-build             # 编译 release 并打包出 dist/Smelt.dmg
-make help                   # 查看全部构建目标
+cargo run --bin smelt       # Run the GUI directly in development mode
+make dist-build             # Build a release and package dist/Smelt.dmg
+make help                   # Show all available build targets
 ```
 
-跑测试与类型检查：
+Run tests and type checks:
 
 ```sh
 cargo check --all-targets
 cargo test
 ```
 
-## 架构
+## Architecture
 
-Rust 2021 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component)（GUI）、
-portable-pty + alacritty_terminal（内嵌终端）、tokio、axum（远程网关）、iroh（P2P 隧道）。
-配置放 `~/.smelt/`。
+Rust 2021 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, axum for the remote gateway, and iroh for P2P tunnels.
+Configuration is stored in `~/.smelt/`.
 
-仓库产出四个二进制，日常只需要跑第一个：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，
-类 tmux，由 GUI 按需拉起，不需要手动运行）、`gateway`（远程网关的独立可执行版，用于开发调试）、
-`smelt-notify`（Claude Code hooks 调用的状态上报小工具）。
-移动端在 `mobile/`（Flutter），经 `crates/smelt-mobile` 复用 Rust 侧的 iroh 隧道。
+The repository produces four binaries. In daily use, you only need the first: `smelt` (the main GUI), `smeltd` (a terminal persistence daemon, similar to tmux, launched on demand by the GUI), `gateway` (a standalone executable for developing and debugging the remote gateway), and `smelt-notify` (a small status-reporting utility called by Claude Code hooks).
+The mobile client lives in `mobile/` (Flutter) and reuses the iroh tunnel from the Rust side through `crates/smelt-mobile`.
 
-详细架构、目录结构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，
-产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，
-杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)，
-远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
+For detailed architecture, directory structure, and the implemented feature list, see [`docs/workspace.md`](docs/workspace.md).
+For the main product roadmap, see [`docs/product-roadmap.md`](docs/product-roadmap.md); for the miscellaneous backlog, see [`docs/roadmap.md`](docs/roadmap.md); and for remote protocol details, see [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md).
 
-## 贡献
+## Contributing
 
-欢迎 issue 与 PR。提交前请确保 `cargo check --all-targets` 与 `cargo test` 通过，
-commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org/)。
+Issues and pull requests are welcome. Before submitting, please make sure `cargo check --all-targets` and `cargo test` pass, and follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages.
 
 ## License
 
