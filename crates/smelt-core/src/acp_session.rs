@@ -118,9 +118,15 @@ pub enum ElicitFieldKindView {
 pub struct ElicitFieldView {
     pub key: String,
     pub title: String,
-    #[serde(default)]
+    // Snapshots before optional elicitation fields existed omitted this key.
+    // Those fields were all required, so preserve that behavior on restore.
+    #[serde(default = "elicitation_field_required_by_default")]
     pub required: bool,
     pub kind: ElicitFieldKindView,
+}
+
+fn elicitation_field_required_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1519,6 +1525,26 @@ mod tests {
         assert_eq!(snapshot.entries_offset, 2);
         assert_eq!(snapshot.entries.len(), 1);
         assert!(matches!(&snapshot.entries[0], AcpEntry::User(text) if text == "three"));
+    }
+
+    #[test]
+    fn legacy_elicitation_field_without_required_stays_required() {
+        let legacy: ElicitFieldView = serde_json::from_value(serde_json::json!({
+            "key": "scope",
+            "title": "Scope",
+            "kind": { "Text": { "secret": false } }
+        }))
+        .expect("legacy elicitation field should deserialize");
+        assert!(legacy.required);
+
+        let optional: ElicitFieldView = serde_json::from_value(serde_json::json!({
+            "key": "notes",
+            "title": "Notes",
+            "required": false,
+            "kind": { "Text": { "secret": false } }
+        }))
+        .expect("new optional elicitation field should deserialize");
+        assert!(!optional.required);
     }
 
     #[test]
