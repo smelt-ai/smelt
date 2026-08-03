@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const WORKSPACE_MENU_VERSION: u32 = 1;
+pub const WORKSPACE_MENU_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceMenuSnapshot {
@@ -66,6 +66,9 @@ pub struct WorkspaceMenuSession {
     pub project_title: Option<String>,
     pub project_order: u32,
     pub session_order: u32,
+    /// Pane order within a split terminal session. ACP and single-pane sessions use zero.
+    #[serde(default)]
+    pub leaf_order: u32,
     #[serde(default)]
     pub agent: Option<String>,
 }
@@ -89,6 +92,7 @@ mod tests {
                     project_title: None,
                     project_order: 0,
                     session_order: 0,
+                    leaf_order: 0,
                     agent: Some("codex".into()),
                 },
                 WorkspaceMenuSession {
@@ -101,6 +105,7 @@ mod tests {
                     project_title: None,
                     project_order: 0,
                     session_order: 1,
+                    leaf_order: 0,
                     agent: Some("codex".into()),
                 },
             ],

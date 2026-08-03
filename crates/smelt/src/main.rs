@@ -3693,37 +3693,62 @@ impl Workspace {
             .sessions
             .iter()
             .enumerate()
-            .filter_map(|(session_order, session)| {
-                let (id, kind, agent) = match &session.kind {
-                    SessionKind::Term { active, .. } => (
-                        active.read(cx).session_id().to_string(),
-                        WorkspaceMenuSessionKind::Terminal,
-                        None,
-                    ),
+            .flat_map(|(session_order, session)| {
+                let project = membership.get(session_order).and_then(|value| *value);
+                let project_root = project.map(|(_, group)| group.root.clone());
+                let project_title = project.map(|(_, group)| group.label.clone());
+                let project_order = project
+                    .map(|(order, _)| order.min(u32::MAX as usize) as u32)
+                    .unwrap_or(u32::MAX);
+                let session_order = session_order.min(u32::MAX as usize) as u32;
+
+                match &session.kind {
+                    SessionKind::Term { .. } => {
+                        let leaves = session.term_leaves();
+                        let single_pane = leaves.len() == 1;
+                        leaves
+                            .into_iter()
+                            .enumerate()
+                            .map(|(leaf_order, pane)| WorkspaceMenuSession {
+                                id: pane.read(cx).session_id().to_string(),
+                                kind: WorkspaceMenuSessionKind::Terminal,
+                                title: if single_pane {
+                                    session.title(cx)
+                                } else {
+                                    pane_title(&pane, cx)
+                                },
+                                custom_title: if single_pane {
+                                    session.custom_title.is_some()
+                                } else {
+                                    pane.read(cx).custom_title().is_some()
+                                },
+                                cwd: pane.read(cx).cwd(),
+                                project_root: project_root.clone(),
+                                project_title: project_title.clone(),
+                                project_order,
+                                session_order,
+                                leaf_order: leaf_order.min(u32::MAX as usize) as u32,
+                                agent: None,
+                            })
+                            .collect::<Vec<_>>()
+                    }
                     SessionKind::Acp(view) => {
                         let view = view.read(cx);
-                        (
-                            view.session_id().to_string(),
-                            WorkspaceMenuSessionKind::Acp,
-                            Some(view.agent_kind().id().to_string()),
-                        )
+                        vec![WorkspaceMenuSession {
+                            id: view.session_id().to_string(),
+                            kind: WorkspaceMenuSessionKind::Acp,
+                            title: session.title(cx),
+                            custom_title: session.custom_title.is_some(),
+                            cwd: view.cwd(),
+                            project_root,
+                            project_title,
+                            project_order,
+                            session_order,
+                            leaf_order: 0,
+                            agent: Some(view.agent_kind().id().to_string()),
+                        }]
                     }
-                };
-                let project = membership.get(session_order).and_then(|value| *value);
-                Some(WorkspaceMenuSession {
-                    id,
-                    kind,
-                    title: session.title(cx),
-                    custom_title: session.custom_title.is_some(),
-                    cwd: session.cwd(cx),
-                    project_root: project.map(|(_, group)| group.root.clone()),
-                    project_title: project.map(|(_, group)| group.label.clone()),
-                    project_order: project
-                        .map(|(order, _)| order.min(u32::MAX as usize) as u32)
-                        .unwrap_or(u32::MAX),
-                    session_order: session_order.min(u32::MAX as usize) as u32,
-                    agent,
-                })
+                }
             })
             .collect();
 
@@ -8080,6 +8105,7 @@ mod workspace_state_tests {
                     project_title: Some("repo".into()),
                     project_order: 0,
                     session_order: 0,
+                    leaf_order: 0,
                     agent: Some("codex".into()),
                 }],
             ),

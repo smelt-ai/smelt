@@ -29,7 +29,8 @@ use crate::agent_status::AgentStatus;
 use crate::attention::{AttentionItem, AttentionStore, apply_daemon_transition};
 use crate::daemon_state::{DaemonPhase, DaemonSessionState};
 use crate::workspace_menu::{
-    WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
+    WORKSPACE_MENU_VERSION, WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
+    WorkspaceMenuSnapshot,
 };
 
 fn mobile_workspace_menu() -> WorkspaceMenuSnapshot {
@@ -67,6 +68,7 @@ fn mobile_workspace_menu() -> WorkspaceMenuSnapshot {
             project_title: Some(project.title.clone()),
             project_order: project.order,
             session_order: menu.sessions.len().min(u32::MAX as usize) as u32,
+            leaf_order: 0,
             agent: Some(remote.agent),
         });
     }
@@ -155,9 +157,125 @@ fn workspace_menu_from_value(value: &serde_json::Value) -> WorkspaceMenuSnapshot
         && let Ok(snapshot) = serde_json::from_value::<WorkspaceMenuSnapshot>(menu.clone())
         && snapshot.version > 0
     {
+        let mut snapshot = snapshot;
+        if snapshot.version < WORKSPACE_MENU_VERSION {
+            add_legacy_terminal_leaves(value, &mut snapshot);
+        }
         return snapshot;
     }
-    legacy_workspace_menu_from_value(value)
+    let mut snapshot = legacy_workspace_menu_from_value(value);
+    add_legacy_terminal_leaves(value, &mut snapshot);
+    snapshot
+}
+
+fn add_legacy_terminal_leaves(value: &serde_json::Value, menu: &mut WorkspaceMenuSnapshot) {
+    let Some(saved_sessions) = value
+        .get("sessions")
+        .and_then(|sessions| sessions.as_array())
+    else {
+        return;
+    };
+    for (session_order, saved) in saved_sessions.iter().enumerate() {
+        if saved.get("acp").is_some_and(|acp| !acp.is_null()) {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        collect_saved_terminal_leaves(&saved["layout"], &mut leaves);
+        if leaves.is_empty() {
+            continue;
+        }
+        let base = leaves.iter().find_map(|leaf| {
+            let id = leaf.get("id")?.as_str()?;
+            menu.session(id).cloned()
+        });
+        for (leaf_order, leaf) in leaves.into_iter().enumerate() {
+            let Some(id) = leaf.get("id").and_then(|id| id.as_str()) else {
+                continue;
+            };
+            if let Some(existing) = menu.sessions.iter_mut().find(|session| session.id == id) {
+                existing.leaf_order = leaf_order.min(u32::MAX as usize) as u32;
+                continue;
+            }
+            let cwd = leaf
+                .get("cwd")
+                .and_then(|cwd| cwd.as_str())
+                .map(String::from);
+            let project_root = base
+                .as_ref()
+                .and_then(|session| session.project_root.clone())
+                .or_else(|| {
+                    cwd.as_deref().and_then(|cwd| {
+                        let roots = menu
+                            .projects
+                            .iter()
+                            .map(|project| project.root.clone())
+                            .collect::<Vec<_>>();
+                        mobile_project_root(&roots, cwd)
+                    })
+                });
+            let project = project_root
+                .as_deref()
+                .and_then(|root| menu.projects.iter().find(|project| project.root == root));
+            let custom_title = leaf
+                .get("custom_title")
+                .and_then(|title| title.as_str())
+                .map(str::trim)
+                .filter(|title| !title.is_empty());
+            let title = custom_title
+                .map(String::from)
+                .or_else(|| {
+                    leaf.get("launch_label")
+                        .and_then(|title| title.as_str())
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .map(String::from)
+                })
+                .or_else(|| cwd.as_deref().map(path_title))
+                .unwrap_or_else(|| id.to_string());
+            menu.sessions.push(WorkspaceMenuSession {
+                id: id.to_string(),
+                kind: WorkspaceMenuSessionKind::Terminal,
+                title,
+                custom_title: custom_title.is_some(),
+                cwd,
+                project_root: project_root.clone(),
+                project_title: base
+                    .as_ref()
+                    .and_then(|session| session.project_title.clone())
+                    .or_else(|| project.map(|project| project.title.clone())),
+                project_order: base
+                    .as_ref()
+                    .map(|session| session.project_order)
+                    .or_else(|| project.map(|project| project.order))
+                    .unwrap_or(u32::MAX),
+                session_order: base
+                    .as_ref()
+                    .map(|session| session.session_order)
+                    .unwrap_or_else(|| session_order.min(u32::MAX as usize) as u32),
+                leaf_order: leaf_order.min(u32::MAX as usize) as u32,
+                agent: None,
+            });
+        }
+    }
+}
+
+fn collect_saved_terminal_leaves<'a>(
+    pane: &'a serde_json::Value,
+    leaves: &mut Vec<&'a serde_json::Value>,
+) {
+    if let Some(leaf) = pane.get("Leaf") {
+        leaves.push(leaf);
+        return;
+    }
+    if let Some(children) = pane
+        .get("Split")
+        .and_then(|split| split.get("children"))
+        .and_then(|children| children.as_array())
+    {
+        for child in children {
+            collect_saved_terminal_leaves(child, leaves);
+        }
+    }
 }
 
 /// 兼容尚未写入共享 menu 快照的旧 workspace.json。这里只负责一次性读旧结构；
@@ -229,6 +347,7 @@ fn legacy_workspace_menu_from_value(value: &serde_json::Value) -> WorkspaceMenuS
             project_title,
             project_order: project_order.min(u32::MAX as usize) as u32,
             session_order: session_order.min(u32::MAX as usize) as u32,
+            leaf_order: 0,
             agent: acp
                 .get("agent")
                 .and_then(|agent| agent.as_str())
@@ -527,7 +646,7 @@ fn mobile_summary_from_daemon(
         project_title: menu_session.project_title.clone(),
         project_order: menu_session.project_order,
         session_order: menu_session.session_order,
-        leaf_order: 0,
+        leaf_order: menu_session.leaf_order,
         updated_at: session.updated_at.min(i64::MAX as u64) as i64,
         detail: session.detail_line(),
         unread,
@@ -1960,6 +2079,7 @@ mod tests {
                 project_title: Some("mobile-project".into()),
                 project_order: 0,
                 session_order: 2,
+                leaf_order: 0,
                 agent: Some("codex".into()),
             }],
         )
@@ -1982,6 +2102,7 @@ mod tests {
                 project_title: None,
                 project_order: 0,
                 session_order: 0,
+                leaf_order: 1,
                 agent: Some("codex".into()),
             }],
         );
@@ -1989,6 +2110,7 @@ mod tests {
         let summary = mobile_summary_from_daemon(&session, &menu, &attention).unwrap();
         assert_eq!(summary.kind, WorkspaceMenuSessionKind::Terminal);
         assert_eq!(summary.title, "Codex CLI");
+        assert_eq!(summary.leaf_order, 1);
     }
 
     #[test]
@@ -2038,6 +2160,98 @@ mod tests {
         assert_eq!(session.title, "PC display title");
         assert_eq!(session.project_title.as_deref(), Some("repo · two"));
         assert_eq!(session.session_order, 3);
+        assert_eq!(session.leaf_order, 0);
+    }
+
+    #[test]
+    fn version_one_workspace_menu_recovers_all_split_terminal_leaves() {
+        let value = serde_json::json!({
+            "projects": ["/repo"],
+            "sessions": [{
+                "layout": {
+                    "Split": {
+                        "axis": "H",
+                        "children": [
+                            {"Leaf": {"id": "terminal-left", "cwd": "/repo", "custom_title": "Tests"}},
+                            {"Leaf": {"id": "terminal-right", "cwd": "/repo"}}
+                        ]
+                    }
+                },
+                "active": 1,
+                "acp": null
+            }],
+            "menu": {
+                "version": 1,
+                "projects": [{"root": "/repo", "title": "repo", "order": 0}],
+                "sessions": [{
+                    "id": "terminal-right",
+                    "kind": "terminal",
+                    "title": "repo",
+                    "cwd": "/repo",
+                    "project_root": "/repo",
+                    "project_title": "repo",
+                    "project_order": 0,
+                    "session_order": 0
+                }]
+            }
+        });
+
+        let menu = workspace_menu_from_value(&value);
+        assert_eq!(menu.sessions.len(), 2);
+        let left = menu.session("terminal-left").unwrap();
+        assert_eq!(left.title, "Tests");
+        assert_eq!(left.leaf_order, 0);
+        let right = menu.session("terminal-right").unwrap();
+        assert_eq!(right.leaf_order, 1);
+    }
+
+    #[test]
+    fn mobile_lifecycle_keeps_all_split_terminal_leaves_in_order() {
+        let hub = mobile_lifecycle_hub_for_test();
+        let mut left = mobile_daemon_state(DaemonPhase::Idle);
+        left.id = "terminal-left".into();
+        let mut right = mobile_daemon_state(DaemonPhase::Idle);
+        right.id = "terminal-right".into();
+        hub.apply_snapshot(vec![right, left]);
+
+        let menu = WorkspaceMenuSnapshot::current(
+            vec![],
+            vec![
+                WorkspaceMenuSession {
+                    id: "terminal-left".into(),
+                    kind: WorkspaceMenuSessionKind::Terminal,
+                    title: "Left pane".into(),
+                    custom_title: false,
+                    cwd: Some("/tmp/mobile-project".into()),
+                    project_root: Some("/tmp/mobile-project".into()),
+                    project_title: Some("mobile-project".into()),
+                    project_order: 0,
+                    session_order: 4,
+                    leaf_order: 0,
+                    agent: None,
+                },
+                WorkspaceMenuSession {
+                    id: "terminal-right".into(),
+                    kind: WorkspaceMenuSessionKind::Terminal,
+                    title: "Right pane".into(),
+                    custom_title: false,
+                    cwd: Some("/tmp/mobile-project".into()),
+                    project_root: Some("/tmp/mobile-project".into()),
+                    project_title: Some("mobile-project".into()),
+                    project_order: 0,
+                    session_order: 4,
+                    leaf_order: 1,
+                    agent: None,
+                },
+            ],
+        );
+
+        let summaries = hub.summaries_with_menu(&menu);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].id, "terminal-left");
+        assert_eq!(summaries[0].leaf_order, 0);
+        assert_eq!(summaries[1].id, "terminal-right");
+        assert_eq!(summaries[1].leaf_order, 1);
     }
 
     #[test]
