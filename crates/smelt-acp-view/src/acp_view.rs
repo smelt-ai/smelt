@@ -128,12 +128,6 @@ pub struct AcpView {
     /// 已粘进来、等着随下一条 prompt 发出去的图片（缩略图条显示，发完清空）。
     /// 只在内存里待到发送为止：图片体积大，不进 workspace.json。
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
-    /// ACP 规定同一 session 一次只能有一个在跑的 turn；运行中点发送不能裸并发
-    /// 塞第二个 prompt（协议没设计支持，行为全凭 agent 自己兜底）。这里改成
-    /// 排队：Running 时点发送只入队，输入框上方给一条可见的「已排队」条，
-    /// 相位回 Idle（apply_snapshot 里那个分支）再按顺序真正发出去。只在内存里
-    /// 待到发送为止，不落盘。
-    queued_prompts: std::collections::VecDeque<(String, Vec<std::sync::Arc<gpui::Image>>)>,
     /// 已发送消息的解码图片缓存，避免流式输出或 spinner 重绘时反复解码 base64。
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
@@ -391,7 +385,6 @@ impl AcpView {
             profile_id,
             agent,
             pending_images: Vec::new(),
-            queued_prompts: std::collections::VecDeque::new(),
             rendered_images,
             rendered_diffs,
             supports_image: true,
@@ -869,8 +862,7 @@ impl AcpView {
     }
 
     /// 真正把一条 prompt 打给 smeltd——不碰 `self.pending_images`，图片由调用方
-    /// 传入。`send_prompt`（直发）和排队 flush（`flush_queued_prompt`）都走这里，
-    /// 保证两条路径的编码/发送逻辑只有一份。
+    /// 传入，保证文本和图片 prompt 共用同一套编码/发送逻辑。
     fn send_prompt_now(
         &mut self,
         text: String,
@@ -894,15 +886,6 @@ impl AcpView {
             {
                 cx.notify();
             }
-        }
-    }
-
-    /// 相位回 Idle 时按顺序取一条排队消息发出去（一次只发一条——发出去后相位
-    /// 会变回 Running，下一次真正 Idle 再继续，不能一口气把整个队列打光，
-    /// 否则又变回协议不支持的裸并发）。
-    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
-        if let Some((text, images)) = self.queued_prompts.pop_front() {
-            self.send_prompt_now(text, images, cx);
         }
     }
 
@@ -962,15 +945,7 @@ impl AcpView {
             return;
         }
         input.update(cx, |s, cx| s.set_value("", window, cx));
-        if self.is_running() {
-            // 同 session 一次只能有一个在跑的 turn（ACP 约定），运行中点发送
-            // 不裸并发塞第二个 prompt，先排队，等相位回 Idle 再按顺序真正发出。
-            let images = std::mem::take(&mut self.pending_images);
-            self.queued_prompts.push_back((text, images));
-            cx.notify();
-        } else {
-            self.send_prompt(text, cx);
-        }
+        self.send_prompt(text, cx);
     }
 
     /// 快照应用：整份状态从 smeltd 镜像过来。归约（entries 合并/phase 机/
@@ -1054,8 +1029,7 @@ impl AcpView {
         self.turn_started_at_ms = snap.turn_started_at_ms;
         self.last_turn_duration_ms = snap.last_turn_duration_ms;
         // 完成边沿：回合结束（completed_unread 上升沿）**且没有人在等**（无待批
-        // 权限 / 无待答选择）才算一次真完成——agent 问问题等你答也算回合结束，
-        // 但不能据此收任务、续跑队列。
+        // 权限 / 无待答选择）才算一次真完成——agent 问问题等你答也算回合结束。
         let completed = snap.completed_unread
             && !self.was_completed_unread
             && self.permissions.is_empty()
@@ -1086,10 +1060,6 @@ impl AcpView {
             }
             if let Some(prompt) = self.pending_initial_prompt.take() {
                 self.send_prompt(prompt, cx);
-            } else if !self.queued_prompts.is_empty() {
-                // 交接提示和排队消息不会同时出现（前者只在全新 fork 会话里用），
-                // 分支互斥即可：这轮 Idle 只发队首一条，剩下的等下一次 Idle。
-                self.flush_queued_prompt(cx);
             }
         }
 
@@ -1869,7 +1839,7 @@ impl Render for AcpView {
                                         .bg(ui_theme::tint(ui_theme::accent(), 0x20))
                                 })
                                 .text_sm()
-                                .child(smelt_ui::markdown_mermaid::markdown_view(
+                                .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                     ("acp-user-md", i),
                                     markdown_user_text_for_cwd(text, this.cwd.as_deref()),
                                 )),
@@ -1878,10 +1848,12 @@ impl Render for AcpView {
                     AcpEntry::UserWithImages { text, images } => {
                         let mut content = v_flex().gap_2();
                         if !text.trim().is_empty() {
-                            content = content.child(smelt_ui::markdown_mermaid::markdown_view(
-                                ("acp-user-images-md", i),
-                                markdown_user_text_for_cwd(text, this.cwd.as_deref()),
-                            ));
+                            content = content.child(
+                                smelt_ui::markdown_mermaid::markdown_view_clickable(
+                                    ("acp-user-images-md", i),
+                                    markdown_user_text_for_cwd(text, this.cwd.as_deref()),
+                                ),
+                            );
                         }
                         let mut image_strip = h_flex().gap_2().flex_wrap();
                         for image_ix in 0..images.len() {
@@ -2003,7 +1975,7 @@ impl Render for AcpView {
                                         .text_sm()
                                         .text_color(muted)
                                         .italic()
-                                        .child(smelt_ui::markdown_mermaid::markdown_view(
+                                        .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                             ("acp-thought-md", i),
                                             markdown_text_for_cwd(text, this.cwd.as_deref()),
                                         )),
@@ -2020,7 +1992,7 @@ impl Render for AcpView {
                             .min_w_0()
                             .text_sm()
                             .text_color(t.foreground)
-                            .child(smelt_ui::markdown_mermaid::markdown_view(
+                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                 ("acp-md", i),
                                 markdown_text_for_cwd(text, this.cwd.as_deref()),
                             ))
@@ -2423,7 +2395,7 @@ impl Render for AcpView {
                                         // 写的（`##`/`**`/列表），纯文本渲染只会把这些符号原样吐出来。
                                         let body_el: gpui::AnyElement =
                                             if matches!(kind, ToolKind::Other) {
-                                                smelt_ui::markdown_mermaid::markdown_view(
+                                                smelt_ui::markdown_mermaid::markdown_view_clickable(
                                                     ("acp-tool-output-md", i * 100 + part_ix),
                                                     shown,
                                                 )
@@ -3144,65 +3116,6 @@ impl Render for AcpView {
                         .min_h(px(88.))
                         .child(Input::new(input)),
                 )
-                // 排队消息条：运行中点发送不会立刻打过去（ACP 一个 session 一次
-                // 只能有一个在跑的 turn），得让人看见「排上了」，还能反悔撤回。
-                .when(!self.queued_prompts.is_empty(), |col| {
-                    let mut strip = v_flex().px_4().pt_3().gap_1p5();
-                    for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
-                        let preview: String = text.chars().take(60).collect();
-                        let preview = if text.chars().count() > 60 {
-                            format!("{preview}…")
-                        } else {
-                            preview
-                        };
-                        let img_suffix = if images.is_empty() {
-                            String::new()
-                        } else {
-                            format!("（含 {} 张图）", images.len())
-                        };
-                        strip = strip.child(
-                            h_flex()
-                                .id(("acp-queued-prompt", ix))
-                                .gap_2()
-                                .items_center()
-                                .px_2p5()
-                                .py_1()
-                                .rounded_md()
-                                .bg(ui_theme::overlay(0x14))
-                                .border_1()
-                                .border_color(t.border)
-                                .child(
-                                    Icon::new(IconName::LoaderCircle)
-                                        .size_3p5()
-                                        .text_color(gpui::rgb(ui_theme::text_muted())),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .text_xs()
-                                        .text_color(gpui::rgb(ui_theme::text_muted()))
-                                        .child(format!("排队中 · {preview}{img_suffix}")),
-                                )
-                                .child(
-                                    div()
-                                        .id(("acp-queued-prompt-remove", ix))
-                                        .text_xs()
-                                        .text_color(gpui::rgb(ui_theme::text_muted()))
-                                        .cursor_pointer()
-                                        .hover(|d| d.opacity(0.8))
-                                        .child("撤回")
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            if ix < this.queued_prompts.len() {
-                                                this.queued_prompts.remove(ix);
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        );
-                    }
-                    col.child(strip)
-                })
                 // 待发图片的缩略图条：粘完得看得见「贴上了」，还得能反悔。
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
@@ -3960,11 +3873,8 @@ fn unix_time_ms() -> u64 {
 
 /// gpui-component 会把 Markdown 链接目标原样交给 `open_url`。相对文件路径在
 /// macOS 上会被 LaunchServices 误当作应用标识并报 -50，因此在进入 Markdown
-/// 渲染前把它们解析成基于会话 cwd 的 file URL。
+/// 渲染前把本地路径解析成 Smelt 内部使用的 file URL。
 fn markdown_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
-    let Some(cwd) = cwd else {
-        return text.to_string();
-    };
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find("](") {
@@ -4133,7 +4043,7 @@ fn html_tag_end(text: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
+fn resolve_relative_file_link(target: &str, cwd: Option<&str>) -> Option<String> {
     let target = target.trim();
     if target.is_empty()
         || target.starts_with('#')
@@ -4161,7 +4071,7 @@ fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::path::Path::new(cwd).join(path)
+        std::path::Path::new(cwd?).join(path)
     };
     let mut url = url::Url::from_file_path(absolute).ok()?;
     if !fragment.is_empty() {
@@ -4354,6 +4264,18 @@ mod tests {
         assert!(rendered.contains("[workspace.md](smelt-file:///tmp/project/docs/workspace.md)"));
         assert!(rendered.contains("[源码](smelt-file:///tmp/source.rs#L42)"));
         assert!(rendered.contains("[官网](https://example.com)"));
+    }
+
+    #[test]
+    fn markdown_absolute_files_resolve_without_session_cwd() {
+        let rendered = markdown_text_for_cwd(
+            "无弹窗：[截图](/tmp/smelt-current-notification-final.png)",
+            None,
+        );
+        assert_eq!(
+            rendered,
+            "无弹窗：[截图](smelt-file:///tmp/smelt-current-notification-final.png)"
+        );
     }
 
     /// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能
