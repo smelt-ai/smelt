@@ -1626,9 +1626,11 @@ fn git_diff_pane(
             let ws_open = ws.clone();
             let open_full_file = div()
                 .id("diff-view-full-file")
+                .flex_none()
                 .px_2()
                 .py(px(1.0))
                 .text_xs()
+                .whitespace_nowrap()
                 .cursor_pointer()
                 .text_color(muted)
                 .hover(|s| s.text_color(fg))
@@ -1807,9 +1809,11 @@ fn git_diff_pane(
             // 「统一 / 并排」切换按钮。
             let toggle = div()
                 .id("diff-split-toggle")
+                .flex_none()
                 .px_2()
                 .py(px(1.0))
                 .text_xs()
+                .whitespace_nowrap()
                 .rounded_sm()
                 .cursor_pointer()
                 .text_color(fg)
@@ -1834,6 +1838,7 @@ fn git_diff_pane(
                 .text_sm()
                 .child(
                     div()
+                        .w_full()
                         .flex()
                         .items_center()
                         .gap_2()
@@ -1843,9 +1848,30 @@ fn git_diff_pane(
                         .text_color(muted)
                         .border_b_1()
                         .border_color(border)
-                        .child(div().flex_1().min_w_0().child(name))
+                        .justify_end()
                         .child(open_full_file)
                         .child(toggle),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .min_w_0()
+                        .px_3()
+                        .py_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .border_b_1()
+                        .border_color(border)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .whitespace_nowrap()
+                                .child(name),
+                        ),
                 )
                 // 可变高度虚拟列表持有唯一滚动句柄；评论卡片插入后仍只渲染可见行。
                 .child(
