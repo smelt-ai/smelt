@@ -465,6 +465,12 @@ impl MobileLifecycleHub {
         changed
     }
 
+    fn refresh_from_daemon(&self) {
+        if let Some(sessions) = load_daemon_session_snapshot() {
+            self.apply_snapshot(sessions);
+        }
+    }
+
     fn summaries(&self) -> Vec<MobileSessionSummary> {
         let menu = mobile_workspace_menu();
         self.summaries_with_menu(&menu)
@@ -495,6 +501,35 @@ impl MobileLifecycleHub {
         });
         summaries
     }
+}
+
+fn daemon_session_snapshot_from_response(
+    response: &serde_json::Value,
+) -> Option<Vec<DaemonSessionState>> {
+    serde_json::from_value(response.get("states")?.clone()).ok()
+}
+
+fn load_daemon_session_snapshot() -> Option<Vec<DaemonSessionState>> {
+    let mut stream = UnixStream::connect(sock_path()).ok()?;
+    let timeout = Some(Duration::from_secs(2));
+    stream.set_read_timeout(timeout).ok()?;
+    stream.set_write_timeout(timeout).ok()?;
+    writeln!(stream, "{}", serde_json::json!({ "op": "list" })).ok()?;
+
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    let response = serde_json::from_str(&line).ok()?;
+    daemon_session_snapshot_from_response(&response)
+}
+
+async fn refreshed_mobile_summaries(hub: Arc<MobileLifecycleHub>) -> Vec<MobileSessionSummary> {
+    let fallback = Arc::clone(&hub);
+    tokio::task::spawn_blocking(move || {
+        hub.refresh_from_daemon();
+        hub.summaries()
+    })
+    .await
+    .unwrap_or_else(|_| fallback.summaries())
 }
 
 fn mobile_lifecycle_subscription(hub: Weak<MobileLifecycleHub>) {
@@ -667,7 +702,7 @@ async fn acp_sessions_handler(
             .into_response();
     }
 
-    let sessions = state.mobile_lifecycle.summaries();
+    let sessions = refreshed_mobile_summaries(Arc::clone(&state.mobile_lifecycle)).await;
 
     Json(serde_json::json!({
         "sessions": sessions
@@ -1367,7 +1402,9 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
                     AcpWsRequest::ListSessions => {
-                        let sessions = state.mobile_lifecycle.summaries();
+                        let sessions = refreshed_mobile_summaries(Arc::clone(
+                            &state.mobile_lifecycle,
+                        )).await;
                         let resp = serde_json::json!({
                             "type": "sessions",
                             "sessions": sessions,
@@ -2252,6 +2289,31 @@ mod tests {
         assert_eq!(summaries[0].leaf_order, 0);
         assert_eq!(summaries[1].id, "terminal-right");
         assert_eq!(summaries[1].leaf_order, 1);
+    }
+
+    #[test]
+    fn daemon_list_response_restores_new_sessions_for_mobile_refresh() {
+        let response = serde_json::json!({
+            "sessions": ["existing", "new-terminal"],
+            "states": [
+                {
+                    "id": "existing",
+                    "phase": "idle",
+                    "structured_events": false
+                },
+                {
+                    "id": "new-terminal",
+                    "cwd": "/repo",
+                    "phase": "idle",
+                    "structured_events": false
+                }
+            ]
+        });
+
+        let sessions = daemon_session_snapshot_from_response(&response).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[1].id, "new-terminal");
+        assert_eq!(sessions[1].cwd.as_deref(), Some("/repo"));
     }
 
     #[test]

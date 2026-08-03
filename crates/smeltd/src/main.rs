@@ -4017,6 +4017,8 @@ fn handle_open(
                 .lock()
                 .unwrap()
                 .insert(id.clone(), Arc::clone(&sess));
+            let opened_state = sess.state.lock().unwrap().clone();
+            broadcast_state(&subscribers, &opened_state);
             start_pty_pump(
                 Arc::clone(&sess),
                 pty_reader,
