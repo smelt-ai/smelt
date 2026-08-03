@@ -5,7 +5,9 @@
 //! - 已有会话续聊才用 paste + 裸 `\r`（见 `send_text_and_submit`）
 //! - 见 docs/local-tasks.md
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::FluentBuilder;
@@ -13,6 +15,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::*;
 use serde::{Deserialize, Serialize};
 
@@ -85,12 +88,75 @@ impl TaskColumn {
     }
 }
 
-/// 一次具体执行；Task 保存用户目标，TaskRun 保存每次尝试的现场与结果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// 执行通道。`Pty` = 交互终端（startup-arg 首包）；`Acp` = ACP 结构化对话
+/// （建独立 ACP 会话 + 首包 prompt）。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskChannel {
+    /// 交互终端（默认）。旧数据只有这一种形态。
     Pty,
-    Acp,
+    /// ACP 结构化对话。payload 记录接哪家 agent 与可选 workspace profile。
+    Acp {
+        /// `AcpAgentKind::id()`：claude/copilot/codex/grok。空 = 走默认 claude。
+        agent: String,
+        profile_id: Option<String>,
+    },
+}
+
+impl Default for TaskChannel {
+    fn default() -> Self {
+        Self::Pty
+    }
+}
+
+impl Serialize for TaskChannel {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("TaskChannel", 1)?;
+        match self {
+            Self::Pty => st.serialize_field("pty", &())?,
+            Self::Acp { agent, profile_id } => {
+                st.serialize_field("acp", &AcpChannel { agent, profile_id })?
+            }
+        }
+        st.end()
+    }
+}
+
+#[derive(Serialize)]
+struct AcpChannel<'a> {
+    agent: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_id: &'a Option<String>,
+}
+
+impl<'de> Deserialize<'de> for TaskChannel {
+    /// 兼容旧数据（`"pty"`）与手改的裸 `"acp"` 字符串：后者映射成 `Acp{默认}`，
+    /// 否则 load_json 会把整份文件当损坏回退清空。
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Repr {
+            Pty,
+            Acp {
+                #[serde(default)]
+                agent: String,
+                #[serde(default)]
+                profile_id: Option<String>,
+            },
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            String(String),
+            Map(Repr),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Map(Repr::Pty) => Self::Pty,
+            Raw::Map(Repr::Acp { agent, profile_id }) => Self::Acp { agent, profile_id },
+            Raw::String(s) if s == "acp" => Self::Acp { agent: String::new(), profile_id: None },
+            Raw::String(_) => Self::Pty,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +225,37 @@ impl TaskKind {
     }
 }
 
+/// 失败自动重试策略（任务级）。`max_attempts=1` = 不重试；`0` = 无限。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRetryPolicy {
+    /// 最多尝试次数（含首次）。1 = 不重试；0 = 无限。
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// 失败 → 下次重试间隔秒数。0 = 立即回待办队列。
+    #[serde(default)]
+    pub retry_delay_secs: u64,
+    /// 重试时是否换 provider（Remix）。当前只记录，不改 launch。
+    #[serde(default)]
+    pub remix_on_retry: bool,
+}
+
+impl Default for TaskRetryPolicy {
+    fn default() -> Self {
+        Self { max_attempts: default_max_attempts(), retry_delay_secs: 0, remix_on_retry: false }
+    }
+}
+
+impl TaskRetryPolicy {
+    /// `attempt` 是已完成的尝试编号（1-based）。已用尝试 < max_attempts 才继续。
+    pub fn allows_retry(self, attempt: u32) -> bool {
+        self.max_attempts == 0 || attempt < self.max_attempts
+    }
+}
+
+fn default_max_attempts() -> u32 {
+    1
+}
+
 /// 本地任务。
 ///
 /// 字段分工（给 UI / agent / 自循环时别混）：
@@ -169,6 +266,9 @@ impl TaskKind {
 /// - `session_id`：执行体（smeltd 会话）
 /// - `kind` / `run_at`：普通 vs 单次定时
 /// - `auto_run`：是否允许系统自动开跑（完成续跑 / 定时扫描）；手动点「运行」始终可以
+/// - `depends_on`：前置任务 id，全部 Done 才允许执行
+/// - `retry_policy` / `retry_at`：失败自动重试策略与当前冷却到点时刻
+/// - `channel`：执行通道（PTY / ACP）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -200,6 +300,18 @@ pub struct Task {
     /// `false` = 只等人点「运行」。缺省 true（兼容旧数据与排队续跑预期）。
     #[serde(default = "default_true")]
     pub auto_run: bool,
+    /// 前置任务 id，全部 Done 才允许被 claim/手动运行。旧数据缺省空。
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// 失败自动重试策略。旧数据缺省 = 不重试。
+    #[serde(default)]
+    pub retry_policy: TaskRetryPolicy,
+    /// 重试冷却到点时刻（Unix 秒）。None = 立即可 claim。开跑/领用即清。
+    #[serde(default)]
+    pub retry_at: Option<u64>,
+    /// 执行通道（PTY / ACP）。旧数据缺省 = PTY。
+    #[serde(default)]
+    pub channel: TaskChannel,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -225,6 +337,10 @@ impl Task {
             kind: TaskKind::Once,
             run_at: None,
             auto_run: true,
+            depends_on: Vec::new(),
+            retry_policy: TaskRetryPolicy::default(),
+            retry_at: None,
+            channel: TaskChannel::Pty,
             created_at: now,
             updated_at: now,
         }
@@ -236,6 +352,21 @@ impl Task {
             && self.kind == TaskKind::Scheduled
             && self.column.is_todo()
             && self.run_at.map(|at| at <= now).unwrap_or(false)
+    }
+
+    /// 前置依赖是否全部满足：`depends_on` 引用的任务都处于 Done。
+    /// 自引用与已删除的依赖视同满足（防死锁 / 不因删任务卡死队列）。
+    pub fn dependencies_met(&self, tasks: &[Task]) -> bool {
+        let self_id = self.id.as_str();
+        self.depends_on.iter().all(|id| {
+            if id == self_id {
+                return true;
+            }
+            match tasks.iter().find(|t| t.id == *id) {
+                Some(dep) => dep.column == TaskColumn::Done,
+                None => true,
+            }
+        })
     }
 }
 
@@ -252,6 +383,33 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 把一次失败落到 Run + Task：
+/// - Run 记 Failed（保留 error / finished_at）
+/// - 若该 Run 仍是当前 run：任务回待办（未超限，冷却内不可 claim）或落 Failed 列（超限）
+/// - 保留 `current_run_id` 指向失败 Run，供历史面板展示；重试的 `begin_run` 会覆盖它
+fn apply_failure_to_task(task: &mut Task, run: &mut TaskRun, error: &str, now: u64) {
+    run.status = TaskRunStatus::Failed;
+    run.error = Some(error.to_string());
+    run.finished_at = Some(now);
+    if task.current_run_id.as_deref() == Some(run.id.as_str()) {
+        task.session_id = None;
+        task.updated_at = now;
+        if task.retry_policy.allows_retry(run.attempt) {
+            // 未超限：回待办，冷却后由 due_retry_ids / claim 重新取跑。
+            task.column = TaskColumn::Backlog;
+            task.retry_at = if task.retry_policy.retry_delay_secs > 0 {
+                Some(now + task.retry_policy.retry_delay_secs)
+            } else {
+                None
+            };
+        } else {
+            // 超限：落 Failed 列，不再自动跑。
+            task.column = TaskColumn::Failed;
+            task.retry_at = None;
+        }
+    }
 }
 
 /// 解析本地时间字符串 → Unix 秒。支持 `YYYY-MM-DD HH:MM` / `YYYY-MM-DD HH:MM:SS`。
@@ -379,33 +537,87 @@ pub struct NewTaskPrefill {
 impl Global for NewTaskPrefill {}
 
 // ===================== TaskStore（全局）=====================
+//
+// TaskStore 持有**进程级内存缓存**（render 读它不碰 socket），写操作同步发给
+// smeltd（权威落盘 `~/.smelt/tasks.json`），smeltd 不可用时降级直接写本地文件。
+// 这样 GUI 与 `smelt-task` CLI 看到同一份任务：agent 自循环塞的任务，GUI 通过
+// 30s tick 的 `task_list` 刷新可见。
+
+/// 进程级任务缓存。`RwLock` 让 render 读（读锁，微秒级）与写（短暂写锁）共存。
+static TASK_CACHE: OnceLock<RwLock<TaskFile>> = OnceLock::new();
+
+fn task_cache() -> &'static RwLock<TaskFile> {
+    TASK_CACHE.get_or_init(|| RwLock::new(crate::json_store::load_json(tasks_global_path())))
+}
+
+/// 序列化执行通道成 op 字段（对齐 smeltd `parse_channel`）。
+fn channel_json(channel: &TaskChannel) -> serde_json::Value {
+    match channel {
+        TaskChannel::Pty => serde_json::json!({ "channel": "pty" }),
+        TaskChannel::Acp { agent, profile_id } => serde_json::json!({
+            "channel": "acp",
+            "agent": agent,
+            "profile_id": profile_id,
+        }),
+    }
+}
 
 pub struct TaskStore;
 
 impl TaskStore {
     pub fn load() -> TaskFile {
-        crate::json_store::load_json(tasks_global_path())
+        task_cache().read().unwrap().clone()
     }
 
+    /// 降级路径（smeltd 不可用）直接落盘本地文件。
     pub fn save(file: &TaskFile) {
         crate::json_store::save_json(tasks_global_path(), file);
     }
 
-    pub fn upsert(task: Task) {
-        let mut file = Self::load();
-        if let Some(slot) = file.tasks.iter_mut().find(|t| t.id == task.id) {
-            *slot = task;
-        } else {
-            file.tasks.insert(0, task);
+    /// 在缓存上执行闭包，替换回缓存，返回闭包结果 + 最新文件快照。
+    fn mutate<X>(f: impl FnOnce(&mut TaskFile) -> X) -> (X, TaskFile) {
+        let mut file = task_cache().read().unwrap().clone();
+        let out = f(&mut file);
+        *task_cache().write().unwrap() = file.clone();
+        (out, file)
+    }
+
+    /// 改完缓存后同步 smeltd（权威落盘）；失败降级本地落盘，保证至少一份持久化。
+    fn persist(file: &TaskFile, op: serde_json::Value) {
+        if smelt_core::task::request_task_op(op).is_err() {
+            Self::save(file);
         }
-        Self::save(&file);
+    }
+
+    /// 从 smeltd 拉全量任务刷新缓存（30s tick 调，让 `smelt-task` 塞的任务可见）。
+    /// 拉不到（smeltd 不可用）就保持缓存不动。
+    pub fn refresh_from_smeltd() {
+        let Ok(resp) = smelt_core::task::request_task_op(serde_json::json!({ "op": "task_list" }))
+        else {
+            return;
+        };
+        if let Ok(file) = serde_json::from_value::<TaskFile>(resp["file"].clone()) {
+            *task_cache().write().unwrap() = file;
+        }
+    }
+
+    pub fn upsert(task: Task) {
+        let (_, file) = Self::mutate(|f| {
+            if let Some(slot) = f.tasks.iter_mut().find(|t| t.id == task.id) {
+                *slot = task.clone();
+            } else {
+                f.tasks.insert(0, task.clone());
+            }
+        });
+        Self::persist(&file, serde_json::json!({ "op": "task_add", "task": task }));
     }
 
     pub fn remove(id: &str) {
-        let mut file = Self::load();
-        file.tasks.retain(|t| t.id != id);
-        file.runs.retain(|run| run.task_id != id);
-        Self::save(&file);
+        let (_, file) = Self::mutate(|f| {
+            f.tasks.retain(|t| t.id != id);
+            f.runs.retain(|run| run.task_id != id);
+        });
+        Self::persist(&file, serde_json::json!({ "op": "task_remove", "id": id }));
         // 任务删了，落盘的首包 prompt 文件也得一起删，不然 `tasks/prompts/` 里
         // 会一直攒孤儿文件（历史上就是这么攒出来的）。
         if let Some(dir) = tasks_dir() {
@@ -418,110 +630,219 @@ impl TaskStore {
     }
 
     pub fn update<F: FnOnce(&mut Task)>(id: &str, f: F) -> Option<Task> {
-        let mut file = Self::load();
-        let task = file.tasks.iter_mut().find(|t| t.id == id)?;
-        f(task);
-        task.updated_at = now_secs();
-        let out = task.clone();
-        Self::save(&file);
-        Some(out)
+        let (out, file) = Self::mutate(|file| {
+            let task = file.tasks.iter_mut().find(|t| t.id == id)?;
+            f(task);
+            task.updated_at = now_secs();
+            Some(task.clone())
+        });
+        let Some(task) = out else {
+            return None;
+        };
+        Self::persist(&file, serde_json::json!({ "op": "task_update", "task": task.clone() }));
+        Some(task)
     }
 
     /// 为任务创建一次 PTY 执行尝试。若上一次仍显示活跃，先以“被新执行替代”收尾，
     /// 避免一个 Task 悬挂多个权威 Run。
     pub fn begin_pty_run(task_id: &str, launch: &str) -> Option<TaskRun> {
-        let mut file = Self::load();
+        Self::begin_run(task_id, launch, TaskChannel::Pty)
+    }
+
+    /// 为任务创建一次 ACP 执行尝试（记录接哪家 agent 与可选 workspace profile）。
+    pub fn begin_acp_run(
+        task_id: &str,
+        launch: &str,
+        agent: &str,
+        profile_id: Option<String>,
+    ) -> Option<TaskRun> {
+        Self::begin_run(
+            task_id,
+            launch,
+            TaskChannel::Acp { agent: agent.to_string(), profile_id },
+        )
+    }
+
+    /// 为任务创建一次执行尝试（channel 由调用方指定）。开跑即清重试冷却。
+    /// 若上一次仍显示活跃，先以“被新执行替代”收尾，避免一个 Task 悬挂多个权威 Run。
+    fn begin_run(task_id: &str, launch: &str, channel: TaskChannel) -> Option<TaskRun> {
         let now = now_secs();
-        let attempt = file
-            .runs
-            .iter()
-            .filter(|run| run.task_id == task_id)
-            .map(|run| run.attempt)
-            .max()
-            .unwrap_or(0)
-            + 1;
-
-        for run in file
-            .runs
-            .iter_mut()
-            .filter(|run| run.task_id == task_id && run.status.is_active())
-        {
-            run.status = TaskRunStatus::Failed;
-            run.error = Some("被新的执行尝试替代".into());
-            run.finished_at = Some(now);
+        // 优先走 smeltd：它原子创建 run 并落盘（权威）。
+        let mut op = serde_json::json!({
+            "op": "task_begin_run",
+            "task_id": task_id,
+            "launch": launch,
+        });
+        op["channel"] = channel_json(&channel);
+        if let Ok(resp) = smelt_core::task::request_task_op(op) {
+            let run: TaskRun = serde_json::from_value(resp["run"].clone()).ok()?;
+            Self::mutate(|f| {
+                if let Some(task) = f.tasks.iter_mut().find(|task| task.id == task_id) {
+                    task.column = TaskColumn::Running;
+                    task.current_run_id = Some(run.id.clone());
+                    task.retry_at = None;
+                    task.updated_at = now;
+                }
+                f.runs.push(run.clone());
+            });
+            return Some(run);
         }
-
-        let run = TaskRun {
-            id: uuid::Uuid::new_v4().to_string(),
-            task_id: task_id.to_string(),
-            attempt,
-            channel: TaskChannel::Pty,
-            launch: launch.to_string(),
-            session_id: None,
-            status: TaskRunStatus::Starting,
-            error: None,
-            created_at: now,
-            started_at: None,
-            finished_at: None,
-        };
-        let task = file.tasks.iter_mut().find(|task| task.id == task_id)?;
-        task.column = TaskColumn::Running;
-        task.current_run_id = Some(run.id.clone());
-        task.updated_at = now;
-        file.runs.push(run.clone());
-        Self::save(&file);
-        Some(run)
+        // 降级：本地造 run + 落盘。
+        let (run, file) = Self::mutate(|f| {
+            let attempt = f
+                .runs
+                .iter()
+                .filter(|run| run.task_id == task_id)
+                .map(|run| run.attempt)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            for run in f
+                .runs
+                .iter_mut()
+                .filter(|run| run.task_id == task_id && run.status.is_active())
+            {
+                run.status = TaskRunStatus::Failed;
+                run.error = Some("被新的执行尝试替代".into());
+                run.finished_at = Some(now);
+            }
+            let run = TaskRun {
+                id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.to_string(),
+                attempt,
+                channel: channel.clone(),
+                launch: launch.to_string(),
+                session_id: None,
+                status: TaskRunStatus::Starting,
+                error: None,
+                created_at: now,
+                started_at: None,
+                finished_at: None,
+            };
+            let task = f.tasks.iter_mut().find(|task| task.id == task_id)?;
+            task.column = TaskColumn::Running;
+            task.current_run_id = Some(run.id.clone());
+            task.retry_at = None;
+            task.updated_at = now;
+            f.runs.push(run.clone());
+            Some(run)
+        });
+        if run.is_some() {
+            Self::save(&file);
+        }
+        run
     }
 
     /// PTY 成功创建后，把 Run 与稳定 session id 绑定。
     pub fn mark_run_started(task_id: &str, run_id: &str, session_id: &str) -> bool {
-        let mut file = Self::load();
-        let now = now_secs();
-        let Some(run) = file
-            .runs
-            .iter_mut()
-            .find(|run| run.id == run_id && run.task_id == task_id)
-        else {
-            return false;
-        };
-        run.status = TaskRunStatus::Running;
-        run.session_id = Some(session_id.to_string());
-        run.started_at = Some(now);
-        let Some(task) = file.tasks.iter_mut().find(|task| task.id == task_id) else {
-            return false;
-        };
-        task.session_id = Some(session_id.to_string());
-        task.current_run_id = Some(run_id.to_string());
-        task.column = TaskColumn::Running;
-        task.updated_at = now;
-        Self::save(&file);
-        true
+        let (ok, file) = Self::mutate(|file| {
+            let now = now_secs();
+            let Some(run) = file
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id && run.task_id == task_id)
+            else {
+                return false;
+            };
+            run.status = TaskRunStatus::Running;
+            run.session_id = Some(session_id.to_string());
+            run.started_at = Some(now);
+            let Some(task) = file.tasks.iter_mut().find(|task| task.id == task_id) else {
+                return false;
+            };
+            task.session_id = Some(session_id.to_string());
+            task.current_run_id = Some(run_id.to_string());
+            task.column = TaskColumn::Running;
+            task.updated_at = now;
+            true
+        });
+        if ok {
+            Self::persist(
+                &file,
+                serde_json::json!({
+                    "op": "task_attach_session",
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                }),
+            );
+        }
+        ok
     }
 
-    /// 执行现场启动失败：保留失败 Run，并让 Task 回到待办以便重试。
-    pub fn mark_run_failed(task_id: &str, run_id: &str, error: impl Into<String>) -> bool {
-        let mut file = Self::load();
-        let now = now_secs();
-        let Some(run) = file
-            .runs
-            .iter_mut()
-            .find(|run| run.id == run_id && run.task_id == task_id)
-        else {
-            return false;
-        };
-        run.status = TaskRunStatus::Failed;
-        run.error = Some(error.into());
-        run.finished_at = Some(now);
-        let Some(task) = file.tasks.iter_mut().find(|task| task.id == task_id) else {
-            return false;
-        };
-        if task.current_run_id.as_deref() == Some(run_id) {
-            task.column = TaskColumn::Backlog;
-            task.session_id = None;
-            task.updated_at = now;
+    /// 执行现场启动失败：保留失败 Run，按重试策略回待办（冷却）或落 Failed 列。
+    /// 返回受影响任务的项目 cwd（Some）用于触发续跑/重试。
+    pub fn mark_run_failed(task_id: &str, run_id: &str, error: impl Into<String>) -> Option<String> {
+        let err = error.into();
+        let (cwd, file) = Self::mutate(|file| {
+            let now = now_secs();
+            let cwd = file
+                .tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.project_cwd.clone());
+            let Some(run) = file
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id && run.task_id == task_id)
+            else {
+                return None;
+            };
+            let Some(task) = file.tasks.iter_mut().find(|task| task.id == task_id) else {
+                return None;
+            };
+            apply_failure_to_task(task, run, &err, now);
+            cwd
+        });
+        if cwd.is_some() {
+            Self::persist(
+                &file,
+                serde_json::json!({
+                    "op": "task_run_failed",
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "error": err,
+                }),
+            );
         }
-        Self::save(&file);
-        true
+        cwd
+    }
+
+    /// agent 回合失败（结构化 phase=Failed 边沿）：把该会话绑定的活跃任务按重试策略处理。
+    /// 语义对齐 `mark_session_done`，返回 `Some(cwd)` 表示确实收尾了至少一条任务。
+    pub fn mark_session_failed(session_id: &str, error: &str) -> Option<String> {
+        let (cwd, file) = Self::mutate(|file| {
+            let mut cwd: Option<String> = None;
+            let now = now_secs();
+            for t in &mut file.tasks {
+                if t.session_id.as_deref() != Some(session_id) {
+                    continue;
+                }
+                if !t.column.is_active() {
+                    continue;
+                }
+                if let Some(run_id) = t.current_run_id.clone()
+                    && let Some(run) = file.runs.iter_mut().find(|run| {
+                        run.id == run_id
+                            && run.session_id.as_deref() == Some(session_id)
+                            && run.status.is_active()
+                    })
+                {
+                    apply_failure_to_task(t, run, error, now);
+                }
+                if cwd.is_none() {
+                    cwd = Some(t.project_cwd.clone());
+                }
+            }
+            cwd
+        });
+        if cwd.is_some() {
+            Self::persist(
+                &file,
+                serde_json::json!({ "op": "task_session_failed", "session_id": session_id, "error": error }),
+            );
+        }
+        cwd
     }
 
     pub fn runs_for_task(task_id: &str) -> Vec<TaskRun> {
@@ -537,33 +858,38 @@ impl TaskStore {
     /// 终端 agent 停转（完成一轮）时：把当前 Run 标 Completed，Task 进入待审查。
     /// 返回 `Some(project_cwd)` 表示确实收尾了至少一条任务（用于触发自动续跑）。
     pub fn mark_session_done(session_id: &str) -> Option<String> {
-        let mut file = Self::load();
-        let mut done_cwd: Option<String> = None;
-        let now = now_secs();
-        for t in &mut file.tasks {
-            if t.session_id.as_deref() != Some(session_id) {
-                continue;
-            }
-            if matches!(t.column, TaskColumn::Running | TaskColumn::Waiting) {
-                t.column = TaskColumn::Review;
-                t.updated_at = now;
-                if let Some(run_id) = t.current_run_id.as_deref()
-                    && let Some(run) = file.runs.iter_mut().find(|run| {
-                        run.id == run_id
-                            && run.session_id.as_deref() == Some(session_id)
-                            && run.status.is_active()
-                    })
-                {
-                    run.status = TaskRunStatus::Completed;
-                    run.finished_at = Some(now);
+        let (done_cwd, file) = Self::mutate(|file| {
+            let mut done_cwd: Option<String> = None;
+            let now = now_secs();
+            for t in &mut file.tasks {
+                if t.session_id.as_deref() != Some(session_id) {
+                    continue;
                 }
-                if done_cwd.is_none() {
-                    done_cwd = Some(t.project_cwd.clone());
+                if matches!(t.column, TaskColumn::Running | TaskColumn::Waiting) {
+                    t.column = TaskColumn::Review;
+                    t.updated_at = now;
+                    if let Some(run_id) = t.current_run_id.as_deref()
+                        && let Some(run) = file.runs.iter_mut().find(|run| {
+                            run.id == run_id
+                                && run.session_id.as_deref() == Some(session_id)
+                                && run.status.is_active()
+                        })
+                    {
+                        run.status = TaskRunStatus::Completed;
+                        run.finished_at = Some(now);
+                    }
+                    if done_cwd.is_none() {
+                        done_cwd = Some(t.project_cwd.clone());
+                    }
                 }
             }
-        }
+            done_cwd
+        });
         if done_cwd.is_some() {
-            Self::save(&file);
+            Self::persist(
+                &file,
+                serde_json::json!({ "op": "task_session_done", "session_id": session_id }),
+            );
         }
         done_cwd
     }
@@ -577,11 +903,19 @@ impl TaskStore {
             .any(|t| t.column.is_active() && t.project_cwd.trim_end_matches('/') == cwd)
     }
 
-    /// 任务此刻是否可被**系统**自动取跑（待办 + `auto_run`；定时须已到期）。
-    /// 人手点「运行」不走此判断。
-    fn is_auto_runnable(t: &Task, now: u64) -> bool {
+    /// 任务此刻是否可被**系统**自动取跑（待办 + `auto_run`；依赖满足 + 重试冷却过；
+    /// 定时须已到期）。人手点「运行」不走此判断。
+    fn is_auto_runnable(t: &Task, tasks: &[Task], now: u64) -> bool {
         if !t.auto_run || !t.column.is_todo() {
             return false;
+        }
+        if !t.dependencies_met(tasks) {
+            return false;
+        }
+        if let Some(at) = t.retry_at {
+            if now < at {
+                return false;
+            }
         }
         match t.kind {
             TaskKind::Once => true,
@@ -593,7 +927,7 @@ impl TaskStore {
     /// 与执行记录一起写入，避免领取后启动失败留下幽灵 Running。
     ///
     /// - 只取 `prefer_cwd` 同项目（串行续跑）
-    /// - 仅 `auto_run == true` 且可跑
+    /// - 仅 `auto_run == true`、依赖满足、重试冷却已过 且可跑
     /// - 该 cwd 已有 Running/Waiting 则不领
     /// - FIFO：`created_at` 升序
     pub fn claim_next_runnable(prefer_cwd: &str) -> Option<String> {
@@ -615,7 +949,8 @@ impl TaskStore {
             .iter()
             .enumerate()
             .filter(|(_, t)| {
-                t.project_cwd.trim_end_matches('/') == prefer && Self::is_auto_runnable(t, now)
+                t.project_cwd.trim_end_matches('/') == prefer
+                    && Self::is_auto_runnable(t, &file.tasks, now)
             })
             .map(|(i, _)| i)
             .collect();
@@ -624,13 +959,34 @@ impl TaskStore {
     }
 
     /// 已到期、可自动执行的单次定时任务 id（按 `run_at` 升序）。
+    /// 依赖未满足的定时任务不会被领取。
     pub fn due_scheduled_ids() -> Vec<String> {
         let now = now_secs();
-        let mut due: Vec<(u64, String)> = Self::load()
+        let file = Self::load();
+        let mut due: Vec<(u64, String)> = file
             .tasks
-            .into_iter()
-            .filter(|t| t.is_due(now))
-            .map(|t| (t.run_at.unwrap_or(0), t.id))
+            .iter()
+            .filter(|t| t.is_due(now) && t.dependencies_met(&file.tasks))
+            .map(|t| (t.run_at.unwrap_or(0), t.id.clone()))
+            .collect();
+        due.sort_by_key(|(at, _)| *at);
+        due.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// 重试冷却已到、可重新取跑的任务 id（按 `retry_at` 升序）。
+    pub fn due_retry_ids() -> Vec<String> {
+        let now = now_secs();
+        let file = Self::load();
+        let mut due: Vec<(u64, String)> = file
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.retry_at.is_some_and(|at| at <= now)
+                    && t.auto_run
+                    && t.column.is_todo()
+                    && t.dependencies_met(&file.tasks)
+            })
+            .map(|t| (t.retry_at.unwrap_or(0), t.id.clone()))
             .collect();
         due.sort_by_key(|(at, _)| *at);
         due.into_iter().map(|(_, id)| id).collect()
@@ -770,6 +1126,7 @@ impl Workspace {
         // 每次打开：默认普通 + 可自动执行，清空文案；焦点落在首包。
         self.task_kind = TaskKind::Once;
         self.task_auto_run = true;
+        self.task_show_advanced = false;
         if let Some(input) = &self.task_body_input {
             input.update(cx, |s, cx| {
                 s.set_value("", window, cx);
@@ -809,6 +1166,12 @@ impl Workspace {
         self.task_bind_launch = task.launch.clone();
         self.task_kind = task.kind;
         self.task_auto_run = task.auto_run;
+        self.task_channel_acp = matches!(&task.channel, TaskChannel::Acp { .. });
+        if let TaskChannel::Acp { agent, .. } = &task.channel {
+            if !agent.is_empty() {
+                self.task_acp_agent = agent.clone();
+            }
+        }
 
         if let Some(input) = &self.task_body_input {
             let body = task.body.clone();
@@ -878,6 +1241,11 @@ impl Workspace {
             title_in
         };
         let launch = self.task_bind_launch_cmd(cx);
+        let channel = if self.task_channel_acp {
+            TaskChannel::Acp { agent: self.task_acp_agent.clone(), profile_id: None }
+        } else {
+            TaskChannel::Pty
+        };
         TaskStore::update(&id, |t| {
             t.title = title;
             t.body = body;
@@ -886,6 +1254,7 @@ impl Workspace {
             t.auto_run = auto_run;
             t.project_cwd = cwd;
             t.launch = launch;
+            t.channel = channel;
         });
         self.close_new_task_modal(cx);
     }
@@ -946,6 +1315,12 @@ impl Workspace {
         task.kind = kind;
         task.run_at = run_at;
         task.auto_run = auto_run;
+        if self.task_channel_acp {
+            task.channel = TaskChannel::Acp {
+                agent: self.task_acp_agent.clone(),
+                profile_id: None,
+            };
+        }
         let id = task.id.clone();
         self.task_selected = Some(id.clone());
         TaskStore::upsert(task);
@@ -967,7 +1342,8 @@ impl Workspace {
         if let Some(sid) = sid {
             self.assign_task_to_session(&id, &sid, should_run, window, cx);
         } else if should_run {
-            self.run_task_in_terminal(&id, window, cx);
+            // 走 run_task：按通道路由（终端新开 / ACP 对话），并守依赖。
+            self.run_task(&id, window, cx);
         } else {
             cx.notify();
         }
@@ -976,7 +1352,13 @@ impl Workspace {
     /// 后台扫描：到期定时任务 → 复用 [`Self::run_task`]。
     /// 同 cwd 已有执行中任务时跳过（串行，留给完成边沿续跑）。
     pub fn tick_scheduled_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ids = TaskStore::due_scheduled_ids();
+        // 先刷缓存：让 `smelt-task`（agent 自循环）塞进来的任务对 GUI 可见。
+        TaskStore::refresh_from_smeltd();
+        self.reconcile_tasks(cx);
+        let mut ids = TaskStore::due_scheduled_ids();
+        ids.extend(TaskStore::due_retry_ids());
+        ids.sort();
+        ids.dedup();
         if ids.is_empty() {
             return;
         }
@@ -984,7 +1366,9 @@ impl Workspace {
             let Some(t) = TaskStore::get(&id) else {
                 continue;
             };
-            if !t.is_due(now_secs()) {
+            if t.retry_at.is_some_and(|at| at <= now_secs()) {
+                eprintln!("[tasks] retry due id={}", id);
+            } else if !t.is_due(now_secs()) {
                 continue;
             }
             if TaskStore::has_running_for_cwd(&t.project_cwd) {
@@ -1019,8 +1403,61 @@ impl Workspace {
         self.run_task(&id, window, cx);
     }
 
+    /// 对账：`Running` 但绑定会话已不存在（GUI 崩溃后 smeltd 会话也丢了）的任务
+    /// 标失败，避免「永远卡 Running、阻塞同 cwd 串行」的坏状态。会话既可能在
+    /// 本 GUI（还没 reattach），也可能在 smeltd（活会话），两者都不在才算死。
+    fn reconcile_tasks(&mut self, cx: &mut Context<Self>) {
+        let mut known: HashSet<String> = HashSet::new();
+        for sess in &self.sessions {
+            match &sess.kind {
+                crate::SessionKind::Term { .. } => {
+                    for leaf in sess.term_leaves() {
+                        known.insert(leaf.read(cx).session_id().to_string());
+                    }
+                }
+                crate::SessionKind::Acp(view) => {
+                    known.insert(view.read(cx).session_id().to_string());
+                }
+            }
+        }
+        if let Ok(alive) = smelt_core::session_control::list_sessions() {
+            known.extend(alive);
+        }
+        let stale: Vec<(String, String)> = TaskStore::load()
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.column.is_active()
+                    && t.session_id
+                        .as_ref()
+                        .is_some_and(|sid| !known.contains(sid))
+            })
+            .filter_map(|t| {
+                t.current_run_id
+                    .clone()
+                    .map(|rid| (t.id.clone(), rid))
+            })
+            .collect();
+        for (tid, run_id) in stale {
+            eprintln!("[tasks] reconcile: 任务 {tid} 绑定的会话已不存在，标记失败");
+            TaskStore::mark_run_failed(&tid, &run_id, "绑定的会话已丢失");
+        }
+    }
+
     pub fn set_task_auto_run(&mut self, on: bool, cx: &mut Context<Self>) {
         self.task_auto_run = on;
+        cx.notify();
+    }
+
+    /// 弹窗切执行通道：false=终端，true=ACP 对话。
+    pub fn set_task_channel_acp(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.task_channel_acp = on;
+        cx.notify();
+    }
+
+    /// 弹窗切 ACP 通道接哪家 agent（`AcpAgentKind::id()`）。
+    pub fn set_task_acp_agent(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.task_acp_agent = agent.to_string();
         cx.notify();
     }
 
@@ -1086,6 +1523,10 @@ impl Workspace {
         let on_existing = self.task_bind_session.is_some();
         let is_scheduled = self.task_kind == TaskKind::Scheduled;
         let auto_run = self.task_auto_run || is_scheduled;
+        let channel_acp = self.task_channel_acp;
+        let acp_agent_btn = smelt_core::agent_kind::AcpAgentKind::from_id(&self.task_acp_agent)
+            .map(|a| a.label().to_string())
+            .unwrap_or_else(|| "Claude Code".into());
         let exec_hint = if is_scheduled {
             "到点后自动新开终端开跑（单次）；也可提前点「运行」"
         } else if auto_run {
@@ -1113,96 +1554,88 @@ impl Workspace {
 
         let e = cx.entity().clone();
         let e2 = e.clone();
-        let context_row = h_flex()
-            .gap_3()
-            .items_end()
+        let e3 = e.clone();
+        // 主区：项目（高频，默认当前项目）。
+        let project_row = v_flex()
+            .gap_1()
+            .child(field_label("项目 · 可选"))
             .child(
-                v_flex()
-                    .gap_1()
-                    .flex_1()
-                    .min_w_0()
-                    .child(field_label("项目 · 可选"))
-                    .child(
-                        Button::new("task-pick-project")
-                            .label(proj_btn_label)
-                            .icon(IconName::Folder)
-                            .small()
-                            .w_full()
-                            .dropdown_menu({
-                                let projects = projects.clone();
+                Button::new("task-pick-project")
+                    .label(proj_btn_label)
+                    .icon(IconName::Folder)
+                    .small()
+                    .w_full()
+                    .dropdown_menu({
+                        let projects = projects.clone();
+                        let e = e.clone();
+                        move |menu, _window, _cx| {
+                            let mut menu = menu;
+                            if projects.is_empty() {
+                                return menu.item(
+                                    PopupMenuItem::new("暂无项目（先打开终端）")
+                                        .disabled(true),
+                                );
+                            }
+                            for p in &projects {
+                                let cwd = p.clone();
                                 let e = e.clone();
-                                move |menu, _window, _cx| {
-                                    let mut menu = menu;
-                                    if projects.is_empty() {
-                                        return menu.item(
-                                            PopupMenuItem::new("暂无项目（先打开终端）")
-                                                .disabled(true),
-                                        );
-                                    }
-                                    for p in &projects {
-                                        let cwd = p.clone();
-                                        let e = e.clone();
-                                        let label = project_label(p);
-                                        menu = menu.item(PopupMenuItem::new(label).on_click(
-                                            move |_, _, cx| {
-                                                let cwd = cwd.clone();
-                                                e.update(cx, |ws, cx| {
-                                                    ws.set_task_bind_project(cwd, cx);
-                                                });
-                                            },
-                                        ));
-                                    }
-                                    menu
-                                }
-                            }),
-                    ),
-            )
+                                let label = project_label(p);
+                                menu = menu.item(PopupMenuItem::new(label).on_click(
+                                    move |_, _, cx| {
+                                        let cwd = cwd.clone();
+                                        e.update(cx, |ws, cx| {
+                                            ws.set_task_bind_project(cwd, cx);
+                                        });
+                                    },
+                                ));
+                            }
+                            menu
+                        }
+                    }),
+            );
+        // 高级区：Agent（启动命令）。当前终端时忽略。
+        let agent_row = v_flex()
+            .gap_1()
+            .opacity(if on_existing { 0.45 } else { 1. })
+            .child(field_label(if on_existing {
+                "Agent · 当前终端时忽略"
+            } else {
+                "Agent · 可选"
+            }))
             .child(
-                v_flex()
-                    .gap_1()
-                    .flex_1()
-                    .min_w_0()
-                    .opacity(if on_existing { 0.45 } else { 1. })
-                    .child(field_label(if on_existing {
-                        "Agent · 当前终端时忽略"
-                    } else {
-                        "Agent · 可选"
-                    }))
-                    .child(
-                        Button::new("task-pick-agent")
-                            .label(agent_btn_label)
-                            .icon(agent_icon)
-                            .small()
-                            .w_full()
-                            .dropdown_menu({
-                                let launches = launches.clone();
-                                move |menu, _window, _cx| {
-                                    let mut menu = menu;
-                                    if launches.is_empty() {
-                                        return menu.item(
-                                            PopupMenuItem::new("设置里暂无启动项").disabled(true),
-                                        );
-                                    }
-                                    for entry in &launches {
-                                        let label = entry.label.clone();
-                                        let command = entry.command.clone();
-                                        let e = e2.clone();
-                                        let icon = icon_for_launch_command(&command);
-                                        menu = menu.item(
-                                            PopupMenuItem::new(label).icon(icon).on_click(
-                                                move |_, _, cx| {
-                                                    let command = command.clone();
-                                                    e.update(cx, |ws, cx| {
-                                                        ws.set_task_bind_launch(command, cx);
-                                                    });
-                                                },
-                                            ),
-                                        );
-                                    }
-                                    menu
-                                }
-                            }),
-                    ),
+                Button::new("task-pick-agent")
+                    .label(agent_btn_label)
+                    .icon(agent_icon)
+                    .small()
+                    .w_full()
+                    .dropdown_menu({
+                        let launches = launches.clone();
+                        move |menu, _window, _cx| {
+                            let mut menu = menu;
+                            if launches.is_empty() {
+                                return menu.item(
+                                    PopupMenuItem::new("设置里暂无启动项").disabled(true),
+                                );
+                            }
+                            for entry in &launches {
+                                let label = entry.label.clone();
+                                let command = entry.command.clone();
+                                let e = e2.clone();
+                                let icon = icon_for_launch_command(&command);
+                                menu = menu.item(
+                                    PopupMenuItem::new(label).icon(icon).on_click(
+                                        move |_, _, cx| {
+                                            let command = command.clone();
+                                            e.update(cx, |ws, cx| {
+                                                ws.set_task_bind_launch(command, cx);
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            menu
+                        }
+                    }),
             );
 
         // 类型：普通 / 定时
@@ -1269,6 +1702,126 @@ impl Workspace {
                 "只等人点运行"
             }));
 
+        // 执行通道：终端（新开交互终端 + 首包指令）/ ACP 对话（结构化消息流）。
+        let channel_row = h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("task-channel-terminal")
+                    .label("终端")
+                    .small()
+                    .when(!channel_acp, |b| b.primary())
+                    .when(channel_acp, |b| b.ghost())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_task_channel_acp(false, cx);
+                    })),
+            )
+            .child(
+                Button::new("task-channel-acp")
+                    .label("ACP 对话")
+                    .small()
+                    .when(channel_acp, |b| b.primary())
+                    .when(!channel_acp, |b| b.ghost())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_task_channel_acp(true, cx);
+                    })),
+            )
+            .child(div().text_xs().text_color(muted).child(if channel_acp {
+                "对话通道：结构化消息流"
+            } else {
+                "终端通道：交互终端 + 首包指令"
+            }));
+
+        // ACP 通道时选 agent（默认 claude）。
+        let e_agent = e3.clone();
+        let acp_agent_row = v_flex()
+            .gap_1()
+            .child(field_label("Agent · ACP 对话接哪家"))
+            .child(
+                Button::new("task-acp-agent")
+                    .label(acp_agent_btn)
+                    .small()
+                    .w_full()
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let mut menu = menu;
+                        for agent in smelt_core::agent_kind::AcpAgentKind::ALL {
+                            let label = agent.label().to_string();
+                            let id = agent.id().to_string();
+                            let e = e_agent.clone();
+                            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                let id = id.clone();
+                                e.update(cx, |ws, cx| ws.set_task_acp_agent(&id, cx));
+                            }));
+                        }
+                        menu
+                    }),
+            );
+
+        // 高级选项折叠区：通道/类型/自动执行/Agent/定时时间都收进来。
+        // 新建默认折叠（只留「指令 + 项目」主字段）；编辑模式恒展开（改已有配置）。
+        let advanced_open = self.task_show_advanced || editing;
+        let advanced_toggle = div()
+            .id("task-advanced-toggle")
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .text_xs()
+            .text_color(muted)
+            .hover(|d| d.text_color(fg))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.task_show_advanced = !this.task_show_advanced;
+                    cx.notify();
+                }),
+            )
+            .child(
+                Icon::new(if advanced_open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(px(14.)),
+            )
+            .child(div().child("高级选项"));
+        let advanced_section = || {
+            v_flex()
+                .gap_3()
+                .px_3()
+                .py_3()
+                .rounded_lg()
+                .bg(rgb(crate::ui_theme::bg_rail()))
+                .child(v_flex().gap_1().child(field_label("执行通道")).child(channel_row))
+                .when(channel_acp, |d| d.child(acp_agent_row))
+                .child(v_flex().gap_1().child(field_label("类型")).child(kind_row))
+                .when(is_scheduled, |d| {
+                    let run_at_in = self.task_run_at_input.as_ref();
+                    d.child(
+                        v_flex()
+                            .gap_1()
+                            .child(field_label("执行时间 · 本地（YYYY-MM-DD HH:MM）"))
+                            .children(run_at_in.map(|i| Input::new(i))),
+                    )
+                })
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(field_label("自动执行"))
+                        .child(auto_row),
+                )
+                .child(agent_row)
+                .when(editing, |d| {
+                    d.child(
+                        v_flex()
+                            .gap_1()
+                            .child(field_label("侧栏标题 · 可选"))
+                            .child(Input::new(title_in)),
+                    )
+                })
+                .child(div().text_xs().text_color(muted).child(exec_hint))
+        };
+
         let content = v_flex()
             .gap_3()
             .child(
@@ -1296,36 +1849,18 @@ impl Workspace {
                         .child("已绑定侧栏选中的终端，运行会把指令发进该会话。"),
                 )
             })
-            .child(v_flex().gap_1().child(field_label("类型")).child(kind_row))
+            // 主字段：指令（唯一必填，最显眼）
             .child(
                 v_flex()
                     .gap_1()
-                    .child(field_label("自动执行"))
-                    .child(auto_row),
-            )
-            .when(is_scheduled, |d| {
-                let run_at_in = self.task_run_at_input.as_ref();
-                d.child(
-                    v_flex()
-                        .gap_1()
-                        .child(field_label("执行时间 · 本地（YYYY-MM-DD HH:MM）"))
-                        .children(run_at_in.map(|i| Input::new(i))),
-                )
-            })
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(field_label("指令（必填 · 给 agent 的首包）"))
+                    .child(field_label("指令 · 给 agent 的首包（必填）"))
                     .child(Input::new(body_in)),
             )
-            .child(context_row)
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(field_label("侧栏标题 · 可选"))
-                    .child(Input::new(title_in)),
-            )
-            .child(div().text_xs().text_color(muted).child(exec_hint))
+            // 主字段：项目（默认当前项目）
+            .child(project_row)
+            // 高级选项：编辑恒展开（advanced_open 已含 editing）；新建点「高级选项」展开
+            .when(!editing, |d| d.child(advanced_toggle))
+            .when(advanced_open, |d| d.child(advanced_section()))
             .child(
                 h_flex()
                     .justify_end()
@@ -1638,6 +2173,14 @@ impl Workspace {
         let title = task.title.clone();
         let proj = project_label(&task.project_cwd);
         let col = task.column;
+        // ACP 等待态覆盖通用的「执行中」：让人一眼看到任务卡在等人批/等人答。
+        let status_label = if col.is_active()
+            && let Some(sid) = task.session_id.as_ref()
+        {
+            self.acp_waiting_label(sid, cx).unwrap_or(col.label())
+        } else {
+            col.label()
+        };
         let col_color: Hsla = rgb(col.color()).into();
         // 徽章底 = 该列语义色的低透明度版本，与 `col.color()` 同源
         let col_tint: Hsla = crate::ui_theme::tint(col.color(), 0x22).into();
@@ -1697,7 +2240,7 @@ impl Workspace {
 
         // 状态徽章可点：下拉改状态（不占操作行）
         let status_badge = Button::new(SharedString::from(format!("tc-st-{id}")))
-            .label(col.label())
+            .label(status_label)
             .xsmall()
             .ghost()
             .dropdown_menu(move |menu, _window, _cx| {
@@ -1950,6 +2493,24 @@ impl Workspace {
     }
 
     /// 按 session_id 聚焦已有侧栏终端；找到返回 true。
+    /// ACP 等待子态文案：绑定会话正在等批准 / 等选择 → 「等你批准」/「等你选择」；
+    /// 否则 None（任务仍显示通用列状态）。
+    fn acp_waiting_label(&self, sid: &str, cx: &mut Context<Self>) -> Option<&'static str> {
+        for sess in &self.sessions {
+            if let crate::SessionKind::Acp(view) = &sess.kind {
+                if view.read(cx).session_id() != sid {
+                    continue;
+                }
+                return match view.read(cx).phase() {
+                    smelt_core::acp_session::AcpPhase::AwaitingApproval => Some("等你批准"),
+                    smelt_core::acp_session::AcpPhase::AwaitingChoice => Some("等你选择"),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
     pub fn focus_session_by_id(
         &mut self,
         sid: &str,
@@ -1985,9 +2546,13 @@ impl Workspace {
                 return;
             }
         }
-        // 执行中但会话已丢 → 再新开
+        // 执行中但会话已丢 → 再新开（按通道路由：ACP 走对话会话）
         if task.column.is_active() {
-            self.run_task_in_terminal(id, window, cx);
+            if matches!(task.channel, TaskChannel::Acp { .. }) {
+                self.run_task_in_acp(id, window, cx);
+            } else {
+                self.run_task_in_terminal(id, window, cx);
+            }
         }
         cx.notify();
     }
@@ -1997,6 +2562,16 @@ impl Workspace {
         let Some(task) = TaskStore::get(id) else {
             return;
         };
+        // 手动运行也守依赖：前置任务没完成就拉起会堵死 FIFO。
+        let all = TaskStore::load();
+        if !task.dependencies_met(&all.tasks) {
+            window.push_notification(Notification::error("前置任务未完成，无法运行"), cx);
+            return;
+        }
+        // ACP 通道：建独立对话会话（有存活 ACP 会话也不注入，任务是独立现场）。
+        if matches!(task.channel, TaskChannel::Acp { .. }) {
+            return self.run_task_in_acp(id, window, cx);
+        }
         if let Some(sid) = task.session_id.clone() {
             // 会话还在：把首包打进该终端（右键新建仅创建后的「开跑」）
             let mut alive = false;
@@ -2087,6 +2662,70 @@ impl Workspace {
         self.focus_active(window, cx);
         cx.notify();
     }
+
+    /// 在**对话通道**跑任务：建一个独立 ACP 会话（接任务指定的 agent），握手完成后
+    /// 自动发首包 prompt（`pending_initial_prompt` 机制）。sid 固定 `acp-<uuid>`，
+    /// 供完成/失败边沿按 sid 回查任务。
+    pub fn run_task_in_acp(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = TaskStore::get(id) else {
+            return;
+        };
+        let TaskChannel::Acp { agent, profile_id } = &task.channel else {
+            return;
+        };
+        let agent_kind = smelt_core::agent_kind::AcpAgentKind::from_id(agent)
+            .unwrap_or(smelt_core::agent_kind::AcpAgentKind::Claude);
+        let base_launch = task
+            .launch
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| agent_kind.default_cmd());
+        let cwd = if task.project_cwd.trim().is_empty() {
+            None
+        } else {
+            Some(task.project_cwd.clone())
+        };
+
+        let Some(run) = TaskStore::begin_acp_run(id, &base_launch, agent_kind.id(), profile_id.clone())
+        else {
+            return;
+        };
+        let sid = format!("acp-{}", uuid::Uuid::new_v4());
+
+        let request = crate::acp_view::AcpHandoffRequest {
+            source: None,
+            cwd: cwd.clone(),
+            agent: agent_kind,
+            launch: smelt_core::agent_kind::AcpLaunchSpec::from_command(base_launch.clone()),
+            refresh_launch_from_settings: false,
+            profile_id: profile_id.clone(),
+            config_values: Vec::new(),
+            prompt: task_prompt(&task),
+        };
+        let view = cx.new(|cx| {
+            crate::acp_view::AcpView::start_with_handoff_sid(window, cx, request, Some(sid.clone()))
+        });
+        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
+        self.sessions.push(crate::Session {
+            ui_id: crate::next_session_ui_id(),
+            kind: crate::SessionKind::Acp(view),
+            custom_title: Some(task.title.clone()),
+            remote_owned: false,
+            _acp_persist_sub,
+            ui_state: crate::SessionUiState::default(),
+        });
+        self.session_list_revision = self.session_list_revision.wrapping_add(1);
+        self.active_session = self.sessions.len() - 1;
+        // 存 base（重跑时重新拼首包），并把 Run 绑到固定 acp-* sid。
+        TaskStore::update(id, |t| {
+            t.launch = Some(base_launch);
+        });
+        TaskStore::mark_run_started(id, &run.id, &sid);
+
+        self.save_state(cx);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
 }
 
 // ===================== 测试 =====================
@@ -2094,8 +2733,8 @@ impl Workspace {
 #[cfg(test)]
 mod task_model_tests {
     use super::{
-        Task, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRun, TaskRunStatus, TaskStore,
-        build_launch_with_prompt, parse_local_datetime, shell_single_quote,
+        Task, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRetryPolicy, TaskRun, TaskRunStatus,
+        TaskStore, build_launch_with_prompt, parse_local_datetime, shell_single_quote,
     };
     use std::path::Path;
 
@@ -2132,6 +2771,10 @@ mod task_model_tests {
         t.column = TaskColumn::Running;
         t.kind = TaskKind::Scheduled;
         t.run_at = Some(1_700_000_000);
+        t.depends_on = vec!["dep-1".into()];
+        t.retry_policy = TaskRetryPolicy { max_attempts: 5, retry_delay_secs: 30, remix_on_retry: true };
+        t.retry_at = Some(1_700_000_100);
+        t.channel = TaskChannel::Acp { agent: "claude".into(), profile_id: Some("p1".into()) };
         let run = TaskRun {
             id: "run-1".into(),
             task_id: t.id.clone(),
@@ -2158,6 +2801,13 @@ mod task_model_tests {
         assert_eq!(back.tasks[0].current_run_id.as_deref(), Some("run-1"));
         assert_eq!(back.runs[0].status, TaskRunStatus::Completed);
         assert_eq!(back.runs[0].attempt, 1);
+        assert_eq!(back.tasks[0].depends_on, vec!["dep-1".to_string()]);
+        assert_eq!(back.tasks[0].retry_policy.max_attempts, 5);
+        assert_eq!(back.tasks[0].retry_at, Some(1_700_000_100));
+        assert_eq!(
+            back.tasks[0].channel,
+            TaskChannel::Acp { agent: "claude".into(), profile_id: Some("p1".into()) }
+        );
         assert_eq!(TaskColumn::Ready.label(), "待办");
         assert_eq!(TaskColumn::Waiting.label(), "执行中");
     }
@@ -2170,6 +2820,44 @@ mod task_model_tests {
         assert!(back.tasks[0].run_at.is_none());
         assert!(back.tasks[0].current_run_id.is_none());
         assert!(back.runs.is_empty());
+    }
+
+    #[test]
+    fn old_json_defaults_new_fields() {
+        let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x"}]}"#;
+        let back: TaskFile = serde_json::from_str(json).unwrap();
+        let t = &back.tasks[0];
+        assert!(t.depends_on.is_empty());
+        assert_eq!(t.retry_policy, TaskRetryPolicy::default());
+        assert!(t.retry_at.is_none());
+        assert_eq!(t.channel, TaskChannel::Pty);
+    }
+
+    #[test]
+    fn channel_serde_old_pty_string() {
+        // 旧数据：裸 "pty"
+        let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x","channel":"pty"}]}"#;
+        let back: TaskFile = serde_json::from_str(json).unwrap();
+        assert_eq!(back.tasks[0].channel, TaskChannel::Pty);
+    }
+
+    #[test]
+    fn channel_serde_acp_object_roundtrip() {
+        let ch = TaskChannel::Acp { agent: "codex".into(), profile_id: None };
+        let json = serde_json::to_string(&ch).unwrap();
+        let back: TaskChannel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TaskChannel::Acp { agent: "codex".into(), profile_id: None });
+    }
+
+    #[test]
+    fn channel_serde_hand_edited_acp_string() {
+        // 手改 tasks.json 写裸 "acp" → 映射成 Acp{默认}，防止 load_json 整体回退清空
+        let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x","channel":"acp"}]}"#;
+        let back: TaskFile = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back.tasks[0].channel,
+            TaskChannel::Acp { agent: String::new(), profile_id: None }
+        );
     }
 
     #[test]
@@ -2205,20 +2893,20 @@ mod task_model_tests {
     fn is_auto_runnable_skips_future_scheduled_and_manual() {
         let now = 1_000u64;
         let once = Task::new("/p".into(), "a".into(), "b".into(), None);
-        assert!(TaskStore::is_auto_runnable(&once, now));
+        assert!(TaskStore::is_auto_runnable(&once, &[], now));
 
         let mut manual = Task::new("/p".into(), "a".into(), "b".into(), None);
         manual.auto_run = false;
-        assert!(!TaskStore::is_auto_runnable(&manual, now));
+        assert!(!TaskStore::is_auto_runnable(&manual, &[], now));
 
         let mut sched = Task::new("/p".into(), "a".into(), "b".into(), None);
         sched.kind = TaskKind::Scheduled;
         sched.run_at = Some(2_000);
-        assert!(!TaskStore::is_auto_runnable(&sched, now));
+        assert!(!TaskStore::is_auto_runnable(&sched, &[], now));
         sched.run_at = Some(500);
-        assert!(TaskStore::is_auto_runnable(&sched, now));
+        assert!(TaskStore::is_auto_runnable(&sched, &[], now));
         sched.auto_run = false;
-        assert!(!TaskStore::is_auto_runnable(&sched, now));
+        assert!(!TaskStore::is_auto_runnable(&sched, &[], now));
     }
 
     #[test]
@@ -2230,11 +2918,66 @@ mod task_model_tests {
         b.auto_run = false; // 更早但不自动 → 跳过
         let mut c = Task::new("/proj".into(), "3".into(), "b3".into(), None);
         c.created_at = 20;
-        let mut list = vec![a, b, c];
-        list.retain(|t| t.project_cwd == "/proj" && TaskStore::is_auto_runnable(t, 999));
-        list.sort_by_key(|t| t.created_at);
-        assert_eq!(list[0].title, "1");
-        assert_eq!(list.len(), 2);
+        let list = vec![a, b, c];
+        // claim_next_runnable 读磁盘，这里复刻它的筛选逻辑（同 cwd + auto_runnable + FIFO）。
+        let mut filtered: Vec<&Task> = list
+            .iter()
+            .filter(|t| t.project_cwd == "/proj" && TaskStore::is_auto_runnable(t, &list, 999))
+            .collect();
+        filtered.sort_by_key(|t| t.created_at);
+        assert_eq!(filtered[0].title, "1");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn is_auto_runnable_respects_retry_at() {
+        let now = 1_000u64;
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        // 重试冷却未到 → 不可取跑
+        t.retry_at = Some(now + 10);
+        assert!(!TaskStore::is_auto_runnable(&t, &[], now));
+        // 冷却已到 → 可取跑
+        t.retry_at = Some(now);
+        assert!(TaskStore::is_auto_runnable(&t, &[], now));
+        t.retry_at = None;
+        assert!(TaskStore::is_auto_runnable(&t, &[], now));
+    }
+
+    #[test]
+    fn is_auto_runnable_respects_deps() {
+        let now = 1_000u64;
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        dep.column = TaskColumn::Running;
+        let t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let tasks = vec![t.clone()];
+        // 空依赖 → 可跑
+        assert!(TaskStore::is_auto_runnable(&t, &tasks, now));
+        // 依赖未完成 → 不可跑
+        let mut t2 = t.clone();
+        t2.depends_on = vec![dep.id.clone()];
+        let tasks2 = vec![dep, t2.clone()];
+        assert!(!TaskStore::is_auto_runnable(&t2, &tasks2, now));
+    }
+
+    #[test]
+    fn claim_next_skips_blocked_by_deps_then_fifo() {
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        dep.column = TaskColumn::Backlog; // 未完成
+        dep.auto_run = false; // 它只是阻塞条件，自身不参与候选
+        let mut a = Task::new("/p".into(), "1".into(), "b1".into(), None);
+        a.created_at = 10;
+        a.depends_on = vec![dep.id.clone()];
+        let mut b = Task::new("/p".into(), "2".into(), "b2".into(), None);
+        b.created_at = 20;
+        let list = vec![dep, a, b];
+        let mut filtered: Vec<&Task> = list
+            .iter()
+            .filter(|t| t.project_cwd == "/p" && TaskStore::is_auto_runnable(t, &list, 999))
+            .collect();
+        filtered.sort_by_key(|t| t.created_at);
+        // 依赖未满足的「1」被跳过，取「2」
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].title, "2");
     }
 
     #[test]
@@ -2242,6 +2985,139 @@ mod task_model_tests {
         let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x"}]}"#;
         let back: TaskFile = serde_json::from_str(json).unwrap();
         assert!(back.tasks[0].auto_run);
+    }
+
+    #[test]
+    fn dependencies_met_all_done() {
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        dep.column = TaskColumn::Done;
+        let t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut with_dep = t.clone();
+        with_dep.depends_on = vec![dep.id.clone()];
+        let tasks = vec![dep, with_dep.clone()];
+        assert!(with_dep.dependencies_met(&tasks));
+    }
+
+    #[test]
+    fn dependency_pending_or_running_blocks() {
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        dep.column = TaskColumn::Backlog;
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        t.depends_on = vec![dep.id.clone()];
+        let tasks = vec![dep.clone(), t.clone()];
+        assert!(!t.dependencies_met(&tasks));
+        dep.column = TaskColumn::Running;
+        let tasks = vec![dep, t.clone()];
+        assert!(!t.dependencies_met(&tasks));
+    }
+
+    #[test]
+    fn dependency_deleted_treated_met() {
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        t.depends_on = vec!["已删除的id".into()];
+        let tasks = vec![t.clone()];
+        assert!(t.dependencies_met(&tasks));
+    }
+
+    #[test]
+    fn self_dependency_met() {
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        t.depends_on = vec![t.id.clone()];
+        assert!(t.dependencies_met(&[t.clone()]));
+    }
+
+    #[test]
+    fn apply_failure_retries_within_limit() {
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 0, remix_on_retry: false };
+        t.column = TaskColumn::Running;
+        t.session_id = Some("sid".into());
+        let mut run = TaskRun {
+            id: "run-1".into(),
+            task_id: t.id.clone(),
+            attempt: 1,
+            channel: TaskChannel::Pty,
+            launch: "claude".into(),
+            session_id: Some("sid".into()),
+            status: TaskRunStatus::Running,
+            error: None,
+            created_at: 1,
+            started_at: Some(1),
+            finished_at: None,
+        };
+        t.current_run_id = Some(run.id.clone());
+        super::apply_failure_to_task(&mut t, &mut run, "boom", 100);
+        assert_eq!(run.status, TaskRunStatus::Failed);
+        assert_eq!(run.error.as_deref(), Some("boom"));
+        // 未超限 → 回待办，无冷却（delay=0），保留 current_run_id，清 session
+        assert_eq!(t.column, TaskColumn::Backlog);
+        assert!(t.retry_at.is_none());
+        assert_eq!(t.current_run_id.as_deref(), Some("run-1"));
+        assert!(t.session_id.is_none());
+    }
+
+    #[test]
+    fn apply_failure_delay_sets_retry_at() {
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 60, remix_on_retry: false };
+        t.column = TaskColumn::Running;
+        let mut run = TaskRun {
+            id: "run-1".into(),
+            task_id: t.id.clone(),
+            attempt: 1,
+            channel: TaskChannel::Pty,
+            launch: "claude".into(),
+            session_id: Some("sid".into()),
+            status: TaskRunStatus::Running,
+            error: None,
+            created_at: 1,
+            started_at: Some(1),
+            finished_at: None,
+        };
+        t.current_run_id = Some(run.id.clone());
+        super::apply_failure_to_task(&mut t, &mut run, "boom", 100);
+        assert_eq!(t.column, TaskColumn::Backlog);
+        assert_eq!(t.retry_at, Some(160));
+    }
+
+    #[test]
+    fn apply_failure_exhausted_goes_failed_column() {
+        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 0, remix_on_retry: false };
+        t.column = TaskColumn::Running;
+        let mut run = TaskRun {
+            id: "run-3".into(),
+            task_id: t.id.clone(),
+            attempt: 3,
+            channel: TaskChannel::Pty,
+            launch: "claude".into(),
+            session_id: Some("sid".into()),
+            status: TaskRunStatus::Running,
+            error: None,
+            created_at: 1,
+            started_at: Some(1),
+            finished_at: None,
+        };
+        t.current_run_id = Some(run.id.clone());
+        super::apply_failure_to_task(&mut t, &mut run, "boom", 100);
+        // 已用尝试 == max → 落 Failed 列，不再自动跑
+        assert_eq!(t.column, TaskColumn::Failed);
+        assert!(t.retry_at.is_none());
+        assert!(t.session_id.is_none());
+    }
+
+    #[test]
+    fn retry_policy_allows_retry_boundaries() {
+        use super::TaskRetryPolicy;
+        let no_retry = TaskRetryPolicy::default();
+        assert!(!no_retry.allows_retry(1)); // max=1 → 第一次尝试后不再重试
+        let infinite = TaskRetryPolicy { max_attempts: 0, retry_delay_secs: 0, remix_on_retry: false };
+        assert!(infinite.allows_retry(1));
+        assert!(infinite.allows_retry(100));
+        let three = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 0, remix_on_retry: false };
+        assert!(three.allows_retry(1));
+        assert!(three.allows_retry(2));
+        assert!(!three.allows_retry(3));
     }
 
     #[test]

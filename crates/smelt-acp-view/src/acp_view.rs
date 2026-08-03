@@ -68,6 +68,11 @@ pub enum AcpViewEvent {
     PreviewImage(std::sync::Arc<gpui::Image>),
     ContinueInNewSession(AcpHandoffRequest),
     NavigateToSession(String),
+    /// 回合结束且无人在等（无 pending_permissions / pending_elicitation）的上升沿。
+    /// 绑定任务据此把 Run 标 Completed、Task 进待审查。
+    CompletedTurn,
+    /// 连接不可恢复地结束（AcpPhase::Ended）的上升沿，带原因。绑定任务据此走失败/重试。
+    Ended(String),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -78,7 +83,8 @@ pub struct AcpForkOrigin {
 
 #[derive(Clone)]
 pub struct AcpHandoffRequest {
-    pub source: AcpForkOrigin,
+    /// 交接来源。`None` = 不是从另一个会话 fork 的（任务开跑等无来源场景）。
+    pub source: Option<AcpForkOrigin>,
     pub cwd: Option<String>,
     pub agent: AcpAgentKind,
     pub launch: AcpLaunchSpec,
@@ -178,6 +184,10 @@ pub struct AcpView {
     /// 当前回合开始时间与最近完成耗时，由 smeltd 计时后随快照同步。
     turn_started_at_ms: Option<u64>,
     last_turn_duration_ms: Option<u64>,
+    /// 上一份快照的 `completed_unread` 与相位是否已处于 Ended：用于检测完成/失败
+    /// 上升沿（绑定任务的边沿），避免每个 Idle 快照都重复触发。
+    was_completed_unread: bool,
+    was_ended: bool,
     /// 手动展开了完整输出的工具调用（key = tool_call_id）。长输出默认折叠成
     /// 前几行 + 「展开」，回合态不落盘。
     expanded_tools: std::collections::HashSet<String>,
@@ -268,24 +278,51 @@ impl AcpView {
         this
     }
 
-    /// 新建独立 ACP 会话，并在握手完成后发送来源会话的精简交接上下文。
+    /// 新建独立 ACP 会话（无指定 sid），并在握手完成后发送来源会话的精简交接上下文。
     pub fn start_with_handoff(
         window: &mut Window,
         cx: &mut Context<Self>,
         request: AcpHandoffRequest,
     ) -> Self {
-        let mut this = Self::start(
-            window,
+        Self::start_with_handoff_sid(window, cx, request, None)
+    }
+
+    /// 同 `start_with_handoff`，但允许调用方注入固定 sid（任务开跑用 `acp-<uuid>`
+    /// 绑定执行记录；任务完成边沿按 sid 回查）。`None` = 生成全新 id。
+    pub fn start_with_handoff_sid(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        request: AcpHandoffRequest,
+        saved_sid: Option<String>,
+    ) -> Self {
+        let mut this = Self::placeholder(
             cx,
             request.agent,
             request.launch,
+            request.profile_id.is_none(),
             request.profile_id,
             request.cwd,
+            String::new(),
+            Vec::new(),
+            None,
+            saved_sid,
         );
+        this.phase = AcpPhase::Starting;
+        this.starting_since = Some(std::time::Instant::now());
+        this.init_input(window, cx);
         this.refresh_launch_from_settings = request.refresh_launch_from_settings;
         this.pending_initial_prompt = Some(request.prompt);
         this.pending_initial_config = request.config_values;
-        this.fork_origin = Some(request.source);
+        this.fork_origin = request.source;
+        let handle = spawn_acp_client(AcpClientLaunch {
+            id: this.sid.clone(),
+            cwd: this.cwd.clone(),
+            launch: this.launch.clone(),
+            agent_id: request.agent.id().to_string(),
+            resume_id: None, // 第一次开，没有旧会话可续
+            retained_entries_len: this.entries.len(),
+        });
+        this.attach_handle(handle, cx);
         this
     }
 
@@ -375,6 +412,8 @@ impl AcpView {
             config_options: Vec::new(),
             turn_started_at_ms: None,
             last_turn_duration_ms: None,
+            was_completed_unread: false,
+            was_ended: false,
             expanded_tools: std::collections::HashSet::new(),
             expanded_tool_cards: std::collections::HashSet::new(),
             collapsed_tool_cards: std::collections::HashSet::new(),
@@ -440,6 +479,10 @@ impl AcpView {
     /// ACP 有自己的相位机，不能经 DaemonStates 那套五态绕一圈拿——`Starting`
     /// 和 `Ended` 在映射里都会塌成「空闲」，于是「正在启动」的横幅底下顶着一个
     /// 「空闲」胶囊，自相矛盾。
+    pub fn phase(&self) -> &AcpPhase {
+        &self.phase
+    }
+
     pub fn phase_label(&self) -> (&'static str, u32) {
         match &self.phase {
             AcpPhase::Starting => ("启动中", ui_theme::blue()),
@@ -1009,11 +1052,31 @@ impl AcpView {
         self.config_options = snap.config_options;
         self.turn_started_at_ms = snap.turn_started_at_ms;
         self.last_turn_duration_ms = snap.last_turn_duration_ms;
-        let _ = snap.completed_unread;
+        // 完成边沿：回合结束（completed_unread 上升沿）**且没有人在等**（无待批
+        // 权限 / 无待答选择）才算一次真完成——agent 问问题等你答也算回合结束，
+        // 但不能据此收任务、续跑队列。
+        let completed = snap.completed_unread
+            && !self.was_completed_unread
+            && self.permissions.is_empty()
+            && self.elicitation.is_none();
+        self.was_completed_unread = snap.completed_unread;
+        let ended_msg = match &self.phase {
+            AcpPhase::Ended(msg) => Some(msg.clone()),
+            _ => None,
+        };
+        let became_ended = ended_msg.is_some() && !self.was_ended;
+        self.was_ended = ended_msg.is_some();
         self.prune_tool_ui_state();
 
         if matches!(self.phase, AcpPhase::Ended(_)) {
             self.handle = None;
+        }
+
+        if completed {
+            cx.emit(AcpViewEvent::CompletedTurn);
+        }
+        if became_ended {
+            cx.emit(AcpViewEvent::Ended(ended_msg.unwrap()));
         }
 
         if matches!(self.phase, AcpPhase::Idle) {
@@ -2027,7 +2090,7 @@ impl Render for AcpView {
                                                         cx.emit(
                                                             AcpViewEvent::ContinueInNewSession(
                                                                 AcpHandoffRequest {
-                                                                    source,
+                                                                    source: Some(source),
                                                                     cwd: this.cwd.clone(),
                                                                     agent: this.agent,
                                                                     launch: this.launch.clone(),

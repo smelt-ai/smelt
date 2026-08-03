@@ -186,13 +186,13 @@ impl Workspace {
 
     /// inspector 面板顶部的横向 tabs，避免常驻 56px 竖轨挤占会话宽度。
     ///
-    /// `corner_guard`：见 stage.rs::render_stage_header 同名参数——这条横条被
+    /// `left_guard`：见 stage.rs::render_stage_header 同名参数——这条横条被
     /// Files/Git 展开态复用为舞台第一行时，sidebar 收起会让它变成贴着窗口左边
     /// 缘那块，真交通灯浮在它上面，需要在左边多让出交通灯宽度；平时停靠在右侧
-    /// inspector 卡片里就永远不是最左边那块，传 `false`。
+    /// inspector 卡片里就永远不是最左边那块，传 0。宽度由调用方按全屏状态算好。
     pub(crate) fn render_inspector_rail(
         &mut self,
-        corner_guard: bool,
+        left_guard: Pixels,
         right_edge: bool,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -235,14 +235,16 @@ impl Workspace {
             .flex()
             .flex_row()
             .items_center()
-            // 128px：同 stage.rs corner_guard 注释——要避开的不只是交通灯，
-            // 还有 main.rs 顶部拖拽层里常驻绝对定位的「切换左侧栏」图标
-            // （left 92px + 24px 宽）。
-            .when(corner_guard, |d| d.pl(px(128.)))
+            // left_guard 由调用方按全屏状态算好（见 main.rs 的注释）：非全屏
+            // 128px 要避开的不只是交通灯，还有 main.rs 顶部拖拽层里常驻绝对
+            // 定位的「切换左侧栏」图标（left 92px + 24px 宽）；全屏时红绿灯
+            // 隐藏、按钮移到 left(18px)，让位宽度缩小到 48px。
+            .when(left_guard > px(0.), |d| d.pl(left_guard))
             // 跟 stage.rs 头栏同一档默认左边距——Underline 变体本身内边距是 0
             // （TabVariant::inner_paddings 里专门给它清零了，指望 tab 之间紧贴），
-            // 之前没给非 corner_guard 分支补左边距，FILES 直接贴着卡片左边缘。
-            .when(!corner_guard, |d| d.pl_4())
+            // 之前没给非 left_guard（left_guard 为 0）分支补左边距，FILES 直接贴着
+            // 卡片左边缘。
+            .when(left_guard == px(0.), |d| d.pl_4())
             // 停靠态 / 展开态都贴着窗口右边缘，右上角浮着全屏/终端抽屉/
             // 侧边面板 3 颗图标（main.rs 那个 h_flex），tab 横条不留够空间
             // FILES/GIT/SKILL 和下划线会直接怼上图标，见 render_stage_header
@@ -303,7 +305,7 @@ impl Workspace {
     ) -> Div {
         // 停靠 Inspector 永远在窗口右侧，不会碰到左上角交通灯；但它自己就是
         // 贴着窗口右边缘的那张卡，得让 tab 横条给右上角浮着的图标留位置。
-        let tabs = self.render_inspector_rail(false, true, cx);
+        let tabs = self.render_inspector_rail(px(0.), true, cx);
         let body: AnyElement = match self.inspector_tab {
             InspectorTab::Files => self.render_inspector_files(window, cx),
             InspectorTab::Git => self.render_inspector_git(window, cx),

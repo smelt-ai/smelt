@@ -153,8 +153,10 @@
 //! 时机、不管权限。
 
 mod acp_registry;
+mod tasks;
 
 use acp_registry::{AcpRegistry, AcpSlot};
+use tasks::TaskState;
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent, AgentEventKind};
 use smelt_core::osc::{OscNotification, OscNotificationKind, OscScan};
 use smelt_core::remote_gateway;
@@ -1723,6 +1725,7 @@ fn main() {
     // subscribe 连接是网络层面的东西，跟 out.client/watchers 一样没必要假装还在。
     // 建在 resume_handoff 之前：交接恢复的会话也需要一份 Subscribers 去广播状态。
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+    let task_state = tasks::new_task_state();
     let (listener, sessions, acp_sessions) =
         match handoff.and_then(|p| resume_handoff(&p, &subscribers)) {
             Some(x) => {
@@ -1788,6 +1791,7 @@ fn main() {
             let Ok(conn) = conn else { continue };
             let sessions = Arc::clone(&sessions);
             let acp_sessions = Arc::clone(&acp_sessions);
+            let task_state = Arc::clone(&task_state);
             let remote_state = Arc::clone(&remote_state);
             let iroh_state = Arc::clone(&iroh_state);
             let subscribers = Arc::clone(&subscribers);
@@ -1796,6 +1800,7 @@ fn main() {
                     conn,
                     sessions,
                     acp_sessions,
+                    task_state,
                     exe_mtime,
                     listen_fd,
                     remote_state,
@@ -3305,6 +3310,7 @@ mod action_integration_tests {
             server,
             Arc::clone(sessions),
             new_acp_sessions(),
+            tasks::new_task_state(),
             0,
             -1,
             remote_state,
@@ -3440,6 +3446,7 @@ mod input_integration_tests {
             server,
             Arc::clone(sessions),
             new_acp_sessions(),
+            tasks::new_task_state(),
             0,
             -1,
             remote_state,
@@ -3519,6 +3526,7 @@ fn handle_conn(
     conn: UnixStream,
     sessions: Sessions,
     acp_sessions: AcpSessions,
+    task_state: TaskState,
     exe_mtime: u64,
     listen_fd: RawFd,
     remote_state: RemoteState,
@@ -3547,6 +3555,19 @@ fn handle_conn(
         Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &subscribers),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
         Some("acp_restart") => handle_acp_restart(conn, &v, &acp_sessions, &subscribers),
+        Some("task_add") => tasks::handle_task_add(conn, &task_state, &v),
+        Some("task_list") => tasks::handle_task_list(conn, &task_state, &v),
+        Some("task_update") => tasks::handle_task_update(conn, &task_state, &v),
+        Some("task_remove") => tasks::handle_task_remove(conn, &task_state, &v),
+        Some("task_done") => tasks::handle_task_done(conn, &task_state, &v),
+        Some("task_claim") => tasks::handle_task_claim(conn, &task_state, &v),
+        Some("task_begin_run") => tasks::handle_task_begin_run(conn, &task_state, &v),
+        Some("task_attach_session") => tasks::handle_task_attach_session(conn, &task_state, &v),
+        Some("task_session_done") => tasks::handle_task_session_done(conn, &task_state, &v),
+        Some("task_session_failed") => tasks::handle_task_session_failed(conn, &task_state, &v),
+        Some("task_run_failed") => tasks::handle_task_run_failed(conn, &task_state, &v),
+        Some("task_due") => tasks::handle_task_due(conn, &task_state, &v),
+        Some("task_runs_for") => tasks::handle_task_runs_for(conn, &task_state, &v),
         Some("list") => {
             let (mut ids, mut states): (Vec<String>, Vec<SessionState>) = sessions
                 .lock()
@@ -6556,6 +6577,7 @@ mod watch_tests {
                         server,
                         Arc::clone(&sessions),
                         new_acp_sessions(),
+                        tasks::new_task_state(),
                         0,
                         -1,
                         new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string())),

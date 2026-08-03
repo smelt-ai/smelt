@@ -23,6 +23,7 @@ pub mod osc;
 pub mod pairing;
 pub mod remote_gateway;
 pub mod session_control;
+pub mod task;
 pub mod term_text;
 pub mod title_spinner;
 pub mod workspace_menu;
