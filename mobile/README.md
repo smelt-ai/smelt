@@ -1,17 +1,28 @@
-# smelt_mobile
+# Smelt Mobile
 
-A new Flutter project.
+Flutter client for Smelt remote ACP conversations.
 
-## Getting Started
+## iOS development signing
 
-This project is a starting point for a Flutter application.
+Debug and Profile builds load a local signing override. Create it once per
+developer:
 
-A few resources to get you started if this is your first Flutter project:
+```sh
+cp ios/Flutter/Developer.xcconfig.example ios/Flutter/Developer.xcconfig
+```
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+Then set a Team ID available in your Xcode account and a unique Bundle ID
+registered by that team:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```xcconfig
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile.yourname
+```
+
+`Developer.xcconfig` is ignored by Git, so developers can install independent
+copies without changing `project.pbxproj`. Keep the same Bundle ID to preserve
+that developer build's Keychain pairing data across upgrades.
+
+Release does not load developer overrides. App Store signing remains
+intentionally unconfigured until the production Apple Developer team and final
+Bundle ID are chosen.

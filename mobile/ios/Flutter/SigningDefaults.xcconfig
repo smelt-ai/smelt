@@ -1,0 +1,4 @@
+// Shared fallback for simulator builds. App Store identity is intentionally
+// unset until a production Apple Developer account has been selected.
+PRODUCT_BUNDLE_IDENTIFIER = ai.smelt.mobile
+CODE_SIGN_STYLE = Automatic
