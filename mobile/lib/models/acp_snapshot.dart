@@ -781,6 +781,23 @@ class PendingElicitation {
     'chosen': chosen.map((key, value) => MapEntry('$key', value)),
     'text_values': textValues.map((key, value) => MapEntry('$key', value)),
   };
+
+  bool isReady({Map<int, String> localTextValues = const {}}) {
+    return fields.asMap().entries.every((entry) {
+      final field = entry.value;
+      if (!field.required) return true;
+      return switch (field.kind) {
+        ElicitationSelect() ||
+        ElicitationMultiSelect() => chosen[entry.key]?.isNotEmpty == true,
+        ElicitationText() =>
+          (localTextValues[entry.key] ?? textValues[entry.key])
+                  ?.trim()
+                  .isNotEmpty ==
+              true,
+        ElicitationExternalUrl() => true,
+      };
+    });
+  }
 }
 
 Map<int, T> _parseIndexMap<T>(
@@ -799,11 +816,13 @@ Map<int, T> _parseIndexMap<T>(
 class ElicitationField {
   final String key;
   final String title;
+  final bool required;
   final ElicitationFieldKind kind;
 
   const ElicitationField({
     required this.key,
     required this.title,
+    this.required = false,
     required this.kind,
   });
 
@@ -811,6 +830,7 @@ class ElicitationField {
     return ElicitationField(
       key: json['key'] as String? ?? '',
       title: json['title'] as String? ?? '',
+      required: json['required'] as bool? ?? false,
       kind: ElicitationFieldKind.fromJson(json['kind']),
     );
   }
@@ -818,6 +838,7 @@ class ElicitationField {
   Map<String, dynamic> toJson() => {
     'key': key,
     'title': title,
+    'required': required,
     'kind': _elicitationKindToJson(kind),
   };
 }

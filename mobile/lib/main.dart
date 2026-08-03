@@ -1978,15 +1978,7 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildElicitationCard(PendingElicitation elicitation) {
-    final ready = elicitation.fields.asMap().entries.every((entry) {
-      return switch (entry.value.kind) {
-        ElicitationSelect() || ElicitationMultiSelect() =>
-          elicitation.chosen[entry.key]?.isNotEmpty == true,
-        ElicitationText() =>
-          _elicitationTextValues[entry.key]?.trim().isNotEmpty == true,
-        ElicitationExternalUrl() => true,
-      };
-    });
+    final ready = elicitation.isReady(localTextValues: _elicitationTextValues);
     final singleSelect =
         elicitation.fields.length == 1 &&
         elicitation.fields.first.kind is ElicitationSelect;

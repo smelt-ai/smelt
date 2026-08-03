@@ -1167,20 +1167,20 @@ impl AcpView {
         }
     }
 
-    /// 每个字段都有选择后才可提交（渲染侧按这个亮按钮）。
+    /// 所有必填字段都有值后才可提交（可选字段留空不会阻塞）。
     fn elicit_ready(&self, cx: &App) -> bool {
         self.elicitation.as_ref().is_some_and(|card| {
-            card.fields
-                .iter()
-                .enumerate()
-                .all(|(ix, field)| match field.kind {
-                    ElicitFieldKindView::Text { .. } => self
-                        .elicitation_inputs
-                        .get(&ix)
-                        .is_some_and(|input| !input.read(cx).value().trim().is_empty()),
-                    ElicitFieldKindView::ExternalUrl(_) => true,
-                    _ => card.chosen.get(&ix).is_some_and(|sel| !sel.is_empty()),
-                })
+            card.fields.iter().enumerate().all(|(ix, field)| {
+                !field.required
+                    || match field.kind {
+                        ElicitFieldKindView::Text { .. } => self
+                            .elicitation_inputs
+                            .get(&ix)
+                            .is_some_and(|input| !input.read(cx).value().trim().is_empty()),
+                        ElicitFieldKindView::ExternalUrl(_) => true,
+                        _ => card.chosen.get(&ix).is_some_and(|sel| !sel.is_empty()),
+                    }
+            })
         })
     }
 
