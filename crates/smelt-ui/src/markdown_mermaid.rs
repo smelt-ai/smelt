@@ -257,12 +257,26 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
 /// 个钩子就是本文件的 mermaid 支持，以后要加别的自定义 block 渲染也从这里改，
 /// 不要在调用点各自散开接。
 ///
-/// `TextView::markdown` 默认 `selectable(false)`，5 处调用点此前都没人显式打开
-/// 过，导致会话历史/ACP 对话/文件预览里的正文鼠标框选、复制全部失效——这里统一
-/// 打开，不用每个调用点各自记得加。
+/// `TextView::markdown` 默认 `selectable(false)`，各调用点需要正文可复制时统一打开。
 pub fn markdown_view(id: impl Into<ElementId>, text: impl Into<SharedString>) -> TextView {
+    markdown_view_with_selection(id, text, true)
+}
+
+/// ACP 对话里的 Markdown 需要保持链接点击可用，避免文本选择状态拦截链接事件。
+pub fn markdown_view_clickable(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+) -> TextView {
+    markdown_view_with_selection(id, text, false)
+}
+
+fn markdown_view_with_selection(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    selectable: bool,
+) -> TextView {
     TextView::markdown(id, text)
-        .selectable(true)
+        .selectable(selectable)
         .markdown_block_parser(parse_mermaid_block)
         .markdown_block_renderer("mermaid", render_mermaid_block)
 }
