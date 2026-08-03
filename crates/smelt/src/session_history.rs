@@ -1125,6 +1125,7 @@ pub fn history_view(
                             let is_sel =
                                 selected_path_for_list.as_deref() == Some(s.path.as_path());
                             let path = s.path.clone();
+                            let path_for_copy = path.to_string_lossy().into_owned();
                             let resume_id = s.resume_id.clone();
                             let row_cwd = cwd.clone();
                             let ws_for_resume = workspace.clone();
@@ -1182,6 +1183,16 @@ pub fn history_view(
                                                     });
                                                 },
                                             ));
+                                            let path = path_for_copy.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new("复制文件路径").on_click(
+                                                    move |_ev, _window, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(path.clone()),
+                                                        );
+                                                    },
+                                                ),
+                                            );
                                             menu
                                         }),
                                 )
