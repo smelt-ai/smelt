@@ -151,6 +151,72 @@ void main() {
     expect(filterSessions(sessions, SessionListFilter.all), sessions);
   });
 
+  test('attention notifications stay hidden for the active session', () {
+    const completed = LifecycleAttention(
+      sessionId: 'current',
+      title: 'Completed',
+      message: 'Task completed',
+      kind: 'success',
+    );
+    const input = LifecycleAttention(
+      sessionId: 'current',
+      title: 'Waiting for you',
+      message: 'Agent needs input',
+      kind: 'input',
+    );
+
+    for (final attention in [completed, input]) {
+      expect(
+        shouldShowAttentionNotification(
+          attention: attention,
+          activeSessionId: 'current',
+          subscribedSessionId: null,
+        ),
+        isFalse,
+      );
+    }
+  });
+
+  test('attention notifications still surface for other sessions', () {
+    const completed = LifecycleAttention(
+      sessionId: 'background',
+      title: 'Completed',
+      message: 'Task completed',
+      kind: 'success',
+    );
+    const input = LifecycleAttention(
+      sessionId: 'background',
+      title: 'Waiting for you',
+      message: 'Agent needs input',
+      kind: 'input',
+    );
+
+    expect(
+      shouldShowAttentionNotification(
+        attention: completed,
+        activeSessionId: 'current',
+        subscribedSessionId: null,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldShowAttentionNotification(
+        attention: completed,
+        activeSessionId: null,
+        subscribedSessionId: 'background',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowAttentionNotification(
+        attention: input,
+        activeSessionId: null,
+        subscribedSessionId: 'background',
+      ),
+      isTrue,
+    );
+  });
+
   testWidgets('session filter bar fits a compact phone width', (tester) async {
     await tester.binding.setSurfaceSize(const Size(320, 160));
     addTearDown(() => tester.binding.setSurfaceSize(null));

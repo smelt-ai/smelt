@@ -67,6 +67,18 @@ List<SessionSummary> filterSessions(
   SessionListFilter.all => sessions.toList(),
 };
 
+bool shouldShowAttentionNotification({
+  required LifecycleAttention attention,
+  required String? activeSessionId,
+  required String? subscribedSessionId,
+}) {
+  if (activeSessionId == attention.sessionId) return false;
+  if (subscribedSessionId == attention.sessionId && !attention.requiresAction) {
+    return false;
+  }
+  return true;
+}
+
 Future<String?> showDesktopRenameDialog(
   BuildContext context,
   String initialName,
@@ -464,10 +476,15 @@ class _HomePageState extends State<HomePage> {
       gatewayService.listSessions();
       if (_activeSessionId == item.sessionId) {
         gatewayService.markRead(item.sessionId);
-        return;
       }
       final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
-      if (isCurrent && !item.requiresAction) return;
+      if (!shouldShowAttentionNotification(
+        attention: item,
+        activeSessionId: _activeSessionId,
+        subscribedSessionId: gatewayService.subscribedSessionId,
+      )) {
+        return;
+      }
       final session = _sessions
           .where((candidate) => candidate.id == item.sessionId)
           .firstOrNull;
