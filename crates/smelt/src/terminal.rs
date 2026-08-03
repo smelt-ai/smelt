@@ -1256,7 +1256,7 @@ pub fn kill_remote(id: &str) {
 }
 
 /// 守护进程当前持有的**全部**会话——不止 GUI 侧栏认领的那些，测试跑出来的
-/// 孤儿、忘了关的临时会话同样计在内。设置页「会话管理」弹窗用；跟 daemon_info()
+/// 游离会话、忘了关的临时会话同样计在内。设置页「会话管理」弹窗用；跟 daemon_info()
 /// 同一套阻塞调用模式，调用方自己扔后台线程。
 pub fn list_daemon_sessions() -> Vec<DaemonSessionState> {
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
@@ -2591,7 +2591,7 @@ mod damage_gate_tests {
     ///
     /// 真实教训：这几个测试连的是真实 smeltd 守护进程（不是 mock），而它们本身
     /// 是有记录的 flaky（全量并行跑时偶发超时失败，见 flaky-damage-gate-tests 记
-    /// 忆）——每 flaky 失败一次就跳过一次手写清理，泄漏一个孤儿会话；开发机上
+    /// 忆）——每 flaky 失败一次就跳过一次手写清理，泄漏一个游离会话会话；开发机上
     /// 长期攒了一堆 `smelt-kitty-test-*`/`smelt-damage-test-*`，跟真实项目会话
     /// 混在守护进程的会话计数里，「侧栏会话数」和「守护进程会话数」对不上正是
     /// 这个原因。
@@ -3031,8 +3031,8 @@ mod event_proxy_answers_tests {
         );
     }
 
-    /// `OSC 11 ?`（查询当前背景色）：之前同样被吞掉，回应里应带上我们固定的
-    /// DEFAULT_BG（`0x1a1b26`）而不是空/无回应。
+    /// `OSC 11 ?`（查询当前背景色）：之前同样被吞掉，回应里应带上当前主题的
+    /// 默认背景色（深色下 `bg_panel` = `0x313338`，跟随卡片配色）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
         set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
@@ -3046,8 +3046,8 @@ mod event_proxy_answers_tests {
         let (ty, resp) = read_frame(&mut probe);
         assert_eq!(ty, 0);
         assert!(
-            resp.contains("rgb:1a1a/1b1b/2626"),
-            "应含 DEFAULT_BG 的 rgb 十六进制，实际: {resp:?}"
+            resp.contains("rgb:3131/3333/3838"),
+            "应含默认背景色（bg_panel 深色 0x313338）的 rgb 十六进制，实际: {resp:?}"
         );
     }
 

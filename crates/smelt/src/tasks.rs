@@ -619,7 +619,7 @@ impl TaskStore {
         });
         Self::persist(&file, serde_json::json!({ "op": "task_remove", "id": id }));
         // 任务删了，落盘的首包 prompt 文件也得一起删，不然 `tasks/prompts/` 里
-        // 会一直攒孤儿文件（历史上就是这么攒出来的）。
+        // 会一直攒遗留文件（历史上就是这么攒出来的）。
         if let Some(dir) = tasks_dir() {
             let _ = std::fs::remove_file(dir.join("prompts").join(format!("{id}.txt")));
         }

@@ -2,7 +2,7 @@
 //!
 //! 几处已知的残留来源（都是 schema/实现换过之后，老文件没人再读写了）：
 //! - `tasks/prompts/*.txt`：任务删除时如果没同步删 prompt 文件（已在
-//!   [`crate::tasks::TaskStore::remove`] 里修了），会留下孤儿；老版本的这个 bug
+//!   [`crate::tasks::TaskStore::remove`] 里修了），会留下遗留；老版本的这个 bug
 //!   已经攒了一批，这里补一次性清理入口。
 //! - `tasks/*.json`：早期按项目路径分文件存任务（文件名形如
 //!   `-Users-xxx-dev-proj.json`），现在只读写单一的 `~/.smelt/tasks.json`，
@@ -26,20 +26,20 @@ fn smelt_home() -> Option<PathBuf> {
 
 #[derive(Default, Clone)]
 pub struct CleanupScan {
-    pub orphan_prompts: Vec<PathBuf>,
+    pub legacy_prompts: Vec<PathBuf>,
     pub legacy_task_files: Vec<PathBuf>,
     pub legacy_worktree_dirs: Vec<PathBuf>,
 }
 
 impl CleanupScan {
     pub fn is_empty(&self) -> bool {
-        self.orphan_prompts.is_empty()
+        self.legacy_prompts.is_empty()
             && self.legacy_task_files.is_empty()
             && self.legacy_worktree_dirs.is_empty()
     }
 
     pub fn total_items(&self) -> usize {
-        self.orphan_prompts.len() + self.legacy_task_files.len() + self.legacy_worktree_dirs.len()
+        self.legacy_prompts.len() + self.legacy_task_files.len() + self.legacy_worktree_dirs.len()
     }
 }
 
@@ -73,7 +73,7 @@ pub fn scan() -> CleanupScan {
             }
             let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             if !known_ids.contains(id) {
-                out.orphan_prompts.push(path);
+                out.legacy_prompts.push(path);
             }
         }
     }
@@ -90,7 +90,7 @@ pub fn scan() -> CleanupScan {
 pub fn clean(scan: &CleanupScan) -> usize {
     let mut removed = 0;
     for path in scan
-        .orphan_prompts
+        .legacy_prompts
         .iter()
         .chain(scan.legacy_task_files.iter())
     {
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn scan_report_counts_match_total_items() {
         let s = CleanupScan {
-            orphan_prompts: vec![PathBuf::from("a.txt")],
+            legacy_prompts: vec![PathBuf::from("a.txt")],
             legacy_task_files: vec![PathBuf::from("b.json"), PathBuf::from("c.json")],
             legacy_worktree_dirs: vec![],
         };

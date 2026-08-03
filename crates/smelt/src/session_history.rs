@@ -1,8 +1,8 @@
 //! 历史会话浏览：列出某个项目下各家 agent CLI 本地保存的历史会话（Claude Code /
 //! Codex / Grok / Copilot 各有自己的存储格式，四份独立实现，共用同一套
-//! `SessionSummary`/`Turn`/`SessionDetail` 展示模型），点开能看完整对话内容（只读
-//! 浏览，不支持 resume——续接走 ACP 协议本身，见 acp.rs）。跟 usage_stats.rs 读的
-//! 是同一份 Claude 数据源，但目的不同——那边统计聚合数字，这里还原对话本身。
+//! `SessionSummary`/`Turn`/`SessionDetail` 展示模型），点开能看完整对话内容；续接
+//! 同时支持 ACP 消息流和 CLI/TUI 两条路径。跟 usage_stats.rs 读的是同一份 Claude
+//! 数据源，但目的不同——那边统计聚合数字，这里还原对话本身。
 //!
 //! 四家格式调研自实测（各 CLI 版本可能变，这些解析都是「尽力而为」，不是协议）：
 //! - Claude: `~/.claude/projects/<项目目录编码>/<session_id>.jsonl`
@@ -1161,14 +1161,18 @@ pub fn history_view(
                                             let row_cwd = row_cwd.clone();
                                             let row_launch_override = row_launch_override.clone();
                                             let row_profile_id = row_profile_id.clone();
-                                            menu = menu.item(PopupMenuItem::new("继续").on_click(
+                                            let acp_resume_id = resume_id.clone();
+                                            let acp_row_cwd = row_cwd.clone();
+                                            let acp_launch_override = row_launch_override.clone();
+                                            menu = menu.item(PopupMenuItem::new("ACP 继续").on_click(
                                                 move |_ev, window, cx| {
                                                     // 没选中项目时历史页本来就是空的，理论到不了这里，
                                                     // 防御性地什么都不做而不是 panic。
-                                                    let Some(cwd) = row_cwd.clone() else { return };
-                                                    let resume_id = resume_id.clone();
-                                                    let launch_override =
-                                                        row_launch_override.clone();
+                                                    let Some(cwd) = acp_row_cwd.clone() else {
+                                                        return;
+                                                    };
+                                                    let resume_id = acp_resume_id.clone();
+                                                    let launch_override = acp_launch_override.clone();
                                                     let profile_id = row_profile_id.clone();
                                                     ws.update(cx, |this, cx| {
                                                         this.resume_acp_session(
@@ -1183,6 +1187,30 @@ pub fn history_view(
                                                     });
                                                 },
                                             ));
+                                            let ws = ws_for_resume.clone();
+                                            let cli_resume_id = resume_id;
+                                            let cli_row_cwd = row_cwd;
+                                            let cli_launch_override = row_launch_override;
+                                            menu = menu.item(
+                                                PopupMenuItem::new("CLI/TUI 继续").on_click(
+                                                    move |_ev, _window, cx| {
+                                                        let Some(cwd) = cli_row_cwd.clone() else {
+                                                            return;
+                                                        };
+                                                        let resume_id = cli_resume_id.clone();
+                                                        let launch_override = cli_launch_override.clone();
+                                                        ws.update(cx, |this, cx| {
+                                                            this.resume_cli_session(
+                                                                agent,
+                                                                launch_override,
+                                                                cwd,
+                                                                resume_id,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    },
+                                                ),
+                                            );
                                             let path = path_for_copy.clone();
                                             menu = menu.item(
                                                 PopupMenuItem::new("复制文件路径").on_click(

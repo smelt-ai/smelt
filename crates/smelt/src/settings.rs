@@ -2424,7 +2424,7 @@ impl Workspace {
                         (None, None) => None,
                     };
                     // 「N 个会话」不只是个数字——守护持有的会话不全是侧栏认领的
-                    // （测试跑出来的孤儿、忘了关的临时会话也计在内），点开能看
+                    // （测试跑出来的游离会话、忘了关的临时会话也计在内），点开能看
                     // 到明细并单独清理，不用被迫走「重启守护进程」那种连坐所有
                     // 会话的核选项。守护没起来就没什么可看的，不露这个入口。
                     let manage_sessions_entity = daemon_entity.clone();
@@ -2474,7 +2474,7 @@ impl Workspace {
                 })),
         );
 
-        // —— 存储：`~/.smelt` 下的历史残留（老 schema / 老实现留下的孤儿文件）扫描与清理 ——
+        // —— 存储：`~/.smelt` 下的历史残留（老 schema / 老实现留下的遗留文件）扫描与清理 ——
         let storage_page = SettingPage::new("存储").resettable(false).group(
             SettingGroup::new()
                 .title("残留数据清理")
@@ -2489,10 +2489,10 @@ impl Workspace {
                         None => "还没扫描".to_string(),
                         Some(s) if s.is_empty() => "没有发现残留数据".to_string(),
                         Some(s) => format!(
-                            "发现 {} 处残留：孤儿 prompt 文件 {} 个、旧版任务文件 {} 个、\
+                            "发现 {} 处残留：遗留 prompt 文件 {} 个、旧版任务文件 {} 个、\
                              旧版 worktree 目录 {} 个",
                             s.total_items(),
-                            s.orphan_prompts.len(),
+                            s.legacy_prompts.len(),
                             s.legacy_task_files.len(),
                             s.legacy_worktree_dirs.len(),
                         ),

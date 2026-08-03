@@ -45,6 +45,15 @@ pub struct DaemonSessionState {
     /// 作为 agent 兼容信号消费，避免同一事件双通知。
     #[serde(default)]
     pub structured_events: bool,
+    /// 会话是否有客户端连接（list op 附带；GUI 每次启动时据此自动清理死会话和
+    /// 长期无人认领的游离会话——这两种都没有连接）。旧版守护不报该字段，反序列化
+    /// 默认 true——宁可不删，不误杀。
+    #[serde(default = "default_connected")]
+    pub connected: bool,
+}
+
+fn default_connected() -> bool {
+    true
 }
 
 impl DaemonSessionState {
