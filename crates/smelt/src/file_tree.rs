@@ -12,7 +12,7 @@ use std::time::Instant;
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::input::Input;
+use gpui_component::input::{Input, InputEvent};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
@@ -897,6 +897,7 @@ pub fn file_content_parts(
                     .id("md-preview")
                     .flex_1()
                     .min_h_0()
+                    .overflow_x_scroll()
                     .overflow_y_scroll()
                     .p_3()
                     .child(div().text_sm().text_color(fg).child(
@@ -1279,6 +1280,13 @@ impl Workspace {
             conflict_pending: false,
             preview: is_markdown,
         });
+        // InputState 自己会刷新编辑器，但预览和文件头属于 Workspace，必须订阅变更
+        // 才能在编辑时同步更新 Markdown 预览与未保存标记，而不依赖切换 tab 触发 render。
+        self._file_editor_sub = Some(cx.subscribe(&editor, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
         cx.notify();
 
         // 图片由 GPUI 的 img 元素直接从路径异步解码；不要再走 read_to_string，

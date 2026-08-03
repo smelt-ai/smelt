@@ -275,6 +275,8 @@ struct SessionUiState {
     expanded: HashSet<String>,
     file_tree_selected: Option<String>,
     open_file: Option<OpenFile>,
+    /// 当前打开文件编辑器的变更订阅；输入变化时让 Workspace 重渲染预览和脏标记。
+    _file_editor_sub: Option<Subscription>,
     file_tree_w: f32,
     pinned_roots: Vec<String>,
     collapsed_roots: HashSet<String>,
@@ -313,6 +315,7 @@ impl Default for SessionUiState {
             expanded: HashSet::new(),
             file_tree_selected: None,
             open_file: None,
+            _file_editor_sub: None,
             file_tree_w: inspector::MIN_FILE_TREE_WIDTH,
             pinned_roots: Vec::new(),
             collapsed_roots: HashSet::new(),
@@ -451,6 +454,7 @@ impl SessionUiState {
             expanded: archive.expanded,
             file_tree_selected: archive.file_tree_selected,
             open_file: None,
+            _file_editor_sub: None,
             file_tree_w: archive.file_tree_w.clamp(
                 inspector::MIN_FILE_TREE_WIDTH,
                 inspector::MAX_FILE_TREE_WIDTH,
@@ -1992,6 +1996,15 @@ struct Workspace {
     task_editing: Option<String>,
     /// 定时任务扫描循环是否已启动（避免 render 重复 spawn）。
     task_schedule_started: bool,
+    /// ACP 任务回合结束/失败挂旗（sid, cwd）：render 头与终端挂旗汇流到
+    /// `on_session_task_idle` 触发自动续跑/重试。None = 无待续跑。
+    pending_acp_task_continue: Option<(String, String)>,
+    /// 新建任务弹窗：执行通道（false=终端，true=ACP 对话）。
+    task_channel_acp: bool,
+    /// 新建任务弹窗：ACP 通道接哪家 agent（`AcpAgentKind::id()`，默认 claude）。
+    task_acp_agent: String,
+    /// 新建任务弹窗：高级选项（通道/类型/自动执行等）是否展开。默认折叠，只留主字段。
+    task_show_advanced: bool,
     /// 文件树搜索结果（文件名 + 文件内容）：后台遍历项目填充，render 只读。
     /// query 非空时左栏由树形切换为扁平命中列表。
     search_results: Option<SearchState>,
@@ -2385,6 +2398,10 @@ impl Workspace {
             show_new_task_modal: false,
             task_editing: None,
             task_schedule_started: false,
+            pending_acp_task_continue: None,
+            task_channel_acp: false,
+            task_acp_agent: "claude".into(),
+            task_show_advanced: false,
             search_results: None,
             search_gen: 0,
             _workspace_resize_sub,
@@ -3169,6 +3186,20 @@ impl Workspace {
                         this.activate(ix, window, cx);
                     }
                 }
+                acp_view::AcpViewEvent::CompletedTurn => {
+                    // ACP 回合真完成（无人在等）：绑定任务进待审查，挂旗续跑同 cwd 下一条。
+                    let sid = _view.read(cx).session_id().to_string();
+                    if let Some(cwd) = crate::tasks::TaskStore::mark_session_done(&sid) {
+                        this.pending_acp_task_continue = Some((sid, cwd));
+                    }
+                }
+                acp_view::AcpViewEvent::Ended(reason) => {
+                    // ACP 连接不可恢复结束：绑定任务按重试策略处理，挂旗让队列继续。
+                    let sid = _view.read(cx).session_id().to_string();
+                    if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, reason) {
+                        this.pending_acp_task_continue = Some((sid, cwd));
+                    }
+                }
             },
         )
     }
@@ -3180,7 +3211,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.remember_session_project(request.cwd.as_deref());
-        let title = format!("继续：{}", request.source.title);
+        let title = request
+            .source
+            .as_ref()
+            .map(|s| format!("继续：{}", s.title))
+            .unwrap_or_else(|| "继续".to_string());
         let view = cx.new(|cx| acp_view::AcpView::start_with_handoff(window, cx, request));
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
@@ -5815,6 +5850,9 @@ impl Render for Workspace {
                 }
             }
         }
+        if let Some((sid, cwd)) = self.pending_acp_task_continue.take() {
+            task_continues.push((sid, cwd));
+        }
         for (sid, cwd) in task_continues {
             self.on_session_task_idle(&sid, &cwd, window, cx);
         }
@@ -6077,6 +6115,20 @@ impl Render for Workspace {
         } else {
             px(100. - (100. - 16.) * inspector_motion.progress.clamp(0., 1.))
         };
+        // 左侧让位宽度（stage.rs / inspector.rs 的 corner_guard 语义，改由调用方
+        // 算好宽度传进去）：sidebar 收起时舞台/返回条/展开的 inspector rail 会变成
+        // 贴着窗口最左边那块，头栏要让出红绿灯 + 悬浮「切换左侧栏」按钮的宽度。
+        // 全屏时红绿灯被 macOS 隐藏、切换按钮也移到 left(18px)（见 sidebar-toggle
+        // 那里的注释），让位宽度跟着缩小：128px（非全屏，红绿灯 ~78px + 按钮
+        // 92+24=116px 再加余量）→ 48px（全屏，按钮 18+24=42px 相对卡片左边缘
+        // 9px 只剩 33px，加 15px 余量）。
+        let left_guard = if self.sidebar_open {
+            px(0.)
+        } else if window.is_fullscreen() {
+            px(48.)
+        } else {
+            px(128.)
+        };
         // 底部抽屉（快捷终端）同一套挂载过渡；具体高度交给下面真正的
         // v_resizable/resizable_panel 组件去管（拖拽 + 动画期间的程序化改宽度
         // 都走那一套，不再自己手算 opacity/height）。
@@ -6101,7 +6153,7 @@ impl Render for Workspace {
         // 需 .flex()，否则单 pane 的叶子 flex_1 不生效、塌缩到内容高度（边框不到底）。
         // 旧右侧「结构面板」已被 inspector + 舞台头承接，不再渲染。
         let content = if self.sessions.get(self.active_session).is_some() {
-            let stage_header = self.render_stage_header(!self.sidebar_open, right_reserve, cx);
+            let stage_header = self.render_stage_header(left_guard, right_reserve, cx);
             div()
                 .flex_1()
                 .min_w_0()
@@ -6178,7 +6230,7 @@ impl Render for Workspace {
                 Some(MainView::Files) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(!self.sidebar_open, right_edge, cx))
+                    .child(self.render_inspector_rail(left_guard, right_edge, cx))
                     .child(self.render_inspector_files(window, cx))
                     .into_any_element(),
                 // GIT 同理：展开只是复用停靠面板（rail + git_narrow_panel）铺满
@@ -6187,19 +6239,19 @@ impl Render for Workspace {
                 Some(MainView::Git) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(!self.sidebar_open, right_edge, cx))
+                    .child(self.render_inspector_rail(left_guard, right_edge, cx))
                     .child(self.git_narrow_panel(window, cx))
                     .into_any_element(),
                 Some(MainView::Skills) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(!self.sidebar_open, right_edge, cx))
+                    .child(self.render_inspector_rail(left_guard, right_edge, cx))
                     .child(self.render_inspector_skills(cx))
                     .into_any_element(),
                 Some(v) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_stage_back_bar(v, !self.sidebar_open, right_reserve, cx))
+                    .child(self.render_stage_back_bar(v, left_guard, right_reserve, cx))
                     .child(self.render_stage_override(v, window, cx))
                     .into_any_element(),
                 None => content.into_any_element(),
@@ -6253,8 +6305,8 @@ impl Render for Workspace {
         // sidebar 收起时舞台卡片会变成贴着窗口最左边那块，真交通灯浮在它上面；
         // 这个安全区不再由这里整条 34px 往下挤（那样会把头栏推到单独一行，
         // 平白多出一截空白——之前踩过），而是交给舞台头/返回条/inspector 横条
-        // 自己按 corner_guard 在同一行左边让出交通灯宽度，见 stage.rs /
-        // inspector.rs 里 corner_guard 参数的用法。
+        // 自己按 left_guard（全屏感知的左侧让位宽度，见上面 left_guard 的注释）
+        // 在同一行左边让出交通灯宽度，见 stage.rs / inspector.rs 里该参数的用法。
         let stage_card = workspace_frame::card(stage_surface).child(stage);
 
         // 舞台 + inspector 用自己独立的一层 h_resizable（stage_inspector_resize），
@@ -6692,7 +6744,13 @@ impl Render for Workspace {
                         div()
                             .id("sidebar-toggle")
                             .absolute()
-                            .left(px(92.))
+                            // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
+                            // 隐藏红绿灯，这 92px 就全空了，按钮贴到卡片左边缘
+                            // 内侧——8px 卡片边距 + 10px 呼吸间距 = 18px，跟右侧
+                            // pr(px(18.))、红绿灯 x=18 同一条竖直基准。全屏进出
+                            // 必伴随窗口尺寸变化触发重绘，渲染时直接查
+                            // is_fullscreen() 就能拿到正确状态。
+                            .left(px(if window.is_fullscreen() { 18. } else { 92. }))
                             // 侧栏展开时悬浮在 session_list 的 34px 顶部导航行上；
                             // 收起时悬浮在 stage 头上——两种状态现在都是 34px 高，
                             // 5px 本来就居中；卡片整体下移了 8px（见上面注释），
@@ -6707,11 +6765,16 @@ impl Render for Workspace {
                             .text_color(rgb(ui_theme::text_mid()))
                             .hover(|s| s.bg(ui_theme::overlay(0x18)))
                             .child(
-                                Icon::new(if self.sidebar_open {
-                                    IconName::PanelLeftClose
+                                // 跟右侧两个开关同一套「细线 ↔ 实心色块」区分开合：
+                                // 收起态用 bundled 的细线 PanelLeft，展开态换成
+                                // panel-left-filled 实心色块，不再用带箭头的
+                                // -open/-close 变体（对齐 Codex 工具栏风格）。
+                                if self.sidebar_open {
+                                    Icon::empty()
+                                        .path("smelt-icons/panel-left-filled.svg")
                                 } else {
-                                    IconName::PanelLeftOpen
-                                })
+                                    Icon::new(IconName::PanelLeft)
+                                }
                                 .size_4(),
                             )
                             .tooltip(|window, cx| {
@@ -7210,6 +7273,13 @@ impl gpui::AssetSource for SmeltAssets {
         if path == "smelt-icons/panel-right-filled.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
                 include_bytes!("../assets/icons/panel-right-filled.svg").as_slice(),
+            )));
+        }
+        // panel-left-filled：左侧栏开关的开启态，跟 panel-right-filled 同一套
+        // 「细线外框 + 实心色块」风格（右侧两个开关已统一，左侧这枚补上对齐）。
+        if path == "smelt-icons/panel-left-filled.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-left-filled.svg").as_slice(),
             )));
         }
         gpui_component_assets::Assets.load(path)

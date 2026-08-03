@@ -7,7 +7,7 @@
 use crate::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
 use crate::workspace_menu::{WorkspaceMenuProject, WorkspaceMenuSnapshot};
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -170,6 +170,22 @@ pub fn forget_remote_session(id: &str) {
     let mut sessions = load_remote_sessions_unlocked();
     sessions.retain(|session| session.id != id);
     save_remote_sessions(sessions);
+}
+
+/// smeltd 当前活着的会话 id（终端 + ACP，靠前缀区分）。任务对账用：判断绑定会话
+/// 是否还活着，不活的任务标失败，避免「会话没了但任务永远卡 Running」。
+pub fn list_sessions() -> Result<Vec<String>, String> {
+    let response = daemon_request(json!({ "op": "list" }))?;
+    Ok(response
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 fn daemon_request(request: Value) -> Result<Value, String> {

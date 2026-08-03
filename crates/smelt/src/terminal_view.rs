@@ -176,6 +176,15 @@ pub struct TerminalView {
     /// 结构化状态上一帧是否已经是 Succeeded；hook 激活后完成边沿以此为准，
     /// 不能再让标题 spinner 的短暂消失误判任务完成。
     was_structured_succeeded: bool,
+    /// 结构化状态上一帧是否已经是 Failed；用于检测失败边沿（触发任务失败处理）。
+    was_structured_failed: bool,
+    /// 非结构化路径下 spinner 已连续落下的帧数（REFRESH≈30ms 为单位）。标题停转
+    /// 可能是「完成」也可能是「等人」（问问题/请求权限），无法可靠区分——所以
+    /// 必须静默稳定超过阈值才判完成。
+    idle_frames: u32,
+    /// 本次「静默」开始前是否真的跑过（有 spinner 落下这个转换）。没跑过的普通
+    /// 空闲终端不能因为 3 秒无输出就被当成「任务完成」。
+    idle_was_running: bool,
     /// 上一次轮询看到的结构化 phase；BEL 只被同一竞速窗口内的新 phase 转换覆盖，
     /// 不能因为 daemon 长期停在旧 Succeeded 就吞掉以后普通 shell 发出的 BEL。
     last_structured_phase: Option<crate::terminal::DaemonPhase>,
@@ -268,6 +277,9 @@ fn terminal_bell_notifications_enabled(cx: &App) -> bool {
 
 /// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。
 const STUCK_FRAMES: u32 = 8 * 60 * 1000 / 30;
+/// 非结构化完成「静默稳定」阈值：spinner 落下后连续 3s 无新输出才判完成
+/// （标题停转也可能是「等人」，无法可靠区分，取保守值）。
+const NONSTRUCTURED_SETTLE_FRAMES: u32 = 3 * 1000 / 30;
 
 /// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里各项的图标对齐
 /// （新建终端/Claude Code/Codex/Copilot/Grok 一一对应），一眼认出这一行是哪种会话。
@@ -381,6 +393,10 @@ impl TerminalView {
                         && daemon_state.as_ref().is_some_and(|state| {
                             state.phase == crate::terminal::DaemonPhase::Succeeded
                         });
+                    let structured_failed = structured_events
+                        && daemon_state.as_ref().is_some_and(|state| {
+                            state.phase == crate::terminal::DaemonPhase::Failed
+                        });
                     let running = if structured_events {
                         daemon_state.as_ref().is_some_and(|state| {
                             matches!(
@@ -397,8 +413,16 @@ impl TerminalView {
                     let completion_edge = if structured_events {
                         !this.was_structured_succeeded && structured_succeeded
                     } else {
-                        codex_osc_stop || (this.was_running && !running)
+                        // 非结构化：spinner 落下且静默稳定 ≥NONSTRUCTURED_SETTLE_FRAMES
+                        // 才判完成（标题停转也可能是「等人」，取保守阈值）。必须真的
+                        // 有「从跑转静」这个转换，普通空闲终端不算完成。
+                        codex_osc_stop
+                            || (!running
+                                && this.idle_was_running
+                                && this.idle_frames == NONSTRUCTURED_SETTLE_FRAMES)
                     };
+                    let failure_edge =
+                        structured_events && !this.was_structured_failed && structured_failed;
                     let name = this.title.clone();
                     if completion_edge {
                         // fallback 标题由运行转为空闲时也产生统一完成事件；结构化完成和
@@ -415,19 +439,44 @@ impl TerminalView {
                         // 同项目自动 claim 下一条待办（见 `on_session_task_idle`）。
                         let sid = this.session_id.clone();
                         if let Some(cwd) = crate::tasks::TaskStore::mark_session_done(&sid) {
-                            this.pending_task_continue_cwd = Some(cwd);
+                            // 结构化完成（含 Codex OSC Stop）是明确终点，自动续跑下一条；
+                            // 非结构化无法区分「完成」vs「等人」，保守起见不自动续跑，
+                            // 等人手动确认，避免误收任务、误触发队列。
+                            if structured_events || codex_osc_stop {
+                                this.pending_task_continue_cwd = Some(cwd);
+                            }
                         }
                         crate::pet::push_pet_message(
                             cx,
                             format!("「{name}」任务完成啦，来看看结果吧"),
                         );
                     }
+                    if failure_edge {
+                        let sid = this.session_id.clone();
+                        let err = daemon_state
+                            .as_ref()
+                            .and_then(|s| s.pending_question.clone())
+                            .unwrap_or_else(|| "agent 回合失败".to_string());
+                        if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, &err)
+                        {
+                            // 失败按重试策略回待办（冷却）或落 Failed 列；挂旗让
+                            // Workspace 继续 claim——同 cwd 下一条或重试该任务。
+                            this.pending_task_continue_cwd = Some(cwd);
+                        }
+                        crate::pet::push_pet_message(
+                            cx,
+                            format!("「{name}」任务失败，已按重试策略处理"),
+                        );
+                    }
                     this.was_structured_succeeded = structured_succeeded;
+                    this.was_structured_failed = structured_failed;
                     this.last_structured_phase = structured_events
                         .then(|| daemon_state.as_ref().map(|state| state.phase))
                         .flatten();
                     if running {
                         this.running_frames += 1;
+                        this.idle_frames = 0;
+                        this.idle_was_running = false;
                         if this.running_frames == STUCK_FRAMES && !this.stuck_notified {
                             this.stuck_notified = true;
                             crate::pet::push_pet_message(
@@ -438,6 +487,9 @@ impl TerminalView {
                     } else {
                         this.running_frames = 0;
                         this.stuck_notified = false;
+                        // 有「从跑转静」这个转换才记 idle_was_running（普通空闲终端不算）。
+                        this.idle_was_running = this.idle_was_running || this.was_running;
+                        this.idle_frames += 1;
                     }
                     this.was_running = running;
 
@@ -509,6 +561,9 @@ impl TerminalView {
             cursor: None,
             was_running: false,
             was_structured_succeeded: false,
+            was_structured_failed: false,
+            idle_frames: 0,
+            idle_was_running: false,
             last_structured_phase: None,
             running_frames: 0,
             stuck_notified: false,

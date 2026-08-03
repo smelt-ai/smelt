@@ -31,7 +31,7 @@ impl Workspace {
     pub(crate) fn render_stage_back_bar(
         &self,
         v: MainView,
-        corner_guard: bool,
+        left_guard: Pixels,
         right_reserve: Pixels,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -55,16 +55,18 @@ impl Workspace {
             // sidebar 收起时这条横条会变成贴着窗口左边缘那一块，真交通灯浮在
             // 它头上——跟 render_stage_header 同一个处理：不额外拿一整行 34px
             // 去撑高度，就地在左边多让出交通灯的宽度，留在同一行里。
-            // 128px 不是随手拍的：main.rs 顶部拖拽层里的「切换左侧栏」图标固定
-            // 绝对定位在 left(92px)、size_6（24px），92+24=116 再加一点间距——
-            // 之前给 92px 只避开了交通灯，没避开这颗常驻图标，标题文字被它糊住。
-            .when(corner_guard, |d| d.pl(px(128.)))
+            // left_guard 由调用方按全屏状态算好（见 main.rs 的注释）：非全屏
+            // 128px 不是随手拍的——main.rs 顶部拖拽层里的「切换左侧栏」图标固定
+            // 绝对定位在 left(92px)、size_6（24px），92+24=116 再加一点间距，
+            // 之前给 92px 只避开了交通灯，没避开这颗常驻图标，标题文字被它糊住；
+            // 全屏时红绿灯隐藏、按钮移到 left(18px)，让位宽度缩小到 48px。
+            .when(left_guard > px(0.), |d| d.pl(left_guard))
             // 右边同理：这条横条贴着窗口右边缘时，右上角浮着全屏/终端抽屉/
             // 侧边面板 3 颗 size_6 图标（main.rs 那个 h_flex：3*24 + 2*4 gap +
             // 10 右边距 ≈ 90px），不留够空间标题/内容会被糊住。跟 render_stage_header
             // 一样用连续插值，别在 inspector 开合瞬间一刀切。
             .pr(right_reserve)
-            .when(!corner_guard, |d| d.pl_3())
+            .when(left_guard == px(0.), |d| d.pl_3())
             .child(
                 div()
                     .id("stage-back")
@@ -105,13 +107,15 @@ impl Workspace {
 
     /// 44px 舞台头。没有会话时返回 None（空态自带引导）。
     ///
-    /// `corner_guard`：sidebar 收起时这块舞台会变成贴着窗口左边缘的那一块，
+    /// `left_guard`：sidebar 收起时这块舞台会变成贴着窗口左边缘的那一块，
     /// 真交通灯浮在它上面——这时不额外拿一整条 34px 出来把头栏往下挤（那样
     /// 平白多出一整行空白，看着像布局错位），而是让头栏自己在左边多留出
     /// 交通灯的宽度，标题跟交通灯挤在同一行里，参考 Arc / VS Code 的处理。
+    /// 宽度由调用方按全屏状态算好（全屏时红绿灯隐藏、切换按钮移到最左，
+    /// 让位从 128px 缩到 48px）；传 0 表示不需要让位。
     pub(crate) fn render_stage_header(
         &mut self,
-        corner_guard: bool,
+        left_guard: Pixels,
         right_reserve: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
@@ -240,8 +244,8 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .when(corner_guard, |d| d.pl(px(128.)))
-                .when(!corner_guard, |d| d.pl_4())
+                .when(left_guard > px(0.), |d| d.pl(left_guard))
+                .when(left_guard == px(0.), |d| d.pl_4())
                 // 右边贴窗口边缘时（inspector 没停靠在旁边）要避开右上角浮着的
                 // 全屏/终端抽屉/侧边面板 3 颗图标，见 render_stage_back_bar 同款
                 // 注释；inspector 停靠时它在旁边接管右边缘，这里就不用多留。
