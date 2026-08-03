@@ -6,6 +6,7 @@ import 'package:xterm/xterm.dart';
 
 import '../services/gateway_service.dart';
 import '../services/terminal_stream_service.dart';
+import '../utils/xterm_input_filter.dart';
 
 class TerminalSessionPage extends StatefulWidget {
   const TerminalSessionPage({super.key, required this.session});
@@ -22,6 +23,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   late Terminal _terminal;
   late StreamController<List<int>> _byteController;
   late StreamSubscription<String> _decodedSubscription;
+  late XtermInputFilter _inputFilter;
   late final StreamSubscription<TerminalStreamEvent> _eventSubscription;
   late final StreamSubscription<TerminalStreamState> _stateSubscription;
 
@@ -71,6 +73,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       unawaited(_byteController.close());
       unawaited(_decodedSubscription.cancel());
     }
+    _inputFilter = XtermInputFilter();
     _byteController = StreamController<List<int>>();
     _decodedSubscription = _byteController.stream
         .transform(const Utf8Decoder(allowMalformed: true))
@@ -90,7 +93,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
           _error = null;
         });
       case TerminalDataEvent():
-        _byteController.add(event.bytes);
+        final bytes = _inputFilter.add(event.bytes);
+        if (bytes.isNotEmpty) _byteController.add(bytes);
       case TerminalErrorEvent():
         if (!mounted) return;
         setState(() {
