@@ -830,7 +830,10 @@ class ElicitationField {
     return ElicitationField(
       key: json['key'] as String? ?? '',
       title: json['title'] as String? ?? '',
-      required: json['required'] as bool? ?? false,
+      // Legacy snapshots predate optional elicitation fields. Missing metadata
+      // therefore means the old all-fields-required behavior, while new
+      // snapshots can explicitly send false.
+      required: json['required'] as bool? ?? true,
       kind: ElicitationFieldKind.fromJson(json['kind']),
     );
   }
