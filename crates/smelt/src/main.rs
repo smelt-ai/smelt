@@ -72,7 +72,10 @@ use terminal_view::TerminalView;
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
 use git_panel::{BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, RepoInfo};
 use session_history::{HistoryListState, HistoryPane, history_view};
-use settings::{Appearance, LlmInputs, load_appearance, load_launch_config};
+use settings::{
+    Appearance, LlmInputs, active_launch_entries, default_launch_entries, load_appearance,
+    load_launch_config,
+};
 
 const MIN_SIDEBAR_WIDTH: f32 = 240.0;
 const MIN_INSPECTOR_WIDTH: f32 = 320.0;
@@ -1545,13 +1548,13 @@ fn restored_active_position(restored_indices: &[usize], saved_active: usize) -> 
         .unwrap_or_else(|position| position.min(restored_indices.len() - 1))
 }
 
-fn merge_restore_orphans(
+fn merge_restore_pending(
     mut sessions: Vec<SessionState>,
-    orphans: &[(usize, SessionState)],
+    pending: &[(usize, SessionState)],
 ) -> Vec<SessionState> {
-    let mut orphans = orphans.to_vec();
-    orphans.sort_by_key(|(index, _)| *index);
-    for (index, session) in orphans {
+    let mut pending = pending.to_vec();
+    pending.sort_by_key(|(index, _)| *index);
+    for (index, session) in pending {
         sessions.insert(index.min(sessions.len()), session);
     }
     sessions
@@ -1559,16 +1562,16 @@ fn merge_restore_orphans(
 
 fn persisted_active_position(
     active_session: usize,
-    orphans: &[(usize, SessionState)],
+    pending: &[(usize, SessionState)],
     sessions_restored: bool,
 ) -> usize {
     if !sessions_restored {
         return active_session;
     }
     let mut position = active_session;
-    let mut orphan_indices = orphans.iter().map(|(index, _)| *index).collect::<Vec<_>>();
-    orphan_indices.sort_unstable();
-    for index in orphan_indices {
+    let mut pending_indices = pending.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+    pending_indices.sort_unstable();
+    for index in pending_indices {
         if index <= position {
             position += 1;
         }
@@ -2165,7 +2168,7 @@ struct Workspace {
     /// 「重启守护进程」二次确认弹窗开关：点确定会断开所有当前终端会话。
     show_daemon_restart_confirm: bool,
     /// 「会话管理」弹窗开关：设置页「更新」tab 点开会话数详情用。守护进程持有
-    /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的孤儿、忘了关的临时会话都会
+    /// 的会话不只 GUI 侧栏认领的那些——测试跑出来的游离会话、忘了关的临时会话都会
     /// 计进「N 个会话」里但从没在任何侧栏露过面，只有这里能看见并单独清理，
     /// 不用被迫走「重启守护进程」这种会误伤正常会话的核选项。
     session_manager_open: bool,
@@ -2173,7 +2176,7 @@ struct Workspace {
     session_manager_list: Option<Vec<terminal::DaemonSessionState>>,
     /// 启动时从存档恢复失败的会话（守护未就绪等）。仍写回 workspace.json，避免
     /// 「恢复失败 → 写空盘 → 会话永久蒸发」。侧栏本帧看不到它们，下次冷启动会重试。
-    restore_orphans: Vec<(usize, SessionState)>,
+    restore_pending: Vec<(usize, SessionState)>,
     /// 用户在后台恢复期间删除的项目路径；尚未交货的恢复结果命中这些路径时直接丢弃。
     cancelled_restore_paths: Vec<String>,
     /// 会话列表被用户增删/重排的版本号。后台恢复只在版本未变化时按旧存档索引插入。
@@ -2242,8 +2245,8 @@ impl Workspace {
             .as_ref()
             .map(normalize_saved_sessions)
             .unwrap_or_default();
-        // 恢复完成前先放进 orphans：save_state 会合并 orphans，避免空 sessions 窗口期抹盘。
-        let restore_orphans = pending_sessions.iter().cloned().enumerate().collect();
+        // 恢复完成前先放进 pending：save_state 会合并 pending，避免空 sessions 窗口期抹盘。
+        let restore_pending = pending_sessions.iter().cloned().enumerate().collect();
         let sessions: Vec<Session> = Vec::new();
 
         // 项目列表：新存档直接读；旧存档（没有 projects 字段）从各会话 cwd 反推一份，
@@ -2467,13 +2470,13 @@ impl Workspace {
             show_daemon_restart_confirm: false,
             session_manager_open: false,
             session_manager_list: None,
-            restore_orphans,
+            restore_pending,
             cancelled_restore_paths: Vec::new(),
             session_list_revision: 0,
             active_session_revision: 0,
             focus_handle: cx.focus_handle(),
         };
-        // orphans 已挂上全部待恢复会话 → 写盘不会抹掉存档。
+        // pending 已挂上全部待恢复会话 → 写盘不会抹掉存档。
         ws.save_state(cx);
         updater::cleanup_stale_backup();
         ws.check_for_update(true, cx);
@@ -2679,7 +2682,7 @@ impl Workspace {
                             session_state_cwd(&ss).as_deref(),
                             &this.cancelled_restore_paths,
                         ) {
-                            this.restore_orphans
+                            this.restore_pending
                                 .retain(|(index, _)| *index != original_index);
                             continue;
                         }
@@ -2745,7 +2748,7 @@ impl Workspace {
                             original_index,
                             restore_order_intact,
                         );
-                        this.restore_orphans
+                        this.restore_pending
                             .retain(|(index, _)| *index != original_index);
                         restored += 1;
                     }
@@ -2768,14 +2771,14 @@ impl Workspace {
                                 terminal::kill_remote(&leaf.sid);
                             }
                         }
-                        this.restore_orphans
+                        this.restore_pending
                             .retain(|(index, _)| *index != original_index);
                         return false;
                     }
                     let leaves = match result {
                         Ok(leaves) => leaves,
                         Err(e) => {
-                            eprintln!("[workspace] 会话恢复失败，保留 orphan：{e}");
+                            eprintln!("[workspace] 会话恢复失败，保留待恢复条目：{e}");
                             return false;
                         }
                     };
@@ -2826,7 +2829,7 @@ impl Workspace {
                         original_index,
                         restore_order_intact,
                     );
-                    this.restore_orphans
+                    this.restore_pending
                         .retain(|(index, _)| *index != original_index);
                     // 让这一个立刻上屏，不等其余的
                     cx.notify();
@@ -2858,18 +2861,43 @@ impl Workspace {
                     view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
                 }
                 this.save_state(cx);
-                if !this.restore_orphans.is_empty() {
+                if !this.restore_pending.is_empty() {
                     eprintln!(
                         "[workspace] {} 个会话未能恢复，已保留在存档中，下次启动会重试",
-                        this.restore_orphans.len()
+                        this.restore_pending.len()
                     );
                 }
                 eprintln!(
                     "[workspace] 后台恢复完成：成功 {restored}，失败 {}",
-                    this.restore_orphans.len()
+                    this.restore_pending.len()
                 );
                 // restore 完成后再查/升级守护，避免与 reattach 并行 handoff
                 this.check_daemon_outdated(cx);
+                // 启动对齐：每次打开 GUI 自动清理一次——死会话和没有任何客户端
+                // 连接的游离会话（测试遗留、忘了关的、旧守护没认领的）都会被清掉，
+                // 不弹提示、不碰任何正在使用的会话。恢复完成的会话此刻已 attach，
+                // 有连接，不会误清。
+                cx.spawn(async move |this, cx| {
+                    let stale = cx
+                        .background_executor()
+                        .spawn(async {
+                            terminal::list_daemon_sessions()
+                                .into_iter()
+                                .filter(|s| !s.connected)
+                                .map(|s| s.id)
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+                    for id in stale {
+                        Self::kill_daemon_session(&id);
+                    }
+                    let _ = this.update(cx, |this, cx| {
+                        if this.session_manager_open {
+                            this.refresh_session_manager(cx);
+                        }
+                    });
+                })
+                .detach();
                 cx.notify();
             });
         })
@@ -3349,6 +3377,35 @@ impl Workspace {
         self.save_state(cx);
     }
 
+    /// 历史会话页「CLI/TUI 继续」：在 Smelt 的 PTY 中启动各家 CLI 自己的交互式
+    /// 恢复命令。它不经过 ACP，也不复制历史文本；agent CLI 直接从自己的 session
+    /// store 恢复原会话。profile 的环境变量沿用历史页当前 tab 的 ACP 配置。
+    pub fn resume_cli_session(
+        &mut self,
+        agent: settings::AcpAgentKind,
+        launch_override: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+        cwd: String,
+        resume_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let base = cli_launch_entry_for_agent(agent, cx);
+        let mut command = cli_resume_command(agent, &base.command, &resume_id);
+        if let Some(launch) = launch_override {
+            for (name, value) in launch.env.iter().rev() {
+                let value = smelt_core::workspace_override::expand_tilde(value);
+                command = format!("{name}={} {command}", shell_quote(&value));
+            }
+        }
+        self.add_session_with_launch(
+            Some(cwd),
+            Some(settings::LaunchEntry {
+                label: format!("{} TUI", agent.short_label()),
+                command,
+            }),
+            cx,
+        );
+    }
+
     /// 项目行「+」下拉菜单的快捷入口：`launch` 编进 shell 的启动命令行（见
     /// terminal.rs::spawn / smeltd.rs::spawn_session），`label` 用作侧栏初始显示名。
     ///
@@ -3549,9 +3606,9 @@ impl Workspace {
             })
             .collect();
         // 启动时恢复失败的会话按原位置写回，下次冷启动重试。
-        sessions = merge_restore_orphans(sessions, &self.restore_orphans);
+        sessions = merge_restore_pending(sessions, &self.restore_pending);
 
-        // 安全阀：内存里一个会话都没有、也没有 orphan，但磁盘上还有旧存档 → 绝不
+        // 安全阀：内存里一个会话都没有、也没有待恢复条目，但磁盘上还有旧存档 → 绝不
         // 用空列表覆盖（历史上「守护未就绪 → 恢复全失败 → save_state 抹盘」会把
         // 用户所有侧栏会话永久清掉）。
         //
@@ -3579,7 +3636,7 @@ impl Workspace {
             menu,
             active_session: persisted_active_position(
                 self.active_session,
-                &self.restore_orphans,
+                &self.restore_pending,
                 self.sessions_restored,
             ),
             route: self.primary_route,
@@ -4274,7 +4331,7 @@ impl Workspace {
         {
             self.cancelled_restore_paths.push(path.clone());
         }
-        self.restore_orphans.retain(|(_, session)| {
+        self.restore_pending.retain(|(_, session)| {
             !restore_path_is_cancelled(
                 session_state_cwd(session).as_deref(),
                 std::slice::from_ref(&path),
@@ -4818,12 +4875,12 @@ impl Workspace {
 
     /// GUI 侧栏当前认领的全部 session id（Term 会话；ACP 会话是 GUI 直接 spawn
     /// 的子进程，根本不经过 smeltd，不出现在 list 结果里，不用管）。跟 list
-    /// 查回来的全量做差集，剩下的就是「守护持有但没有任何侧栏在追踪」的孤儿
+    /// 查回来的全量做差集，剩下的就是「守护持有但没有任何侧栏在追踪」的游离会话
     /// ——测试跑出来的、忘了关的临时会话，都会落在这一类。
-    /// 会话管理弹窗判断「孤儿」的依据：守护/smeltd 那边的会话 id 有没有被
+    /// 会话管理弹窗判断「游离会话」的依据：守护/smeltd 那边的会话 id 有没有被
     /// 某个侧栏标签认领。终端会话看 `term_leaves`；ACP 会话现在也托管在
     /// smeltd 里、用同一份 `list` 汇总（见 smeltd「ACP 会话托管」一节），
-    /// 不把它们的 id 也算进「已认领」，正常开着的 ACP 对话会被误标成孤儿。
+    /// 不把它们的 id 也算进「已认领」，正常开着的 ACP 对话会被误标成游离会话。
     fn tracked_session_ids(&self, cx: &App) -> std::collections::HashSet<String> {
         self.sessions
             .iter()
@@ -4837,7 +4894,7 @@ impl Workspace {
     }
 
     /// 打开「会话管理」弹窗并触发一次查询（每次打开都重新拉最新数据，不复用
-    /// 上次缓存——孤儿是不是还在、有没有新泄漏，都得是当下的事实）。
+    /// 上次缓存——游离会话是不是还在、有没有新泄漏，都得是当下的事实）。
     fn open_session_manager(&mut self, cx: &mut Context<Self>) {
         self.session_manager_open = true;
         self.session_manager_list = None;
@@ -4885,25 +4942,25 @@ impl Workspace {
         .detach();
     }
 
-    /// 批量清理「没有任何侧栏在追踪」的孤儿——不碰任何 GUI 认领的正常会话，
+    /// 批量清理「没有任何侧栏在追踪」的游离会话——不碰任何 GUI 认领的正常会话，
     /// 不需要走「重启守护进程」那种连坐所有会话的核选项。
-    fn kill_all_orphans_in_manager(&mut self, cx: &mut Context<Self>) {
+    fn kill_all_detached_in_manager(&mut self, cx: &mut Context<Self>) {
         let tracked = self.tracked_session_ids(cx);
         let Some(list) = self.session_manager_list.clone() else {
             return;
         };
-        let orphan_ids: Vec<String> = list
+        let detached_ids: Vec<String> = list
             .into_iter()
             .map(|s| s.id)
             .filter(|id| !tracked.contains(id))
             .collect();
-        if orphan_ids.is_empty() {
+        if detached_ids.is_empty() {
             return;
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .spawn(async move {
-                    for id in &orphan_ids {
+                    for id in &detached_ids {
                         Self::kill_daemon_session(id);
                     }
                 })
@@ -4913,7 +4970,7 @@ impl Workspace {
         .detach();
     }
 
-    /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是孤儿（没有任何
+    /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
     /// 侧栏在追踪），逐个/批量清理。入口和弹层都在设置窗口里。
     pub(crate) fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border) = {
@@ -4935,14 +4992,14 @@ impl Workspace {
                 .child("守护进程当前没有任何会话。")
                 .into_any_element(),
             Some(list) => {
-                let orphan_count = list.iter().filter(|s| !tracked.contains(&s.id)).count();
+                let detached_count = list.iter().filter(|s| !tracked.contains(&s.id)).count();
                 let mut rows = v_flex()
                     .id("session-manager-list")
                     .gap_1()
                     .max_h(px(360.))
                     .overflow_y_scroll();
-                for s in list {
-                    let is_orphan = !tracked.contains(&s.id);
+                for (row_index, s) in list.iter().enumerate() {
+                    let is_detached = !tracked.contains(&s.id);
                     let is_acp = s.id.starts_with("acp-");
                     let label = s
                         .cwd
@@ -4961,7 +5018,7 @@ impl Workspace {
                                     .gap_2()
                                     .items_center()
                                     .min_w_0()
-                                    .child(div().size_2().rounded_full().bg(if is_orphan {
+                                    .child(div().size_2().rounded_full().bg(if is_detached {
                                         rgb(ui_theme::red())
                                     } else {
                                         rgb(ui_theme::green())
@@ -4973,12 +5030,29 @@ impl Workspace {
                                             .text_color(muted)
                                             .child(if is_acp { "对话" } else { "终端" }),
                                     )
-                                    .child(div().text_sm().text_color(fg).truncate().child(label))
-                                    .children(is_orphan.then(|| {
+                                    .child(
+                                        div()
+                                            .id(("session-manager-label", row_index))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .text_color(fg)
+                                            .truncate()
+                                            .tooltip({
+                                                let tip: SharedString = label.clone().into();
+                                                move |window, cx| {
+                                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                                        .build(window, cx)
+                                                }
+                                            })
+                                            .child(label),
+                                    )
+                                    .children(is_detached.then(|| {
                                         div()
                                             .text_xs()
+                                            .flex_shrink_0()
                                             .text_color(rgb(ui_theme::red()))
-                                            .child("孤儿（无侧栏追踪）")
+                                            .child("游离会话（无侧栏追踪）")
                                     })),
                             )
                             .child(Self::modal_button(
@@ -5000,14 +5074,14 @@ impl Workspace {
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child(format!("共 {} 个，{orphan_count} 个孤儿", list.len())),
+                            .child(format!("共 {} 个，{detached_count} 个游离会话", list.len())),
                     )
                     .child(rows)
                     .into_any_element()
             }
         };
 
-        let has_orphans = self
+        let has_detached = self
             .session_manager_list
             .as_ref()
             .map(|l| l.iter().any(|s| !tracked.contains(&s.id)))
@@ -5019,7 +5093,7 @@ impl Workspace {
                 div()
                     .text_sm()
                     .text_color(muted)
-                    .child("守护进程持有的全部会话；孤儿是没有被任何窗口侧栏追踪的（测试跑出来的、忘了关的临时会话），清理它们不影响正常使用中的会话。"),
+                    .child("守护进程持有的全部会话；游离会话是没有被任何窗口侧栏追踪的（测试跑出来的、忘了关的临时会话），清理它们不影响正常使用中的会话。"),
             )
             .child(div().border_t_1().border_color(border).pt_3().child(body))
             .child(
@@ -5038,15 +5112,15 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .when(has_orphans, |el| {
+                    .when(has_detached, |el| {
                         el.child(Self::modal_button(
-                            "kill-all-orphans",
-                            "清理全部孤儿",
+                            "kill-all-detached",
+                            "清理全部游离会话",
                             tint,
                             hover,
                             accent_text,
                             |this, _, _, cx| {
-                                this.kill_all_orphans_in_manager(cx);
+                                this.kill_all_detached_in_manager(cx);
                             },
                             cx,
                         ))
@@ -7134,6 +7208,78 @@ fn acp_agent_from_cmd(cmd: &str) -> settings::AcpAgentKind {
     }
 }
 
+/// 返回 shell 中第一个真正的程序 token，跳过 `VAR=value` 前缀和 `env`。
+fn command_program(command: &str) -> Option<&str> {
+    let mut tokens = command.split_whitespace();
+    for token in tokens.by_ref() {
+        if smelt_core::workspace_override::split_env_assignment(token).is_some()
+            || token == "env"
+        {
+            continue;
+        }
+        return std::path::Path::new(token)
+            .file_name()
+            .and_then(|name| name.to_str());
+    }
+    None
+}
+
+fn command_matches_agent(command: &str, agent: settings::AcpAgentKind) -> bool {
+    command_program(command) == Some(agent.id())
+}
+
+/// 选择 CLI/TUI 启动命令：优先使用设置中的同 agent 启动项，缺失时回退出厂命令。
+fn cli_launch_entry_for_agent(
+    agent: settings::AcpAgentKind,
+    cx: &App,
+) -> settings::LaunchEntry {
+    active_launch_entries(cx)
+        .into_iter()
+        .chain(default_launch_entries())
+        .find(|entry| command_matches_agent(&entry.command, agent))
+        .unwrap_or_else(|| settings::LaunchEntry {
+            label: agent.label().to_string(),
+            command: agent.id().to_string(),
+        })
+}
+
+/// 单引号包裹 shell 参数；历史 session id 和 profile 路径都不能直接拼进命令。
+fn shell_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// 各家 CLI/TUI 的历史恢复语法不同，但都使用同一个 canonical session id。
+fn cli_resume_command(
+    agent: settings::AcpAgentKind,
+    base_command: &str,
+    resume_id: &str,
+) -> String {
+    let base = base_command.trim();
+    let id = shell_quote(resume_id);
+    let suffix = match agent {
+        settings::AcpAgentKind::Claude | settings::AcpAgentKind::Grok => {
+            format!("--resume {id}")
+        }
+        settings::AcpAgentKind::Copilot => format!("--resume={id}"),
+        settings::AcpAgentKind::Codex => format!("resume {id}"),
+    };
+    if base.is_empty() {
+        format!("{} {suffix}", agent.id())
+    } else {
+        format!("{base} {suffix}")
+    }
+}
+
 /// 当前工作目录字符串。
 fn current_dir() -> Option<String> {
     std::env::current_dir()
@@ -7995,7 +8141,7 @@ mod workspace_state_tests {
     #[cfg(test)]
     mod restore_order_tests {
         use crate::{
-            AcpSaved, PaneState, SessionState, merge_restore_orphans, persisted_active_position,
+            AcpSaved, PaneState, SessionState, merge_restore_pending, persisted_active_position,
             planned_restore_insert_position, record_restored_index, restore_path_is_cancelled,
             restored_active_position, restored_insert_position, should_auto_resume_active_acp,
             should_restore_saved_active, split_restore_queue,
@@ -8066,18 +8212,18 @@ mod workspace_state_tests {
         }
 
         #[test]
-        fn restore_orphans_are_merged_at_their_saved_indices() {
+        fn restore_pending_are_merged_at_their_saved_indices() {
             let live = vec![state("acp-1", true), state("acp-3", true)];
-            let orphans = vec![(0, state("term-0", false)), (2, state("term-2", false))];
+            let pending = vec![(0, state("term-0", false)), (2, state("term-2", false))];
 
-            let merged = merge_restore_orphans(live, &orphans);
+            let merged = merge_restore_pending(live, &pending);
             let names = merged
                 .iter()
                 .map(|session| session.custom_title.as_deref().unwrap())
                 .collect::<Vec<_>>();
 
             assert_eq!(names, vec!["term-0", "acp-1", "term-2", "acp-3"]);
-            assert_eq!(persisted_active_position(1, &orphans, true), 3);
+            assert_eq!(persisted_active_position(1, &pending, true), 3);
         }
 
         #[test]
@@ -8141,7 +8287,9 @@ mod workspace_state_tests {
 
 #[cfg(test)]
 mod acp_agent_tests {
-    use super::{AcpSaved, acp_agent_from_cmd};
+    use super::{
+        AcpSaved, acp_agent_from_cmd, cli_resume_command, command_matches_agent, shell_quote,
+    };
     use crate::settings::AcpAgentKind;
 
     /// 多 agent 之前的 ACP 存档没有 `agent` 字段：必须读得进来（None），
@@ -8321,5 +8469,47 @@ mod acp_agent_tests {
             assert_eq!(AcpAgentKind::from_id(a.id()), Some(a));
         }
         assert_eq!(AcpAgentKind::from_id("gemini"), None);
+    }
+
+    #[test]
+    fn cli_resume_commands_use_each_agents_tui_syntax() {
+        assert_eq!(
+            cli_resume_command(AcpAgentKind::Claude, "claude --allow-all", "history-1"),
+            "claude --allow-all --resume 'history-1'"
+        );
+        assert_eq!(
+            cli_resume_command(AcpAgentKind::Copilot, "copilot --allow-all", "history-1"),
+            "copilot --allow-all --resume='history-1'"
+        );
+        assert_eq!(
+            cli_resume_command(AcpAgentKind::Codex, "codex --full-auto", "history-1"),
+            "codex --full-auto resume 'history-1'"
+        );
+        assert_eq!(
+            cli_resume_command(AcpAgentKind::Grok, "grok --always-approve", "history-1"),
+            "grok --always-approve --resume 'history-1'"
+        );
+    }
+
+    #[test]
+    fn cli_resume_command_quotes_shell_arguments() {
+        assert_eq!(shell_quote("a session's id"), "'a session'\\''s id'");
+        assert_eq!(
+            cli_resume_command(AcpAgentKind::Claude, "claude", "a session's id"),
+            "claude --resume 'a session'\\''s id'"
+        );
+    }
+
+    #[test]
+    fn cli_command_matching_skips_environment_prefixes() {
+        assert!(command_matches_agent(
+            "CLAUDE_CONFIG_DIR='/tmp/claude' claude --allow-all",
+            AcpAgentKind::Claude
+        ));
+        assert!(command_matches_agent(
+            "env COPILOT_HOME=/tmp/copilot copilot --allow-all",
+            AcpAgentKind::Copilot
+        ));
+        assert!(!command_matches_agent("claude --allow-all", AcpAgentKind::Codex));
     }
 }

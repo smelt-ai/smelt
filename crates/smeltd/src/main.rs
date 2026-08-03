@@ -1955,6 +1955,7 @@ fn waitpid_retry(pid: i32, options: i32) -> i32 {
     }
 }
 
+
 fn cleanup_rejected_acp_handoff(owned: OwnedAcpHandoff) {
     unsafe {
         libc::close(owned.stdin_fd);
@@ -3569,19 +3570,41 @@ fn handle_conn(
         Some("task_due") => tasks::handle_task_due(conn, &task_state, &v),
         Some("task_runs_for") => tasks::handle_task_runs_for(conn, &task_state, &v),
         Some("list") => {
-            let (mut ids, mut states): (Vec<String>, Vec<SessionState>) = sessions
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(id, s)| (id.clone(), s.state.lock().unwrap().clone()))
-                .unzip();
-            let (acp_ids, acp_states): (Vec<String>, Vec<SessionState>) = acp_sessions
-                .snapshot()
-                .into_iter()
-                .map(|(id, slot)| (id, slot.value.state.lock().unwrap().clone()))
-                .unzip();
-            ids.extend(acp_ids);
-            states.extend(acp_states);
+            // 附带每个会话是否「有客户端连接」（connected），供 GUI 每次启动时
+            // 自动清理：死会话和长期无人认领的游离会话都没有连接，一个字段覆盖
+            // 两种场景。正常使用中的会话（GUI/远程/移动端正 attach 或旁观）都有
+            // 连接，不会被误清。
+            let mut ids: Vec<String> = Vec::new();
+            let mut states: Vec<serde_json::Value> = Vec::new();
+            {
+                let sessions = sessions.lock().unwrap();
+                for (id, s) in sessions.iter() {
+                    let mut v = serde_json::to_value(s.state.lock().unwrap().clone())
+                        .unwrap_or(serde_json::Value::Null);
+                    let connected = {
+                        let out = s.out.lock().unwrap();
+                        out.client.is_some() || !out.watchers.is_empty()
+                    };
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("connected".to_string(), serde_json::json!(connected));
+                    }
+                    ids.push(id.clone());
+                    states.push(v);
+                }
+            }
+            for (id, slot) in acp_sessions.snapshot() {
+                let mut v = serde_json::to_value(slot.value.state.lock().unwrap().clone())
+                    .unwrap_or(serde_json::Value::Null);
+                let connected = {
+                    let out = slot.value.out.lock().unwrap();
+                    out.client.is_some() || !out.watchers.is_empty()
+                };
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("connected".to_string(), serde_json::json!(connected));
+                }
+                ids.push(id);
+                states.push(v);
+            }
             let mut c = conn;
             let _ = writeln!(
                 c,
@@ -3593,8 +3616,17 @@ fn handle_conn(
             let id = v["id"].as_str().unwrap_or_default();
             let s = sessions.lock().unwrap().remove(id);
             if let Some(s) = s {
-                unsafe {
-                    libc::kill(s.ctl.lock().unwrap().pid, libc::SIGKILL);
+                let pid = s.ctl.lock().unwrap().pid;
+                // 防御坏 pid：kill(-1) 会发给系统所有进程、kill(0) 发给同组进程，
+                // pid<=1 一律不真杀（正常 spawn 的 shell pid 必然 >1，只是兜底）。
+                if pid > 1 {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    // 顺手收尸：shell 已死但 PTY pump 线程未必走到 waitpid（历史上
+                    // 攒出过几十个僵尸），GUI 清理游离会话/主动关 pane 都走这里，
+                    // 借此把僵尸收掉。阻塞等待是微秒~毫秒级，可接受。
+                    let _ = waitpid_retry(pid, 0);
                 }
                 let mut out = s.out.lock().unwrap();
                 if let Some(c) = out.client.take() {
@@ -4918,7 +4950,7 @@ fn handle_acp_watch(
     sess.out
         .lock()
         .unwrap()
-        .watchers
+         .watchers
         .retain(|w| w.as_raw_fd() != attached_fd);
 }
 
