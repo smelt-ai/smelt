@@ -163,6 +163,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('session filter labels stay on one line with large text', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 160));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(1.4)),
+          child: Scaffold(
+            body: SessionFilterBar(
+              selected: SessionListFilter.running,
+              attentionCount: 99,
+              runningCount: 99,
+              allCount: 99,
+              onChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+
+    for (final label in ['Action 99', 'Running 99', 'All 99']) {
+      final text = tester.widget<Text>(find.text(label));
+      expect(text.maxLines, 1);
+      expect(text.softWrap, isFalse);
+    }
+    expect(find.byIcon(Icons.priority_high), findsNothing);
+    expect(find.byIcon(Icons.autorenew), findsNothing);
+    expect(find.byIcon(Icons.forum_outlined), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('cached connection bar identifies stale content', (tester) async {
     await tester.pumpWidget(
       MaterialApp(

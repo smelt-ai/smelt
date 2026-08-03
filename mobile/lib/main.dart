@@ -117,34 +117,48 @@ class SessionFilterBar extends StatelessWidget {
 
   String _count(int value) => value > 99 ? '99+' : '$value';
 
+  Widget _label(String value) {
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      child: Text(value, maxLines: 1, softWrap: false),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final showIcons = constraints.maxWidth >= 360;
+        final textScale = MediaQuery.textScalerOf(context).scale(1);
+        final iconWidthThreshold = 390 * textScale.clamp(1, 1.4);
+        final showIcons = constraints.maxWidth >= iconWidthThreshold;
         return SizedBox(
           width: double.infinity,
           child: SegmentedButton<SessionListFilter>(
             showSelectedIcon: false,
+            expandedInsets: EdgeInsets.zero,
+            style: SegmentedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              visualDensity: VisualDensity.compact,
+            ),
             segments: [
               ButtonSegment(
                 value: SessionListFilter.attention,
                 icon: showIcons
                     ? const Icon(Icons.priority_high, size: 17)
                     : null,
-                label: Text('Action ${_count(attentionCount)}'),
+                label: _label('Action ${_count(attentionCount)}'),
               ),
               ButtonSegment(
                 value: SessionListFilter.running,
                 icon: showIcons ? const Icon(Icons.autorenew, size: 17) : null,
-                label: Text('Running ${_count(runningCount)}'),
+                label: _label('Running ${_count(runningCount)}'),
               ),
               ButtonSegment(
                 value: SessionListFilter.all,
                 icon: showIcons
                     ? const Icon(Icons.forum_outlined, size: 17)
                     : null,
-                label: Text('All ${_count(allCount)}'),
+                label: _label('All ${_count(allCount)}'),
               ),
             ],
             selected: {selected},
