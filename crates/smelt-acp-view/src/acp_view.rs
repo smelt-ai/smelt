@@ -514,6 +514,7 @@ impl AcpView {
             InputState::new(window, cx)
                 .placeholder("给 agent 的指令：@ 引文件，/ 用命令，Enter 发送，Shift+Enter 换行")
                 .multi_line(true)
+                .submit_on_enter(true)
                 .auto_grow(3, 10)
         });
         self._input_sub = Some(cx.subscribe_in(
@@ -1870,7 +1871,7 @@ impl Render for AcpView {
                                 .text_sm()
                                 .child(smelt_ui::markdown_mermaid::markdown_view(
                                     ("acp-user-md", i),
-                                    markdown_text_for_cwd(text, this.cwd.as_deref()),
+                                    markdown_user_text_for_cwd(text, this.cwd.as_deref()),
                                 )),
                         )
                         .into_any_element(),
@@ -1879,7 +1880,7 @@ impl Render for AcpView {
                         if !text.trim().is_empty() {
                             content = content.child(smelt_ui::markdown_mermaid::markdown_view(
                                 ("acp-user-images-md", i),
-                                markdown_text_for_cwd(text, this.cwd.as_deref()),
+                                markdown_user_text_for_cwd(text, this.cwd.as_deref()),
                             ));
                         }
                         let mut image_strip = h_flex().gap_2().flex_wrap();
@@ -3986,6 +3987,152 @@ fn markdown_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
     out
 }
 
+fn markdown_user_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
+    markdown_text_for_cwd(&escape_html_tags_for_markdown(text), cwd)
+}
+
+/// Raw HTML is parsed as markup by the Markdown renderer. Unsupported tags can
+/// therefore make the whole fragment disappear; user messages should show the
+/// literal tag instead. Keep code spans and fenced code untouched.
+fn escape_html_tags_for_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut inline_code_ticks = None;
+    let mut fenced_code_ticks = None;
+
+    while i < text.len() {
+        if let Some(fence_len) = fenced_code_ticks {
+            if is_line_start(text, i) {
+                if let Some((run_len, end)) = backtick_run(text, i)
+                    && run_len >= fence_len
+                    && line_after_backticks_is_blank(text, end)
+                {
+                    out.push_str(&text[i..end]);
+                    i = end;
+                    fenced_code_ticks = None;
+                    continue;
+                }
+            }
+            let ch = text[i..].chars().next().expect("valid UTF-8 offset");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if is_line_start(text, i) {
+            let indent = text[i..]
+                .chars()
+                .take(3)
+                .take_while(|ch| *ch == ' ')
+                .count();
+            if let Some((run_len, end)) = backtick_run(text, i + indent)
+                && run_len >= 3
+            {
+                out.push_str(&text[i..end]);
+                i = end;
+                fenced_code_ticks = Some(run_len);
+                inline_code_ticks = None;
+                continue;
+            }
+        }
+
+        if text.as_bytes()[i] == b'`' {
+            if let Some((run_len, end)) = backtick_run(text, i) {
+                out.push_str(&text[i..end]);
+                i = end;
+                inline_code_ticks = match inline_code_ticks {
+                    Some(active) if active == run_len => None,
+                    None => Some(run_len),
+                    active => active,
+                };
+                continue;
+            }
+        }
+
+        if inline_code_ticks.is_none() && text.as_bytes()[i] == b'<' && looks_like_html_tag(text, i)
+        {
+            if html_tag_end(text, i).is_some() && (i == 0 || text.as_bytes()[i - 1] != b'\\') {
+                out.push('\\');
+                out.push('<');
+                i += 1;
+                continue;
+            }
+        }
+
+        let ch = text[i..].chars().next().expect("valid UTF-8 offset");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
+}
+
+fn is_line_start(text: &str, offset: usize) -> bool {
+    offset == 0 || text.as_bytes().get(offset - 1) == Some(&b'\n')
+}
+
+fn backtick_run(text: &str, offset: usize) -> Option<(usize, usize)> {
+    if text.as_bytes().get(offset) != Some(&b'`') {
+        return None;
+    }
+    let mut end = offset;
+    while text.as_bytes().get(end) == Some(&b'`') {
+        end += 1;
+    }
+    Some((end - offset, end))
+}
+
+fn line_after_backticks_is_blank(text: &str, offset: usize) -> bool {
+    text[offset..]
+        .split_once('\n')
+        .map_or(true, |(line, _)| line.trim().is_empty())
+}
+
+fn looks_like_html_tag(text: &str, start: usize) -> bool {
+    let rest = &text[start + 1..];
+    if rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("mailto:") {
+        return false;
+    }
+    if rest.starts_with('/')
+        || rest.starts_with('!')
+        || rest.starts_with('?')
+        || rest.starts_with("![CDATA[")
+    {
+        return true;
+    }
+
+    let first = rest.chars().next();
+    if !first.is_some_and(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    let first_len = first.map_or(0, char::len_utf8);
+    let mut name_end = first_len;
+    for (offset, ch) in rest[first_len..].char_indices() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':') {
+            name_end = first_len + offset + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    rest[name_end..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '>' || ch == '/' || ch.is_whitespace())
+}
+
+fn html_tag_end(text: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, ch) in text[start + 1..].char_indices() {
+        match quote {
+            Some(active) if ch == active => quote = None,
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '>' => return Some(start + 1 + offset),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn resolve_relative_file_link(target: &str, cwd: &str) -> Option<String> {
     let target = target.trim();
     if target.is_empty()
@@ -4187,8 +4334,9 @@ fn render_diff_lines(
 mod tests {
     use super::{
         HANDOFF_MAX_CHARS, build_conversation_layout, build_handoff_prompt,
-        is_active_permission_selection, markdown_text_for_cwd, resolve_restart_launch,
-        tool_card_default_expanded, tool_uses_compact_process_row,
+        escape_html_tags_for_markdown, is_active_permission_selection, markdown_text_for_cwd,
+        markdown_user_text_for_cwd, resolve_restart_launch, tool_card_default_expanded,
+        tool_uses_compact_process_row,
     };
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
     use smelt_core::acp_session::{
@@ -4227,6 +4375,22 @@ mod tests {
     fn markdown_colon_line_col_refs_take_line_not_col() {
         let rendered = markdown_text_for_cwd("见 [x](src/main.rs:10:5)", Some("/tmp/project"));
         assert!(rendered.contains("[x](smelt-file:///tmp/project/src/main.rs#L10)"));
+    }
+
+    #[test]
+    fn user_markdown_keeps_html_tags_literal() {
+        let escaped = escape_html_tags_for_markdown(
+            "前 <section class=\"card\">内容</section> <https://example.com> ` <span> `\n\
+             ```html\n<div>代码</div>\n```\n",
+        );
+        assert_eq!(
+            escaped,
+            "前 \\<section class=\"card\">内容\\</section> <https://example.com> ` <span> `\n\
+             ```html\n<div>代码</div>\n```\n"
+        );
+
+        let rendered = markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", None);
+        assert!(rendered.contains("\\<panel>"));
     }
 
     #[test]
