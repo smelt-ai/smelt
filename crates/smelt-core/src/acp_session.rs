@@ -118,6 +118,8 @@ pub enum ElicitFieldKindView {
 pub struct ElicitFieldView {
     pub key: String,
     pub title: String,
+    #[serde(default)]
+    pub required: bool,
     pub kind: ElicitFieldKindView,
 }
 
@@ -440,6 +442,7 @@ fn elicit_field_view(f: &ElicitField) -> ElicitFieldView {
     ElicitFieldView {
         key: f.key.clone(),
         title: f.title.clone(),
+        required: f.required,
         kind: match &f.kind {
             ElicitFieldKind::Select(opts) => ElicitFieldKindView::Select(
                 opts.iter()
@@ -823,6 +826,7 @@ fn recovered_elicitation(
         fields.push(crate::acp_conn::ElicitField {
             key: format!("question_{ix}"),
             title: prompt.to_string(),
+            required: true,
             kind,
         });
     }
@@ -1526,6 +1530,7 @@ mod tests {
             raw_fields: vec![ElicitField {
                 key: "k".into(),
                 title: "t".into(),
+                required: true,
                 kind: ElicitFieldKind::Select(vec![
                     crate::acp_conn::ElicitOption {
                         value: V::String("a".into()),
@@ -1559,6 +1564,7 @@ mod tests {
             raw_fields: vec![ElicitField {
                 key: "k".into(),
                 title: "t".into(),
+                required: true,
                 kind: ElicitFieldKind::MultiSelect(vec![
                     crate::acp_conn::ElicitOption {
                         value: V::String("a".into()),

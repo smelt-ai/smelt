@@ -275,6 +275,7 @@ void main() {
               {
                 'key': 'question_0',
                 'title': 'Channel',
+                'required': true,
                 'kind': {
                   'Select': [
                     {'label': 'Gitea Issue'},
@@ -294,11 +295,57 @@ void main() {
       final elicitation = snapshot.pendingElicitation!;
       expect(elicitation.message, 'Choose a notification channel');
       expect(elicitation.chosen[0], [1]);
+      expect(elicitation.fields.single.required, isTrue);
+      expect(elicitation.isReady(), isTrue);
       final kind = elicitation.fields.single.kind as ElicitationSelect;
       expect(kind.options.map((option) => option.label), [
         'Gitea Issue',
         'Bark',
       ]);
+    });
+
+    test('optional text field does not block a selected required option', () {
+      const elicitation = PendingElicitation(
+        message: 'Choose a repair scope',
+        fields: [
+          ElicitationField(
+            key: 'scope',
+            title: 'Scope',
+            required: true,
+            kind: ElicitationSelect([ElicitationOption('Fix and warn')]),
+          ),
+          ElicitationField(
+            key: 'scope_custom',
+            title: 'Other',
+            kind: ElicitationText(secret: false),
+          ),
+        ],
+        chosen: {
+          0: [0],
+        },
+      );
+
+      expect(elicitation.isReady(), isTrue);
+    });
+
+    test('required text field blocks until it has a value', () {
+      const elicitation = PendingElicitation(
+        message: 'Name this session',
+        fields: [
+          ElicitationField(
+            key: 'name',
+            title: 'Name',
+            required: true,
+            kind: ElicitationText(secret: false),
+          ),
+        ],
+      );
+
+      expect(elicitation.isReady(), isFalse);
+      expect(
+        elicitation.isReady(localTextValues: const {0: 'Mobile debug'}),
+        isTrue,
+      );
     });
   });
 }

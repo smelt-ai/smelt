@@ -264,6 +264,8 @@ pub struct ElicitField {
     /// accept 回填时的 key（schema properties 的键名）。
     pub key: String,
     pub title: String,
+    /// 只有 schema 的 required 字段才会阻塞整张表单提交。
+    pub required: bool,
     pub kind: ElicitFieldKind,
 }
 
@@ -333,6 +335,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
     let required = schema.required.clone().unwrap_or_default();
     let mut fields = Vec::new();
     for (key, prop) in &schema.properties {
+        let is_required = required.iter().any(|required_key| required_key == key);
         let buttonized = match prop {
             ElicitationPropertySchema::String(s) => {
                 let options: Vec<ElicitOption> = if let Some(one_of) = &s.one_of {
@@ -357,6 +360,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                 Some(ElicitField {
                     key: key.clone(),
                     title: s.title.clone().unwrap_or_else(|| key.clone()),
+                    required: is_required,
                     kind: if options.is_empty() {
                         ElicitFieldKind::Text { secret: false }
                     } else {
@@ -367,6 +371,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
             ElicitationPropertySchema::Boolean(b) => Some(ElicitField {
                 key: key.clone(),
                 title: b.title.clone().unwrap_or_else(|| key.clone()),
+                required: is_required,
                 kind: ElicitFieldKind::Select(vec![
                     ElicitOption {
                         value: ElicitationContentValue::Boolean(true),
@@ -401,6 +406,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
                 (!options.is_empty()).then(|| ElicitField {
                     key: key.clone(),
                     title: a.title.clone().unwrap_or_else(|| key.clone()),
+                    required: is_required,
                     kind: ElicitFieldKind::MultiSelect(options),
                 })
             }
@@ -408,7 +414,7 @@ fn parse_elicit_fields(schema: &ElicitationSchema) -> Option<Vec<ElicitField>> {
         };
         match buttonized {
             Some(field) => fields.push(field),
-            None if required.iter().any(|r| r == key) => return None,
+            None if is_required => return None,
             None => {} // 可选且按钮化不了：跳过
         }
     }
@@ -1805,12 +1811,14 @@ mod elicit_parse_tests {
                     "title": "Other",
                     "description": "Type your own answer (optional)."
                 }
-            }
+            },
+            "required": ["question_0"]
         }))
         .expect("schema 反序列化");
         let fields = parse_elicit_fields(&schema).expect("单选和自由文本都应解析");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].key, "question_0");
+        assert!(fields[0].required);
         let ElicitFieldKind::Select(options) = &fields[0].kind else {
             panic!("单选题应解析为 Select");
         };
@@ -1822,6 +1830,7 @@ mod elicit_parse_tests {
                 .iter()
                 .any(|field| matches!(field.kind, ElicitFieldKind::Text { .. }))
         );
+        assert!(!fields[1].required);
     }
 
     /// 必填自由文本由通用输入框承接，不再迫使 agent 回退纯文本追问。
@@ -1836,6 +1845,7 @@ mod elicit_parse_tests {
         }))
         .expect("schema 反序列化");
         let fields = parse_elicit_fields(&schema).expect("自由文本应可显示");
+        assert!(fields[0].required);
         assert!(matches!(
             fields[0].kind,
             ElicitFieldKind::Text { secret: false }

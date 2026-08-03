@@ -80,6 +80,7 @@ void main() {
           ElicitationField(
             key: 'mode',
             title: 'Mode',
+            required: true,
             kind: ElicitationSelect([
               ElicitationOption('Fast'),
               ElicitationOption('Careful'),
@@ -115,6 +116,7 @@ void main() {
     expect((tool.output.single as ToolOutputText).text, '51 passed');
     expect(restored.pendingPermissions.single.toolCallId, 'approval-1');
     expect(restored.pendingElicitation?.chosen[0], [1]);
+    expect(restored.pendingElicitation?.fields.single.required, isTrue);
     expect(restored.usage?.usedTokens, 120);
     expect(restored.plan?.steps.single.title, 'Verify');
     expect(restored.model?.currentName, 'Codex');
