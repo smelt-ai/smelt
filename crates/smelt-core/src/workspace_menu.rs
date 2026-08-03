@@ -30,9 +30,12 @@ impl WorkspaceMenuSnapshot {
     }
 
     pub fn acp_session(&self, id: &str) -> Option<&WorkspaceMenuSession> {
-        self.sessions
-            .iter()
-            .find(|session| session.id == id && session.kind == WorkspaceMenuSessionKind::Acp)
+        self.session(id)
+            .filter(|session| session.kind == WorkspaceMenuSessionKind::Acp)
+    }
+
+    pub fn session(&self, id: &str) -> Option<&WorkspaceMenuSession> {
+        self.sessions.iter().find(|session| session.id == id)
     }
 }
 
@@ -105,5 +108,9 @@ mod tests {
 
         assert!(snapshot.acp_session("terminal-running-codex").is_none());
         assert!(snapshot.acp_session("any-stable-id").is_some());
+        assert_eq!(
+            snapshot.session("terminal-running-codex").map(|s| s.kind),
+            Some(WorkspaceMenuSessionKind::Terminal)
+        );
     }
 }

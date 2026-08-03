@@ -33,7 +33,24 @@ void main() {
     expect(summary.projectOrder, 2);
     expect(summary.attention?.sessionId, 'session-1');
     expect(summary.attention?.requiresAction, isFalse);
+    expect(summary.kind, SessionKind.acp);
   });
+
+  test(
+    'SessionSummary preserves terminal kind through the disk cache shape',
+    () {
+      final summary = SessionSummary.fromJson({
+        'id': 'terminal-1',
+        'kind': 'terminal',
+        'title': 'Codex CLI',
+        'phase': 'thinking',
+        'agent': 'codex',
+      });
+
+      expect(summary.kind, SessionKind.terminal);
+      expect(summary.toJson()['kind'], 'terminal');
+    },
+  );
 
   test('session menu order follows project then PC session order', () {
     SessionSummary session(String id, int project, int session) {

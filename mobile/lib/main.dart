@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'models/pairing_config.dart';
 import 'models/saved_desktop.dart';
 import 'pages/qr_scanner_page.dart';
+import 'pages/terminal_session_page.dart';
 import 'services/gateway_service.dart';
 import 'services/message_draft_store.dart';
 import 'models/acp_snapshot.dart';
@@ -30,7 +31,8 @@ bool shouldAutoFollowSnapshot({
 
 String sessionListTitle(SessionSummary session) {
   final title = session.title.trim();
-  return title.isEmpty ? 'ACP conversation' : title;
+  if (title.isNotEmpty) return title;
+  return session.kind == SessionKind.terminal ? 'Terminal' : 'ACP conversation';
 }
 
 String? sessionListSubtitle(SessionSummary session) {
@@ -766,7 +768,7 @@ class _HomePageState extends State<HomePage> {
           controlAffinity: ListTileControlAffinity.leading,
           title: Text(project.title),
           subtitle: Text(
-            '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
+            '${sessions.length} session${sessions.length == 1 ? '' : 's'}',
           ),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
@@ -848,6 +850,8 @@ class _HomePageState extends State<HomePage> {
       leading: Icon(
         attentionStyle
             ? Icons.notification_important_outlined
+            : session.kind == SessionKind.terminal
+            ? Icons.terminal
             : Icons.chat_bubble_outline,
       ),
       title: Text(sessionListTitle(session)),
@@ -861,7 +865,7 @@ class _HomePageState extends State<HomePage> {
             isLabelVisible: session.unread,
             child: _getStatusChip(session.status),
           ),
-          if (showActions)
+          if (showActions && session.kind == SessionKind.acp)
             PopupMenuButton<String>(
               tooltip: 'Conversation actions',
               onSelected: (action) {
@@ -1252,10 +1256,12 @@ class _HomePageState extends State<HomePage> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => SessionPage(
-          session: session,
-          messageDraftStore: _messageDraftStore,
-        ),
+        builder: (context) => session.kind == SessionKind.terminal
+            ? TerminalSessionPage(session: session)
+            : SessionPage(
+                session: session,
+                messageDraftStore: _messageDraftStore,
+              ),
       ),
     );
   }

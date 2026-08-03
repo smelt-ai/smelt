@@ -92,6 +92,18 @@ void main() {
     expect(sessionListSubtitle(session), isNull);
   });
 
+  test('terminal sessions use a terminal fallback title', () {
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: ' ',
+      phase: 'idle',
+      agent: 'codex',
+    );
+
+    expect(sessionListTitle(session), 'Terminal');
+  });
+
   test('session filters separate actionable and running conversations', () {
     const approval = SessionSummary(
       id: 'approval',

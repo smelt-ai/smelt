@@ -7,20 +7,20 @@
 //! `sock_path()` 连它自己的 unix socket，用既有的 `list`/`watch` op——不管是从独立
 //! 进程调用还是从 smeltd 内部的这个模块调用，走的都是同一条路径，行为完全一致。
 //!
-//! 只服务移动 App：唯一的对外能力是 `/acp/*`。浏览器面板（remote-web SPA、
+//! 只服务移动 App：对外能力是 `/acp/*` 与 `/terminal/*`。浏览器面板（remote-web SPA、
 //! 内嵌 HTML 终端、`/s/{id}` 那套流式终端接口）连同 Cloudflare/WebRTC 一起下线了，
 //! 所以这里没有任何 HTML 模板与静态资源托管。
 //!
 //! 见 docs/remote-ops-roadmap.md（Phase 1/2）、docs/collaboration.md（安全底线）。
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -117,7 +117,8 @@ struct AuthQuery {
 /// 组好整个网关的路由，鉴权用这一个 token（见 collaboration.md：一个网关/token 管
 /// 这台机器上的全部活会话，泄漏一条链接的代价是明确的，不是没想到的疏漏）。
 ///
-/// 只有 ACP 两条路由：手机 App 是唯一消费方，它经 iroh 隧道连到这里。
+/// 手机 App 是唯一消费方，它经 iroh 隧道连到这里。ACP 控制面与终端数据面分开，
+/// 避免高吞吐 PTY 字节阻塞会话状态与审批消息。
 pub fn build_router(token: String, write_enabled: bool) -> Router {
     let mobile_lifecycle = MobileLifecycleHub::start();
     let state = AppState {
@@ -128,6 +129,7 @@ pub fn build_router(token: String, write_enabled: bool) -> Router {
     Router::new()
         .route("/acp/sessions", get(acp_sessions_handler))
         .route("/acp/ws", get(acp_ws_handler))
+        .route("/terminal/{id}/ws", get(terminal_ws_handler))
         .with_state(state)
 }
 
@@ -344,7 +346,7 @@ impl MobileLifecycleHub {
         changed
     }
 
-    fn summaries(&self) -> Vec<AcpSessionSummary> {
+    fn summaries(&self) -> Vec<MobileSessionSummary> {
         let menu = mobile_workspace_menu();
         self.summaries_with_menu(&menu)
     }
@@ -357,12 +359,12 @@ impl MobileLifecycleHub {
         let _ = self.updates.send(MobileLifecycleEvent::SessionsChanged);
     }
 
-    fn summaries_with_menu(&self, menu: &WorkspaceMenuSnapshot) -> Vec<AcpSessionSummary> {
+    fn summaries_with_menu(&self, menu: &WorkspaceMenuSnapshot) -> Vec<MobileSessionSummary> {
         let state = self.state.lock().unwrap();
         let mut summaries: Vec<_> = state
             .sessions
             .values()
-            .filter_map(|session| acp_summary_from_daemon(session, &menu, &state.attention))
+            .filter_map(|session| mobile_summary_from_daemon(session, &menu, &state.attention))
             .collect();
         summaries.sort_by(|a, b| {
             a.project_order
@@ -424,10 +426,11 @@ fn mobile_lifecycle_subscription(hub: Weak<MobileLifecycleHub>) {
     }
 }
 
-/// ACP 会话摘要（移动端列表用）
+/// 移动端会话摘要。会话类型只认 PC 写入的共享菜单快照，不从命令或 id 猜测。
 #[derive(serde::Serialize)]
-struct AcpSessionSummary {
+struct MobileSessionSummary {
     id: String,
+    kind: WorkspaceMenuSessionKind,
     title: String,
     phase: String,
     status: String,
@@ -481,13 +484,13 @@ fn agent_from_launch(launch: &str) -> &'static str {
     }
 }
 
-fn acp_summary_from_daemon(
+fn mobile_summary_from_daemon(
     session: &DaemonSessionState,
     menu: &WorkspaceMenuSnapshot,
     attention_store: &AttentionStore,
-) -> Option<AcpSessionSummary> {
+) -> Option<MobileSessionSummary> {
     // 会话类型来自 PC 的共享菜单快照，不再根据 id 前缀或启动命令猜测。
-    let menu_session = menu.acp_session(&session.id)?;
+    let menu_session = menu.session(&session.id)?;
     let attention = attention_store.unread(&session.id).cloned();
     let unread = attention.is_some();
     let agent = menu_session
@@ -500,7 +503,10 @@ fn acp_summary_from_daemon(
                 .map(|launch| agent_from_launch(launch).to_string())
         })
         .unwrap_or_else(|| "other".to_string());
-    let title = if !menu_session.custom_title && agent == "codex" {
+    let title = if menu_session.kind == WorkspaceMenuSessionKind::Acp
+        && !menu_session.custom_title
+        && agent == "codex"
+    {
         session
             .title
             .clone()
@@ -509,8 +515,9 @@ fn acp_summary_from_daemon(
     } else {
         menu_session.title.clone()
     };
-    Some(AcpSessionSummary {
+    Some(MobileSessionSummary {
         id: session.id.clone(),
+        kind: menu_session.kind,
         title,
         phase: daemon_phase_name(session.phase).to_string(),
         status: mobile_status_name(session.phase, unread).to_string(),
@@ -547,6 +554,421 @@ async fn acp_sessions_handler(
         "sessions": sessions
     }))
     .into_response()
+}
+
+const TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
+const TERMINAL_DAEMON_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINAL_WATCH_POLL: Duration = Duration::from_millis(100);
+const MAX_TERMINAL_INPUT_BYTES: usize = 64 * 1024;
+const MAX_TERMINAL_REPLAY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "method")]
+enum TerminalWsRequest {
+    #[serde(rename = "attach")]
+    Attach { params: TerminalGeometryParams },
+    #[serde(rename = "input")]
+    Input { params: TerminalInputParams },
+    #[serde(rename = "resize")]
+    Resize { params: TerminalGeometryParams },
+    #[serde(rename = "ping")]
+    Ping { params: PingParams },
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+struct TerminalGeometryParams {
+    cols: u16,
+    rows: u16,
+    #[serde(default, rename = "cellWidth")]
+    cell_width: u16,
+    #[serde(default, rename = "cellHeight")]
+    cell_height: u16,
+}
+
+impl TerminalGeometryParams {
+    fn normalized(self) -> Result<Self, &'static str> {
+        if self.cols == 0 || self.rows == 0 {
+            return Err("cols/rows must be greater than zero");
+        }
+        Ok(Self {
+            cols: self.cols.min(300),
+            rows: self.rows.min(200),
+            cell_width: self.cell_width.min(256),
+            cell_height: self.cell_height.min(256),
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TerminalInputParams {
+    data: String,
+}
+
+enum TerminalFrame {
+    Header {
+        cols: u16,
+        rows: u16,
+        replay_len: usize,
+    },
+    Bytes(Vec<u8>),
+    Closed,
+    Error(String),
+}
+
+async fn terminal_ws_handler(
+    Path(id): Path<String>,
+    ws: WebSocketUpgrade,
+    Query(q): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if q.token != *state.token {
+        return (StatusCode::FORBIDDEN, "token incorrect").into_response();
+    }
+    let exposed = mobile_workspace_menu()
+        .session(&id)
+        .is_some_and(|session| session.kind == WorkspaceMenuSessionKind::Terminal);
+    if !exposed {
+        return (StatusCode::NOT_FOUND, "terminal session not found").into_response();
+    }
+    ws.on_upgrade(move |socket| terminal_ws_pump(socket, state, id))
+        .into_response()
+}
+
+async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
+    use futures::{SinkExt, StreamExt};
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let connected = serde_json::json!({
+        "type": "terminalConnected",
+        "sessionId": id,
+        "writeEnabled": state.write_enabled,
+    });
+    if ws_tx
+        .send(Message::Text(connected.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let attach = tokio::time::timeout(TERMINAL_ATTACH_TIMEOUT, ws_rx.next()).await;
+    let geometry = match attach {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            match serde_json::from_str::<TerminalWsRequest>(&text) {
+                Ok(TerminalWsRequest::Attach { params }) => params.normalized(),
+                _ => Err("first terminal request must be attach"),
+            }
+        }
+        Ok(Some(Ok(_))) => Err("first terminal request must be text"),
+        Ok(Some(Err(_))) | Ok(None) => return,
+        Err(_) => Err("terminal attach timed out"),
+    };
+    let geometry = match geometry {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            let _ = send_terminal_fatal_error(&mut ws_tx, error).await;
+            return;
+        }
+    };
+
+    let resize_id = id.clone();
+    let resize_result =
+        tokio::task::spawn_blocking(move || send_terminal_resize(&resize_id, geometry)).await;
+    match resize_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = send_terminal_fatal_error(&mut ws_tx, &error).await;
+            return;
+        }
+        Err(error) => {
+            let _ = send_terminal_fatal_error(
+                &mut ws_tx,
+                &format!("failed to resize terminal: {error}"),
+            )
+            .await;
+            return;
+        }
+    }
+
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<TerminalFrame>(64);
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let watch_id = id.clone();
+    let watch_task = tokio::task::spawn_blocking(move || {
+        terminal_watch_and_forward(&watch_id, frame_tx, stop_rx)
+    });
+
+    loop {
+        tokio::select! {
+            incoming = ws_rx.next() => {
+                let Some(Ok(message)) = incoming else { break };
+                match message {
+                    Message::Text(text) => {
+                        let request = serde_json::from_str::<TerminalWsRequest>(&text);
+                        match request {
+                            Ok(TerminalWsRequest::Input { params }) => {
+                                if !state.write_enabled {
+                                    let _ = send_terminal_error(&mut ws_tx, "write not enabled").await;
+                                    continue;
+                                }
+                                if params.data.is_empty() {
+                                    let _ = send_terminal_error(&mut ws_tx, "terminal input must not be empty").await;
+                                    continue;
+                                }
+                                if params.data.len() > MAX_TERMINAL_INPUT_BYTES {
+                                    let _ = send_terminal_error(&mut ws_tx, "terminal input is too large").await;
+                                    continue;
+                                }
+                                let input_id = id.clone();
+                                match tokio::task::spawn_blocking(move || send_terminal_input(&input_id, &params.data)).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => {
+                                        let _ = send_terminal_error(&mut ws_tx, &error).await;
+                                    }
+                                    Err(error) => {
+                                        let _ = send_terminal_error(&mut ws_tx, &format!("failed to write terminal input: {error}")).await;
+                                    }
+                                }
+                            }
+                            Ok(TerminalWsRequest::Resize { params }) => {
+                                let geometry = match params.normalized() {
+                                    Ok(geometry) => geometry,
+                                    Err(error) => {
+                                        let _ = send_terminal_error(&mut ws_tx, error).await;
+                                        continue;
+                                    }
+                                };
+                                let resize_id = id.clone();
+                                match tokio::task::spawn_blocking(move || send_terminal_resize(&resize_id, geometry)).await {
+                                    Ok(Ok(())) => {
+                                        let response = serde_json::json!({
+                                            "type": "terminalResized",
+                                            "sessionId": id,
+                                            "cols": geometry.cols,
+                                            "rows": geometry.rows,
+                                        });
+                                        if ws_tx.send(Message::Text(response.to_string().into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Ok(Err(error)) => {
+                                        let _ = send_terminal_error(&mut ws_tx, &error).await;
+                                    }
+                                    Err(error) => {
+                                        let _ = send_terminal_error(&mut ws_tx, &format!("failed to resize terminal: {error}")).await;
+                                    }
+                                }
+                            }
+                            Ok(TerminalWsRequest::Ping { params }) => {
+                                let response = serde_json::json!({
+                                    "type": "pong",
+                                    "sentAtMs": params.sent_at_ms,
+                                });
+                                if ws_tx.send(Message::Text(response.to_string().into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(TerminalWsRequest::Attach { .. }) => {
+                                let _ = send_terminal_error(&mut ws_tx, "terminal is already attached").await;
+                            }
+                            Err(_) => {
+                                let _ = send_terminal_error(&mut ws_tx, "invalid terminal request").await;
+                            }
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            frame = frame_rx.recv() => {
+                let Some(frame) = frame else { break };
+                let message = match frame {
+                    TerminalFrame::Header { cols, rows, replay_len } => {
+                        let ready = serde_json::json!({
+                            "type": "terminalReady",
+                            "sessionId": id,
+                            "cols": cols,
+                            "rows": rows,
+                            "replayBytes": replay_len,
+                            "writeEnabled": state.write_enabled,
+                        });
+                        Message::Text(ready.to_string().into())
+                    }
+                    TerminalFrame::Bytes(bytes) => Message::Binary(bytes.into()),
+                    TerminalFrame::Error(error) => {
+                        let _ = send_terminal_fatal_error(&mut ws_tx, &error).await;
+                        break;
+                    }
+                    TerminalFrame::Closed => {
+                        let closed = serde_json::json!({
+                            "type": "terminalClosed",
+                            "sessionId": id,
+                        });
+                        let _ = ws_tx.send(Message::Text(closed.to_string().into())).await;
+                        break;
+                    }
+                };
+                if ws_tx.send(message).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = stop_tx.send(true);
+    drop(frame_rx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
+}
+
+async fn send_terminal_error<S>(sink: &mut S, error: &str) -> Result<(), S::Error>
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    use futures::SinkExt;
+    let response = serde_json::json!({"type": "terminalError", "error": error});
+    sink.send(Message::Text(response.to_string().into())).await
+}
+
+async fn send_terminal_fatal_error<S>(sink: &mut S, error: &str) -> Result<(), S::Error>
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    use futures::SinkExt;
+    let response = serde_json::json!({
+        "type": "terminalError",
+        "error": error,
+        "fatal": true,
+    });
+    sink.send(Message::Text(response.to_string().into())).await
+}
+
+fn send_terminal_input(id: &str, data: &str) -> Result<(), String> {
+    send_terminal_daemon_command(serde_json::json!({
+        "op": "input",
+        "id": id,
+        "data": data,
+    }))
+}
+
+fn send_terminal_resize(id: &str, geometry: TerminalGeometryParams) -> Result<(), String> {
+    send_terminal_daemon_command(serde_json::json!({
+        "op": "resize",
+        "id": id,
+        "cols": geometry.cols,
+        "rows": geometry.rows,
+        "cell_w": geometry.cell_width,
+        "cell_h": geometry.cell_height,
+    }))
+}
+
+fn send_terminal_daemon_command(request: serde_json::Value) -> Result<(), String> {
+    let mut stream =
+        UnixStream::connect(sock_path()).map_err(|error| format!("connect failed: {error}"))?;
+    stream
+        .set_read_timeout(Some(TERMINAL_DAEMON_TIMEOUT))
+        .map_err(|error| format!("set timeout failed: {error}"))?;
+    writeln!(stream, "{request}").map_err(|error| format!("write failed: {error}"))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| format!("read failed: {error}"))?;
+    let response: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("invalid daemon response: {error}"))?;
+    if response["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(response["err"]
+            .as_str()
+            .unwrap_or("terminal command failed")
+            .to_string())
+    }
+}
+
+fn terminal_watch_and_forward(
+    id: &str,
+    tx: tokio::sync::mpsc::Sender<TerminalFrame>,
+    stop: tokio::sync::watch::Receiver<bool>,
+) {
+    let result = terminal_watch_loop(id, &tx, &stop);
+    match result {
+        Ok(()) => {
+            let _ = tx.blocking_send(TerminalFrame::Closed);
+        }
+        Err(error) if !*stop.borrow() => {
+            let _ = tx.blocking_send(TerminalFrame::Error(error));
+        }
+        Err(_) => {}
+    }
+}
+
+fn terminal_watch_loop(
+    id: &str,
+    tx: &tokio::sync::mpsc::Sender<TerminalFrame>,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    let conn =
+        UnixStream::connect(sock_path()).map_err(|error| format!("connect failed: {error}"))?;
+    conn.set_read_timeout(Some(TERMINAL_DAEMON_TIMEOUT))
+        .map_err(|error| format!("set timeout failed: {error}"))?;
+    let mut writer = conn
+        .try_clone()
+        .map_err(|error| format!("clone failed: {error}"))?;
+    writeln!(writer, "{}", serde_json::json!({"op": "watch", "id": id}))
+        .map_err(|error| format!("watch failed: {error}"))?;
+
+    let mut reader = BufReader::new(conn);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| format!("watch header failed: {error}"))?;
+    if line.is_empty() {
+        return Err("terminal session not found".to_string());
+    }
+    let header: serde_json::Value =
+        serde_json::from_str(&line).map_err(|error| format!("invalid watch header: {error}"))?;
+    let cols = header["cols"].as_u64().unwrap_or(80).min(300) as u16;
+    let rows = header["rows"].as_u64().unwrap_or(24).min(200) as u16;
+    let replay_len = header["replay_len"].as_u64().unwrap_or(0) as usize;
+    if replay_len > MAX_TERMINAL_REPLAY_BYTES {
+        return Err("terminal snapshot is too large".to_string());
+    }
+    tx.blocking_send(TerminalFrame::Header {
+        cols,
+        rows,
+        replay_len,
+    })
+    .map_err(|_| "terminal client disconnected".to_string())?;
+
+    if replay_len > 0 {
+        let mut snapshot = vec![0; replay_len];
+        reader
+            .read_exact(&mut snapshot)
+            .map_err(|error| format!("terminal snapshot failed: {error}"))?;
+        tx.blocking_send(TerminalFrame::Bytes(snapshot))
+            .map_err(|_| "terminal client disconnected".to_string())?;
+    }
+
+    reader
+        .get_ref()
+        .set_read_timeout(Some(TERMINAL_WATCH_POLL))
+        .map_err(|error| format!("set watch timeout failed: {error}"))?;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        if *stop.borrow() {
+            return Err("terminal watch stopped".to_string());
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => tx
+                .blocking_send(TerminalFrame::Bytes(buffer[..read].to_vec()))
+                .map_err(|_| "terminal client disconnected".to_string())?,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(format!("terminal watch failed: {error}")),
+        }
+    }
 }
 
 /// WebSocket 消息类型（移动端 → 服务端）
@@ -1347,6 +1769,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_requests_preserve_control_input_and_bound_geometry() {
+        let input: TerminalWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "input",
+            "params": {"data": "\u{1b}[A\u{3}"}
+        }))
+        .unwrap();
+        match input {
+            TerminalWsRequest::Input { params } => {
+                assert_eq!(params.data.as_bytes(), b"\x1b[A\x03");
+            }
+            _ => panic!("expected terminal input"),
+        }
+
+        let resize: TerminalWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "resize",
+            "params": {
+                "cols": 900,
+                "rows": 400,
+                "cellWidth": 512,
+                "cellHeight": 1024
+            }
+        }))
+        .unwrap();
+        match resize {
+            TerminalWsRequest::Resize { params } => {
+                let params = params.normalized().unwrap();
+                assert_eq!(params.cols, 300);
+                assert_eq!(params.rows, 200);
+                assert_eq!(params.cell_width, 256);
+                assert_eq!(params.cell_height, 256);
+            }
+            _ => panic!("expected terminal resize"),
+        }
+
+        let zero = TerminalGeometryParams {
+            cols: 0,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        assert!(zero.normalized().is_err());
+    }
+
+    #[test]
     fn mobile_requests_preserve_images_and_session_controls() {
         let ping: AcpWsRequest = serde_json::from_value(serde_json::json!({
             "method": "ping",
@@ -1500,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_summary_excludes_terminal_agent_cli_sessions() {
+    fn mobile_summary_includes_terminal_agent_cli_sessions() {
         let attention = AttentionStore::default();
         let mut session = mobile_daemon_state(DaemonPhase::Thinking);
         session.id = "terminal-codex-cli".into();
@@ -1520,7 +1986,9 @@ mod tests {
             }],
         );
 
-        assert!(acp_summary_from_daemon(&session, &menu, &attention).is_none());
+        let summary = mobile_summary_from_daemon(&session, &menu, &attention).unwrap();
+        assert_eq!(summary.kind, WorkspaceMenuSessionKind::Terminal);
+        assert_eq!(summary.title, "Codex CLI");
     }
 
     #[test]
@@ -1530,7 +1998,8 @@ mod tests {
         menu.sessions[0].custom_title = true;
         let session = mobile_daemon_state(DaemonPhase::Idle);
 
-        let summary = acp_summary_from_daemon(&session, &menu, &AttentionStore::default()).unwrap();
+        let summary =
+            mobile_summary_from_daemon(&session, &menu, &AttentionStore::default()).unwrap();
         assert_eq!(summary.title, "用户重命名");
     }
 
