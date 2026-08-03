@@ -5585,6 +5585,14 @@ fn snapshot_cursor_suffix<T: EventListener>(term: &Term<T>, out: &mut Vec<u8>) {
             CursorShape::Block => out.extend_from_slice(b"\x1b[2 q\x1b[?25h"),
         }
     }
+
+    // The next PTY bytes are a diff against the terminal's current rendition.
+    // Restore it after painting the keyframe so live output starts from the same state.
+    let style = CellStyle::from_cell(&term.grid().cursor.template);
+    if style.link.is_some() {
+        emit_link_osc(out, style.link.as_deref());
+    }
+    emit_absolute_sgr(out, &style);
 }
 
 /// TUI 可视区 keyframe：按行 CUP + 绝对 SGR（Codux `terminal_snapshot_data` 同构）。
@@ -5724,7 +5732,7 @@ fn cell_has_visuals(cell: &Cell) -> bool {
     ) || cell.hyperlink().is_some()
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct CellStyle {
     fg: Color,
     bg: Color,
@@ -6215,6 +6223,29 @@ mod snapshot_tests {
         let text = visible_text(&term2);
         assert!(text.contains("hello"), "got {text:?}");
         assert!(text.contains("world"), "got {text:?}");
+    }
+
+    #[test]
+    fn snapshot_restores_current_sgr_for_following_live_output() {
+        let size = DaemonTermSize { rows: 4, cols: 30 };
+        let mut original = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut original_parser: Processor = Processor::new();
+        original_parser.advance(&mut original, b"plain \x1b[1;4;31mstyled");
+
+        let snapshot = snapshot_ansi(&original, None);
+        let mut restored = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut restored_parser: Processor = Processor::new();
+        restored_parser.advance(&mut restored, &snapshot);
+
+        assert_eq!(
+            CellStyle::from_cell(&original.grid().cursor.template),
+            CellStyle::from_cell(&restored.grid().cursor.template),
+            "snapshot must restore the SGR state expected by subsequent PTY diffs"
+        );
+
+        original_parser.advance(&mut original, b" live");
+        restored_parser.advance(&mut restored, b" live");
+        assert_eq!(attr_dump(&original), attr_dump(&restored));
     }
 
     #[test]

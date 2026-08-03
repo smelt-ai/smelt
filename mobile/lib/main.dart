@@ -419,6 +419,7 @@ class _HomePageState extends State<HomePage> {
   SessionListFilter _sessionFilter = SessionListFilter.all;
   bool _acceptConnectionNotifications = true;
   String? _pendingOpenSessionId;
+  String? _activeSessionId;
 
   final _pairingCodeController = TextEditingController();
 
@@ -461,6 +462,10 @@ class _HomePageState extends State<HomePage> {
     _attentionSubscription = gatewayService.attentionStream.listen((item) {
       if (!mounted || !_acceptConnectionNotifications) return;
       gatewayService.listSessions();
+      if (_activeSessionId == item.sessionId) {
+        gatewayService.markRead(item.sessionId);
+        return;
+      }
       final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
       if (isCurrent && !item.requiresAction) return;
       final session = _sessions
@@ -1253,16 +1258,28 @@ class _HomePageState extends State<HomePage> {
 
   void _openSession(SessionSummary session) {
     gatewayService.markRead(session.id);
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => session.kind == SessionKind.terminal
-            ? TerminalSessionPage(session: session)
-            : SessionPage(
-                session: session,
-                messageDraftStore: _messageDraftStore,
-              ),
-      ),
+    if (_shownAttentionSessionId == session.id) {
+      _shownAttentionSessionId = null;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    }
+    final previousActiveSessionId = _activeSessionId;
+    _activeSessionId = session.id;
+    unawaited(
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => session.kind == SessionKind.terminal
+              ? TerminalSessionPage(session: session)
+              : SessionPage(
+                  session: session,
+                  messageDraftStore: _messageDraftStore,
+                ),
+        ),
+      ).whenComplete(() {
+        if (mounted && _activeSessionId == session.id) {
+          _activeSessionId = previousActiveSessionId;
+        }
+      }),
     );
   }
 
