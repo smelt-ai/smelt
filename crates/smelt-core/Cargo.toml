@@ -32,3 +32,7 @@ libc = "0.2"
 base64 = "0.22"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+
+# 远程网关连接引用计数的防休眠断言（见 remote_gateway.rs::SleepAssertion）。
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
