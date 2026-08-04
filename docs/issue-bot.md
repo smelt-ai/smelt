@@ -44,7 +44,10 @@ issue opened/reopened
 |---|---|---|
 | `FEISHU_ISSUE_WEBHOOK` | ✅ | 上面复制的 webhook 地址 |
 | `FEISHU_WEBHOOK_SECRET` | 可选 | 签名校验密钥（勾选了签名才需要） |
-| `DEEPSEEK_API_KEY` | 可选 | 开启 LLM 分类时必填（[DeepSeek 开放平台](https://platform.deepseek.com) 创建） |
+
+> LLM 分类**零新增配置**：默认走 GitHub Models，直接用 Actions 自动注入的
+> `GITHUB_TOKEN`（workflow 已声明 `models: read` 权限）。只有想切回 DeepSeek
+> 时才需要 `DEEPSEEK_API_KEY`（见下文"切换提供商"）。
 
 ### 3. 验证
 
@@ -52,8 +55,8 @@ issue opened/reopened
 
 - 飞书群收到一条蓝色卡片（含标题、作者、审核结论、LLM 分类、"查看详情"链接）
 - 内容不完整的 issue 会收到机器人评论 + `needs-triage` 标签
-- 配了 `DEEPSEEK_API_KEY` 时，issue 自动带上 `bug`/`feature`/`question` 和
-  `severity:P0` 等分类标签；没配或调用失败则静默跳过，不影响其他功能
+- 分类成功时，issue 自动带上 `bug`/`feature`/`question` 和
+  `severity:P0` 等分类标签；调用失败则静默跳过，不影响其他功能
 
 > 注意：workflow 只在**默认分支（main）**上生效，改动后要先合入 main。
 
@@ -68,16 +71,30 @@ issue opened/reopened
 
 查重依赖 GitHub Search API，失败时静默跳过，不阻塞审核。
 
-## LLM 分类（DeepSeek，已启用）
+## LLM 分类（GitHub Models，已启用）
 
 workflow 的"规则审核"之后会自动调用 `.github/scripts/issue-llm-triage.py`，
 给 issue 分类（bug/feature/question）并定严重度（P0/P1/P2），附带一句话摘要：
 
 - 分类结果写入评论和飞书卡片，并自动打 `bug` / `feature` / `question` /
   `severity:P0` 等标签
-- **容错**：缺 `DEEPSEEK_API_KEY`、网络错误、超时、返回格式异常，一律降级跳过，
+- **零配置**：默认走 GitHub Models（`openai/gpt-4o-mini`），用 Actions 自动注入的
+  `GITHUB_TOKEN`，runner 直连秒回，有免费额度（限速，issue 分类这种低频场景够用）
+- **容错**：缺 token、网络错误、超时（15s 硬超时）、返回格式异常，一律降级跳过，
   不影响审核与推送
-- 模型默认 `deepseek-v4-flash`（快模型）；想换其他模型改脚本里的 `MODEL` 常量即可
+
+### 切换提供商
+
+脚本支持多提供商（OpenAI 兼容 API），通过 `LLM_PROVIDER` 环境变量切换：
+
+| 提供商 | `LLM_PROVIDER` | 认证 | 默认模型 |
+|---|---|---|---|
+| GitHub Models（默认） | `github_models` | `GITHUB_TOKEN` | `openai/gpt-4o-mini` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+
+切到 DeepSeek：workflow 的 LLM 步骤把 `GITHUB_TOKEN` 换成
+`DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}` 并设 `LLM_PROVIDER: deepseek`，
+再在仓库加 `DEEPSEEK_API_KEY` secret。模型名可用 `LLM_MODEL` 覆盖。
 
 ## 本地调试审核脚本
 
@@ -93,13 +110,17 @@ python3 .github/scripts/issue-triage.py
 cat /tmp/env.txt   # 查看 AUDIT_PASS / AUDIT_PROBLEMS / AUDIT_DUP
 ```
 
-LLM 分类脚本同理（需先 `export DEEPSEEK_API_KEY=...`）：
+LLM 分类脚本同理（GitHub Models 需 `export GITHUB_TOKEN=...`，DeepSeek 需
+`export DEEPSEEK_API_KEY=...`）：
 
 ```sh
-export DEEPSEEK_API_KEY=sk-xxx
+export GITHUB_TOKEN=ghp_xxx   # 或 DEEPSEEK_API_KEY=sk-xxx
 GITHUB_ENV=/tmp/env-llm.txt \
 GITHUB_EVENT_TITLE="App 启动后三秒内崩溃" \
 GITHUB_EVENT_BODY="打开 App 后立即闪退。复现步骤：1. 启动 2. 等待三秒 3. 崩溃" \
 python3 .github/scripts/issue-llm-triage.py
 cat /tmp/env-llm.txt   # 查看 LLM_OK / LLM_TYPE / LLM_SEVERITY / LLM_SUMMARY
 ```
+
+本地 mock 测试（不起真实 API）：用 `LLM_API_URL` 指向本地 server，`LLM_PROVIDER`
+按需指定，`LLM_MODEL` 任意。
