@@ -14,6 +14,7 @@ class _FakeTerminalStream implements TerminalStreamClient {
   final _states = StreamController<TerminalStreamState>.broadcast(sync: true);
 
   TerminalStreamState _state = TerminalStreamState.waitingForGateway;
+  final geometries = <TerminalGeometry>[];
 
   void emit(TerminalStreamEvent event) => _events.add(event);
 
@@ -35,9 +36,6 @@ class _FakeTerminalStream implements TerminalStreamClient {
   bool get writeEnabled => true;
 
   @override
-  void forceGeometry() {}
-
-  @override
   void resume() {}
 
   @override
@@ -50,7 +48,7 @@ class _FakeTerminalStream implements TerminalStreamClient {
   void suspend() {}
 
   @override
-  void updateGeometry(TerminalGeometry geometry) {}
+  void updateGeometry(TerminalGeometry geometry) => geometries.add(geometry);
 
   @override
   Future<void> dispose() async {
@@ -171,6 +169,106 @@ void main() {
     await tester.pumpAndSettle();
     expect(scrollController.offset, lessThan(latestOffset));
   });
+
+  testWidgets(
+    'software keyboard preserves PTY geometry and terminal scrolling',
+    (tester) async {
+      final stream = _FakeTerminalStream();
+      const session = SessionSummary(
+        id: 'terminal-1',
+        kind: SessionKind.terminal,
+        title: 'Shell',
+        phase: 'running',
+        agent: 'terminal',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TerminalSessionPage(session: session, stream: stream),
+        ),
+      );
+      stream.connect();
+      final replay = Uint8List.fromList(
+        utf8.encode(
+          '${List.generate(100, (index) => 'history-$index\r\n').join()}'
+          'LATEST',
+        ),
+      );
+      stream.emit(
+        TerminalReadyEvent(
+          cols: 40,
+          rows: 20,
+          replayBytes: replay.length,
+          writeEnabled: true,
+        ),
+      );
+      stream.emit(TerminalDataEvent(replay));
+      stream.emit(const TerminalReplayCompleteEvent());
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      final viewBefore = tester.widget<TerminalView>(find.byType(TerminalView));
+      final stateBefore = tester.state<TerminalViewState>(
+        find.byType(TerminalView),
+      );
+      final scrollController = viewBefore.scrollController!;
+      expect(stream.geometries, isNotEmpty);
+      final initialGeometry = stream.geometries.last;
+      stream.geometries.clear();
+
+      await tester.tap(find.byIcon(Icons.keyboard_outlined));
+      await tester.pump();
+      await tester.pump();
+
+      final keyboardView = tester.widget<TerminalView>(
+        find.byType(TerminalView),
+      );
+      expect(keyboardView.autoResize, isFalse);
+      expect(find.byType(TerminalShortcutBar), findsOneWidget);
+      expect(
+        scrollController.offset,
+        closeTo(scrollController.position.maxScrollExtent, 0.5),
+      );
+
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '  da',
+          selection: TextSelection.collapsed(offset: 4),
+          composing: TextRange(start: 2, end: 4),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byIcon(Icons.keyboard_hide_outlined));
+      await tester.pump();
+      await tester.pump();
+
+      final viewAfter = tester.widget<TerminalView>(find.byType(TerminalView));
+      final stateAfter = tester.state<TerminalViewState>(
+        find.byType(TerminalView),
+      );
+      expect(viewAfter.autoResize, isTrue);
+      expect(stateAfter, isNot(same(stateBefore)));
+      expect(find.byType(TerminalShortcutBar), findsNothing);
+      expect(
+        stream.geometries.every(
+          (geometry) =>
+              geometry.cols == initialGeometry.cols &&
+              geometry.rows == initialGeometry.rows,
+        ),
+        isTrue,
+      );
+      expect(
+        scrollController.offset,
+        closeTo(scrollController.position.maxScrollExtent, 0.5),
+      );
+
+      final latestOffset = scrollController.offset;
+      await tester.drag(find.byType(TerminalView), const Offset(0, 120));
+      await tester.pumpAndSettle();
+      expect(scrollController.offset, lessThan(latestOffset));
+    },
+  );
 
   testWidgets('terminal shortcut bar emits PTY control sequences', (
     tester,

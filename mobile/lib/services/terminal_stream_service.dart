@@ -89,7 +89,6 @@ abstract interface class TerminalStreamClient {
 
   void start(TerminalGeometry geometry);
   void updateGeometry(TerminalGeometry geometry);
-  void forceGeometry();
   void sendInput(String data);
   void suspend();
   void resume();
@@ -176,21 +175,6 @@ class TerminalStreamService implements TerminalStreamClient {
       _send({'method': 'resize', 'params': latest.toJson()});
       _lastSentGeometry = latest;
     });
-  }
-
-  @override
-  void forceGeometry() {
-    if (_disposed ||
-        _ended ||
-        _suspended ||
-        _state != TerminalStreamState.connected) {
-      return;
-    }
-    final geometry = _geometry;
-    if (geometry == null) return;
-    _resizeTimer?.cancel();
-    _send({'method': 'resize', 'params': geometry.toJson()});
-    _lastSentGeometry = geometry;
   }
 
   @override

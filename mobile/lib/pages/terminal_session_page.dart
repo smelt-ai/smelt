@@ -36,6 +36,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   bool _writeEnabled = false;
   bool _softwareKeyboardEnabled = false;
   bool _softwareKeyboardWasVisible = false;
+  bool _terminalGeometryLocked = false;
   int _decoderGeneration = 0;
 
   @override
@@ -55,14 +56,12 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     _stateSubscription = _stream.stateStream.listen((state) {
       if (!mounted) return;
       if (state != TerminalStreamState.connected) {
-        _closeKeyboardAndReleaseFocus();
+        _closeSoftwareKeyboard();
       }
       setState(() {
         _streamState = state;
         if (state != TerminalStreamState.connected) {
           _writeEnabled = false;
-          _softwareKeyboardEnabled = false;
-          _softwareKeyboardWasVisible = false;
         }
       });
     });
@@ -101,7 +100,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   void _handleTerminalEvent(TerminalStreamEvent event) {
     switch (event) {
       case TerminalReadyEvent():
-        _closeKeyboardAndReleaseFocus();
+        _closeSoftwareKeyboard();
         _terminal = _newTerminal();
         _terminalViewKey = GlobalKey<TerminalViewState>();
         _resetDecoder();
@@ -109,7 +108,6 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         setState(() {
           _writeEnabled = event.writeEnabled;
           _softwareKeyboardEnabled = false;
-          _softwareKeyboardWasVisible = false;
           _error = null;
         });
       case TerminalDataEvent():
@@ -119,22 +117,18 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         _scrollToLatestAfterReplay();
       case TerminalErrorEvent():
         if (!mounted) return;
-        if (event.fatal) _closeKeyboardAndReleaseFocus();
+        if (event.fatal) _closeSoftwareKeyboard();
         setState(() {
           _error = event.message;
           if (event.fatal) {
             _writeEnabled = false;
-            _softwareKeyboardEnabled = false;
-            _softwareKeyboardWasVisible = false;
           }
         });
       case TerminalClosedEvent():
         if (!mounted) return;
-        _closeKeyboardAndReleaseFocus();
+        _closeSoftwareKeyboard();
         setState(() {
           _writeEnabled = false;
-          _softwareKeyboardEnabled = false;
-          _softwareKeyboardWasVisible = false;
           _error = 'Terminal session ended';
         });
     }
@@ -145,12 +139,21 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     // Replay data passes through an asynchronous UTF-8 decoder. Wait for it
     // to update xterm, then give RenderTerminal one layout to publish its new
     // scroll extent before moving to the live tail.
+    _scrollToTerminalTailAfterLayout(decoderGeneration: generation);
+  }
+
+  void _scrollToTerminalTailAfterLayout({int? decoderGeneration}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || generation != _decoderGeneration) return;
+      if (!mounted ||
+          (decoderGeneration != null &&
+              decoderGeneration != _decoderGeneration)) {
+        return;
+      }
       _terminalViewKey.currentState?.renderTerminal.markNeedsLayout();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted ||
-            generation != _decoderGeneration ||
+            (decoderGeneration != null &&
+                decoderGeneration != _decoderGeneration) ||
             !_terminalScrollController.hasClients) {
           return;
         }
@@ -176,31 +179,52 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     setState(() {
       _softwareKeyboardEnabled = true;
       _softwareKeyboardWasVisible = false;
+      _terminalGeometryLocked = true;
     });
+    _scrollToTerminalTailAfterLayout();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_softwareKeyboardEnabled) return;
       _terminalViewKey.currentState?.requestKeyboard();
     });
   }
 
-  void _syncGeometryAfterLayout() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _terminalViewKey.currentState?.renderTerminal.markNeedsLayout();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _stream.forceGeometry();
-      });
-    });
-  }
-
   void _closeSoftwareKeyboard() {
     _closeKeyboardAndReleaseFocus();
-    if (mounted && _softwareKeyboardEnabled) {
-      setState(() {
-        _softwareKeyboardEnabled = false;
-        _softwareKeyboardWasVisible = false;
-      });
+    if (!mounted || (!_softwareKeyboardEnabled && !_terminalGeometryLocked)) {
+      return;
     }
+
+    final keyboardVisible = View.of(context).viewInsets.bottom > 0;
+    if (!keyboardVisible) {
+      _finishSoftwareKeyboardCycle();
+      return;
+    }
+
+    setState(() {
+      _softwareKeyboardEnabled = false;
+      _softwareKeyboardWasVisible = true;
+      _terminalGeometryLocked = true;
+      _terminalViewKey = GlobalKey<TerminalViewState>();
+    });
+    _scrollToTerminalTailAfterLayout();
+  }
+
+  void _finishSoftwareKeyboardCycle() {
+    if (!mounted ||
+        (!_softwareKeyboardEnabled &&
+            !_softwareKeyboardWasVisible &&
+            !_terminalGeometryLocked)) {
+      return;
+    }
+    setState(() {
+      _softwareKeyboardEnabled = false;
+      _softwareKeyboardWasVisible = false;
+      _terminalGeometryLocked = false;
+      // xterm 4.0 keeps IME composing text after closeKeyboard(). Recreating
+      // the view clears that local render state without replacing the PTY.
+      _terminalViewKey = GlobalKey<TerminalViewState>();
+    });
+    _scrollToTerminalTailAfterLayout();
   }
 
   void _closeKeyboardAndReleaseFocus() {
@@ -211,18 +235,19 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   @override
   void didChangeMetrics() {
     super.didChangeMetrics();
-    if (!mounted || !_softwareKeyboardEnabled) return;
+    if (!mounted || (!_softwareKeyboardEnabled && !_terminalGeometryLocked)) {
+      return;
+    }
     if (View.of(context).viewInsets.bottom > 0) {
-      _softwareKeyboardWasVisible = true;
-      _syncGeometryAfterLayout();
+      if (!_softwareKeyboardWasVisible) {
+        _softwareKeyboardWasVisible = true;
+        _scrollToTerminalTailAfterLayout();
+      }
       return;
     }
     if (!_softwareKeyboardWasVisible) return;
-    setState(() {
-      _softwareKeyboardEnabled = false;
-      _softwareKeyboardWasVisible = false;
-    });
-    _syncGeometryAfterLayout();
+    _closeKeyboardAndReleaseFocus();
+    _finishSoftwareKeyboardCycle();
   }
 
   @override
@@ -282,6 +307,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                 autofocus: false,
                 readOnly: !_writeEnabled,
                 hardwareKeyboardOnly: !_softwareKeyboardEnabled,
+                autoResize: !_terminalGeometryLocked,
                 deleteDetection: true,
                 simulateScroll: true,
                 onTapUp: (_, _) => _enableSoftwareKeyboard(),

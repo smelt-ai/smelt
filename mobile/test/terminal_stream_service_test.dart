@@ -23,7 +23,7 @@ void main() {
       final attach = Completer<Map<String, dynamic>>();
       final input = Completer<Map<String, dynamic>>();
       final resizes = List.generate(
-        2,
+        1,
         (_) => Completer<Map<String, dynamic>>(),
       );
       var resizeCount = 0;
@@ -140,13 +140,6 @@ void main() {
       );
       expect(inputMessage['params']['data'], '\x03');
 
-      service.forceGeometry();
-      final forcedResizeMessage = await resizes[0].future.timeout(
-        const Duration(seconds: 5),
-      );
-      expect(forcedResizeMessage['params']['cols'], 40);
-      expect(forcedResizeMessage['params']['rows'], 20);
-
       service.updateGeometry(
         const TerminalGeometry(
           cols: 50,
@@ -155,7 +148,7 @@ void main() {
           cellHeight: 16,
         ),
       );
-      final resizeMessage = await resizes[1].future.timeout(
+      final resizeMessage = await resizes[0].future.timeout(
         const Duration(seconds: 5),
       );
       expect(resizeMessage['params']['cols'], 50);
