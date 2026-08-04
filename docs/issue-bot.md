@@ -77,8 +77,7 @@ workflow 的"规则审核"之后会自动调用 `.github/scripts/issue-llm-triag
   `severity:P0` 等标签
 - **容错**：缺 `DEEPSEEK_API_KEY`、网络错误、超时、返回格式异常，一律降级跳过，
   不影响审核与推送
-- 模型默认 `deepseek-chat`（V3，快且便宜）；想换 `deepseek-reasoner`（R1，
-  推理更强更慢）改脚本里的 `MODEL` 常量即可
+- 模型默认 `deepseek-v4-flash`（快模型）；想换其他模型改脚本里的 `MODEL` 常量即可
 
 ## 本地调试审核脚本
 
