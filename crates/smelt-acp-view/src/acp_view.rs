@@ -45,6 +45,22 @@ pub use smelt_core::acp_chat::{
     compact_diff_lines, diff_lines, is_interrupt_marker, strip_code_fence,
 };
 
+const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
+
+fn should_seed_restored_height_hints(
+    awaiting_initial_snapshot: bool,
+    replaying_history: bool,
+    following_tail: bool,
+    entries_changed: bool,
+    old_entry_count: usize,
+    new_entry_count: usize,
+) -> bool {
+    new_entry_count > 0
+        && following_tail
+        && ((awaiting_initial_snapshot && entries_changed)
+            || (replaying_history && new_entry_count > old_entry_count))
+}
+
 #[derive(Clone)]
 struct CachedDiff {
     old_fingerprint: (usize, u64),
@@ -195,6 +211,10 @@ pub struct AcpView {
     collapsed_tool_cards: std::collections::HashSet<String>,
     /// 可变高度消息虚拟列表：只测量和构建视口附近的 Markdown/工具卡。
     list_state: ListState,
+    /// 占位视图尚未收到恢复后的首份非空历史。冷 attach 的完整快照要先给未测量
+    /// 条目高度提示，避免滚动范围为零。`session/load` 回放则只信快照里的
+    /// `replaying_history`。
+    awaiting_initial_history_snapshot: bool,
     /// 用户是否已滚离消息尾部；由 ListScrollEvent 更新。
     viewing_history: bool,
     /// 「强制重启」请求正在路上：用于阻止侧栏菜单重复触发。跟
@@ -260,6 +280,7 @@ impl AcpView {
             None,
             None,
         );
+        this.awaiting_initial_history_snapshot = false;
         this.phase = AcpPhase::Starting;
         this.starting_since = Some(std::time::Instant::now());
         this.init_input(window, cx);
@@ -304,6 +325,7 @@ impl AcpView {
             None,
             saved_sid,
         );
+        this.awaiting_initial_history_snapshot = false;
         this.phase = AcpPhase::Starting;
         this.starting_since = Some(std::time::Instant::now());
         this.init_input(window, cx);
@@ -355,7 +377,8 @@ impl AcpView {
         let rendered_images = decode_entry_images(&entries, 0);
         let rendered_diffs = build_diff_cache(&entries);
         let rendered_markdown = build_markdown_cache(&entries, cwd.as_deref());
-        let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
+        let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.))
+            .with_uniform_item_height(px(RESTORED_ENTRY_HEIGHT_HINT_PX));
         list_state.set_follow_mode(FollowMode::Tail);
         let view = cx.entity().downgrade();
         list_state.set_scroll_handler(move |event, _window, cx| {
@@ -416,6 +439,7 @@ impl AcpView {
             expanded_tool_cards: std::collections::HashSet::new(),
             collapsed_tool_cards: std::collections::HashSet::new(),
             list_state,
+            awaiting_initial_history_snapshot: true,
             viewing_history: false,
             restarting: false,
             restart_error: None,
@@ -862,6 +886,7 @@ impl AcpView {
         if text.trim().is_empty() && self.pending_images.is_empty() {
             return;
         }
+        self.awaiting_initial_history_snapshot = false;
         let images = std::mem::take(&mut self.pending_images);
         self.send_prompt_now(text, images, cx);
     }
@@ -961,6 +986,9 @@ impl AcpView {
     fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
         let should_persist = snap.should_persist;
         let old_entries_len = self.entries.len();
+        let replaying_history = snap.replaying_history;
+        let snapshot_entries_changed =
+            snap.entries_offset != old_entries_len || !snap.entries.is_empty();
         let incremental_entries = snap.entries_offset <= self.entries.len();
         let entries_offset = if incremental_entries {
             snap.entries_offset
@@ -992,7 +1020,18 @@ impl AcpView {
         ));
         refresh_diff_cache(&self.entries, entries_offset, &mut self.rendered_diffs);
         let new_entries_len = self.entries.len();
-        if snap.entries_offset <= old_entries_len {
+        let seed_restored_height_hints = should_seed_restored_height_hints(
+            self.awaiting_initial_history_snapshot,
+            replaying_history,
+            self.list_state.is_following_tail(),
+            snapshot_entries_changed,
+            old_entries_len,
+            new_entries_len,
+        );
+        if seed_restored_height_hints {
+            self.list_state
+                .reset_with_uniform_height(new_entries_len, px(RESTORED_ENTRY_HEIGHT_HINT_PX));
+        } else if snap.entries_offset <= old_entries_len {
             // splice 会把落在被替换 item 内部的滚动锚点重置到该 item 顶部。
             // 流式正文持续替换最后一项时，用户若正在这项里向上浏览，就会每个
             // chunk 被拉回一次，形成明显抖动。离开尾随态后保留逻辑锚点；正文
@@ -1008,6 +1047,9 @@ impl AcpView {
             }
         } else {
             self.list_state.reset(new_entries_len);
+        }
+        if new_entries_len > 0 {
+            self.awaiting_initial_history_snapshot = false;
         }
         self.phase = snap.phase;
         self.permissions = snap.pending_permissions;
@@ -1838,6 +1880,13 @@ impl Render for AcpView {
                         .child(
                             div()
                                 .max_w(gpui::relative(0.72))
+                                // gpui-component 的 markdown 列表块（ol/ul）内部用
+                                // `w_full()`/`flex_1()` 排布"序号 + 正文"。这个气泡
+                                // 是收缩到内容大小（只有 max_w，没有 width）的 flex
+                                // item，短列表内容会被误测成只有序号那么宽，正文被
+                                // `overflow_hidden()` 悄悄裁掉——只剩"1." "2." 悬浮。
+                                // 兜个最小宽度，给列表正文留出可见空间。
+                                .min_w(gpui::px(160.))
                                 .px_4()
                                 .py_2p5()
                                 .rounded_lg()
@@ -1910,6 +1959,9 @@ impl Render for AcpView {
                             .child(
                                 div()
                                     .max_w(gpui::relative(0.8))
+                                    // 同上：避免短的有序/无序列表被收缩到只剩序号宽度、
+                                    // 正文被裁没。
+                                    .min_w(gpui::px(160.))
                                     .px_3()
                                     .py_3()
                                     .rounded_lg()
@@ -4325,17 +4377,53 @@ fn render_diff_lines(
 #[cfg(test)]
 mod tests {
     use super::{
-        HANDOFF_MAX_CHARS, build_conversation_layout, build_handoff_prompt, build_markdown_cache,
-        escape_html_tags_for_markdown, is_active_permission_selection, markdown_text_for_cwd,
-        markdown_user_text_for_cwd, refresh_markdown_cache, resolve_restart_launch,
+        HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
+        build_handoff_prompt, build_markdown_cache, escape_html_tags_for_markdown,
+        is_active_permission_selection, markdown_text_for_cwd, markdown_user_text_for_cwd,
+        refresh_markdown_cache, resolve_restart_launch, should_seed_restored_height_hints,
         tool_card_default_expanded, tool_uses_compact_process_row,
     };
+    use gpui::{ListAlignment, ListState, px};
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
     use smelt_core::acp_session::{
         ApprovalDetailsView, PendingPermission, PermissionOptionKindView, PermissionOptionView,
     };
     use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
     use smelt_ui::agent_ui_config::AgentUiConfig;
+
+    #[test]
+    fn restored_history_height_hints_cover_unmeasured_entries() {
+        let state = ListState::new(0, ListAlignment::Top, px(800.));
+        state.reset_with_uniform_height(100, px(RESTORED_ENTRY_HEIGHT_HINT_PX));
+
+        assert_eq!(state.item_count(), 100);
+        assert_eq!(state.max_offset_for_scrollbar().y, px(9_600.));
+    }
+
+    #[test]
+    fn restored_height_hints_only_reset_for_new_history_entries() {
+        assert!(should_seed_restored_height_hints(
+            true, false, true, true, 20, 20,
+        ));
+        assert!(should_seed_restored_height_hints(
+            false, true, true, true, 20, 21,
+        ));
+        assert!(!should_seed_restored_height_hints(
+            false, false, true, true, 20, 20,
+        ));
+        assert!(!should_seed_restored_height_hints(
+            false, true, true, false, 20, 20,
+        ));
+        assert!(!should_seed_restored_height_hints(
+            false, true, true, true, 20, 20,
+        ));
+        assert!(!should_seed_restored_height_hints(
+            true, true, false, true, 20, 21,
+        ));
+        assert!(!should_seed_restored_height_hints(
+            true, true, true, true, 0, 0,
+        ));
+    }
 
     #[test]
     fn markdown_local_files_become_internal_file_urls() {
@@ -4719,5 +4807,71 @@ mod tests {
             "tool-1",
             "unknown"
         ));
+    }
+
+    // 回归守卫：`AcpEntry::User`/`UserWithImages` 气泡是"收缩到内容大小"的 flex
+    // item（只有 max_w，没有 width），而 gpui-component 的 markdown 有序/无序列表
+    // 内部用 `w_full()`/`flex_1()` 排布"序号 + 正文"。两者叠加时，短列表内容会被
+    // 误测成只有序号那么宽，正文被列表内容行的 `overflow_hidden()` 裁没，聊天里
+    // 只剩悬浮的 "1." "2."（bug 复现见 PR 描述）。锁死气泡有个不为零的最小宽度，
+    // 防止以后有人顺手把 `min_w` 从气泡样式里删掉。
+    struct ListBubbleTestRoot {
+        text: &'static str,
+    }
+
+    impl gpui::Render for ListBubbleTestRoot {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement, ParentElement, Styled, div, px};
+            // 复刻 acp_view 里用户气泡的真实结构：外层限宽窗口 -> 右对齐 flex 行
+            // -> 收缩到内容大小、带 max_w/min_w 的气泡 -> markdown 正文。
+            div().w(px(500.)).child(
+                div()
+                    .flex()
+                    .w_full()
+                    .justify_end()
+                    .child(
+                        div()
+                            .max_w(px(400.))
+                            .min_w(px(160.))
+                            .debug_selector(|| "BUBBLE".to_string())
+                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
+                                "list-bubble-test",
+                                self.text.to_string(),
+                            )),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn short_ordered_list_bubble_does_not_collapse_below_min_width(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, VisualTestContext, px};
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_cx| ListBubbleTestRoot {
+                text: "1. xxxx\n2. bbbbb",
+            });
+            gpui_component::Root::new(content, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let bounds = cx
+            .debug_bounds("BUBBLE")
+            .expect("bubble should have painted");
+        assert!(
+            bounds.size.width >= px(160.),
+            "list bubble collapsed below its min-width floor: {:?}; short list item \
+             text would be clipped invisible by the list renderer's overflow_hidden()",
+            bounds.size.width,
+        );
     }
 }

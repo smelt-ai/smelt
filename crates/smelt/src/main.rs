@@ -29,7 +29,6 @@ mod inspector;
 mod mem_usage;
 use smelt_core::osc;
 mod panel_transition;
-mod pet;
 mod session_history;
 mod session_list;
 mod settings;
@@ -48,7 +47,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -250,6 +249,75 @@ enum ArchivedDrawerTabKind {
     Terminal,
     Files,
     Git,
+}
+
+/// 预览图降采样上限：预览盒也就 ~1100×800 逻辑像素，2048 内完全够清晰。
+/// 必须降采样——长截图几万像素高，原图直接喂 GPU 会撞 sprite atlas 上限
+/// （16384px）导致 `paint_image` 返回 Err、整张图画不出来。
+const MAX_PREVIEW_DIM: u32 = 2048;
+
+/// gpui::ImageFormat → image crate 的 ImageFormat。SVG 走 gpui 的 svg_renderer，
+/// image crate 不解码，返回 None。
+fn to_image_format(f: gpui::ImageFormat) -> Option<image::ImageFormat> {
+    Some(match f {
+        gpui::ImageFormat::Png => image::ImageFormat::Png,
+        gpui::ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        gpui::ImageFormat::Webp => image::ImageFormat::WebP,
+        gpui::ImageFormat::Gif => image::ImageFormat::Gif,
+        gpui::ImageFormat::Bmp => image::ImageFormat::Bmp,
+        gpui::ImageFormat::Tiff => image::ImageFormat::Tiff,
+        gpui::ImageFormat::Ico => image::ImageFormat::Ico,
+        gpui::ImageFormat::Pnm => image::ImageFormat::Pnm,
+        gpui::ImageFormat::Svg => return None,
+    })
+}
+
+/// 解码 + 降采样成 RenderImage（BGRA）供预览层 canvas 直接绘制。
+/// 顺带把 RGBA 字节换成 gpui 纹理要的 BGRA。失败（格式不支持/数据损坏）
+/// 返回 None，预览层留空即可，不阻塞 UI。
+fn decode_preview_image(image: &gpui::Image) -> Option<Arc<gpui::RenderImage>> {
+    let format = to_image_format(image.format)?;
+    let decoded = image::load_from_memory_with_format(&image.bytes, format).ok()?;
+    let (w, h) = (decoded.width(), decoded.height());
+    let scale = (MAX_PREVIEW_DIM as f32 / w as f32)
+        .min(MAX_PREVIEW_DIM as f32 / h as f32)
+        .min(1.0);
+    let img = if scale < 1.0 {
+        decoded.resize(
+            ((w as f32) * scale) as u32,
+            ((h as f32) * scale) as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        decoded
+    };
+    let mut rgba = img.into_rgba8();
+    // RGBA → BGRA：gpui 纹理格式。
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let frame = image::Frame::new(rgba);
+    Some(Arc::new(gpui::RenderImage::new(vec![frame])))
+}
+
+/// 守护状态更新很频繁（agent 活跃时每步都推 phase/标题变化），每次更新都
+/// `refresh_windows()` 强制整窗重绘太贵——这是「终端一有输出整窗 flexbox 重排、
+/// 空闲 CPU 高」的主要来源（issue #23）。这里把 100ms 窗口内的多次更新合并成
+/// 一次整窗刷新：状态点/侧栏展示延迟 100ms 完全无感。
+static STATE_REFRESH_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+fn schedule_state_refresh(cx: &gpui::AsyncApp) {
+    if STATE_REFRESH_SCHEDULED.swap(true, Ordering::Relaxed) {
+        return; // 已有一笔刷新在途，这次更新并入它
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(100))
+            .await;
+        STATE_REFRESH_SCHEDULED.store(false, Ordering::Relaxed);
+        let _ = cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
 }
 
 /// 底部抽屉的终端标签；每个标签自己持有一个终端进程。
@@ -1875,6 +1943,11 @@ struct Workspace {
     /// ACP 消息图片的窗口级预览。放在 Workspace 而非 AcpView，遮罩才能覆盖侧栏、
     /// inspector 和输入区，且不受会话面板裁剪。
     acp_image_preview: Option<Arc<gpui::Image>>,
+    /// 预览用的解码 + 降采样图（见 `decode_preview_image`）：长截图几万像素高，
+    /// 原图直接喂 GPU 会撞 sprite atlas 上限（16384px）画不出来；且 gpui 的 `img`
+    /// 元素会因 taffy 的 aspect_ratio 规则被撑成超高布局，contain 跟着失效、只露出
+    /// 顶部一截。这里预解码成受控尺寸的 RenderImage，预览层用 canvas 手动 contain。
+    acp_image_preview_render: Option<Arc<gpui::RenderImage>>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
     file_gen: u64,
     /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
@@ -2024,11 +2097,10 @@ struct Workspace {
     launch_inputs: Option<settings::LaunchInputs>,
     /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
     profile_inputs: Option<settings::ProfileInputs>,
-    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器。
+    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色取色器。
     opacity_slider: Option<Entity<SliderState>>,
     font_size_slider: Option<Entity<SliderState>>,
     bg_color_picker: Option<Entity<ColorPickerState>>,
-    pet_color_picker: Option<Entity<ColorPickerState>>,
     /// 上面三个组件的变更订阅。
     settings_subs: Vec<Subscription>,
     /// 上次应用到窗口的背景外观：不透明度 / 模糊改了要 window 才能切，故在 render 里同步。
@@ -2348,6 +2420,7 @@ impl Workspace {
             dir_inflight: HashSet::new(),
             file_tree_pending_reveal: None,
             acp_image_preview: None,
+            acp_image_preview_render: None,
             file_gen: 0,
             pending_file_switch: None,
             delete_file_target: None,
@@ -2440,7 +2513,6 @@ impl Workspace {
             opacity_slider: None,
             font_size_slider: None,
             bg_color_picker: None,
-            pet_color_picker: None,
             settings_subs: Vec::new(),
             applied_window_bg: None,
             debug_hud: false,
@@ -3227,6 +3299,23 @@ impl Workspace {
                 acp_view::AcpViewEvent::Changed => this.save_state(cx),
                 acp_view::AcpViewEvent::PreviewImage(image) => {
                     this.acp_image_preview = Some(image.clone());
+                    this.acp_image_preview_render = None; // 换图了,旧渲染作废
+                    let expect_id = image.id();
+                    let image_for_decode = image.clone();
+                    cx.spawn(async move |this, cx| {
+                        let render = cx
+                            .background_executor()
+                            .spawn(async move { decode_preview_image(&image_for_decode) })
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            // 竞态防抖:解码期间用户可能又点了另一张图,旧的完成时别覆盖。
+                            if this.acp_image_preview.as_ref().map(|i| i.id()) == Some(expect_id) {
+                                this.acp_image_preview_render = render;
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::ContinueInNewSession(request) => {
@@ -6624,8 +6713,50 @@ impl Render for Workspace {
         let preview_viewport = window.viewport_size();
         let preview_box_w = preview_viewport.width * 0.86;
         let preview_box_h = preview_viewport.height * 0.84;
-        let image_preview_overlay = self.acp_image_preview.as_ref().map(|image| {
-            let image = image.clone();
+        // 预览图用 canvas 手动 contain 绘制，不用 `img` 元素：gpui 的 img 会强制
+        // 设置 aspect_ratio，taffy 的 leaf 规则把高度撑成 ≥ width/ratio——长截图
+        // ratio 极小，高度被撑到几万像素，contain 跟着失效、overflow 只露出顶部
+        // 一截（正是这个 bug 的根因）。canvas 布局尺寸由 CSS 决定、绘制矩形自算，
+        // 不受 taffy aspect_ratio 影响。
+        let preview_render = self.acp_image_preview_render.clone();
+        let preview_canvas = canvas(
+            move |bounds, window, _cx| {
+                // 拦截点击：点在图片区域不穿透到 backdrop（那里是「点击关闭」）。
+                window.insert_hitbox(bounds, HitboxBehavior::Normal);
+            },
+            move |bounds, _, window, _cx| {
+                let Some(render) = preview_render.as_ref() else {
+                    return; // 解码还没完成，完成后 notify 重绘
+                };
+                let img_size = render.size(0);
+                let (iw, ih) = (img_size.width.0 as f32, img_size.height.0 as f32);
+                if iw <= 0.0 || ih <= 0.0 {
+                    return;
+                }
+                // contain：完整放入预览盒并居中（可放大也可缩小）。
+                let scale = (bounds.size.width / iw).min(bounds.size.height / ih);
+                let w = iw * scale;
+                let h = ih * scale;
+                let origin = point(
+                    bounds.origin.x + (bounds.size.width - w) / 2.0,
+                    bounds.origin.y + (bounds.size.height - h) / 2.0,
+                );
+                let image_bounds = Bounds {
+                    origin,
+                    size: size(w, h),
+                };
+                let _ = window.paint_image(
+                    bounds,
+                    image_bounds,
+                    Corners::all(px(4.0)),
+                    render.clone(),
+                    0,
+                    false,
+                );
+            },
+        )
+        .size_full();
+        let image_preview_overlay = self.acp_image_preview.as_ref().map(|_image| {
             div()
                 .id("workspace-image-preview-backdrop")
                 .absolute()
@@ -6634,6 +6765,7 @@ impl Render for Workspace {
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.acp_image_preview = None;
+                    this.acp_image_preview_render = None;
                     cx.notify();
                 }))
                 .child(
@@ -6644,17 +6776,10 @@ impl Render for Workspace {
                         .left((preview_viewport.width - preview_box_w) / 2.0)
                         .w(preview_box_w)
                         .h(preview_box_h)
-                        // 再兜一层底：万一某张图（比如巨长截图撞到 GPU 纹理尺寸上限）
-                        // 解码/采样异常导致绘制尺寸跟布局盒子对不上，也不会漏到盒子外面。
                         .overflow_hidden()
                         .cursor_default()
                         .on_click(|_ev, _window, cx| cx.stop_propagation())
-                        .child(
-                            img(image)
-                                .size_full()
-                                .object_fit(ObjectFit::Contain)
-                                .rounded_md(),
-                        ),
+                        .child(preview_canvas),
                 )
                 .child(
                     div()
@@ -6677,6 +6802,7 @@ impl Render for Workspace {
                         .child("×")
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.acp_image_preview = None;
+                            this.acp_image_preview_render = None;
                             cx.notify();
                         })),
                 )
@@ -6749,6 +6875,7 @@ impl Render for Workspace {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
                 if ks.key == "escape" && this.acp_image_preview.take().is_some() {
+                    this.acp_image_preview_render = None;
                     cx.notify();
                     return;
                 }
@@ -7661,11 +7788,8 @@ fn main() {
         cx.set_global(appearance);
         cx.set_global(load_launch_config());
 
-        // 桌面宠物：配置 + 播报邮箱 + LLM 大脑配置（跨窗口全局单例），再开独立透明浮窗。
-        cx.set_global(pet::load_pet_config());
-        cx.set_global(pet::PetMailbox::default());
+        // 桌面宠物已删除（见 git 历史）；LLM 大脑配置仍是跨窗口全局单例。
         cx.set_global(agent::load_llm_config());
-        pet::open_pet_window(cx);
 
         // 状态通道：常驻订阅守护的 subscribe，维护 DaemonStates 全局单例，
         // Session::status/pane_status 靠它把"猜"换成"读事实"（见
@@ -7737,8 +7861,10 @@ fn main() {
                             }
                         }
                     }
-                    cx.refresh_windows(); // 状态点跟着这次变化重绘
+                    // 状态点重绘由 schedule_state_refresh 节流触发，这里不再直接
+                    // refresh_windows——见该函数注释（agent 活跃时状态更新很频繁）。
                 });
+                schedule_state_refresh(&cx);
             }
         })
         .detach();

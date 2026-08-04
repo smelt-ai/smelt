@@ -28,15 +28,16 @@ base64 = "0.22"
 # @ / 补全走 gpui-component 的 CompletionProvider，候选类型来自 lsp-types，
 # 版本必须跟 gpui-component 对齐（0.97 + proposed），否则是两套不兼容的类型。
 lsp-types = { version = "0.97.0", features = ["proposed"] }
-# GPUI + gpui-component（组件库，Apache-2.0）。三者锁到 gpui-component 用的同一个
-# zed commit，避免版本漂移；gpui_platform 开 runtime_shaders 免装完整 Xcode。
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# GPUI + gpui-component（组件库，Apache-2.0）。gpui-component 已改为跟随 Zed
+# 主线，直接依赖保持同一 source，由 Cargo.lock 固定精确 revision，避免解析出
+# 两套不兼容的 GPUI 类型；gpui_platform 开 runtime_shaders 免装完整 Xcode。
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 # tree-sitter-languages：文件树打开文件用组件自带的 Editor（CodeEditor 模式），
 # 语法高亮 + 行号 + 搜索都是组件自己做的，不再需要 syntect。
-gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "e9df1921bb209fe2dceaa47234b2a2bf9a8cb1f8", features = ["tree-sitter-languages"] }
 # 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "e9df1921bb209fe2dceaa47234b2a2bf9a8cb1f8" }
 # 内嵌终端：portable-pty 起 shell 子进程并拿到 PTY，alacritty_terminal 做
 # 终端状态机（ANSI 解析 + 网格模型），GPUI 负责把网格渲染出来。
 portable-pty = "0.9"
@@ -54,7 +55,7 @@ similar = "2"
 notify = "6"
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # mermaid 代码块画图：纯 Rust 解析+布局+出 SVG，不需要浏览器/Node。换过一次库：
 # 试过 mermaid-rs-renderer，边路由（尤其反向/回边）绕远路明显，这个用真正的
 # Sugiyama/dagre 布局，实测同一张图边路径干净不少。=0.2.0 精确锁版本——它默认
