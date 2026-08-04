@@ -84,6 +84,7 @@ class TerminalStreamService {
     TerminalChannelFactory? channelFactory,
     this.connectTimeout = const Duration(seconds: 15),
     this.resizeDebounce = const Duration(milliseconds: 120),
+    this.attachRefreshDelay = const Duration(milliseconds: 80),
   }) : _channelFactory = channelFactory ?? WebSocketChannel.connect {
     _gatewaySubscription = gateway.stateStream.listen(_handleGatewayState);
   }
@@ -93,6 +94,7 @@ class TerminalStreamService {
   final TerminalChannelFactory _channelFactory;
   final Duration connectTimeout;
   final Duration resizeDebounce;
+  final Duration attachRefreshDelay;
 
   final _eventsController = StreamController<TerminalStreamEvent>.broadcast();
   final _stateController = StreamController<TerminalStreamState>.broadcast();
@@ -102,8 +104,10 @@ class TerminalStreamService {
   WebSocketChannel? _channel;
   Timer? _reconnectTimer;
   Timer? _resizeTimer;
+  Timer? _attachRefreshTimer;
   TerminalGeometry? _geometry;
   TerminalGeometry? _lastSentGeometry;
+  int _replayBytesRemaining = 0;
   TerminalStreamState _state = TerminalStreamState.waitingForGateway;
   int _generation = 0;
   int _reconnectDelayMs = 500;
@@ -149,6 +153,20 @@ class TerminalStreamService {
       _send({'method': 'resize', 'params': latest.toJson()});
       _lastSentGeometry = latest;
     });
+  }
+
+  void forceGeometry() {
+    if (_disposed ||
+        _ended ||
+        _suspended ||
+        _state != TerminalStreamState.connected) {
+      return;
+    }
+    final geometry = _geometry;
+    if (geometry == null) return;
+    _resizeTimer?.cancel();
+    _send({'method': 'resize', 'params': geometry.toJson()});
+    _lastSentGeometry = geometry;
   }
 
   void sendInput(String data) {
@@ -217,7 +235,15 @@ class TerminalStreamService {
   void _handleMessage(dynamic data, int generation) {
     if (_disposed || generation != _generation) return;
     if (data is List<int>) {
-      _eventsController.add(TerminalDataEvent(Uint8List.fromList(data)));
+      final bytes = Uint8List.fromList(data);
+      _eventsController.add(TerminalDataEvent(bytes));
+      if (_replayBytesRemaining > 0) {
+        _replayBytesRemaining = (_replayBytesRemaining - bytes.length).clamp(
+          0,
+          1 << 30,
+        );
+        if (_replayBytesRemaining == 0) _refreshAfterReplay();
+      }
       return;
     }
     if (data is! String) return;
@@ -228,6 +254,7 @@ class TerminalStreamService {
           _writeEnabled = message['writeEnabled'] as bool? ?? false;
         case 'terminalReady':
           _writeEnabled = message['writeEnabled'] as bool? ?? false;
+          _replayBytesRemaining = message['replayBytes'] as int? ?? 0;
           _reconnectDelayMs = 500;
           _setState(TerminalStreamState.connected);
           _eventsController.add(
@@ -242,6 +269,7 @@ class TerminalStreamService {
           if (latest != null && latest != _lastSentGeometry) {
             updateGeometry(latest);
           }
+          if (_replayBytesRemaining == 0) _refreshAfterReplay();
         case 'terminalError':
           final fatal = message['fatal'] as bool? ?? false;
           _eventsController.add(
@@ -266,6 +294,43 @@ class TerminalStreamService {
         TerminalErrorEvent('Invalid terminal message: $error'),
       );
     }
+  }
+
+  void _refreshAfterReplay() {
+    if (_disposed ||
+        _ended ||
+        _suspended ||
+        _state != TerminalStreamState.connected) {
+      return;
+    }
+    final geometry = _geometry;
+    if (geometry == null) return;
+    final nudgedRows = geometry.rows < 200
+        ? geometry.rows + 1
+        : geometry.rows - 1;
+    final nudged = TerminalGeometry(
+      cols: geometry.cols,
+      rows: nudgedRows,
+      cellWidth: geometry.cellWidth,
+      cellHeight: geometry.cellHeight,
+    );
+
+    // The watcher is live once replay bytes have arrived. A one-row jolt now
+    // forces full-screen TUIs to redraw into that watcher instead of leaving
+    // the mobile renderer with a stale partial keyframe.
+    _resizeTimer?.cancel();
+    _attachRefreshTimer?.cancel();
+    _send({'method': 'resize', 'params': nudged.toJson()});
+    _lastSentGeometry = nudged;
+    _attachRefreshTimer = Timer(attachRefreshDelay, () {
+      if (_disposed || _suspended || _state != TerminalStreamState.connected) {
+        return;
+      }
+      final latest = _geometry;
+      if (latest == null) return;
+      _send({'method': 'resize', 'params': latest.toJson()});
+      _lastSentGeometry = latest;
+    });
   }
 
   void _handleChannelDone(int generation) {
@@ -318,6 +383,9 @@ class TerminalStreamService {
 
   void _closeChannel() {
     _generation++;
+    _replayBytesRemaining = 0;
+    _attachRefreshTimer?.cancel();
+    _attachRefreshTimer = null;
     _resizeTimer?.cancel();
     _channelSubscription?.cancel();
     _channelSubscription = null;

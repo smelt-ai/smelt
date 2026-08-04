@@ -121,6 +121,9 @@ const PAGE_LINES: i32 = 20;
 /// 一个内嵌终端视图。
 pub struct TerminalView {
     terminal: Terminal,
+    /// 每次替换底层连接递增。旧连接的 redraw 任务退出时只能重连自己的 generation，
+    /// 避免显式重启/其它成功重连已经装上新 Terminal 后又被迟到任务覆盖。
+    terminal_generation: u64,
     focus_handle: FocusHandle,
     did_focus: bool,
     /// 上一帧的焦点状态，用来把「焦点变了」这件事上报给应用（DEC 1004，见 report_focus）。
@@ -320,7 +323,7 @@ impl TerminalView {
         launch_label: Option<&str>,
     ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
-        Self::drive_redraws(terminal.redraw_channel(), cx);
+        Self::drive_redraws(terminal.redraw_channel(), 0, cx);
         let launch_kind = classify_launch(launch);
         let launch_cmd = launch
             .map(str::trim)
@@ -535,6 +538,7 @@ impl TerminalView {
 
         Self {
             terminal,
+            terminal_generation: 0,
             focus_handle: cx.focus_handle(),
             did_focus: false,
             was_focused: false,
@@ -613,12 +617,63 @@ impl TerminalView {
 
     /// 驱动重绘的常驻任务：await 读线程的唤醒 → `cx.notify()`。内容一到就画，
     /// 不靠轮询。读线程退出（发送端 drop）时 recv 返回 Err，任务随之结束。
-    fn drive_redraws(rx: smol::channel::Receiver<()>, cx: &mut Context<Self>) {
+    fn drive_redraws(rx: smol::channel::Receiver<()>, generation: u64, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break; // 视图已销毁
+                    return; // 视图已销毁
                 }
+            }
+
+            // PTY 实时流意外结束：只重新附着仍存在的守护会话，并由握手快照追平。
+            // shell 正常退出时守护已先移除 session，Terminal::reattach 会失败且不会
+            // 创建新 shell。短退避覆盖 daemon upgrade/瞬时 socket 抖动。
+            let reconnect = this
+                .update(cx, |this, _| {
+                    (this.terminal_generation == generation)
+                        .then(|| (this.cwd.clone(), this.session_id.clone()))
+                })
+                .ok()
+                .flatten();
+            let Some((cwd, session_id)) = reconnect else {
+                return;
+            };
+
+            let delays = [0, 250, 750, 1_500];
+            let mut last_error = None;
+            for delay_ms in delays {
+                if delay_ms > 0 {
+                    Timer::after(Duration::from_millis(delay_ms)).await;
+                }
+                let cwd_attempt = cwd.clone();
+                let session_id_attempt = session_id.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        Terminal::reattach(24, 80, cwd_attempt.as_deref(), &session_id_attempt)
+                    })
+                    .await;
+                match result {
+                    Ok(terminal) => {
+                        let _ = this.update(cx, move |this, cx| {
+                            if this.terminal_generation == generation {
+                                this.adopt_terminal(terminal, cx);
+                            }
+                        });
+                        return;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+
+                let still_current = this
+                    .update(cx, |this, _| this.terminal_generation == generation)
+                    .unwrap_or(false);
+                if !still_current {
+                    return;
+                }
+            }
+            if let Some(error) = last_error {
+                eprintln!("[terminal] 自动重新附着失败 session_id={session_id}: {error:#}");
             }
         })
         .detach();
@@ -642,10 +697,11 @@ impl TerminalView {
 
     /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
     pub fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
+        self.terminal_generation = self.terminal_generation.wrapping_add(1);
         self.terminal = terminal;
         // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
         // 自行退出；这里给新连接挂一个新的重绘任务。
-        Self::drive_redraws(self.terminal.redraw_channel(), cx);
+        Self::drive_redraws(self.terminal.redraw_channel(), self.terminal_generation, cx);
         self.clear_attention(cx);
         self.was_running = false;
         self.was_structured_succeeded = false;

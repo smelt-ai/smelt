@@ -21,15 +21,19 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     with WidgetsBindingObserver {
   late final TerminalStreamService _stream;
   late Terminal _terminal;
+  late GlobalKey<TerminalViewState> _terminalViewKey;
   late StreamController<List<int>> _byteController;
   late StreamSubscription<String> _decodedSubscription;
   late XtermInputFilter _inputFilter;
   late final StreamSubscription<TerminalStreamEvent> _eventSubscription;
   late final StreamSubscription<TerminalStreamState> _stateSubscription;
+  final FocusNode _terminalFocusNode = FocusNode();
 
   TerminalStreamState _streamState = TerminalStreamState.waitingForGateway;
   String? _error;
   bool _writeEnabled = false;
+  bool _softwareKeyboardEnabled = false;
+  bool _softwareKeyboardWasVisible = false;
   int _decoderGeneration = 0;
 
   @override
@@ -41,13 +45,21 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       sessionId: widget.session.id,
     );
     _terminal = _newTerminal();
+    _terminalViewKey = GlobalKey<TerminalViewState>();
     _resetDecoder();
     _eventSubscription = _stream.events.listen(_handleTerminalEvent);
     _stateSubscription = _stream.stateStream.listen((state) {
       if (!mounted) return;
+      if (state != TerminalStreamState.connected) {
+        _closeKeyboardAndReleaseFocus();
+      }
       setState(() {
         _streamState = state;
-        if (state != TerminalStreamState.connected) _writeEnabled = false;
+        if (state != TerminalStreamState.connected) {
+          _writeEnabled = false;
+          _softwareKeyboardEnabled = false;
+          _softwareKeyboardWasVisible = false;
+        }
       });
     });
   }
@@ -85,11 +97,15 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   void _handleTerminalEvent(TerminalStreamEvent event) {
     switch (event) {
       case TerminalReadyEvent():
+        _closeKeyboardAndReleaseFocus();
         _terminal = _newTerminal();
+        _terminalViewKey = GlobalKey<TerminalViewState>();
         _resetDecoder();
         if (!mounted) return;
         setState(() {
           _writeEnabled = event.writeEnabled;
+          _softwareKeyboardEnabled = false;
+          _softwareKeyboardWasVisible = false;
           _error = null;
         });
       case TerminalDataEvent():
@@ -97,17 +113,90 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         if (bytes.isNotEmpty) _byteController.add(bytes);
       case TerminalErrorEvent():
         if (!mounted) return;
+        if (event.fatal) _closeKeyboardAndReleaseFocus();
         setState(() {
           _error = event.message;
-          if (event.fatal) _writeEnabled = false;
+          if (event.fatal) {
+            _writeEnabled = false;
+            _softwareKeyboardEnabled = false;
+            _softwareKeyboardWasVisible = false;
+          }
         });
       case TerminalClosedEvent():
         if (!mounted) return;
+        _closeKeyboardAndReleaseFocus();
         setState(() {
           _writeEnabled = false;
+          _softwareKeyboardEnabled = false;
+          _softwareKeyboardWasVisible = false;
           _error = 'Terminal session ended';
         });
     }
+  }
+
+  void _toggleSoftwareKeyboard() {
+    if (!_writeEnabled) return;
+    if (_softwareKeyboardEnabled) {
+      _closeSoftwareKeyboard();
+      return;
+    }
+
+    _enableSoftwareKeyboard();
+  }
+
+  void _enableSoftwareKeyboard() {
+    if (!_writeEnabled || _softwareKeyboardEnabled) return;
+
+    setState(() {
+      _softwareKeyboardEnabled = true;
+      _softwareKeyboardWasVisible = false;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_softwareKeyboardEnabled) return;
+      _terminalViewKey.currentState?.requestKeyboard();
+    });
+  }
+
+  void _syncGeometryAfterLayout() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _terminalViewKey.currentState?.renderTerminal.markNeedsLayout();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _stream.forceGeometry();
+      });
+    });
+  }
+
+  void _closeSoftwareKeyboard() {
+    _closeKeyboardAndReleaseFocus();
+    if (mounted && _softwareKeyboardEnabled) {
+      setState(() {
+        _softwareKeyboardEnabled = false;
+        _softwareKeyboardWasVisible = false;
+      });
+    }
+  }
+
+  void _closeKeyboardAndReleaseFocus() {
+    _terminalViewKey.currentState?.closeKeyboard();
+    _terminalFocusNode.unfocus();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted || !_softwareKeyboardEnabled) return;
+    if (View.of(context).viewInsets.bottom > 0) {
+      _softwareKeyboardWasVisible = true;
+      _syncGeometryAfterLayout();
+      return;
+    }
+    if (!_softwareKeyboardWasVisible) return;
+    setState(() {
+      _softwareKeyboardEnabled = false;
+      _softwareKeyboardWasVisible = false;
+    });
+    _syncGeometryAfterLayout();
   }
 
   @override
@@ -119,6 +208,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
+        _closeSoftwareKeyboard();
         _stream.suspend();
     }
   }
@@ -133,6 +223,19 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       appBar: AppBar(
         title: Text(title),
         actions: [
+          IconButton(
+            tooltip: !_writeEnabled
+                ? 'Keyboard unavailable'
+                : _softwareKeyboardEnabled
+                ? 'Hide keyboard'
+                : 'Show keyboard',
+            onPressed: _writeEnabled ? _toggleSoftwareKeyboard : null,
+            icon: Icon(
+              _softwareKeyboardEnabled
+                  ? Icons.keyboard_hide_outlined
+                  : Icons.keyboard_outlined,
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: Center(child: _buildConnectionIndicator()),
@@ -147,11 +250,14 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
             Expanded(
               child: TerminalView(
                 _terminal,
-                key: ValueKey(_terminal),
-                autofocus: _writeEnabled,
+                key: _terminalViewKey,
+                focusNode: _terminalFocusNode,
+                autofocus: false,
                 readOnly: !_writeEnabled,
+                hardwareKeyboardOnly: !_softwareKeyboardEnabled,
                 deleteDetection: true,
                 simulateScroll: true,
+                onTapUp: (_, _) => _enableSoftwareKeyboard(),
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                 theme: TerminalThemes.defaultTheme,
                 textStyle: const TerminalStyle(
@@ -161,7 +267,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                 ),
               ),
             ),
-            if (_writeEnabled) TerminalShortcutBar(onInput: _stream.sendInput),
+            if (_writeEnabled && _softwareKeyboardEnabled)
+              TerminalShortcutBar(onInput: _stream.sendInput),
           ],
         ),
       ),
@@ -193,6 +300,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _terminalViewKey.currentState?.closeKeyboard();
+    _terminalFocusNode.dispose();
     _decoderGeneration++;
     unawaited(_byteController.close());
     unawaited(_decodedSubscription.cancel());

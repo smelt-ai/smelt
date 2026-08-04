@@ -825,6 +825,40 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
         }
     };
 
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<TerminalFrame>(64);
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (watch_ready_tx, watch_ready_rx) = tokio::sync::oneshot::channel();
+    let watch_id = id.clone();
+    let watch_task = tokio::task::spawn_blocking(move || {
+        terminal_watch_and_forward(&watch_id, frame_tx, stop_rx, watch_ready_tx)
+    });
+
+    // 先完成「快照 + 实时 watcher」的无缝挂载，再触发首次 resize。反过来做时，
+    // SIGWINCH 产生的 TUI 重绘可能落在 resize 返回与 watch 挂载之间：移动端收到的
+    // 只有旧尺寸快照，备用屏又没有 scrollback，于是底部内容永久缺失且无法滚到。
+    match tokio::time::timeout(TERMINAL_DAEMON_TIMEOUT, watch_ready_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            let _ = send_terminal_fatal_error(&mut ws_tx, &error).await;
+            let _ = stop_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
+            return;
+        }
+        Ok(Err(_)) => {
+            let _ =
+                send_terminal_fatal_error(&mut ws_tx, "terminal watch ended during attach").await;
+            let _ = stop_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
+            return;
+        }
+        Err(_) => {
+            let _ = send_terminal_fatal_error(&mut ws_tx, "terminal watch attach timed out").await;
+            let _ = stop_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
+            return;
+        }
+    }
+
     let resize_id = id.clone();
     let resize_result =
         tokio::task::spawn_blocking(move || send_terminal_resize(&resize_id, geometry)).await;
@@ -832,6 +866,8 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let _ = send_terminal_fatal_error(&mut ws_tx, &error).await;
+            let _ = stop_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
             return;
         }
         Err(error) => {
@@ -840,16 +876,11 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
                 &format!("failed to resize terminal: {error}"),
             )
             .await;
+            let _ = stop_tx.send(true);
+            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
             return;
         }
     }
-
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<TerminalFrame>(64);
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let watch_id = id.clone();
-    let watch_task = tokio::task::spawn_blocking(move || {
-        terminal_watch_and_forward(&watch_id, frame_tx, stop_rx)
-    });
 
     loop {
         tokio::select! {
@@ -1041,13 +1072,18 @@ fn terminal_watch_and_forward(
     id: &str,
     tx: tokio::sync::mpsc::Sender<TerminalFrame>,
     stop: tokio::sync::watch::Receiver<bool>,
+    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) {
-    let result = terminal_watch_loop(id, &tx, &stop);
+    let mut ready = Some(ready);
+    let result = terminal_watch_loop(id, &tx, &stop, &mut ready);
     match result {
         Ok(()) => {
             let _ = tx.blocking_send(TerminalFrame::Closed);
         }
         Err(error) if !*stop.borrow() => {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Err(error.clone()));
+            }
             let _ = tx.blocking_send(TerminalFrame::Error(error));
         }
         Err(_) => {}
@@ -1058,6 +1094,7 @@ fn terminal_watch_loop(
     id: &str,
     tx: &tokio::sync::mpsc::Sender<TerminalFrame>,
     stop: &tokio::sync::watch::Receiver<bool>,
+    ready: &mut Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> Result<(), String> {
     let conn =
         UnixStream::connect(sock_path()).map_err(|error| format!("connect failed: {error}"))?;
@@ -1099,6 +1136,10 @@ fn terminal_watch_loop(
             .map_err(|error| format!("terminal snapshot failed: {error}"))?;
         tx.blocking_send(TerminalFrame::Bytes(snapshot))
             .map_err(|_| "terminal client disconnected".to_string())?;
+    }
+
+    if let Some(ready) = ready.take() {
+        let _ = ready.send(Ok(()));
     }
 
     reader

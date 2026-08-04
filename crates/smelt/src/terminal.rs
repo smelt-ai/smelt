@@ -1697,6 +1697,7 @@ fn open_request(
     cwd: Option<&str>,
     id: &str,
     launch: Option<&str>,
+    create_if_missing: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "op": "open",
@@ -1705,6 +1706,7 @@ fn open_request(
         "cols": cols,
         "rows": rows,
         "initial_launch": launch,
+        "create_if_missing": create_if_missing,
     })
 }
 
@@ -1737,6 +1739,23 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
+        Self::spawn_inner(rows, cols, cwd, id, launch, true)
+    }
+
+    /// 只重新附着守护中仍存在的 PTY。用于实时流异常断开后的自动恢复；会话已经
+    /// 正常退出时返回错误，绝不创建一个同 id 的新 shell 冒充原会话。
+    pub fn reattach(rows: usize, cols: usize, cwd: Option<&str>, id: &str) -> anyhow::Result<Self> {
+        Self::spawn_inner(rows, cols, cwd, id, None, false)
+    }
+
+    fn spawn_inner(
+        rows: usize,
+        cols: usize,
+        cwd: Option<&str>,
+        id: &str,
+        launch: Option<&str>,
+        create_if_missing: bool,
+    ) -> anyhow::Result<Self> {
         // 1) 连守护（不在则自动拉起）并声明要打开的会话，握手失败带几次短重试。
         //
         // 守护无缝升级 exec 交接期间，恰好在这一瞬间新开的 pane 可能撞上这个连接
@@ -1748,7 +1767,12 @@ impl Terminal {
         let (buffered, size, replay_len) = {
             let mut last_err = None;
             let mut result = None;
-            for attempt in 0..HANDSHAKE_RETRIES {
+            let retries = if create_if_missing {
+                HANDSHAKE_RETRIES
+            } else {
+                1
+            };
+            for attempt in 0..retries {
                 if attempt > 0 {
                     thread::sleep(HANDSHAKE_RETRY_DELAY);
                 }
@@ -1758,7 +1782,7 @@ impl Terminal {
                 // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
                 // upgrade 交接的百毫秒抖动，重连一次就好。
                 let writer = connect_daemon()?;
-                match Self::handshake_on(writer, rows, cols, cwd, id, launch) {
+                match Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing) {
                     Ok(x) => {
                         result = Some(x);
                         break;
@@ -1903,15 +1927,23 @@ impl Terminal {
         cwd: Option<&str>,
         id: &str,
         launch: Option<&str>,
+        create_if_missing: bool,
     ) -> anyhow::Result<(BufReader<UnixStream>, TermSize, usize)> {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
-        writeln!(writer, "{}", open_request(rows, cols, cwd, id, launch))?;
+        writeln!(
+            writer,
+            "{}",
+            open_request(rows, cols, cwd, id, launch, create_if_missing)
+        )?;
         let mut buffered = BufReader::new(writer);
         let mut line = String::new();
         buffered.read_line(&mut line)?;
         let v: serde_json::Value = serde_json::from_str(line.trim())?;
+        if v["ok"].as_bool() == Some(false) {
+            anyhow::bail!("{}", v["err"].as_str().unwrap_or("终端重新附着失败"));
+        }
         let size = TermSize {
             rows: v["rows"].as_u64().unwrap_or(rows as u64) as usize,
             cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
@@ -2842,10 +2874,17 @@ mod open_request_tests {
 
     #[test]
     fn open_request_serializes_initial_launch() {
-        let value = open_request(24, 80, Some("/tmp/project"), "sid-1", Some("claude"));
+        let value = open_request(24, 80, Some("/tmp/project"), "sid-1", Some("claude"), true);
         assert_eq!(value["initial_launch"], "claude");
+        assert_eq!(value["create_if_missing"], true);
         assert!(value.get("launch").is_none());
         assert!(value.get("missing").is_none());
+    }
+
+    #[test]
+    fn reattach_request_does_not_allow_session_creation() {
+        let value = open_request(24, 80, None, "sid-1", None, false);
+        assert_eq!(value["create_if_missing"], false);
     }
 }
 
@@ -2863,7 +2902,7 @@ mod handshake_timeout_tests {
         let (ours, theirs) = UnixStream::pair().expect("pair 失败");
         let (tx, rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            let r = Terminal::handshake_on(ours, 24, 80, None, "mute-daemon-test", None);
+            let r = Terminal::handshake_on(ours, 24, 80, None, "mute-daemon-test", None, true);
             let _ = tx.send(r.is_err());
         });
         match rx.recv_timeout(HANDSHAKE_READ_TIMEOUT + Duration::from_secs(2)) {
@@ -2871,6 +2910,39 @@ mod handshake_timeout_tests {
             Err(_) => panic!("握手对不回话的守护没有在超时窗口内返回——主线程会被永久卡死"),
         }
         drop(theirs); // 撑到断言之后才放，确保对端全程存活
+    }
+
+    #[test]
+    fn handshake_rejects_attach_only_missing_session_response() {
+        let (ours, mut theirs) = UnixStream::pair().expect("pair 失败");
+        thread::spawn(move || {
+            let mut request = String::new();
+            BufReader::new(theirs.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&request).unwrap()["create_if_missing"],
+                false
+            );
+            writeln!(
+                theirs,
+                "{}",
+                serde_json::json!({
+                    "ok": false,
+                    "err": "终端会话不存在",
+                    "rows": 24,
+                    "cols": 80,
+                    "replay_len": 0,
+                })
+            )
+            .unwrap();
+        });
+
+        let error = match Terminal::handshake_on(ours, 24, 80, None, "missing", None, false) {
+            Ok(_) => panic!("attach-only 缺失会话必须失败"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("不存在"));
     }
 }
 

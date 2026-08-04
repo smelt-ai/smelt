@@ -22,7 +22,11 @@ void main() {
     () async {
       final attach = Completer<Map<String, dynamic>>();
       final input = Completer<Map<String, dynamic>>();
-      final resize = Completer<Map<String, dynamic>>();
+      final resizes = List.generate(
+        4,
+        (_) => Completer<Map<String, dynamic>>(),
+      );
+      var resizeCount = 0;
       var terminalConnections = 0;
 
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -64,14 +68,19 @@ void main() {
               case 'input':
                 if (!input.isCompleted) input.complete(message);
               case 'resize':
-                if (!resize.isCompleted) resize.complete(message);
-                socket.add(
-                  jsonEncode({
-                    'type': 'terminalError',
-                    'error': 'terminal session not found',
-                    'fatal': true,
-                  }),
-                );
+                if (resizeCount < resizes.length) {
+                  resizes[resizeCount].complete(message);
+                  resizeCount++;
+                }
+                if (resizeCount == resizes.length) {
+                  socket.add(
+                    jsonEncode({
+                      'type': 'terminalError',
+                      'error': 'terminal session not found',
+                      'fatal': true,
+                    }),
+                  );
+                }
             }
           }
           return;
@@ -93,6 +102,7 @@ void main() {
         gateway: gateway,
         sessionId: 'terminal-1',
         resizeDebounce: Duration.zero,
+        attachRefreshDelay: Duration.zero,
       );
       addTearDown(service.dispose);
       final events = <TerminalStreamEvent>[];
@@ -115,11 +125,29 @@ void main() {
       final data = events.whereType<TerminalDataEvent>().single;
       expect(data.bytes, [0xe4, 0xb8, 0xad]);
 
+      final attachNudge = await resizes[0].future.timeout(
+        const Duration(seconds: 5),
+      );
+      expect(attachNudge['params']['cols'], 40);
+      expect(attachNudge['params']['rows'], 21);
+      final attachRestore = await resizes[1].future.timeout(
+        const Duration(seconds: 5),
+      );
+      expect(attachRestore['params']['cols'], 40);
+      expect(attachRestore['params']['rows'], 20);
+
       service.sendInput('\x03');
       final inputMessage = await input.future.timeout(
         const Duration(seconds: 5),
       );
       expect(inputMessage['params']['data'], '\x03');
+
+      service.forceGeometry();
+      final forcedResizeMessage = await resizes[2].future.timeout(
+        const Duration(seconds: 5),
+      );
+      expect(forcedResizeMessage['params']['cols'], 40);
+      expect(forcedResizeMessage['params']['rows'], 20);
 
       service.updateGeometry(
         const TerminalGeometry(
@@ -129,10 +157,11 @@ void main() {
           cellHeight: 16,
         ),
       );
-      final resizeMessage = await resize.future.timeout(
+      final resizeMessage = await resizes[3].future.timeout(
         const Duration(seconds: 5),
       );
       expect(resizeMessage['params']['cols'], 50);
+      expect(resizeMessage['params']['rows'], 24);
       await _waitFor(() => service.state == TerminalStreamState.ended);
       await Future<void>.delayed(const Duration(milliseconds: 700));
       expect(terminalConnections, 1);
