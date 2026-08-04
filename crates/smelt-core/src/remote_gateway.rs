@@ -769,6 +769,10 @@ enum TerminalFrame {
     Error(String),
 }
 
+enum TerminalWatchCommand {
+    Resize(TerminalGeometryParams),
+}
+
 async fn terminal_ws_handler(
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
@@ -827,15 +831,23 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
 
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<TerminalFrame>(64);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (watch_command_tx, watch_command_rx) = std::sync::mpsc::channel();
     let (watch_ready_tx, watch_ready_rx) = tokio::sync::oneshot::channel();
     let watch_id = id.clone();
     let watch_task = tokio::task::spawn_blocking(move || {
-        terminal_watch_and_forward(&watch_id, frame_tx, stop_rx, watch_ready_tx)
+        terminal_watch_and_forward(
+            &watch_id,
+            geometry,
+            frame_tx,
+            watch_command_rx,
+            stop_rx,
+            watch_ready_tx,
+        )
     });
 
-    // 先完成「快照 + 实时 watcher」的无缝挂载，再触发首次 resize。反过来做时，
-    // SIGWINCH 产生的 TUI 重绘可能落在 resize 返回与 watch 挂载之间：移动端收到的
-    // 只有旧尺寸快照，备用屏又没有 scrollback，于是底部内容永久缺失且无法滚到。
+    // Geometry ownership and the first resize are part of the daemon watch
+    // handshake. The daemon resizes its persistent grid before producing the
+    // snapshot and keeps the same connection as the ownership lease.
     match tokio::time::timeout(TERMINAL_DAEMON_TIMEOUT, watch_ready_rx).await {
         Ok(Ok(Ok(()))) => {}
         Ok(Ok(Err(error))) => {
@@ -853,29 +865,6 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
         }
         Err(_) => {
             let _ = send_terminal_fatal_error(&mut ws_tx, "terminal watch attach timed out").await;
-            let _ = stop_tx.send(true);
-            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
-            return;
-        }
-    }
-
-    let resize_id = id.clone();
-    let resize_result =
-        tokio::task::spawn_blocking(move || send_terminal_resize(&resize_id, geometry)).await;
-    match resize_result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            let _ = send_terminal_fatal_error(&mut ws_tx, &error).await;
-            let _ = stop_tx.send(true);
-            let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
-            return;
-        }
-        Err(error) => {
-            let _ = send_terminal_fatal_error(
-                &mut ws_tx,
-                &format!("failed to resize terminal: {error}"),
-            )
-            .await;
             let _ = stop_tx.send(true);
             let _ = tokio::time::timeout(Duration::from_secs(1), watch_task).await;
             return;
@@ -922,9 +911,8 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
                                         continue;
                                     }
                                 };
-                                let resize_id = id.clone();
-                                match tokio::task::spawn_blocking(move || send_terminal_resize(&resize_id, geometry)).await {
-                                    Ok(Ok(())) => {
+                                match watch_command_tx.send(TerminalWatchCommand::Resize(geometry)) {
+                                    Ok(()) => {
                                         let response = serde_json::json!({
                                             "type": "terminalResized",
                                             "sessionId": id,
@@ -935,11 +923,8 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
                                             break;
                                         }
                                     }
-                                    Ok(Err(error)) => {
-                                        let _ = send_terminal_error(&mut ws_tx, &error).await;
-                                    }
-                                    Err(error) => {
-                                        let _ = send_terminal_error(&mut ws_tx, &format!("failed to resize terminal: {error}")).await;
+                                    Err(_) => {
+                                        let _ = send_terminal_error(&mut ws_tx, "terminal geometry lease ended").await;
                                     }
                                 }
                             }
@@ -1034,17 +1019,6 @@ fn send_terminal_input(id: &str, data: &str) -> Result<(), String> {
     }))
 }
 
-fn send_terminal_resize(id: &str, geometry: TerminalGeometryParams) -> Result<(), String> {
-    send_terminal_daemon_command(serde_json::json!({
-        "op": "resize",
-        "id": id,
-        "cols": geometry.cols,
-        "rows": geometry.rows,
-        "cell_w": geometry.cell_width,
-        "cell_h": geometry.cell_height,
-    }))
-}
-
 fn send_terminal_daemon_command(request: serde_json::Value) -> Result<(), String> {
     let mut stream =
         UnixStream::connect(sock_path()).map_err(|error| format!("connect failed: {error}"))?;
@@ -1070,12 +1044,14 @@ fn send_terminal_daemon_command(request: serde_json::Value) -> Result<(), String
 
 fn terminal_watch_and_forward(
     id: &str,
+    geometry: TerminalGeometryParams,
     tx: tokio::sync::mpsc::Sender<TerminalFrame>,
+    commands: std::sync::mpsc::Receiver<TerminalWatchCommand>,
     stop: tokio::sync::watch::Receiver<bool>,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) {
     let mut ready = Some(ready);
-    let result = terminal_watch_loop(id, &tx, &stop, &mut ready);
+    let result = terminal_watch_loop(id, geometry, &tx, &commands, &stop, &mut ready);
     match result {
         Ok(()) => {
             let _ = tx.blocking_send(TerminalFrame::Closed);
@@ -1092,7 +1068,9 @@ fn terminal_watch_and_forward(
 
 fn terminal_watch_loop(
     id: &str,
+    geometry: TerminalGeometryParams,
     tx: &tokio::sync::mpsc::Sender<TerminalFrame>,
+    commands: &std::sync::mpsc::Receiver<TerminalWatchCommand>,
     stop: &tokio::sync::watch::Receiver<bool>,
     ready: &mut Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> Result<(), String> {
@@ -1103,8 +1081,20 @@ fn terminal_watch_loop(
     let mut writer = conn
         .try_clone()
         .map_err(|error| format!("clone failed: {error}"))?;
-    writeln!(writer, "{}", serde_json::json!({"op": "watch", "id": id}))
-        .map_err(|error| format!("watch failed: {error}"))?;
+    writeln!(
+        writer,
+        "{}",
+        serde_json::json!({
+            "op": "watch",
+            "id": id,
+            "controls_geometry": true,
+            "cols": geometry.cols,
+            "rows": geometry.rows,
+            "cell_w": geometry.cell_width,
+            "cell_h": geometry.cell_height,
+        })
+    )
+    .map_err(|error| format!("watch failed: {error}"))?;
 
     let mut reader = BufReader::new(conn);
     let mut line = String::new();
@@ -1151,6 +1141,13 @@ fn terminal_watch_loop(
         if *stop.borrow() {
             return Err("terminal watch stopped".to_string());
         }
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                TerminalWatchCommand::Resize(geometry) => {
+                    write_terminal_resize_frame(&mut writer, geometry)?;
+                }
+            }
+        }
         match reader.read(&mut buffer) {
             Ok(0) => return Ok(()),
             Ok(read) => tx
@@ -1164,6 +1161,24 @@ fn terminal_watch_loop(
             Err(error) => return Err(format!("terminal watch failed: {error}")),
         }
     }
+}
+
+fn write_terminal_resize_frame(
+    writer: &mut UnixStream,
+    geometry: TerminalGeometryParams,
+) -> Result<(), String> {
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&(u32::from(geometry.cols)).to_be_bytes());
+    payload[4..8].copy_from_slice(&(u32::from(geometry.rows)).to_be_bytes());
+    payload[8..12].copy_from_slice(&(u32::from(geometry.cell_width)).to_be_bytes());
+    payload[12..16].copy_from_slice(&(u32::from(geometry.cell_height)).to_be_bytes());
+    let mut frame = Vec::with_capacity(5 + payload.len());
+    frame.push(1);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    writer
+        .write_all(&frame)
+        .map_err(|error| format!("terminal resize failed: {error}"))
 }
 
 /// WebSocket 消息类型（移动端 → 服务端）
@@ -2007,6 +2022,28 @@ mod tests {
             cell_height: 16,
         };
         assert!(zero.normalized().is_err());
+    }
+
+    #[test]
+    fn terminal_resize_uses_the_geometry_lease_frame() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let geometry = TerminalGeometryParams {
+            cols: 49,
+            rows: 47,
+            cell_width: 8,
+            cell_height: 15,
+        };
+        write_terminal_resize_frame(&mut writer, geometry).unwrap();
+
+        let mut frame = [0u8; 21];
+        reader.read_exact(&mut frame).unwrap();
+        assert_eq!(frame[0], 1);
+        assert_eq!(u32::from_be_bytes(frame[1..5].try_into().unwrap()), 16);
+        let values: Vec<u32> = frame[5..]
+            .chunks_exact(4)
+            .map(|bytes| u32::from_be_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![49, 47, 8, 15]);
     }
 
     #[test]

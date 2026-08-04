@@ -1160,6 +1160,11 @@ impl Render for TerminalView {
             window.focus(&self.focus_handle, cx);
         }
 
+        // smeltd may hand geometry ownership to a mobile renderer. Apply that
+        // canonical grid first and do not echo the change back as a resize.
+        self.terminal.sync_daemon_geometry();
+        let remote_geometry_locked = self.terminal.remote_geometry_locked();
+
         // 依据「本终端自身尺寸」重算行列（网格 Hub 里每个终端只占一格）。
         {
             let (w, h) = self.grid_size.get();
@@ -1188,7 +1193,7 @@ impl Render for TerminalView {
             self.cell_w = cell_w; // 供鼠标坐标换算
             // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
             // 等 canvas 量到真实尺寸再调（避免 w=0 把终端缩成最小 4 列）。
-            if w > 1.0 && h > 1.0 {
+            if w > 1.0 && h > 1.0 && !remote_geometry_locked {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
                 let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
@@ -1227,9 +1232,8 @@ impl Render for TerminalView {
         if focused != self.was_focused {
             self.was_focused = focused;
             self.terminal.report_focus(focused);
-            // 获得焦点时强制重发 resize：远程端（手机）可能在这个终端失焦期间改过
-            // PTY 尺寸，需要把本机尺寸同步回去。标记 pty_kick_pending，下一帧会走
-            // force_resize 路径（见上面 if self.pty_kick_pending 分支）。
+            // 获得焦点时强制重发 resize。若移动端当前持有尺寸租约，标记会保留到
+            // 租约释放，届时下一帧才走 force_resize，避免两端形成 resize 循环。
             if focused {
                 self.pty_kick_pending = true;
             }

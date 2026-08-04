@@ -173,6 +173,7 @@ void main() {
   testWidgets(
     'software keyboard preserves PTY geometry and terminal scrolling',
     (tester) async {
+      addTearDown(() => tester.view.viewInsets = FakeViewPadding.zero);
       final stream = _FakeTerminalStream();
       const session = SessionSummary(
         id: 'terminal-1',
@@ -230,6 +231,26 @@ void main() {
         closeTo(scrollController.position.maxScrollExtent, 0.5),
       );
 
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+      await tester.pump();
+      stream.emit(
+        TerminalDataEvent(
+          Uint8List.fromList(
+            utf8.encode(
+              List.generate(30, (index) => 'keyboard-live-$index\r\n').join(),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        scrollController.offset,
+        closeTo(scrollController.position.maxScrollExtent, 0.5),
+        reason: 'live output must keep advancing while the keyboard is open',
+      );
+
       tester.testTextInput.updateEditingValue(
         const TextEditingValue(
           text: '  da',
@@ -240,6 +261,8 @@ void main() {
       await tester.pump();
 
       await tester.tap(find.byIcon(Icons.keyboard_hide_outlined));
+      await tester.pump();
+      tester.view.viewInsets = FakeViewPadding.zero;
       await tester.pump();
       await tester.pump();
 
@@ -261,6 +284,26 @@ void main() {
       expect(
         scrollController.offset,
         closeTo(scrollController.position.maxScrollExtent, 0.5),
+      );
+
+      stream.emit(
+        TerminalDataEvent(
+          Uint8List.fromList(
+            utf8.encode(
+              List.generate(
+                30,
+                (index) => 'post-keyboard-live-$index\r\n',
+              ).join(),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        scrollController.offset,
+        closeTo(scrollController.position.maxScrollExtent, 0.5),
+        reason: 'live output must keep advancing after the keyboard closes',
       );
 
       final latestOffset = scrollController.offset;

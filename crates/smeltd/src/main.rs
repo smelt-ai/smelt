@@ -156,11 +156,13 @@ mod acp_registry;
 mod tasks;
 
 use acp_registry::{AcpRegistry, AcpSlot};
-use tasks::TaskState;
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent, AgentEventKind};
-use smelt_core::osc::{OscNotification, OscNotificationKind, OscScan};
+use smelt_core::osc::{
+    OscNotification, OscNotificationKind, OscScan, TerminalGeometryOsc, terminal_geometry_osc,
+};
 use smelt_core::remote_gateway;
 use smelt_core::title_spinner;
+use tasks::TaskState;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -460,6 +462,13 @@ struct Ctl {
     /// 终端建成同尺寸再解析，否则行宽错位（zsh 行尾 % 盖不掉、TUI 布局撕裂）。
     cols: u16,
     rows: u16,
+    /// Canonical cell metrics associated with `cols` / `rows`.
+    cell_w: u16,
+    cell_h: u16,
+    /// A remote watch connection owns PTY geometry while this is non-zero.
+    /// Desktop renderers remain attached but must follow the canonical grid
+    /// instead of resizing it back to their local viewport.
+    remote_viewports: usize,
     /// spawn 时的静态目录（作战地图要）。**不**跟随 shell 的 `cd`——真实 cwd 要
     /// OSC 7，这里只是「这个会话是从哪打开的」，见 SessionState.cwd 用法。
     cwd: Option<String>,
@@ -867,27 +876,123 @@ fn resize_fd(fd: RawFd, rows: u16, cols: u16, xpixel: u16, ypixel: u16) {
 
 /// 会话 resize：PTY ioctl + 常驻 Term 同步 + 可选 jolt 抖动。
 /// 手机远程与 GUI open 帧共用，避免两套尺寸逻辑漂移。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResizeOrigin {
+    Desktop,
+    Remote,
+}
+
 fn resize_session(sess: &Session, cols: u16, rows: u16, cell_w: u16, cell_h: u16) {
+    let _ = resize_session_from(sess, cols, rows, cell_w, cell_h, ResizeOrigin::Desktop);
+}
+
+fn resize_session_remote(sess: &Session, cols: u16, rows: u16, cell_w: u16, cell_h: u16) {
+    let _ = resize_session_from(sess, cols, rows, cell_w, cell_h, ResizeOrigin::Remote);
+}
+
+fn resize_session_from(
+    sess: &Session,
+    cols: u16,
+    rows: u16,
+    cell_w: u16,
+    cell_h: u16,
+    origin: ResizeOrigin,
+) -> bool {
     let cols = cols.max(1);
     let rows = rows.max(1);
+    let mut ctl = sess.ctl.lock().unwrap();
+    if origin == ResizeOrigin::Desktop && ctl.remote_viewports > 0 {
+        return false;
+    }
+    if cell_w > 0 {
+        ctl.cell_w = cell_w;
+    }
+    if cell_h > 0 {
+        ctl.cell_h = cell_h;
+    }
+    let cell_w = ctl.cell_w;
+    let cell_h = ctl.cell_h;
     let xpixel = cols.saturating_mul(cell_w);
     let ypixel = rows.saturating_mul(cell_h);
-    let mut ctl = sess.ctl.lock().unwrap();
     let fd = ctl.master.as_raw_fd();
-    if ctl.jolt {
-        ctl.jolt = false;
-        resize_fd(fd, rows.saturating_add(1), cols, xpixel, ypixel);
-    }
-    resize_fd(fd, rows, cols, xpixel, ypixel);
+    let jolt = std::mem::take(&mut ctl.jolt);
     ctl.cols = cols;
     ctl.rows = rows;
-    drop(ctl);
+    let remote_controlled = ctl.remote_viewports > 0;
+
+    // Serialize the invisible geometry marker before SIGWINCH can produce
+    // cursor-addressed output at the new size. Desktop renderers resize their
+    // local VT model from this marker without echoing a resize frame.
     if let Ok(mut term) = sess.term.lock() {
         term.resize(DaemonTermSize {
             rows: rows as usize,
             cols: cols as usize,
         });
+        let marker = terminal_geometry_osc(
+            &sess.geometry_token,
+            TerminalGeometryOsc {
+                cols,
+                rows,
+                cell_width: cell_w,
+                cell_height: cell_h,
+                remote_controlled,
+            },
+        );
+        let mut out = sess.out.lock().unwrap();
+        out.clients.retain_mut(|client| {
+            if client.write_all(&marker).is_ok() {
+                true
+            } else {
+                let _ = client.shutdown(Shutdown::Both);
+                false
+            }
+        });
     }
+
+    if jolt {
+        resize_fd(fd, rows.saturating_add(1), cols, xpixel, ypixel);
+    }
+    resize_fd(fd, rows, cols, xpixel, ypixel);
+    true
+}
+
+fn begin_remote_viewport(sess: &Session, cols: u16, rows: u16, cell_w: u16, cell_h: u16) {
+    {
+        let mut ctl = sess.ctl.lock().unwrap();
+        ctl.remote_viewports = ctl.remote_viewports.saturating_add(1);
+        ctl.jolt = true;
+    }
+    resize_session_remote(sess, cols, rows, cell_w, cell_h);
+}
+
+fn end_remote_viewport(sess: &Session) {
+    let mut ctl = sess.ctl.lock().unwrap();
+    ctl.remote_viewports = ctl.remote_viewports.saturating_sub(1);
+    if ctl.remote_viewports != 0 {
+        return;
+    }
+    let geometry = TerminalGeometryOsc {
+        cols: ctl.cols,
+        rows: ctl.rows,
+        cell_width: ctl.cell_w,
+        cell_height: ctl.cell_h,
+        remote_controlled: false,
+    };
+    // The pump keeps `term` through its corresponding `out` write, so taking
+    // the same pair here prevents the unlock marker from overtaking bytes
+    // already parsed at the mobile geometry. Keep `ctl` as well so a desktop
+    // resize cannot slip between decrementing the lease and sending unlock.
+    let Ok(_term) = sess.term.lock() else { return };
+    let marker = terminal_geometry_osc(&sess.geometry_token, geometry);
+    let mut out = sess.out.lock().unwrap();
+    out.clients.retain_mut(|client| {
+        if client.write_all(&marker).is_ok() {
+            true
+        } else {
+            let _ = client.shutdown(Shutdown::Both);
+            false
+        }
+    });
 }
 
 /// 开/关 fd 的 CLOEXEC 标志。平时所有 fd 都应带 CLOEXEC（不泄漏给 spawn 出的 shell）；
@@ -960,6 +1065,10 @@ fn new_daemon_term<T: EventListener>(rows: u16, cols: u16, listener: T) -> Term<
 }
 
 struct Session {
+    /// Per-session capability for daemon-only geometry control sequences.
+    /// The PTY child never receives this token, so terminal output cannot
+    /// forge a desktop resize or remote-viewport lock.
+    geometry_token: String,
     ctl: Mutex<Ctl>,
     out: Mutex<Out>,
     /// 常驻网格：PTY 输出持续 advance；attach 时序列化成 ANSI 快照。挂的是
@@ -2106,6 +2215,7 @@ fn resume_handoff(
             ));
         }
         let sess = Arc::new(Session {
+            geometry_token: uuid::Uuid::new_v4().simple().to_string(),
             ctl: Mutex::new(Ctl {
                 master,
                 pid,
@@ -2113,6 +2223,9 @@ fn resume_handoff(
                 jolt: true,
                 cols,
                 rows,
+                cell_w: 0,
+                cell_h: 0,
+                remote_viewports: 0,
                 cwd,
             }),
             out: Mutex::new(Out {
@@ -3286,12 +3399,16 @@ mod action_integration_tests {
             subscribers,
         };
         let sess = Arc::new(Session {
+            geometry_token: uuid::Uuid::new_v4().simple().to_string(),
             ctl: Mutex::new(Ctl {
                 master,
                 pid,
                 jolt: false,
                 cols,
                 rows,
+                cell_w: 0,
+                cell_h: 0,
+                remote_viewports: 0,
                 cwd: None,
             }),
             out: Mutex::new(Out {
@@ -3424,12 +3541,16 @@ mod input_integration_tests {
             subscribers,
         };
         let sess = Arc::new(Session {
+            geometry_token: uuid::Uuid::new_v4().simple().to_string(),
             ctl: Mutex::new(Ctl {
                 master,
                 pid,
                 jolt: false,
                 cols,
                 rows,
+                cell_w: 0,
+                cell_h: 0,
+                remote_viewports: 0,
                 cwd: None,
             }),
             out: Mutex::new(Out {
@@ -4062,15 +4183,11 @@ fn handle_open(
 
     // attach：回报 PTY 当前尺寸 → 网格 ANSI 快照 → 接管转发。
     //
-    // 锁序必须与泵一致（term → out），且 snapshot 与装上 client 之间不能放掉 out：
+    // 锁序与 resize 一致（ctl → term → out），且 snapshot 与装上 client 之间不能放掉 out：
     // 若先 snapshot 再另抢 out，间隙里泵可能 advance(D) 后发现还没 client 而丢弃 D，
     // 新客户端拿到的网格就永久缺字节（正是「吐快照」要避免的 reattach 错位）。
     // 正确做法：持 term 时抢到 out → 再出快照 → 放 term → 写 socket 期间只持 out
     // （泵 advance 后堵在 out，client 装上后再把缺口字节转发给新客户端）。
-    let (cur_cols, cur_rows) = {
-        let ctl = sess.ctl.lock().unwrap();
-        (ctl.cols, ctl.rows)
-    };
     let launch_for_snap = sess.state.lock().unwrap().launch.clone();
     let attached_fd = {
         let Ok(mut c) = conn.try_clone() else { return };
@@ -4078,13 +4195,26 @@ fn handle_open(
         // 写超时：客户端冻结时不能无限期占着 out 锁（见 CLIENT_WRITE_TIMEOUT）。
         let _ = c.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
 
-        let (snapshot, mut out) = {
+        let (cur_cols, cur_rows, snapshot, mut out) = {
+            let ctl = sess.ctl.lock().unwrap();
             let term = sess.term.lock().unwrap();
             let out = sess.out.lock().unwrap();
+            let mut snapshot = terminal_geometry_osc(
+                &sess.geometry_token,
+                TerminalGeometryOsc {
+                    cols: ctl.cols,
+                    rows: ctl.rows,
+                    cell_width: ctl.cell_w,
+                    cell_height: ctl.cell_h,
+                    remote_controlled: ctl.remote_viewports > 0,
+                },
+            );
             // launch 参与判定：Grok 等未必进 1049 备用屏，但仍是 TUI，灌网格会顶行乱码。
-            let snapshot = snapshot_ansi(&term, launch_for_snap.as_deref());
+            snapshot.extend(snapshot_ansi(&term, launch_for_snap.as_deref()));
             drop(term);
-            (snapshot, out)
+            let geometry = (ctl.cols, ctl.rows);
+            drop(ctl);
+            (geometry.0, geometry.1, snapshot, out)
         };
 
         // replay_len = 快照字节数：客户端仍用它划「历史/实时」边界，跳过快照里的
@@ -4093,7 +4223,12 @@ fn handle_open(
         if writeln!(
             c,
             "{}",
-            serde_json::json!({ "cols": cur_cols, "rows": cur_rows, "replay_len": replay_len })
+            serde_json::json!({
+                "cols": cur_cols,
+                "rows": cur_rows,
+                "replay_len": replay_len,
+                "geometry_token": sess.geometry_token.as_str(),
+            })
         )
         .is_err()
         {
@@ -4179,10 +4314,22 @@ fn handle_open(
     out.clients.retain(|c| c.as_raw_fd() != attached_fd);
 }
 
-/// 只读旁观：观战席/远程查看这类场景用。跟 `handle_open` 的核心区别——
+struct RemoteViewportLease {
+    session: Arc<Session>,
+}
+
+impl Drop for RemoteViewportLease {
+    fn drop(&mut self) {
+        end_remote_viewport(&self.session);
+    }
+}
+
+/// 旁观/远程渲染连接。普通 watch 仍严格只读；声明
+/// `controls_geometry` 的移动端连接在自己的生命周期内持有 PTY 尺寸租约，并可在
+/// 同一连接上发送 type-1 resize 帧。跟 `handle_open` 的核心区别——
 /// 1. 不兜底 spawn：会话必须已存在，旁观一个不存在的会话没有意义；
 /// 2. 不影响 `out.clients`，也不顶替其它 watcher——`push` 进去，多个旁观者可并存；
-/// 3. 没有帧循环：旁观连接只读，收到客户端发来的任何字节都当异常直接断开清理。
+/// 3. 移动端只取得尺寸所有权，不替换桌面 attachment；断开时自动归还。
 fn handle_watch(
     conn: UnixStream,
     mut reader: BufReader<UnixStream>,
@@ -4196,6 +4343,25 @@ fn handle_watch(
     let Some(sess) = sessions.lock().unwrap().get(&id).cloned() else {
         return;
     };
+
+    let controls_geometry = v["controls_geometry"].as_bool().unwrap_or(false);
+    let remote_geometry = controls_geometry.then(|| {
+        (
+            v["cols"].as_u64().unwrap_or(0).min(1000) as u16,
+            v["rows"].as_u64().unwrap_or(0).min(1000) as u16,
+            v["cell_w"].as_u64().unwrap_or(0).min(256) as u16,
+            v["cell_h"].as_u64().unwrap_or(0).min(256) as u16,
+        )
+    });
+    if remote_geometry.is_some_and(|(cols, rows, _, _)| cols == 0 || rows == 0) {
+        return;
+    }
+    let _remote_viewport = remote_geometry.map(|(cols, rows, cell_w, cell_h)| {
+        begin_remote_viewport(&sess, cols, rows, cell_w, cell_h);
+        RemoteViewportLease {
+            session: Arc::clone(&sess),
+        }
+    });
 
     let (cur_cols, cur_rows) = {
         let ctl = sess.ctl.lock().unwrap();
@@ -4233,9 +4399,40 @@ fn handle_watch(
         fd
     };
 
-    // 只读：不认帧协议，读到任何东西（含 EOF/出错）都收尾——旁观者本就不该往这条连接写字节。
-    let mut scratch = [0u8; 64];
-    let _ = reader.read(&mut scratch);
+    if controls_geometry {
+        loop {
+            let mut header = [0u8; 5];
+            if reader.read_exact(&mut header).is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+            if header[0] != 1 || (len != 8 && len != 16) {
+                break;
+            }
+            let mut payload = vec![0u8; len];
+            if reader.read_exact(&mut payload).is_err() {
+                break;
+            }
+            let cols = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as u16;
+            let rows = u32::from_be_bytes(payload[4..8].try_into().unwrap()) as u16;
+            let (cell_w, cell_h) = if len == 16 {
+                (
+                    u32::from_be_bytes(payload[8..12].try_into().unwrap()) as u16,
+                    u32::from_be_bytes(payload[12..16].try_into().unwrap()) as u16,
+                )
+            } else {
+                (0, 0)
+            };
+            if cols == 0 || rows == 0 {
+                break;
+            }
+            resize_session_remote(&sess, cols, rows, cell_w, cell_h);
+        }
+    } else {
+        // Legacy watch remains read-only. Any byte (or EOF) ends the watch.
+        let mut scratch = [0u8; 64];
+        let _ = reader.read(&mut scratch);
+    }
 
     let mut out = sess.out.lock().unwrap();
     out.watchers.retain(|w| w.as_raw_fd() != attached_fd);
@@ -5420,12 +5617,16 @@ fn spawn_session(
         ..Default::default()
     }));
     let sess = Session {
+        geometry_token: uuid::Uuid::new_v4().simple().to_string(),
         ctl: Mutex::new(Ctl {
             master,
             pid,
             jolt: false,
             cols,
             rows,
+            cell_w: 0,
+            cell_h: 0,
+            remote_viewports: 0,
             cwd: cwd.map(String::from),
         }),
         out: Mutex::new(Out {
@@ -5463,10 +5664,15 @@ fn start_pty_pump(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    // 先更新网格（锁序 term → out，与 attach 一致）。
-                    if let Ok(mut term) = sess.term.lock() {
+                    // Keep the grid guard until this chunk claims the output
+                    // lock. Resize uses the same term -> out order, so a
+                    // geometry marker cannot overtake bytes already parsed at
+                    // the previous grid size. Once `out` is held, release the
+                    // grid before potentially slow socket writes.
+                    let mut term_guard = sess.term.lock().ok();
+                    if let Some(term) = term_guard.as_mut() {
                         let _ = catch_unwind(AssertUnwindSafe(|| {
-                            parser.advance(&mut *term, chunk);
+                            parser.advance(&mut **term, chunk);
                         }));
                     }
                     // 标题事件先归约，再消费同一批字节里的 OSC 完成信号。否则标题
@@ -5485,6 +5691,7 @@ fn start_pty_pump(
                         broadcast_state(&subscribers, &snapshot);
                     }
                     let mut out = sess.out.lock().unwrap();
+                    drop(term_guard);
                     // 每个渲染层独立转发；一路写失败只摘掉该 attachment。必须 shutdown
                     // 整条 socket，而不是只 drop 这里的写端 clone：handle_open 还持有
                     // 同一 socket 的读端，不 shutdown 的话客户端可能永远等不到 EOF，
@@ -5511,6 +5718,7 @@ fn start_pty_pump(
                             false
                         }
                     });
+                    drop(out);
                 }
             }
         }
@@ -6574,12 +6782,16 @@ mod watch_tests {
             subscribers,
         };
         Arc::new(Session {
+            geometry_token: uuid::Uuid::new_v4().simple().to_string(),
             ctl: Mutex::new(Ctl {
                 master,
                 pid,
                 jolt: false,
                 cols,
                 rows,
+                cell_w: 0,
+                cell_h: 0,
+                remote_viewports: 0,
                 cwd: None,
             }),
             out: Mutex::new(Out {
@@ -6592,13 +6804,94 @@ mod watch_tests {
     }
 
     /// 读一行 JSON 尺寸头 + `replay_len` 字节快照——跟真实客户端的 attach 协议一致。
-    fn read_header_and_snapshot(br: &mut BufReader<UnixStream>) {
+    fn read_header_and_snapshot(br: &mut BufReader<UnixStream>) -> serde_json::Value {
         let mut line = String::new();
         br.read_line(&mut line).unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         let replay_len = v["replay_len"].as_u64().unwrap() as usize;
         let mut snap = vec![0u8; replay_len];
         br.read_exact(&mut snap).unwrap();
+        v
+    }
+
+    #[test]
+    fn remote_watch_owns_geometry_until_its_connection_closes() {
+        let sess = make_dummy_session(59, 181);
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::from([(
+            "t".to_string(),
+            Arc::clone(&sess),
+        )])));
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let sessions_for_watch = Arc::clone(&sessions);
+        let watch = thread::spawn(move || {
+            let reader = BufReader::new(server.try_clone().unwrap());
+            handle_watch(
+                server,
+                reader,
+                &serde_json::json!({
+                    "id": "t",
+                    "controls_geometry": true,
+                    "cols": 49,
+                    "rows": 47,
+                    "cell_w": 8,
+                    "cell_h": 15,
+                }),
+                sessions_for_watch,
+            );
+        });
+
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let header = read_header_and_snapshot(&mut reader);
+        assert_eq!(header["cols"], 49);
+        assert_eq!(header["rows"], 47);
+        assert_eq!(sess.ctl.lock().unwrap().remote_viewports, 1);
+
+        // A focused desktop may try to reassert its large viewport. The
+        // daemon must keep the mobile canonical grid while the lease lives.
+        resize_session(&sess, 181, 59, 9, 18);
+        {
+            let ctl = sess.ctl.lock().unwrap();
+            assert_eq!((ctl.cols, ctl.rows), (49, 47));
+        }
+
+        let geometry = TerminalGeometryParamsForTest {
+            cols: 55,
+            rows: 40,
+            cell_w: 8,
+            cell_h: 15,
+        };
+        client.write_all(&geometry.frame()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        watch.join().unwrap();
+
+        {
+            let ctl = sess.ctl.lock().unwrap();
+            assert_eq!((ctl.cols, ctl.rows), (55, 40));
+            assert_eq!(ctl.remote_viewports, 0);
+        }
+        resize_session(&sess, 181, 59, 9, 18);
+        let ctl = sess.ctl.lock().unwrap();
+        assert_eq!((ctl.cols, ctl.rows), (181, 59));
+    }
+
+    struct TerminalGeometryParamsForTest {
+        cols: u16,
+        rows: u16,
+        cell_w: u16,
+        cell_h: u16,
+    }
+
+    impl TerminalGeometryParamsForTest {
+        fn frame(&self) -> Vec<u8> {
+            let mut payload = Vec::with_capacity(16);
+            for value in [self.cols, self.rows, self.cell_w, self.cell_h] {
+                payload.extend_from_slice(&u32::from(value).to_be_bytes());
+            }
+            let mut frame = vec![1];
+            frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            frame.extend_from_slice(&payload);
+            frame
+        }
     }
 
     #[test]
@@ -6663,7 +6956,8 @@ mod watch_tests {
             );
         });
         let mut open_br = BufReader::new(open_client.try_clone().unwrap());
-        read_header_and_snapshot(&mut open_br);
+        let open_header = read_header_and_snapshot(&mut open_br);
+        assert_eq!(open_header["geometry_token"], sess.geometry_token.as_str());
 
         // 第二路：另一个交互 attachment。同 id 并行 open 不该顶掉第一路。
         let (open2_server, open2_client) = UnixStream::pair().unwrap();

@@ -267,6 +267,12 @@ struct TermMetrics {
     cell_h: u16,
 }
 
+#[derive(Default)]
+struct DaemonGeometrySignal {
+    generation: u64,
+    geometry: Option<smelt_core::osc::TerminalGeometryOsc>,
+}
+
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态；PtyWrite /
 /// ColorRequest / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
@@ -1658,6 +1664,12 @@ pub struct Terminal {
     size: TermSize,
     /// 与 EventProxy 共享的行列/单元格像素（resize 与 TextAreaSizeRequest 共用）。
     metrics: Arc<Mutex<TermMetrics>>,
+    /// Geometry updates injected by smeltd into the output stream. The read
+    /// thread publishes them here; the UI thread applies them to the local VT
+    /// without echoing a resize frame back to the daemon.
+    daemon_geometry: Arc<Mutex<DaemonGeometrySignal>>,
+    daemon_geometry_generation: u64,
+    remote_geometry_locked: bool,
     /// 普通 OSC 9/99/777 通知槽（UI 轮询 take_notification 取走）。
     notify: NotifySlot,
     /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
@@ -1768,7 +1780,7 @@ impl Terminal {
         // 我们这边会读到 EOF/解析失败。整个交接是百毫秒到 1 秒量级的一次性抖动，
         // 短重试几次基本能把这个窗口盖掉，调用方不必为这种瞬时性错误崩溃整个 GUI
         // （调用方目前对失败仍是 `.expect()`，见 terminal_view.rs 的注释）。
-        let (buffered, size, replay_len) = {
+        let (buffered, size, replay_len, geometry_token) = {
             let mut last_err = None;
             let mut result = None;
             let retries = if create_if_missing {
@@ -1813,6 +1825,7 @@ impl Terminal {
             cell_w: 0,
             cell_h: 0,
         }));
+        let daemon_geometry = Arc::new(Mutex::new(DaemonGeometrySignal::default()));
         let term = Term::new(
             term_config(),
             &size,
@@ -1836,11 +1849,16 @@ impl Terminal {
         let mut reader = buffered;
         let term_reader = Arc::clone(&term);
         let notify_reader = notify.clone();
+        let metrics_reader = Arc::clone(&metrics);
+        let daemon_geometry_reader = Arc::clone(&daemon_geometry);
         let dead_reader = Arc::clone(&dead);
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
             let mut osc = crate::osc::OscScan::default();
+            let mut geometry_osc = geometry_token
+                .map(smelt_core::osc::TerminalGeometryOscScan::new)
+                .unwrap_or_default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
             // 重放缓冲里的历史字节可能藏着早就处理完的 OSC 9/99/777 通知（比如 Claude
@@ -1857,6 +1875,7 @@ impl Terminal {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF：shell 退出
                     Ok(n) => {
+                        let mut geometry_updates = Vec::new();
                         // OSC 9/99/777 通知：alacritty 不解析，自己扫字节提取
                         for (i, &b) in buf[..n].iter().enumerate() {
                             let target = if bytes_seen + i < replay_len {
@@ -1869,10 +1888,40 @@ impl Terminal {
                                     *g = Some(msg);
                                 }
                             }
+                            if let Some(geometry) = geometry_osc.feed(b)
+                                && let Ok(mut signal) = daemon_geometry_reader.lock()
+                            {
+                                signal.generation = signal.generation.wrapping_add(1);
+                                signal.geometry = Some(geometry);
+                                geometry_updates.push((i + 1, geometry));
+                            }
                         }
                         bytes_seen += n;
                         if let Ok(mut term) = term_reader.lock() {
-                            parser.advance(&mut *term, &buf[..n]);
+                            // A geometry marker is serialized before PTY
+                            // output at the new size. Split this read at each
+                            // marker so cursor-addressed bytes after it are
+                            // never parsed against the previous grid.
+                            let mut start = 0;
+                            for (end, geometry) in geometry_updates {
+                                parser.advance(&mut *term, &buf[start..end]);
+                                if let Ok(mut metrics) = metrics_reader.lock() {
+                                    metrics.rows = geometry.rows;
+                                    metrics.cols = geometry.cols;
+                                    if geometry.cell_width > 0 {
+                                        metrics.cell_w = geometry.cell_width;
+                                    }
+                                    if geometry.cell_height > 0 {
+                                        metrics.cell_h = geometry.cell_height;
+                                    }
+                                }
+                                term.resize(TermSize {
+                                    rows: usize::from(geometry.rows),
+                                    cols: usize::from(geometry.cols),
+                                });
+                                start = end;
+                            }
+                            parser.advance(&mut *term, &buf[start..n]);
                             // 快照刚灌完：贴底 + 清 SGR；live jolt 字节会接在后面。
                             if !replay_finalized && bytes_seen >= replay_len {
                                 replay_finalized = true;
@@ -1909,6 +1958,9 @@ impl Terminal {
             writer,
             size,
             metrics,
+            daemon_geometry,
+            daemon_geometry_generation: 0,
+            remote_geometry_locked: false,
             notify,
             bell_notify,
             title,
@@ -1944,7 +1996,7 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
         create_if_missing: bool,
-    ) -> anyhow::Result<(BufReader<UnixStream>, TermSize, usize)> {
+    ) -> anyhow::Result<(BufReader<UnixStream>, TermSize, usize, Option<String>)> {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
@@ -1965,11 +2017,12 @@ impl Terminal {
             cols: v["cols"].as_u64().unwrap_or(cols as u64) as usize,
         };
         let replay_len = v["replay_len"].as_u64().unwrap_or(0) as usize;
+        let geometry_token = v["geometry_token"].as_str().map(str::to_owned);
         // 握手完必须清掉超时：这条 stream 接下来交给读线程长期读 PTY 输出（见
         // spawn 里 `let mut reader = buffered`），空闲终端半天没输出是常态，读循环
         // 对任何 Err 一律 break 当 EOF——超时留着就等于给每个安静的终端定时断线。
         buffered.get_ref().set_read_timeout(None)?;
-        Ok((buffered, size, replay_len))
+        Ok((buffered, size, replay_len, geometry_token))
     }
 
     /// 取走最新普通通知消息（读并清）：OSC 9/99/777 上报的文本。
@@ -2043,6 +2096,51 @@ impl Terminal {
         };
         term.reset_damage();
         damaged
+    }
+
+    /// Apply the daemon's canonical grid without writing a resize frame back.
+    /// A remote renderer holds the geometry lease while
+    /// `remote_geometry_locked` is true; local viewport changes must wait.
+    pub fn sync_daemon_geometry(&mut self) -> bool {
+        let update = {
+            let Ok(signal) = self.daemon_geometry.lock() else {
+                return false;
+            };
+            if signal.generation == self.daemon_geometry_generation {
+                return false;
+            }
+            signal
+                .geometry
+                .map(|geometry| (signal.generation, geometry))
+        };
+        let Some((generation, geometry)) = update else {
+            return false;
+        };
+        self.daemon_geometry_generation = generation;
+        self.remote_geometry_locked = geometry.remote_controlled;
+
+        let rows = usize::from(geometry.rows);
+        let cols = usize::from(geometry.cols);
+        let grid_changed = self.size.rows != rows || self.size.cols != cols;
+        self.size = TermSize { rows, cols };
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.rows = geometry.rows;
+            metrics.cols = geometry.cols;
+            if geometry.cell_width > 0 {
+                metrics.cell_w = geometry.cell_width;
+            }
+            if geometry.cell_height > 0 {
+                metrics.cell_h = geometry.cell_height;
+            }
+        }
+        if grid_changed && let Ok(mut term) = self.term.lock() {
+            term.resize(self.size);
+        }
+        true
+    }
+
+    pub fn remote_geometry_locked(&self) -> bool {
+        self.remote_geometry_locked
     }
 
     /// 按新行列 + 单元格像素 resize：同步 alacritty 网格，并发帧让守护 ioctl
@@ -3293,6 +3391,9 @@ mod search_resync_tests {
             writer: Arc::new(Mutex::new(sock)),
             size: TermSize { rows, cols },
             metrics,
+            daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
+            daemon_geometry_generation: 0,
+            remote_geometry_locked: false,
             notify: Arc::new(Mutex::new(None)),
             bell_notify: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(None)),
@@ -3307,6 +3408,29 @@ mod search_resync_tests {
                 rx
             },
         }
+    }
+
+    #[test]
+    fn daemon_geometry_resizes_local_grid_and_tracks_remote_lease() {
+        let mut terminal = make_terminal(59, 181);
+        {
+            let mut signal = terminal.daemon_geometry.lock().unwrap();
+            signal.generation = 1;
+            signal.geometry = Some(smelt_core::osc::TerminalGeometryOsc {
+                cols: 49,
+                rows: 47,
+                cell_width: 8,
+                cell_height: 15,
+                remote_controlled: true,
+            });
+        }
+
+        assert!(terminal.sync_daemon_geometry());
+        assert_eq!((terminal.size.cols, terminal.size.rows), (49, 47));
+        assert!(terminal.remote_geometry_locked());
+        let metrics = terminal.metrics.lock().unwrap();
+        assert_eq!((metrics.cols, metrics.rows), (49, 47));
+        assert_eq!((metrics.cell_w, metrics.cell_h), (8, 15));
     }
 
     /// 直接往 Term 喂字节（等价于读线程收到 PTY 输出）。
