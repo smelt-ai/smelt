@@ -23,7 +23,7 @@ void main() {
       final attach = Completer<Map<String, dynamic>>();
       final input = Completer<Map<String, dynamic>>();
       final resizes = List.generate(
-        4,
+        2,
         (_) => Completer<Map<String, dynamic>>(),
       );
       var resizeCount = 0;
@@ -102,7 +102,6 @@ void main() {
         gateway: gateway,
         sessionId: 'terminal-1',
         resizeDebounce: Duration.zero,
-        attachRefreshDelay: Duration.zero,
       );
       addTearDown(service.dispose);
       final events = <TerminalStreamEvent>[];
@@ -132,17 +131,8 @@ void main() {
         events.indexWhere((event) => event is TerminalReplayCompleteEvent),
         greaterThan(events.indexWhere((event) => event is TerminalDataEvent)),
       );
-
-      final attachNudge = await resizes[0].future.timeout(
-        const Duration(seconds: 5),
-      );
-      expect(attachNudge['params']['cols'], 40);
-      expect(attachNudge['params']['rows'], 21);
-      final attachRestore = await resizes[1].future.timeout(
-        const Duration(seconds: 5),
-      );
-      expect(attachRestore['params']['cols'], 40);
-      expect(attachRestore['params']['rows'], 20);
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(resizeCount, 0, reason: 'replay completion must not redraw PTY');
 
       service.sendInput('\x03');
       final inputMessage = await input.future.timeout(
@@ -151,7 +141,7 @@ void main() {
       expect(inputMessage['params']['data'], '\x03');
 
       service.forceGeometry();
-      final forcedResizeMessage = await resizes[2].future.timeout(
+      final forcedResizeMessage = await resizes[0].future.timeout(
         const Duration(seconds: 5),
       );
       expect(forcedResizeMessage['params']['cols'], 40);
@@ -165,7 +155,7 @@ void main() {
           cellHeight: 16,
         ),
       );
-      final resizeMessage = await resizes[3].future.timeout(
+      final resizeMessage = await resizes[1].future.timeout(
         const Duration(seconds: 5),
       );
       expect(resizeMessage['params']['cols'], 50);

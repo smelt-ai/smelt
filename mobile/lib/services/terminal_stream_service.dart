@@ -103,7 +103,6 @@ class TerminalStreamService implements TerminalStreamClient {
     TerminalChannelFactory? channelFactory,
     this.connectTimeout = const Duration(seconds: 15),
     this.resizeDebounce = const Duration(milliseconds: 120),
-    this.attachRefreshDelay = const Duration(milliseconds: 80),
   }) : _channelFactory = channelFactory ?? WebSocketChannel.connect {
     _gatewaySubscription = gateway.stateStream.listen(_handleGatewayState);
   }
@@ -113,7 +112,6 @@ class TerminalStreamService implements TerminalStreamClient {
   final TerminalChannelFactory _channelFactory;
   final Duration connectTimeout;
   final Duration resizeDebounce;
-  final Duration attachRefreshDelay;
 
   final _eventsController = StreamController<TerminalStreamEvent>.broadcast();
   final _stateController = StreamController<TerminalStreamState>.broadcast();
@@ -123,7 +121,6 @@ class TerminalStreamService implements TerminalStreamClient {
   WebSocketChannel? _channel;
   Timer? _reconnectTimer;
   Timer? _resizeTimer;
-  Timer? _attachRefreshTimer;
   TerminalGeometry? _geometry;
   TerminalGeometry? _lastSentGeometry;
   int _replayBytesRemaining = 0;
@@ -331,44 +328,6 @@ class TerminalStreamService implements TerminalStreamClient {
     if (_replayComplete) return;
     _replayComplete = true;
     _eventsController.add(const TerminalReplayCompleteEvent());
-    _refreshAfterReplay();
-  }
-
-  void _refreshAfterReplay() {
-    if (_disposed ||
-        _ended ||
-        _suspended ||
-        _state != TerminalStreamState.connected) {
-      return;
-    }
-    final geometry = _geometry;
-    if (geometry == null) return;
-    final nudgedRows = geometry.rows < 200
-        ? geometry.rows + 1
-        : geometry.rows - 1;
-    final nudged = TerminalGeometry(
-      cols: geometry.cols,
-      rows: nudgedRows,
-      cellWidth: geometry.cellWidth,
-      cellHeight: geometry.cellHeight,
-    );
-
-    // The watcher is live once replay bytes have arrived. A one-row jolt now
-    // forces full-screen TUIs to redraw into that watcher instead of leaving
-    // the mobile renderer with a stale partial keyframe.
-    _resizeTimer?.cancel();
-    _attachRefreshTimer?.cancel();
-    _send({'method': 'resize', 'params': nudged.toJson()});
-    _lastSentGeometry = nudged;
-    _attachRefreshTimer = Timer(attachRefreshDelay, () {
-      if (_disposed || _suspended || _state != TerminalStreamState.connected) {
-        return;
-      }
-      final latest = _geometry;
-      if (latest == null) return;
-      _send({'method': 'resize', 'params': latest.toJson()});
-      _lastSentGeometry = latest;
-    });
   }
 
   void _handleChannelDone(int generation) {
@@ -423,8 +382,6 @@ class TerminalStreamService implements TerminalStreamClient {
     _generation++;
     _replayBytesRemaining = 0;
     _replayComplete = false;
-    _attachRefreshTimer?.cancel();
-    _attachRefreshTimer = null;
     _resizeTimer?.cancel();
     _channelSubscription?.cancel();
     _channelSubscription = null;
