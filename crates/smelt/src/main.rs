@@ -2498,8 +2498,31 @@ impl Workspace {
         } else {
             ws.check_daemon_outdated(cx);
         }
+        ws.start_daemon_outdated_watch(cx);
         ws.start_remote_session_sync(window, cx);
         ws
+    }
+
+    /// 每 60s 探一次守护是否落后于磁盘上的 smeltd。手工装 App / dev 重编译后
+    /// 没有「更新事件」可挂,只能靠检测发现;探到落后就走 `check_daemon_outdated`
+    /// 的空闲门控——agent 忙就挂起,空闲才升,不打扰使用(连接路径的 ensure 只
+    /// 对齐磁盘不再偷跑 exec,这里负责兜底把守护在空闲时跟上)。
+    /// 探测是本地 socket 往返(毫秒级),60s 一次对用户完全无感。
+    fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let ok = this.update(cx, |this, cx| {
+                    this.check_daemon_outdated(cx);
+                });
+                if ok.is_err() {
+                    break; // Workspace 已销毁
+                }
+            }
+        })
+        .detach();
     }
 
     /// Mirror mobile-created ACP sessions into the running desktop workspace. The catalog and
