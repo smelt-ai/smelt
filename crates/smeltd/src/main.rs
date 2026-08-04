@@ -412,8 +412,12 @@ mod single_instance_tests {
 /// 守护被 SIGKILL（例：装新版时用 cp 覆盖了已签名二进制，upgrade 的 exec 会被
 /// macOS 内核直接杀掉，无输出无崩溃报告）或静默 return 时，这份日志是唯一线索：
 /// 日志停在「即将 exec」而没有下一行「交接完成」，就是 exec 被杀。
+///
+/// 同时转一份进全 app 通用的 `app_log`（~/.smelt/app.log，见该模块）——这里记录的
+/// 全是异常/生命周期事件，天然也是「关键操作/错误」，没必要在两份日志里分别手写。
 fn dlog(msg: &str) {
     use std::io::Write;
+    smelt_core::app_log::info("daemon", msg);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1708,6 +1712,12 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 
 fn main() {
+    // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
+    // 先装 panic hook，再记一条启动事件——守护本身没有终端可看，崩溃/异常全靠这份
+    // 日志留痕。跟已有的 daemon.log（只记交接/网络这类守护自身生命周期事件）互补。
+    smelt_core::app_log::install_panic_hook("smeltd");
+    smelt_core::app_log::tee_stderr("smeltd");
+    smelt_core::app_log::info("smeltd", "守护启动");
     // 尽早提 fd 上限：晚了的话，前面已经开的 fd 会先一步顶到旧上限。
     raise_fd_limit();
     // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
@@ -4008,10 +4018,15 @@ fn handle_open(
             let (sess, pty_reader) = match result {
                 Ok(result) => result,
                 Err(error) => {
+                    smelt_core::app_log::error(
+                        "session",
+                        &format!("会话 {id} 启动失败：{error:#}"),
+                    );
                     write_terminal_error(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
                     return;
                 }
             };
+            smelt_core::app_log::info("session", &format!("会话 {id} 已创建"));
             let sess = Arc::new(sess);
             sessions
                 .lock()
@@ -5469,6 +5484,7 @@ fn start_pty_pump(
             }
         }
         sessions.lock().unwrap().remove(&id);
+        smelt_core::app_log::info("session", &format!("会话 {id} 已结束（shell 退出）"));
         let mut out = sess.out.lock().unwrap();
         if let Some(c) = out.client.take() {
             let _ = c.shutdown(Shutdown::Both); // GUI 读到 EOF 即知 shell 退出
