@@ -29,7 +29,6 @@ mod inspector;
 mod mem_usage;
 use smelt_core::osc;
 mod panel_transition;
-mod pet;
 mod session_history;
 mod session_list;
 mod settings;
@@ -2098,11 +2097,10 @@ struct Workspace {
     launch_inputs: Option<settings::LaunchInputs>,
     /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
     profile_inputs: Option<settings::ProfileInputs>,
-    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器。
+    /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 字体大小滑块 + 背景色取色器。
     opacity_slider: Option<Entity<SliderState>>,
     font_size_slider: Option<Entity<SliderState>>,
     bg_color_picker: Option<Entity<ColorPickerState>>,
-    pet_color_picker: Option<Entity<ColorPickerState>>,
     /// 上面三个组件的变更订阅。
     settings_subs: Vec<Subscription>,
     /// 上次应用到窗口的背景外观：不透明度 / 模糊改了要 window 才能切，故在 render 里同步。
@@ -2515,7 +2513,6 @@ impl Workspace {
             opacity_slider: None,
             font_size_slider: None,
             bg_color_picker: None,
-            pet_color_picker: None,
             settings_subs: Vec::new(),
             applied_window_bg: None,
             debug_hud: false,
@@ -7764,11 +7761,8 @@ fn main() {
         cx.set_global(appearance);
         cx.set_global(load_launch_config());
 
-        // 桌面宠物：配置 + 播报邮箱 + LLM 大脑配置（跨窗口全局单例），再开独立透明浮窗。
-        cx.set_global(pet::load_pet_config());
-        cx.set_global(pet::PetMailbox::default());
+        // 桌面宠物已删除（见 git 历史）；LLM 大脑配置仍是跨窗口全局单例。
         cx.set_global(agent::load_llm_config());
-        pet::open_pet_window(cx);
 
         // 状态通道：常驻订阅守护的 subscribe，维护 DaemonStates 全局单例，
         // Session::status/pane_status 靠它把"猜"换成"读事实"（见
