@@ -11,6 +11,7 @@ pub mod acp_session;
 pub mod agent_event;
 pub mod agent_kind;
 pub mod agent_status;
+pub mod app_log;
 pub mod attention;
 pub mod block_on;
 pub mod claude_paths;
