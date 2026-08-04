@@ -8325,7 +8325,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "smelt"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
@@ -8364,7 +8364,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-acp-view"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "agent-client-protocol",
  "base64",
@@ -8380,7 +8380,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
@@ -8403,7 +8403,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-iroh"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -8417,7 +8417,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-ui"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "dirs 5.0.1",
  "gpui",
@@ -8455,7 +8455,7 @@ dependencies = [
 
 [[package]]
 name = "smeltd"
-version = "0.6.9"
+version = "0.6.10"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
