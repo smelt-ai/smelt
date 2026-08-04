@@ -70,7 +70,7 @@ cargo test
 
 ## 架构
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、axum（远程网关）、iroh（P2P 隧道）。Flutter FFI crate 仍使用 Rust 2021。
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、axum（远程网关）、iroh（P2P 隧道）。
 配置放 `~/.smelt/`。
 
 工作区包含 `smelt`（GUI 主程序）、`smeltd`（终端持久化守护，类 tmux，由 GUI 按需拉起）、`gateway`（远程网关的独立可执行版，用于开发调试）、`smelt-notify`（Claude Code hooks 调用的状态上报小工具），以及用于开发和调试 P2P 隧道的 `smelt-iroh-host` / `smelt-iroh-connect`。普通用户主要使用 `smelt`，守护进程由 GUI 按需管理。
