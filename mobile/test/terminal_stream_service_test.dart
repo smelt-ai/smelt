@@ -124,6 +124,14 @@ void main() {
       await _waitFor(() => events.any((event) => event is TerminalDataEvent));
       final data = events.whereType<TerminalDataEvent>().single;
       expect(data.bytes, [0xe4, 0xb8, 0xad]);
+      await _waitFor(
+        () => events.any((event) => event is TerminalReplayCompleteEvent),
+      );
+      expect(events.whereType<TerminalReplayCompleteEvent>(), hasLength(1));
+      expect(
+        events.indexWhere((event) => event is TerminalReplayCompleteEvent),
+        greaterThan(events.indexWhere((event) => event is TerminalDataEvent)),
+      );
 
       final attachNudge = await resizes[0].future.timeout(
         const Duration(seconds: 5),

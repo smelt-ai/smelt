@@ -66,6 +66,10 @@ class TerminalDataEvent extends TerminalStreamEvent {
   final Uint8List bytes;
 }
 
+class TerminalReplayCompleteEvent extends TerminalStreamEvent {
+  const TerminalReplayCompleteEvent();
+}
+
 class TerminalErrorEvent extends TerminalStreamEvent {
   const TerminalErrorEvent(this.message, {this.fatal = false});
 
@@ -77,7 +81,22 @@ class TerminalClosedEvent extends TerminalStreamEvent {
   const TerminalClosedEvent();
 }
 
-class TerminalStreamService {
+abstract interface class TerminalStreamClient {
+  Stream<TerminalStreamEvent> get events;
+  Stream<TerminalStreamState> get stateStream;
+  TerminalStreamState get state;
+  bool get writeEnabled;
+
+  void start(TerminalGeometry geometry);
+  void updateGeometry(TerminalGeometry geometry);
+  void forceGeometry();
+  void sendInput(String data);
+  void suspend();
+  void resume();
+  Future<void> dispose();
+}
+
+class TerminalStreamService implements TerminalStreamClient {
   TerminalStreamService({
     required this.gateway,
     required this.sessionId,
@@ -108,6 +127,7 @@ class TerminalStreamService {
   TerminalGeometry? _geometry;
   TerminalGeometry? _lastSentGeometry;
   int _replayBytesRemaining = 0;
+  bool _replayComplete = false;
   TerminalStreamState _state = TerminalStreamState.waitingForGateway;
   int _generation = 0;
   int _reconnectDelayMs = 500;
@@ -117,11 +137,16 @@ class TerminalStreamService {
   bool _ended = false;
   bool _writeEnabled = false;
 
+  @override
   Stream<TerminalStreamEvent> get events => _eventsController.stream;
+  @override
   Stream<TerminalStreamState> get stateStream => _stateController.stream;
+  @override
   TerminalStreamState get state => _state;
+  @override
   bool get writeEnabled => _writeEnabled;
 
+  @override
   void start(TerminalGeometry geometry) {
     if (_disposed || _ended) return;
     _started = true;
@@ -129,6 +154,7 @@ class TerminalStreamService {
     if (gateway.state == WsState.connected) unawaited(_open());
   }
 
+  @override
   void updateGeometry(TerminalGeometry geometry) {
     if (_disposed || _ended) return;
     _geometry = geometry;
@@ -155,6 +181,7 @@ class TerminalStreamService {
     });
   }
 
+  @override
   void forceGeometry() {
     if (_disposed ||
         _ended ||
@@ -169,6 +196,7 @@ class TerminalStreamService {
     _lastSentGeometry = geometry;
   }
 
+  @override
   void sendInput(String data) {
     if (data.isEmpty ||
         !_writeEnabled ||
@@ -181,6 +209,7 @@ class TerminalStreamService {
     });
   }
 
+  @override
   void suspend() {
     if (_disposed || _suspended) return;
     _suspended = true;
@@ -189,6 +218,7 @@ class TerminalStreamService {
     _setState(TerminalStreamState.waitingForGateway);
   }
 
+  @override
   void resume() {
     if (_disposed || !_suspended || _ended) return;
     _suspended = false;
@@ -242,7 +272,7 @@ class TerminalStreamService {
           0,
           1 << 30,
         );
-        if (_replayBytesRemaining == 0) _refreshAfterReplay();
+        if (_replayBytesRemaining == 0) _completeReplay();
       }
       return;
     }
@@ -255,6 +285,7 @@ class TerminalStreamService {
         case 'terminalReady':
           _writeEnabled = message['writeEnabled'] as bool? ?? false;
           _replayBytesRemaining = message['replayBytes'] as int? ?? 0;
+          _replayComplete = false;
           _reconnectDelayMs = 500;
           _setState(TerminalStreamState.connected);
           _eventsController.add(
@@ -269,7 +300,7 @@ class TerminalStreamService {
           if (latest != null && latest != _lastSentGeometry) {
             updateGeometry(latest);
           }
-          if (_replayBytesRemaining == 0) _refreshAfterReplay();
+          if (_replayBytesRemaining == 0) _completeReplay();
         case 'terminalError':
           final fatal = message['fatal'] as bool? ?? false;
           _eventsController.add(
@@ -294,6 +325,13 @@ class TerminalStreamService {
         TerminalErrorEvent('Invalid terminal message: $error'),
       );
     }
+  }
+
+  void _completeReplay() {
+    if (_replayComplete) return;
+    _replayComplete = true;
+    _eventsController.add(const TerminalReplayCompleteEvent());
+    _refreshAfterReplay();
   }
 
   void _refreshAfterReplay() {
@@ -384,6 +422,7 @@ class TerminalStreamService {
   void _closeChannel() {
     _generation++;
     _replayBytesRemaining = 0;
+    _replayComplete = false;
     _attachRefreshTimer?.cancel();
     _attachRefreshTimer = null;
     _resizeTimer?.cancel();
@@ -401,6 +440,7 @@ class TerminalStreamService {
     _stateController.add(next);
   }
 
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

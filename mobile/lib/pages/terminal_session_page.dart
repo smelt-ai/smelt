@@ -9,9 +9,10 @@ import '../services/terminal_stream_service.dart';
 import '../utils/xterm_input_filter.dart';
 
 class TerminalSessionPage extends StatefulWidget {
-  const TerminalSessionPage({super.key, required this.session});
+  const TerminalSessionPage({super.key, required this.session, this.stream});
 
   final SessionSummary session;
+  final TerminalStreamClient? stream;
 
   @override
   State<TerminalSessionPage> createState() => _TerminalSessionPageState();
@@ -19,7 +20,7 @@ class TerminalSessionPage extends StatefulWidget {
 
 class _TerminalSessionPageState extends State<TerminalSessionPage>
     with WidgetsBindingObserver {
-  late final TerminalStreamService _stream;
+  late final TerminalStreamClient _stream;
   late Terminal _terminal;
   late GlobalKey<TerminalViewState> _terminalViewKey;
   late StreamController<List<int>> _byteController;
@@ -28,6 +29,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   late final StreamSubscription<TerminalStreamEvent> _eventSubscription;
   late final StreamSubscription<TerminalStreamState> _stateSubscription;
   final FocusNode _terminalFocusNode = FocusNode();
+  final ScrollController _terminalScrollController = ScrollController();
 
   TerminalStreamState _streamState = TerminalStreamState.waitingForGateway;
   String? _error;
@@ -40,10 +42,12 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _stream = TerminalStreamService(
-      gateway: gatewayService,
-      sessionId: widget.session.id,
-    );
+    _stream =
+        widget.stream ??
+        TerminalStreamService(
+          gateway: gatewayService,
+          sessionId: widget.session.id,
+        );
     _terminal = _newTerminal();
     _terminalViewKey = GlobalKey<TerminalViewState>();
     _resetDecoder();
@@ -111,6 +115,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       case TerminalDataEvent():
         final bytes = _inputFilter.add(event.bytes);
         if (bytes.isNotEmpty) _byteController.add(bytes);
+      case TerminalReplayCompleteEvent():
+        _scrollToLatestAfterReplay();
       case TerminalErrorEvent():
         if (!mounted) return;
         if (event.fatal) _closeKeyboardAndReleaseFocus();
@@ -132,6 +138,26 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
           _error = 'Terminal session ended';
         });
     }
+  }
+
+  void _scrollToLatestAfterReplay() {
+    final generation = _decoderGeneration;
+    // Replay data passes through an asynchronous UTF-8 decoder. Wait for it
+    // to update xterm, then give RenderTerminal one layout to publish its new
+    // scroll extent before moving to the live tail.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _decoderGeneration) return;
+      _terminalViewKey.currentState?.renderTerminal.markNeedsLayout();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted ||
+            generation != _decoderGeneration ||
+            !_terminalScrollController.hasClients) {
+          return;
+        }
+        final position = _terminalScrollController.position;
+        position.jumpTo(position.maxScrollExtent);
+      });
+    });
   }
 
   void _toggleSoftwareKeyboard() {
@@ -252,6 +278,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                 _terminal,
                 key: _terminalViewKey,
                 focusNode: _terminalFocusNode,
+                scrollController: _terminalScrollController,
                 autofocus: false,
                 readOnly: !_writeEnabled,
                 hardwareKeyboardOnly: !_softwareKeyboardEnabled,
@@ -302,6 +329,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     WidgetsBinding.instance.removeObserver(this);
     _terminalViewKey.currentState?.closeKeyboard();
     _terminalFocusNode.dispose();
+    _terminalScrollController.dispose();
     _decoderGeneration++;
     unawaited(_byteController.close());
     unawaited(_decodedSubscription.cancel());
