@@ -196,6 +196,10 @@ pub struct AcpSnapshot {
     /// Monotonic version assigned by smeltd whenever it publishes this session.
     #[serde(default)]
     pub snapshot_revision: u64,
+    /// `session/load` 正在用协议通知重建历史。客户端可据此为批量恢复的未测量
+    /// 条目提供高度提示，而不必同步布局整段历史。
+    #[serde(default)]
+    pub replaying_history: bool,
     pub entries: Vec<AcpEntry>,
     pub phase: AcpPhase,
     #[serde(default)]
@@ -413,6 +417,7 @@ impl AcpSessionState {
             entries_offset,
             entries_total,
             snapshot_revision: 0,
+            replaying_history: self.replaying_history,
             entries: self.entries[entries_offset..entries_end].to_vec(),
             phase: self.phase.clone(),
             pending_permissions: self
@@ -1591,6 +1596,14 @@ mod tests {
         assert_eq!(snapshot.entries_offset, 2);
         assert_eq!(snapshot.entries.len(), 1);
         assert!(matches!(&snapshot.entries[0], AcpEntry::User(text) if text == "three"));
+    }
+
+    #[test]
+    fn snapshot_replay_flag_is_preserved() {
+        let mut state = fresh_state();
+        state.replaying_history = true;
+        let snapshot = state.to_snapshot(false);
+        assert!(snapshot.replaying_history);
     }
 
     #[test]
