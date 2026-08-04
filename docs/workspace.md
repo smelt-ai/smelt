@@ -13,8 +13,10 @@
 cargo run --bin smelt
 ```
 
-> 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除；
-> 本仓库现在只有 `workspace`（GUI）和 `smeltd`（终端持久化守护）两个二进制。
+> 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除。
+> 工作区现含多个二进制：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，另含
+> `gateway` / `smelt-notify` / `smelt-task` / `smelt-iroh-host` / `smelt-iroh-connect`
+> 等辅助二进制），详见根目录 `Cargo.toml` 的 workspace 注释。
 
 ---
 
@@ -56,7 +58,8 @@ UI 线程每 30ms 对网格做快照并重绘。
 ### 历史会话页（Claude Code 专属）
 页内有「会话 / 记忆」两个子页，共用「左列表 + 右详情」骨架，数据都在
 `~/.claude/projects/<编码后的项目路径>/` 下：
-- **会话**：`*.jsonl`，还原完整对话（只读浏览，不支持 resume），见 `session_history.rs`
+- **会话**：`*.jsonl`，还原完整对话；右键条目可「ACP 继续」/「CLI/TUI 继续」协议级续接
+  （不再是只读浏览），见 `session_history.rs`
 - **记忆**：`memory/*.md`，Claude Code 攒下的长期记忆——每个 md 是一条（YAML
   frontmatter 的 `name`/`description` + markdown 正文），左列表显示标题和一句话描述，
   右侧渲染全文。见 `claude_memory.rs`。目录里的 `MEMORY.md` 是索引（内容 = 各条

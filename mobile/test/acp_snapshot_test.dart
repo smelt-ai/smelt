@@ -304,6 +304,36 @@ void main() {
       ]);
     });
 
+    test('treats elicitation fields without required metadata as required', () {
+      final legacy = PendingElicitation.fromJson({
+        'message': 'Choose a notification channel',
+        'fields': [
+          {
+            'key': 'question_0',
+            'title': 'Channel',
+            'kind': {
+              'Select': [
+                {'label': 'Bark'},
+              ],
+            },
+          },
+        ],
+      });
+
+      expect(legacy.fields.single.required, isTrue);
+      expect(legacy.isReady(), isFalse);
+
+      final optional = ElicitationField.fromJson({
+        'key': 'notes',
+        'title': 'Notes',
+        'required': false,
+        'kind': {
+          'Text': {'secret': false},
+        },
+      });
+      expect(optional.required, isFalse);
+    });
+
     test('optional text field does not block a selected required option', () {
       const elicitation = PendingElicitation(
         message: 'Choose a repair scope',

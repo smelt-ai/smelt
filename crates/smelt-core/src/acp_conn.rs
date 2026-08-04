@@ -63,7 +63,7 @@ pub struct AcpLaunch {
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
 /// UI → 连接线程的指令。
 pub enum AcpCommand {
-    /// 发一轮 prompt（agent 空闲时才该发；UI 侧负责在 turn 进行中排队/禁用）。
+    /// 发一轮 prompt。UI 会立即转发，不在本地等待上一轮结束。
     /// `images` 空 = 纯文本那条老路径。
     Prompt {
         text: String,
@@ -522,6 +522,10 @@ pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpH
                 } else {
                     format!("{e}\n--- agent stderr ---\n{tail}")
                 };
+                crate::app_log::error(
+                    "acp",
+                    &format!("会话 {} 连接异常终止：{msg}", launch.sid),
+                );
                 let _ = event_tx.try_send(AcpEvent::Fatal(msg));
             }
             // Ok 结束（Shutdown）不发 Fatal——UI 主动关的，没必要再报。

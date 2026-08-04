@@ -72,7 +72,7 @@ cargo test
 
 ## Architecture
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, axum for the remote gateway, and iroh for P2P tunnels. The Flutter FFI crate remains on Rust 2021.
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/longbridge/gpui-component) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, axum for the remote gateway, and iroh for P2P tunnels.
 Configuration is stored in `~/.smelt/`.
 
 The workspace contains `smelt` (the main GUI), `smeltd` (a terminal persistence daemon, similar to tmux, launched on demand by the GUI), `gateway` (a standalone executable for developing and debugging the remote gateway), `smelt-notify` (a small status-reporting utility called by Claude Code hooks), and the `smelt-iroh-host` / `smelt-iroh-connect` helpers for developing and debugging P2P tunnels. Most users only interact with `smelt`; the GUI manages `smeltd` as needed.

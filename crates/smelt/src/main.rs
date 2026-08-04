@@ -2162,6 +2162,11 @@ struct Workspace {
     daemon_upgrade_msg: Option<String>,
     /// 无缝升级进行中（按钮置灰防连点）。
     daemon_upgrading: bool,
+    /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
+    /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
+    daemon_upgrade_pending: bool,
+    /// 待升级的退避重试定时器是否已在跑（防重复 spawn）。
+    daemon_upgrade_retry_scheduled: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
     daemon_info: Option<terminal::DaemonInfo>,
@@ -2466,6 +2471,8 @@ impl Workspace {
             daemon_outdated: None,
             daemon_upgrade_msg: None,
             daemon_upgrading: false,
+            daemon_upgrade_pending: false,
+            daemon_upgrade_retry_scheduled: false,
             daemon_info: None,
             show_daemon_restart_confirm: false,
             session_manager_open: false,
@@ -2491,8 +2498,31 @@ impl Workspace {
         } else {
             ws.check_daemon_outdated(cx);
         }
+        ws.start_daemon_outdated_watch(cx);
         ws.start_remote_session_sync(window, cx);
         ws
+    }
+
+    /// 每 60s 探一次守护是否落后于磁盘上的 smeltd。手工装 App / dev 重编译后
+    /// 没有「更新事件」可挂,只能靠检测发现;探到落后就走 `check_daemon_outdated`
+    /// 的空闲门控——agent 忙就挂起,空闲才升,不打扰使用(连接路径的 ensure 只
+    /// 对齐磁盘不再偷跑 exec,这里负责兜底把守护在空闲时跟上)。
+    /// 探测是本地 socket 往返(毫秒级),60s 一次对用户完全无感。
+    fn start_daemon_outdated_watch(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let ok = this.update(cx, |this, cx| {
+                    this.check_daemon_outdated(cx);
+                });
+                if ok.is_err() {
+                    break; // Workspace 已销毁
+                }
+            }
+        })
+        .detach();
     }
 
     /// Mirror mobile-created ACP sessions into the running desktop workspace. The catalog and
@@ -4815,9 +4845,56 @@ impl Workspace {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 if outdated {
-                    this.upgrade_daemon_seamless(cx);
+                    if this.any_agent_busy(cx) {
+                        // 有 agent 正在跑：无缝升级虽然不丢会话，但会让所有终端
+                        // 闪断重连——挑用户不在跑任务的时刻做，别背着用户换代
+                        // （这正是「用着用着终端全卡」的体验来源之一）。
+                        // 挂起等空闲，30s 后重试（agent 通常一个回合就结束了）。
+                        this.daemon_upgrade_pending = true;
+                        this.schedule_daemon_upgrade_retry(cx);
+                    } else {
+                        this.daemon_upgrade_pending = false;
+                        this.upgrade_daemon_seamless(cx);
+                    }
+                } else {
+                    this.daemon_upgrade_pending = false;
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
+    /// 空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
+    fn any_agent_busy(&self, cx: &App) -> bool {
+        cx.try_global::<DaemonStates>()
+            .map(|states| {
+                states.0.lock().unwrap().values().any(|s| {
+                    matches!(
+                        s.phase,
+                        crate::terminal::DaemonPhase::Thinking
+                            | crate::terminal::DaemonPhase::ExecutingTool
+                    )
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// 待升级挂起后 30s 重试一次：agent 回合通常很快结束，空闲下来就该升掉，
+    /// 免得长期停在旧守护（老协议兼容是有的，但没必要一直拖到用户手动操作）。
+    fn schedule_daemon_upgrade_retry(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_upgrade_retry_scheduled {
+            return;
+        }
+        self.daemon_upgrade_retry_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon_upgrade_retry_scheduled = false;
+                this.check_daemon_outdated(cx);
             });
         })
         .detach();
@@ -6538,6 +6615,15 @@ impl Render for Workspace {
                 )
         });
 
+        // relative()/inset 百分比在这类弹层里不可靠：taffy 对绝对定位元素并不
+        // 保证「只给 top+bottom 就能反推 height」，没有显式 width/height 时会退回
+        // 按内容（img 的原始像素尺寸）自撑，宽度顶满容器、高度按原图比例继续往下
+        // 长——正是长截图「宽度占满、只看到顶部一截、还不能滚动」的成因。
+        // 直接在 Rust 侧用 viewport_size() 算出具体像素宽高，displayed 的盒子拿到
+        // 的是确定的 px 尺寸，不依赖任何百分比/自动尺寸推导。
+        let preview_viewport = window.viewport_size();
+        let preview_box_w = preview_viewport.width * 0.86;
+        let preview_box_h = preview_viewport.height * 0.84;
         let image_preview_overlay = self.acp_image_preview.as_ref().map(|image| {
             let image = image.clone();
             div()
@@ -6545,9 +6631,6 @@ impl Render for Workspace {
                 .absolute()
                 .inset_0()
                 .bg(rgba(0x000000d9))
-                .flex()
-                .items_center()
-                .justify_center()
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.acp_image_preview = None;
@@ -6556,8 +6639,14 @@ impl Render for Workspace {
                 .child(
                     div()
                         .id("workspace-image-preview-content")
-                        .w(relative(0.86))
-                        .h(relative(0.84))
+                        .absolute()
+                        .top((preview_viewport.height - preview_box_h) / 2.0)
+                        .left((preview_viewport.width - preview_box_w) / 2.0)
+                        .w(preview_box_w)
+                        .h(preview_box_h)
+                        // 再兜一层底：万一某张图（比如巨长截图撞到 GPU 纹理尺寸上限）
+                        // 解码/采样异常导致绘制尺寸跟布局盒子对不上，也不会漏到盒子外面。
+                        .overflow_hidden()
                         .cursor_default()
                         .on_click(|_ev, _window, cx| cx.stop_propagation())
                         .child(

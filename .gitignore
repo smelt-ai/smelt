@@ -15,6 +15,9 @@ dist/
 # macOS 目录元数据
 .DS_Store
 
+# Python 脚本缓存（.github/scripts/ 下的审核脚本）
+__pycache__/
+
 # remote H5
 remote-web/node_modules/
 remote-web/dist/

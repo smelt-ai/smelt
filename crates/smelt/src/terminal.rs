@@ -686,7 +686,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             Ok(managed_daemon_path())
         }
         DaemonProbe::Running {
-            exe_mtime,
+            exe_mtime: _,
             exe_path,
         } => {
             let on_managed = exe_path
@@ -697,27 +697,27 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
                 .as_ref()
                 .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
                 .unwrap_or(!on_managed); // 老守护无 exe：若已在 managed 目录则别瞎迁
-            let bundled_m = file_mtime_secs(&bundled);
             // 路径不对（仍在 .app / 非 managed）→ 必须迁。
             // 二进制升级：仅当「跑的比 App 旧」且**文件内容实质不同**——
             // 禁止仅因 cp 造成 mtime+1s 就 handoff（会清空 Term → 对话像被重初始化）。
             let size_differs = !managed.is_file() || !same_daemon_binary_size(&managed, &bundled);
-            // 已在 managed 且 running 比 App 分发物旧、size 也不同 → 真升级
-            let needs_binary_upgrade = on_managed
-                && !inside_app
-                && size_differs
-                && bundled_m.is_some_and(|b| b > exe_mtime.saturating_add(1));
             let must_relocate = inside_app || !on_managed;
-            if must_relocate || needs_binary_upgrade {
+            if must_relocate {
+                // **安全关键**：守护还住在 .app 里 / 不在 managed 目录，随时可能被
+                // Finder 拖 DMG 覆盖 App 时误杀，必须立即迁出——这条不能等空闲。
                 eprintln!(
-                    "[workspace] 迁移守护 → managed（inside_app={inside_app} on_managed={on_managed} upgrade={needs_binary_upgrade} exe={exe_path:?}）"
+                    "[workspace] 迁移守护 → managed（inside_app={inside_app} on_managed={on_managed} exe={exe_path:?}）"
                 );
                 let outcome = handoff_daemon_to_managed(&bundled);
                 if !matches!(outcome, UpgradeOutcome::Upgraded) {
                     let _ = install_managed_daemon_from(&bundled);
                 }
             } else if size_differs {
-                // 路径正确、无需 exec：只静默对齐磁盘文件
+                // 守护已在 managed（含版本旧）：只对齐磁盘文件，**不 exec**。
+                // 连接路径偷偷换代正是「用着用着终端全卡」的根源——exec 会断开所有
+                // 客户端连接，而这里只是例行检查，不该背着用户在任意时刻换代。
+                // 真正的换代交给 GUI 的空闲升级（main.rs::check_daemon_outdated
+                // 有空闲门控），或用户手动点升级。
                 let _ = install_managed_daemon_from(&bundled);
             }
             Ok(managed_daemon_path())
@@ -1673,6 +1673,10 @@ pub struct Terminal {
     search_matches: Mutex<Vec<(Point, Point)>>,
     /// 当前命中在 `search_matches` 里的下标。
     search_index: Mutex<usize>,
+    /// 连接是否已断（读线程 EOF/IO 错误后置位）。守护 exec 交接、被 SIGKILL、
+    /// 或 shell 退出都会走到这里——UI 侧据此决定是否自动重连（重连前还会再查
+    /// 一次守护里会话还在不在，区分「守护换血」和「shell 真的退了」）。
+    dead: Arc<AtomicBool>,
     /// 重绘唤醒（Zed 式事件驱动）：读线程每喂完一批字节就 `try_send(())`，UI 侧
     /// 一个 `cx.spawn` 任务 `recv().await` 后 `cx.notify()`。这样「喂内容」与「触发
     /// 重绘」是同一个动作，不再依赖 30ms 轮询去 `take_damage()` 事后发现——reattach
@@ -1827,10 +1831,12 @@ impl Terminal {
         // 重绘唤醒通道：读线程 → UI。bounded(1) 合并突发（已有待处理唤醒时后续 try_send
         // 直接丢弃，不堆积）。见 Terminal::redraw_rx 字段注释。
         let (redraw_tx, redraw_rx) = smol::channel::bounded::<()>(1);
+        let dead: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         let mut reader = buffered;
         let term_reader = Arc::clone(&term);
         let notify_reader = notify.clone();
+        let dead_reader = Arc::clone(&dead);
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
@@ -1890,8 +1896,11 @@ impl Terminal {
                     Err(_) => break,
                 }
             }
-            // 读线程退出（EOF/守护离线）：主动关掉发送端，让 UI 侧的 recv 任务收到
-            // Err 而退出，不空转。
+            // 读线程退出（EOF/守护离线）：标记连接已断，并主动关掉发送端，让 UI 侧
+            // 的 recv 任务收到 Err 而退出——UI 侧据此触发自动重连（见 terminal_view.rs
+            // 的 schedule_auto_reconnect）。adopt_terminal 换上新连接后 dead 归零，
+            // 旧 channel 的 Err 不会再误触发重连。
+            dead_reader.store(true, Ordering::Relaxed);
             drop(redraw_tx);
         });
 
@@ -1907,6 +1916,7 @@ impl Terminal {
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
+            dead,
             redraw_rx,
         })
     }
@@ -1914,6 +1924,12 @@ impl Terminal {
     /// 重绘唤醒的接收端（clone 一份给 UI 侧的 `cx.spawn` 任务 await）。见 `redraw_rx` 字段。
     pub fn redraw_channel(&self) -> smol::channel::Receiver<()> {
         self.redraw_rx.clone()
+    }
+
+    /// 连接是否已断（读线程退出后为 true）。UI 侧拿它判断要不要自动重连；
+    /// `adopt_terminal` 换上重连好的新 Terminal 后自然归 false。
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Relaxed)
     }
 
     /// 一次性握手：在已连上的 stream 上声明会话 + 读首行尺寸 + 重放字节数，不重试
@@ -2634,6 +2650,38 @@ mod damage_gate_tests {
         }
     }
 
+    /// 自动重连的触发前提：连接断开后 `is_dead()` 必须置位。模拟守护侧杀掉会话
+    /// （= 连接被断，与 exec 交接断开连接同一条路径），读线程应读到 EOF 并标记
+    /// dead——UI 侧（terminal_view 的 schedule_auto_reconnect）据此启动自动重连。
+    /// 若这个不置位，exec 断线后终端就永远静默冻结，正是本次「终端全卡、只能
+    /// 重启 GUI」bug 的根因之一。
+    #[test]
+    fn killed_session_marks_terminal_dead() {
+        let dir = std::env::temp_dir().join(format!("smelt-dead-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let id = format!("dead-test-{}", uuid_like());
+        // 不持 guard：会话由下面的 kill_remote 主动清理。
+        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        assert!(!term.is_dead(), "刚连上不该是断的");
+
+        // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
+        thread::sleep(Duration::from_millis(500));
+        kill_remote(&id);
+
+        // 守护 remove 会话并 shutdown client → 读线程 EOF → dead 置位。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if term.is_dead() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "kill 会话后读线程应在超时窗口内标记 dead"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// 验证上面这个修复模式本身是对的：手写清理语句会被 panic 跳过，Drop 不会
     /// ——这正是要堵的洞，不是走个形式验证 Rust 语言特性。
     #[test]
@@ -3252,6 +3300,7 @@ mod search_resync_tests {
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
+            dead: Arc::new(AtomicBool::new(false)),
             // 测试不驱动 UI 重绘，给一个即时关闭的通道占位即可。
             redraw_rx: {
                 let (_, rx) = smol::channel::bounded::<()>(1);

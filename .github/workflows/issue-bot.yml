@@ -1,0 +1,146 @@
+# Issue 机器人：新 issue 创建/重开时自动审核（模板完整性 + 标题查重），
+# 不合格就评论提示并打 needs-triage 标签；无论结果都推卡片到飞书群。
+# 审核是规则级的（.github/scripts/issue-triage.py），后续可加 LLM triage 步骤。
+#
+# 首次使用前：去飞书群加"自定义机器人"拿到 webhook，存成仓库 secret
+#   FEISHU_ISSUE_WEBHOOK（必配）；勾了签名校验再加 FEISHU_WEBHOOK_SECRET。
+# 详细步骤见 docs/issue-bot.md。
+name: issue-bot
+
+on:
+  issues:
+    # 只用 opened/reopened：bot 自己评论/打标不会再次触发，无死循环风险
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  models: read  # GitHub Models API（LLM 分类），用自动注入的 GITHUB_TOKEN
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: 规则审核（模板完整性 + 标题查重）
+        id: audit
+        env:
+          GITHUB_EVENT_TITLE: ${{ github.event.issue.title }}
+          GITHUB_EVENT_BODY: ${{ github.event.issue.body || '' }}
+          GITHUB_EVENT_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/issue-triage.py
+
+      # GitHub Models 分类：脚本内部容错（缺 token/网络错误/超时/格式错都降级
+      # LLM_OK=no），不会中断 job。零新增 secret——用 Actions 自动注入的
+      # GITHUB_TOKEN + models:read 权限即可。
+      - name: LLM 分类（GitHub Models，bug/feature/question + P0/P1/P2）
+        id: llm
+        # 脚本内有 15s 硬超时；这里再兜底，防止脚本出问题时拖死整个 workflow
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_TITLE: ${{ github.event.issue.title }}
+          GITHUB_EVENT_BODY: ${{ github.event.issue.body || '' }}
+        run: python3 .github/scripts/issue-llm-triage.py
+
+      # 不合格：打 needs-triage 标签（不存在则先创建，否则 addLabels 会 422）
+      # 并评论列出问题 + 查重提示 + LLM 分类（如有）。
+      - name: 审核不合格 → 评论提示 + 打标
+        if: env.AUDIT_PASS == 'no'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.issue.number;
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: 'needs-triage' });
+            } catch {
+              await github.rest.issues.createLabel({ owner, repo, name: 'needs-triage', color: 'fbca04' });
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['needs-triage'] });
+            let note = '⚠️ 自动审核未通过：' + process.env.AUDIT_PROBLEMS;
+            if (process.env.AUDIT_DUP && process.env.AUDIT_DUP !== 'ok') {
+              note += '\n\n🔎 ' + process.env.AUDIT_DUP;
+            }
+            if (process.env.LLM_OK === 'yes') {
+              note += '\n\n📋 LLM 分类：' + process.env.LLM_TYPE + ' · ' + process.env.LLM_SEVERITY;
+              if (process.env.LLM_SUMMARY) { note += ' · ' + process.env.LLM_SUMMARY; }
+            }
+            note += '\n\n请按 issue 模板补充完整，补充后在评论里 @ 维护者即可。';
+            await github.rest.issues.createComment({ owner, repo, issue_number: number, body: note });
+
+      # 通过：把之前可能残留的 needs-triage 标签清掉（label 不存在就忽略）
+      - name: 审核通过 → 清理 needs-triage 标签
+        if: env.AUDIT_PASS == 'yes'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            try {
+              await github.rest.issues.removeLabel({
+                owner, repo, issue_number: context.payload.issue.number, name: 'needs-triage'
+              });
+            } catch { /* 标签不存在则无需清理 */ }
+
+      # LLM 分类成功：打类型（bug/feature/question）和严重度（severity:P0 等）标签
+      - name: LLM 分类成功 → 打分类标签
+        if: env.LLM_OK == 'yes'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.issue.number;
+            const labels = [process.env.LLM_TYPE, 'severity:' + process.env.LLM_SEVERITY];
+            for (const name of labels) {
+              try { await github.rest.issues.getLabel({ owner, repo, name }); }
+              catch { await github.rest.issues.createLabel({ owner, repo, name, color: '5319e7' }); }
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels });
+
+      # 飞书推送：always() 保证即使审核脚本意外失败，issue 也能被群里看到。
+      # 配置了 FEISHU_WEBHOOK_SECRET 时自动带上签名头，防 webhook 被滥用。
+      - name: 推送卡片到飞书群
+        if: always()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_ISSUE_WEBHOOK }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_USER: ${{ github.event.issue.user.login }}
+        run: |
+          [[ -n "$FEISHU_WEBHOOK" ]] || { echo "✗ 未配置 FEISHU_ISSUE_WEBHOOK secret"; exit 1; }
+          payload=$(jq -n --arg n "$ISSUE_NUMBER" --arg t "$ISSUE_TITLE" --arg u "$ISSUE_USER" \
+            --arg url "$ISSUE_URL" --arg pass "${AUDIT_PASS:-}" --arg problems "${AUDIT_PROBLEMS:-}" \
+            --arg dup "${AUDIT_DUP:-}" --arg llmok "${LLM_OK:-}" --arg ltype "${LLM_TYPE:-}" \
+            --arg lsev "${LLM_SEVERITY:-}" --arg lsum "${LLM_SUMMARY:-}" '{
+              msg_type: "interactive",
+              card: {
+                schema: "2.0",
+                header: { title: { tag: "plain_text", content: ("🐞 新 Issue #" + $n) }, template: "blue" },
+                body: { elements: [
+                  { tag: "markdown", content: ("**" + $t + "**\n作者：@" + $u + "\n" +
+                    (if $pass == "yes" then "✅ 自动审核通过"
+                     elif $pass == "no" then ("⚠️ 需补充：" + $problems)
+                     else "❓ 审核未执行") +
+                    (if $dup != "" and $dup != "ok" then ("\n🔎 " + $dup) else "") +
+                    (if $llmok == "yes" then ("\n📋 " + $ltype + " · " + $lsev + (if $lsum != "" then (" · " + $lsum) else "")) else "") +
+                    "\n[查看详情](" + $url + ")") }
+                ] }
+              }
+            }')
+          ts=$(date +%s)
+          if [[ -n "$FEISHU_WEBHOOK_SECRET" ]]; then
+            sign=$(printf '%s\n%s' "$ts" "$FEISHU_WEBHOOK_SECRET" \
+              | openssl dgst -sha256 -hmac "$FEISHU_WEBHOOK_SECRET" -binary | base64)
+            curl -s -X POST -H 'Content-Type: application/json' \
+              -H "X-Lark-Request-Timestamp: $ts" \
+              -H "X-Lark-Signature: $sign" \
+              -d "$payload" "$FEISHU_WEBHOOK"
+          else
+            curl -s -X POST -H 'Content-Type: application/json' -d "$payload" "$FEISHU_WEBHOOK"
+          fi

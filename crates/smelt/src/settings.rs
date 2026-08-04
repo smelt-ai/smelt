@@ -2348,6 +2348,40 @@ impl Workspace {
                                     )
                                     .child(
                                         div()
+                                            .id("settings-open-log-link")
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .text_color(muted)
+                                            .hover(|s| s.text_color(fg))
+                                            .child("打开日志 ↗")
+                                            .on_mouse_down(MouseButton::Left, |_, _window, _cx| {
+                                                // 反馈问题时手动带上这份日志：GitHub
+                                                // issue 附件靠拖拽，没有 API 能替用户
+                                                // 自动上传，所以帮用户直接定位到文件。
+                                                if let Some(path) = smelt_core::app_log::log_path()
+                                                {
+                                                    #[cfg(target_os = "macos")]
+                                                    {
+                                                        let _ = std::process::Command::new("open")
+                                                            .arg("-R")
+                                                            .arg(&path)
+                                                            .spawn();
+                                                    }
+                                                    #[cfg(not(target_os = "macos"))]
+                                                    {
+                                                        if let Some(dir) = path.parent() {
+                                                            let _ = std::process::Command::new(
+                                                                "xdg-open",
+                                                            )
+                                                            .arg(dir)
+                                                            .spawn();
+                                                        }
+                                                    }
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        div()
                                             .id("settings-report-issue-link")
                                             .text_xs()
                                             .cursor_pointer()
@@ -2355,6 +2389,18 @@ impl Workspace {
                                             .hover(|s| s.text_color(fg))
                                             .child("反馈问题 ↗")
                                             .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                                                // 先把日志在 Finder 里选出来，用户点开
+                                                // issue 页面后可以直接把它拖进去。
+                                                if let Some(path) = smelt_core::app_log::log_path()
+                                                {
+                                                    #[cfg(target_os = "macos")]
+                                                    {
+                                                        let _ = std::process::Command::new("open")
+                                                            .arg("-R")
+                                                            .arg(&path)
+                                                            .spawn();
+                                                    }
+                                                }
                                                 cx.open_url(
                                                     "https://github.com/smelt-ai/smelt/issues/new/choose",
                                                 );

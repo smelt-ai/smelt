@@ -118,9 +118,15 @@ pub enum ElicitFieldKindView {
 pub struct ElicitFieldView {
     pub key: String,
     pub title: String,
-    #[serde(default)]
+    // Snapshots before optional elicitation fields existed omitted this key.
+    // Those fields were all required, so preserve that behavior on restore.
+    #[serde(default = "elicitation_field_required_by_default")]
     pub required: bool,
     pub kind: ElicitFieldKindView,
+}
+
+fn elicitation_field_required_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -247,6 +253,10 @@ pub struct LiveElicitation {
     pub chosen: BTreeMap<usize, Vec<usize>>,
     pub text_values: BTreeMap<usize, String>,
     pub responder: Option<ElicitationResponder>,
+    /// `session/load` may reconstruct an unanswered AskUserQuestion from a tool call instead of
+    /// replaying its elicitation request. Track that tool so a later terminal status can retire
+    /// the synthetic card. Live protocol elicitations leave this as `None`.
+    pub recovered_tool_call_id: Option<String>,
     /// 同 `LivePermission::raw_request_line`。
     pub raw_request_line: Option<String>,
 }
@@ -520,6 +530,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             state.replaying_history = true;
         }
         AcpEvent::UserChunk(text) => {
+            clear_recovered_elicitation_after_replayed_user_message(state);
             if state.awaiting_user_echo {
                 // 自己刚发那条的回声——本地已经在 apply_user_action(Prompt) 时显示过了。
             } else {
@@ -611,13 +622,21 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             }
         }
         AcpEvent::ToolCall(tc) => {
-            let replayed_elicitation = recovered_elicitation(&tc.title, tc.raw_input.as_ref());
+            let tool_call_id = tc.tool_call_id.to_string();
+            let tool_status = crate::acp_conn::tool_status_from_acp(tc.status);
+            let replayed_elicitation = matches!(
+                tool_status,
+                crate::acp_chat::ToolCallStatus::Pending
+                    | crate::acp_chat::ToolCallStatus::InProgress
+            )
+            .then(|| recovered_elicitation(&tc.title, tc.raw_input.as_ref(), &tool_call_id))
+            .flatten();
             outcome.entries_offset = Some(state.entries.len());
             state.entries.push(AcpEntry::ToolCall {
-                id: tc.tool_call_id.to_string(),
+                id: tool_call_id,
                 title: tc.title,
                 kind: crate::acp_conn::tool_kind_from_acp(tc.kind),
-                status: crate::acp_conn::tool_status_from_acp(tc.status),
+                status: tool_status,
                 output: crate::acp_conn::tool_content_parts(&tc.content),
             });
             if let Some(elicitation) = replayed_elicitation {
@@ -631,17 +650,28 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         }
         AcpEvent::ToolCallUpdate(u) => {
             let update_id = u.tool_call_id.to_string();
-            let replayed_elicitation = u.fields.raw_input.as_ref().and_then(|raw_input| {
-                let title = u.fields.title.as_deref().or_else(|| {
-                    state.entries.iter().rev().find_map(|entry| match entry {
-                        AcpEntry::ToolCall { id, title, .. } if id == &update_id => {
-                            Some(title.as_str())
-                        }
-                        _ => None,
-                    })
-                })?;
-                recovered_elicitation(title, Some(raw_input))
+            let update_status = u.fields.status.map(crate::acp_conn::tool_status_from_acp);
+            let remains_pending = update_status.is_none_or(|status| {
+                matches!(
+                    status,
+                    crate::acp_chat::ToolCallStatus::Pending
+                        | crate::acp_chat::ToolCallStatus::InProgress
+                )
             });
+            let replayed_elicitation = remains_pending
+                .then_some(u.fields.raw_input.as_ref())
+                .flatten()
+                .and_then(|raw_input| {
+                    let title = u.fields.title.as_deref().or_else(|| {
+                        state.entries.iter().rev().find_map(|entry| match entry {
+                            AcpEntry::ToolCall { id, title, .. } if id == &update_id => {
+                                Some(title.as_str())
+                            }
+                            _ => None,
+                        })
+                    })?;
+                    recovered_elicitation(title, Some(raw_input), &update_id)
+                });
             let entry_index = state.entries.iter().rposition(
                 |entry| matches!(entry, AcpEntry::ToolCall { id, .. } if id == &update_id),
             );
@@ -661,8 +691,8 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 if let Some(k) = u.fields.kind {
                     *kind = crate::acp_conn::tool_kind_from_acp(k);
                 }
-                if let Some(s) = u.fields.status {
-                    *status = crate::acp_conn::tool_status_from_acp(s);
+                if let Some(s) = update_status {
+                    *status = s;
                 }
                 if let Some(c) = u.fields.content {
                     *output = crate::acp_conn::tool_content_parts(&c);
@@ -671,6 +701,14 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             if let Some(elicitation) = replayed_elicitation {
                 state.elicitation = Some(elicitation);
                 state.phase = AcpPhase::AwaitingChoice;
+            } else if update_status.is_some_and(|status| {
+                matches!(
+                    status,
+                    crate::acp_chat::ToolCallStatus::Completed
+                        | crate::acp_chat::ToolCallStatus::Failed
+                )
+            }) {
+                clear_recovered_elicitation(state, &update_id);
             }
         }
         AcpEvent::ToolStarted { id, title, kind } => {
@@ -759,6 +797,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 chosen: Default::default(),
                 text_values: Default::default(),
                 responder: Some(responder),
+                recovered_tool_call_id: None,
                 raw_request_line,
             });
             state.phase = AcpPhase::AwaitingChoice;
@@ -795,6 +834,7 @@ fn finish_turn(state: &mut AcpSessionState) {
 fn recovered_elicitation(
     title: &str,
     raw_input: Option<&serde_json::Value>,
+    tool_call_id: &str,
 ) -> Option<LiveElicitation> {
     let questions = raw_input?.get("questions")?.as_array()?;
     let mut fields = Vec::new();
@@ -836,8 +876,40 @@ fn recovered_elicitation(
         chosen: Default::default(),
         text_values: Default::default(),
         responder: None,
+        recovered_tool_call_id: Some(tool_call_id.to_string()),
         raw_request_line: None,
     })
+}
+
+fn clear_recovered_elicitation(state: &mut AcpSessionState, tool_call_id: &str) {
+    let matches_completed_tool = state
+        .elicitation
+        .as_ref()
+        .is_some_and(|card| card.recovered_tool_call_id.as_deref() == Some(tool_call_id));
+    if !matches_completed_tool {
+        return;
+    }
+    state.elicitation = None;
+    state.phase = if !state.permissions.is_empty() {
+        AcpPhase::AwaitingApproval
+    } else if !state.replaying_history && state.turn_started_at_ms.is_some() {
+        AcpPhase::Running
+    } else {
+        AcpPhase::Idle
+    };
+}
+
+fn clear_recovered_elicitation_after_replayed_user_message(state: &mut AcpSessionState) {
+    if !state.replaying_history {
+        return;
+    }
+    let recovered_tool_call_id = state
+        .elicitation
+        .as_ref()
+        .and_then(|card| card.recovered_tool_call_id.clone());
+    if let Some(tool_call_id) = recovered_tool_call_id {
+        clear_recovered_elicitation(state, &tool_call_id);
+    }
 }
 
 /// Build the plain-text reply used by a recovered elicitation whose original responder no longer
@@ -1522,6 +1594,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_elicitation_field_without_required_stays_required() {
+        let legacy: ElicitFieldView = serde_json::from_value(serde_json::json!({
+            "key": "scope",
+            "title": "Scope",
+            "kind": { "Text": { "secret": false } }
+        }))
+        .expect("legacy elicitation field should deserialize");
+        assert!(legacy.required);
+
+        let optional: ElicitFieldView = serde_json::from_value(serde_json::json!({
+            "key": "notes",
+            "title": "Notes",
+            "required": false,
+            "kind": { "Text": { "secret": false } }
+        }))
+        .expect("new optional elicitation field should deserialize");
+        assert!(!optional.required);
+    }
+
+    #[test]
     fn choose_elicitation_single_select_signals_auto_submit() {
         use agent_client_protocol::schema::v1::ElicitationContentValue as V;
         let mut s = fresh_state();
@@ -1545,6 +1637,7 @@ mod tests {
             chosen: Default::default(),
             text_values: Default::default(),
             responder: None,
+            recovered_tool_call_id: None,
             raw_request_line: None,
         });
         let auto_submit = choose_elicitation(&mut s, 0, 1);
@@ -1579,6 +1672,7 @@ mod tests {
             chosen: Default::default(),
             text_values: Default::default(),
             responder: None,
+            recovered_tool_call_id: None,
             raw_request_line: None,
         });
         let auto_submit = choose_elicitation(&mut s, 0, 0);
@@ -1607,9 +1701,10 @@ mod tests {
             }]
         });
 
-        let card = recovered_elicitation("提醒走哪个渠道？", Some(&raw_input))
+        let card = recovered_elicitation("提醒走哪个渠道？", Some(&raw_input), "ask-1")
             .expect("replayed AskUserQuestion should remain actionable");
         assert!(card.responder.is_none());
+        assert_eq!(card.recovered_tool_call_id.as_deref(), Some("ask-1"));
         assert_eq!(card.raw_fields.len(), 1);
         let ElicitFieldKind::Select(options) = &card.raw_fields[0].kind else {
             panic!("single-select question should remain a select");
@@ -1629,6 +1724,100 @@ mod tests {
     }
 
     #[test]
+    fn completed_replayed_question_does_not_rebuild_an_elicitation() {
+        let raw_input = serde_json::json!({
+            "questions": [{
+                "question": "Already answered?",
+                "options": [{"label": "Yes"}, {"label": "No"}]
+            }]
+        });
+        let mut state = fresh_state();
+        apply_event(&mut state, AcpEvent::HistoryReplayStarted);
+
+        apply_event(
+            &mut state,
+            AcpEvent::ToolCall(
+                agent_client_protocol::schema::v1::ToolCall::new("ask-1", "Already answered?")
+                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                    .raw_input(raw_input),
+            ),
+        );
+
+        assert!(state.elicitation.is_none());
+        assert!(matches!(state.phase, AcpPhase::Starting));
+    }
+
+    #[test]
+    fn terminal_tool_update_clears_recovered_elicitation() {
+        let raw_input = serde_json::json!({
+            "questions": [{
+                "question": "Already answered?",
+                "options": [{"label": "Yes"}, {"label": "No"}]
+            }]
+        });
+        let mut state = fresh_state();
+        apply_event(&mut state, AcpEvent::HistoryReplayStarted);
+        apply_event(
+            &mut state,
+            AcpEvent::ToolCall(
+                agent_client_protocol::schema::v1::ToolCall::new("ask-1", "Already answered?")
+                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Pending)
+                    .raw_input(raw_input),
+            ),
+        );
+        assert!(matches!(state.phase, AcpPhase::AwaitingChoice));
+
+        apply_event(
+            &mut state,
+            AcpEvent::ToolCallUpdate(agent_client_protocol::schema::v1::ToolCallUpdate::new(
+                "ask-1",
+                agent_client_protocol::schema::v1::ToolCallUpdateFields::new()
+                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed),
+            )),
+        );
+
+        assert!(state.elicitation.is_none());
+        assert!(matches!(state.phase, AcpPhase::Idle));
+        assert!(matches!(
+            state.entries.last(),
+            Some(AcpEntry::ToolCall {
+                status: ToolCallStatus::Completed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn replayed_user_answer_clears_question_without_a_terminal_tool_update() {
+        let raw_input = serde_json::json!({
+            "questions": [{
+                "question": "Fix it now?",
+                "options": [{"label": "Fix"}, {"label": "Later"}]
+            }]
+        });
+        let mut state = fresh_state();
+        apply_event(&mut state, AcpEvent::HistoryReplayStarted);
+        apply_event(
+            &mut state,
+            AcpEvent::ToolCall(
+                agent_client_protocol::schema::v1::ToolCall::new("ask-1", "Fix it now?")
+                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Pending)
+                    .raw_input(raw_input),
+            ),
+        );
+        assert!(matches!(state.phase, AcpPhase::AwaitingChoice));
+
+        apply_event(&mut state, AcpEvent::UserChunk("Fix".into()));
+
+        assert!(state.elicitation.is_none());
+        assert!(matches!(state.phase, AcpPhase::Idle));
+        assert!(matches!(
+            state.entries.last(),
+            Some(AcpEntry::User(answer)) if answer == "Fix"
+        ));
+    }
+
+    #[test]
     fn ready_does_not_overwrite_a_recovered_choice_phase() {
         let raw_input = serde_json::json!({
             "questions": [{
@@ -1637,7 +1826,7 @@ mod tests {
             }]
         });
         let mut state = fresh_state();
-        state.elicitation = recovered_elicitation("Choose", Some(&raw_input));
+        state.elicitation = recovered_elicitation("Choose", Some(&raw_input), "ask-1");
 
         apply_event(
             &mut state,

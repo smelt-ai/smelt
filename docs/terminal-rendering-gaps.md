@@ -8,9 +8,9 @@
 
 | smelt | Zed |
 |-------|-----|
-| `src/bin/workspace/terminal.rs` | `crates/terminal/src/{terminal,alacritty}.rs` |
-| `src/bin/workspace/terminal_view.rs` | `crates/terminal_view/src/{terminal_view,terminal_element}.rs` |
-| `src/bin/smeltd.rs` | （无对等物；Zed 进程内 PTY） |
+| `crates/smelt/src/terminal.rs` | `crates/terminal/src/{terminal,alacritty}.rs` |
+| `crates/smelt/src/terminal_view.rs` | `crates/terminal_view/src/{terminal_view,terminal_element}.rs` |
+| `crates/smeltd/src/main.rs` | （无对等物；Zed 进程内 PTY） |
 | — | `crates/terminal/src/mappings/{keys,mouse}.rs` |
 
 **渲染基础（已完成，别再动）**：正文在 canvas 里直接 paint，逐行
