@@ -1838,6 +1838,13 @@ impl Render for AcpView {
                         .child(
                             div()
                                 .max_w(gpui::relative(0.72))
+                                // gpui-component 的 markdown 列表块（ol/ul）内部用
+                                // `w_full()`/`flex_1()` 排布"序号 + 正文"。这个气泡
+                                // 是收缩到内容大小（只有 max_w，没有 width）的 flex
+                                // item，短列表内容会被误测成只有序号那么宽，正文被
+                                // `overflow_hidden()` 悄悄裁掉——只剩"1." "2." 悬浮。
+                                // 兜个最小宽度，给列表正文留出可见空间。
+                                .min_w(gpui::px(160.))
                                 .px_4()
                                 .py_2p5()
                                 .rounded_lg()
@@ -1910,6 +1917,9 @@ impl Render for AcpView {
                             .child(
                                 div()
                                     .max_w(gpui::relative(0.8))
+                                    // 同上：避免短的有序/无序列表被收缩到只剩序号宽度、
+                                    // 正文被裁没。
+                                    .min_w(gpui::px(160.))
                                     .px_3()
                                     .py_3()
                                     .rounded_lg()
@@ -4719,5 +4729,71 @@ mod tests {
             "tool-1",
             "unknown"
         ));
+    }
+
+    // 回归守卫：`AcpEntry::User`/`UserWithImages` 气泡是"收缩到内容大小"的 flex
+    // item（只有 max_w，没有 width），而 gpui-component 的 markdown 有序/无序列表
+    // 内部用 `w_full()`/`flex_1()` 排布"序号 + 正文"。两者叠加时，短列表内容会被
+    // 误测成只有序号那么宽，正文被列表内容行的 `overflow_hidden()` 裁没，聊天里
+    // 只剩悬浮的 "1." "2."（bug 复现见 PR 描述）。锁死气泡有个不为零的最小宽度，
+    // 防止以后有人顺手把 `min_w` 从气泡样式里删掉。
+    struct ListBubbleTestRoot {
+        text: &'static str,
+    }
+
+    impl gpui::Render for ListBubbleTestRoot {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement, ParentElement, Styled, div, px};
+            // 复刻 acp_view 里用户气泡的真实结构：外层限宽窗口 -> 右对齐 flex 行
+            // -> 收缩到内容大小、带 max_w/min_w 的气泡 -> markdown 正文。
+            div().w(px(500.)).child(
+                div()
+                    .flex()
+                    .w_full()
+                    .justify_end()
+                    .child(
+                        div()
+                            .max_w(px(400.))
+                            .min_w(px(160.))
+                            .debug_selector(|| "BUBBLE".to_string())
+                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
+                                "list-bubble-test",
+                                self.text.to_string(),
+                            )),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn short_ordered_list_bubble_does_not_collapse_below_min_width(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, VisualTestContext, px};
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_cx| ListBubbleTestRoot {
+                text: "1. xxxx\n2. bbbbb",
+            });
+            gpui_component::Root::new(content, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let bounds = cx
+            .debug_bounds("BUBBLE")
+            .expect("bubble should have painted");
+        assert!(
+            bounds.size.width >= px(160.),
+            "list bubble collapsed below its min-width floor: {:?}; short list item \
+             text would be clipped invisible by the list renderer's overflow_hidden()",
+            bounds.size.width,
+        );
     }
 }
