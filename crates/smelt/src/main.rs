@@ -6567,6 +6567,15 @@ impl Render for Workspace {
                 )
         });
 
+        // relative()/inset 百分比在这类弹层里不可靠：taffy 对绝对定位元素并不
+        // 保证「只给 top+bottom 就能反推 height」，没有显式 width/height 时会退回
+        // 按内容（img 的原始像素尺寸）自撑，宽度顶满容器、高度按原图比例继续往下
+        // 长——正是长截图「宽度占满、只看到顶部一截、还不能滚动」的成因。
+        // 直接在 Rust 侧用 viewport_size() 算出具体像素宽高，displayed 的盒子拿到
+        // 的是确定的 px 尺寸，不依赖任何百分比/自动尺寸推导。
+        let preview_viewport = window.viewport_size();
+        let preview_box_w = preview_viewport.width * 0.86;
+        let preview_box_h = preview_viewport.height * 0.84;
         let image_preview_overlay = self.acp_image_preview.as_ref().map(|image| {
             let image = image.clone();
             div()
@@ -6582,18 +6591,14 @@ impl Render for Workspace {
                 .child(
                     div()
                         .id("workspace-image-preview-content")
-                        // 之前用 flex + w/h(relative(..)) 让内容盒居中：flex 子项默认
-                        // min-size 是 auto，会按内容（大图/超长截图的原始像素尺寸）撑开，
-                        // 撑大了 ObjectFit::Contain 也救不回来；改成 min 归零又会在某些
-                        // 帧上被 flex-shrink 直接收缩到 0，图片整个消失不见。
-                        // 干脆不进 flex 布局：backdrop 本身 absolute 已经是定位上下文，
-                        // 内容盒直接用 absolute + 四边 inset 卡出 86%/84% 的居中区域，
-                        // 大小完全由 inset 决定，不受 flex 最小/收缩规则影响。
                         .absolute()
-                        .top(relative(0.08))
-                        .bottom(relative(0.08))
-                        .left(relative(0.07))
-                        .right(relative(0.07))
+                        .top((preview_viewport.height - preview_box_h) / 2.0)
+                        .left((preview_viewport.width - preview_box_w) / 2.0)
+                        .w(preview_box_w)
+                        .h(preview_box_h)
+                        // 再兜一层底：万一某张图（比如巨长截图撞到 GPU 纹理尺寸上限）
+                        // 解码/采样异常导致绘制尺寸跟布局盒子对不上，也不会漏到盒子外面。
+                        .overflow_hidden()
                         .cursor_default()
                         .on_click(|_ev, _window, cx| cx.stop_propagation())
                         .child(
