@@ -19,10 +19,15 @@ DeepSeek 是 OpenAI 兼容 API，直接用 Python 标准库 urllib 调用，无�
 
 import json
 import os
+import signal
 import urllib.request
 
 API_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
 MODEL = "deepseek-v4-flash"  # 快模型；备选 deepseek-chat（V3）
+
+# socket 超时（秒）。注意 urllib 的 timeout 覆盖不到 DNS 解析/连接建立阶段，
+# 所以下面还有 signal.alarm 硬超时兜底，避免 API 不可达时拖慢整个 workflow。
+API_TIMEOUT = 15
 
 SYSTEM_PROMPT = (
     "你是开源项目的 issue 管理员。根据 issue 的标题和正文，只输出 JSON，"
@@ -32,6 +37,11 @@ SYSTEM_PROMPT = (
 
 VALID_TYPES = ("bug", "feature", "question")
 VALID_SEVERITIES = ("P0", "P1", "P2")
+
+
+def _timeout_handler(signum, frame):
+    """signal.alarm 触发：DNS/连接阶段挂起时的最后防线。"""
+    raise TimeoutError(f"LLM API 调用超过 {API_TIMEOUT}s 硬超时")
 
 
 def env(key, default=""):
@@ -70,11 +80,23 @@ def main():
         },
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+    def _call():
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
             data = json.load(resp)
         content = data["choices"][0]["message"]["content"]
-        result = json.loads(content)
+        return json.loads(content)
+
+    # signal.alarm 只在主线程 + POSIX 可用（ubuntu runner / macOS 本地都满足）。
+    # 用它给整个 API 调用加硬超时，DNS 解析或 TCP 连接挂起时也能及时降级。
+    try:
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(API_TIMEOUT)
+        try:
+            result = _call()
+        finally:
+            if hasattr(signal, "SIGALRM"):
+                signal.alarm(0)  # 正常返回也要取消闹钟
     except Exception as e:
         print(f"[LLM] 调用失败，降级跳过: {e}")
         write_env("LLM_OK", "no")

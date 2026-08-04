@@ -37,6 +37,8 @@ jobs:
       # 不会中断 job。配好 secret 前这一步骤等同跳过。
       - name: DeepSeek 分类（bug/feature/question + P0/P1/P2）
         id: llm
+        # 脚本内有 15s 硬超时；这里再兜底，防止脚本出问题时拖死整个 workflow
+        timeout-minutes: 2
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_EVENT_TITLE: ${{ github.event.issue.title }}
