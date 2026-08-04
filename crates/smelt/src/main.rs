@@ -48,7 +48,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -299,6 +299,26 @@ fn decode_preview_image(image: &gpui::Image) -> Option<Arc<gpui::RenderImage>> {
     }
     let frame = image::Frame::new(rgba);
     Some(Arc::new(gpui::RenderImage::new(vec![frame])))
+}
+
+/// 守护状态更新很频繁（agent 活跃时每步都推 phase/标题变化），每次更新都
+/// `refresh_windows()` 强制整窗重绘太贵——这是「终端一有输出整窗 flexbox 重排、
+/// 空闲 CPU 高」的主要来源（issue #23）。这里把 100ms 窗口内的多次更新合并成
+/// 一次整窗刷新：状态点/侧栏展示延迟 100ms 完全无感。
+static STATE_REFRESH_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+fn schedule_state_refresh(cx: &gpui::AsyncApp) {
+    if STATE_REFRESH_SCHEDULED.swap(true, Ordering::Relaxed) {
+        return; // 已有一笔刷新在途，这次更新并入它
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(100))
+            .await;
+        STATE_REFRESH_SCHEDULED.store(false, Ordering::Relaxed);
+        let _ = cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
 }
 
 /// 底部抽屉的终端标签；每个标签自己持有一个终端进程。
@@ -7820,8 +7840,10 @@ fn main() {
                             }
                         }
                     }
-                    cx.refresh_windows(); // 状态点跟着这次变化重绘
+                    // 状态点重绘由 schedule_state_refresh 节流触发，这里不再直接
+                    // refresh_windows——见该函数注释（agent 活跃时状态更新很频繁）。
                 });
+                schedule_state_refresh(&cx);
             }
         })
         .detach();
