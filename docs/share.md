@@ -5,7 +5,7 @@
 > 一个基于 GPUI 的桌面工作台，内嵌真终端，专为「同时指挥多个 Claude Code / Codex agent 干活」设计——多项目 × 多标签，会话状态一目了然，关掉 GUI 也不打断正在跑的 agent。
 
 **状态**：working prototype · 持续迭代中
-**语言**：Rust 2021 ｜ **GUI**：GPUI
+**语言**：Rust 2024 ｜ **GUI**：GPUI
 
 ---
 
@@ -151,12 +151,18 @@ smelt 的核心体验是「能跑 `vim`/`htop` 这类全屏 TUI 还不卡」，�
 
 ```
 workspace（GUI） ──attach / 输入──▶ smeltd（守护） ──PTY 管理──▶ shell / claude
-可随时退出 / 崩溃                按会话 id 落盘，字节流 + 重放      真实子进程，GUI 生死与它无关
+可随时退出 / 崩溃                常驻 Term 导出网格 keyframe 快照    真实子进程，GUI 生死与它无关
 ```
 
-1. 会话 **id 创建即落盘**，不等首次写入，避免「刚建就丢」
-2. **attach 先回报 PTY 真实尺寸**，GUI 按它建终端，再收重放字节，杜绝尺寸协商时序错乱导致的花屏
+1. 会话 **id 创建后立即落盘**（spawn 成功后写 `workspace.json`），避免「刚建就丢」
+2. **attach 先回报 PTY 真实尺寸**，GUI 按它建终端，再收网格快照（重放区间与实时输出按
+   `replay_len` 划界），杜绝尺寸协商时序错乱导致的花屏
 3. 同一会话的读写走**同一把锁串行**，防止并发 attach 把输出交叉打乱
+
+> 说明：早期「按会话 id 落盘 + 重放字节流」的环形缓冲方案已废弃（smeltd 改为常驻
+> `Term` 导出网格 keyframe 快照，历史字节缓冲被测试锁死永不 feed）；ACP 会话则走
+> `AcpSnapshot` + `resume_session_id` 的协议级续接。文档中残留的「字节流重放」说法
+> 一律以本条为准。
 
 ---
 
@@ -174,7 +180,7 @@ workspace（GUI） ──attach / 输入──▶ smeltd（守护） ──PTY �
 
 ### 想试试 / 想一起做
 
-- `cargo run --bin workspace` 直接跑起来，可选再起一个 `cargo run --bin smeltd` 体验会话持久化
+- `cargo run --bin smelt` 直接跑起来（GUI 会按需拉起 smeltd），可选单独 `cargo run --bin smeltd` 体验会话持久化
 - 想法和待做点子集中记在 `docs/roadmap.md`，做完了从那挪走或标 ✅
 
 ---

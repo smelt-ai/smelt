@@ -33,8 +33,11 @@ smeltd handles the request in this order:
    spawning an agent.
 2. If the slot is absent or ended, spawn a replacement agent process with the
    persisted `resume_session_id`.
-3. The connection attempts `session/resume`, followed by `session/load` when
-   resume is unsupported or the adapter directs the client to use load.
+3. The connection attempts `session/load` with the persisted `resume_session_id`
+   (cold restore). `session/resume` does not replay history and is **not** used
+   for cold restore — it only supports attach-style resume while the agent
+   process is alive, so restoration after a dead daemon slot always goes
+   through `session/load`.
 4. Create a new conversation only when restoration is explicitly unsupported
    or the historical session is confirmed missing.
 5. Return a retryable restoration failure for timeouts, transport failures,

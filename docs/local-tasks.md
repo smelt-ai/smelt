@@ -65,7 +65,7 @@ TaskRun {
   id,
   task_id,
   attempt,             // 第几次尝试
-  channel,             // 当前为 pty；预留 acp
+  channel,             // pty（终端）| acp（ACP 结构化对话，预留远程）
   launch,              // 本次执行使用的启动命令快照
   session_id?,
   status,              // starting | running | completed | failed | cancelled
@@ -110,7 +110,8 @@ spinner 落下（Running→Idle）
 | **T2.5** ✅ | 任务类型：普通 + 单次定时（`run_at` + 扫描） | 到点自动开跑 |
 | **T2.6** ✅ | 完成边沿 → 同 cwd 自动 claim 下一条 | 队列串行续跑 |
 | **T3** | 会话「钉成任务」、右键删/改状态 | 双向不割裂 |
-| **T4+** | agent CLI 塞队 / 状态通道 / 远程 | 真自循环 |
+| **T4+** ✅ | agent CLI 塞队 / 状态通道（`smelt-task` add/list/done/remove/show/run、`task_session_done`/`task_session_failed` 状态边沿） | 真自循环 |
+| **T5** | 远程 / 飞书卡片 | 手机上看任务、IM 里处理 |
 
 ---
 
