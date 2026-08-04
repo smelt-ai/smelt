@@ -396,6 +396,20 @@ pub(crate) fn gutter_width(lines: &[DiffLine]) -> f32 {
 
 // ===================== git 子进程调用 =====================
 
+/// 文件监听噪音路径：这些目录变化极频繁（构建产物/依赖），git status 结果
+/// 基本不受它们影响。递归监听不滤掉它们的话，rust-analyzer/cargo 持续写
+/// target/ 就会反复触发 git status + 整窗重绘——空闲 CPU 高、耗电的主因。
+fn is_git_noise_path(p: &std::path::Path) -> bool {
+    p.components().any(|c| {
+        c.as_os_str().to_str().is_some_and(|s| {
+            matches!(
+                s,
+                "target" | "node_modules" | "dist" | "build" | ".next" | ".cache"
+            )
+        })
+    })
+}
+
 /// 跑一条 git 子命令：固定 `-C root` + `GIT_OPTIONAL_LOCKS=0`（避免刷新索引 stat 缓存
 /// 抢 .git/index.lock——之前吃过这个亏，见 ensure_git_status 的注释）。
 pub fn run_git(root: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -2398,9 +2412,11 @@ impl Workspace {
     /// 里任何东西变了就在 git_dirty 里标脏，配合下面 250ms 一次的检查循环，git 页
     /// 基本能做到「文件一变就刷新」而不是干等 1.5s 轮询窗口。
     ///
-    /// 递归监听整棵目录树（含 .git/ 内部），没有按 .gitignore 过滤噪音——多余的唤醒
-    /// 顶多让 ensure_git_status 多跑一次（已用 GIT_OPTIONAL_LOCKS=0 保证很轻），
-    /// 250ms 的检查节流已经把最坏情况锁定在每秒最多 4 次，不会失控。
+    /// 递归监听整棵目录树（含 .git/ 内部），**但过滤高频噪音路径**（构建产物/依赖
+    /// 目录）——不滤的话，rust-analyzer/cargo 持续写 target/、node_modules 的每次
+    /// 触碰都会触发一次 git status + 整窗重绘，空闲 CPU 高、耗电的主要来源。
+    /// 250ms 的检查节流把最坏情况锁定在每秒最多 4 次，但那是「每次都得跑外部 git
+    /// 进程」的 4 次，依然很贵。
     /// 只在这个 root 第一次进 Git 页时建一次；watcher 存进 git_watchers 常驻到应用退出
     /// （必须持有 watcher 不被 drop，否则会停止收事件）。
     pub fn ensure_git_watch(&mut self, root: String, cx: &mut Context<Self>) {
@@ -2410,7 +2426,12 @@ impl Workspace {
         let dirty = self.git_dirty.clone();
         let root_for_cb = root.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
+            if let Ok(event) = res {
+                // 噪音过滤：构建产物 / 依赖目录变化极频繁，监听它们只会让
+                // git status 反复空跑。只有真实源码/配置文件变化才标脏。
+                if event.paths.iter().any(|p| is_git_noise_path(p)) {
+                    return;
+                }
                 if let Ok(mut set) = dirty.lock() {
                     set.insert(root_for_cb.clone());
                 }
