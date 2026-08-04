@@ -6533,6 +6533,13 @@ impl Render for Workspace {
                         .id("workspace-image-preview-content")
                         .w(relative(0.86))
                         .h(relative(0.84))
+                        // flex 子项默认 min-size 是 auto（按内容撑开），大图/超长截图会把
+                        // 这个盒子的最小尺寸撑到图片原始像素大小，导致盒子本身超出屏幕
+                        // ——ObjectFit::Contain 只在「给定的盒子」内等比缩放，盒子本身撑
+                        // 大了它也救不回来。显式把 min 归零，让盒子能真正收缩到 86%/84%，
+                        // 图片才能完整缩放进可视区域，而不是被截断。
+                        .min_w(px(0.))
+                        .min_h(px(0.))
                         .cursor_default()
                         .on_click(|_ev, _window, cx| cx.stop_propagation())
                         .child(
