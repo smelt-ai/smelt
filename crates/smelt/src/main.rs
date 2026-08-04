@@ -6520,9 +6520,6 @@ impl Render for Workspace {
                 .absolute()
                 .inset_0()
                 .bg(rgba(0x000000d9))
-                .flex()
-                .items_center()
-                .justify_center()
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.acp_image_preview = None;
@@ -6531,15 +6528,18 @@ impl Render for Workspace {
                 .child(
                     div()
                         .id("workspace-image-preview-content")
-                        .w(relative(0.86))
-                        .h(relative(0.84))
-                        // flex 子项默认 min-size 是 auto（按内容撑开），大图/超长截图会把
-                        // 这个盒子的最小尺寸撑到图片原始像素大小，导致盒子本身超出屏幕
-                        // ——ObjectFit::Contain 只在「给定的盒子」内等比缩放，盒子本身撑
-                        // 大了它也救不回来。显式把 min 归零，让盒子能真正收缩到 86%/84%，
-                        // 图片才能完整缩放进可视区域，而不是被截断。
-                        .min_w(px(0.))
-                        .min_h(px(0.))
+                        // 之前用 flex + w/h(relative(..)) 让内容盒居中：flex 子项默认
+                        // min-size 是 auto，会按内容（大图/超长截图的原始像素尺寸）撑开，
+                        // 撑大了 ObjectFit::Contain 也救不回来；改成 min 归零又会在某些
+                        // 帧上被 flex-shrink 直接收缩到 0，图片整个消失不见。
+                        // 干脆不进 flex 布局：backdrop 本身 absolute 已经是定位上下文，
+                        // 内容盒直接用 absolute + 四边 inset 卡出 86%/84% 的居中区域，
+                        // 大小完全由 inset 决定，不受 flex 最小/收缩规则影响。
+                        .absolute()
+                        .top(relative(0.08))
+                        .bottom(relative(0.08))
+                        .left(relative(0.07))
+                        .right(relative(0.07))
                         .cursor_default()
                         .on_click(|_ev, _window, cx| cx.stop_propagation())
                         .child(
