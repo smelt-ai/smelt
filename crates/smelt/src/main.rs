@@ -6716,11 +6716,13 @@ impl Render for Workspace {
                     bounds.origin.x + (bounds.size.width - w) / 2.0,
                     bounds.origin.y + (bounds.size.height - h) / 2.0,
                 );
+                let image_bounds = Bounds {
+                    origin,
+                    size: size(w, h),
+                };
                 let _ = window.paint_image(
-                    Bounds {
-                        origin,
-                        size: size(w, h),
-                    },
+                    bounds,
+                    image_bounds,
                     Corners::all(px(4.0)),
                     render.clone(),
                     0,
