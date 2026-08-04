@@ -219,6 +219,8 @@ pub struct TerminalView {
     /// 首帧布局后强制发一次 PTY resize（含真实 cell 像素）。reattach 后守护 jolt
     /// 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺像素」的 TUI 排版。
     pty_kick_pending: bool,
+    /// 断线自动重连是否已在跑（防并发：多个触发点同时 schedule 时只起一个后台任务）。
+    reconnecting: bool,
 }
 
 /// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
@@ -576,6 +578,7 @@ impl TerminalView {
             launch_label,
             launch_cmd,
             pty_kick_pending: true,
+            reconnecting: false,
         }
     }
 
@@ -612,14 +615,103 @@ impl TerminalView {
     }
 
     /// 驱动重绘的常驻任务：await 读线程的唤醒 → `cx.notify()`。内容一到就画，
-    /// 不靠轮询。读线程退出（发送端 drop）时 recv 返回 Err，任务随之结束。
+    /// 不靠轮询。读线程退出（发送端 drop）时 recv 返回 Err——此时若当前 Terminal
+    /// 已标记 dead（连接被守护 exec/离线切断），触发自动重连；`adopt_terminal`
+    /// 换上新连接后旧 channel 的 Err 虽然也会走到这里，但新 Terminal 不是 dead，
+    /// 不会误触发。
     fn drive_redraws(rx: smol::channel::Receiver<()>, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break; // 视图已销毁
+                    return; // 视图已销毁
                 }
             }
+            // 读线程退出：连接断了。dead 判断放在 update 里，读的是「当前」Terminal。
+            let _ = this.update(cx, |this, cx| {
+                if this.terminal.is_dead() {
+                    this.schedule_auto_reconnect(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 断线自动重连（后台，带退避）。守护 exec 交接 / 被强杀 / 重启时，会话本身
+    /// 还活在守护里，reattach 即可恢复画面；只有 shell 真的退出/被杀（守护里查无
+    /// 此会话）才不复活。
+    ///
+    /// 这是终端断线的**兜底自愈**：此前重连只挂在 `upgrade_daemon_seamless` 一条
+    /// 路径上，而守护 exec 还有别的触发方式（ensure/handoff 迁移、装 App 时
+    /// handoff、异常重启），那些路径断开连接后没有任何人重连终端 → 全部终端
+    /// 永久冻结、只能重启 GUI。这里跟状态订阅通道的 2s 重连循环同一个思路，
+    /// 让终端自己长出一条命来，不依赖调用方。
+    fn schedule_auto_reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.reconnecting {
+            return;
+        }
+        self.reconnecting = true;
+        let sid = self.session_id.clone();
+        let cwd = self.cwd.clone();
+        cx.spawn(async move |this, cx| {
+            // 退避：500ms 起步，翻倍到 10s 封顶，重到成功或会话消失为止。
+            let mut delay = Duration::from_millis(500);
+            loop {
+                // 1) 守护活着吗？exec 期间 socket 短暂不可连 / 守护还没起来时，
+                //    都不能判「会话没了」——那是要等的，不是要放弃的。
+                let daemon_up = cx
+                    .background_executor()
+                    .spawn(async { terminal::daemon_info().is_some() })
+                    .await;
+                if !daemon_up {
+                    cx.background_executor().timer(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(10));
+                    continue;
+                }
+                // 2) 会话还在守护里吗？不在 = shell 真的退了/被杀，不复活它。
+                let sid2 = sid.clone();
+                let alive = cx
+                    .background_executor()
+                    .spawn(async move {
+                        terminal::list_daemon_sessions()
+                            .iter()
+                            .any(|s| s.id == sid2)
+                    })
+                    .await;
+                if !alive {
+                    break;
+                }
+                // 3) 重连（reattach：守护按 id 重放历史画面，输出不丢）。
+                let sid3 = sid.clone();
+                let cwd3 = cwd.clone();
+                let term = cx
+                    .background_executor()
+                    .spawn(async move {
+                        terminal::Terminal::spawn(24, 80, cwd3.as_deref(), &sid3, None)
+                    })
+                    .await;
+                match term {
+                    Ok(t) => {
+                        // 主线程挂回：adopt_terminal 换 Terminal、清 attention、
+                        // 重置交互态并触发重绘。
+                        let done = this.update(cx, |this, cx| {
+                            this.reconnecting = false;
+                            this.adopt_terminal(t, cx);
+                        });
+                        if done.is_err() {
+                            return; // 视图已销毁
+                        }
+                        break;
+                    }
+                    Err(_) => {
+                        cx.background_executor().timer(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(10));
+                    }
+                }
+            }
+            // 会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
+            let _ = this.update(cx, |this, _| {
+                this.reconnecting = false;
+            });
         })
         .detach();
     }

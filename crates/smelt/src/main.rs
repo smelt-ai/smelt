@@ -2162,6 +2162,11 @@ struct Workspace {
     daemon_upgrade_msg: Option<String>,
     /// 无缝升级进行中（按钮置灰防连点）。
     daemon_upgrading: bool,
+    /// 检测到守护已过期、但有 agent 正在跑，升级挂起等空闲：true = 待升级。
+    /// 空闲后（或用户手动点升级）会清掉，转成真正的 `upgrade_daemon_seamless`。
+    daemon_upgrade_pending: bool,
+    /// 待升级的退避重试定时器是否已在跑（防重复 spawn）。
+    daemon_upgrade_retry_scheduled: bool,
     /// 守护自报的运行信息（PID / 启动时刻 / 会话数），设置页「更新」里展示。
     /// 跟 daemon_outdated 同一趟后台探测回填；守护没起 → None。
     daemon_info: Option<terminal::DaemonInfo>,
@@ -2466,6 +2471,8 @@ impl Workspace {
             daemon_outdated: None,
             daemon_upgrade_msg: None,
             daemon_upgrading: false,
+            daemon_upgrade_pending: false,
+            daemon_upgrade_retry_scheduled: false,
             daemon_info: None,
             show_daemon_restart_confirm: false,
             session_manager_open: false,
@@ -4790,9 +4797,56 @@ impl Workspace {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
                 if outdated {
-                    this.upgrade_daemon_seamless(cx);
+                    if this.any_agent_busy(cx) {
+                        // 有 agent 正在跑：无缝升级虽然不丢会话，但会让所有终端
+                        // 闪断重连——挑用户不在跑任务的时刻做，别背着用户换代
+                        // （这正是「用着用着终端全卡」的体验来源之一）。
+                        // 挂起等空闲，30s 后重试（agent 通常一个回合就结束了）。
+                        this.daemon_upgrade_pending = true;
+                        this.schedule_daemon_upgrade_retry(cx);
+                    } else {
+                        this.daemon_upgrade_pending = false;
+                        this.upgrade_daemon_seamless(cx);
+                    }
+                } else {
+                    this.daemon_upgrade_pending = false;
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
+    /// 空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
+    fn any_agent_busy(&self, cx: &App) -> bool {
+        cx.try_global::<DaemonStates>()
+            .map(|states| {
+                states.0.lock().unwrap().values().any(|s| {
+                    matches!(
+                        s.phase,
+                        crate::terminal::DaemonPhase::Thinking
+                            | crate::terminal::DaemonPhase::ExecutingTool
+                    )
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// 待升级挂起后 30s 重试一次：agent 回合通常很快结束，空闲下来就该升掉，
+    /// 免得长期停在旧守护（老协议兼容是有的，但没必要一直拖到用户手动操作）。
+    fn schedule_daemon_upgrade_retry(&mut self, cx: &mut Context<Self>) {
+        if self.daemon_upgrade_retry_scheduled {
+            return;
+        }
+        self.daemon_upgrade_retry_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon_upgrade_retry_scheduled = false;
+                this.check_daemon_outdated(cx);
             });
         })
         .detach();
