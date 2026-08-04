@@ -22,7 +22,7 @@ import os
 import urllib.request
 
 API_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
-MODEL = "deepseek-chat"  # 可选 deepseek-reasoner（R1，推理更强但更慢更贵）
+MODEL = "deepseek-v4-flash"  # 快模型；备选 deepseek-chat（V3）
 
 SYSTEM_PROMPT = (
     "你是开源项目的 issue 管理员。根据 issue 的标题和正文，只输出 JSON，"
