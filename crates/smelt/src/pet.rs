@@ -43,6 +43,10 @@ const IDLE_CHAT_FRAMES: f32 = 20.0 * 160.0;
 const AFK_FRAMES: f32 = 20.0 * 600.0;
 /// 切换 app 后再评论的冷却帧数（20fps × ~75s）：频繁切 app 时不啰嗦。
 const APP_SWITCH_COOLDOWN: f32 = 20.0 * 75.0;
+/// 前台 app 探测间隔（帧）：`frontmost_app()` 是 LaunchServices 的 XPC 同步调用，
+/// 每帧查会让主线程空转在进程间通信上（空闲 CPU 近 20% 的主因，issue #23）。
+/// 用户切换前台 app 的感知延迟 1 秒完全无感，低频轮询足够。
+const APP_PROBE_INTERVAL_FRAMES: u32 = 20;
 
 /// 「忙碌值」超过此值判定情绪为 Busy。
 const BUSY_THRESHOLD: f32 = 2.2;
@@ -179,6 +183,9 @@ pub struct PetView {
     afk_notified: bool,
     /// 上次感知到的前台 app 名（用于检测「切换了 app」）。
     last_app: Option<String>,
+    /// 前台 app 探测节流计数：攒够 APP_PROBE_INTERVAL_FRAMES 帧（1s）才查一次
+    /// `frontmost_app()`——那是 XPC 同步调用，每帧查会让空闲 CPU 居高不下。
+    app_probe_ticks: u32,
     /// 切 app 评论的冷却计时（帧），>0 时不评论。
     app_switch_cd: f32,
     /// 「忙碌值」：每次切 app 累加，逐帧衰减，用于推出情绪状态。
@@ -258,28 +265,35 @@ impl PetView {
                     }
 
                     // 感知前台 app：切到别的 app 时偶尔评论一句（带冷却，不啰嗦）。
+                    // 低频探测（1s 一次）：frontmost_app 是 XPC 同步调用，每帧查太贵。
                     if this.app_switch_cd > 0.0 {
                         this.app_switch_cd -= 1.0;
                     }
-                    let front = frontmost_app();
-                    if front != this.last_app {
-                        let had_prev = this.last_app.is_some();
-                        this.last_app = front.clone();
-                        if had_prev {
-                            // 切 app 记一笔「忙碌值」，不受评论冷却限制——即便不吭声，情绪也在累积。
-                            this.switch_energy = (this.switch_energy + 1.0).min(6.0);
-                        }
-                        // 首次观测只记基线不评论；切到 smelt 自己也不评论。
-                        if had_prev && this.app_switch_cd <= 0.0 {
-                            if let Some(app) = front.filter(|a| a != "smelt" && a != "Smelt") {
-                                this.app_switch_cd = APP_SWITCH_COOLDOWN;
-                                this.proactive_say(
-                                    format!(
-                                        "主人刚切到「{app}」这个应用，用宠物口吻俏皮地评论一句，别超过 15 字。"
-                                    ),
-                                    format!("在用 {app} 呀～"),
-                                    cx,
-                                );
+                    this.app_probe_ticks += 1;
+                    if this.app_probe_ticks >= APP_PROBE_INTERVAL_FRAMES {
+                        this.app_probe_ticks = 0;
+                        let front = frontmost_app();
+                        if front != this.last_app {
+                            let had_prev = this.last_app.is_some();
+                            this.last_app = front.clone();
+                            if had_prev {
+                                // 切 app 记一笔「忙碌值」，不受评论冷却限制——即便不吭声，情绪也在累积。
+                                this.switch_energy = (this.switch_energy + 1.0).min(6.0);
+                            }
+                            // 首次观测只记基线不评论；切到 smelt 自己也不评论。
+                            if had_prev && this.app_switch_cd <= 0.0 {
+                                if let Some(app) =
+                                    front.filter(|a| a != "smelt" && a != "Smelt")
+                                {
+                                    this.app_switch_cd = APP_SWITCH_COOLDOWN;
+                                    this.proactive_say(
+                                        format!(
+                                            "主人刚切到「{app}」这个应用，用宠物口吻俏皮地评论一句，别超过 15 字。"
+                                        ),
+                                        format!("在用 {app} 呀～"),
+                                        cx,
+                                    );
+                                }
                             }
                         }
                     }
@@ -349,6 +363,7 @@ impl PetView {
             still_frames: 0.0,
             afk_notified: false,
             last_app: None,
+            app_probe_ticks: 0,
             app_switch_cd: 0.0,
             switch_energy: 0.0,
             native_drag: false,
