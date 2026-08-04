@@ -1,4 +1,4 @@
-//! 设置面板：外观 / 桌面宠物 / 启动参数 / 更新 四个分组，含嵌入式设置页
+//! 设置面板：外观 / LLM / 启动参数 / 更新 等分组，含嵌入式设置页
 //! （主窗口右上角齿轮）和独立设置窗口共用的渲染逻辑。
 //!
 //! 跟 git_panel.rs / file_tree.rs 同一个套路：从 main.rs 拆出来的 `impl Workspace`
@@ -19,14 +19,14 @@ use gpui_component::input::Input;
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
-use gpui_component::radio::{Radio, RadioGroup};
+// use gpui_component::radio::{Radio, RadioGroup}; // 宠物删除后未用
 use gpui_component::setting::{
     SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::*;
 
-use crate::{Workspace, agent, pet, terminal, terminal_view, updater};
+use crate::{Workspace, agent, terminal, terminal_view, updater};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -1205,19 +1205,7 @@ fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
     cx.set_global(a);
 }
 
-/// 改桌面宠物配置全局 + 存盘 + 显隐同步，不触发 view 重绘，用法同 [`apply_appearance`]。
-fn apply_pet_config(f: impl FnOnce(&mut pet::PetConfig), cx: &mut App) {
-    let mut c = cx.global::<pet::PetConfig>().clone();
-    let was_enabled = c.enabled;
-    f(&mut c);
-    pet::save_pet_config(&c);
-    if c.enabled != was_enabled {
-        pet::sync_pet_window_visibility(cx, c.enabled);
-    }
-    cx.set_global(c);
-}
-
-/// 改宠物大脑（LLM）配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
+/// 改 LLM 配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
 fn apply_llm_config(f: impl FnOnce(&mut agent::LlmConfig), cx: &mut App) {
     let mut c = cx.global::<agent::LlmConfig>().clone();
     f(&mut c);
@@ -1419,7 +1407,6 @@ impl Workspace {
 
         // —— 有状态组件：不透明度滑块 + 字体大小滑块 + 背景色 / 宠物色取色器 ——
         let ap = cx.global::<Appearance>().clone();
-        let pc = cx.global::<pet::PetConfig>().clone();
         let opacity_slider = cx.new(|_| {
             SliderState::new()
                 .min(60.0)
@@ -1436,8 +1423,6 @@ impl Workspace {
         });
         let bg_color_picker =
             cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(ap.bg_color)));
-        let pet_color_picker =
-            cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(pc.color)));
 
         self.settings_subs.clear();
 
@@ -1474,20 +1459,9 @@ impl Workspace {
                 }
             },
         ));
-        self.settings_subs.push(cx.subscribe(
-            &pet_color_picker,
-            |this, _s, ev: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(c) = ev;
-                if let Some(hsla) = c {
-                    let color = hsla_to_rgb(*hsla);
-                    this.update_pet_config(move |cfg| cfg.color = color, cx);
-                }
-            },
-        ));
         self.opacity_slider = Some(opacity_slider);
         self.font_size_slider = Some(font_size_slider);
         self.bg_color_picker = Some(bg_color_picker);
-        self.pet_color_picker = Some(pet_color_picker);
     }
 
     /// 无 window 版：改全局 + 存盘 + 重绘。窗口背景（透明/模糊）由 render 里的
@@ -1497,17 +1471,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 修改桌面宠物配置：改全局 + 存盘 + 触发重绘。宠物窗口每帧读该全局，改动 ≤50ms 生效。
-    pub fn update_pet_config(
-        &mut self,
-        f: impl FnOnce(&mut pet::PetConfig),
-        cx: &mut Context<Self>,
-    ) {
-        apply_pet_config(f, cx);
-        cx.notify();
-    }
-
-    /// 修改宠物大脑（LLM）配置：改全局 + 存盘 + 重绘。
+    /// 修改 LLM 配置：改全局 + 存盘 + 重绘。
     pub fn update_llm_config(
         &mut self,
         f: impl FnOnce(&mut agent::LlmConfig),
@@ -1762,7 +1726,7 @@ impl Workspace {
     }
 
     /// 渲染独立设置页面：铺满主区、居中限宽、支持滚动。
-    /// 设置页主体：外观 / 桌面宠物 / 更新三个分组。供嵌入式设置页（主窗口右上角齿轮，
+    /// 设置页主体：外观 / LLM / 启动 / 更新 等分组。供嵌入式设置页（主窗口右上角齿轮，
     /// 带「返回」头）和独立设置窗口（原生标题栏，无需「返回」）共用，各自决定外层怎么包。
     pub fn render_settings_content(&self, cx: &mut Context<Self>) -> Div {
         let (fg, muted, border, popover) = {
@@ -1799,8 +1763,6 @@ impl Workspace {
         let btn_hover = move |id: &'static str, label: String, hover_bg: Hsla| {
             btn_base(id, label).hover(move |s| s.bg(hover_bg))
         };
-
-        const PET_SIZES: [f32; 3] = [0.8, 1.0, 1.25];
 
         // —— 外观 ——
         let bg_color_picker = self.bg_color_picker.clone();
@@ -1972,86 +1934,44 @@ impl Workspace {
                 ),
             ]));
 
-        // —— 桌面宠物 ——
-        let pet_color_picker = self.pet_color_picker.clone();
+        // —— LLM：Git 面板「生成 commit message」等功能的 OpenAI 兼容接口配置 ——
+        // 桌面宠物已删除（原「宠物大脑」区块整体并入这里，去掉宠物语义）。
         let llm_inputs = self.llm_inputs.clone();
-        let pet_page = SettingPage::new("桌面宠物").group(SettingGroup::new().items(vec![
-                SettingItem::new(
-                    "显示宠物",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<pet::PetConfig>().enabled,
-                        |v: bool, cx: &mut App| apply_pet_config(|c| c.enabled = v, cx),
-                    ),
+        let llm_page = SettingPage::new("LLM").group(SettingGroup::new().items(vec![
+            SettingItem::new(
+                "启用 LLM",
+                SettingField::switch(
+                    |cx: &App| cx.global::<agent::LlmConfig>().enabled,
+                    |v: bool, cx: &mut App| apply_llm_config(|c| c.enabled = v, cx),
                 ),
-                SettingItem::new(
-                    "状态播报",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<pet::PetConfig>().notify,
-                        |v: bool, cx: &mut App| apply_pet_config(|c| c.notify = v, cx),
-                    ),
-                ),
-                SettingItem::new(
-                    "宠物大脑（LLM）",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<agent::LlmConfig>().enabled,
-                        |v: bool, cx: &mut App| apply_llm_config(|c| c.enabled = v, cx),
-                    ),
-                )
-                .description("接入 OpenAI 兼容接口，点击或通知宠物时将调用 LLM 主动说话。"),
-                SettingItem::render(move |_, _, _| {
-                    let field = |label: &str, state: &Entity<gpui_component::input::InputState>| {
+            )
+            .description("接入 OpenAI 兼容接口，用于 Git 面板自动生成 Conventional Commits 提交信息。"),
+            SettingItem::render(move |_, _, _| {
+                let field = |label: &str, state: &Entity<gpui_component::input::InputState>| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_xs().text_color(muted).child(label.to_string()))
+                        .child(Input::new(state).small())
+                };
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .children(llm_inputs.as_ref().map(|inp| {
                         div()
                             .flex()
                             .flex_col()
-                            .gap_1()
-                            .child(div().text_xs().text_color(muted).child(label.to_string()))
-                            .child(Input::new(state).small())
-                    };
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .children(llm_inputs.as_ref().map(|inp| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(field("接口地址 base_url", &inp.base_url))
-                                .child(field("API Key", &inp.api_key))
-                                .child(field("模型 model", &inp.model))
-                                .child(field("人设 persona", &inp.persona))
-                        }))
-                }),
-                SettingItem::new(
-                    "颜色",
-                    SettingField::render(move |_, _, _| {
-                        div().children(
-                            pet_color_picker
-                                .as_ref()
-                                .map(|p| ColorPicker::new(p).small()),
-                        )
-                    }),
-                ),
-                SettingItem::new(
-                    "大小",
-                    SettingField::render(move |_, _, cx: &mut App| {
-                        let scale = cx.global::<pet::PetConfig>().scale;
-                        let size_ix = PET_SIZES.iter().position(|v| (scale - v).abs() < 0.01);
-                        RadioGroup::horizontal("pet-size")
-                            .selected_index(size_ix)
-                            .on_click(|ix: &usize, _window, cx: &mut App| {
-                                let val = PET_SIZES[*ix];
-                                apply_pet_config(|c| c.scale = val, cx);
-                            })
-                            .children([
-                                Radio::new("sz-s").label("小"),
-                                Radio::new("sz-m").label("中"),
-                                Radio::new("sz-l").label("大"),
-                            ])
-                    }),
-                ),
-            ]));
+                            .gap_3()
+                            .child(field("接口地址 base_url", &inp.base_url))
+                            .child(field("API Key", &inp.api_key))
+                            .child(field("模型 model", &inp.model))
+                            .child(field("人设 persona", &inp.persona))
+                    }))
+            }),
+        ]));
 
         // —— 启动：项目「+」下拉菜单的可配置启动项 ——
         // Settings 的 list 测量项高度时，百分比宽度（w_full）经常解析不到确定父宽，
@@ -3303,7 +3223,7 @@ impl Workspace {
                 })
                 .pages(vec![
                     appearance_page,
-                    pet_page,
+                    llm_page,
                     launch_page,
                     agent_page,
                     update_page,

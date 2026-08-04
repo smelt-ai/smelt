@@ -378,14 +378,7 @@ impl TerminalView {
                         this.pending_bell_at = None;
                     }
                     if let Some((kind, title, msg)) = attention {
-                        let task = this.terminal.current_title();
                         this.publish_attention(kind, title, msg.clone(), cx);
-                        // 宠物播报照常（应用内的轻提示，不算系统级打扰；宠物自己有气泡节流）。
-                        let line = match task.as_deref() {
-                            Some(t) if !t.is_empty() => format!("「{t}」{msg}"),
-                            _ => msg.clone(),
-                        };
-                        crate::pet::push_pet_message(cx, line);
                     }
 
                     // hook 一旦激活，运行/完成都以结构化 phase 为准；否则才回退标题
@@ -425,7 +418,6 @@ impl TerminalView {
                     };
                     let failure_edge =
                         structured_events && !this.was_structured_failed && structured_failed;
-                    let name = this.title.clone();
                     if completion_edge {
                         // fallback 标题由运行转为空闲时也产生统一完成事件；结构化完成和
                         // Codex OSC Stop 已由各自的明确事件发布，不能重复入队。
@@ -448,10 +440,6 @@ impl TerminalView {
                                 this.pending_task_continue_cwd = Some(cwd);
                             }
                         }
-                        crate::pet::push_pet_message(
-                            cx,
-                            format!("「{name}」任务完成啦，来看看结果吧"),
-                        );
                     }
                     if failure_edge {
                         let sid = this.session_id.clone();
@@ -465,10 +453,6 @@ impl TerminalView {
                             // Workspace 继续 claim——同 cwd 下一条或重试该任务。
                             this.pending_task_continue_cwd = Some(cwd);
                         }
-                        crate::pet::push_pet_message(
-                            cx,
-                            format!("「{name}」任务失败，已按重试策略处理"),
-                        );
                     }
                     this.was_structured_succeeded = structured_succeeded;
                     this.was_structured_failed = structured_failed;
@@ -481,10 +465,6 @@ impl TerminalView {
                         this.idle_was_running = false;
                         if this.running_frames == STUCK_FRAMES && !this.stuck_notified {
                             this.stuck_notified = true;
-                            crate::pet::push_pet_message(
-                                cx,
-                                format!("「{name}」已经跑了好久，要不去瞅一眼？"),
-                            );
                         }
                     } else {
                         this.running_frames = 0;
