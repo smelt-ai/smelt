@@ -105,6 +105,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> AcpSnapshot {
         entries_offset,
         entries_total: entries_offset,
         snapshot_revision: 0,
+        replaying_history: false,
         entries: Vec::new(),
         phase: AcpPhase::Ended(reason.to_string()),
         pending_permissions: Vec::new(),

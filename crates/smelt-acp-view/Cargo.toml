@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 smelt-core = { path = "../smelt-core" }
 smelt-ui = { path = "../smelt-ui" }
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "e9df1921bb209fe2dceaa47234b2a2bf9a8cb1f8", features = ["tree-sitter-languages"] }
 # 仅用于 SessionId 这一个类型（acp_session_id 字段/存档边界），协议本身的连接
 # 驱动已经不在这层了。
 agent-client-protocol = { version = "=1.3.0", features = ["unstable_elicitation"] }
