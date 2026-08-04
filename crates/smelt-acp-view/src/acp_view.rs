@@ -132,6 +132,9 @@ pub struct AcpView {
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
     rendered_diffs: std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+    /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
+    /// entry 变化时执行，静态重绘直接复用 `SharedString`。
+    rendered_markdown: Vec<Option<gpui::SharedString>>,
     /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
     /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
     supports_image: bool,
@@ -351,6 +354,7 @@ impl AcpView {
         let initial_entry_count = entries.len();
         let rendered_images = decode_entry_images(&entries, 0);
         let rendered_diffs = build_diff_cache(&entries);
+        let rendered_markdown = build_markdown_cache(&entries, cwd.as_deref());
         let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.));
         list_state.set_follow_mode(FollowMode::Tail);
         let view = cx.entity().downgrade();
@@ -387,6 +391,7 @@ impl AcpView {
             pending_images: Vec::new(),
             rendered_images,
             rendered_diffs,
+            rendered_markdown,
             supports_image: true,
             paste_hint: None,
             completion: None,
@@ -973,6 +978,12 @@ impl AcpView {
             // 不应发生：Unix stream 有序且写失败会断开。保守清空，避免显示错位历史。
             self.entries = snap.entries;
         }
+        refresh_markdown_cache(
+            &self.entries,
+            entries_offset,
+            self.cwd.as_deref(),
+            &mut self.rendered_markdown,
+        );
         self.rendered_images
             .retain(|(entry_ix, _), _| *entry_ix < entries_offset);
         self.rendered_images.extend(decode_entry_images(
@@ -1821,7 +1832,7 @@ impl Render for AcpView {
                         .into_any_element(),
                     // 用户气泡右对齐限宽（对齐设计稿）：整行铺满时跟 agent 正文
                     // 混成一片，看不出谁在说话。
-                    AcpEntry::User(text) => h_flex()
+                    AcpEntry::User(_) => h_flex()
                         .w_full()
                         .justify_end()
                         .child(
@@ -1841,7 +1852,12 @@ impl Render for AcpView {
                                 .text_sm()
                                 .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                     ("acp-user-md", i),
-                                    markdown_user_text_for_cwd(text, this.cwd.as_deref()),
+                                    cached_entry_markdown(
+                                        &this.rendered_markdown,
+                                        i,
+                                        entry,
+                                        this.cwd.as_deref(),
+                                    ),
                                 )),
                         )
                         .into_any_element(),
@@ -1851,7 +1867,12 @@ impl Render for AcpView {
                             content = content.child(
                                 smelt_ui::markdown_mermaid::markdown_view_clickable(
                                     ("acp-user-images-md", i),
-                                    markdown_user_text_for_cwd(text, this.cwd.as_deref()),
+                                    cached_entry_markdown(
+                                        &this.rendered_markdown,
+                                        i,
+                                        entry,
+                                        this.cwd.as_deref(),
+                                    ),
                                 ),
                             );
                         }
@@ -1977,7 +1998,12 @@ impl Render for AcpView {
                                         .italic()
                                         .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                             ("acp-thought-md", i),
-                                            markdown_text_for_cwd(text, this.cwd.as_deref()),
+                                            cached_entry_markdown(
+                                                &this.rendered_markdown,
+                                                i,
+                                                entry,
+                                                this.cwd.as_deref(),
+                                            ),
                                         )),
                                 )
                             })
@@ -1994,7 +2020,12 @@ impl Render for AcpView {
                             .text_color(t.foreground)
                             .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                 ("acp-md", i),
-                                markdown_text_for_cwd(text, this.cwd.as_deref()),
+                                cached_entry_markdown(
+                                    &this.rendered_markdown,
+                                    i,
+                                    entry,
+                                    this.cwd.as_deref(),
+                                ),
                             ))
                             .when(final_answer, |col| {
                                 col.child(
@@ -3901,6 +3932,57 @@ fn markdown_user_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
     markdown_text_for_cwd(&escape_html_tags_for_markdown(text), cwd)
 }
 
+fn markdown_for_entry(entry: &AcpEntry, cwd: Option<&str>) -> Option<gpui::SharedString> {
+    let rendered = match entry {
+        AcpEntry::User(text) if !is_interrupt_marker(text) => markdown_user_text_for_cwd(text, cwd),
+        AcpEntry::UserWithImages { text, .. } => markdown_user_text_for_cwd(text, cwd),
+        AcpEntry::Assistant { text, .. } => markdown_text_for_cwd(text, cwd),
+        _ => return None,
+    };
+    Some(rendered.into())
+}
+
+fn build_markdown_cache(
+    entries: &[AcpEntry],
+    cwd: Option<&str>,
+) -> Vec<Option<gpui::SharedString>> {
+    entries
+        .iter()
+        .map(|entry| markdown_for_entry(entry, cwd))
+        .collect()
+}
+
+fn refresh_markdown_cache(
+    entries: &[AcpEntry],
+    entries_offset: usize,
+    cwd: Option<&str>,
+    cache: &mut Vec<Option<gpui::SharedString>>,
+) {
+    if cache.len() < entries_offset {
+        *cache = build_markdown_cache(entries, cwd);
+        return;
+    }
+    cache.truncate(entries_offset);
+    cache.extend(
+        entries[entries_offset..]
+            .iter()
+            .map(|entry| markdown_for_entry(entry, cwd)),
+    );
+}
+
+fn cached_entry_markdown(
+    cache: &[Option<gpui::SharedString>],
+    entry_ix: usize,
+    entry: &AcpEntry,
+    cwd: Option<&str>,
+) -> gpui::SharedString {
+    cache
+        .get(entry_ix)
+        .and_then(Clone::clone)
+        .or_else(|| markdown_for_entry(entry, cwd))
+        .unwrap_or_default()
+}
+
 /// Raw HTML is parsed as markup by the Markdown renderer. Unsupported tags can
 /// therefore make the whole fragment disappear; user messages should show the
 /// literal tag instead. Keep code spans and fenced code untouched.
@@ -4243,10 +4325,10 @@ fn render_diff_lines(
 #[cfg(test)]
 mod tests {
     use super::{
-        HANDOFF_MAX_CHARS, build_conversation_layout, build_handoff_prompt,
+        HANDOFF_MAX_CHARS, build_conversation_layout, build_handoff_prompt, build_markdown_cache,
         escape_html_tags_for_markdown, is_active_permission_selection, markdown_text_for_cwd,
-        markdown_user_text_for_cwd, resolve_restart_launch, tool_card_default_expanded,
-        tool_uses_compact_process_row,
+        markdown_user_text_for_cwd, refresh_markdown_cache, resolve_restart_launch,
+        tool_card_default_expanded, tool_uses_compact_process_row,
     };
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
     use smelt_core::acp_session::{
@@ -4313,6 +4395,38 @@ mod tests {
 
         let rendered = markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", None);
         assert!(rendered.contains("\\<panel>"));
+    }
+
+    #[test]
+    fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
+        let mut entries = vec![
+            AcpEntry::User("见 [旧文件](old.rs) 和 <panel>".into()),
+            AcpEntry::Assistant {
+                text: "查看 [旧回答](answer.rs)".into(),
+                thought: false,
+            },
+        ];
+        let mut cache = build_markdown_cache(&entries, Some("/tmp/project"));
+        let unchanged_prefix = cache[0].clone();
+
+        entries.truncate(1);
+        entries.push(AcpEntry::Assistant {
+            text: "查看 [新回答](new.rs)".into(),
+            thought: false,
+        });
+        entries.push(AcpEntry::Divider("next".into()));
+        refresh_markdown_cache(&entries, 1, Some("/tmp/project"), &mut cache);
+
+        assert_eq!(cache.len(), entries.len());
+        assert_eq!(cache[0], unchanged_prefix);
+        assert!(cache[0].as_deref().unwrap().contains("\\<panel>"));
+        assert!(
+            cache[1]
+                .as_deref()
+                .unwrap()
+                .contains("smelt-file:///tmp/project/new.rs")
+        );
+        assert!(cache[2].is_none());
     }
 
     #[test]

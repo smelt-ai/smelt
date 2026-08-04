@@ -27,14 +27,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement, IntoElement, ObjectFit, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, px, relative,
 };
 use gpui_component::ActiveTheme;
-use gpui_component::text::{MarkdownNode, MarkdownParseContext, TextView, markdown_ast};
+use gpui_component::text::{
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, markdown_ast,
+};
 use sha2::{Digest, Sha256};
 
 /// `~/.smelt/mermaid_cache/`——照抄 `tasks_dir()`/`worktrees_root()` 的模式：
@@ -277,13 +279,33 @@ fn markdown_view_with_selection(
 ) -> TextView {
     TextView::markdown(id, text)
         .selectable(selectable)
-        .markdown_block_parser(parse_mermaid_block)
-        .markdown_block_renderer("mermaid", render_mermaid_block)
+        .markdown_extensions(shared_markdown_extensions().clone())
+}
+
+/// `MarkdownExtensions` assigns a new global revision whenever a parser or renderer is registered.
+/// Rebuilding it from the immediate-mode render path therefore makes every existing `TextViewState`
+/// synchronously reparse unchanged Markdown on every frame. Keep one immutable registry so cloned
+/// views retain a stable revision.
+fn shared_markdown_extensions() -> &'static MarkdownExtensions {
+    static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
+    EXTENSIONS.get_or_init(|| {
+        MarkdownExtensions::default()
+            .block_parser(parse_mermaid_block)
+            .block_renderer("mermaid", render_mermaid_block)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_extensions_are_reused_across_views() {
+        assert!(std::ptr::eq(
+            shared_markdown_extensions(),
+            shared_markdown_extensions()
+        ));
+    }
 
     fn temp_cache_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("smelt-mermaid-{}-{tag}", std::process::id()))
