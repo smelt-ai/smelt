@@ -522,6 +522,10 @@ pub fn spawn_acp(launch: AcpLaunch, spawn_gate: Option<Arc<RwLock<()>>>) -> AcpH
                 } else {
                     format!("{e}\n--- agent stderr ---\n{tail}")
                 };
+                crate::app_log::error(
+                    "acp",
+                    &format!("会话 {} 连接异常终止：{msg}", launch.sid),
+                );
                 let _ = event_tx.try_send(AcpEvent::Fatal(msg));
             }
             // Ok 结束（Shutdown）不发 Fatal——UI 主动关的，没必要再报。

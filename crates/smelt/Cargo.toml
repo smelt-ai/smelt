@@ -55,7 +55,7 @@ similar = "2"
 notify = "6"
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # mermaid 代码块画图：纯 Rust 解析+布局+出 SVG，不需要浏览器/Node。换过一次库：
 # 试过 mermaid-rs-renderer，边路由（尤其反向/回边）绕远路明显，这个用真正的
 # Sugiyama/dagre 布局，实测同一张图边路径干净不少。=0.2.0 精确锁版本——它默认
