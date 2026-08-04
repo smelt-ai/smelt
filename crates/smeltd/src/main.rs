@@ -109,9 +109,10 @@
 //! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
 //! 默认关闭、绑回环，见 collaboration.md 的安全底线。
 //!
-//! 网关运行期间在 macOS 持有 `PreventUserIdleSystemSleep` 电源断言：屏幕仍可按系统设置
-//! 正常熄灭，但整机不会因空闲睡眠而把网关和 iroh 挂起。`RemoteGateway` 销毁即释放，
-//! 所以关闭远程、守护升级和退出都不会留下常驻断言。
+//! 防休眠按**实际远程客户端连接**引用计数：有 WebSocket 客户端连着才在 macOS 持有
+//! `PreventUserIdleSystemSleep` 电源断言（屏幕仍可按系统设置正常熄灭，但整机不会因
+//! 空闲睡眠把活跃的远程会话挂起），全部断开即释放——网关空跑时整机照常休眠，不再
+//! 常驻断言耗电（见 issue #23）。实现见 remote_gateway::SleepAssertion。
 //!
 //! ## iroh 隧道（`iroh_start`/`iroh_stop`/`iroh_status`）
 //!
@@ -978,72 +979,6 @@ struct RemoteGateway {
     addr: std::net::SocketAddr,
     write: bool,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    _sleep_assertion: Option<SystemSleepAssertion>,
-}
-
-#[cfg(target_os = "macos")]
-struct SystemSleepAssertion {
-    id: u32,
-}
-
-#[cfg(target_os = "macos")]
-impl SystemSleepAssertion {
-    fn acquire() -> Result<Self, i32> {
-        use core_foundation::base::TCFType as _;
-        use core_foundation::string::{CFString, CFStringRef};
-
-        #[link(name = "IOKit", kind = "framework")]
-        unsafe extern "C" {
-            fn IOPMAssertionCreateWithName(
-                assertion_type: CFStringRef,
-                assertion_level: u32,
-                assertion_name: CFStringRef,
-                assertion_id: *mut u32,
-            ) -> i32;
-        }
-
-        let assertion_type = CFString::new("PreventUserIdleSystemSleep");
-        let reason = CFString::new("Smelt remote access is enabled");
-        let mut id = 0;
-        let result = unsafe {
-            IOPMAssertionCreateWithName(
-                assertion_type.as_concrete_TypeRef(),
-                255,
-                reason.as_concrete_TypeRef(),
-                &mut id,
-            )
-        };
-        if result == 0 {
-            Ok(Self { id })
-        } else {
-            Err(result)
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for SystemSleepAssertion {
-    fn drop(&mut self) {
-        #[link(name = "IOKit", kind = "framework")]
-        unsafe extern "C" {
-            fn IOPMAssertionRelease(assertion_id: u32) -> i32;
-        }
-
-        let result = unsafe { IOPMAssertionRelease(self.id) };
-        if result != 0 {
-            dlog(&format!("释放远程电源断言失败：IOKit {result}"));
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-struct SystemSleepAssertion;
-
-#[cfg(not(target_os = "macos"))]
-impl SystemSleepAssertion {
-    fn acquire() -> Result<Self, i32> {
-        Ok(Self)
-    }
 }
 
 struct RemoteStateData {
@@ -1225,19 +1160,11 @@ fn start_remote_gateway(
 
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => {
-            let sleep_assertion = match SystemSleepAssertion::acquire() {
-                Ok(assertion) => Some(assertion),
-                Err(code) => {
-                    dlog(&format!("远程服务无法阻止系统空闲睡眠：IOKit {code}"));
-                    None
-                }
-            };
             guard.gateway = Some(RemoteGateway {
                 token: token.clone(),
                 addr,
                 write,
                 shutdown_tx,
-                _sleep_assertion: sleep_assertion,
             });
             Ok((token, addr, write))
         }
@@ -1442,17 +1369,8 @@ mod ensure_remote_gateway_write_tests {
         let (token, _addr, write) = ensure_remote_gateway_with_write(&state, true).expect("start");
         assert!(write, "应烤进 write=true");
         assert!(!token.is_empty());
-        #[cfg(target_os = "macos")]
-        assert!(
-            state
-                .lock()
-                .unwrap()
-                .gateway
-                .as_ref()
-                .and_then(|gateway| gateway._sleep_assertion.as_ref())
-                .is_some(),
-            "远程网关运行时必须持有系统防休眠断言"
-        );
+        // 防休眠断言现在按「实际 WebSocket 客户端连接」引用计数（见
+        // remote_gateway::SleepAssertion），网关空跑不持常驻断言——不再在这里断言。
         // 现状一致：再要一次可写必须复用同一 token，不能偷偷再起一个
         let (token2, _, write2) = ensure_remote_gateway_with_write(&state, true).expect("reuse");
         assert_eq!(token, token2);

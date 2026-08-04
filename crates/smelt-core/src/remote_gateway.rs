@@ -80,6 +80,143 @@ pub fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
+/// 远程客户端连接的防休眠断言（引用计数）。
+///
+/// 网关开着但**没有客户端连**时,整机应该照常休眠——以前网关一开就常驻一个
+/// `PreventUserIdleSystemSleep`,合盖/空闲睡眠都被挡掉,长期插电放着也持续耗电
+/// （见 issue #23）。改为:每有一个存活的 WebSocket 客户端连接,引用计数 +1;
+/// 首个连接建立时 acquire 断言,最后一个断开时 release。手机 app 连着 → 不睡
+/// （合理,它要实时收推送）;没人连 → 正常休眠。
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct SleepAssertion {
+    inner: Arc<SleepAssertionInner>,
+}
+
+#[cfg(target_os = "macos")]
+struct SleepAssertionInner {
+    count: Mutex<usize>,
+    id: Mutex<Option<u32>>,
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone)]
+pub struct SleepAssertion(());
+
+impl SleepAssertion {
+    pub fn new() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                inner: Arc::new(SleepAssertionInner {
+                    count: Mutex::new(0),
+                    id: Mutex::new(None),
+                }),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self(())
+        }
+    }
+
+    /// 一个远程客户端连接建立:计数 +1,首个连接（0→1）时 acquire 防休眠断言。
+    /// 返回的 guard 保活到连接断开,drop 时计数 -1,最后一个（1→0）释放断言。
+    pub fn guard(&self) -> SleepAssertionGuard {
+        #[cfg(target_os = "macos")]
+        {
+            let mut count = self.inner.count.lock().unwrap();
+            if *count == 0 {
+                *self.inner.id.lock().unwrap() = acquire_sleep_assertion();
+            }
+            *count += 1;
+            SleepAssertionGuard {
+                inner: self.inner.clone(),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self;
+            SleepAssertionGuard(())
+        }
+    }
+}
+
+impl Default for SleepAssertion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 一次远程连接的保活句柄。`Drop` 时计数 -1,归零即释放防休眠断言。
+#[cfg(target_os = "macos")]
+pub struct SleepAssertionGuard {
+    inner: Arc<SleepAssertionInner>,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct SleepAssertionGuard(());
+
+#[cfg(target_os = "macos")]
+impl Drop for SleepAssertionGuard {
+    fn drop(&mut self) {
+        let mut count = self.inner.count.lock().unwrap();
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            if let Some(id) = self.inner.id.lock().unwrap().take() {
+                release_sleep_assertion(id);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_sleep_assertion() -> Option<u32> {
+    use core_foundation::base::TCFType as _;
+    use core_foundation::string::{CFString, CFStringRef};
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPMAssertionCreateWithName(
+            assertion_type: CFStringRef,
+            assertion_level: u32,
+            assertion_name: CFStringRef,
+            assertion_id: *mut u32,
+        ) -> i32;
+    }
+
+    let assertion_type = CFString::new("PreventUserIdleSystemSleep");
+    let reason = CFString::new("Smelt remote client connected");
+    let mut id = 0;
+    let result = unsafe {
+        IOPMAssertionCreateWithName(
+            assertion_type.as_concrete_TypeRef(),
+            255,
+            reason.as_concrete_TypeRef(),
+            &mut id,
+        )
+    };
+    if result == 0 {
+        Some(id)
+    } else {
+        eprintln!("远程客户端连接无法阻止系统空闲睡眠：IOKit {result}");
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn release_sleep_assertion(id: u32) {
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPMAssertionRelease(assertion_id: u32) -> i32;
+    }
+
+    let result = unsafe { IOPMAssertionRelease(id) };
+    if result != 0 {
+        eprintln!("释放远程电源断言失败：IOKit {result}");
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     token: Arc<String>,
@@ -89,6 +226,9 @@ struct AppState {
     /// 决定，`build_router` 只是如实转达。
     write_enabled: bool,
     mobile_lifecycle: Arc<MobileLifecycleHub>,
+    /// 防休眠断言的引用计数句柄：WebSocket 客户端连着时 hold，全部断开后释放
+    /// （见 `SleepAssertion` 文档）。网关开着但没人连时整机照常休眠。
+    sleep_assertion: SleepAssertion,
 }
 
 struct MobileLifecycleHub {
@@ -124,6 +264,7 @@ pub fn build_router(token: String, write_enabled: bool) -> Router {
         token: Arc::new(token),
         write_enabled,
         mobile_lifecycle,
+        sleep_assertion: SleepAssertion::new(),
     };
     Router::new()
         .route("/acp/sessions", get(acp_sessions_handler))
@@ -769,6 +910,11 @@ async fn acp_ws_handler(
 async fn acp_ws_pump(socket: WebSocket, state: AppState) {
     use futures::stream::StreamExt;
     use tokio::sync::mpsc;
+
+    // 连接存活期间持有防休眠断言（引用计数，见 SleepAssertion）；函数返回、
+    // 即连接断开时 guard drop 自动释放。手机 app 连着 → 整机保持可唤醒；
+    // 全部断开 → 正常休眠。
+    let _sleep_guard = state.sleep_assertion.guard();
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let write_enabled = state.write_enabled;
