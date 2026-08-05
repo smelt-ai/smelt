@@ -4399,6 +4399,29 @@ fn handle_watch(
         fd
     };
 
+    // 与桌面 reattach 同款补抖（见 handle_open 的 "reattach jolt 策略"）。
+    // begin_remote_viewport 的那次 SIGWINCH 发生在 watcher 挂载**之前**，且快照是
+    // 紧接着抓的——TUI 的重绘此刻还没吐出来，移动端第一次进入只能看到旧尺寸内容被
+    // reflow 后的残帧（且部分 TUI 第一次 SIGWINCH 只重排半屏）。watcher 挂上之后再
+    // 抖两次，重绘字节就能直接流给移动端，首次进入不再显示旧内容。
+    if controls_geometry {
+        let sess2 = Arc::clone(&sess);
+        thread::spawn(move || {
+            for delay in [Duration::from_millis(120), Duration::from_millis(320)] {
+                thread::sleep(delay);
+                let (cols, rows) = {
+                    let Ok(mut ctl) = sess2.ctl.lock() else { return };
+                    if ctl.remote_viewports == 0 {
+                        return;
+                    }
+                    ctl.jolt = true;
+                    (ctl.cols, ctl.rows)
+                };
+                resize_session_remote(&sess2, cols, rows, 0, 0);
+            }
+        });
+    }
+
     if controls_geometry {
         loop {
             let mut header = [0u8; 5];
