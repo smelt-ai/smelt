@@ -6,7 +6,7 @@ import 'package:xterm/xterm.dart';
 
 import '../services/gateway_service.dart';
 import '../services/terminal_stream_service.dart';
-import '../utils/reflow_safe_terminal.dart';
+import '../utils/safe_terminal.dart';
 import '../utils/xterm_input_filter.dart';
 
 class TerminalSessionPage extends StatefulWidget {
@@ -71,7 +71,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   }
 
   Terminal _newTerminal({int cols = 80, int rows = 24}) {
-    final terminal = ReflowSafeTerminal(
+    final terminal = SafeTerminal(
       maxLines: 5000,
       onOutput: _stream.sendInput,
     );
