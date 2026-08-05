@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex};
 use crate::acp_session::{AcpPhase, AcpSnapshot, AcpUserAction};
 use crate::agent_kind::AcpLaunchSpec;
 
+pub const ACP_INITIAL_TAIL_LIMIT: usize = 100;
+pub const ACP_HISTORY_PAGE_LIMIT: usize = 100;
+
 /// 一次 `acp_open` 的启动参数。`agent_id` 是 `AcpAgentKind::id()` 那串小写
 /// 标识（"claude"/"codex"/"copilot"/"grok"）；仍随请求发送以兼容旧 smeltd
 /// 的 handoff 数据，恢复历史本身只依赖 agent 的 `session/load`。
@@ -28,9 +31,10 @@ pub struct AcpClientLaunch {
     /// agent 侧真实的 session id，这个字段只在“smeltd 也不认识这个 id”时
     /// （比如它刚重启过）才会被用上。
     pub resume_id: Option<String>,
-    /// 建连前 GUI 已持有的消息数。若第一份 daemon 快照到达前连接失败，终态
-    /// 快照用它作为 offset，避免把仍可展示的历史误清空。
-    pub retained_entries_len: usize,
+    /// 建连前 GUI 已持有的连续历史末端（全局 offset，不是本地 Vec 长度）。若
+    /// 第一份 daemon 快照到达前连接失败，终态快照用它作为 offset，避免把仍可
+    /// 展示的分页历史误清空。
+    pub retained_entries_end: usize,
 }
 
 fn legacy_cmd_fallback(launch: &AcpLaunchSpec) -> Option<String> {
@@ -62,6 +66,7 @@ fn acp_open_request(launch: &AcpClientLaunch) -> serde_json::Value {
         "launch": &launch.launch,
         "agent": &launch.agent_id,
         "resume_id": &launch.resume_id,
+        "tail_limit": ACP_INITIAL_TAIL_LIMIT,
     });
     if let Some(cmd) = legacy_cmd_fallback(&launch.launch) {
         req["cmd"] = serde_json::Value::String(cmd);
@@ -101,10 +106,12 @@ impl Drop for AcpClientHandle {
 fn fallback_snapshot(reason: &str, entries_offset: usize) -> AcpSnapshot {
     AcpSnapshot {
         // 断线只是 GUI 与 smeltd 的传输终止，不代表 daemon 中的会话历史消失。
-        // 用已接收长度作为增量偏移，AcpView 会保留现有 entries，只更新终态。
+        // 用已接收连续历史的全局末端作为增量偏移，AcpView 会保留现有 entries，
+        // 只更新终态。
         entries_offset,
         entries_total: entries_offset,
         snapshot_revision: 0,
+        session_title: None,
         replaying_history: false,
         entries: Vec::new(),
         phase: AcpPhase::Ended(reason.to_string()),
@@ -128,6 +135,40 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> AcpSnapshot {
     }
 }
 
+fn acp_snapshot_request(id: &str, before: usize, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "op": "acp_snapshot",
+        "id": id,
+        "before": before,
+        "limit": limit,
+    })
+}
+
+/// Read one bounded page immediately before `before` without disturbing the long-lived
+/// control connection. The caller runs this blocking helper off the GPUI thread.
+pub fn load_acp_history(id: &str, before: usize, limit: usize) -> Result<AcpSnapshot, String> {
+    let mut stream = UnixStream::connect(crate::daemon_state::smeltd_sock_path())
+        .map_err(|e| format!("连不上 smeltd：{e}"))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| format!("设置读取超时失败：{e}"))?;
+    writeln!(stream, "{}", acp_snapshot_request(id, before, limit))
+        .map_err(|e| format!("读取历史请求发送失败：{e}"))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|e| format!("读取历史失败：{e}"))?;
+    let value: serde_json::Value = serde_json::from_str(response.trim())
+        .map_err(|_| "历史快照解析失败".to_string())?;
+    serde_json::from_value(
+        value
+            .get("snapshot")
+            .cloned()
+            .ok_or_else(|| "ACP 会话不存在".to_string())?,
+    )
+    .map_err(|_| "历史快照内容无效".to_string())
+}
+
 /// 连 smeltd 的 `acp_open`，起连接线程，立即返回（不阻塞调用方——旧版
 /// `spawn_acp` 就是这个约定，「握手结果以事件回来」）。连不上 smeltd、握手
 /// 失败都不 panic，而是塞一份 `Ended` 快照进 `snapshot_rx`，跟
@@ -144,14 +185,15 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            let mut known_entries_len = launch.retained_entries_len;
+            let mut known_entries_end = launch.retained_entries_end;
+            let mut known_session_title = None;
             let sock_path = crate::daemon_state::smeltd_sock_path();
             let conn = match UnixStream::connect(&sock_path) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = snapshot_tx.try_send(fallback_snapshot(
                         &format!("连不上 smeltd：{e}"),
-                        known_entries_len,
+                        known_entries_end,
                     ));
                     return;
                 }
@@ -159,7 +201,7 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
             let Ok(mut writer) = conn.try_clone() else {
                 let _ = snapshot_tx.try_send(fallback_snapshot(
                     "无法建立 smeltd 双向连接",
-                    known_entries_len,
+                    known_entries_end,
                 ));
                 return;
             };
@@ -167,7 +209,7 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
             if writeln!(writer, "{req}").is_err() {
                 let _ = snapshot_tx.try_send(fallback_snapshot(
                     "向 smeltd 发起会话失败",
-                    known_entries_len,
+                    known_entries_end,
                 ));
                 return;
             }
@@ -212,15 +254,18 @@ pub fn spawn_acp_client(launch: AcpClientLaunch) -> AcpClientHandle {
                 let Ok(snap) = serde_json::from_value::<AcpSnapshot>(snap_v.clone()) else {
                     continue;
                 };
-                known_entries_len = snap.entries_offset.saturating_add(snap.entries.len());
+                known_entries_end = snap.entries_offset.saturating_add(snap.entries.len());
+                known_session_title = snap.session_title.clone();
                 if snapshot_tx.try_send(snap).is_err() {
                     return; // 接收端（GUI 视图）没了
                 }
             }
-            let _ = snapshot_tx.try_send(fallback_snapshot(
+            let mut disconnected = fallback_snapshot(
                 "与 smeltd 的连接已断开",
-                known_entries_len,
-            ));
+                known_entries_end,
+            );
+            disconnected.session_title = known_session_title;
+            let _ = snapshot_tx.try_send(disconnected);
         })
         .expect("spawn acp client thread");
 
@@ -280,7 +325,10 @@ pub fn restart_acp_session(id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AcpClientLaunch, acp_open_request, fallback_snapshot};
+    use super::{
+        ACP_INITIAL_TAIL_LIMIT, AcpClientLaunch, acp_open_request, acp_snapshot_request,
+        fallback_snapshot,
+    };
     use crate::agent_kind::AcpLaunchSpec;
 
     #[test]
@@ -292,10 +340,11 @@ mod tests {
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             agent_id: "claude".into(),
             resume_id: Some("resume-1".into()),
-            retained_entries_len: 0,
+            retained_entries_end: 0,
         });
 
         assert_eq!(req["op"], "acp_open");
+        assert_eq!(req["tail_limit"], ACP_INITIAL_TAIL_LIMIT);
         assert_eq!(req["launch"]["command"], "claude --print");
         assert_eq!(
             req["launch"]["env"]["CLAUDE_CONFIG_DIR"],
@@ -312,7 +361,7 @@ mod tests {
             launch: AcpLaunchSpec::from_command("claude --print"),
             agent_id: "claude".into(),
             resume_id: None,
-            retained_entries_len: 0,
+            retained_entries_end: 0,
         });
 
         assert_eq!(req["launch"]["command"], "claude --print");
@@ -329,5 +378,15 @@ mod tests {
             snapshot.phase,
             crate::acp_session::AcpPhase::Ended(_)
         ));
+    }
+
+    #[test]
+    fn history_request_is_bounded_before_the_loaded_prefix() {
+        let req = acp_snapshot_request("acp-1", 900, 100);
+
+        assert_eq!(req["op"], "acp_snapshot");
+        assert_eq!(req["id"], "acp-1");
+        assert_eq!(req["before"], 900);
+        assert_eq!(req["limit"], 100);
     }
 }
