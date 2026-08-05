@@ -126,4 +126,72 @@ void main() {
     expect(visibleLines(terminal), before);
     expect(terminal.buffer.lines.maxLength, 200);
   });
+
+  group('mouse wheel reporting', () {
+    late List<String> output;
+    late SafeTerminal terminal;
+
+    setUp(() {
+      output = [];
+      terminal = SafeTerminal(maxLines: 100, onOutput: output.add);
+      terminal.resize(20, 5);
+    });
+
+    void enableMouseReporting(String mode) => terminal.write(mode);
+
+    test('a wheel tick is reported as a wheel, not as shift-click', () {
+      enableMouseReporting('\x1b[?1003h\x1b[?1006h');
+
+      terminal.mouseInput(
+        TerminalMouseButton.wheelUp,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+      terminal.mouseInput(
+        TerminalMouseButton.wheelDown,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+
+      expect(output, ['\x1b[<64;3;4M', '\x1b[<65;3;4M']);
+    });
+
+    test('the correction also applies to the legacy encoding', () {
+      enableMouseReporting('\x1b[?1003h');
+
+      terminal.mouseInput(
+        TerminalMouseButton.wheelUp,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+
+      expect(output.single.codeUnitAt(3), 32 + 64);
+    });
+
+    test('other buttons keep the code xterm reports for them', () {
+      enableMouseReporting('\x1b[?1003h\x1b[?1006h');
+
+      terminal.mouseInput(
+        TerminalMouseButton.left,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+
+      expect(output, ['\x1b[<${TerminalMouseButton.left.id};3;4M']);
+    });
+
+    test('the plain xterm terminal still mis-encodes the wheel', () {
+      final plain = Terminal(maxLines: 100, onOutput: output.add);
+      plain.resize(20, 5);
+      plain.write('\x1b[?1003h\x1b[?1006h');
+
+      plain.mouseInput(
+        TerminalMouseButton.wheelUp,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+
+      expect(output, ['\x1b[<68;3;4M']);
+    });
+  });
 }

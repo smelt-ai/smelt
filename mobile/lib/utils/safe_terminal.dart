@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:xterm/xterm.dart';
 
-/// A [Terminal] that works around two buffer corruption bugs in xterm 4.0.0.
+/// A [Terminal] that works around three bugs in xterm 4.0.0.
 ///
 /// **Detached lines left behind by a scroll region.** `Buffer.scrollUp` shifts
 /// a scroll region with `lines[i] = lines[i + n]`, and that setter detaches
@@ -34,6 +34,16 @@ import 'package:xterm/xterm.dart';
 /// rotation offset of zero, and the public `maxLength` setter rebuilds the
 /// backing array by reading through the current rotation before zeroing the
 /// offset - so round-tripping it normalises the ring without touching privates.
+///
+/// **Mouse wheel reported as a modified button press.** `TerminalMouseButton`
+/// declares `wheelUp(id: 64 + 4)` and `wheelDown(id: 64 + 5)`. In the X11
+/// encoding every terminal speaks, the low two bits of a button code select the
+/// button and bit 6 (64) marks it as a wheel, so wheel up is 64 and wheel down
+/// is 65; bit 2 (4) is the shift modifier. xterm therefore reports a wheel tick
+/// as shift-click, which a full screen application either ignores or mistakes
+/// for a selection gesture. That is the only way the alternate screen can be
+/// scrolled - it has no scrollback of its own - so wheel scrolling silently
+/// does nothing in every TUI.
 class SafeTerminal extends Terminal {
   SafeTerminal({
     super.maxLines,
@@ -44,11 +54,11 @@ class SafeTerminal extends Terminal {
     super.onResize,
     super.platform,
     super.inputHandler,
-    super.mouseHandler,
+    TerminalMouseHandler mouseHandler = defaultMouseHandler,
     super.onPrivateOSC,
     super.reflowEnabled,
     super.wordSeparators,
-  });
+  }) : super(mouseHandler: WheelEncodingFix(mouseHandler));
 
   @override
   void write(String data) {
@@ -100,5 +110,46 @@ class SafeTerminal extends Terminal {
     // setter does not account for.
     lines.maxLength = capacity + 1;
     lines.maxLength = capacity;
+  }
+}
+
+/// Corrects the button code xterm 4.0.0 reports for mouse wheel ticks.
+///
+/// Wraps another [TerminalMouseHandler] and rewrites the button code of the
+/// sequence it produced, in whichever encoding the application asked for.
+class WheelEncodingFix implements TerminalMouseHandler {
+  const WheelEncodingFix(this.inner);
+
+  final TerminalMouseHandler inner;
+
+  static const _correctedIds = {
+    TerminalMouseButton.wheelUp: 64,
+    TerminalMouseButton.wheelDown: 65,
+  };
+
+  @override
+  String? call(TerminalMouseEvent event) {
+    final report = inner(event);
+    final corrected = _correctedIds[event.button];
+    if (report == null || corrected == null) return report;
+    return _withButtonId(report, event.button.id, corrected);
+  }
+
+  static String _withButtonId(String report, int reported, int corrected) {
+    // SGR: ESC [ < id ; col ; row (M|m)
+    if (report.startsWith('\x1b[<')) {
+      return report.replaceFirst('\x1b[<$reported;', '\x1b[<$corrected;');
+    }
+    // Normal and UTF-8: ESC [ M <id+32> <col+32> <row+32>
+    if (report.startsWith('\x1b[M') && report.length > 3) {
+      return '\x1b[M'
+          '${String.fromCharCode(32 + corrected)}'
+          '${report.substring(4)}';
+    }
+    // urxvt: ESC [ <id+32> ; col ; row M
+    return report.replaceFirst(
+      '\x1b[${32 + reported};',
+      '\x1b[${32 + corrected};',
+    );
   }
 }
