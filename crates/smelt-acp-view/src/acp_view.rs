@@ -985,6 +985,7 @@ impl AcpView {
     ///    外面的集中状态订阅维护，这里不再自己判相位跳变。
     fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
         let should_persist = snap.should_persist;
+        let previous_history_session_id = self.history_session_id.clone();
         let old_entries_len = self.entries.len();
         let replaying_history = snap.replaying_history;
         let snapshot_entries_changed =
@@ -1116,7 +1117,7 @@ impl AcpView {
             }
         }
 
-        if should_persist {
+        if should_persist || self.history_session_id != previous_history_session_id {
             cx.emit(AcpViewEvent::Changed);
         }
         cx.notify();
