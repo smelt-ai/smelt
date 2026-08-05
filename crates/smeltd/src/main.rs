@@ -4407,7 +4407,7 @@ fn handle_watch(
     if controls_geometry {
         let sess2 = Arc::clone(&sess);
         thread::spawn(move || {
-            for delay in [Duration::from_millis(120), Duration::from_millis(320)] {
+            for delay in [Duration::from_millis(300), Duration::from_millis(400)] {
                 thread::sleep(delay);
                 let (cols, rows) = {
                     let Ok(mut ctl) = sess2.ctl.lock() else { return };
@@ -6794,6 +6794,7 @@ mod snapshot_tests {
 #[cfg(test)]
 mod watch_tests {
     use super::*;
+    use std::time::Instant;
 
     /// 造一个不依赖真实 shell 的会话：`Ctl.master` 指向 `/dev/null`（测试不发输入帧，
     /// 用不上真正的 PTY 写端），`pid` 用一个已退出、还没被 reap 的真实子进程——
@@ -6905,6 +6906,78 @@ mod watch_tests {
         resize_session(&sess, 181, 59, 9, 18);
         let ctl = sess.ctl.lock().unwrap();
         assert_eq!((ctl.cols, ctl.rows), (181, 59));
+    }
+
+    #[test]
+    fn mobile_watch_rejolts_the_tui_after_the_watcher_is_attached() {
+        // attach 时的那次 SIGWINCH 发生在 watcher 挂载之前、快照抓取之后没有任何补抖，
+        // TUI 若只重绘半屏（Claude 等），移动端首次进入就会停在旧画面上。守护必须在
+        // watcher 挂上之后继续补抖，让重绘字节真正流到移动端。
+        let sess = make_dummy_session(59, 181);
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::from([(
+            "t".to_string(),
+            Arc::clone(&sess),
+        )])));
+
+        // 每次 resize_session_* 都会给桌面客户端写一条 geometry OSC 标记——用它数抖动次数。
+        let (desktop_server, desktop_client) = UnixStream::pair().unwrap();
+        sess.out.lock().unwrap().clients.push(desktop_server);
+
+        let (server, client) = UnixStream::pair().unwrap();
+        let sessions_for_watch = Arc::clone(&sessions);
+        let watch = thread::spawn(move || {
+            let reader = BufReader::new(server.try_clone().unwrap());
+            handle_watch(
+                server,
+                reader,
+                &serde_json::json!({
+                    "id": "t",
+                    "controls_geometry": true,
+                    "cols": 49,
+                    "rows": 47,
+                    "cell_w": 8,
+                    "cell_h": 15,
+                }),
+                sessions_for_watch,
+            );
+        });
+
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        read_header_and_snapshot(&mut reader);
+
+        desktop_client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let token = sess.geometry_token.as_bytes().to_vec();
+        let mut seen = Vec::new();
+        let mut desktop_client = desktop_client;
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline {
+            let mut buffer = [0u8; 4096];
+            match desktop_client.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => seen.extend_from_slice(&buffer[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+            let markers = seen.windows(token.len()).filter(|w| *w == token).count();
+            if markers >= 3 {
+                break;
+            }
+        }
+
+        let markers = seen.windows(token.len()).filter(|w| *w == token).count();
+        assert!(
+            markers >= 3,
+            "attach 后必须再补抖两次（共 ≥3 条 geometry 标记），实际 {markers} 条"
+        );
+
+        client.shutdown(Shutdown::Write).unwrap();
+        watch.join().unwrap();
     }
 
     struct TerminalGeometryParamsForTest {
