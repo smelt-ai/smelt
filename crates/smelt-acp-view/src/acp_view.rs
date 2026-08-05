@@ -25,7 +25,10 @@ use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h
 
 use agent_client_protocol::schema::v1::SessionId;
 
-use smelt_core::acp_client::{AcpClientHandle, AcpClientLaunch, spawn_acp_client};
+use smelt_core::acp_client::{
+    ACP_HISTORY_PAGE_LIMIT, AcpClientHandle, AcpClientLaunch, load_acp_history,
+    spawn_acp_client,
+};
 use smelt_core::acp_conn::{ModelState, PromptImage, SessionConfigState};
 use smelt_core::acp_session::{
     AcpPhase, AcpSnapshot, AcpUserAction, ApprovalDetailsView, ElicitFieldKindView,
@@ -61,10 +64,76 @@ fn should_seed_restored_height_hints(
             || (replaying_history && new_entry_count > old_entry_count))
 }
 
+fn loaded_entries_end(loaded_offset: usize, entries_len: usize) -> usize {
+    loaded_offset.saturating_add(entries_len)
+}
+
+fn can_load_older_history(history_loading: bool, loaded_offset: usize) -> bool {
+    !history_loading && loaded_offset > 0
+}
+
+fn should_replace_session_title(incoming_has_title: bool, entries_changed: bool) -> bool {
+    incoming_has_title || entries_changed
+}
+
+fn merge_snapshot_entries(
+    entries: &mut Vec<AcpEntry>,
+    loaded_offset: &mut usize,
+    entries_total: &mut usize,
+    incoming_offset: usize,
+    incoming_total: usize,
+    incoming: Vec<AcpEntry>,
+    initial: bool,
+) -> Option<usize> {
+    let incoming_end = incoming_offset.saturating_add(incoming.len());
+    let incoming_total = incoming_total.max(incoming_end);
+    if initial {
+        *entries = incoming;
+        *loaded_offset = incoming_offset;
+        *entries_total = incoming_total;
+        return Some(0);
+    }
+
+    let loaded_end = loaded_offset.saturating_add(entries.len());
+    if incoming_total < *loaded_offset {
+        // `session/load` restarted from an empty history while this GUI still held an old tail.
+        *entries = incoming;
+        *loaded_offset = incoming_offset;
+        *entries_total = incoming_total;
+        return Some(0);
+    }
+    *entries_total = incoming_total;
+    if incoming_offset == loaded_end && incoming.is_empty() {
+        return None;
+    }
+
+    if incoming_offset >= *loaded_offset && incoming_offset <= loaded_end {
+        let local_offset = incoming_offset - *loaded_offset;
+        entries.truncate(local_offset);
+        entries.extend(incoming);
+        return Some(local_offset);
+    }
+    if incoming_offset < *loaded_offset && incoming_end >= *loaded_offset {
+        let overlap = incoming_end - *loaded_offset;
+        let suffix_start = overlap.min(entries.len());
+        let mut merged = incoming;
+        merged.extend(entries.drain(suffix_start..));
+        *entries = merged;
+        *loaded_offset = incoming_offset;
+        return Some(0);
+    }
+    if incoming_offset > loaded_end {
+        // A missed stream update created a gap. Keep the newest contiguous suffix and let upward
+        // pagination fill older entries rather than displaying mismatched local/global indices.
+        *entries = incoming;
+        *loaded_offset = incoming_offset;
+        return Some(0);
+    }
+    None
+}
+
 #[derive(Clone)]
 struct CachedDiff {
-    old_fingerprint: (usize, u64),
-    new_fingerprint: (usize, u64),
     lines: std::rc::Rc<Vec<DiffLine>>,
     added: usize,
     removed: usize,
@@ -151,6 +220,14 @@ pub struct AcpView {
     /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
     /// entry 变化时执行，静态重绘直接复用 `SharedString`。
     rendered_markdown: Vec<Option<gpui::SharedString>>,
+    /// 当前本地 `entries[0]` 在 smeltd 完整历史中的全局下标，以及服务端总条数。
+    /// GUI 首次 attach 只取尾页，实时增量仍使用服务端全局 offset，因此合并时必须
+    /// 显式换算，不能再假设本地 Vec 从全局 0 开始。
+    loaded_entries_offset: usize,
+    entries_total: usize,
+    history_loading: bool,
+    /// 分页尾页可能不含首条用户消息，标题由快照单独携带。
+    session_title: Option<String>,
     /// 本会话的 agent 是否收图（握手 Ready 带来）。握手前默认 true——那时还没
     /// 粘图的机会，先假设支持，Ready 到了再按实际能力修正（Grok = false）。
     supports_image: bool,
@@ -290,7 +367,10 @@ impl AcpView {
             launch: this.launch.clone(),
             agent_id: agent.id().to_string(),
             resume_id: None, // 第一次开，没有旧会话可续
-            retained_entries_len: this.entries.len(),
+            retained_entries_end: loaded_entries_end(
+                this.loaded_entries_offset,
+                this.entries.len(),
+            ),
         });
         this.attach_handle(handle, cx);
         this
@@ -339,7 +419,10 @@ impl AcpView {
             launch: this.launch.clone(),
             agent_id: request.agent.id().to_string(),
             resume_id: None, // 第一次开，没有旧会话可续
-            retained_entries_len: this.entries.len(),
+            retained_entries_end: loaded_entries_end(
+                this.loaded_entries_offset,
+                this.entries.len(),
+            ),
         });
         this.attach_handle(handle, cx);
         this
@@ -375,7 +458,7 @@ impl AcpView {
         let auto_resume_pending = true;
         let initial_entry_count = entries.len();
         let rendered_images = decode_entry_images(&entries, 0);
-        let rendered_diffs = build_diff_cache(&entries);
+        let rendered_diffs = std::collections::HashMap::new();
         let rendered_markdown = build_markdown_cache(&entries, cwd.as_deref());
         let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.))
             .with_uniform_item_height(px(RESTORED_ENTRY_HEIGHT_HINT_PX));
@@ -384,12 +467,16 @@ impl AcpView {
         list_state.set_scroll_handler(move |event, _window, cx| {
             let view = view.clone();
             let viewing_history = event.is_scrolled && !event.is_following_tail;
+            let near_loaded_top = event.visible_range.start <= 5;
             // list 正在可变借用自己的状态，延后通知外层重新判断 sticky 提问。
             cx.defer(move |cx| {
                 let _ = view.update(cx, |this, cx| {
                     if this.viewing_history != viewing_history {
                         this.viewing_history = viewing_history;
                         cx.notify();
+                    }
+                    if near_loaded_top {
+                        this.load_older_history(cx);
                     }
                 });
             });
@@ -415,6 +502,10 @@ impl AcpView {
             rendered_images,
             rendered_diffs,
             rendered_markdown,
+            loaded_entries_offset: 0,
+            entries_total: initial_entry_count,
+            history_loading: false,
+            session_title: None,
             supports_image: true,
             paste_hint: None,
             completion: None,
@@ -484,7 +575,10 @@ impl AcpView {
             launch: self.launch.clone(),
             agent_id: self.agent.id().to_string(),
             resume_id: self.history_session_id.as_ref().map(|s| s.to_string()),
-            retained_entries_len: self.entries.len(),
+            retained_entries_end: loaded_entries_end(
+                self.loaded_entries_offset,
+                self.entries.len(),
+            ),
         });
         self.attach_handle(handle, cx);
         cx.notify();
@@ -600,6 +694,78 @@ impl AcpView {
         .detach();
     }
 
+    fn load_older_history(&mut self, cx: &mut Context<Self>) {
+        if !can_load_older_history(self.history_loading, self.loaded_entries_offset) {
+            return;
+        }
+        self.history_loading = true;
+        let sid = self.sid.clone();
+        let before = self.loaded_entries_offset;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    load_acp_history(&sid, before, ACP_HISTORY_PAGE_LIMIT)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.history_loading = false;
+                match result {
+                    Ok(snapshot) => view.prepend_history_page(snapshot, cx),
+                    Err(error) => eprintln!("[workspace] ACP 历史分页失败：{error}"),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn prepend_history_page(&mut self, snapshot: AcpSnapshot, cx: &mut Context<Self>) {
+        let page_len = snapshot.entries.len();
+        if page_len == 0
+            || snapshot.entries_offset.saturating_add(page_len) != self.loaded_entries_offset
+        {
+            return;
+        }
+
+        let mut page = snapshot.entries;
+        page.append(&mut self.entries);
+        self.entries = page;
+        self.loaded_entries_offset = snapshot.entries_offset;
+        self.entries_total = self.entries_total.max(snapshot.entries_total);
+        if snapshot.session_title.is_some() {
+            self.session_title = snapshot.session_title;
+        }
+
+        self.rendered_images = self
+            .rendered_images
+            .drain()
+            .map(|((entry_ix, image_ix), image)| ((entry_ix + page_len, image_ix), image))
+            .collect();
+        self.rendered_images.extend(decode_entry_images(
+            &self.entries[..page_len],
+            0,
+        ));
+
+        let mut markdown = build_markdown_cache(&self.entries[..page_len], self.cwd.as_deref());
+        markdown.append(&mut self.rendered_markdown);
+        self.rendered_markdown = markdown;
+        self.expanded_thoughts = self
+            .expanded_thoughts
+            .drain()
+            .map(|entry_ix| entry_ix + page_len)
+            .collect();
+        self.expanded_process_groups = self
+            .expanded_process_groups
+            .drain()
+            .map(|entry_ix| entry_ix + page_len)
+            .collect();
+
+        // GPUI shifts the logical scroll anchor by `page_len` for a pure prepend, so the
+        // same message stays under the cursor instead of jumping to the newly loaded page.
+        self.list_state.splice(0..0, page_len);
+        cx.notify();
+    }
+
     /// smeltd 托管用的会话 id，也是持久化存档（`AcpSaved.sid`）的 key——
     /// GUI 重开后拿它原样传回 `placeholder` 的 `saved_sid`，才能接上 smeltd
     /// 里还活着的同一个会话，而不是每次都当新会话处理。
@@ -610,7 +776,9 @@ impl AcpView {
     /// 从首条用户消息生成稳定的会话标题。Codex app-server 不会主动把 thread name
     /// 推给客户端；左侧会话列表和完成通知至少应能说明这轮对话在做什么。
     pub fn auto_title(&self) -> Option<String> {
-        smelt_core::acp_chat::auto_title(&self.entries)
+        self.session_title
+            .clone()
+            .or_else(|| smelt_core::acp_chat::auto_title(&self.entries))
     }
 
     /// 存档快照：写进 AcpSaved.history_session_id，GUI 重开后「重新开始」
@@ -983,42 +1151,50 @@ impl AcpView {
     /// 1. 摊平快照字段进本地同名字段，渲染代码不用碰；
     /// 2. 持久化 / 重绘时机跟着快照走。四色状态、Dock 角标、待处理通知都由
     ///    外面的集中状态订阅维护，这里不再自己判相位跳变。
-    fn apply_snapshot(&mut self, snap: AcpSnapshot, cx: &mut Context<Self>) {
+    fn apply_snapshot(&mut self, mut snap: AcpSnapshot, cx: &mut Context<Self>) {
         let should_persist = snap.should_persist;
+        let previous_history_session_id = self.history_session_id.clone();
         let old_entries_len = self.entries.len();
         let replaying_history = snap.replaying_history;
-        let snapshot_entries_changed =
-            snap.entries_offset != old_entries_len || !snap.entries.is_empty();
-        let incremental_entries = snap.entries_offset <= self.entries.len();
-        let entries_offset = if incremental_entries {
-            snap.entries_offset
-        } else {
-            0
-        };
+        let initial_snapshot = self.awaiting_initial_history_snapshot;
+        let changed_from = merge_snapshot_entries(
+            &mut self.entries,
+            &mut self.loaded_entries_offset,
+            &mut self.entries_total,
+            snap.entries_offset,
+            snap.entries_total,
+            std::mem::take(&mut snap.entries),
+            initial_snapshot,
+        );
+        let snapshot_entries_changed = changed_from.is_some();
+        let entries_offset = changed_from.unwrap_or(self.entries.len());
         let previous_permission = self
             .permissions
             .first()
             .map(|card| (card.tool_call_id.clone(), card.question.clone()));
-        if incremental_entries {
-            self.entries.truncate(snap.entries_offset);
-            self.entries.extend(snap.entries);
-        } else {
-            // 不应发生：Unix stream 有序且写失败会断开。保守清空，避免显示错位历史。
-            self.entries = snap.entries;
+        if snapshot_entries_changed {
+            refresh_markdown_cache(
+                &self.entries,
+                entries_offset,
+                self.cwd.as_deref(),
+                &mut self.rendered_markdown,
+            );
+            self.rendered_images
+                .retain(|(entry_ix, _), _| *entry_ix < entries_offset);
+            self.rendered_images.extend(decode_entry_images(
+                &self.entries[entries_offset..],
+                entries_offset,
+            ));
+            for id in self.entries[entries_offset..]
+                .iter()
+                .filter_map(|entry| match entry {
+                    AcpEntry::ToolCall { id, .. } => Some(id),
+                    _ => None,
+                })
+            {
+                self.rendered_diffs.remove(id);
+            }
         }
-        refresh_markdown_cache(
-            &self.entries,
-            entries_offset,
-            self.cwd.as_deref(),
-            &mut self.rendered_markdown,
-        );
-        self.rendered_images
-            .retain(|(entry_ix, _), _| *entry_ix < entries_offset);
-        self.rendered_images.extend(decode_entry_images(
-            &self.entries[entries_offset..],
-            entries_offset,
-        ));
-        refresh_diff_cache(&self.entries, entries_offset, &mut self.rendered_diffs);
         let new_entries_len = self.entries.len();
         let seed_restored_height_hints = should_seed_restored_height_hints(
             self.awaiting_initial_history_snapshot,
@@ -1031,7 +1207,7 @@ impl AcpView {
         if seed_restored_height_hints {
             self.list_state
                 .reset_with_uniform_height(new_entries_len, px(RESTORED_ENTRY_HEIGHT_HINT_PX));
-        } else if snap.entries_offset <= old_entries_len {
+        } else if let Some(entries_offset) = changed_from {
             // splice 会把落在被替换 item 内部的滚动锚点重置到该 item 顶部。
             // 流式正文持续替换最后一项时，用户若正在这项里向上浏览，就会每个
             // chunk 被拉回一次，形成明显抖动。离开尾随态后保留逻辑锚点；正文
@@ -1039,14 +1215,12 @@ impl AcpView {
             let scroll_anchor = (!self.list_state.is_following_tail())
                 .then(|| self.list_state.logical_scroll_top());
             self.list_state.splice(
-                snap.entries_offset..old_entries_len,
-                new_entries_len - snap.entries_offset,
+                entries_offset..old_entries_len,
+                new_entries_len.saturating_sub(entries_offset),
             );
             if let Some(anchor) = scroll_anchor {
                 self.list_state.scroll_to(anchor);
             }
-        } else {
-            self.list_state.reset(new_entries_len);
         }
         if new_entries_len > 0 {
             self.awaiting_initial_history_snapshot = false;
@@ -1065,6 +1239,9 @@ impl AcpView {
             self.elicitation_inputs.clear();
         }
         self.status_line = snap.status_line;
+        if should_replace_session_title(snap.session_title.is_some(), snapshot_entries_changed) {
+            self.session_title = snap.session_title;
+        }
         let runtime_session_id = snap.acp_session_id.map(SessionId::new);
         self.acp_session_id = runtime_session_id.clone();
         if let Some(history_session_id) = snap.history_session_id {
@@ -1116,7 +1293,7 @@ impl AcpView {
             }
         }
 
-        if should_persist {
+        if should_persist || self.history_session_id != previous_history_session_id {
             cx.emit(AcpViewEvent::Changed);
         }
         cx.notify();
@@ -1133,12 +1310,25 @@ impl AcpView {
                 _ => None,
             })
             .collect();
+        self.rendered_diffs.retain(|id, _| live_ids.contains(id));
         self.expanded_tools.retain(|id| live_ids.contains(id));
         self.expanded_tool_cards.retain(|id| live_ids.contains(id));
         self.collapsed_tool_cards.retain(|id| live_ids.contains(id));
         self.expanded_thoughts.retain(|ix| *ix < self.entries.len());
         self.expanded_process_groups
             .retain(|ix| *ix < self.entries.len());
+    }
+
+    fn ensure_diff_cache_for_entry(&mut self, entry_ix: usize) {
+        let Some(AcpEntry::ToolCall { id, output, .. }) = self.entries.get(entry_ix) else {
+            return;
+        };
+        if self.rendered_diffs.contains_key(id) {
+            return;
+        }
+        let id = id.clone();
+        let parts = build_diff_parts(output);
+        self.rendered_diffs.insert(id, parts);
     }
 
     fn tool_card_is_expanded(
@@ -1842,6 +2032,7 @@ impl Render for AcpView {
             view.update(app, |this, cx| {
                 let t = cx.theme();
                 let muted = t.muted_foreground;
+                this.ensure_diff_cache_for_entry(i);
                 let active_permission_tool_id = this
                     .permissions
                     .first()
@@ -3622,110 +3813,31 @@ fn decode_entry_images(
         .collect()
 }
 
-fn build_diff_cache(
-    entries: &[AcpEntry],
-) -> std::collections::HashMap<String, Vec<Option<CachedDiff>>> {
-    let mut cache = std::collections::HashMap::new();
-    for entry in entries {
-        let AcpEntry::ToolCall { id, output, .. } = entry else {
-            continue;
-        };
-        let parts = output
-            .iter()
-            .map(|part| match part {
-                ToolOutputPart::Diff {
-                    old_text, new_text, ..
-                } => {
-                    let old = old_text.as_deref().unwrap_or("");
-                    let full = diff_lines(old, new_text);
-                    let added = full
-                        .iter()
-                        .filter(|line| line.tag == DiffLineTag::Added)
-                        .count();
-                    let removed = full
-                        .iter()
-                        .filter(|line| line.tag == DiffLineTag::Removed)
-                        .count();
-                    Some(CachedDiff {
-                        old_fingerprint: text_fingerprint(old),
-                        new_fingerprint: text_fingerprint(new_text),
-                        lines: std::rc::Rc::new(compact_diff_lines(&full, 3)),
-                        added,
-                        removed,
-                    })
-                }
-                ToolOutputPart::Text(_) => None,
-            })
-            .collect();
-        cache.insert(id.clone(), parts);
-    }
-    cache
-}
-
-fn refresh_diff_cache(
-    entries: &[AcpEntry],
-    entries_offset: usize,
-    cache: &mut std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
-) {
-    let live_ids: std::collections::HashSet<&str> = entries
+fn build_diff_parts(output: &[ToolOutputPart]) -> Vec<Option<CachedDiff>> {
+    output
         .iter()
-        .filter_map(|entry| match entry {
-            AcpEntry::ToolCall { id, .. } => Some(id.as_str()),
-            _ => None,
+        .map(|part| match part {
+            ToolOutputPart::Diff {
+                old_text, new_text, ..
+            } => {
+                let full = diff_lines(old_text.as_deref().unwrap_or(""), new_text);
+                let added = full
+                    .iter()
+                    .filter(|line| line.tag == DiffLineTag::Added)
+                    .count();
+                let removed = full
+                    .iter()
+                    .filter(|line| line.tag == DiffLineTag::Removed)
+                    .count();
+                Some(CachedDiff {
+                    lines: std::rc::Rc::new(compact_diff_lines(&full, 3)),
+                    added,
+                    removed,
+                })
+            }
+            ToolOutputPart::Text(_) => None,
         })
-        .collect();
-    cache.retain(|id, _| live_ids.contains(id.as_str()));
-
-    for entry in entries.iter().skip(entries_offset) {
-        let AcpEntry::ToolCall { id, output, .. } = entry else {
-            continue;
-        };
-        let old_parts = cache.remove(id).unwrap_or_default();
-        let parts = output
-            .iter()
-            .enumerate()
-            .map(|(part_ix, part)| match part {
-                ToolOutputPart::Diff {
-                    old_text, new_text, ..
-                } => {
-                    let old = old_text.as_deref().unwrap_or("");
-                    let old_fingerprint = text_fingerprint(old);
-                    let new_fingerprint = text_fingerprint(new_text);
-                    if let Some(Some(cached)) = old_parts.get(part_ix)
-                        && cached.old_fingerprint == old_fingerprint
-                        && cached.new_fingerprint == new_fingerprint
-                    {
-                        return Some(cached.clone());
-                    }
-                    let full = diff_lines(old, new_text);
-                    let added = full
-                        .iter()
-                        .filter(|line| line.tag == DiffLineTag::Added)
-                        .count();
-                    let removed = full
-                        .iter()
-                        .filter(|line| line.tag == DiffLineTag::Removed)
-                        .count();
-                    Some(CachedDiff {
-                        old_fingerprint,
-                        new_fingerprint,
-                        lines: std::rc::Rc::new(compact_diff_lines(&full, 3)),
-                        added,
-                        removed,
-                    })
-                }
-                ToolOutputPart::Text(_) => None,
-            })
-            .collect();
-        cache.insert(id.clone(), parts);
-    }
-}
-
-fn text_fingerprint(text: &str) -> (usize, u64) {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    (text.len(), hasher.finish())
+        .collect()
 }
 
 fn is_user_entry(entry: &AcpEntry) -> bool {
@@ -4378,10 +4490,12 @@ fn render_diff_lines(
 mod tests {
     use super::{
         HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
-        build_handoff_prompt, build_markdown_cache, escape_html_tags_for_markdown,
-        is_active_permission_selection, markdown_text_for_cwd, markdown_user_text_for_cwd,
-        refresh_markdown_cache, resolve_restart_launch, should_seed_restored_height_hints,
-        tool_card_default_expanded, tool_uses_compact_process_row,
+        build_handoff_prompt, build_markdown_cache, can_load_older_history,
+        escape_html_tags_for_markdown, is_active_permission_selection, loaded_entries_end,
+        markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
+        refresh_markdown_cache, resolve_restart_launch, should_replace_session_title,
+        should_seed_restored_height_hints, tool_card_default_expanded,
+        tool_uses_compact_process_row,
     };
     use gpui::{ListAlignment, ListState, px};
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -4423,6 +4537,157 @@ mod tests {
         assert!(!should_seed_restored_height_hints(
             true, true, true, true, 0, 0,
         ));
+    }
+
+    #[test]
+    fn paged_history_reconnect_fallback_keeps_the_loaded_tail() {
+        let mut entries = vec![AcpEntry::User("900".into()), AcpEntry::User("901".into())];
+        let mut loaded_offset = 900;
+        let mut entries_total = 1_000;
+        let retained_end = loaded_entries_end(loaded_offset, entries.len());
+
+        assert_eq!(retained_end, 902);
+        assert_eq!(
+            merge_snapshot_entries(
+                &mut entries,
+                &mut loaded_offset,
+                &mut entries_total,
+                retained_end,
+                retained_end,
+                Vec::new(),
+                false,
+            ),
+            None
+        );
+        assert_eq!(loaded_offset, 900);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn history_pagination_does_not_require_a_live_control_connection() {
+        assert!(can_load_older_history(false, 900));
+        assert!(!can_load_older_history(true, 900));
+        assert!(!can_load_older_history(false, 0));
+    }
+
+    #[test]
+    fn state_only_snapshot_without_title_keeps_the_existing_title() {
+        assert!(!should_replace_session_title(false, false));
+        assert!(should_replace_session_title(true, false));
+        assert!(should_replace_session_title(false, true));
+    }
+
+    #[test]
+    fn snapshot_tail_uses_global_offsets_for_live_updates() {
+        let mut entries = Vec::new();
+        let mut loaded_offset = 0;
+        let mut entries_total = 0;
+
+        assert_eq!(
+            merge_snapshot_entries(
+                &mut entries,
+                &mut loaded_offset,
+                &mut entries_total,
+                900,
+                1_000,
+                vec![AcpEntry::User("900".into()), AcpEntry::User("901".into())],
+                true,
+            ),
+            Some(0)
+        );
+        assert_eq!(loaded_offset, 900);
+        assert_eq!(entries_total, 1_000);
+
+        assert_eq!(
+            merge_snapshot_entries(
+                &mut entries,
+                &mut loaded_offset,
+                &mut entries_total,
+                902,
+                904,
+                vec![AcpEntry::User("902".into()), AcpEntry::User("903".into())],
+                false,
+            ),
+            Some(2)
+        );
+        assert_eq!(loaded_offset, 900);
+        assert_eq!(entries_total, 904);
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(&entries[3], AcpEntry::User(text) if text == "903"));
+    }
+
+    #[test]
+    fn overlapping_snapshot_keeps_the_contiguous_loaded_suffix() {
+        let mut entries = vec![AcpEntry::User("2".into()), AcpEntry::User("3".into())];
+        let mut loaded_offset = 2;
+        let mut entries_total = 4;
+
+        assert_eq!(
+            merge_snapshot_entries(
+                &mut entries,
+                &mut loaded_offset,
+                &mut entries_total,
+                1,
+                4,
+                vec![AcpEntry::User("1".into()), AcpEntry::User("2".into())],
+                false,
+            ),
+            Some(0)
+        );
+        let texts = entries
+            .iter()
+            .map(|entry| match entry {
+                AcpEntry::User(text) => text.as_str(),
+                _ => panic!("expected user entry"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loaded_offset, 1);
+        assert_eq!(texts, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn snapshot_gap_resets_to_the_newest_contiguous_suffix() {
+        let mut entries = vec![AcpEntry::User("10".into()), AcpEntry::User("11".into())];
+        let mut loaded_offset = 10;
+        let mut entries_total = 12;
+
+        assert_eq!(
+            merge_snapshot_entries(
+                &mut entries,
+                &mut loaded_offset,
+                &mut entries_total,
+                14,
+                15,
+                vec![AcpEntry::User("14".into())],
+                false,
+            ),
+            Some(0)
+        );
+        assert_eq!(loaded_offset, 14);
+        assert_eq!(entries_total, 15);
+        assert!(matches!(&entries[0], AcpEntry::User(text) if text == "14"));
+    }
+
+    #[test]
+    fn state_only_snapshot_does_not_rebuild_loaded_entries() {
+        let mut entries = vec![AcpEntry::User("10".into()), AcpEntry::User("11".into())];
+        let mut loaded_offset = 10;
+        let mut entries_total = 12;
+
+        assert_eq!(
+            merge_snapshot_entries(
+                &mut entries,
+                &mut loaded_offset,
+                &mut entries_total,
+                12,
+                12,
+                Vec::new(),
+                false,
+            ),
+            None
+        );
+        assert_eq!(loaded_offset, 10);
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

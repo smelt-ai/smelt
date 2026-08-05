@@ -107,6 +107,10 @@ fn palette() -> &'static [u32; 16] {
 }
 
 /// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 字形修饰 + 是否在选区内。
+///
+/// 需要 Clone：跨物理行拼接链接文本（见 terminal_view.rs 的 `wrapped_line_range` /
+/// 软换行拼接逻辑）要把若干行的 cell 拷进一个临时缓冲区再整体扫描。
+#[derive(Clone)]
 pub struct Cell {
     pub ch: char,
     pub fg: u32,
@@ -176,6 +180,13 @@ pub struct Frame {
     /// 光标**位置** (行, 列)，含被隐藏的情况；None 仅表示不在可视区内。
     /// IME 候选窗 / 预编辑串定位用——光标藏没藏，输入法都得知道往哪落。
     pub cursor_pos: Option<(usize, usize)>,
+    /// `wrapped[i] == true` 表示第 i 行是**软换行**——内容本来更长，只是屏幕宽度不够
+    /// 被截到下一行，并不是应用真的输出了换行符（alacritty 的 `Flags::WRAPLINE`，打在
+    /// 该行最后一格上）。终端里打印的长链接常常正好卡在这种断点上：链接识别
+    /// （见 terminal_view.rs 的 `find_links`）按整行扫描的话会在断点处把 URL 切成两截，
+    /// 点击只拿到前/后半截、打开错误地址（#21）。用这个数组把同一条软换行链串起来的
+    /// 物理行拼成一行再扫描，就不会切错。长度与 `rows` 一致。
+    pub wrapped: Vec<bool>,
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
@@ -1706,6 +1717,14 @@ const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// 而握手在 GUI 主线程同步跑——没有这个超时就是无限 beachball（真实发生过：启动
 /// 恢复会话时主线程卡死，强杀重开又 abort）。取值对齐 probe_daemon 的 5s。
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// 终端写端（键盘输入 / PTY 自动应答 → smeltd）的写超时。守护僵死、不再消费这条
+/// socket 时，Unix 发送缓冲写满，`write_all` 无超时会在内核 `sosend` 里无限睡眠——
+/// 而写调用全在 UI 主线程（send_input / write_pty），一堵就是整个 App 卡死（2026-08-04
+/// hang 报告：`__sendto → sosend → lck_mtx_sleep`，主线程挂起 35s+）。正常守护毫秒级
+/// 消费，exec 交接期连接本身会断（EPIPE 快速失败，不走超时路径），取 500ms——注意
+/// macOS 上 SO_SNDTIMEO 实际耗时约两倍（实测 500ms 设置 ≈ 1s 返回），僵死时 UI 最多
+/// 卡 1 秒左右，输入丢一次，比永久冻结可接受得多。
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn open_request(
     rows: usize,
@@ -2000,6 +2019,9 @@ impl Terminal {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
+        // Keep the write timeout for the lifetime of the cloned UI writer. A
+        // wedged daemon must not be able to block the GPUI thread forever.
+        writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
         writeln!(
             writer,
             "{}",
@@ -2284,6 +2306,7 @@ impl Terminal {
                     rows: Vec::new(),
                     cursor: None,
                     cursor_pos: None,
+                    wrapped: Vec::new(),
                 };
             }
         };
@@ -2296,14 +2319,18 @@ impl Terminal {
 
         let cols = self.size.cols;
         let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(self.size.rows);
+        let mut wrapped: Vec<bool> = Vec::with_capacity(self.size.rows);
         let mut row: Vec<Cell> = Vec::with_capacity(cols);
         let mut count = 0usize;
+        // 当前行最后一格是不是 WRAPLINE——每格都刷新，行满时刚好是最后一格的值。
+        let mut row_wraps;
         for indexed in content.display_iter {
             let cell = indexed.cell;
             let selected = sel_range
                 .as_ref()
                 .is_some_and(|r| r.contains(indexed.point));
             let flags = cell.flags;
+            row_wraps = flags.contains(Flags::WRAPLINE);
             let inverse = flags.contains(Flags::INVERSE);
             let mut fg = resolve(cell.fg, true);
             let mut bg = resolve(cell.bg, false);
@@ -2346,10 +2373,12 @@ impl Terminal {
             count += 1;
             if count % cols == 0 {
                 rows.push(std::mem::take(&mut row));
+                wrapped.push(row_wraps);
             }
         }
         if !row.is_empty() {
             rows.push(row);
+            wrapped.push(false);
         }
 
         // 光标位置：alacritty 的 cursor.point 是**活动区**坐标（不含滚动偏移），加上
@@ -2383,6 +2412,7 @@ impl Terminal {
             rows,
             cursor,
             cursor_pos,
+            wrapped,
         }
     }
 
@@ -3089,6 +3119,60 @@ mod handshake_timeout_tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("不存在"));
+    }
+
+    /// 复现 2026-08-04 hang 报告（Smelt 0.6.9）的第二环：守护不再消费终端写
+    /// socket 时，写端无限阻塞。主线程栈 `__sendto → sosend → lck_mtx_sleep`
+    /// = Unix socket 发送缓冲写满、对端不读，而 `write_frame → write_all` 没有
+    /// 写超时 → UI 主线程 send_input 永久卡死（采样显示挂起 35s+）。
+    /// 修复后：握手建立的 writer 必须带写超时，写满缓冲时应返回 Err 而不是
+    /// 永久挂起。用 UnixStream::pair 当假守护：先正常回握手回执（否则走不到
+    /// writer 阶段），之后保持连接打开但不再消费，模拟守护僵死。
+    #[test]
+    fn writer_times_out_when_daemon_stops_consuming() {
+        let (mut daemon_side, client_side) = UnixStream::pair().expect("pair 失败");
+
+        // 假守护线程不 join：断言窗口（2s）远小于其存活时长，进程退出时兜底清理。
+        thread::spawn(move || {
+            let mut line = String::new();
+            let mut reader = BufReader::new(daemon_side.try_clone().expect("clone 失败"));
+            reader
+                .read_line(&mut line)
+                .expect("应收到 open 请求行");
+            let _ = daemon_side.write_all(b"{\"rows\":24,\"cols\":80,\"replay_len\":0}\n");
+            // 之后保持连接打开但不再读：客户端写满发送缓冲后应阻塞（修复前）
+            // / 超时返回（修复后）。
+            thread::sleep(Duration::from_secs(60));
+        });
+
+        let (buffered, _size, _replay, _geometry_token) = Terminal::handshake_on(
+            client_side,
+            24,
+            80,
+            None,
+            "write-timeout-test",
+            None,
+            true,
+        )
+        .expect("假守护正常回执，握手应成功");
+
+        // 与 Terminal::spawn 同一条路径：从握手流 clone 出写端。
+        let mut writer = buffered.get_ref().try_clone().expect("clone 失败");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            // 8MB 远超 Unix socket 默认发送缓冲，对端不读 → 写满后阻塞。
+            let payload = vec![0u8; 8 * 1024 * 1024];
+            let _ = writer.write_all(&payload);
+            let _ = tx.send(());
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => {}
+            Err(_) => panic!(
+                "守护不再消费时写端应超时返回，而不是无限阻塞——否则 UI 主线程 send_input 卡死"
+            ),
+        }
     }
 }
 

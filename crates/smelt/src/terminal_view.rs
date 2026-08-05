@@ -170,8 +170,9 @@ pub struct TerminalView {
     grid_origin: Rc<StdCell<(f32, f32)>>,
     /// 终端自身像素尺寸 (宽, 高)，由 canvas 写入；按卡片大小算行列（网格 Hub 用）。
     grid_size: Rc<StdCell<(f32, f32)>>,
-    /// 当前 Cmd 悬停的链接范围 (行, 起列, 止列)，用于高亮 + 切换鼠标样式。
-    hover_url: Option<(usize, usize, usize)>,
+    /// 当前 Cmd 悬停的链接范围：命中的每个物理行各一段 (行, 起列, 止列)，用于高亮 +
+    /// 切换鼠标样式。软换行的长链接可能横跨多行，所以是个列表而不是单一区间（#21）。
+    hover_url: Option<Vec<(usize, usize, usize)>>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
     /// 上一帧该终端是否在「运行中」（标题以 braille spinner 开头）；用于检测完成边沿。
@@ -974,41 +975,98 @@ impl TerminalView {
     }
 
     /// 点击单元处若落在某个链接上，返回该目标（未做 file:// 转换，打开前还要经
-    /// [`open_target`]）。
+    /// [`open_target`]）。软换行截断的长链接会被自动跨行拼起来（见 [`link_at`]），不会
+    /// 因为正好卡在断行处就点出被截断的错误地址（#21）。
     fn url_at(&self, (r, c): (usize, usize)) -> Option<String> {
-        let row = self.last_frame.as_ref()?.rows.get(r)?;
-        link_at(row, c).map(|(_, _, url)| url)
+        let frame = self.last_frame.as_ref()?;
+        link_at(frame, r, c).map(|(_, url)| url)
     }
 
-    /// 单元处链接的范围 (行, 起列, 止列)，用于悬停高亮。
-    fn link_range_at(&self, (r, c): (usize, usize)) -> Option<(usize, usize, usize)> {
-        let row = self.last_frame.as_ref()?.rows.get(r)?;
-        link_at(row, c).map(|(a, b, _)| (r, a, b))
+    /// 单元处链接跨越的所有物理行区间 [(行, 起列, 止列), ...]，用于悬停高亮——软换行的
+    /// 链接可能横跨好几行，每行各给一段列区间。
+    fn link_range_at(&self, (r, c): (usize, usize)) -> Option<Vec<(usize, usize, usize)>> {
+        let frame = self.last_frame.as_ref()?;
+        link_at(frame, r, c).map(|(segs, _)| segs)
     }
 }
 
-/// 某一格上的链接：(起列, 止列, 目标)。
+/// 找到 `r` 所在的软换行逻辑行范围 `[first, last]`（物理行号，含端点）。
+///
+/// `frame.wrapped[i] == true` 表示第 i 行是被截断的，内容延续到第 i+1 行（终端没有
+/// 真的输出换行符）。终端里打印的长链接经常正好卡在这种断点上——不把同一条软换行链
+/// 串起来的话，行内正则扫描 / OSC 8 扩展都只能看到断点前或断点后的半截。
+fn wrapped_line_range(frame: &terminal::Frame, r: usize) -> (usize, usize) {
+    let mut first = r;
+    while first > 0 && frame.wrapped.get(first - 1).copied().unwrap_or(false) {
+        first -= 1;
+    }
+    let mut last = r;
+    while frame.wrapped.get(last).copied().unwrap_or(false) && last + 1 < frame.rows.len() {
+        last += 1;
+    }
+    (first, last)
+}
+
+/// 单元处的链接：命中的物理行区间列表 + 目标 URL/路径。
 ///
 /// **先看 OSC 8**（`Cell::link`，终端协议层的链接）：`eza` / `gh` / `cargo` 这类输出里，
 /// 可见文本往往只是标题、真正的 URL 藏在协议里，正则扫可见文本根本找不到。没有 OSC 8
 /// 才回退到正则扫出来的 URL / 本地路径（[`find_links`]）。
-fn link_at(row: &[terminal::Cell], c: usize) -> Option<(usize, usize, String)> {
-    if let Some(uri) = row.get(c).and_then(|cell| cell.link.clone()) {
-        // 同一个链接铺在连续若干格上，向两侧扩到 uri 变化为止。
-        let same = |i: usize| row.get(i).and_then(|x| x.link.as_deref()) == Some(&*uri);
-        let mut a = c;
+///
+/// 扫描前先把 `r` 所在的软换行逻辑行（[`wrapped_line_range`]）拼成一条缓冲区再整体找
+/// 链接，最后把命中的缓冲区下标切回各物理行的列区间——否则打印的长链接卡在换行处就
+/// 会被从中间切断，点出来的是被截断的错误地址（#21）。
+fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<(Vec<(usize, usize, usize)>, String)> {
+    let (first, last) = wrapped_line_range(frame, r);
+    let mut buf: Vec<terminal::Cell> = Vec::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(last - first + 2);
+    for row_idx in first..=last {
+        starts.push(buf.len());
+        if let Some(row) = frame.rows.get(row_idx) {
+            buf.extend(row.iter().cloned());
+        }
+    }
+    starts.push(buf.len());
+
+    let idx = starts.get(r - first).copied()? + c;
+    if idx >= buf.len() {
+        return None;
+    }
+
+    let (a, b, url) = if let Some(uri) = buf.get(idx).and_then(|cell| cell.link.clone()) {
+        // 同一个链接铺在连续若干格上（可能跨行），向两侧扩到 uri 变化为止。
+        let same = |i: usize| buf.get(i).and_then(|x| x.link.as_deref()) == Some(&*uri);
+        let mut a = idx;
         while a > 0 && same(a - 1) {
             a -= 1;
         }
-        let mut b = c;
-        while b + 1 < row.len() && same(b + 1) {
+        let mut b = idx;
+        while b + 1 < buf.len() && same(b + 1) {
             b += 1;
         }
-        return Some((a, b, uri.to_string()));
+        (a, b, uri.to_string())
+    } else {
+        let (a, b, url) = find_links(&buf)
+            .into_iter()
+            .find(|&(a, b, _)| idx >= a && idx <= b)?;
+        (a, b, url)
+    };
+
+    // 把缓冲区下标区间 [a, b] 切回各物理行的列区间，供悬停高亮逐行绘制。
+    let mut segs = Vec::new();
+    for (i, row_idx) in (first..=last).enumerate() {
+        let row_start = starts[i];
+        let row_end = starts[i + 1];
+        if row_end <= row_start {
+            continue;
+        }
+        let lo = a.max(row_start);
+        let hi = b.min(row_end - 1);
+        if lo <= hi {
+            segs.push((row_idx, lo - row_start, hi - row_start));
+        }
     }
-    find_links(row)
-        .into_iter()
-        .find(|&(a, b, _)| c >= a && c <= b)
+    Some((segs, url))
 }
 
 /// 输入法（IME）支持：中文等需要合成的输入走这里，最终提交的文字通过
@@ -1218,7 +1276,7 @@ impl Render for TerminalView {
                 self.pty_kick_pending = true;
             }
         }
-        let hover_url = self.hover_url;
+        let hover_url = self.hover_url.clone();
         let has_hover = hover_url.is_some();
         // 滚动会改 display_offset：每帧按当前 offset 把绝对命中映到可视区。
         if self.search_open {
@@ -1625,10 +1683,10 @@ impl Render for TerminalView {
                                 Some((cr, cc, kind)) if cr == r => Some((cc, kind)),
                                 _ => None,
                             };
-                            let hl = match hover_url {
-                                Some((hr, a, b)) if hr == r => Some((a, b)),
-                                _ => None,
-                            };
+                            let hl = hover_url
+                                .as_ref()
+                                .and_then(|segs| segs.iter().find(|&&(hr, _, _)| hr == r))
+                                .map(|&(_, a, b)| (a, b));
                             // 同一行可能有多段命中；传整行命中列表给 paint_row。
                             let row_hits: Vec<(usize, usize, bool)> = search_hits
                                 .iter()
@@ -2596,6 +2654,7 @@ mod tests {
         bg_spans, cells_to_token, classify_launch, fallback_attention, keystroke_to_bytes, link_at,
         scrollbar_thumb, text_batches, visible_end,
     };
+    use crate::terminal;
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
     use smelt_core::attention::AttentionKind;
@@ -2784,6 +2843,16 @@ mod tests {
         );
     }
 
+    /// 造一个单行 Frame（`wrapped` 全 false），给不涉及软换行的 link_at 测试用。
+    fn single_row_frame(cells: Vec<Cell>) -> terminal::Frame {
+        terminal::Frame {
+            rows: vec![cells],
+            cursor: None,
+            cursor_pos: None,
+            wrapped: vec![false],
+        }
+    }
+
     /// OSC 8 超链接：可见文本只是标题（`Release notes`），真正的 URL 藏在协议里。正则扫
     /// 可见文本是找不到的，必须读 `Cell::link`，且范围要覆盖铺着同一个 URI 的所有格子。
     #[test]
@@ -2794,22 +2863,53 @@ mod tests {
         // 「cd」两格挂着 OSC 8 链接
         cells[3].link = Some(uri.clone());
         cells[4].link = Some(uri.clone());
+        let frame = single_row_frame(cells);
 
         assert_eq!(
-            link_at(&cells, 3),
-            Some((3, 4, "https://example.com/notes".to_string())),
+            link_at(&frame, 0, 3),
+            Some((vec![(0, 3, 4)], "https://example.com/notes".to_string())),
             "命中 OSC 8：范围覆盖挂着同一 URI 的连续格子"
         );
         assert_eq!(
-            link_at(&cells, 4),
-            link_at(&cells, 3),
+            link_at(&frame, 0, 4),
+            link_at(&frame, 0, 3),
             "同一链接内任意一格结果相同"
         );
         assert_eq!(
-            link_at(&cells, 0),
+            link_at(&frame, 0, 0),
             None,
             "没挂链接、可见文本也不是 URL 的格子：没有链接"
         );
+    }
+
+    /// #21 的回归测试：长链接被终端软换行截成两截，`wrapped[0] == true` 表示第 0 行
+    /// 没有真的换行、内容延续到第 1 行。点第 0 行末尾或第 1 行开头，都要拿到拼接后的
+    /// 完整 URL，而不是被断行切出来的半截。
+    #[test]
+    fn url_split_across_soft_wrap_is_reassembled() {
+        // 模拟窄终端（8 列）：一整条 URL 被截成两行显示。
+        // 行 0: "https://" 行 1: "a.b/c123"（拼起来是 "https://a.b/c123"）
+        let row0 = row("https://");
+        let row1 = row("a.b/c123");
+        let frame = terminal::Frame {
+            rows: vec![row0, row1],
+            cursor: None,
+            cursor_pos: None,
+            wrapped: vec![true, false],
+        };
+
+        let full = "https://a.b/c123".to_string();
+        // 点在第 0 行最后一格（断行前）
+        let (segs, url) = link_at(&frame, 0, 7).expect("软换行前半截也应命中链接");
+        assert_eq!(url, full, "拼接后应是完整 URL，而不是被换行切断的前半截");
+        assert_eq!(
+            segs,
+            vec![(0, 0, 7), (1, 0, 7)],
+            "高亮范围要跨两行给出各自的列区间"
+        );
+
+        // 点在第 1 行开头（断行后）结果应完全一致
+        assert_eq!(link_at(&frame, 1, 0), Some((segs, full)));
     }
 
     /// 零宽字符（变体选择器 U+FE0F、组合变音符等）挂在基字符那一格上（alacritty 的

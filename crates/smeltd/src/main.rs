@@ -4567,6 +4567,7 @@ struct AcpOpenRequest {
     launch: smelt_core::agent_kind::AcpLaunchSpec,
     agent_needs_transcript_check: bool,
     resume_id: Option<String>,
+    tail_limit: Option<usize>,
 }
 
 fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
@@ -4591,6 +4592,9 @@ fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
         launch,
         agent_needs_transcript_check: v["agent"].as_str().unwrap_or("claude") == "claude",
         resume_id: v["resume_id"].as_str().map(String::from),
+        tail_limit: v["tail_limit"]
+            .as_u64()
+            .map(|value| (value as usize).clamp(1, 500)),
     })
 }
 
@@ -5022,7 +5026,13 @@ fn handle_acp_open(
             let Ok(mut c) = conn.try_clone() else { return };
             let fd = c.as_raw_fd();
             let _ = c.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
-            let snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
+            let reduced = sess.reduced.lock().unwrap();
+            let offset = req
+                .tail_limit
+                .map(|limit| reduced.entries.len().saturating_sub(limit))
+                .unwrap_or(0);
+            let snapshot = reduced.to_snapshot_since(false, offset);
+            drop(reduced);
             if writeln!(c, "{}", serde_json::json!({ "snapshot": snapshot })).is_err() {
                 return;
             }
@@ -7245,13 +7255,13 @@ mod acp_tests {
     }
 
     #[test]
-    fn reopening_live_session_returns_full_history_without_relaunch() {
+    fn reopening_live_session_returns_requested_tail_without_relaunch() {
         let mut reduced = AcpSessionState::default();
-        reduced.entries.push(AcpEntry::User("old question".into()));
-        reduced.entries.push(AcpEntry::Assistant {
-            text: "old answer".into(),
-            thought: false,
-        });
+        for index in 0..5 {
+            reduced
+                .entries
+                .push(AcpEntry::User(format!("message-{index}")));
+        }
         reduced.phase = AcpPhase::Idle;
 
         let acp_sessions = new_acp_sessions();
@@ -7275,7 +7285,8 @@ mod acp_tests {
                 reader,
                 &serde_json::json!({
                     "id": "acp-live",
-                    "cmd": "/must/not/be/launched"
+                    "cmd": "/must/not/be/launched",
+                    "tail_limit": 2
                 }),
                 sessions_for_open,
                 Arc::new(Mutex::new(Vec::new())),
@@ -7286,7 +7297,8 @@ mod acp_tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["snapshot"]["entries_offset"], 0);
+        assert_eq!(response["snapshot"]["entries_offset"], 3);
+        assert_eq!(response["snapshot"]["entries_total"], 5);
         assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
         assert!(slot.value.handle.lock().unwrap().is_some());
 
