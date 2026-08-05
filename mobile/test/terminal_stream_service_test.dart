@@ -158,4 +158,113 @@ void main() {
       expect(terminalConnections, 1);
     },
   );
+
+  test(
+    'terminal stream discards a mismatched snapshot and reattaches',
+    () async {
+      var terminalConnections = 0;
+      final attachGeometries = <Map<String, dynamic>>[];
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        if (request.uri.path == '/acp/ws') {
+          final socket = await WebSocketTransformer.upgrade(request);
+          socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+          await for (final _ in socket) {}
+          return;
+        }
+        if (request.uri.path == '/terminal/terminal-1/ws') {
+          final connection = ++terminalConnections;
+          final socket = await WebSocketTransformer.upgrade(request);
+          socket.add(
+            jsonEncode({
+              'type': 'terminalConnected',
+              'sessionId': 'terminal-1',
+              'writeEnabled': true,
+            }),
+          );
+          await for (final raw in socket) {
+            if (raw is! String) continue;
+            final message = jsonDecode(raw) as Map<String, dynamic>;
+            if (message['method'] != 'attach') continue;
+            attachGeometries.add(
+              Map<String, dynamic>.from(
+                message['params'] as Map<String, dynamic>,
+              ),
+            );
+            if (connection == 1) {
+              socket.add(
+                jsonEncode({
+                  'type': 'terminalReady',
+                  'sessionId': 'terminal-1',
+                  'cols': 181,
+                  'rows': 59,
+                  'replayBytes': 3,
+                  'writeEnabled': true,
+                }),
+              );
+              socket.add(utf8.encode('OLD'));
+            } else {
+              socket.add(
+                jsonEncode({
+                  'type': 'terminalReady',
+                  'sessionId': 'terminal-1',
+                  'cols': 49,
+                  'rows': 47,
+                  'replayBytes': 3,
+                  'writeEnabled': true,
+                }),
+              );
+              socket.add(utf8.encode('NEW'));
+            }
+          }
+          return;
+        }
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+      });
+
+      final gateway = GatewayService();
+      addTearDown(gateway.dispose);
+      await gateway.connect('http://127.0.0.1:${server.port}', 'tok');
+      await _waitFor(() => gateway.state == WsState.connected);
+
+      final service = TerminalStreamService(
+        gateway: gateway,
+        sessionId: 'terminal-1',
+      );
+      addTearDown(service.dispose);
+      final events = <TerminalStreamEvent>[];
+      final eventSubscription = service.events.listen(events.add);
+      addTearDown(eventSubscription.cancel);
+
+      service.start(
+        const TerminalGeometry(
+          cols: 49,
+          rows: 47,
+          cellWidth: 8,
+          cellHeight: 16,
+        ),
+      );
+
+      await _waitFor(() => terminalConnections == 2);
+      await _waitFor(
+        () => events.any((event) => event is TerminalReplayCompleteEvent),
+      );
+
+      expect(attachGeometries, hasLength(2));
+      expect(attachGeometries.every((geometry) => geometry['cols'] == 49), true);
+      final ready = events.whereType<TerminalReadyEvent>().single;
+      expect((ready.cols, ready.rows), (49, 47));
+      expect(
+        events
+            .whereType<TerminalDataEvent>()
+            .expand((event) => event.bytes)
+            .toList(),
+        utf8.encode('NEW'),
+      );
+      expect(events.whereType<TerminalReplayCompleteEvent>(), hasLength(1));
+    },
+  );
 }

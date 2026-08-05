@@ -170,6 +170,77 @@ void main() {
     expect(scrollController.offset, lessThan(latestOffset));
   });
 
+  testWidgets('snapshot replays at the negotiated mobile geometry', (
+    tester,
+  ) async {
+      final stream = _FakeTerminalStream();
+      const session = SessionSummary(
+        id: 'terminal-1',
+        kind: SessionKind.terminal,
+        title: 'Shell',
+        phase: 'running',
+        agent: 'terminal',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TerminalSessionPage(session: session, stream: stream),
+        ),
+      );
+      expect(stream.geometries, isNotEmpty);
+      final mobileGeometry = stream.geometries.last;
+
+      stream.connect();
+      final replay = Uint8List.fromList(
+        utf8.encode(
+          '\x1b[?1049l\x1b[H\x1b[2J\x1b[3J\x1b[?7l'
+          '${List.generate(90, (index) => 'desktop-$index\x1b[K\r\n').join()}'
+          'LATEST',
+        ),
+      );
+      stream.emit(
+        TerminalReadyEvent(
+          cols: mobileGeometry.cols,
+          rows: mobileGeometry.rows,
+          replayBytes: replay.length,
+          writeEnabled: true,
+        ),
+      );
+      stream.emit(TerminalDataEvent(replay));
+      await tester.pump();
+
+      var view = tester.widget<TerminalView>(find.byType(TerminalView));
+      expect(view.autoResize, isFalse);
+      expect(
+        (view.terminal.viewWidth, view.terminal.viewHeight),
+        (mobileGeometry.cols, mobileGeometry.rows),
+      );
+      expect(view.terminal.buffer.getText(), contains('LATEST'));
+
+      stream.emit(const TerminalReplayCompleteEvent());
+      await tester.pump();
+      await tester.pump();
+
+      view = tester.widget<TerminalView>(find.byType(TerminalView));
+      expect(view.autoResize, isTrue);
+      expect(
+        (view.terminal.viewWidth, view.terminal.viewHeight),
+        (mobileGeometry.cols, mobileGeometry.rows),
+      );
+      expect(view.terminal.buffer.getText(), contains('LATEST'));
+      expect(view.scrollController!.position.maxScrollExtent, greaterThan(0));
+
+      final live = utf8.encode('\r\nLIVE-\u7aef');
+      stream.emit(
+        TerminalDataEvent(Uint8List.fromList(live.sublist(0, live.length - 1))),
+      );
+      stream.emit(
+        TerminalDataEvent(Uint8List.fromList(live.sublist(live.length - 1))),
+      );
+      await tester.pump();
+      expect(view.terminal.buffer.getText(), contains('LIVE-\u7aef'));
+    },
+  );
+
   testWidgets(
     'software keyboard preserves PTY geometry and terminal scrolling',
     (tester) async {
@@ -330,4 +401,5 @@ void main() {
     expect(inputs, ['\x1b', '\x03', '\x1b[A']);
     expect(tester.takeException(), isNull);
   });
+
 }

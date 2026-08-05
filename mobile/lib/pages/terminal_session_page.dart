@@ -23,8 +23,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   late final TerminalStreamClient _stream;
   late Terminal _terminal;
   late GlobalKey<TerminalViewState> _terminalViewKey;
-  late StreamController<List<int>> _byteController;
-  late StreamSubscription<String> _decodedSubscription;
+  late Sink<List<int>> _byteSink;
   late XtermInputFilter _inputFilter;
   late final StreamSubscription<TerminalStreamEvent> _eventSubscription;
   late final StreamSubscription<TerminalStreamState> _stateSubscription;
@@ -37,6 +36,9 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   bool _softwareKeyboardEnabled = false;
   bool _softwareKeyboardWasVisible = false;
   bool _terminalGeometryLocked = false;
+  bool _replayGeometryLocked = false;
+  bool _applyingStreamGeometry = false;
+  TerminalGeometry? _viewportGeometry;
   int _decoderGeneration = 0;
 
   @override
@@ -67,53 +69,92 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     });
   }
 
-  Terminal _newTerminal() => Terminal(
-    maxLines: 5000,
-    onOutput: _stream.sendInput,
-    onResize: (cols, rows, cellWidth, cellHeight) {
-      if (cols <= 0 || rows <= 0) return;
-      final geometry = TerminalGeometry(
-        cols: cols,
-        rows: rows,
-        cellWidth: cellWidth.clamp(1, 256),
-        cellHeight: cellHeight.clamp(1, 256),
+  Terminal _newTerminal({int cols = 80, int rows = 24}) {
+    final terminal = Terminal(maxLines: 5000, onOutput: _stream.sendInput);
+    // A daemon snapshot contains cursor-addressed output for the dimensions in
+    // terminalReady. Establish that grid before any replay byte is decoded.
+    terminal.resize(cols.clamp(1, 300), rows.clamp(1, 200));
+    terminal.onResize = _handleTerminalResize;
+    return terminal;
+  }
+
+  void _handleTerminalResize(
+    int cols,
+    int rows,
+    int cellWidth,
+    int cellHeight,
+  ) {
+    if (_applyingStreamGeometry || cols <= 0 || rows <= 0) return;
+    final geometry = TerminalGeometry(
+      cols: cols,
+      rows: rows,
+      cellWidth: cellWidth.clamp(1, 256),
+      cellHeight: cellHeight.clamp(1, 256),
+    );
+    _viewportGeometry = geometry;
+    _stream.updateGeometry(geometry);
+  }
+
+  void _applyViewportGeometry() {
+    final geometry = _viewportGeometry;
+    if (geometry == null ||
+        (_terminal.viewWidth == geometry.cols &&
+            _terminal.viewHeight == geometry.rows)) {
+      return;
+    }
+    _applyingStreamGeometry = true;
+    try {
+      _terminal.resize(
+        geometry.cols,
+        geometry.rows,
+        geometry.cellWidth,
+        geometry.cellHeight,
       );
-      _stream.updateGeometry(geometry);
-    },
-  );
+    } finally {
+      _applyingStreamGeometry = false;
+    }
+  }
 
   void _resetDecoder() {
     final generation = ++_decoderGeneration;
     if (generation > 1) {
-      unawaited(_byteController.close());
-      unawaited(_decodedSubscription.cancel());
+      _byteSink.close();
     }
     _inputFilter = XtermInputFilter();
-    _byteController = StreamController<List<int>>();
-    _decodedSubscription = _byteController.stream
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .listen((text) {
-          if (generation == _decoderGeneration) _terminal.write(text);
-        });
+    final terminal = _terminal;
+    _byteSink = const Utf8Decoder(
+      allowMalformed: true,
+    ).startChunkedConversion(
+      _CallbackSink<String>((text) {
+        if (generation == _decoderGeneration) terminal.write(text);
+      }),
+    );
   }
 
   void _handleTerminalEvent(TerminalStreamEvent event) {
     switch (event) {
       case TerminalReadyEvent():
         _closeSoftwareKeyboard();
-        _terminal = _newTerminal();
+        _terminal = _newTerminal(cols: event.cols, rows: event.rows);
         _terminalViewKey = GlobalKey<TerminalViewState>();
         _resetDecoder();
         if (!mounted) return;
         setState(() {
           _writeEnabled = event.writeEnabled;
           _softwareKeyboardEnabled = false;
+          _replayGeometryLocked = true;
           _error = null;
         });
       case TerminalDataEvent():
         final bytes = _inputFilter.add(event.bytes);
-        if (bytes.isNotEmpty) _byteController.add(bytes);
+        if (bytes.isNotEmpty) _byteSink.add(bytes);
       case TerminalReplayCompleteEvent():
+        _applyViewportGeometry();
+        if (mounted) {
+          setState(() {
+            _replayGeometryLocked = false;
+          });
+        }
         _scrollToLatestAfterReplay();
       case TerminalErrorEvent():
         if (!mounted) return;
@@ -122,6 +163,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
           _error = event.message;
           if (event.fatal) {
             _writeEnabled = false;
+            _replayGeometryLocked = false;
           }
         });
       case TerminalClosedEvent():
@@ -129,6 +171,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         _closeSoftwareKeyboard();
         setState(() {
           _writeEnabled = false;
+          _replayGeometryLocked = false;
           _error = 'Terminal session ended';
         });
     }
@@ -136,9 +179,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
 
   void _scrollToLatestAfterReplay() {
     final generation = _decoderGeneration;
-    // Replay data passes through an asynchronous UTF-8 decoder. Wait for it
-    // to update xterm, then give RenderTerminal one layout to publish its new
-    // scroll extent before moving to the live tail.
+    // The decoder has synchronously applied the replay. Give RenderTerminal a
+    // layout to publish the resized buffer's scroll extent before following it.
     _scrollToTerminalTailAfterLayout(decoderGeneration: generation);
   }
 
@@ -307,7 +349,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                 autofocus: false,
                 readOnly: !_writeEnabled,
                 hardwareKeyboardOnly: !_softwareKeyboardEnabled,
-                autoResize: !_terminalGeometryLocked,
+                autoResize:
+                    !_terminalGeometryLocked && !_replayGeometryLocked,
                 deleteDetection: true,
                 simulateScroll: true,
                 onTapUp: (_, _) => _enableSoftwareKeyboard(),
@@ -357,13 +400,24 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     _terminalFocusNode.dispose();
     _terminalScrollController.dispose();
     _decoderGeneration++;
-    unawaited(_byteController.close());
-    unawaited(_decodedSubscription.cancel());
+    _byteSink.close();
     unawaited(_eventSubscription.cancel());
     unawaited(_stateSubscription.cancel());
     unawaited(_stream.dispose());
     super.dispose();
   }
+}
+
+class _CallbackSink<T> implements Sink<T> {
+  _CallbackSink(this.onData);
+
+  final ValueChanged<T> onData;
+
+  @override
+  void add(T data) => onData(data);
+
+  @override
+  void close() {}
 }
 
 class _TerminalErrorBar extends StatelessWidget {

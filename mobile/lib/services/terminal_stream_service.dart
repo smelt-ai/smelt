@@ -264,6 +264,14 @@ class TerminalStreamService implements TerminalStreamClient {
         case 'terminalConnected':
           _writeEnabled = message['writeEnabled'] as bool? ?? false;
         case 'terminalReady':
+          final cols = message['cols'] as int? ?? 80;
+          final rows = message['rows'] as int? ?? 24;
+          final geometry = _geometry;
+          if (geometry != null &&
+              (cols != geometry.cols || rows != geometry.rows)) {
+            _reattachForGeometry(generation);
+            return;
+          }
           _writeEnabled = message['writeEnabled'] as bool? ?? false;
           _replayBytesRemaining = message['replayBytes'] as int? ?? 0;
           _replayComplete = false;
@@ -271,8 +279,8 @@ class TerminalStreamService implements TerminalStreamClient {
           _setState(TerminalStreamState.connected);
           _eventsController.add(
             TerminalReadyEvent(
-              cols: message['cols'] as int? ?? 80,
-              rows: message['rows'] as int? ?? 24,
+              cols: cols,
+              rows: rows,
               replayBytes: message['replayBytes'] as int? ?? 0,
               writeEnabled: _writeEnabled,
             ),
@@ -306,6 +314,18 @@ class TerminalStreamService implements TerminalStreamClient {
         TerminalErrorEvent('Invalid terminal message: $error'),
       );
     }
+  }
+
+  void _reattachForGeometry(int generation) {
+    if (_disposed || generation != _generation) return;
+    // Legacy gateways attach at the desktop geometry, resize the daemon, then
+    // deliver that stale snapshot. Replaying and reflowing a large populated
+    // xterm buffer corrupts its indexed scrollback. Drop the entire generation;
+    // the gateway has already completed the requested resize before Ready, so
+    // the next attachment receives an authoritative mobile-sized snapshot.
+    _closeChannel();
+    _setState(TerminalStreamState.waitingForGateway);
+    _scheduleReconnect();
   }
 
   void _completeReplay() {
