@@ -87,6 +87,11 @@ impl Workspace {
             .map(|(ix, s)| (ix, s.title(cx)))
             .collect();
         let statuses: Vec<AgentStatus> = self.sessions.iter().map(|s| s.status(cx)).collect();
+        let last_updated_at: Vec<u64> = self
+            .sessions
+            .iter()
+            .map(|s| s.effective_updated_at(cx))
+            .collect();
         let entity_ids: Vec<EntityId> = self.sessions.iter().map(|s| s.anchor_id()).collect();
         // 非项目分组会拿掉项目标题，因此把每个会话所属项目的标签摊到行内展示，
         // 否则同名会话按状态混在一起后完全看不出来自哪个项目。
@@ -105,6 +110,7 @@ impl Workspace {
             self.sidebar_grouping,
             project_groups,
             &statuses,
+            &last_updated_at,
             self.sessions.len(),
         );
 
@@ -228,7 +234,12 @@ impl Workspace {
                                     "状态",
                                     e_group.clone(),
                                 );
-                                add_item(menu, SidebarGrouping::None, "没有任何", e_group.clone())
+                                add_item(
+                                    menu,
+                                    SidebarGrouping::LastUpdated,
+                                    "时间",
+                                    e_group.clone(),
+                                )
                             }),
                     ),
             );

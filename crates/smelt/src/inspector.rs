@@ -128,6 +128,13 @@ impl Workspace {
         .into_any_element()
     }
 
+    /// Files 内容区右上角切换文件树显隐；停靠态和舞台展开态共用这份状态。
+    pub(crate) fn toggle_file_tree(&mut self, cx: &mut Context<Self>) {
+        self.file_tree_open = !self.file_tree_open;
+        self.save_state(cx);
+        cx.notify();
+    }
+
     /// 当前 tab 是不是已经「提升到舞台」（⤢ 展开）。
     /// 提升后本体在舞台上，右侧就别再停靠一份——否则同一个文件树 / 变更列表
     /// 左右各渲染一遍，看着像出了两个面板。
@@ -162,12 +169,18 @@ impl Workspace {
             // 只有 SKILL 没有展开形态（stage_view() = None），这时才退回停靠。
             if let Some(view) = tab.stage_view() {
                 self.set_stage_override(Some(view), window, cx);
+                if tab == InspectorTab::Git {
+                    self.reset_git_diff_view();
+                }
                 self.inspector_tab = tab;
                 self.save_state(cx);
                 cx.notify();
                 return;
             }
             self.set_stage_override(None, window, cx);
+            if tab == InspectorTab::Git {
+                self.reset_git_diff_view();
+            }
             self.inspector_tab = tab;
             self.set_inspector_open(true);
             self.save_state(cx);
@@ -177,6 +190,9 @@ impl Workspace {
         if self.inspector_tab == tab && self.inspector_open {
             self.set_inspector_open(false);
         } else {
+            if tab == InspectorTab::Git && self.inspector_tab != tab {
+                self.reset_git_diff_view();
+            }
             self.inspector_tab = tab;
             self.set_inspector_open(true);
         }
@@ -353,6 +369,7 @@ impl Workspace {
         let tree_w = self
             .file_tree_w
             .clamp(MIN_FILE_TREE_WIDTH, MAX_FILE_TREE_WIDTH);
+        let tree_open = self.file_tree_open;
         let tree = if has_query {
             match &self.search_results {
                 Some(state) => {
@@ -394,16 +411,46 @@ impl Workspace {
             .into_any_element();
         // 路径栏横跨整个面板；只有它下方才开始左右分栏。这样路径不被左侧内容区
         // 裁掉，树内搜索也不会与面包屑抢同一行，结构对齐常见编辑器的文件视图。
-        let content_parts = crate::file_tree::file_content_parts(&self.open_file, &roots, cx);
+        let content_parts =
+            crate::file_tree::file_content_parts(&self.open_file, &roots, tree_open, cx);
         let content_header = content_parts.header;
         let content = content_parts.body;
+        let resize_listener = tree_open.then(|| self.file_tree_resize_listener(cx));
+        let tree_side = tree_open.then(|| {
+            div()
+                .h_full()
+                .flex()
+                .flex_none()
+                .child(self.file_tree_resize_handle("inspector-files-split", cx))
+                .child(
+                    div()
+                        .w(px(tree_w))
+                        .flex_none()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .flex()
+                        .bg(rgb(ui_theme::bg_panel()))
+                        .child(
+                            div()
+                                .size_full()
+                                .min_h_0()
+                                .flex()
+                                .flex_col()
+                                .border_l_1()
+                                .border_color(rgb(ui_theme::border_dim()))
+                                .child(tree),
+                        ),
+                )
+                .into_any_element()
+        });
         let body = div()
             .flex_1()
             .relative()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .child(self.file_tree_resize_listener(cx))
+            .children(resize_listener)
             .child(
                 div()
                     .size_full()
@@ -417,27 +464,7 @@ impl Workspace {
                             .flex()
                             .child(content),
                     )
-                    .child(self.file_tree_resize_handle("inspector-files-split", cx))
-                    .child(
-                        div()
-                            .w(px(tree_w))
-                            .flex_none()
-                            .min_w_0()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .flex()
-                            .bg(rgb(ui_theme::bg_panel()))
-                            .child(
-                                div()
-                                    .size_full()
-                                    .min_h_0()
-                                    .flex()
-                                    .flex_col()
-                                    .border_l_1()
-                                    .border_color(rgb(ui_theme::border_dim()))
-                                    .child(tree),
-                            ),
-                    ),
+                    .children(tree_side),
             )
             .into_any_element();
         div()
