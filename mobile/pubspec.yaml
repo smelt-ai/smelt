@@ -44,7 +44,15 @@ dependencies:
   diff_match_patch: ^0.4.1
   path_provider: ^2.1.6
   crypto: ^3.0.7
-  xterm: ^4.0.0
+  # Fork of xterm 4.0.0 carrying three fixes upstream has not taken: buffer
+  # lines detached by a scroll region, a reflow reading through a stale ring
+  # rotation, and mouse wheel ticks reported as a modified click. Upstream has
+  # not merged a pull request since February 2024. Pinned by commit; see
+  # https://github.com/smelt-ai/xterm.dart/tree/smelt
+  xterm:
+    git:
+      url: https://github.com/smelt-ai/xterm.dart.git
+      ref: 4dc01b95d99a1dc6eb71f1a5e8ee2d7aa8a95c33
   # 版本必须与 crates/smelt-mobile 里 pin 的 flutter_rust_bridge 完全一致，
   # 否则生成的绑定与运行时对不上，表现为启动即崩。
   flutter_rust_bridge: 2.12.0

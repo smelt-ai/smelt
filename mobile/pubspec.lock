@@ -910,10 +910,11 @@ packages:
   xterm:
     dependency: "direct main"
     description:
-      name: xterm
-      sha256: "168dfedca77cba33fdb6f52e2cd001e9fde216e398e89335c19b524bb22da3a2"
-      url: "https://pub.dev"
-    source: hosted
+      path: "."
+      ref: "4dc01b95d99a1dc6eb71f1a5e8ee2d7aa8a95c33"
+      resolved-ref: "4dc01b95d99a1dc6eb71f1a5e8ee2d7aa8a95c33"
+      url: "https://github.com/smelt-ai/xterm.dart.git"
+    source: git
     version: "4.0.0"
   yaml:
     dependency: transitive
