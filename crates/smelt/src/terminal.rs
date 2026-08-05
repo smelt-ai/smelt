@@ -1705,6 +1705,14 @@ const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// 而握手在 GUI 主线程同步跑——没有这个超时就是无限 beachball（真实发生过：启动
 /// 恢复会话时主线程卡死，强杀重开又 abort）。取值对齐 probe_daemon 的 5s。
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// 终端写端（键盘输入 / PTY 自动应答 → smeltd）的写超时。守护僵死、不再消费这条
+/// socket 时，Unix 发送缓冲写满，`write_all` 无超时会在内核 `sosend` 里无限睡眠——
+/// 而写调用全在 UI 主线程（send_input / write_pty），一堵就是整个 App 卡死（2026-08-04
+/// hang 报告：`__sendto → sosend → lck_mtx_sleep`，主线程挂起 35s+）。正常守护毫秒级
+/// 消费，exec 交接期连接本身会断（EPIPE 快速失败，不走超时路径），取 500ms——注意
+/// macOS 上 SO_SNDTIMEO 实际耗时约两倍（实测 500ms 设置 ≈ 1s 返回），僵死时 UI 最多
+/// 卡 1 秒左右，输入丢一次，比永久冻结可接受得多。
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn open_request(
     rows: usize,
@@ -1934,6 +1942,11 @@ impl Terminal {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
+        // 写超时必须从握手起就带上且全程保留：握手后读超时会清掉（交给读线程长
+        // 期读 PTY 输出），但写端由 UI 主线程直接调用，守护僵死/不消费时没有写
+        // 超时就是无限 beachball（hang 报告根因，见 WRITE_TIMEOUT 注释）。同 fd
+        // 的 set_write_timeout 对 try_clone 出的写端同样生效。
+        writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
         writeln!(writer, "{}", open_request(rows, cols, cwd, id, launch))?;
         let mut buffered = BufReader::new(writer);
         let mut line = String::new();
@@ -2938,6 +2951,59 @@ mod handshake_timeout_tests {
             Err(_) => panic!("握手对不回话的守护没有在超时窗口内返回——主线程会被永久卡死"),
         }
         drop(theirs); // 撑到断言之后才放，确保对端全程存活
+    }
+
+    /// 复现 2026-08-04 hang 报告（Smelt 0.6.9）的第二环：守护不再消费终端写
+    /// socket 时，写端无限阻塞。主线程栈 `__sendto → sosend → lck_mtx_sleep`
+    /// = Unix socket 发送缓冲写满、对端不读，而 `write_frame → write_all` 没有
+    /// 写超时 → UI 主线程 send_input 永久卡死（采样显示挂起 35s+）。
+    /// 修复后：握手建立的 writer 必须带写超时，写满缓冲时应返回 Err 而不是
+    /// 永久挂起。用 UnixStream::pair 当假守护：先正常回握手回执（否则走不到
+    /// writer 阶段），之后保持连接打开但不再消费，模拟守护僵死。
+    #[test]
+    fn writer_times_out_when_daemon_stops_consuming() {
+        let (mut daemon_side, client_side) = UnixStream::pair().expect("pair 失败");
+
+        // 假守护线程不 join：断言窗口（2s）远小于其存活时长，进程退出时兜底清理。
+        thread::spawn(move || {
+            let mut line = String::new();
+            let mut reader = BufReader::new(daemon_side.try_clone().expect("clone 失败"));
+            reader
+                .read_line(&mut line)
+                .expect("应收到 open 请求行");
+            let _ = daemon_side.write_all(b"{\"rows\":24,\"cols\":80,\"replay_len\":0}\n");
+            // 之后保持连接打开但不再读：客户端写满发送缓冲后应阻塞（修复前）
+            // / 超时返回（修复后）。
+            thread::sleep(Duration::from_secs(60));
+        });
+
+        let (buffered, _size, _replay) = Terminal::handshake_on(
+            client_side,
+            24,
+            80,
+            None,
+            "write-timeout-test",
+            None,
+        )
+        .expect("假守护正常回执，握手应成功");
+
+        // 与 Terminal::spawn 同一条路径：从握手流 clone 出写端。
+        let mut writer = buffered.get_ref().try_clone().expect("clone 失败");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            // 8MB 远超 Unix socket 默认发送缓冲，对端不读 → 写满后阻塞。
+            let payload = vec![0u8; 8 * 1024 * 1024];
+            let _ = writer.write_all(&payload);
+            let _ = tx.send(());
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => {}
+            Err(_) => panic!(
+                "守护不再消费时写端应超时返回，而不是无限阻塞——否则 UI 主线程 send_input 卡死"
+            ),
+        }
     }
 }
 
