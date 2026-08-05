@@ -1092,6 +1092,13 @@ const SETTINGS_PAGE_UPDATE: usize = 4;
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
+    History {
+        agent: settings::AcpAgentKind,
+        profile_id: Option<String>,
+        cwd: String,
+        resume_id: String,
+        current_title: String,
+    },
 }
 
 /// 单个终端 pane 自动推导的标题：优先 agent 上报的任务名，其次快捷启动显示名，
@@ -2134,6 +2141,12 @@ struct Workspace {
     session_list: HashMap<String, (Instant, Rc<Vec<session_history::SessionSummary>>)>,
     /// 正在后台扫描历史会话列表的 key（同上 `"{agent_id}:{cwd}"`，防重复并发 spawn）。
     session_list_inflight: HashSet<String>,
+    /// 历史会话标题搜索框；只过滤已加载列表，不触发 transcript 重扫。
+    history_filter: Option<Entity<gpui_component::input::InputState>>,
+    _history_filter_sub: Option<Subscription>,
+    /// 用户在 agent 尚未返回 resume id 前改名的 ACP 会话。只记录本次显式改名，
+    /// 因此不会把旧 workspace.json 里的 custom_title 迁移进历史元数据仓库。
+    pending_history_title_persist: HashSet<u64>,
     /// 当前选中查看的历史会话（路径 + 解析出的对话内容）；None 表示未选。
     session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
     /// 历史会话右侧消息详情的可变高度虚拟列表状态。
@@ -2497,6 +2510,9 @@ impl Workspace {
             git_autofetch_at: HashMap::new(),
             session_list: HashMap::new(),
             session_list_inflight: HashSet::new(),
+            history_filter: None,
+            _history_filter_sub: None,
+            pending_history_title_persist: HashSet::new(),
             session_detail: None,
             history_detail_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(800.)),
             session_detail_gen: 0,
@@ -2675,6 +2691,9 @@ impl Workspace {
                 .agent_option_id
                 .strip_prefix("profile:")
                 .map(String::from);
+            let stored_title = record.resume_id.as_deref().and_then(|resume_id| {
+                smelt_core::session_metadata::custom_title(agent, profile_id.as_deref(), resume_id)
+            });
             let resume_id = record
                 .resume_id
                 .map(agent_client_protocol::schema::v1::SessionId::new);
@@ -2698,7 +2717,8 @@ impl Workspace {
             self.sessions.push(Session {
                 ui_id: next_session_ui_id(),
                 kind: SessionKind::Acp(view),
-                custom_title: (!record.title.trim().is_empty()).then_some(record.title),
+                custom_title: stored_title
+                    .or_else(|| (!record.title.trim().is_empty()).then_some(record.title)),
                 remote_owned: true,
                 _acp_persist_sub,
                 ui_state: SessionUiState::default(),
@@ -3296,7 +3316,10 @@ impl Workspace {
             view,
             window,
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
-                acp_view::AcpViewEvent::Changed => this.save_state(cx),
+                acp_view::AcpViewEvent::Changed => {
+                    this.persist_pending_history_title_for_view(_view, cx);
+                    this.save_state(cx);
+                }
                 acp_view::AcpViewEvent::PreviewImage(image) => {
                     this.acp_image_preview = Some(image.clone());
                     this.acp_image_preview_render = None; // 换图了,旧渲染作废
@@ -3465,13 +3488,16 @@ impl Workspace {
         let launch = launch_override.unwrap_or_else(|| {
             smelt_core::agent_kind::AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))
         });
+        let custom_title =
+            smelt_core::session_metadata::custom_title(agent, profile_id.as_deref(), &resume_id);
+        let view_profile_id = profile_id.clone();
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
                 cx,
                 agent,
                 launch,
-                profile_id.is_none(),
-                profile_id,
+                view_profile_id.is_none(),
+                view_profile_id,
                 Some(cwd),
                 "正在加载历史会话…".to_string(),
                 Vec::new(),
@@ -3485,7 +3511,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
-            custom_title: None,
+            custom_title,
             remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
@@ -4424,6 +4450,8 @@ impl Workspace {
                 store.remove_session(&id);
             }
         }
+        self.pending_history_title_persist
+            .remove(&self.sessions[ix].ui_id);
         self.sessions.remove(ix);
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         // 空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
@@ -4745,6 +4773,7 @@ impl Workspace {
                 s.title(cx)
             }
             RenameTarget::Pane(view) => pane_title(view, cx),
+            RenameTarget::History { current_title, .. } => current_title.clone(),
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         input.update(cx, |s, cx| s.focus(window, cx));
@@ -4772,18 +4801,152 @@ impl Workspace {
         };
         self._rename_sub = None;
         let text = input.read(cx).value().trim().to_string();
+        let custom_title = (!text.is_empty()).then_some(text);
         match target {
             RenameTarget::Session(ix) => {
+                let mut history_identity = None;
+                let mut pending_ui_id = None;
                 if let Some(s) = self.sessions.get_mut(ix) {
-                    s.custom_title = (!text.is_empty()).then_some(text);
+                    s.custom_title = custom_title.clone();
+                    if let SessionKind::Acp(view) = &s.kind {
+                        let view = view.read(cx);
+                        if let Some(resume_id) = view.history_session_id_for_save() {
+                            history_identity = Some((
+                                view.agent_kind(),
+                                view.profile_id().map(String::from),
+                                view.cwd().unwrap_or_default(),
+                                resume_id.to_string(),
+                            ));
+                        } else {
+                            pending_ui_id = Some(s.ui_id);
+                        }
+                    }
+                }
+                if let Some((agent, profile_id, cwd, resume_id)) = history_identity {
+                    if let Some(session) = self.sessions.get(ix) {
+                        self.pending_history_title_persist.remove(&session.ui_id);
+                    }
+                    self.set_history_custom_title(
+                        agent,
+                        profile_id,
+                        cwd,
+                        resume_id,
+                        custom_title.clone(),
+                        cx,
+                    );
+                } else if let Some(ui_id) = pending_ui_id {
+                    if custom_title.is_some() {
+                        self.pending_history_title_persist.insert(ui_id);
+                    } else {
+                        self.pending_history_title_persist.remove(&ui_id);
+                    }
                 }
             }
             RenameTarget::Pane(view) => {
-                view.update(cx, |t, _| t.set_custom_title(Some(text)));
+                view.update(cx, |t, _| t.set_custom_title(custom_title));
+            }
+            RenameTarget::History {
+                agent,
+                profile_id,
+                cwd,
+                resume_id,
+                ..
+            } => {
+                self.set_history_custom_title(agent, profile_id, cwd, resume_id, custom_title, cx);
             }
         }
         self.save_state(cx);
         cx.notify();
+    }
+
+    pub(crate) fn set_history_custom_title(
+        &mut self,
+        agent: settings::AcpAgentKind,
+        profile_id: Option<String>,
+        cwd: String,
+        resume_id: String,
+        custom_title: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = smelt_core::session_metadata::set_custom_title(
+            agent,
+            profile_id.as_deref(),
+            &resume_id,
+            custom_title.as_deref(),
+        ) {
+            eprintln!("[session-metadata] 保存会话名称失败: {error}");
+        }
+
+        let key = session_history::session_list_key(agent, profile_id.as_deref(), &cwd);
+        if let Some((_, sessions)) = self.session_list.get_mut(&key) {
+            let mut updated = sessions.as_ref().clone();
+            for session in &mut updated {
+                if session.resume_id == resume_id {
+                    session.custom_title = custom_title.clone();
+                    session.title = custom_title
+                        .clone()
+                        .unwrap_or_else(|| session.agent_title.clone());
+                }
+            }
+            *sessions = Rc::new(updated);
+        }
+
+        for session in &mut self.sessions {
+            let SessionKind::Acp(view) = &session.kind else {
+                continue;
+            };
+            let view = view.read(cx);
+            if view.agent_kind() == agent
+                && view.profile_id() == profile_id.as_deref()
+                && view
+                    .history_session_id_for_save()
+                    .as_ref()
+                    .map(ToString::to_string)
+                    == Some(resume_id.clone())
+            {
+                session.custom_title = custom_title.clone();
+            }
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    fn persist_pending_history_title_for_view(
+        &mut self,
+        changed_view: &Entity<acp_view::AcpView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| session.anchor_id() == changed_view.entity_id())
+        else {
+            return;
+        };
+        if !self.pending_history_title_persist.contains(&session.ui_id) {
+            return;
+        }
+        let ui_id = session.ui_id;
+        let custom_title = session.custom_title.clone();
+        let view = changed_view.read(cx);
+        let Some(resume_id) = view.history_session_id_for_save() else {
+            return;
+        };
+        let identity = (
+            view.agent_kind(),
+            view.profile_id().map(String::from),
+            view.cwd().unwrap_or_default(),
+            resume_id.to_string(),
+        );
+        self.pending_history_title_persist.remove(&ui_id);
+        self.set_history_custom_title(
+            identity.0,
+            identity.1,
+            identity.2,
+            identity.3,
+            custom_title,
+            cx,
+        );
     }
 
     /// 取消重命名：不落地任何改动。
@@ -5607,6 +5770,7 @@ impl Workspace {
         // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
         let heading = match self.rename_target {
             Some(RenameTarget::Pane(_)) => "重命名终端",
+            Some(RenameTarget::History { .. }) => "重命名历史会话",
             _ => "重命名会话",
         };
 
@@ -5963,6 +6127,7 @@ impl Workspace {
                     list_state,
                     &self.session_detail,
                     self.history_detail_list_state.clone(),
+                    self.history_filter.clone(),
                     memories,
                     self.memory_selected,
                     cx,
@@ -6210,6 +6375,18 @@ impl Render for Workspace {
 
         // 历史会话页：后台刷新当前项目的会话列表 / 记忆列表（看当前是哪个子页）。
         if self.stage_override == Some(MainView::History) {
+            if self.history_filter.is_none() {
+                use gpui_component::input::{InputEvent, InputState};
+                let state =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称或原始标题…"));
+                self._history_filter_sub =
+                    Some(cx.subscribe(&state, |_, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            cx.notify();
+                        }
+                    }));
+                self.history_filter = Some(state);
+            }
             if let Some(root) = self.active_project_root(cx) {
                 match self.history_pane {
                     HistoryPane::Sessions => {

@@ -34,8 +34,11 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
 #[derive(Clone)]
 pub struct SessionSummary {
     pub path: PathBuf,
-    /// 首条用户消息文本（截断），取不到就回退用 session id（文件名去掉扩展名）。
+    /// 实际展示标题：用户设置过名称时优先，否则使用 agent_title。
     pub title: String,
+    /// Agent transcript / summary 提供的原始标题，用作搜索和自定义标题下的辅助信息。
+    pub agent_title: String,
+    pub custom_title: Option<String>,
     /// agent 那头认得的 session id——续接时要发给协议的就是这个，不是 `path`。
     /// 四家取法不一样：Claude 是文件名去扩展名，Codex 是 `session_meta.id`，
     /// Grok/Copilot 是会话目录名，`path` 本身的形状（文件 vs 目录）四家也不一样，
@@ -220,7 +223,9 @@ fn summarize_session(path: &Path) -> Option<SessionSummary> {
     // not advertise those files as resumable conversations in the first place.
     let title = title?;
     Some(SessionSummary {
-        title,
+        title: title.clone(),
+        agent_title: title,
+        custom_title: None,
         path: path.to_path_buf(),
         resume_id: session_id,
         started_at,
@@ -457,9 +462,12 @@ fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary
         }
     }
 
+    let title = title.unwrap_or_else(|| session_id.clone());
     Some(SessionSummary {
         path: path.to_path_buf(),
-        title: title.unwrap_or_else(|| session_id.clone()),
+        title: title.clone(),
+        agent_title: title,
+        custom_title: None,
         resume_id: session_id,
         started_at,
         last_active_at,
@@ -615,7 +623,9 @@ fn summarize_grok_session(session_dir: &Path, want_cwd: &str) -> Option<SessionS
         .unwrap_or_else(|| session_id.clone());
     Some(SessionSummary {
         path: session_dir.to_path_buf(),
-        title,
+        title: title.clone(),
+        agent_title: title,
+        custom_title: None,
         resume_id: session_id,
         started_at: summary
             .get("created_at")
@@ -828,7 +838,9 @@ fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<Sessi
 
     Some(SessionSummary {
         path: session_dir.to_path_buf(),
-        title,
+        title: title.clone(),
+        agent_title: title,
+        custom_title: None,
         resume_id: session_id,
         started_at: fields.get("created_at").and_then(|v| parse_rfc3339(v)),
         last_active_at: fields.get("updated_at").and_then(|v| parse_rfc3339(v)),
@@ -909,6 +921,7 @@ pub fn load_copilot_session_detail(session_dir: &Path) -> Option<SessionDetail> 
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::*;
 use std::collections::HashMap;
@@ -946,9 +959,8 @@ fn session_when(s: &SessionSummary) -> String {
 }
 
 /// 历史会话列表的三种状态：还没扫描完 / 扫描完但没有历史会话 / 拿到数据。
-/// 左侧只是个纯标题列表（不再用 DataTable——四个数据列挤在一栏很局促，且这里
-/// 只需要"选中一条 = 看右边详情"，用不上排序这类表格能力），排序/筛选这类需求
-/// 出现了再加不迟。
+/// 左侧使用可搜索的双层标题列表（不再用 DataTable——四个数据列挤在一栏很局促）：
+/// 主行优先显示用户名称，副行保留 Agent 原始标题或时间信息。
 pub enum HistoryListState {
     Loading,
     Empty,
@@ -980,6 +992,7 @@ pub fn history_view(
     list: HistoryListState,
     detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
     detail_list_state: gpui::ListState,
+    filter: Option<Entity<gpui_component::input::InputState>>,
     memories: Option<Rc<Vec<MemoryEntry>>>,
     memory_selected: Option<usize>,
     cx: &mut Context<Workspace>,
@@ -1092,6 +1105,10 @@ pub fn history_view(
         HistoryListState::Ready(s) => Some(s.clone()),
         _ => None,
     };
+    let query = filter
+        .as_ref()
+        .map(|input| input.read(cx).value().trim().to_lowercase())
+        .unwrap_or_default();
 
     // 当前 tab 若是手动添加的 workspace profile，续接要用它自动拼好的命令
     // （带 workspace 覆盖前缀），不能用底层 kind 的默认命令——不然续接出来的
@@ -1108,131 +1125,246 @@ pub fn history_view(
             placeholder_view("这个项目还没有本地保存的历史会话", muted).into_any_element()
         }
         (HistoryListState::Ready(_), Some(list)) => {
-            // 只列标题：时间/消息数/tokens 这些细节挪到右边详情页顶部固定展示，
-            // 左边专心做"挑一条看"，不用再挤一整张表格。
-            // 右键「继续」的回调是个独立触发的普通闭包，不是 cx.listener——不能直接
-            // 拿闭包外那个 &mut Context<Workspace> 改状态，得先攥一份 Entity handle，
-            // 触发时再 .update() 回去，跟别处「异步回来再 update」是同一个道理。
-            let workspace = cx.entity();
-            let list = list.clone();
-            let selected_path_for_list = selected_path.clone();
-            let row_count = list.len();
-            uniform_list("session-list", row_count, move |range, _window, app| {
-                workspace.update(app, |_, cx| {
-                    range
-                        .map(|ix| {
-                            let s = &list[ix];
-                            let is_sel =
-                                selected_path_for_list.as_deref() == Some(s.path.as_path());
-                            let path = s.path.clone();
-                            let path_for_copy = path.to_string_lossy().into_owned();
-                            let resume_id = s.resume_id.clone();
-                            let row_cwd = cwd.clone();
-                            let ws_for_resume = workspace.clone();
-                            let row_launch_override = launch_override.clone();
-                            let row_profile_id = profile_id.clone();
-                            div()
-                                .w_full()
-                                .px_2()
-                                .pb_1()
-                                .child(
-                                    div()
-                                        .id(("session-row", ix))
-                                        .w_full()
-                                        .px_2()
-                                        .py_2()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .text_color(fg)
-                                        .truncate()
-                                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
-                                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
-                                        .child(s.title.clone())
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.open_session_detail(agent, path.clone(), cx);
-                                            }),
-                                        )
-                                        .context_menu(move |mut menu, _window, _cx| {
-                                            let ws = ws_for_resume.clone();
-                                            let resume_id = resume_id.clone();
-                                            let row_cwd = row_cwd.clone();
-                                            let row_launch_override = row_launch_override.clone();
-                                            let row_profile_id = row_profile_id.clone();
-                                            let acp_resume_id = resume_id.clone();
-                                            let acp_row_cwd = row_cwd.clone();
-                                            let acp_launch_override = row_launch_override.clone();
-                                            menu = menu.item(PopupMenuItem::new("ACP 继续").on_click(
-                                                move |_ev, window, cx| {
-                                                    // 没选中项目时历史页本来就是空的，理论到不了这里，
-                                                    // 防御性地什么都不做而不是 panic。
-                                                    let Some(cwd) = acp_row_cwd.clone() else {
-                                                        return;
-                                                    };
-                                                    let resume_id = acp_resume_id.clone();
-                                                    let launch_override = acp_launch_override.clone();
-                                                    let profile_id = row_profile_id.clone();
-                                                    ws.update(cx, |this, cx| {
-                                                        this.resume_acp_session(
-                                                            agent,
-                                                            launch_override,
-                                                            profile_id,
-                                                            cwd,
-                                                            resume_id,
-                                                            window,
-                                                            cx,
+            let visible_indices = Rc::new(
+                list.iter()
+                    .enumerate()
+                    .filter_map(|(ix, session)| {
+                        (query.is_empty()
+                            || session.title.to_lowercase().contains(&query)
+                            || session.agent_title.to_lowercase().contains(&query))
+                        .then_some(ix)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if visible_indices.is_empty() {
+                placeholder_view("没有匹配的历史会话", muted).into_any_element()
+            } else {
+                // 右键「继续」的回调是个独立触发的普通闭包，不是 cx.listener——不能直接
+                // 拿闭包外那个 &mut Context<Workspace> 改状态，得先攥一份 Entity handle，
+                // 触发时再 .update() 回去，跟别处「异步回来再 update」是同一个道理。
+                let workspace = cx.entity();
+                let list = list.clone();
+                let selected_path_for_list = selected_path.clone();
+                let row_count = visible_indices.len();
+                uniform_list("session-list", row_count, move |range, _window, app| {
+                    workspace.update(app, |_, cx| {
+                        range
+                            .map(|row_ix| {
+                                let ix = visible_indices[row_ix];
+                                let s = &list[ix];
+                                let is_sel =
+                                    selected_path_for_list.as_deref() == Some(s.path.as_path());
+                                let path = s.path.clone();
+                                let path_for_copy = path.to_string_lossy().into_owned();
+                                let resume_id = s.resume_id.clone();
+                                let row_cwd = cwd.clone();
+                                let ws_for_resume = workspace.clone();
+                                let row_launch_override = launch_override.clone();
+                                let row_profile_id = profile_id.clone();
+                                let rename_cwd = cwd.clone();
+                                let rename_resume_id = s.resume_id.clone();
+                                let rename_title = s.title.clone();
+                                let has_custom_title = s.custom_title.is_some();
+                                let secondary_title = if s.custom_title.is_some() {
+                                    let when = session_when(s);
+                                    if when.is_empty() {
+                                        s.agent_title.clone()
+                                    } else {
+                                        format!("{} · {when}", s.agent_title)
+                                    }
+                                } else {
+                                    session_when(s)
+                                };
+                                div()
+                                    .w_full()
+                                    .px_2()
+                                    .pb_1()
+                                    .child(
+                                        v_flex()
+                                            .id(("session-row", ix))
+                                            .w_full()
+                                            .h(px(54.))
+                                            .justify_center()
+                                            .gap_0p5()
+                                            .px_2()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .text_color(fg)
+                                            .when(is_sel, |d| d.bg(accent.opacity(0.18)))
+                                            .when(!is_sel, |d| {
+                                                d.hover(|s| s.bg(c_border.opacity(0.5)))
+                                            })
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .text_sm()
+                                                    .truncate()
+                                                    .child(s.title.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .truncate()
+                                                    .child(secondary_title),
+                                            )
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.open_session_detail(
+                                                        agent,
+                                                        path.clone(),
+                                                        cx,
+                                                    );
+                                                }),
+                                            )
+                                            .context_menu(move |mut menu, _window, _cx| {
+                                                let ws = ws_for_resume.clone();
+                                                let resume_id = resume_id.clone();
+                                                let row_cwd = row_cwd.clone();
+                                                let row_launch_override =
+                                                    row_launch_override.clone();
+                                                let row_profile_id = row_profile_id.clone();
+                                                let acp_profile_id = row_profile_id.clone();
+                                                let acp_resume_id = resume_id.clone();
+                                                let acp_row_cwd = row_cwd.clone();
+                                                let acp_launch_override =
+                                                    row_launch_override.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new("ACP 继续").on_click(
+                                                        move |_ev, window, cx| {
+                                                            // 没选中项目时历史页本来就是空的，理论到不了这里，
+                                                            // 防御性地什么都不做而不是 panic。
+                                                            let Some(cwd) = acp_row_cwd.clone()
+                                                            else {
+                                                                return;
+                                                            };
+                                                            let resume_id = acp_resume_id.clone();
+                                                            let launch_override =
+                                                                acp_launch_override.clone();
+                                                            let profile_id = acp_profile_id.clone();
+                                                            ws.update(cx, |this, cx| {
+                                                                this.resume_acp_session(
+                                                                    agent,
+                                                                    launch_override,
+                                                                    profile_id,
+                                                                    cwd,
+                                                                    resume_id,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        },
+                                                    ),
+                                                );
+                                                let ws = ws_for_resume.clone();
+                                                let cli_resume_id = resume_id;
+                                                let cli_row_cwd = row_cwd;
+                                                let cli_launch_override = row_launch_override;
+                                                menu = menu.item(
+                                                    PopupMenuItem::new("CLI/TUI 继续").on_click(
+                                                        move |_ev, _window, cx| {
+                                                            let Some(cwd) = cli_row_cwd.clone()
+                                                            else {
+                                                                return;
+                                                            };
+                                                            let resume_id = cli_resume_id.clone();
+                                                            let launch_override =
+                                                                cli_launch_override.clone();
+                                                            ws.update(cx, |this, cx| {
+                                                                this.resume_cli_session(
+                                                                    agent,
+                                                                    launch_override,
+                                                                    cwd,
+                                                                    resume_id,
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        },
+                                                    ),
+                                                );
+                                                if let Some(rename_cwd) = rename_cwd.clone() {
+                                                    let ws = ws_for_resume.clone();
+                                                    let rename_profile_id = row_profile_id.clone();
+                                                    let rename_resume_id = rename_resume_id.clone();
+                                                    let rename_title = rename_title.clone();
+                                                    let reset_cwd = rename_cwd.clone();
+                                                    let reset_resume_id = rename_resume_id.clone();
+                                                    menu = menu.separator().item(
+                                                        PopupMenuItem::new("重命名").on_click(
+                                                            move |_ev, window, cx| {
+                                                                let profile_id =
+                                                                    rename_profile_id.clone();
+                                                                let cwd = rename_cwd.clone();
+                                                                let resume_id =
+                                                                    rename_resume_id.clone();
+                                                                let current_title =
+                                                                    rename_title.clone();
+                                                                ws.update(cx, |this, cx| {
+                                                                    this.start_rename(
+                                                                        crate::RenameTarget::History {
+                                                                            agent,
+                                                                            profile_id,
+                                                                            cwd,
+                                                                            resume_id,
+                                                                            current_title,
+                                                                        },
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                            },
+                                                        ),
+                                                    );
+                                                    if has_custom_title {
+                                                        let ws = ws_for_resume.clone();
+                                                        let reset_profile_id =
+                                                            row_profile_id.clone();
+                                                        menu = menu.item(
+                                                            PopupMenuItem::new("恢复默认名称")
+                                                                .on_click(
+                                                                    move |_ev, _window, cx| {
+                                                                        ws.update(cx, |this, cx| {
+                                                                            this.set_history_custom_title(
+                                                                                agent,
+                                                                                reset_profile_id.clone(),
+                                                                                reset_cwd.clone(),
+                                                                                reset_resume_id.clone(),
+                                                                                None,
+                                                                                cx,
+                                                                            );
+                                                                        });
+                                                                    },
+                                                                ),
                                                         );
-                                                    });
-                                                },
-                                            ));
-                                            let ws = ws_for_resume.clone();
-                                            let cli_resume_id = resume_id;
-                                            let cli_row_cwd = row_cwd;
-                                            let cli_launch_override = row_launch_override;
-                                            menu = menu.item(
-                                                PopupMenuItem::new("CLI/TUI 继续").on_click(
-                                                    move |_ev, _window, cx| {
-                                                        let Some(cwd) = cli_row_cwd.clone() else {
-                                                            return;
-                                                        };
-                                                        let resume_id = cli_resume_id.clone();
-                                                        let launch_override = cli_launch_override.clone();
-                                                        ws.update(cx, |this, cx| {
-                                                            this.resume_cli_session(
-                                                                agent,
-                                                                launch_override,
-                                                                cwd,
-                                                                resume_id,
-                                                                cx,
+                                                    }
+                                                }
+                                                let path = path_for_copy.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new("复制文件路径").on_click(
+                                                        move |_ev, _window, cx| {
+                                                            cx.write_to_clipboard(
+                                                                ClipboardItem::new_string(
+                                                                    path.clone(),
+                                                                ),
                                                             );
-                                                        });
-                                                    },
-                                                ),
-                                            );
-                                            let path = path_for_copy.clone();
-                                            menu = menu.item(
-                                                PopupMenuItem::new("复制文件路径").on_click(
-                                                    move |_ev, _window, cx| {
-                                                        cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(path.clone()),
-                                                        );
-                                                    },
-                                                ),
-                                            );
-                                            menu
-                                        }),
-                                )
-                                .into_any_element()
-                        })
-                        .collect()
+                                                        },
+                                                    ),
+                                                );
+                                                menu
+                                            }),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
+                    })
                 })
-            })
-            .flex_1()
-            .min_h_0()
-            .pt_2()
-            .into_any_element()
+                .flex_1()
+                .min_h_0()
+                .pt_2()
+                .into_any_element()
+            }
         }
     };
 
@@ -1353,6 +1485,13 @@ pub fn history_view(
                         .min_h_0()
                         .border_r_1()
                         .border_color(c_border)
+                        .children(filter.as_ref().map(|input| {
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .pt_2()
+                                .child(Input::new(input).small().cleanable(true))
+                        }))
                         .child(list_body),
                 )
                 .child(detail_body),
@@ -1663,19 +1802,28 @@ fn current_profile_launch(
 
 fn list_sessions_for(
     agent: AcpAgentKind,
+    profile_id: Option<&str>,
     override_dir: Option<&str>,
     cwd: &str,
 ) -> Vec<SessionSummary> {
+    let mut custom_titles = smelt_core::session_metadata::custom_titles(agent, profile_id);
     smelt_core::session_control::list_history_for(agent, cwd, override_dir)
         .into_iter()
-        .map(|session| SessionSummary {
-            path: session.path,
-            title: session.title,
-            resume_id: session.resume_id,
-            started_at: session.started_at,
-            last_active_at: session.last_active_at,
-            message_count: session.message_count,
-            total_tokens: session.total_tokens,
+        .map(|session| {
+            let custom_title = custom_titles.remove(&session.resume_id);
+            SessionSummary {
+                path: session.path,
+                title: custom_title
+                    .clone()
+                    .unwrap_or_else(|| session.title.clone()),
+                agent_title: session.title,
+                custom_title,
+                resume_id: session.resume_id,
+                started_at: session.started_at,
+                last_active_at: session.last_active_at,
+                message_count: session.message_count,
+                total_tokens: session.total_tokens,
+            }
         })
         .collect()
 }
@@ -1718,9 +1866,10 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let od = override_dir.clone();
+            let pid = profile_id.clone();
             let sessions = cx
                 .background_executor()
-                .spawn(async move { list_sessions_for(agent, od.as_deref(), &c) })
+                .spawn(async move { list_sessions_for(agent, pid.as_deref(), od.as_deref(), &c) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
@@ -1841,7 +1990,7 @@ mod tests {
         );
 
         let override_dir = normalized_profile_override_dir(&profile).unwrap();
-        let sessions = list_sessions_for(AcpAgentKind::Claude, Some(&override_dir), "/x/y");
+        let sessions = list_sessions_for(AcpAgentKind::Claude, None, Some(&override_dir), "/x/y");
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "with spaces in override path");

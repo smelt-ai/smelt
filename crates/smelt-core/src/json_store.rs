@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 读取 JSON 配置；文件缺失、内容损坏都回退默认值，不 panic 不报错。
 pub fn load_json<T: DeserializeOwned + Default>(path: Option<PathBuf>) -> T {
@@ -22,6 +23,34 @@ pub fn save_json<T: Serialize>(path: Option<PathBuf>, v: &T) {
     if let Ok(json) = serde_json::to_string_pretty(v) {
         let _ = std::fs::write(path, json);
     }
+}
+
+/// 原子写回 JSON：先在目标目录写临时文件，再 rename 覆盖，避免进程中断留下半截 JSON。
+pub(crate) fn save_json_atomic<T: Serialize>(
+    path: Option<PathBuf>,
+    value: &T,
+) -> Result<(), String> {
+    let Some(path) = path else { return Ok(()) };
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} 没有父目录", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let staged = parent.join(format!(
+        ".{}.smelt-{}-{nonce}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("json"),
+        std::process::id()
+    ));
+    let json = serde_json::to_string_pretty(value).map_err(|error| error.to_string())? + "\n";
+    std::fs::write(&staged, json).map_err(|error| error.to_string())?;
+    std::fs::rename(&staged, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&staged);
+        error.to_string()
+    })
 }
 
 /// 写回包含访问令牌等敏感信息的 JSON 配置。
