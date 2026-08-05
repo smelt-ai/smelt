@@ -384,6 +384,77 @@ void main() {
     },
   );
 
+  testWidgets('a repaint that clears the scrollback survives the next reflow', (
+    tester,
+  ) async {
+    final stream = _FakeTerminalStream();
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+    );
+    expect(stream.geometries, isNotEmpty);
+    final mobileGeometry = stream.geometries.last;
+
+    stream.connect();
+    // Replaying at a narrower grid than the viewport makes the resize that
+    // follows the replay a width change, which is what triggers a reflow.
+    stream.emit(
+      TerminalReadyEvent(
+        cols: mobileGeometry.cols - 1,
+        rows: mobileGeometry.rows,
+        replayBytes: 0,
+        writeEnabled: true,
+      ),
+    );
+    await tester.pump();
+
+    // History, then a TUI full repaint that clears the scrollback, then the
+    // content the user is supposed to end up looking at.
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(
+          utf8.encode(
+            List.generate(600, (index) => 'OLD-$index\r\n').join(),
+          ),
+        ),
+      ),
+    );
+    stream.emit(
+      TerminalDataEvent(Uint8List.fromList(utf8.encode('\x1b[H\x1b[2J\x1b[3J'))),
+    );
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(
+          utf8.encode(List.generate(80, (index) => 'NEW-$index\r\n').join()),
+        ),
+      ),
+    );
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pump();
+    await tester.pump();
+
+    final view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.autoResize, isTrue);
+    expect(view.terminal.viewWidth, mobileGeometry.cols);
+
+    final text = view.terminal.buffer.getText();
+    expect(text, contains('NEW-79'));
+    expect(
+      text,
+      isNot(contains('OLD-')),
+      reason: 'lines dropped by the scrollback clear must not come back',
+    );
+    expect(view.scrollController!.position.maxScrollExtent, greaterThan(0));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('terminal shortcut bar emits PTY control sequences', (
     tester,
   ) async {

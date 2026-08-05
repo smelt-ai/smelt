@@ -6,6 +6,7 @@ import 'package:xterm/xterm.dart';
 
 import '../services/gateway_service.dart';
 import '../services/terminal_stream_service.dart';
+import '../utils/reflow_safe_terminal.dart';
 import '../utils/xterm_input_filter.dart';
 
 class TerminalSessionPage extends StatefulWidget {
@@ -70,7 +71,10 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   }
 
   Terminal _newTerminal({int cols = 80, int rows = 24}) {
-    final terminal = Terminal(maxLines: 5000, onOutput: _stream.sendInput);
+    final terminal = ReflowSafeTerminal(
+      maxLines: 5000,
+      onOutput: _stream.sendInput,
+    );
     // A daemon snapshot contains cursor-addressed output for the dimensions in
     // terminalReady. Establish that grid before any replay byte is decoded.
     terminal.resize(cols.clamp(1, 300), rows.clamp(1, 200));
@@ -126,7 +130,22 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       allowMalformed: true,
     ).startChunkedConversion(
       _CallbackSink<String>((text) {
-        if (generation == _decoderGeneration) terminal.write(text);
+        if (generation != _decoderGeneration) return;
+        try {
+          terminal.write(text);
+        } catch (error, stack) {
+          // A failure inside xterm must not tear down the byte pipeline: the
+          // page would then be frozen on whatever was decoded so far, with no
+          // way back short of leaving and re-entering the session.
+          FlutterError.reportError(
+            FlutterErrorDetails(
+              exception: error,
+              stack: stack,
+              library: 'smelt terminal',
+              context: ErrorDescription('writing terminal output'),
+            ),
+          );
+        }
       }),
     );
   }
