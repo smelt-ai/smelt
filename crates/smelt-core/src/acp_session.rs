@@ -196,6 +196,10 @@ pub struct AcpSnapshot {
     /// Monotonic version assigned by smeltd whenever it publishes this session.
     #[serde(default)]
     pub snapshot_revision: u64,
+    /// 从完整历史首条用户消息生成的稳定标题。分页快照可能不包含首条消息，
+    /// 客户端不能再只靠当前页反推标题。
+    #[serde(default)]
+    pub session_title: Option<String>,
     /// `session/load` 正在用协议通知重建历史。客户端可据此为批量恢复的未测量
     /// 条目提供高度提示，而不必同步布局整段历史。
     #[serde(default)]
@@ -417,6 +421,7 @@ impl AcpSessionState {
             entries_offset,
             entries_total,
             snapshot_revision: 0,
+            session_title: crate::acp_chat::auto_title(&self.entries),
             replaying_history: self.replaying_history,
             entries: self.entries[entries_offset..entries_end].to_vec(),
             phase: self.phase.clone(),
