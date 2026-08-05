@@ -45,7 +45,7 @@ use smelt_ui::ui_theme;
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
 pub use smelt_core::acp_chat::{
     AcpEntry, AcpImage, DiffLine, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart,
-    compact_diff_lines, diff_lines, is_interrupt_marker, strip_code_fence,
+    compact_diff_lines, diff_line_stats, diff_lines, is_interrupt_marker, strip_code_fence,
 };
 
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
@@ -1323,10 +1323,14 @@ impl AcpView {
         let Some(AcpEntry::ToolCall { id, output, .. }) = self.entries.get(entry_ix) else {
             return;
         };
-        if self.rendered_diffs.contains_key(id) {
+        let id = id.clone();
+        if self
+            .rendered_diffs
+            .get(&id)
+            .is_some_and(|parts| diff_cache_matches_output(parts, output))
+        {
             return;
         }
-        let id = id.clone();
         let parts = build_diff_parts(output);
         self.rendered_diffs.insert(id, parts);
     }
@@ -1348,6 +1352,7 @@ impl AcpView {
 
     fn toggle_tool_card(
         &mut self,
+        entry_ix: usize,
         id: String,
         status: ToolCallStatus,
         has_pending_permission: bool,
@@ -1360,6 +1365,8 @@ impl AcpView {
             self.collapsed_tool_cards.remove(&id);
             self.expanded_tool_cards.insert(id);
         }
+        self.list_state
+            .remeasure_items(entry_ix..entry_ix.saturating_add(1));
         cx.notify();
     }
 
@@ -2251,6 +2258,7 @@ impl Render for AcpView {
                                         if !this.expanded_thoughts.remove(&i) {
                                             this.expanded_thoughts.insert(i);
                                         }
+                                        this.list_state.remeasure_items(i..i.saturating_add(1));
                                         cx.notify();
                                     })),
                             )
@@ -2436,7 +2444,8 @@ impl Render for AcpView {
                             let can_expand = tool_output_has_content(output);
                             let diff_stats = cached_diff_stats(
                                 this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
-                            );
+                            )
+                            .or_else(|| diff_stats_for_output(output));
                             let id_for_compact_toggle = id.clone();
                             let status_for_toggle = *status;
                             let mut row = h_flex()
@@ -2480,6 +2489,7 @@ impl Render for AcpView {
                                     .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                                         this.toggle_tool_card(
+                                            i,
                                             id_for_compact_toggle.clone(),
                                             status_for_toggle,
                                             has_pending_permission,
@@ -2493,7 +2503,8 @@ impl Render for AcpView {
                             // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
                             let diff_stats = cached_diff_stats(
                                 this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
-                            );
+                            )
+                            .or_else(|| diff_stats_for_output(output));
                             // diff / 状态角标都改成 Discord 那种圆角软底色小药丸，
                             // 而不是裸文字——同样的信息，胶囊比平铺文字更有「标签」的
                             // 活泼感，也跟下面的工具名药丸呼应成一套视觉语言。
@@ -2588,6 +2599,7 @@ impl Render for AcpView {
                                         gpui::MouseButton::Left,
                                         cx.listener(move |this, _ev, _window, cx| {
                                             this.toggle_tool_card(
+                                                i,
                                                 id_for_toggle.clone(),
                                                 status_for_toggle,
                                                 has_pending_permission,
@@ -2741,6 +2753,8 @@ impl Render for AcpView {
                                                                         this.expanded_tools
                                                                             .insert(key.clone());
                                                                     }
+                                                                    this.list_state
+                                                                        .remeasure_items(i..i.saturating_add(1));
                                                                     cx.stop_propagation();
                                                                     cx.notify();
                                                                 },
@@ -2771,6 +2785,7 @@ impl Render for AcpView {
                     && group.first == i
                 {
                     let group_key = group.first;
+                    let group_end = group.end;
                     let mut header = h_flex()
                         .id(("acp-process-group", group.first))
                         .w_full()
@@ -2805,6 +2820,8 @@ impl Render for AcpView {
                             if !this.expanded_process_groups.remove(&group_key) {
                                 this.expanded_process_groups.insert(group_key);
                             }
+                            this.list_state
+                                .remeasure_items(group_key..group_end.min(this.entries.len()));
                             cx.notify();
                         }));
                     if group.failed > 0 {
@@ -3872,6 +3889,18 @@ fn build_diff_parts(output: &[ToolOutputPart]) -> Vec<Option<CachedDiff>> {
         .collect()
 }
 
+fn diff_cache_matches_output(cached: &[Option<CachedDiff>], output: &[ToolOutputPart]) -> bool {
+    cached.len() == output.len()
+        && cached
+            .iter()
+            .zip(output)
+            .all(|(cached, part)| match (part, cached) {
+                (ToolOutputPart::Diff { .. }, Some(_))
+                | (ToolOutputPart::Text(_), None) => true,
+                _ => false,
+            })
+}
+
 fn cached_diff_stats(parts: Option<&[Option<CachedDiff>]>) -> Option<(usize, usize)> {
     let mut added = 0;
     let mut removed = 0;
@@ -4053,6 +4082,7 @@ fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
 #[derive(Clone, Copy, Default)]
 struct ProcessGroupInfo {
     first: usize,
+    end: usize,
     steps: usize,
     tools: usize,
     failed: usize,
@@ -4111,8 +4141,13 @@ fn build_conversation_layout(
                     )
                 })
                 .count();
+            let group_end = process_indices
+                .last()
+                .copied()
+                .map_or(first.saturating_add(1), |ix| ix.saturating_add(1));
             let group = ProcessGroupInfo {
                 first,
+                end: group_end,
                 steps: process_indices.len(),
                 tools,
                 failed,
@@ -4227,6 +4262,26 @@ fn cached_entry_markdown(
         .and_then(Clone::clone)
         .or_else(|| markdown_for_entry(entry, cwd))
         .unwrap_or_default()
+}
+
+fn diff_stats_for_output(output: &[ToolOutputPart]) -> Option<(usize, usize)> {
+    let mut added = 0;
+    let mut removed = 0;
+    let mut has_diff = false;
+    for part in output {
+        let ToolOutputPart::Diff {
+            old_text, new_text, ..
+        } = part
+        else {
+            continue;
+        };
+        let (part_added, part_removed) =
+            diff_line_stats(old_text.as_deref().unwrap_or(""), new_text);
+        added += part_added;
+        removed += part_removed;
+        has_diff = true;
+    }
+    has_diff.then_some((added, removed))
 }
 
 /// Raw HTML is parsed as markup by the Markdown renderer. Unsupported tags can
@@ -4573,11 +4628,11 @@ mod tests {
     use super::{
         CachedDiff, HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
         build_handoff_prompt, build_markdown_cache, cached_diff_stats, can_load_older_history,
-        escape_html_tags_for_markdown, is_active_permission_selection, loaded_entries_end,
-        markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
-        refresh_markdown_cache, resolve_restart_launch, should_replace_session_title,
-        should_seed_restored_height_hints, tool_card_default_expanded, tool_output_has_content,
-        tool_uses_compact_process_row,
+        diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
+        is_active_permission_selection, loaded_entries_end, markdown_text_for_cwd,
+        markdown_user_text_for_cwd, merge_snapshot_entries, refresh_markdown_cache,
+        resolve_restart_launch, should_replace_session_title, should_seed_restored_height_hints,
+        tool_card_default_expanded, tool_output_has_content, tool_uses_compact_process_row,
     };
     use gpui::{ListAlignment, ListState, px};
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -4948,6 +5003,7 @@ mod tests {
         let before = layout[1].process_group.expect("编辑应在过程组");
         let late = layout[3].process_group.expect("迟到工具仍应在过程组");
         assert_eq!(before.first, late.first);
+        assert_eq!(before.end, 4);
         assert_eq!(before.tools, 2);
     }
 
@@ -5140,6 +5196,29 @@ mod tests {
 
         assert_eq!(cached_diff_stats(Some(&cached)), Some((5, 5)));
         assert_eq!(cached_diff_stats(None), None);
+    }
+
+    #[test]
+    fn uncached_diff_stats_are_available_from_tool_output() {
+        let output = vec![ToolOutputPart::Diff {
+            path: "src/lib.rs".into(),
+            old_text: Some("old\n".into()),
+            new_text: "new\nadded\n".into(),
+        }];
+
+        assert_eq!(diff_stats_for_output(&output), Some((2, 1)));
+    }
+
+    #[test]
+    fn diff_cache_shape_must_follow_tool_output_parts() {
+        let cached = vec![None];
+        let output = vec![ToolOutputPart::Diff {
+            path: "src/lib.rs".into(),
+            old_text: None,
+            new_text: "fn main() {}".into(),
+        }];
+
+        assert!(!diff_cache_matches_output(&cached, &output));
     }
 
     #[test]
