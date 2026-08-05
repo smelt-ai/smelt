@@ -2709,6 +2709,7 @@ impl Workspace {
         self.sessions.push(crate::Session {
             ui_id: crate::next_session_ui_id(),
             kind: crate::SessionKind::Acp(view),
+            last_updated_at: crate::unix_now_secs(),
             custom_title: Some(task.title.clone()),
             remote_owned: false,
             _acp_persist_sub,

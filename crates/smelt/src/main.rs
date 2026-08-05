@@ -50,8 +50,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -123,6 +124,29 @@ impl CmdItem {
             selected,
         }
     }
+}
+
+/// 按本地日历把 unix 秒归入「今天 / 昨天 / 本周 / 更早」。
+fn last_updated_bucket(timestamp: u64, now: chrono::DateTime<Local>) -> usize {
+    let Some(updated) = Local
+        .timestamp_opt(timestamp.min(i64::MAX as u64) as i64, 0)
+        .single()
+    else {
+        return 3;
+    };
+    match (now.date_naive() - updated.date_naive()).num_days() {
+        days if days <= 0 => 0,
+        1 => 1,
+        2..=6 => 2,
+        _ => 3,
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 impl Selectable for CmdItem {
@@ -349,10 +373,14 @@ struct SessionUiState {
     /// 当前打开文件编辑器的变更订阅；输入变化时让 Workspace 重渲染预览和脏标记。
     _file_editor_sub: Option<Subscription>,
     file_tree_w: f32,
+    /// Files 内容区右上角的文件树显隐状态。
+    file_tree_open: bool,
     pinned_roots: Vec<String>,
     collapsed_roots: HashSet<String>,
     git_tab: GitTab,
     git_diff: Option<GitDiff>,
+    /// 右侧 Git 文件树点击后，等待聚合 diff 加载完成再定位的文件。
+    pending_diff_file: Option<String>,
     /// Diff 审查拖选的起点；用于计算连续选区范围。
     diff_selection_anchor: Option<usize>,
     /// 拖选当前指针所在的可评论行；松开后 `+` 显示在这里，而不是起点。
@@ -388,10 +416,12 @@ impl Default for SessionUiState {
             open_file: None,
             _file_editor_sub: None,
             file_tree_w: inspector::MIN_FILE_TREE_WIDTH,
+            file_tree_open: true,
             pinned_roots: Vec::new(),
             collapsed_roots: HashSet::new(),
             git_tab: GitTab::Changes,
             git_diff: None,
+            pending_diff_file: None,
             diff_selection_anchor: None,
             diff_selection_cursor: None,
             diff_selection_dragging: false,
@@ -424,6 +454,7 @@ struct SessionRouteArchive {
     file_tree_selected: Option<String>,
     open_file_path: Option<String>,
     file_tree_w: f32,
+    file_tree_open: bool,
     pinned_roots: Vec<String>,
     collapsed_roots: HashSet<String>,
     git_tab: GitTab,
@@ -448,6 +479,7 @@ impl Default for SessionRouteArchive {
             file_tree_selected: None,
             open_file_path: None,
             file_tree_w: inspector::MIN_FILE_TREE_WIDTH,
+            file_tree_open: true,
             pinned_roots: Vec::new(),
             collapsed_roots: HashSet::new(),
             git_tab: GitTab::Changes,
@@ -483,6 +515,7 @@ impl SessionUiState {
                 .map(|file| file.path.clone())
                 .or_else(|| self.pending_restore_file.clone()),
             file_tree_w: self.file_tree_w,
+            file_tree_open: self.file_tree_open,
             pinned_roots: self.pinned_roots.clone(),
             collapsed_roots: self.collapsed_roots.clone(),
             git_tab: self.git_tab,
@@ -530,10 +563,12 @@ impl SessionUiState {
                 inspector::MIN_FILE_TREE_WIDTH,
                 inspector::MAX_FILE_TREE_WIDTH,
             ),
+            file_tree_open: archive.file_tree_open,
             pinned_roots: archive.pinned_roots,
             collapsed_roots: archive.collapsed_roots,
             git_tab: archive.git_tab,
             git_diff: None,
+            pending_diff_file: None,
             diff_selection_anchor: None,
             diff_selection_cursor: None,
             diff_selection_dragging: false,
@@ -733,6 +768,8 @@ struct Session {
     /// 只用于把运行时 UI 快照稳定地绑到 session；拖拽排序和活动 pane 变化都不改它。
     ui_id: u64,
     kind: SessionKind,
+    /// 最近一次会话内容或运行状态变化的 unix 秒时间戳。
+    last_updated_at: u64,
     /// 用户手动改过的会话名（侧栏右键「重命名」）；None = 用下面 title() 的自动推导。
     custom_title: Option<String>,
     /// 由移动端创建、以 `remote_acp_sessions.json` 为权威目录的会话。PC 只投影到
@@ -754,6 +791,7 @@ impl Session {
                 layout: Pane::Leaf(view.clone()),
                 active: view,
             },
+            last_updated_at: unix_now_secs(),
             custom_title: None,
             remote_owned: false,
             _acp_persist_sub: None,
@@ -793,6 +831,18 @@ impl Session {
             SessionKind::Term { active, .. } => *active = view,
             SessionKind::Acp(_) => {}
         }
+    }
+
+    /// 终端状态通道的更新时间比 GUI 创建时间更准确；ACP 使用自身的持久化时间。
+    fn effective_updated_at(&self, cx: &App) -> u64 {
+        let daemon_updated_at = self
+            .term_leaves()
+            .iter()
+            .filter_map(|view| daemon_state_for(view, cx))
+            .map(|state| state.updated_at)
+            .max()
+            .unwrap_or_default();
+        self.last_updated_at.max(daemon_updated_at)
     }
 
     /// 终端会话的分屏树；ACP 会话没有。
@@ -1004,6 +1054,7 @@ mod session_route_tests {
             bottom_drawer_h: 336.0,
             file_tree_selected: Some("/tmp/project/src/main.rs".into()),
             file_tree_w: 312.0,
+            file_tree_open: false,
             git_tab: GitTab::Log,
             ..Default::default()
         };
@@ -1025,6 +1076,7 @@ mod session_route_tests {
             restored.file_tree_selected.as_deref(),
             Some("/tmp/project/src/main.rs")
         );
+        assert!(!restored.file_tree_open);
         assert!(matches!(restored.git_tab, GitTab::Log));
     }
 
@@ -1301,6 +1353,7 @@ struct WsState {
 pub(crate) enum SidebarGrouping {
     None,
     Status,
+    LastUpdated,
     #[default]
     Project,
 }
@@ -1310,6 +1363,9 @@ pub(crate) enum SidebarGrouping {
 struct SessionState {
     layout: PaneState,
     active: usize,
+    /// 最近一次会话内容变化的 unix 秒时间戳；旧存档缺失时按当前时间迁移。
+    #[serde(default = "unix_now_secs")]
+    last_updated_at: u64,
     #[serde(default)]
     custom_title: Option<String>,
     /// Some = ACP 消息流会话（layout 只是占位叶子，旧版 smelt 读到会降级开普通
@@ -1454,6 +1510,7 @@ pub(crate) fn sidebar_groups(
     grouping: SidebarGrouping,
     project_groups: Vec<ProjectGroup>,
     statuses: &[AgentStatus],
+    last_updated_at: &[u64],
     session_count: usize,
 ) -> Vec<ProjectGroup> {
     match grouping {
@@ -1479,6 +1536,40 @@ pub(crate) fn sidebar_groups(
             })
         })
         .collect(),
+        SidebarGrouping::LastUpdated => {
+            let now = Local::now();
+            let mut buckets: [Vec<usize>; 4] = std::array::from_fn(|_| Vec::new());
+            for ix in 0..session_count {
+                let bucket = last_updated_bucket(
+                    last_updated_at.get(ix).copied().unwrap_or_default(),
+                    now,
+                );
+                buckets[bucket].push(ix);
+            }
+            let labels = ["今天", "昨天", "本周", "更早"];
+            buckets
+                .into_iter()
+                .enumerate()
+                .filter_map(|(bucket, mut sessions)| {
+                    if sessions.is_empty() {
+                        return None;
+                    }
+                    sessions.sort_by(|a, b| {
+                        last_updated_at
+                            .get(*b)
+                            .copied()
+                            .unwrap_or_default()
+                            .cmp(&last_updated_at.get(*a).copied().unwrap_or_default())
+                            .then_with(|| a.cmp(b))
+                    });
+                    Some(ProjectGroup {
+                        root: format!("__last_updated_{bucket}"),
+                        label: labels[bucket].to_string(),
+                        sessions,
+                    })
+                })
+                .collect()
+        }
         SidebarGrouping::None => vec![ProjectGroup {
             root: "__all_sessions".into(),
             label: String::new(),
@@ -1859,6 +1950,7 @@ fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
             vec![SessionState {
                 layout: ps.clone(),
                 active: s.active,
+                last_updated_at: unix_now_secs(),
                 custom_title: None,
                 acp: None,
                 route: None,
@@ -1878,6 +1970,7 @@ fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
                 launch_cmd: None,
             },
             active: 0,
+            last_updated_at: unix_now_secs(),
             custom_title: None,
             acp: None,
             route: None,
@@ -1965,7 +2058,7 @@ struct Workspace {
     /// 「保存并切换」选择后，等这次 save_open_file 存盘成功再打开的目标路径；
     /// 存盘失败/冲突则放弃切换，留在当前文件上让用户处理。
     pending_switch_after_save: Option<String>,
-    /// Git 视图里当前查看的文件 diff；None 表示未选中任何文件。
+    /// Git 视图里当前查看的聚合或单文件 diff；None 表示尚未加载。
     /// 打开 diff 的自增序号（独立于 file_gen，避免和文件高亮任务互相取消）。
     diff_gen: u64,
     /// diff 是否用并排（split）视图；false 为统一（unified）视图。
@@ -2301,6 +2394,12 @@ impl std::ops::DerefMut for Workspace {
 }
 
 impl Workspace {
+    /// Files 既可能展开到舞台，也可能停靠在 Inspector；两种状态都视为文件视图可见。
+    fn files_view_visible(&self) -> bool {
+        matches!(self.stage_override, Some(MainView::Files))
+            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
@@ -2717,6 +2816,7 @@ impl Workspace {
             self.sessions.push(Session {
                 ui_id: next_session_ui_id(),
                 kind: SessionKind::Acp(view),
+                last_updated_at: unix_now_secs(),
                 custom_title: stored_title
                     .or_else(|| (!record.title.trim().is_empty()).then_some(record.title)),
                 remote_owned: true,
@@ -2854,6 +2954,7 @@ impl Workspace {
                             Session {
                                 ui_id: next_session_ui_id(),
                                 kind: SessionKind::Acp(view),
+                                last_updated_at: ss.last_updated_at,
                                 custom_title: ss.custom_title,
                                 remote_owned: false,
                                 _acp_persist_sub,
@@ -2935,6 +3036,7 @@ impl Workspace {
                         Session {
                             ui_id: next_session_ui_id(),
                             kind: SessionKind::Term { layout, active },
+                            last_updated_at: ss.last_updated_at,
                             custom_title: ss.custom_title,
                             remote_owned: false,
                             _acp_persist_sub: None,
@@ -3304,6 +3406,18 @@ impl Workspace {
         self.add_session_with_launch(cwd, None, cx);
     }
 
+    fn touch_acp_session(&mut self, view: &Entity<acp_view::AcpView>) {
+        let view_id = view.entity_id();
+        if let Some(session) = self.sessions.iter_mut().find(|session| {
+            matches!(
+                &session.kind,
+                SessionKind::Acp(existing) if existing.entity_id() == view_id
+            )
+        }) {
+            session.last_updated_at = unix_now_secs();
+        }
+    }
+
     /// ACP 会话内容变化（AcpViewEvent::Changed）→ 立即 save_state。与侧栏/文件树
     /// resize 订阅同一惯用法（main.rs::new 里的 _resize_sub）。
     fn subscribe_acp_persist(
@@ -3317,6 +3431,7 @@ impl Workspace {
             window,
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => {
+                    this.touch_acp_session(_view);
                     this.persist_pending_history_title_for_view(_view, cx);
                     this.save_state(cx);
                 }
@@ -3357,6 +3472,7 @@ impl Workspace {
                     }
                 }
                 acp_view::AcpViewEvent::CompletedTurn => {
+                    this.touch_acp_session(_view);
                     // ACP 回合真完成（无人在等）：绑定任务进待审查，挂旗续跑同 cwd 下一条。
                     let sid = _view.read(cx).session_id().to_string();
                     if let Some(cwd) = crate::tasks::TaskStore::mark_session_done(&sid) {
@@ -3364,6 +3480,7 @@ impl Workspace {
                     }
                 }
                 acp_view::AcpViewEvent::Ended(reason) => {
+                    this.touch_acp_session(_view);
                     // ACP 连接不可恢复结束：绑定任务按重试策略处理，挂旗让队列继续。
                     let sid = _view.read(cx).session_id().to_string();
                     if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, reason) {
@@ -3391,6 +3508,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
+            last_updated_at: unix_now_secs(),
             custom_title: Some(title),
             remote_owned: false,
             _acp_persist_sub,
@@ -3425,6 +3543,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
+            last_updated_at: unix_now_secs(),
             custom_title: None,
             remote_owned: false,
             _acp_persist_sub,
@@ -3511,6 +3630,7 @@ impl Workspace {
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Acp(view),
+            last_updated_at: unix_now_secs(),
             custom_title,
             remote_owned: false,
             _acp_persist_sub,
@@ -3707,6 +3827,7 @@ impl Workspace {
                 } else {
                     &s.ui_state
                 };
+                let last_updated_at = s.effective_updated_at(cx);
                 match &s.kind {
                     SessionKind::Term { layout: l, .. } => {
                         let layout = pane_to_state(l, cx);
@@ -3716,6 +3837,7 @@ impl Workspace {
                         SessionState {
                             layout,
                             active,
+                            last_updated_at,
                             custom_title: s.custom_title.clone(),
                             acp: None,
                             route: Some(route.archive()),
@@ -3733,6 +3855,7 @@ impl Workspace {
                                 launch_cmd: None,
                             },
                             active: 0,
+                            last_updated_at,
                             custom_title: s.custom_title.clone(),
                             acp: Some(AcpSaved {
                                 cwd: v.cwd(),
@@ -4649,10 +4772,16 @@ impl Workspace {
             .iter()
             .map(|session| session.status(cx))
             .collect::<Vec<_>>();
+        let last_updated_at = self
+            .sessions
+            .iter()
+            .map(|session| session.effective_updated_at(cx))
+            .collect::<Vec<_>>();
         let order: Vec<usize> = sidebar_groups(
             self.sidebar_grouping,
             self.project_groups(cx),
             &statuses,
+            &last_updated_at,
             self.sessions.len(),
         )
         .iter()
@@ -6400,9 +6529,7 @@ impl Render for Workspace {
 
         // 文件树页：后台刷新根目录 + 所有已展开目录的直接子项列表（fs::read_dir 绝不
         // 在 render 里同步跑）。展开新目录时它会先落空，下一帧缓存到位后自动出现。
-        if matches!(self.stage_override, Some(MainView::Files))
-            || (self.inspector_open && self.inspector_tab == inspector::InspectorTab::Files)
-        {
+        if self.files_view_visible() {
             // 搜索输入框懒创建（需要 window）：键入即 notify，触发文件名 + 内容搜索。
             if self.file_filter.is_none() {
                 use gpui_component::input::{InputEvent, InputState};
@@ -7032,7 +7159,7 @@ impl Render for Workspace {
                     return;
                 }
                 // 文件树键盘导航：搜索框 / 编辑器聚焦时不抢键。
-                if matches!(this.stage_override, Some(MainView::Files))
+                if this.files_view_visible()
                     && !ks.modifiers.platform
                     && !ks.modifiers.control
                 {
@@ -7141,9 +7268,9 @@ impl Render for Workspace {
                     }
                     // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）
                     "w" => this.close_active(window, cx),
-                    // Cmd+S：保存文件树里打开的文件（仅 Files 页，避免切到别的
-                    // 视图时背着用户悄悄写盘）。
-                    "s" if matches!(this.stage_override, Some(MainView::Files)) => {
+                    // Cmd+S：保存 Files 里打开的文件。Files 既可以展开到舞台，也可以
+                    // 停靠在 Inspector；两种显示方式都必须支持保存。
+                    "s" if this.files_view_visible() => {
                         this.save_open_file(cx)
                     }
                     // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
@@ -8332,6 +8459,7 @@ mod project_tests {
                 sizes: Vec::new(),
             },
             active: 0,
+            last_updated_at: 0,
             custom_title: None,
             acp: None,
             route: None,
@@ -8345,6 +8473,7 @@ mod project_tests {
         let ss = SessionState {
             layout: leaf("/placeholder"),
             active: 0,
+            last_updated_at: 0,
             custom_title: None,
             acp: Some(AcpSaved {
                 cwd: Some("/a/acp-proj".into()),
@@ -8505,7 +8634,13 @@ mod workspace_state_tests {
                 AgentStatus::Done,
             ];
 
-            let groups = sidebar_groups(SidebarGrouping::Status, projects, &statuses, 4);
+            let groups = sidebar_groups(
+                SidebarGrouping::Status,
+                projects,
+                &statuses,
+                &[0; 4],
+                4,
+            );
             let order = groups
                 .iter()
                 .flat_map(|group| group.sessions.iter().copied())
@@ -8522,11 +8657,58 @@ mod workspace_state_tests {
                 SidebarGrouping::Project,
                 projects,
                 &[AgentStatus::Idle; 3],
+                &[0; 3],
                 3,
             );
 
             assert_eq!(groups[0].sessions, vec![2, 0]);
             assert_eq!(groups[1].sessions, vec![1]);
+        }
+
+        #[test]
+        fn last_updated_grouping_uses_calendar_buckets_and_recent_order() {
+            use chrono::{Datelike, Local, TimeZone};
+
+            let today = Local::now().date_naive();
+            let at_local_noon = |days_ago: u64| {
+                let date = today - chrono::Days::new(days_ago);
+                Local
+                    .with_ymd_and_hms(date.year(), date.month(), date.day(), 12, 0, 0)
+                    .single()
+                    .unwrap()
+                    .timestamp() as u64
+            };
+            let projects = vec![group("all", &[0, 1, 2, 3])];
+            let statuses = [AgentStatus::Idle; 4];
+            let last_updated_at = [
+                at_local_noon(0),
+                at_local_noon(2),
+                at_local_noon(1),
+                at_local_noon(8),
+            ];
+
+            let groups = sidebar_groups(
+                SidebarGrouping::LastUpdated,
+                projects,
+                &statuses,
+                &last_updated_at,
+                4,
+            );
+
+            assert_eq!(
+                groups
+                    .iter()
+                    .map(|group| group.label.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["今天", "昨天", "本周", "更早"]
+            );
+            assert_eq!(
+                groups
+                    .iter()
+                    .flat_map(|group| group.sessions.iter().copied())
+                    .collect::<Vec<_>>(),
+                vec![0, 2, 1, 3]
+            );
         }
     }
 
@@ -8549,6 +8731,7 @@ mod workspace_state_tests {
                     launch_cmd: None,
                 },
                 active: 0,
+                last_updated_at: crate::unix_now_secs(),
                 custom_title: Some(name.into()),
                 acp: acp.then(|| AcpSaved {
                     cwd: Some(format!("/{name}")),

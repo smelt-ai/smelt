@@ -364,6 +364,9 @@ impl Workspace {
                                     if ws.inspector_panel_promoted() {
                                         ws.set_stage_override(None, window, cx);
                                     }
+                                    if ws.inspector_tab != InspectorTab::Git {
+                                        ws.reset_git_diff_view();
+                                    }
                                     ws.inspector_tab = InspectorTab::Git;
                                     ws.set_inspector_open(true);
                                     cx.notify();
