@@ -79,16 +79,9 @@ fn resolve_key(cfg: &LlmConfig) -> Option<String> {
     })
 }
 
-/// 一次性问一句，拿回宠物要说的话（走宠物人设 system prompt）。是 complete_with_system
-/// 的宠物专用封装，system prompt 固定用 cfg.persona、max_tokens 固定给短回复用的 120。
-pub async fn complete(cfg: LlmConfig, user: String) -> anyhow::Result<String> {
-    let persona = cfg.persona.clone();
-    complete_with_system(cfg, persona, user, 120).await
-}
-
 /// 一次性问一句，system prompt 由调用方指定（OpenAI 兼容 `/chat/completions`，非流式）。
-/// 是 complete() 的通用版本：宠物聊天固定用 cfg.persona 这个人设，别的用途（比如生成
-/// commit message）需要自己的 system prompt，不能被宠物人设污染，所以拆出这个函数。
+/// 调用方负责传入合适的 system prompt，避免不同用途（比如生成 commit message）之间
+/// 互相污染人设。
 ///
 /// 照抄 `digest::chat` 的请求 / 解析逻辑，只是把 URL / model / key 换成配置驱动。
 pub async fn complete_with_system(
