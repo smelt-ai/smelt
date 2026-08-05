@@ -168,6 +168,33 @@ void main() {
       expect(output.single.codeUnitAt(3), 32 + 64);
     });
 
+    test('a horizontal wheel tick is corrected too', () {
+      enableMouseReporting('\x1b[?1003h\x1b[?1006h');
+
+      terminal.mouseInput(
+        TerminalMouseButton.wheelLeft,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+      terminal.mouseInput(
+        TerminalMouseButton.wheelRight,
+        TerminalMouseButtonState.down,
+        const CellOffset(2, 3),
+      );
+
+      expect(output, ['\x1b[<66;3;4M', '\x1b[<67;3;4M']);
+    });
+
+    test('correcting an already correct report leaves it alone', () {
+      // An xterm release that fixes the button table hands us reports that
+      // already carry the right code; the correction has to be a no-op then.
+      const sgr = '\x1b[<64;3;4M';
+      const legacy = '\x1b[M\x60\x23\x24';
+
+      expect(WheelEncodingFix.rewriteButtonId(sgr, 64, 64), sgr);
+      expect(WheelEncodingFix.rewriteButtonId(legacy, 64, 64), legacy);
+    });
+
     test('other buttons keep the code xterm reports for them', () {
       enableMouseReporting('\x1b[?1003h\x1b[?1006h');
 

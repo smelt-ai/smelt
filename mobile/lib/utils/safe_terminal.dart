@@ -3,6 +3,12 @@ import 'package:xterm/xterm.dart';
 
 /// A [Terminal] that works around three bugs in xterm 4.0.0.
 ///
+/// All three are upstream defects rather than misuse, and the package has not
+/// merged a pull request since February 2024, so each one is worked around
+/// here. Drop the corresponding override once an xterm release carries the fix
+/// - `safe_terminal_test.dart` holds a guard test per bug that fails when the
+/// bundled xterm no longer reproduces it.
+///
 /// **Detached lines left behind by a scroll region.** `Buffer.scrollUp` shifts
 /// a scroll region with `lines[i] = lines[i + n]`, and that setter detaches
 /// whatever occupied the destination slot before adopting the new line. The
@@ -20,6 +26,7 @@ import 'package:xterm/xterm.dart';
 ///
 /// Re-adopting a line at its own index restores the owner and the index the
 /// buffer already intended it to have, so the repair is just a self-assignment.
+/// Reported upstream as TerminalStudio/xterm.dart#233.
 ///
 /// **Reflow reading through a stale rotation.** `IndexAwareCircularBuffer
 /// .replaceWith` - the only writer used by the reflow that a width change
@@ -43,7 +50,9 @@ import 'package:xterm/xterm.dart';
 /// as shift-click, which a full screen application either ignores or mistakes
 /// for a selection gesture. That is the only way the alternate screen can be
 /// scrolled - it has no scrollback of its own - so wheel scrolling silently
-/// does nothing in every TUI.
+/// does nothing in every TUI. Reported upstream as
+/// TerminalStudio/xterm.dart#238, which corrects the table to the same codes
+/// this class rewrites reports to.
 class SafeTerminal extends Terminal {
   SafeTerminal({
     super.maxLines,
@@ -117,14 +126,21 @@ class SafeTerminal extends Terminal {
 ///
 /// Wraps another [TerminalMouseHandler] and rewrites the button code of the
 /// sequence it produced, in whichever encoding the application asked for.
+///
+/// The correction is a no-op once the button table is right, so this stays
+/// safe across an xterm upgrade: it rewrites a code to the value the table
+/// would already hold.
 class WheelEncodingFix implements TerminalMouseHandler {
   const WheelEncodingFix(this.inner);
 
   final TerminalMouseHandler inner;
 
+  /// Bit 6 marks a wheel and the low two bits carry the button number.
   static const _correctedIds = {
     TerminalMouseButton.wheelUp: 64,
     TerminalMouseButton.wheelDown: 65,
+    TerminalMouseButton.wheelLeft: 66,
+    TerminalMouseButton.wheelRight: 67,
   };
 
   @override
@@ -132,10 +148,13 @@ class WheelEncodingFix implements TerminalMouseHandler {
     final report = inner(event);
     final corrected = _correctedIds[event.button];
     if (report == null || corrected == null) return report;
-    return _withButtonId(report, event.button.id, corrected);
+    return rewriteButtonId(report, event.button.id, corrected);
   }
 
-  static String _withButtonId(String report, int reported, int corrected) {
+  /// Rewrites the button code carried by [report] from [reported] to
+  /// [corrected], leaving the report untouched when the two already agree.
+  @visibleForTesting
+  static String rewriteButtonId(String report, int reported, int corrected) {
     // SGR: ESC [ < id ; col ; row (M|m)
     if (report.startsWith('\x1b[<')) {
       return report.replaceFirst('\x1b[<$reported;', '\x1b[<$corrected;');
