@@ -2026,22 +2026,23 @@ impl Render for AcpView {
             &self.entries,
             current_turn_active,
         ));
+        // These values are stable for the whole render pass. Computing them once keeps the
+        // virtual-list item builder from rescanning the full conversation for every row.
+        let active_permission_tool_id = self
+            .permissions
+            .first()
+            .map(|card| card.tool_call_id.clone());
+        let timed_answer_ix = self.last_turn_duration_ms.and_then(|_| {
+            self.entries
+                .iter()
+                .rposition(|entry| matches!(entry, AcpEntry::Assistant { thought: false, .. }))
+        });
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             let conversation_layout = conversation_layout.clone();
             view.update(app, |this, cx| {
                 let t = cx.theme();
                 let muted = t.muted_foreground;
-                this.ensure_diff_cache_for_entry(i);
-                let active_permission_tool_id = this
-                    .permissions
-                    .first()
-                    .map(|card| card.tool_call_id.as_str());
-                let timed_answer_ix = this.last_turn_duration_ms.and_then(|_| {
-                    this.entries.iter().rposition(|entry| {
-                        matches!(entry, AcpEntry::Assistant { thought: false, .. })
-                    })
-                });
                 let presentation = conversation_layout.get(i).copied().unwrap_or_default();
                 let final_answer = presentation.final_answer;
                 let process_group = presentation.process_group;
@@ -2049,6 +2050,30 @@ impl Render for AcpView {
                     .is_some_and(|group| this.expanded_process_groups.contains(&group.first));
                 if process_group.is_some_and(|group| group.first != i) && !process_expanded {
                     return div().into_any_element();
+                }
+                let should_cache_tool_diff = match this.entries.get(i) {
+                    Some(AcpEntry::ToolCall {
+                        id,
+                        status,
+                        output,
+                        ..
+                    }) => {
+                        let has_pending_permission =
+                            active_permission_tool_id.as_deref() == Some(id.as_str());
+                        let card_expanded =
+                            this.tool_card_is_expanded(id, *status, has_pending_permission);
+                        let compact_in_process = process_expanded
+                            && process_group.is_some()
+                            && !card_expanded
+                            && tool_uses_compact_process_row(*status, has_pending_permission);
+                        // Compact Edit rows still need the cached diff totals for the inline
+                        // "+N -M" summary; text-only rows can keep the lazy path.
+                        !compact_in_process || tool_output_has_diff(output)
+                    }
+                    _ => false,
+                };
+                if should_cache_tool_diff {
+                    this.ensure_diff_cache_for_entry(i);
                 }
                 let entry = &this.entries[i];
                 let mut el: gpui::AnyElement = match entry {
@@ -2235,8 +2260,8 @@ impl Render for AcpView {
                                         .min_w_0()
                                         .px_2()
                                         .pt_1()
-                                        .pb_2()
-                                        .text_sm()
+                                        .pb_1()
+                                        .text_xs()
                                         .text_color(muted)
                                         .italic()
                                         .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
@@ -2396,7 +2421,8 @@ impl Render for AcpView {
                             ToolCallStatus::Failed => (gpui::rgb(ui_theme::red()).into(), "失败"),
                         };
 
-                        let has_pending_permission = active_permission_tool_id == Some(id.as_str());
+                        let has_pending_permission =
+                            active_permission_tool_id.as_deref() == Some(id.as_str());
                         let card_expanded =
                             this.tool_card_is_expanded(id, *status, has_pending_permission);
                         let compact_in_process = process_expanded
@@ -2405,11 +2431,15 @@ impl Render for AcpView {
                             && tool_uses_compact_process_row(*status, has_pending_permission);
 
                         // 已完成工具在展开的过程组里占绝大多数。提前返回紧凑行，
-                        // 避免再扫描 diff 缓存或构建随后会被丢弃的完整卡片。
+                        // 只保留必要的 diff 统计，不构建随后会被丢弃的完整卡片。
                         if compact_in_process {
+                            let can_expand = tool_output_has_content(output);
+                            let diff_stats = cached_diff_stats(
+                                this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
+                            );
                             let id_for_compact_toggle = id.clone();
                             let status_for_toggle = *status;
-                            h_flex()
+                            let mut row = h_flex()
                                 .id(("acp-tool-compact", i))
                                 .w_full()
                                 .min_h(px(30.))
@@ -2417,8 +2447,6 @@ impl Render for AcpView {
                                 .gap_2()
                                 .items_center()
                                 .rounded_md()
-                                .cursor_pointer()
-                                .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
                                 .child(div().size_1p5().rounded_full().bg(bar_color))
                                 .child(
                                     Icon::new(tool_kind_icon(kind))
@@ -2442,60 +2470,58 @@ impl Render for AcpView {
                                         .text_xs()
                                         .text_color(muted)
                                         .child(title.clone()),
-                                )
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    this.toggle_tool_card(
-                                        id_for_compact_toggle.clone(),
-                                        status_for_toggle,
-                                        has_pending_permission,
-                                        cx,
-                                    );
-                                }))
-                                .into_any_element()
+                                );
+                            if let Some((added, removed)) = diff_stats {
+                                row = row.child(render_compact_diff_stats(added, removed));
+                            }
+                            if can_expand {
+                                row = row
+                                    .cursor_pointer()
+                                    .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.toggle_tool_card(
+                                            id_for_compact_toggle.clone(),
+                                            status_for_toggle,
+                                            has_pending_permission,
+                                            cx,
+                                        );
+                                    }));
+                            }
+                            row.into_any_element()
                         } else {
-
-                        // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
-                        // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
-                        let diff_totals: Vec<(usize, usize)> = this
-                            .rendered_diffs
-                            .get(id)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|cached| {
-                                cached.as_ref().map(|diff| (diff.added, diff.removed))
-                            })
-                            .collect();
-                        let has_diff = !diff_totals.is_empty();
-                        let (total_added, total_removed) = diff_totals
-                            .iter()
-                            .fold((0usize, 0usize), |(a, r), (da, dr)| (a + da, r + dr));
-                        // diff / 状态角标都改成 Discord 那种圆角软底色小药丸，
-                        // 而不是裸文字——同样的信息，胶囊比平铺文字更有「标签」的
-                        // 活泼感，也跟下面的工具名药丸呼应成一套视觉语言。
-                        let header_right: gpui::AnyElement = if has_diff {
-                            h_flex()
-                                .gap_1p5()
-                                .child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_full()
-                                        .bg(ui_theme::tint(ui_theme::green(), 0x22))
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .text_color(gpui::rgb(ui_theme::green()))
-                                        .child(format!("+{total_added}")),
-                                )
-                                .child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_full()
-                                        .bg(ui_theme::tint(ui_theme::red(), 0x22))
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .text_color(gpui::rgb(ui_theme::red()))
-                                        .child(format!("-{total_removed}")),
-                                )
-                                .into_any_element()
+                            // diff 汇总统计：头部摘要显示全部 diff 块加总的增删行数，
+                            // 跟截图里 Edit 卡片右上角「+18 -4」的形态对齐。
+                            let diff_stats = cached_diff_stats(
+                                this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
+                            );
+                            // diff / 状态角标都改成 Discord 那种圆角软底色小药丸，
+                            // 而不是裸文字——同样的信息，胶囊比平铺文字更有「标签」的
+                            // 活泼感，也跟下面的工具名药丸呼应成一套视觉语言。
+                            let header_right: gpui::AnyElement =
+                                if let Some((total_added, total_removed)) = diff_stats {
+                                    h_flex()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .px_1p5()
+                                                .rounded_full()
+                                                .bg(ui_theme::tint(ui_theme::green(), 0x22))
+                                                .text_xs()
+                                                .font_family("monospace")
+                                                .text_color(gpui::rgb(ui_theme::green()))
+                                                .child(format!("+{total_added}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_1p5()
+                                                .rounded_full()
+                                                .bg(ui_theme::tint(ui_theme::red(), 0x22))
+                                                .text_xs()
+                                                .font_family("monospace")
+                                                .text_color(gpui::rgb(ui_theme::red()))
+                                                .child(format!("-{total_removed}")),
+                                        )
+                                        .into_any_element()
                         } else if matches!(status, ToolCallStatus::Completed) {
                             // 完成是默认预期结果，一排卡片全打「完成」绿点纯噪音——
                             // 只在异常态（进行中/失败/待执行）才需要占用视觉注意力。
@@ -2553,7 +2579,7 @@ impl Render for AcpView {
                                 h_flex()
                                     .id(("acp-tool-card-toggle", i))
                                     .px_3()
-                                    .py_1p5()
+                                    .py_1()
                                     .gap_2()
                                     .items_center()
                                     .cursor_pointer()
@@ -2607,7 +2633,7 @@ impl Render for AcpView {
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .text_sm()
+                                            .text_xs()
                                             .font_family("monospace")
                                             .text_color(muted)
                                             .truncate()
@@ -2834,7 +2860,13 @@ impl Render for AcpView {
         // 用 Spinner 而不是「已 N 秒」：GPUI 没有定时重绘，秒数会僵在原地，
         // 反而更像死了；spinner 自带动画帧，转着就说明进程还在。
         let show_thinking = matches!(self.phase, AcpPhase::Running)
-            && !matches!(self.entries.last(), Some(AcpEntry::Assistant { .. }));
+            && !matches!(
+                self.entries.last(),
+                Some(AcpEntry::Assistant {
+                    thought: false,
+                    text,
+                }) if !text.trim().is_empty()
+            );
 
         // 审批是输入动作，不散落进历史工具卡；统一固定在 composer 上方，
         // 队首切换时卡片位置不动，用户也能看见还有多少项等待处理。
@@ -3840,6 +3872,20 @@ fn build_diff_parts(output: &[ToolOutputPart]) -> Vec<Option<CachedDiff>> {
         .collect()
 }
 
+fn cached_diff_stats(parts: Option<&[Option<CachedDiff>]>) -> Option<(usize, usize)> {
+    let mut added = 0;
+    let mut removed = 0;
+    let mut has_diff = false;
+    if let Some(parts) = parts {
+        for diff in parts.iter().flatten() {
+            added += diff.added;
+            removed += diff.removed;
+            has_diff = true;
+        }
+    }
+    has_diff.then_some((added, removed))
+}
+
 fn is_user_entry(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
 }
@@ -3966,6 +4012,42 @@ fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bo
 /// 执行中、失败和待授权状态保留完整卡片，让正在发生的动作和异常保持可见。
 fn tool_uses_compact_process_row(status: ToolCallStatus, has_pending_permission: bool) -> bool {
     !has_pending_permission && matches!(status, ToolCallStatus::Completed)
+}
+
+fn tool_output_has_diff(output: &[ToolOutputPart]) -> bool {
+    output
+        .iter()
+        .any(|part| matches!(part, ToolOutputPart::Diff { .. }))
+}
+
+/// 没有可展示输出的工具只有标题，不提供点击展开，避免展开后得到空卡片。
+fn tool_output_has_content(output: &[ToolOutputPart]) -> bool {
+    output.iter().any(|part| match part {
+        ToolOutputPart::Text(text) => !text.trim().is_empty(),
+        ToolOutputPart::Diff { .. } => true,
+    })
+}
+
+fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
+    h_flex()
+        .flex_shrink_0()
+        .gap_1p5()
+        .items_center()
+        .child(
+            div()
+                .text_xs()
+                .font_family("monospace")
+                .text_color(gpui::rgb(ui_theme::green()))
+                .child(format!("+{added}")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_family("monospace")
+                .text_color(gpui::rgb(ui_theme::red()))
+                .child(format!("-{removed}")),
+        )
+        .into_any_element()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -4489,12 +4571,12 @@ fn render_diff_lines(
 #[cfg(test)]
 mod tests {
     use super::{
-        HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
-        build_handoff_prompt, build_markdown_cache, can_load_older_history,
+        CachedDiff, HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
+        build_handoff_prompt, build_markdown_cache, cached_diff_stats, can_load_older_history,
         escape_html_tags_for_markdown, is_active_permission_selection, loaded_entries_end,
         markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
         refresh_markdown_cache, resolve_restart_launch, should_replace_session_title,
-        should_seed_restored_height_hints, tool_card_default_expanded,
+        should_seed_restored_height_hints, tool_card_default_expanded, tool_output_has_content,
         tool_uses_compact_process_row,
     };
     use gpui::{ListAlignment, ListState, px};
@@ -5038,6 +5120,38 @@ mod tests {
             ToolCallStatus::Completed,
             true
         ));
+    }
+
+    #[test]
+    fn compact_diff_stats_sum_all_cached_diff_parts() {
+        let cached = vec![
+            Some(CachedDiff {
+                lines: std::rc::Rc::new(Vec::new()),
+                added: 3,
+                removed: 1,
+            }),
+            None,
+            Some(CachedDiff {
+                lines: std::rc::Rc::new(Vec::new()),
+                added: 2,
+                removed: 4,
+            }),
+        ];
+
+        assert_eq!(cached_diff_stats(Some(&cached)), Some((5, 5)));
+        assert_eq!(cached_diff_stats(None), None);
+    }
+
+    #[test]
+    fn empty_tool_output_does_not_offer_expandable_content() {
+        assert!(!tool_output_has_content(&[]));
+        assert!(!tool_output_has_content(&[ToolOutputPart::Text(" \n".into())]));
+        assert!(tool_output_has_content(&[ToolOutputPart::Text("result".into())]));
+        assert!(tool_output_has_content(&[ToolOutputPart::Diff {
+            path: "src/lib.rs".into(),
+            old_text: None,
+            new_text: "fn main() {}".into(),
+        }]));
     }
 
     #[test]
