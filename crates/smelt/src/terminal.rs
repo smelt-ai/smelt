@@ -107,6 +107,10 @@ fn palette() -> &'static [u32; 16] {
 }
 
 /// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 字形修饰 + 是否在选区内。
+///
+/// 需要 Clone：跨物理行拼接链接文本（见 terminal_view.rs 的 `wrapped_line_range` /
+/// 软换行拼接逻辑）要把若干行的 cell 拷进一个临时缓冲区再整体扫描。
+#[derive(Clone)]
 pub struct Cell {
     pub ch: char,
     pub fg: u32,
@@ -176,6 +180,13 @@ pub struct Frame {
     /// 光标**位置** (行, 列)，含被隐藏的情况；None 仅表示不在可视区内。
     /// IME 候选窗 / 预编辑串定位用——光标藏没藏，输入法都得知道往哪落。
     pub cursor_pos: Option<(usize, usize)>,
+    /// `wrapped[i] == true` 表示第 i 行是**软换行**——内容本来更长，只是屏幕宽度不够
+    /// 被截到下一行，并不是应用真的输出了换行符（alacritty 的 `Flags::WRAPLINE`，打在
+    /// 该行最后一格上）。终端里打印的长链接常常正好卡在这种断点上：链接识别
+    /// （见 terminal_view.rs 的 `find_links`）按整行扫描的话会在断点处把 URL 切成两截，
+    /// 点击只拿到前/后半截、打开错误地址（#21）。用这个数组把同一条软换行链串起来的
+    /// 物理行拼成一行再扫描，就不会切错。长度与 `rows` 一致。
+    pub wrapped: Vec<bool>,
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
@@ -2154,6 +2165,7 @@ impl Terminal {
                     rows: Vec::new(),
                     cursor: None,
                     cursor_pos: None,
+                    wrapped: Vec::new(),
                 };
             }
         };
@@ -2166,14 +2178,18 @@ impl Terminal {
 
         let cols = self.size.cols;
         let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(self.size.rows);
+        let mut wrapped: Vec<bool> = Vec::with_capacity(self.size.rows);
         let mut row: Vec<Cell> = Vec::with_capacity(cols);
         let mut count = 0usize;
+        // 当前行最后一格是不是 WRAPLINE——每格都刷新，行满时刚好是最后一格的值。
+        let mut row_wraps;
         for indexed in content.display_iter {
             let cell = indexed.cell;
             let selected = sel_range
                 .as_ref()
                 .is_some_and(|r| r.contains(indexed.point));
             let flags = cell.flags;
+            row_wraps = flags.contains(Flags::WRAPLINE);
             let inverse = flags.contains(Flags::INVERSE);
             let mut fg = resolve(cell.fg, true);
             let mut bg = resolve(cell.bg, false);
@@ -2216,10 +2232,12 @@ impl Terminal {
             count += 1;
             if count % cols == 0 {
                 rows.push(std::mem::take(&mut row));
+                wrapped.push(row_wraps);
             }
         }
         if !row.is_empty() {
             rows.push(row);
+            wrapped.push(false);
         }
 
         // 光标位置：alacritty 的 cursor.point 是**活动区**坐标（不含滚动偏移），加上
@@ -2253,6 +2271,7 @@ impl Terminal {
             rows,
             cursor,
             cursor_pos,
+            wrapped,
         }
     }
 
