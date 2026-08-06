@@ -714,6 +714,36 @@ const TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const TERMINAL_DAEMON_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_WATCH_POLL: Duration = Duration::from_millis(100);
 const MAX_TERMINAL_INPUT_BYTES: usize = 64 * 1024;
+
+/// How often the terminal socket probes an otherwise silent viewer. A dead peer
+/// is noticed after at most twice this, which is soon enough that the desktop
+/// is not stuck at the phone's grid for long, while still being far cheaper
+/// than the traffic a visible terminal generates anyway.
+const TERMINAL_WS_PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// 终端 socket 的探活判定。抽出来是因为这一小段状态机就是这个补丁的全部风险
+/// 所在——判早了会把静看的用户踢下线，判晚了几何租约就一直不还——而端到端测
+/// 一个 WebSocket 超时得起真守护进程加真客户端，最后测到的还是 tokio 的计时器。
+#[derive(Debug, Default)]
+struct TerminalLiveness {
+    awaiting_pong: bool,
+}
+
+impl TerminalLiveness {
+    /// 收到任何一帧都算活着，不限于 pong。
+    fn observed_frame(&mut self) {
+        self.awaiting_pong = false;
+    }
+
+    /// 返回 true 表示该断开：上一轮探测发出去之后一帧都没回来。
+    fn should_disconnect_on_tick(&mut self) -> bool {
+        if self.awaiting_pong {
+            return true;
+        }
+        self.awaiting_pong = true;
+        false
+    }
+}
 const MAX_TERMINAL_REPLAY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
@@ -871,10 +901,34 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
         }
     }
 
+    // Server-driven liveness. Nothing on this socket is periodic — a viewer
+    // that is merely watching sends no frames at all — so a dead phone (network
+    // drop, wifi to cellular, app killed) would otherwise leave `ws_rx.next()`
+    // pending forever. That matters because this connection holds the session's
+    // remote geometry lease: until it closes, the desktop is pinned to the
+    // phone's grid and refuses every resize. Probing with protocol-level pings
+    // costs the client nothing, since WebSocket implementations answer them
+    // automatically, and it means an idle-but-alive viewer is never dropped.
+    let mut liveness = tokio::time::interval(TERMINAL_WS_PING_INTERVAL);
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    liveness.tick().await; // the first tick resolves immediately
+    let mut peer = TerminalLiveness::default();
+
     loop {
         tokio::select! {
+            _ = liveness.tick() => {
+                // Nothing came back from the previous probe: the peer is gone in
+                // a way TCP has not reported. Drop it so the lease is freed.
+                if peer.should_disconnect_on_tick() {
+                    break;
+                }
+                if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             incoming = ws_rx.next() => {
                 let Some(Ok(message)) = incoming else { break };
+                peer.observed_frame();
                 match message {
                     Message::Text(text) => {
                         let request = serde_json::from_str::<TerminalWsRequest>(&text);
@@ -1979,6 +2033,43 @@ fn respond_acp_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 静看终端的用户一帧都不发。要是把"没流量"直接当成掉线，正常用户会被踢，
+    /// 所以探测必须先发出去、给对面一整个周期回话的机会。
+    #[test]
+    fn a_silent_but_answering_viewer_is_never_dropped() {
+        let mut peer = TerminalLiveness::default();
+
+        for _ in 0..100 {
+            assert!(!peer.should_disconnect_on_tick(), "探测周期本身不该断连");
+            peer.observed_frame(); // 客户端自动回的 pong
+        }
+    }
+
+    /// 手机断网时 TCP 可能一直不报错（切蜂窝、被前台杀掉），`ws_rx` 就永远挂着。
+    /// 这条连接握着几何租约，不断开的话桌面端会被永久钉在手机的网格上、拒绝一切
+    /// resize，只能杀会话或重启守护进程才能恢复。
+    #[test]
+    fn a_peer_that_stops_answering_is_dropped_on_the_next_tick() {
+        let mut peer = TerminalLiveness::default();
+
+        assert!(!peer.should_disconnect_on_tick(), "第一轮只发探测");
+        assert!(peer.should_disconnect_on_tick(), "探测无人应答就该断开");
+    }
+
+    /// 输入、resize 这些帧同样能证明对面活着——不能因为它没回 pong 就踢掉一个
+    /// 正在打字的用户。
+    #[test]
+    fn any_inbound_frame_counts_as_proof_of_life() {
+        let mut peer = TerminalLiveness::default();
+
+        assert!(!peer.should_disconnect_on_tick());
+        peer.observed_frame(); // 比如一次按键
+        assert!(
+            !peer.should_disconnect_on_tick(),
+            "收到过帧就该重新给一个周期"
+        );
+    }
 
     #[test]
     fn terminal_requests_preserve_control_input_and_bound_geometry() {
