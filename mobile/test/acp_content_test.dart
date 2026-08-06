@@ -12,6 +12,24 @@ Widget _host(Widget child) => MaterialApp(
 );
 
 void main() {
+  testWidgets('completion summaries are not rendered as tool cards', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        const AcpCompletionMessage(
+          output: [ToolOutputText(text: 'All done')],
+          status: ToolCallStatus.completed,
+          isFinal: true,
+        ),
+      ),
+    );
+
+    expect(find.text('Completed'), findsOneWidget);
+    expect(find.text('All done'), findsOneWidget);
+    expect(find.text('Tool'), findsNothing);
+  });
+
   testWidgets('thought blocks are collapsed until opened', (tester) async {
     await tester.pumpWidget(
       _host(

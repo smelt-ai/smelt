@@ -252,6 +252,66 @@ class _AcpAssistantMessageState extends State<AcpAssistantMessage> {
   }
 }
 
+class AcpCompletionMessage extends StatelessWidget {
+  const AcpCompletionMessage({
+    super.key,
+    required this.output,
+    required this.status,
+    this.isFinal = false,
+  });
+
+  final List<ToolOutputPart> output;
+  final ToolCallStatus status;
+  final bool isFinal;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final failed = status == ToolCallStatus.failed;
+    final summary = _stripCodeFence(completionSummaryText(output)).trim();
+    final text = summary.isEmpty ? 'Task completed.' : summary;
+    final statusColor = failed ? colors.error : colors.primary;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                failed ? Icons.error_outline : Icons.check_circle_outline,
+                size: 17,
+                color: statusColor,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                failed ? 'Completion failed' : 'Completed',
+                style: TextStyle(
+                  color: statusColor,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+          AcpMarkdown(data: text, muted: !isFinal),
+          if (isFinal)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Copy completion summary',
+                onPressed: () => Clipboard.setData(ClipboardData(text: text)),
+                icon: const Icon(Icons.copy, size: 17),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class AcpToolCallCard extends StatelessWidget {
   const AcpToolCallCard({
     super.key,

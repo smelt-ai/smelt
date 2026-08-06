@@ -2204,6 +2204,16 @@ class _SessionPageState extends State<SessionPage> {
               : null,
         ),
       AcpEntryToolCall(
+        title: final title,
+        status: final status,
+        output: final output,
+      ) when isTaskCompletionToolTitle(title) =>
+        AcpCompletionMessage(
+          output: output,
+          status: status,
+          isFinal: _isFinalAnswer(index),
+        ),
+      AcpEntryToolCall(
         id: _,
         title: final title,
         kind: final kind,
@@ -2232,6 +2242,11 @@ class _SessionPageState extends State<SessionPage> {
         thought: false,
         text: final text,
       ) when text.trim().isNotEmpty) {
+        return index == candidate;
+      }
+      if (entries[candidate] case AcpEntryToolCall(
+        title: final title,
+      ) when isTaskCompletionToolTitle(title)) {
         return index == candidate;
       }
     }
