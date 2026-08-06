@@ -229,6 +229,13 @@ pub fn is_interrupt_marker(text: &str) -> bool {
     t.starts_with("[Request interrupted by user") && t.ends_with(']')
 }
 
+/// Some ACP adapters report the final agent summary through a synthetic
+/// `task_complete` tool call. It is a completion signal, not an action the
+/// user needs to inspect as a tool.
+pub fn is_task_completion_tool_title(title: &str) -> bool {
+    title.trim().eq_ignore_ascii_case("task_complete")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +263,13 @@ mod tests {
             "[Request interrupted by user for tool use]"
         ));
         assert!(!is_interrupt_marker("请把这段中断逻辑说清楚"));
+    }
+
+    #[test]
+    fn detects_task_completion_tool_title() {
+        assert!(is_task_completion_tool_title("task_complete"));
+        assert!(is_task_completion_tool_title(" TASK_COMPLETE "));
+        assert!(!is_task_completion_tool_title("task_status"));
     }
 
     #[test]
