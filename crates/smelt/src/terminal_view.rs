@@ -60,9 +60,6 @@ fn terminal_font() -> Font {
     }
 }
 
-/// 终端网格刷新间隔（后台线程在更新，UI 定时快照重绘）。
-const REFRESH: Duration = Duration::from_millis(30);
-
 // Tab / Shift-Tab 在终端聚焦时的专属动作。
 //
 // gpui-component 的 `Root` 全局把 "tab"/"shift-tab" 绑成了焦点跳转（`window.focus_next`），
@@ -179,32 +176,21 @@ pub struct TerminalView {
     was_structured_succeeded: bool,
     /// 结构化状态上一帧是否已经是 Failed；用于检测失败边沿（触发任务失败处理）。
     was_structured_failed: bool,
-    /// 非结构化路径下 spinner 已连续落下的帧数（REFRESH≈30ms 为单位）。标题停转
-    /// 可能是「完成」也可能是「等人」（问问题/请求权限），无法可靠区分——所以
-    /// 必须静默稳定超过阈值才判完成。
-    idle_frames: u32,
-    /// 本次「静默」开始前是否真的跑过（有 spinner 落下这个转换）。没跑过的普通
-    /// 空闲终端不能因为 3 秒无输出就被当成「任务完成」。
-    idle_was_running: bool,
-    /// 上一次轮询看到的结构化 phase；BEL 只被同一竞速窗口内的新 phase 转换覆盖，
-    /// 不能因为 daemon 长期停在旧 Succeeded 就吞掉以后普通 shell 发出的 BEL。
-    last_structured_phase: Option<crate::terminal::DaemonPhase>,
-    /// 已连续运行的帧数（REFRESH 为单位）；超阈值判为「卡住」，提醒一次。
-    running_frames: u32,
-    /// 是否已就「卡住」提醒过（同一段运行只提醒一次）。
-    stuck_notified: bool,
+    /// 非结构化路径下 spinner 从运行变为空闲的时刻。标题停转可能是「完成」也可能
+    /// 是「等人」（问问题/请求权限），所以要静默稳定一段时间才判完成。
+    fallback_idle_since: Option<Instant>,
+    /// 使已经过期的 fallback settle timer 失效，避免旧 timer 误判新一轮运行。
+    fallback_settle_generation: u64,
     /// 守护里的会话 id（持久化到 workspace.json；重开 GUI 按它 reattach）。
     session_id: String,
     /// 刚收到但尚未展示的 BEL。仅用于没有结构化状态通道的普通终端/agent fallback；
     /// hook 一旦激活，BEL 永久让位给明确的 phase，不再展示泛化“响铃”。
     pending_bell_at: Option<Instant>,
+    /// 使已经被结构化状态或 Codex Stop 覆盖的 BEL grace timer 失效。
+    bell_timer_generation: u64,
     /// 绑定任务刚被标 Done 时写入「完成项目 cwd」；Workspace::render 取走后
     /// 触发同项目自动续跑下一条待办。None = 本帧无需续跑。
     pending_task_continue_cwd: Option<String>,
-    /// 最近一次比较过的外观设置：定时刷新时用于判断"背景色/图/透明度/模糊"是否被
-    /// 改过（这些跟 PTY 内容无关，Terminal::take_damage 感知不到）。
-    /// None = 还没比较过，首次一律当作"变了"以确保能显示当前外观。
-    last_appearance: Option<crate::Appearance>,
     /// 触控板滚轮的像素余数：触控板每帧只送几像素的增量，若逐事件独立按
     /// LINE_PX 取整会把大部分小增量截断成 0（滚了但没反应），造成"很不跟手"
     /// 的卡顿感。改为跨事件累加像素，攒够一整行再吐出、余数留到下次。
@@ -222,15 +208,6 @@ pub struct TerminalView {
     pty_kick_pending: bool,
     /// 断线自动重连是否已在跑（防并发：多个触发点同时 schedule 时只起一个后台任务）。
     reconnecting: bool,
-}
-
-/// 外观设置里跟终端渲染相关的字段是否发生变化（bg_color/bg_image/opacity/blur）。
-/// Appearance 未 derive PartialEq，故手动比较这几个字段。
-fn appearance_changed(a: &crate::Appearance, b: &crate::Appearance) -> bool {
-    a.bg_color != b.bg_color
-        || a.bg_image != b.bg_image
-        || a.opacity != b.opacity
-        || a.blur != b.blur
 }
 
 /// 同一终端同文本的系统通知最小间隔。
@@ -278,11 +255,9 @@ fn terminal_bell_notifications_enabled(cx: &App) -> bool {
         .unwrap_or(true)
 }
 
-/// 「卡住」阈值：REFRESH≈30ms → ~33fps，约 8 分钟。
-const STUCK_FRAMES: u32 = 8 * 60 * 1000 / 30;
 /// 非结构化完成「静默稳定」阈值：spinner 落下后连续 3s 无新输出才判完成
 /// （标题停转也可能是「等人」，无法可靠区分，取保守值）。
-const NONSTRUCTURED_SETTLE_FRAMES: u32 = 3 * 1000 / 30;
+const NONSTRUCTURED_SETTLE: Duration = Duration::from_secs(3);
 
 /// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里各项的图标对齐
 /// （新建终端/Claude Code/Codex/Copilot/Grok 一一对应），一眼认出这一行是哪种会话。
@@ -334,180 +309,6 @@ impl TerminalView {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        // 定时重绘：后台读线程更新 Term 网格，这里每 30ms 通知 UI 刷新。
-        // 顺便检查响铃：非活动会话也在跑此循环，故能在后台标记「需要注意」。
-        cx.spawn(async move |this, cx| {
-            loop {
-                Timer::after(REFRESH).await;
-                let r = this.update(cx, |this, cx| {
-                    let bell_received = this.terminal.take_bell_notification().is_some();
-                    // 结构化插件一旦在当前 pane 激活，OSC 和 BEL fallback 都让位给
-                    // hook phase。Copilot 常在 Stop hook 之后才发 BEL，只按“同一帧转换”
-                    // 抑制仍会漏出泛化响铃，因此这里按整条会话永久门控。
-                    let daemon_state = daemon_agent_state(&this.session_id, cx);
-                    let structured_events = daemon_state
-                        .as_ref()
-                        .is_some_and(|state| state.structured_events);
-                    let osc = this.terminal.take_notification();
-                    // Warp 的 Codex fallback 语义：未激活结构化插件时，一条普通文本
-                    // OSC 9 就是 Stop。数字 OSC 9 控制命令已在解析层过滤，不会到这里。
-                    let codex_osc_stop = osc.is_some()
-                        && !structured_events
-                        && this.launch_kind == LaunchKind::Codex;
-                    let now = Instant::now();
-                    let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
-                    if structured_events || !bell_notifications_enabled {
-                        this.pending_bell_at = None;
-                    } else if bell_received {
-                        this.pending_bell_at = Some(now);
-                    }
-                    if codex_osc_stop {
-                        this.pending_bell_at = None;
-                    }
-                    let bell_due = this
-                        .pending_bell_at
-                        .is_some_and(|_| bell_notification_due(this.pending_bell_at, now));
-                    let attention = fallback_attention(
-                        bell_due,
-                        (!structured_events).then_some(osc).flatten(),
-                        codex_osc_stop,
-                    );
-                    if attention
-                        .as_ref()
-                        .is_some_and(|(kind, _, _)| *kind == AttentionKind::Bell)
-                    {
-                        this.pending_bell_at = None;
-                    }
-                    if let Some((kind, title, msg)) = attention {
-                        this.publish_attention(kind, title, msg.clone(), cx);
-                    }
-
-                    // hook 一旦激活，运行/完成都以结构化 phase 为准；否则才回退标题
-                    // spinner。混用两条信源会在标题短暂清空时把仍在执行工具的任务误判
-                    // 为完成，甚至提前触发绑定任务的自动续跑。
-                    let structured_succeeded = structured_events
-                        && daemon_state.as_ref().is_some_and(|state| {
-                            state.phase == crate::terminal::DaemonPhase::Succeeded
-                        });
-                    let structured_failed = structured_events
-                        && daemon_state.as_ref().is_some_and(|state| {
-                            state.phase == crate::terminal::DaemonPhase::Failed
-                        });
-                    let running = if structured_events {
-                        daemon_state.as_ref().is_some_and(|state| {
-                            matches!(
-                                state.phase,
-                                crate::terminal::DaemonPhase::Thinking
-                                    | crate::terminal::DaemonPhase::ExecutingTool
-                            )
-                        })
-                    } else {
-                        !codex_osc_stop
-                            && !this.completed_unread(cx)
-                            && title_is_running(this.terminal.current_title())
-                    };
-                    let completion_edge = if structured_events {
-                        !this.was_structured_succeeded && structured_succeeded
-                    } else {
-                        // 非结构化：spinner 落下且静默稳定 ≥NONSTRUCTURED_SETTLE_FRAMES
-                        // 才判完成（标题停转也可能是「等人」，取保守阈值）。必须真的
-                        // 有「从跑转静」这个转换，普通空闲终端不算完成。
-                        codex_osc_stop
-                            || (!running
-                                && this.idle_was_running
-                                && this.idle_frames == NONSTRUCTURED_SETTLE_FRAMES)
-                    };
-                    let failure_edge =
-                        structured_events && !this.was_structured_failed && structured_failed;
-                    if completion_edge {
-                        // fallback 标题由运行转为空闲时也产生统一完成事件；结构化完成和
-                        // Codex OSC Stop 已由各自的明确事件发布，不能重复入队。
-                        if !structured_events && !codex_osc_stop {
-                            this.publish_attention(
-                                AttentionKind::Success,
-                                "已完成",
-                                "已完成".to_string(),
-                                cx,
-                            );
-                        }
-                        // 绑了本 session 的任务 → Done；若确实收尾了任务，挂旗让 Workspace
-                        // 同项目自动 claim 下一条待办（见 `on_session_task_idle`）。
-                        let sid = this.session_id.clone();
-                        if let Some(cwd) = crate::tasks::TaskStore::mark_session_done(&sid) {
-                            // 结构化完成（含 Codex OSC Stop）是明确终点，自动续跑下一条；
-                            // 非结构化无法区分「完成」vs「等人」，保守起见不自动续跑，
-                            // 等人手动确认，避免误收任务、误触发队列。
-                            if structured_events || codex_osc_stop {
-                                this.pending_task_continue_cwd = Some(cwd);
-                            }
-                        }
-                    }
-                    if failure_edge {
-                        let sid = this.session_id.clone();
-                        let err = daemon_state
-                            .as_ref()
-                            .and_then(|s| s.pending_question.clone())
-                            .unwrap_or_else(|| "agent 回合失败".to_string());
-                        if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, &err)
-                        {
-                            // 失败按重试策略回待办（冷却）或落 Failed 列；挂旗让
-                            // Workspace 继续 claim——同 cwd 下一条或重试该任务。
-                            this.pending_task_continue_cwd = Some(cwd);
-                        }
-                    }
-                    this.was_structured_succeeded = structured_succeeded;
-                    this.was_structured_failed = structured_failed;
-                    this.last_structured_phase = structured_events
-                        .then(|| daemon_state.as_ref().map(|state| state.phase))
-                        .flatten();
-                    if running {
-                        this.running_frames += 1;
-                        this.idle_frames = 0;
-                        this.idle_was_running = false;
-                        if this.running_frames == STUCK_FRAMES && !this.stuck_notified {
-                            this.stuck_notified = true;
-                        }
-                    } else {
-                        this.running_frames = 0;
-                        this.stuck_notified = false;
-                        // 有「从跑转静」这个转换才记 idle_was_running（普通空闲终端不算）。
-                        this.idle_was_running = this.idle_was_running || this.was_running;
-                        this.idle_frames += 1;
-                    }
-                    this.was_running = running;
-
-                    // P0 性能修复：这句 notify() 以前无条件调用，导致哪怕 shell 完全空闲
-                    // 也在以 33 次/秒的频率触发 render() 里"整个网格快照 + 每行重新整形
-                    // 文字"的重活。现在先问 alacritty 自带的 damage tracking——终端内容
-                    // （字符/颜色/光标/翻滚/进出备用屏幕/resize）没有真的变化，就跳过。
-                    // 外观设置（背景色/图/透明度/模糊）单独比较，因为这些跟 PTY 内容无关、
-                    // damage tracking 感知不到。拖选高亮 / Cmd 悬停链接不受影响：它们各自
-                    // 的鼠标事件处理里已经各自调用过 cx.notify()，跟这里无关。
-                    // 注：内容变化的重绘现在主要由事件驱动任务（drive_redraws）负责——读线程
-                    // 一有输出就唤醒；这里的 content_changed 仍保留，一是驱动外观变化的重绘，
-                    // 二是作内容重绘的兜底（万一 channel 那条漏了，轮询还能兜住）。
-                    let content_changed = this.terminal.take_damage();
-                    let ap_now = cx.global::<crate::Appearance>().clone();
-                    let ap_changed = match &this.last_appearance {
-                        Some(prev) => appearance_changed(prev, &ap_now),
-                        None => true,
-                    };
-                    if ap_changed {
-                        this.last_appearance = Some(ap_now);
-                    }
-                    if content_changed || ap_changed {
-                        // 滚动/输出变了：搜索高亮要按新的 display_offset 重算可视区命中。
-                        this.refresh_search_highlights();
-                        cx.notify();
-                    }
-                });
-                if r.is_err() {
-                    break; // 视图已销毁
-                }
-            }
-        })
-        .detach();
-
         // 标签标题：取工作目录最后一段
         let title = cwd
             .as_deref()
@@ -516,7 +317,7 @@ impl TerminalView {
             .unwrap_or("终端")
             .to_string();
 
-        Self {
+        let mut view = Self {
             terminal,
             focus_handle: cx.focus_handle(),
             did_focus: false,
@@ -545,22 +346,23 @@ impl TerminalView {
             was_running: false,
             was_structured_succeeded: false,
             was_structured_failed: false,
-            idle_frames: 0,
-            idle_was_running: false,
-            last_structured_phase: None,
-            running_frames: 0,
-            stuck_notified: false,
+            fallback_idle_since: None,
+            fallback_settle_generation: 0,
             session_id,
             pending_bell_at: None,
+            bell_timer_generation: 0,
             pending_task_continue_cwd: None,
-            last_appearance: None,
             scroll_accum: 0.0,
             launch_kind,
             launch_label,
             launch_cmd,
             pty_kick_pending: true,
             reconnecting: false,
+        };
+        if let Some(state) = daemon_agent_state(&view.session_id, cx) {
+            view.handle_daemon_state(&state, cx);
         }
+        view
     }
 
     /// 建终端时的启动方式（侧栏行图标对齐「+」菜单用）。
@@ -603,7 +405,10 @@ impl TerminalView {
     fn drive_redraws(rx: smol::channel::Receiver<()>, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this
+                    .update(cx, |this, cx| this.handle_terminal_event(cx))
+                    .is_err()
+                {
                     return; // 视图已销毁
                 }
             }
@@ -615,6 +420,209 @@ impl TerminalView {
             });
         })
         .detach();
+    }
+
+    /// PTY 读线程每批输出只唤醒一次。终端内容、BEL/OSC fallback 和标题 fallback
+    /// 都在这里消费，因此空闲终端没有任何定时器。
+    fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
+        let daemon_state = daemon_agent_state(&self.session_id, cx);
+        let structured_events = daemon_state
+            .as_ref()
+            .is_some_and(|state| state.structured_events);
+        let bell_received = self.terminal.take_bell_notification().is_some();
+        let osc = self.terminal.take_notification();
+        let codex_osc_stop =
+            osc.is_some() && !structured_events && self.launch_kind == LaunchKind::Codex;
+        let now = Instant::now();
+        let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
+
+        // 结构化插件一旦激活，OSC/BEL fallback 永久让位给明确的 phase。
+        if structured_events || !bell_notifications_enabled {
+            self.invalidate_bell_timer();
+        } else if bell_received {
+            self.pending_bell_at = Some(now);
+            self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
+            self.schedule_bell_timer(cx);
+        }
+        if codex_osc_stop {
+            self.invalidate_bell_timer();
+        }
+        let bell_due = !structured_events
+            && bell_notifications_enabled
+            && bell_notification_due(self.pending_bell_at, now);
+        if let Some((kind, title, message)) = fallback_attention(
+            bell_due,
+            (!structured_events).then_some(osc).flatten(),
+            codex_osc_stop,
+        ) {
+            if kind == AttentionKind::Bell {
+                self.invalidate_bell_timer();
+            }
+            self.publish_attention(kind, title, message, cx);
+        }
+
+        if structured_events {
+            self.cancel_fallback_settle();
+            self.was_running = false;
+            self.handle_structured_state(daemon_state.as_ref(), cx);
+        } else {
+            self.handle_fallback_state(codex_osc_stop, cx);
+        }
+
+        if self.terminal.take_damage() {
+            // 滚动/输出变了：搜索高亮要按新的 display_offset 重算可视区命中。
+            self.refresh_search_highlights();
+        }
+        // 读线程只在有输入时到这里，OSC/BEL/title 变化也需要刷新侧栏和画布。
+        cx.notify();
+    }
+
+    fn invalidate_bell_timer(&mut self) {
+        self.pending_bell_at = None;
+        self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
+    }
+
+    fn schedule_bell_timer(&mut self, cx: &mut Context<Self>) {
+        let generation = self.bell_timer_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(BELL_NOTIFICATION_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.bell_timer_generation != generation {
+                    return;
+                }
+                let structured = daemon_agent_state(&this.session_id, cx)
+                    .as_ref()
+                    .is_some_and(|state| state.structured_events);
+                if structured || !terminal_bell_notifications_enabled(cx) {
+                    this.invalidate_bell_timer();
+                    return;
+                }
+                if this.flush_bell_if_due(Instant::now(), cx) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn flush_bell_if_due(&mut self, now: Instant, cx: &mut Context<Self>) -> bool {
+        if bell_notification_due(self.pending_bell_at, now) {
+            self.invalidate_bell_timer();
+            self.publish_attention(AttentionKind::Bell, "响铃", "🔔 响铃".to_string(), cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_fallback_state(&mut self, codex_osc_stop: bool, cx: &mut Context<Self>) {
+        if codex_osc_stop {
+            self.cancel_fallback_settle();
+            self.was_running = false;
+            self.finish_session(true, false, cx);
+            return;
+        }
+
+        let running = !self.completed_unread(cx) && title_is_running(self.terminal.current_title());
+        if running {
+            self.was_running = true;
+            self.fallback_idle_since = None;
+            self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
+        } else if self.was_running {
+            self.was_running = false;
+            self.fallback_idle_since = Some(Instant::now());
+            self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
+            self.schedule_fallback_settle(cx);
+        }
+    }
+
+    fn schedule_fallback_settle(&mut self, cx: &mut Context<Self>) {
+        let generation = self.fallback_settle_generation;
+        cx.spawn(async move |this, cx| {
+            Timer::after(NONSTRUCTURED_SETTLE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fallback_settle_generation != generation
+                    || this.fallback_idle_since.is_none()
+                {
+                    return;
+                }
+                let structured = daemon_agent_state(&this.session_id, cx)
+                    .as_ref()
+                    .is_some_and(|state| state.structured_events);
+                if structured
+                    || this.completed_unread(cx)
+                    || title_is_running(this.terminal.current_title())
+                {
+                    return;
+                }
+                this.fallback_idle_since = None;
+                this.finish_session(false, false, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_fallback_settle(&mut self) {
+        self.fallback_idle_since = None;
+        self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
+    }
+
+    fn handle_structured_state(
+        &mut self,
+        daemon_state: Option<&smelt_core::daemon_state::DaemonSessionState>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = daemon_state.filter(|state| state.structured_events) else {
+            return;
+        };
+        let succeeded = state.phase == crate::terminal::DaemonPhase::Succeeded;
+        let failed = state.phase == crate::terminal::DaemonPhase::Failed;
+        if succeeded && !self.was_structured_succeeded {
+            self.finish_session(false, true, cx);
+        }
+        if failed && !self.was_structured_failed {
+            let sid = self.session_id.clone();
+            let err = state
+                .pending_question
+                .clone()
+                .unwrap_or_else(|| "agent 回合失败".to_string());
+            if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, &err) {
+                // 失败按重试策略回待办（冷却）或落 Failed 列；挂旗让 Workspace
+                // 继续 claim——同 cwd 下一条或重试该任务。
+                self.pending_task_continue_cwd = Some(cwd);
+            }
+        }
+        self.was_structured_succeeded = succeeded;
+        self.was_structured_failed = failed;
+    }
+
+    /// 由 daemon 状态订阅直接分发，独立于该 pane 当前是否正在渲染。
+    pub fn handle_daemon_state(
+        &mut self,
+        state: &smelt_core::daemon_state::DaemonSessionState,
+        cx: &mut Context<Self>,
+    ) {
+        if state.id != self.session_id || !state.structured_events {
+            return;
+        }
+        self.cancel_fallback_settle();
+        self.was_running = false;
+        self.handle_structured_state(Some(state), cx);
+        cx.notify();
+    }
+
+    fn finish_session(&mut self, codex_osc_stop: bool, structured: bool, cx: &mut Context<Self>) {
+        if !structured && !codex_osc_stop {
+            self.publish_attention(AttentionKind::Success, "已完成", "已完成".to_string(), cx);
+        }
+        let sid = self.session_id.clone();
+        if let Some(cwd) = crate::tasks::TaskStore::mark_session_done(&sid) {
+            // 只有结构化完成和 Codex Stop 是明确终点，才自动续跑下一条任务。
+            if structured || codex_osc_stop {
+                self.pending_task_continue_cwd = Some(cwd);
+            }
+        }
     }
 
     /// 断线自动重连（后台，带退避）。守护 exec 交接 / 被强杀 / 重启时，会话本身
@@ -722,9 +730,10 @@ impl TerminalView {
         self.clear_attention(cx);
         self.was_running = false;
         self.was_structured_succeeded = false;
-        self.last_structured_phase = None;
-        self.running_frames = 0;
-        self.stuck_notified = false;
+        self.was_structured_failed = false;
+        self.fallback_idle_since = None;
+        self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
+        self.invalidate_bell_timer();
         // 新 Terminal 自带空选区，只需重置本视图的拖选 / 应用鼠标交互态。
         self.selecting = false;
         self.app_mouse = false;
@@ -732,6 +741,9 @@ impl TerminalView {
         self.cursor = None;
         // 重连后必须再 force 一次带 cell 像素的 resize（见 pty_kick_pending）。
         self.pty_kick_pending = true;
+        if let Some(state) = daemon_agent_state(&self.session_id, cx) {
+            self.handle_daemon_state(&state, cx);
+        }
         cx.notify();
     }
 
