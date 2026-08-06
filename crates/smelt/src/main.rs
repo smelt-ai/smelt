@@ -48,7 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -2215,9 +2215,6 @@ struct Workspace {
     branches: HashMap<String, (Instant, BranchList)>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
     branches_inflight: HashSet<String>,
-    /// 文件监听标脏的 root 集合：notify 的回调跑在独立系统线程上，故用 Arc<Mutex<..>>
-    /// 跨线程共享；250ms 检查循环（见 ensure_git_watch）发现命中就清位 + 强制刷新。
-    git_dirty: Arc<Mutex<HashSet<String>>>,
     /// 每个 root 常驻的文件监听器（root → watcher）。watcher 必须存活才会继续收事件，
     /// 故存在 Workspace 里跟应用同生命周期；只建一次，见 ensure_git_watch。
     git_watchers: HashMap<String, RecommendedWatcher>,
@@ -2604,7 +2601,6 @@ impl Workspace {
             git_status_inflight: HashSet::new(),
             branches: HashMap::new(),
             branches_inflight: HashSet::new(),
-            git_dirty: Arc::new(Mutex::new(HashSet::new())),
             git_watchers: HashMap::new(),
             git_autofetch_at: HashMap::new(),
             session_list: HashMap::new(),
@@ -6198,6 +6194,30 @@ impl Workspace {
             }
         }
     }
+
+    /// Daemon 状态事件直接分发给所有终端 pane；不能依赖 TerminalView::render，
+    /// 因为非当前顶层会话不会被挂进当前窗口的渲染树。
+    fn handle_daemon_state_event(
+        &mut self,
+        state: &terminal::DaemonSessionState,
+        cx: &mut Context<Self>,
+    ) {
+        let panes: Vec<Entity<TerminalView>> = self
+            .sessions
+            .iter()
+            .flat_map(Session::term_leaves)
+            .collect();
+        let mut handled = false;
+        for pane in panes {
+            if pane.read(cx).session_id() == state.id {
+                let _ = pane.update(cx, |terminal, cx| terminal.handle_daemon_state(state, cx));
+                handled = true;
+            }
+        }
+        if handled {
+            cx.notify();
+        }
+    }
 }
 
 impl Workspace {
@@ -6365,8 +6385,8 @@ impl Render for Workspace {
 
         // 侧栏 GIT 角标全页面实时：保证当前项目的文件监听已建立。角标常驻显示，但
         // git_status 数据原本只在 Files/Git 页 render 时刷新，切到终端等页面就冻结。
-        // ensure_git_watch 建监听后，仓库一有改动就主动重拉 git_status（见其 250ms 检查
-        // 循环），角标在任何页面都即时跟手——事件驱动，文件不变时零开销，不搞轮询。
+        // ensure_git_watch 建监听后，仓库一有改动就主动重拉 git_status，角标在任何页面
+        // 都即时跟手——事件驱动，文件不变时零开销，不搞轮询。
         // 内部按 root 去重，每帧调只是一次 HashMap 查找。
         if let Some(root) = self.cur().and_then(|s| s.cwd(cx)) {
             self.ensure_git_watch(root, cx);
@@ -8105,12 +8125,13 @@ fn main() {
                 thread::sleep(Duration::from_secs(2)); // 断线/连不上，等一下重试
             }
         });
+        let current_ws_for_daemon = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok(event) = daemon_state_rx.recv().await {
                 let _ = cx.update(|cx| {
                     let states = cx.global::<DaemonStates>().0.clone();
                     let attention = cx.global::<AttentionGlobal>().0.clone();
-                    {
+                    let states_to_dispatch = {
                         let mut map = states.lock().unwrap();
                         match event {
                             terminal::DaemonStateEvent::Snapshot(list) => {
@@ -8125,9 +8146,10 @@ fn main() {
                                 // 只清守护侧条目：`acp-` 前缀是 GUI 内 ACP 会话自己
                                 // 维护的状态，smeltd 重连发快照时不能把它们抹掉。
                                 map.retain(|k, _| k.starts_with("acp-"));
-                                for s in list {
-                                    map.insert(s.id.clone(), s);
+                                for s in &list {
+                                    map.insert(s.id.clone(), s.clone());
                                 }
+                                list
                             }
                             terminal::DaemonStateEvent::Update(s) => {
                                 smelt_core::attention::apply_daemon_transition(
@@ -8136,12 +8158,18 @@ fn main() {
                                     &s,
                                     Instant::now(),
                                 );
-                                map.insert(s.id.clone(), s);
+                                map.insert(s.id.clone(), s.clone());
+                                vec![s]
                             }
                         }
+                    };
+                    if let Some(ws) = current_ws_for_daemon.borrow().clone() {
+                        let _ = ws.update(cx, |ws, cx| {
+                            for state in &states_to_dispatch {
+                                ws.handle_daemon_state_event(state, cx);
+                            }
+                        });
                     }
-                    // 状态点重绘由 schedule_state_refresh 节流触发，这里不再直接
-                    // refresh_windows——见该函数注释（agent 活跃时状态更新很频繁）。
                 });
                 schedule_state_refresh(&cx);
             }
