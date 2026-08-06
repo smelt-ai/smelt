@@ -2687,6 +2687,19 @@ impl Render for AcpView {
                                 );
                             if let Some((added, removed)) = diff_stats {
                                 row = row.child(render_compact_diff_stats(added, removed));
+                            } else if matches!(kind, ToolKind::Search) {
+                                // 过程组紧凑行同款：search 直接显示结果数，不必展开。
+                                let count = search_result_count(output);
+                                if count > 0 {
+                                    row = row.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .font_family("monospace")
+                                            .text_color(gpui::rgb(ui_theme::blue()))
+                                            .child(format!("{count} 个结果")),
+                                    );
+                                }
                             }
                             if can_expand {
                                 row = row
@@ -2738,6 +2751,29 @@ impl Render for AcpView {
                                                 .child(format!("-{total_removed}")),
                                         )
                                         .into_any_element()
+                        } else if matches!(kind, ToolKind::Search)
+                            && matches!(status, ToolCallStatus::Completed)
+                        {
+                            // search 头部直接给结果数（类似 Edit 的 +N -M）：不展开
+                            // 就能看到命中数量，展开只为了看明细。
+                            let count = search_result_count(output);
+                            if count > 0 {
+                                h_flex()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .rounded_full()
+                                            .bg(ui_theme::tint(ui_theme::blue(), 0x22))
+                                            .text_xs()
+                                            .font_family("monospace")
+                                            .text_color(gpui::rgb(ui_theme::blue()))
+                                            .child(format!("{count} 个结果")),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            }
                         } else if matches!(status, ToolCallStatus::Completed) {
                             // 完成是默认预期结果，一排卡片全打「完成」绿点纯噪音——
                             // 只在异常态（进行中/失败/待执行）才需要占用视觉注意力。
@@ -4374,6 +4410,25 @@ fn tool_output_has_content(output: &[ToolOutputPart]) -> bool {
         ToolOutputPart::Text(text) => !text.trim().is_empty(),
         ToolOutputPart::Diff { .. } => true,
     })
+}
+
+/// search 工具的结果数：剥掉代码围栏后统计非空行数（grep/ripgrep 输出
+/// 一行一个命中，行数即结果数的合理近似）。Diff 部分不参与计数。
+fn search_result_count(output: &[ToolOutputPart]) -> usize {
+    output
+        .iter()
+        .filter_map(|part| match part {
+            ToolOutputPart::Text(text) => {
+                let body = smelt_core::acp_chat::strip_code_fence(text);
+                Some(
+                    body.lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count(),
+                )
+            }
+            ToolOutputPart::Diff { .. } => None,
+        })
+        .sum()
 }
 
 fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
