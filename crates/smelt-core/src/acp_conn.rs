@@ -63,7 +63,7 @@ pub struct AcpLaunch {
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
 /// UI → 连接线程的指令。
 pub enum AcpCommand {
-    /// 发一轮 prompt。UI 会立即转发，不在本地等待上一轮结束。
+    /// 发一轮 prompt。调用方负责确保同一 session 不并发发送多个 turn。
     /// `images` 空 = 纯文本那条老路径。
     Prompt {
         text: String,

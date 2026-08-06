@@ -72,6 +72,22 @@ fn can_load_older_history(history_loading: bool, loaded_offset: usize) -> bool {
     !history_loading && loaded_offset > 0
 }
 
+fn should_queue_prompt(
+    phase: &AcpPhase,
+    prompt_dispatch_pending: bool,
+    queue_is_empty: bool,
+) -> bool {
+    prompt_dispatch_pending || !matches!(phase, AcpPhase::Idle) || !queue_is_empty
+}
+
+fn should_cancel_for_immediate_prompt(phase: &AcpPhase, prompt_dispatch_pending: bool) -> bool {
+    prompt_dispatch_pending
+        || matches!(
+            phase,
+            AcpPhase::Running | AcpPhase::AwaitingApproval | AcpPhase::AwaitingChoice
+        )
+}
+
 fn should_replace_session_title(incoming_has_title: bool, entries_changed: bool) -> bool {
     incoming_has_title || entries_changed
 }
@@ -213,6 +229,14 @@ pub struct AcpView {
     /// 已粘进来、等着随下一条 prompt 发出去的图片（缩略图条显示，发完清空）。
     /// 只在内存里待到发送为止：图片体积大，不进 workspace.json。
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
+    /// ACP 同一 session 一次只能运行一个 turn。运行中、启动中或上一条 prompt
+    /// 还没收到 Running 快照时，新消息先排队，等 Idle 后按顺序发送。
+    queued_prompts: std::collections::VecDeque<(String, Vec<std::sync::Arc<gpui::Image>>)>,
+    /// action 已交给 smeltd，但 Running 快照尚未回来。防止快点两次时本地 phase
+    /// 仍是 Idle，第二条 prompt 越过队列直接并发发送。
+    prompt_dispatch_pending: bool,
+    /// 用户点了某条排队消息的「立即发送」，正在等待当前 turn 被取消并回到 Idle。
+    immediate_cancel_pending: bool,
     /// 已发送消息的解码图片缓存，避免流式输出或 spinner 重绘时反复解码 base64。
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
@@ -499,6 +523,9 @@ impl AcpView {
             profile_id,
             agent,
             pending_images: Vec::new(),
+            queued_prompts: std::collections::VecDeque::new(),
+            prompt_dispatch_pending: false,
+            immediate_cancel_pending: false,
             rendered_images,
             rendered_diffs,
             rendered_markdown,
@@ -566,6 +593,8 @@ impl AcpView {
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
         self.usage = None; // 上下文用量属于旧会话，别带到新的上
+        self.prompt_dispatch_pending = false;
+        self.immediate_cancel_pending = false;
         self.phase = AcpPhase::Starting;
         self.starting_since = Some(std::time::Instant::now());
         self.init_input(window, cx);
@@ -1045,10 +1074,8 @@ impl AcpView {
         cx.notify();
     }
 
-    /// 总览快捷回复直达（对齐终端会话的 send_key_to_session 语义）。
-    /// 连带把已粘贴的待发图片一起发出去并清空。发出去之后不再本地手动追加
-    /// 用户消息/改相位——那是 smeltd 的事（见 `apply_acp_user_action` 里的
-    /// `note_prompt_sent`），本地 socket 往返是毫秒级，等下一份快照回来就有。
+    /// 总览快捷回复入口。当前 turn 未结束时先排队，避免同一 ACP session 并发
+    /// prompt；回合空闲后由快照处理逻辑逐条 flush。
     pub fn send_prompt(&mut self, text: String, cx: &mut Context<Self>) {
         // 光有图没有字也算一条有效 prompt（「这截图什么意思」式的用法）。
         if text.trim().is_empty() && self.pending_images.is_empty() {
@@ -1056,17 +1083,28 @@ impl AcpView {
         }
         self.awaiting_initial_history_snapshot = false;
         let images = std::mem::take(&mut self.pending_images);
-        self.send_prompt_now(text, images, cx);
+        if should_queue_prompt(
+            &self.phase,
+            self.prompt_dispatch_pending,
+            self.queued_prompts.is_empty(),
+        ) {
+            self.queued_prompts.push_back((text, images));
+            cx.notify();
+        } else if !self.send_prompt_now(&text, &images, cx) {
+            self.queued_prompts.push_back((text, images));
+            cx.notify();
+        }
     }
 
     /// 真正把一条 prompt 打给 smeltd——不碰 `self.pending_images`，图片由调用方
-    /// 传入，保证文本和图片 prompt 共用同一套编码/发送逻辑。
+    /// 传入，保证文本和图片 prompt 共用同一套编码/发送逻辑。返回 false 表示连接
+    /// 尚未可用，调用方应保留消息而不是静默丢弃。
     fn send_prompt_now(
         &mut self,
-        text: String,
-        images: Vec<std::sync::Arc<gpui::Image>>,
+        text: &str,
+        images: &[std::sync::Arc<gpui::Image>],
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let encoded: Vec<PromptImage> = images
             .iter()
             .map(|im| PromptImage {
@@ -1074,17 +1112,56 @@ impl AcpView {
                 data_b64: base64_encode(&im.bytes),
             })
             .collect();
-        if let Some(h) = &self.handle {
-            if h.action_tx
-                .try_send(AcpUserAction::Prompt {
-                    text,
-                    images: encoded,
-                })
-                .is_ok()
-            {
-                cx.notify();
+        let Some(h) = &self.handle else {
+            return false;
+        };
+        if h.action_tx
+            .try_send(AcpUserAction::Prompt {
+                text: text.to_string(),
+                images: encoded,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.prompt_dispatch_pending = true;
+        cx.notify();
+        true
+    }
+
+    /// 相位回 Idle 时按顺序取一条排队消息发出去。一次只发一条，避免把整个队列
+    /// 一口气打光后又回到协议不支持的裸并发。
+    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.prompt_dispatch_pending || !matches!(self.phase, AcpPhase::Idle) {
+            return;
+        }
+        let Some((text, images)) = self.queued_prompts.pop_front() else {
+            return;
+        };
+        if !self.send_prompt_now(&text, &images, cx) {
+            self.queued_prompts.push_front((text, images));
+        }
+    }
+
+    fn prioritize_queued_prompt(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.queued_prompts.len() {
+            return;
+        }
+        if ix > 0 {
+            if let Some(prompt) = self.queued_prompts.remove(ix) {
+                self.queued_prompts.push_front(prompt);
             }
         }
+
+        if should_cancel_for_immediate_prompt(&self.phase, self.prompt_dispatch_pending) {
+            if !self.immediate_cancel_pending {
+                self.immediate_cancel_pending = true;
+                self.cancel_turn();
+            }
+        } else if matches!(self.phase, AcpPhase::Idle) {
+            self.flush_queued_prompt(cx);
+        }
+        cx.notify();
     }
 
     /// 剪贴板里是图就收进待发列表（返回 true 表示这次粘贴被图片消费掉了，
@@ -1258,6 +1335,15 @@ impl AcpView {
         self.config_options = snap.config_options;
         self.turn_started_at_ms = snap.turn_started_at_ms;
         self.last_turn_duration_ms = snap.last_turn_duration_ms;
+        // note_prompt_sent 会先把 Running 快照推给 GUI，再开始真正的 ACP RPC。
+        // 只有收到这份确认后才允许下一条排队消息等待 Idle；不能用旧的 Idle 快照
+        // 清掉 pending 标记，否则快速连续提交仍会并发打进同一个 session。
+        if self.turn_started_at_ms.is_some() || matches!(self.phase, AcpPhase::Ended(_)) {
+            self.prompt_dispatch_pending = false;
+        }
+        if matches!(self.phase, AcpPhase::Idle | AcpPhase::Ended(_)) {
+            self.immediate_cancel_pending = false;
+        }
         // 完成边沿：回合结束（completed_unread 上升沿）**且没有人在等**（无待批
         // 权限 / 无待答选择）才算一次真完成——agent 问问题等你答也算回合结束。
         let completed = snap.completed_unread
@@ -1289,7 +1375,15 @@ impl AcpView {
                 self.set_config_option(config_id, value_id);
             }
             if let Some(prompt) = self.pending_initial_prompt.take() {
-                self.send_prompt(prompt, cx);
+                self.awaiting_initial_history_snapshot = false;
+                let images = std::mem::take(&mut self.pending_images);
+                if self.prompt_dispatch_pending || !self.send_prompt_now(&prompt, &images, cx) {
+                    self.queued_prompts.push_front((prompt, images));
+                }
+            } else if !self.queued_prompts.is_empty() {
+                // 交接提示和排队消息不会同时出现（前者只在全新 fork 会话里用），
+                // 分支互斥即可：这轮 Idle 只发队首一条，剩下的等下一次 Idle。
+                self.flush_queued_prompt(cx);
             }
         }
 
@@ -3439,6 +3533,81 @@ impl Render for AcpView {
                         .min_h(px(88.))
                         .child(Input::new(input)),
                 )
+                // 排队消息条：当前 turn 未结束时不会立刻打给 agent，得让人看见
+                // 「排队中」，还能撤回，避免误以为消息已丢失。
+                .when(!self.queued_prompts.is_empty(), |col| {
+                    let mut strip = v_flex().px_4().pt_3().gap_1p5();
+                    for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
+                        let preview: String = text.chars().take(60).collect();
+                        let preview = if text.chars().count() > 60 {
+                            format!("{preview}…")
+                        } else {
+                            preview
+                        };
+                        let img_suffix = if images.is_empty() {
+                            String::new()
+                        } else {
+                            format!("（含 {} 张图）", images.len())
+                        };
+                        strip = strip.child(
+                            h_flex()
+                                .id(("acp-queued-prompt", ix))
+                                .gap_2()
+                                .items_center()
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .bg(ui_theme::overlay(0x14))
+                                .border_1()
+                                .border_color(t.border)
+                                .child(
+                                    Icon::new(IconName::LoaderCircle)
+                                        .size_3p5()
+                                        .text_color(gpui::rgb(ui_theme::text_muted())),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .text_xs()
+                                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                                        .child(format!("排队中 · {preview}{img_suffix}")),
+                                )
+                                .child(
+                                    div()
+                                        .id(("acp-queued-prompt-send", ix))
+                                        .text_xs()
+                                        .text_color(gpui::rgb(ui_theme::accent()))
+                                        .cursor_pointer()
+                                        .hover(|d| d.opacity(0.8))
+                                        .child(if self.immediate_cancel_pending && ix == 0 {
+                                            "取消中…"
+                                        } else {
+                                            "立即发送"
+                                        })
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            this.prioritize_queued_prompt(ix, cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id(("acp-queued-prompt-remove", ix))
+                                        .text_xs()
+                                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                                        .cursor_pointer()
+                                        .hover(|d| d.opacity(0.8))
+                                        .child("撤回")
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            if ix < this.queued_prompts.len() {
+                                                this.queued_prompts.remove(ix);
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        );
+                    }
+                    col.child(strip)
+                })
                 // 待发图片的缩略图条：粘完得看得见「贴上了」，还得能反悔。
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
@@ -4631,13 +4800,15 @@ mod tests {
         diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
         is_active_permission_selection, loaded_entries_end, markdown_text_for_cwd,
         markdown_user_text_for_cwd, merge_snapshot_entries, refresh_markdown_cache,
-        resolve_restart_launch, should_replace_session_title, should_seed_restored_height_hints,
+        resolve_restart_launch, should_cancel_for_immediate_prompt, should_queue_prompt,
+        should_replace_session_title, should_seed_restored_height_hints,
         tool_card_default_expanded, tool_output_has_content, tool_uses_compact_process_row,
     };
     use gpui::{ListAlignment, ListState, px};
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
     use smelt_core::acp_session::{
-        ApprovalDetailsView, PendingPermission, PermissionOptionKindView, PermissionOptionView,
+        AcpPhase, ApprovalDetailsView, PendingPermission, PermissionOptionKindView,
+        PermissionOptionView,
     };
     use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
     use smelt_ui::agent_ui_config::AgentUiConfig;
@@ -4705,6 +4876,27 @@ mod tests {
         assert!(can_load_older_history(false, 900));
         assert!(!can_load_older_history(true, 900));
         assert!(!can_load_older_history(false, 0));
+    }
+
+    #[test]
+    fn prompts_queue_until_idle_and_dispatch_confirmation() {
+        assert!(!should_queue_prompt(&AcpPhase::Idle, false, true));
+        assert!(should_queue_prompt(&AcpPhase::Running, false, true));
+        assert!(should_queue_prompt(&AcpPhase::Starting, false, true));
+        assert!(should_queue_prompt(&AcpPhase::Idle, true, true));
+        assert!(should_queue_prompt(&AcpPhase::Idle, false, false));
+    }
+
+    #[test]
+    fn immediate_prompt_cancels_only_an_active_turn() {
+        assert!(!should_cancel_for_immediate_prompt(&AcpPhase::Starting, false));
+        assert!(!should_cancel_for_immediate_prompt(&AcpPhase::Idle, false));
+        assert!(should_cancel_for_immediate_prompt(&AcpPhase::Idle, true));
+        assert!(should_cancel_for_immediate_prompt(&AcpPhase::Running, false));
+        assert!(should_cancel_for_immediate_prompt(
+            &AcpPhase::AwaitingApproval,
+            false
+        ));
     }
 
     #[test]
