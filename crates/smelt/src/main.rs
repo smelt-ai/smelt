@@ -2404,6 +2404,11 @@ struct Workspace {
     restore_pending: Vec<(usize, SessionState)>,
     /// 用户在后台恢复期间删除的项目路径；尚未交货的恢复结果命中这些路径时直接丢弃。
     cancelled_restore_paths: Vec<String>,
+    /// 正在后台 reattach 中、尚未插入侧栏的移动端终端会话 id。`reconcile_remote_terminal_sessions`
+    /// 每秒轮询一次，reattach 若比一个轮询周期慢（守护握手重试等），不靠这个集合去重的话
+    /// 会对同一个 id 并发 open 两次——smeltd 对同 id 第二次 open 会顶掉前一个连接，
+    /// 造成两条侧栏项目/一条僵死一条存活的重复会话。
+    remote_terminal_reattach_pending: HashSet<String>,
     /// 会话列表被用户增删/重排的版本号。后台恢复只在版本未变化时按旧存档索引插入。
     session_list_revision: u64,
     /// 活动会话被用户切换的版本号。后台恢复只在版本未变化时恢复存档中的活动项。
@@ -2714,6 +2719,7 @@ impl Workspace {
             session_manager_list: None,
             restore_pending,
             cancelled_restore_paths: Vec::new(),
+            remote_terminal_reattach_pending: HashSet::new(),
             session_list_revision: 0,
             active_session_revision: 0,
             focus_handle: cx.focus_handle(),
@@ -2768,16 +2774,19 @@ impl Workspace {
         .detach();
     }
 
-    /// Mirror mobile-created ACP sessions into the running desktop workspace. The catalog and
-    /// daemon lifecycle remain UI-independent in smelt-core; this method only owns GPUI entities.
+    /// Mirror mobile-created ACP *and terminal* sessions into the running desktop workspace.
+    /// The catalog and daemon lifecycle remain UI-independent in smelt-core; this method only
+    /// owns GPUI entities.
     fn start_remote_session_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, rx) = smol::channel::bounded(1);
         thread::Builder::new()
             .name("smelt-remote-session-sync".into())
             .spawn(move || {
                 loop {
-                    let sessions = smelt_core::session_control::load_remote_sessions();
-                    if tx.send_blocking(sessions).is_err() {
+                    let acp_sessions = smelt_core::session_control::load_remote_sessions();
+                    let term_sessions =
+                        smelt_core::session_control::load_remote_terminal_sessions();
+                    if tx.send_blocking((acp_sessions, term_sessions)).is_err() {
                         break;
                     }
                     thread::sleep(Duration::from_secs(1));
@@ -2785,10 +2794,11 @@ impl Workspace {
             })
             .expect("spawn remote session sync thread");
         cx.spawn_in(window, async move |this, cx| {
-            while let Ok(records) = rx.recv().await {
+            while let Ok((acp_records, term_records)) = rx.recv().await {
                 if this
                     .update_in(cx, |this, window, cx| {
-                        this.reconcile_remote_sessions(records, window, cx)
+                        this.reconcile_remote_sessions(acp_records, window, cx);
+                        this.reconcile_remote_terminal_sessions(term_records, window, cx);
                     })
                     .is_err()
                 {
@@ -2885,6 +2895,126 @@ impl Workspace {
             self.session_list_revision = self.session_list_revision.wrapping_add(1);
             self.save_state(cx);
             cx.notify();
+        }
+    }
+
+    /// 跟 `reconcile_remote_sessions` 是同一套思路，对应移动端新建/删除的终端会话：
+    /// 手机那边只是让 smeltd 开了个 PTY 并写进 `remote_terminal_sessions.json`，
+    /// 这里负责把它 reattach 成 PC 侧栏里能看/能操作的一个真实 `Session`。
+    fn reconcile_remote_terminal_sessions(
+        &mut self,
+        records: Vec<smelt_core::session_control::RemoteTerminalSession>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<HashSet<_>>();
+        let stale = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, session)| {
+                if !session.remote_owned {
+                    return None;
+                }
+                let SessionKind::Term { active, .. } = &session.kind else {
+                    return None;
+                };
+                (!ids.contains(active.read(cx).session_id())).then_some(ix)
+            })
+            .collect::<Vec<_>>();
+        for ix in stale.into_iter().rev() {
+            self.close_session(ix, cx);
+        }
+        // 会话在 reattach 还没跑完时就被摘掉（手机端删了/PC 端手动关了）：清掉挂起标记，
+        // 不然这个 id 会被永久当成「在途」，真出现同 id 新记录时反而被误判成重复跳过。
+        self.remote_terminal_reattach_pending
+            .retain(|id| ids.contains(id));
+
+        let existing = self
+            .sessions
+            .iter()
+            .filter_map(|session| match &session.kind {
+                SessionKind::Term { active, .. } => {
+                    Some(active.read(cx).session_id().to_string())
+                }
+                SessionKind::Acp(_) => None,
+            })
+            .collect::<HashSet<_>>();
+        for record in records {
+            if existing.contains(&record.id) {
+                continue;
+            }
+            // 上一轮已经在跑 reattach 了：轮询间隔（1s）比一次握手/重试短是常态
+            // （见 terminal.rs::spawn_inner 头注释），不去重的话会对同一 id 并发
+            // open 两次——smeltd 对同 id 第二次 open 会顶掉前一个连接，造成两条
+            // 侧栏项目（一条僵死一条存活）。
+            if !self
+                .remote_terminal_reattach_pending
+                .insert(record.id.clone())
+            {
+                continue;
+            }
+            self.remember_session_project(Some(record.cwd.as_str()));
+            let (tx, rx) = smol::channel::bounded(1);
+            let cwd_bg = record.cwd.clone();
+            let sid_bg = record.id.clone();
+            std::thread::Builder::new()
+                .name("smelt-remote-term-reattach".into())
+                .spawn(move || {
+                    let r = terminal::Terminal::reattach(24, 80, Some(&cwd_bg), &sid_bg);
+                    let _ = tx.send_blocking(r);
+                })
+                .expect("spawn smelt-remote-term-reattach 线程");
+            let title = (!record.title.trim().is_empty()).then_some(record.title.clone());
+            let cwd = record.cwd.clone();
+            let sid = record.id.clone();
+            cx.spawn(async move |this, cx| {
+                let result = match rx.recv().await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        let _ = this.update(cx, |this, _cx| {
+                            this.remote_terminal_reattach_pending.remove(&sid);
+                        });
+                        return;
+                    }
+                };
+                let terminal = match result {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[workspace] 移动端终端会话 reattach 失败（{sid}）：{e:#}");
+                        let _ = this.update(cx, |this, _cx| {
+                            this.remote_terminal_reattach_pending.remove(&sid);
+                        });
+                        return;
+                    }
+                };
+                let _ = this.update(cx, |this, cx| {
+                    this.remote_terminal_reattach_pending.remove(&sid);
+                    // 竞态兜底：万一这段时间里已经有另一条路径（正常不该发生，但别信任）
+                    // 把同 id 会话插进来了，不要造出第二条。
+                    let already_present = this.sessions.iter().any(|s| match &s.kind {
+                        SessionKind::Term { active, .. } => active.read(cx).session_id() == sid,
+                        SessionKind::Acp(_) => false,
+                    });
+                    if already_present {
+                        return;
+                    }
+                    let view = cx.new(|cx| {
+                        TerminalView::from_terminal(cx, terminal, Some(cwd), sid, None, None)
+                    });
+                    let mut session = Session::single(view);
+                    session.remote_owned = true;
+                    session.custom_title = title;
+                    this.sessions.push(session);
+                    this.session_list_revision = this.session_list_revision.wrapping_add(1);
+                    this.save_state(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
     }
 
@@ -4688,10 +4818,19 @@ impl Workspace {
         if ix >= self.sessions.len() {
             return;
         }
-        if self.sessions[ix].remote_owned
-            && let SessionKind::Acp(view) = &self.sessions[ix].kind
-        {
-            smelt_core::session_control::forget_remote_session(view.read(cx).session_id());
+        if self.sessions[ix].remote_owned {
+            match &self.sessions[ix].kind {
+                SessionKind::Acp(view) => {
+                    smelt_core::session_control::forget_remote_session(
+                        view.read(cx).session_id(),
+                    );
+                }
+                SessionKind::Term { active, .. } => {
+                    smelt_core::session_control::forget_remote_terminal_session(
+                        active.read(cx).session_id(),
+                    );
+                }
+            }
         }
         // 兼容旧存档/旧创建路径留下的隐式项目：在移除最后一个能提供 cwd 的会话前，
         // 先把它对应的项目实体化。这样“关闭会话”和“关闭项目”始终是两件事。
