@@ -2438,23 +2438,21 @@ impl Workspace {
         Self::modal_shell(380., true, content, cx)
     }
 
-    /// 给某个 root 建一次性的文件监听（notify crate，macOS 走 FSEvents）：仓库目录树
-    /// 里任何东西变了就在 git_dirty 里标脏，配合下面 250ms 一次的检查循环，git 页
-    /// 基本能做到「文件一变就刷新」而不是干等 1.5s 轮询窗口。
+    /// 给某个 root 建一次性的文件监听（notify crate，macOS 走 FSEvents）：文件系统
+    /// 回调通过有界通道唤醒 GPUI 任务，git 页只在真实文件事件到达时刷新。
     ///
     /// 递归监听整棵目录树（含 .git/ 内部），**但过滤高频噪音路径**（构建产物/依赖
     /// 目录）——不滤的话，rust-analyzer/cargo 持续写 target/、node_modules 的每次
     /// 触碰都会触发一次 git status + 整窗重绘，空闲 CPU 高、耗电的主要来源。
-    /// 250ms 的检查节流把最坏情况锁定在每秒最多 4 次，但那是「每次都得跑外部 git
-    /// 进程」的 4 次，依然很贵。
     /// 只在这个 root 第一次进 Git 页时建一次；watcher 存进 git_watchers 常驻到应用退出
     /// （必须持有 watcher 不被 drop，否则会停止收事件）。
     pub fn ensure_git_watch(&mut self, root: String, cx: &mut Context<Self>) {
         if self.git_watchers.contains_key(&root) {
             return;
         }
-        let dirty = self.git_dirty.clone();
-        let root_for_cb = root.clone();
+        // 通道容量为 1：一批文件事件只需一次刷新唤醒，避免保存/构建产生的事件
+        // 在队列里无限堆积。GPUI 任务真正消费唤醒后再读取最新工作区状态。
+        let (dirty_tx, dirty_rx) = smol::channel::bounded::<()>(1);
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res {
                 // 噪音过滤：构建产物 / 依赖目录变化极频繁，监听它们只会让
@@ -2462,9 +2460,8 @@ impl Workspace {
                 if event.paths.iter().any(|p| is_git_noise_path(p)) {
                     return;
                 }
-                if let Ok(mut set) = dirty.lock() {
-                    set.insert(root_for_cb.clone());
-                }
+                // 回调运行在 notify 的线程上，不能直接触碰 GPUI；只发一个唤醒信号。
+                let _ = dirty_tx.try_send(());
             }
         });
         let Ok(mut watcher) = watcher else { return };
@@ -2475,20 +2472,14 @@ impl Workspace {
             return;
         }
         self.git_watchers.insert(root.clone(), watcher);
-        // 立刻拉一次初值：之后纯靠文件事件驱动（下面 250ms 循环），但首帧得先有数据，
+        // 立刻拉一次初值：之后纯靠文件事件驱动，但首帧得先有数据，
         // 否则文件一直不变时侧栏 GIT 角标永远出不来。
         self.ensure_git_status(root.clone(), cx);
 
-        let dirty = self.git_dirty.clone();
         cx.spawn(async move |this, cx| {
-            loop {
-                smol::Timer::after(std::time::Duration::from_millis(250)).await;
-                let hit = dirty.lock().is_ok_and(|mut set| set.remove(&root));
-                if !hit {
-                    continue;
-                }
+            while dirty_rx.recv().await.is_ok() {
                 // 文件变了：标脏并主动重拉 git_status，角标 / Git 页在任何页面都即时刷新，
-                // 不再依赖「当前正停在 Files/Git 页、render 每帧才调 ensure_git_status」。
+                // 不依赖「当前正停在 Files/Git 页、render 每帧才调 ensure_git_status」。
                 // ensure_git_status 内部有 inflight 去重，重复唤醒不会叠并发。
                 let r = this.update(cx, |this, cx| {
                     this.invalidate_git_status(&root);
