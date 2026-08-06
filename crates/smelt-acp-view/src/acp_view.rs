@@ -266,6 +266,9 @@ pub struct AcpView {
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
     /// 会明显卡手，所以一次会话只列一次。
     file_cache: Option<std::rc::Rc<Vec<String>>>,
+    /// 首次列文件的后台任务是否在途：git ls-files + 目录遍历可能耗时，
+    /// 一律后台跑，避免事件回调里同步起子进程卡 UI。
+    file_list_loading: bool,
     /// 当前 ACP 连接使用的运行时 session id，仅用于展示连接状态。
     acp_session_id: Option<SessionId>,
     /// agent 历史存储中的 canonical id。持久化和 `session/load` 只使用它；
@@ -539,6 +542,7 @@ impl AcpView {
             completion: None,
             completion_scroll: ScrollHandle::new(),
             file_cache: None,
+            file_list_loading: false,
             acp_session_id: None,
             history_session_id: resume_session_id,
             available_commands: Vec::new(),
@@ -885,18 +889,36 @@ impl AcpView {
         self.fork_origin = origin;
     }
 
-    /// cwd 下的文件清单（首次调用才真去列，之后走缓存）。
-    fn file_list(&mut self) -> std::rc::Rc<Vec<String>> {
+    /// cwd 下的文件清单（首次调用后台列，之后走缓存）。
+    fn file_list(&mut self, cx: &mut Context<Self>) -> std::rc::Rc<Vec<String>> {
         if let Some(cached) = &self.file_cache {
             return cached.clone();
         }
-        let list = self
-            .cwd
-            .as_deref()
-            .map(smelt_ui::acp_completion::list_files)
-            .unwrap_or_else(|| std::rc::Rc::new(Vec::new()));
-        self.file_cache = Some(list.clone());
-        list
+        if self.file_list_loading {
+            return std::rc::Rc::new(Vec::new());
+        }
+        let Some(cwd) = self.cwd.clone() else {
+            return std::rc::Rc::new(Vec::new());
+        };
+        // 首次：git ls-files / 目录遍历挪后台（大仓库可能跑几百 ms），
+        // 完成后重算当前补全；期间 At 补全先给空，等任务回来自动弹出。
+        self.file_list_loading = true;
+        cx.spawn(async move |this, cx| {
+            // list_files 返回 Rc（非 Send），后台只产出 Vec，回主线程再包 Rc。
+            let list = cx
+                .background_executor()
+                .spawn(async move {
+                    smelt_ui::acp_completion::list_files(&cwd).as_ref().clone()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.file_list_loading = false;
+                this.file_cache = Some(std::rc::Rc::new(list));
+                this.refresh_completion(cx);
+            });
+        })
+        .detach();
+        std::rc::Rc::new(Vec::new())
     }
 
     /// 按输入框当前内容重算补全候选。
@@ -925,7 +947,7 @@ impl AcpView {
             return;
         };
         let files = match trigger.kind {
-            smelt_ui::acp_completion::Kind::At => self.file_list(),
+            smelt_ui::acp_completion::Kind::At => self.file_list(cx),
             smelt_ui::acp_completion::Kind::Slash => std::rc::Rc::new(Vec::new()),
         };
         let items =
