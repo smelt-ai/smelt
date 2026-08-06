@@ -25,7 +25,7 @@
 //! 并进去，否则暗色模式下会看到刺眼的白底图。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -131,6 +131,8 @@ enum MermaidRender {
 thread_local! {
     /// 内存态一级缓存，key 是 `source_digest`（已经把主题模式编进去了）。
     static MERMAID_RENDER_CACHE: RefCell<HashMap<String, MermaidRender>> = RefCell::new(HashMap::new());
+    /// 正在后台渲染的 digest 集合：同一张图只起一个后台任务，避免滚动/重绘重复触发。
+    static MERMAID_RENDER_INFLIGHT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 /// `sha256(缓存格式版本 + 源码 + 主题模式)`。主题模式必须编进去，否则切换亮暗模式
@@ -213,17 +215,44 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
     let is_dark = cx.theme().is_dark();
     let digest = source_digest(&data.source, is_dark);
 
-    let cached = MERMAID_RENDER_CACHE.with(|c| c.borrow().get(&digest).cloned());
-    let result = cached.unwrap_or_else(|| {
-        let outcome = mermaid_cache_dir()
-            .ok_or_else(|| "找不到 ~/.smelt 目录".to_string())
-            .and_then(|dir| render_or_load(&data.source, is_dark, &dir))
-            .map(|img| MermaidRender::Ok(Arc::new(img)))
-            .unwrap_or_else(|e| MermaidRender::Err(e.into()));
-        MERMAID_RENDER_CACHE.with(|c| c.borrow_mut().insert(digest.clone(), outcome.clone()));
-        outcome
-    });
+    if let Some(result) = MERMAID_RENDER_CACHE.with(|c| c.borrow().get(&digest).cloned()) {
+        return mermaid_result_element(result, &digest, &data.source, cx);
+    }
 
+    // 缓存未命中但已有在途任务 → 占位，等后台完成刷新后重渲染命中缓存。
+    if MERMAID_RENDER_INFLIGHT.with(|c| c.borrow().contains(&digest)) {
+        return div()
+            .id(SharedString::from(format!("mermaid-{digest}-pending")))
+            .into_any_element();
+    }
+
+    // 首次见：读盘/渲染挪后台线程，render 不碰文件系统（ES 慢 open() 会卡 UI）。
+    // 完成后写内存缓存 + 刷新窗口，下一帧直接命中缓存。
+    MERMAID_RENDER_INFLIGHT.with(|c| c.borrow_mut().insert(digest.clone()));
+    let source = data.source.clone();
+    let digest_for_task = digest.clone();
+    cx.spawn(async move |cx| {
+        let outcome = match mermaid_cache_dir() {
+            Some(dir) => cx
+                .background_executor()
+                .spawn(async move { render_or_load(&source, is_dark, &dir) })
+                .await
+                .map(|img| MermaidRender::Ok(Arc::new(img)))
+                .unwrap_or_else(|e| MermaidRender::Err(e.into())),
+            None => MermaidRender::Err("找不到 ~/.smelt 目录".into()),
+        };
+        MERMAID_RENDER_INFLIGHT.with(|c| c.borrow_mut().remove(&digest_for_task));
+        MERMAID_RENDER_CACHE.with(|c| c.borrow_mut().insert(digest_for_task, outcome));
+        cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
+
+    div()
+        .id(SharedString::from(format!("mermaid-{digest}-pending")))
+        .into_any_element()
+}
+
+fn mermaid_result_element(result: MermaidRender, digest: &str, source: &str, cx: &App) -> AnyElement {
     match result {
         MermaidRender::Ok(m) => div()
             .id(SharedString::from(format!("mermaid-{digest}")))
@@ -249,7 +278,7 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
                 div()
                     .font_family(smelt_core::font_config::font_family())
                     .text_color(cx.theme().foreground)
-                    .child(data.source.to_string()),
+                    .child(source.to_string()),
             )
             .into_any_element(),
     }

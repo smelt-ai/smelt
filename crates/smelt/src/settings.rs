@@ -8,6 +8,7 @@
 //! 这里**——那是应用级生命周期状态，不属于任何一个面板，仍留在 main.rs；这里的
 //! 「更新」SettingPage 只是读它、展示它、提供按钮触发它。
 
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::InteractiveElement;
@@ -468,6 +469,45 @@ fn command_uses_current_smelt_hook(command: &str, event: &str) -> bool {
 
 fn smelt_notify_available() -> bool {
     smelt_notify_path().is_file()
+}
+
+/// hooks 接入状态缓存。设置页每次重绘都会检查 3 个 hooks 配置文件（read_to_string +
+/// JSON 解析），ES 慢 open() 时会把 render 拖住；安装/卸载 hooks 后主动失效，
+/// 其余时间 5s 内复用缓存结果（外部手改配置最多延迟 5s 反映）。
+static HOOKS_INSTALLED_CACHE: OnceLock<Mutex<Option<(Instant, [bool; 3])>>> = OnceLock::new();
+
+/// 返回 [claude, copilot, codex] 的 hooks 接入状态，带 5s 缓存。
+pub fn hooks_installed_status() -> [bool; 3] {
+    let cache = HOOKS_INSTALLED_CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut guard) = cache.lock() else {
+        // 锁被占用（极端）：直接实时查，不阻塞 render。
+        return [
+            claude_hooks_installed(),
+            copilot_hooks_installed(),
+            codex_hooks_installed(),
+        ];
+    };
+    if let Some((at, status)) = guard.as_ref() {
+        if at.elapsed() < Duration::from_secs(5) {
+            return *status;
+        }
+    }
+    let status = [
+        claude_hooks_installed(),
+        copilot_hooks_installed(),
+        codex_hooks_installed(),
+    ];
+    *guard = Some((Instant::now(), status));
+    status
+}
+
+/// 安装/卸载 hooks 后调用，清缓存强制下次重扫。
+pub fn invalidate_hooks_cache() {
+    if let Some(cache) = HOOKS_INSTALLED_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn hook_file_installed(path: Option<std::path::PathBuf>, events: &[&str]) -> bool {
@@ -2212,14 +2252,26 @@ impl Workspace {
                         .bg(Hsla::from(crate::ui_theme::tint(crate::ui_theme::blue(), 0x24)))
                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                             if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } = &status {
-                                // 先 handoff smeltd 再换 .app，避免会话全灭后对话被「重新初始化」。
-                                if crate::terminal::install_app_preserving_sessions(staged_app)
-                                    .is_ok()
-                                {
-                                    // 排好重启再退；拉不起来也只是退化成手动打开，不该拦着退出。
-                                    let _ = updater::relaunch();
-                                    cx.quit();
-                                }
+                                let staged = staged_app.clone();
+                                // 装包挪后台（内部 copy/rename 整份 .app + 30s 级等待，
+                                // ES 慢 open() 会冻结主线程）；装完回主线程重启退出。
+                                cx.spawn(async move |cx| {
+                                    let ok = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            crate::terminal::install_app_preserving_sessions(
+                                                &staged,
+                                            )
+                                            .is_ok()
+                                        })
+                                        .await;
+                                    if ok {
+                                        // 排好重启再退；拉不起来也只是退化成手动打开，不该拦着退出。
+                                        let _ = updater::relaunch();
+                                        cx.update(|cx| cx.quit());
+                                    }
+                                })
+                                .detach();
                             }
                         })
                 });
@@ -2789,9 +2841,9 @@ impl Workspace {
                     .keywords(["workspace", "claude-quant", "config dir", "多工作区", "agent"]),
                 )
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
-                    let claude_installed = claude_hooks_installed();
-                    let copilot_installed = copilot_hooks_installed();
-                    let codex_installed = codex_hooks_installed();
+                    // render 路径不走实时读盘：hooks 状态 5s 缓存，装/卸后主动失效。
+                    let [claude_installed, copilot_installed, codex_installed] =
+                        hooks_installed_status();
                     let installed = claude_installed && copilot_installed && codex_installed;
                     let (fg, muted, border) = {
                         let t = cx.theme();
@@ -2858,6 +2910,7 @@ impl Workspace {
                                                 c.agent_hooks_enabled = true;
                                             }, cx);
                                             let result = install_agent_hooks();
+                                            invalidate_hooks_cache();
                                             match result {
                                                 Ok(()) => {
                                                     window.push_notification(
@@ -2896,6 +2949,7 @@ impl Workspace {
                                                 c.agent_hooks_enabled = false;
                                             }, cx);
                                             let result = uninstall_agent_hooks();
+                                            invalidate_hooks_cache();
                                             match result {
                                                 Ok(()) => {
                                                     window.push_notification(
