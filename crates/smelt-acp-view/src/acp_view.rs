@@ -2688,16 +2688,16 @@ impl Render for AcpView {
                             if let Some((added, removed)) = diff_stats {
                                 row = row.child(render_compact_diff_stats(added, removed));
                             } else if matches!(kind, ToolKind::Search) {
-                                // 过程组紧凑行同款：search 直接显示结果数，不必展开。
-                                let count = search_result_count(output);
-                                if count > 0 {
+                                // 过程组紧凑行同款：复用输出汇总行原文（如
+                                // 「found 3 matches」），不必展开。
+                                if let Some(summary) = search_summary_text(output) {
                                     row = row.child(
                                         div()
                                             .flex_shrink_0()
                                             .text_xs()
                                             .font_family("monospace")
                                             .text_color(gpui::rgb(ui_theme::blue()))
-                                            .child(format!("{count} 个结果")),
+                                            .child(summary),
                                     );
                                 }
                             }
@@ -2754,10 +2754,9 @@ impl Render for AcpView {
                         } else if matches!(kind, ToolKind::Search)
                             && matches!(status, ToolCallStatus::Completed)
                         {
-                            // search 头部直接给结果数（类似 Edit 的 +N -M）：不展开
-                            // 就能看到命中数量，展开只为了看明细。
-                            let count = search_result_count(output);
-                            if count > 0 {
+                            // search 头部直接复用输出里的汇总行原文（如「found 3
+                            // matches」），与展开内容一致，不二次计算。
+                            if let Some(summary) = search_summary_text(output) {
                                 h_flex()
                                     .gap_1p5()
                                     .child(
@@ -2768,7 +2767,7 @@ impl Render for AcpView {
                                             .text_xs()
                                             .font_family("monospace")
                                             .text_color(gpui::rgb(ui_theme::blue()))
-                                            .child(format!("{count} 个结果")),
+                                            .child(summary),
                                     )
                                     .into_any_element()
                             } else {
@@ -4412,23 +4411,41 @@ fn tool_output_has_content(output: &[ToolOutputPart]) -> bool {
     })
 }
 
-/// search 工具的结果数：剥掉代码围栏后统计非空行数（grep/ripgrep 输出
-/// 一行一个命中，行数即结果数的合理近似）。Diff 部分不参与计数。
-fn search_result_count(output: &[ToolOutputPart]) -> usize {
-    output
-        .iter()
-        .filter_map(|part| match part {
-            ToolOutputPart::Text(text) => {
-                let body = smelt_core::acp_chat::strip_code_fence(text);
-                Some(
-                    body.lines()
-                        .filter(|line| !line.trim().is_empty())
-                        .count(),
-                )
+/// search 工具的头部摘要：直接复用 agent 输出里的匹配数汇总行原文
+/// （如「found 3 matches」「3 matches」「(3 matches)」），与展开后的内容
+/// 一字不差，不做二次计算。没有汇总行则返回 None（头部不显示摘要）。
+fn search_summary_text(output: &[ToolOutputPart]) -> Option<String> {
+    for part in output {
+        let ToolOutputPart::Text(text) = part else {
+            continue;
+        };
+        let body = smelt_core::acp_chat::strip_code_fence(text);
+        for line in body.lines() {
+            let t = line.trim();
+            if is_match_count_line(t) {
+                // 返回原始行文本（保留括号等原样），与展开内容一字不差。
+                return Some(t.to_string());
             }
-            ToolOutputPart::Diff { .. } => None,
-        })
-        .sum()
+        }
+    }
+    None
+}
+
+/// 汇总行判断：`found N matches` / `N matches` / `(N matches)` / `N results`。
+/// 只判形态不取数字；普通匹配行（如 `path:12: found a match`）不会误判。
+fn is_match_count_line(line: &str) -> bool {
+    let t = line.trim().trim_matches(['(', ')']).trim();
+    let lower = t.to_ascii_lowercase();
+    let rest = lower.strip_prefix("found ").unwrap_or(&lower);
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return false;
+    }
+    let tail = rest[digits.len()..].trim_start();
+    tail.starts_with("match") || tail.starts_with("result")
 }
 
 fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
@@ -5017,10 +5034,11 @@ mod tests {
         CachedDiff, HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
         build_handoff_prompt, build_markdown_cache, cached_diff_stats, can_load_older_history,
         diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
-        is_active_permission_selection, loaded_entries_end, markdown_text_for_cwd,
-        markdown_user_text_for_cwd, merge_snapshot_entries, refresh_markdown_cache,
-        resolve_restart_launch, should_cancel_for_immediate_prompt, should_queue_prompt,
-        should_replace_session_title, should_seed_restored_height_hints,
+        is_active_permission_selection, is_match_count_line, loaded_entries_end,
+        markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
+        refresh_markdown_cache, resolve_restart_launch, search_summary_text,
+        should_cancel_for_immediate_prompt, should_queue_prompt, should_replace_session_title,
+        should_seed_restored_height_hints,
         tool_card_default_expanded, tool_output_has_content, tool_uses_compact_process_row,
     };
     use gpui::{ListAlignment, ListState, px};
@@ -5064,6 +5082,42 @@ mod tests {
         assert!(!should_seed_restored_height_hints(
             true, true, true, true, 0, 0,
         ));
+    }
+
+    #[test]
+    fn search_summary_recognizes_match_count_lines() {
+        // 汇总行：各形态都应识别
+        assert!(is_match_count_line("found 3 matches"));
+        assert!(is_match_count_line("Found 2 matches"));
+        assert!(is_match_count_line("3 matches"));
+        assert!(is_match_count_line("(5 matches)"));
+        assert!(is_match_count_line("12 results"));
+        assert!(is_match_count_line("found 1 match"));
+        // 普通匹配行 / 无数字行不误判
+        assert!(!is_match_count_line("src/a.rs:12: found a match here"));
+        assert!(!is_match_count_line("fn foo() -> bool { matches!() }"));
+        assert!(!is_match_count_line("no matches"));
+        assert!(!is_match_count_line(""));
+        assert!(!is_match_count_line("path/to/file.rs"));
+    }
+
+    #[test]
+    fn search_summary_reuses_output_line_verbatim() {
+        // 头部摘要直接复用输出里的汇总行原文，与展开内容一字不差。
+        let parts = vec![ToolOutputPart::Text(
+            "src/a.rs:12: foo\nsrc/b.rs:5: bar\n\nfound 3 matches".into(),
+        )];
+        assert_eq!(search_summary_text(&parts), Some("found 3 matches".to_string()));
+
+        // 无汇总行 → None（头部不显示摘要）
+        let parts2 = vec![ToolOutputPart::Text("src/a.rs:12: foo\nsrc/b.rs:5: bar".into())];
+        assert_eq!(search_summary_text(&parts2), None);
+
+        // 代码围栏包裹也要能认出汇总行
+        let parts3 = vec![ToolOutputPart::Text(
+            "```console\n(3 matches)\n```".into(),
+        )];
+        assert_eq!(search_summary_text(&parts3), Some("(3 matches)".to_string()));
     }
 
     #[test]
