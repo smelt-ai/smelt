@@ -69,6 +69,10 @@
 
 第一个参考客户端可以仍是「桌面页 + xterm」验证 stream，但架构上 stream 与 UI 解耦。
 
+当前 Flutter 客户端的完整终端使用 `xterm.dart`，不嵌 WebView/xterm.js。控制面继续走
+`/acp/ws`，每个打开的终端通过独立的 `/terminal/{id}/ws` 接收二进制 PTY/ANSI 流，
+并以 JSON 控制帧发送输入与 resize；两条流共享同一组 token 与 iroh 隧道。
+
 ---
 
 ## 网关 API 草图（契约中心）

@@ -47,11 +47,14 @@ class LifecycleAttention {
   };
 }
 
+enum SessionKind { acp, terminal }
+
 /// 会话摘要（列表用）
 class SessionSummary {
   static const unknownOrder = 0xffffffff;
 
   final String id;
+  final SessionKind kind;
   final String title;
   final String phase;
   final String status;
@@ -69,6 +72,7 @@ class SessionSummary {
 
   const SessionSummary({
     required this.id,
+    this.kind = SessionKind.acp,
     required this.title,
     required this.phase,
     this.status = 'idle',
@@ -88,6 +92,10 @@ class SessionSummary {
   factory SessionSummary.fromJson(Map<String, dynamic> json) {
     return SessionSummary(
       id: json['id'] as String? ?? '',
+      kind: switch (json['kind']) {
+        'terminal' => SessionKind.terminal,
+        _ => SessionKind.acp,
+      },
       title: json['title'] as String? ?? '',
       phase: json['phase'] as String? ?? 'idle',
       status: json['status'] as String? ?? 'idle',
@@ -111,6 +119,7 @@ class SessionSummary {
 
   Map<String, dynamic> toJson() => {
     'id': id,
+    'kind': kind.name,
     'title': title,
     'phase': phase,
     'status': status,
@@ -301,6 +310,7 @@ class GatewayService {
   static Future<IrohPathSample?> _noIrohPath() async => null;
 
   WebSocketChannel? _channel;
+  Uri? _activeGatewayWsUri;
   StreamSubscription<dynamic>? _channelSubscription;
   Timer? _reconnectTimer;
   Timer? _connectWatchdog;
@@ -463,6 +473,7 @@ class GatewayService {
         restartIroh: restartIroh,
       );
       if (generation != _connectionGeneration) return;
+      _activeGatewayWsUri = wsUri;
       final channel = WebSocketChannel.connect(wsUri);
       _channel = channel;
       _channelSubscription = channel.stream.listen(
@@ -563,6 +574,24 @@ class GatewayService {
     );
   }
 
+  /// 当前主连接实际使用的网关地址。iroh 每次重连都可能换本地端口，终端流
+  /// 必须按这份最新地址建立，不能从持久化的 smelt+iroh endpoint 自己猜。
+  Uri? terminalWebSocketUri(String sessionId) {
+    final active = _activeGatewayWsUri;
+    if (active == null || _state != WsState.connected || sessionId.isEmpty) {
+      return null;
+    }
+    final segments = active.pathSegments.toList();
+    if (segments.length >= 2 &&
+        segments[segments.length - 2] == 'acp' &&
+        segments.last == 'ws') {
+      segments.removeRange(segments.length - 2, segments.length);
+    }
+    return active.replace(
+      pathSegments: [...segments, 'terminal', sessionId, 'ws'],
+    );
+  }
+
   /// 断开连接
   void disconnect() {
     _manuallyDisconnected = true;
@@ -620,6 +649,7 @@ class GatewayService {
     _channelSubscription = null;
     _channel?.sink.close();
     _channel = null;
+    _activeGatewayWsUri = null;
   }
 
   /// 请求会话列表
@@ -648,7 +678,7 @@ class GatewayService {
       'params': {
         'projectRoot': projectRoot,
         'agentOptionId': agentOptionId,
-        if (resumeId != null) 'resumeId': resumeId,
+        'resumeId': ?resumeId,
       },
     });
   }

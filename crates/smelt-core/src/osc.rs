@@ -13,6 +13,124 @@ pub struct OscScan {
     buf: Vec<u8>,
 }
 
+/// smeltd -> desktop renderer geometry synchronization. A PTY has one real
+/// grid, so every renderer must parse subsequent cursor-addressed output with
+/// that same size. The sequence is private and ignored by normal terminals:
+///
+/// `OSC 5151;smelt-terminal-geometry;token;cols;rows;cell_w;cell_h;remote ST`
+pub const TERMINAL_GEOMETRY_OSC: &str = "5151";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalGeometryOsc {
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub remote_controlled: bool,
+}
+
+pub fn terminal_geometry_osc(token: &str, geometry: TerminalGeometryOsc) -> Vec<u8> {
+    format!(
+        "\x1b]{TERMINAL_GEOMETRY_OSC};smelt-terminal-geometry;{token};{};{};{};{};{}\x1b\\",
+        geometry.cols,
+        geometry.rows,
+        geometry.cell_width,
+        geometry.cell_height,
+        u8::from(geometry.remote_controlled),
+    )
+    .into_bytes()
+}
+
+/// Incremental scanner for [`terminal_geometry_osc`]. It intentionally does
+/// not consume bytes; callers still pass the original stream to their VT
+/// parser, which ignores this private OSC.
+#[derive(Default)]
+pub struct TerminalGeometryOscScan {
+    expected_token: Option<String>,
+    prev_esc: bool,
+    in_osc: bool,
+    buf: Vec<u8>,
+}
+
+impl TerminalGeometryOscScan {
+    pub fn new(expected_token: String) -> Self {
+        Self {
+            expected_token: Some(expected_token),
+            ..Self::default()
+        }
+    }
+
+    pub fn feed(&mut self, byte: u8) -> Option<TerminalGeometryOsc> {
+        if self.in_osc {
+            if byte == 0x07 {
+                return self.finish();
+            }
+            if self.prev_esc && byte == 0x5c {
+                self.buf.pop();
+                return self.finish();
+            }
+            self.buf.push(byte);
+            self.prev_esc = byte == 0x1b;
+            if self.buf.len() > 256 {
+                self.reset();
+            }
+        } else if self.prev_esc && byte == 0x5d {
+            self.in_osc = true;
+            self.buf.clear();
+            self.prev_esc = false;
+        } else {
+            self.prev_esc = byte == 0x1b;
+        }
+        None
+    }
+
+    fn finish(&mut self) -> Option<TerminalGeometryOsc> {
+        let geometry = std::str::from_utf8(&self.buf)
+            .ok()
+            .and_then(|value| parse_terminal_geometry_osc(value, self.expected_token.as_deref()?));
+        self.reset();
+        geometry
+    }
+
+    fn reset(&mut self) {
+        self.in_osc = false;
+        self.prev_esc = false;
+        self.buf.clear();
+    }
+}
+
+fn parse_terminal_geometry_osc(value: &str, expected_token: &str) -> Option<TerminalGeometryOsc> {
+    let mut fields = value.split(';');
+    if fields.next()? != TERMINAL_GEOMETRY_OSC || fields.next()? != "smelt-terminal-geometry" {
+        return None;
+    }
+    if fields.next()? != expected_token {
+        return None;
+    }
+    let geometry = TerminalGeometryOsc {
+        cols: fields.next()?.parse().ok()?,
+        rows: fields.next()?.parse().ok()?,
+        cell_width: fields.next()?.parse().ok()?,
+        cell_height: fields.next()?.parse().ok()?,
+        remote_controlled: match fields.next()? {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        },
+    };
+    if geometry.cols == 0
+        || geometry.cols > 1000
+        || geometry.rows == 0
+        || geometry.rows > 1000
+        || geometry.cell_width > 256
+        || geometry.cell_height > 256
+        || fields.next().is_some()
+    {
+        return None;
+    }
+    Some(geometry)
+}
+
 /// OSC 通知协议种类。状态归约必须保留这个区别：Codex 的兼容完成信号仅是
 /// OSC 9，Kitty OSC 99 和结构化 OSC 777 不能被当成同一语义。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +336,38 @@ mod tests {
             scan_all(b"\x1b]9;hello world\x07").as_deref(),
             Some("hello world")
         );
+    }
+
+    #[test]
+    fn terminal_geometry_round_trips_across_read_boundaries() {
+        let expected = TerminalGeometryOsc {
+            cols: 49,
+            rows: 47,
+            cell_width: 8,
+            cell_height: 15,
+            remote_controlled: true,
+        };
+        let bytes = terminal_geometry_osc("session-secret", expected);
+        let mut scan = TerminalGeometryOscScan::new("session-secret".to_string());
+        let mut actual = None;
+        for chunk in bytes.chunks(3) {
+            for &byte in chunk {
+                actual = scan.feed(byte).or(actual);
+            }
+        }
+        assert_eq!(actual, Some(expected));
+    }
+
+    #[test]
+    fn terminal_geometry_scanner_ignores_other_osc_and_invalid_sizes() {
+        let mut scan = TerminalGeometryOscScan::new("session-secret".to_string());
+        let mut events = Vec::new();
+        for &byte in b"\x1b]9;done\x07\x1b]5151;smelt-terminal-geometry;wrong;24;80;8;15;1\x1b\\\x1b]5151;smelt-terminal-geometry;session-secret;0;24;8;15;1\x1b\\" {
+            if let Some(event) = scan.feed(byte) {
+                events.push(event);
+            }
+        }
+        assert!(events.is_empty());
     }
 
     #[test]
