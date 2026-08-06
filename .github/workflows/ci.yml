@@ -32,20 +32,27 @@ jobs:
       # 漂移），加上去只会一上来就红，把真正的信号淹掉。要么先整体格式化一次，
       # 那是独立的一次改动。
       #
-      # 跳过的两组测试都不是这里能给出有效信号的：
+      # 用 nextest 而不是 cargo test：smeltd 的 resume_handoff 测试摆弄的是进程级
+      # 的全局状态（fd 表、waitpid、进程组），同一个进程里跑就会互相串味——原样
+      # 跑大约五次挂一次，串行也照挂。nextest 每个测试起一个独立进程，这个干扰
+      # 就不存在了。
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # 跳掉的两组测试都不是这里能给出有效信号的：
       #
       # - damage_gate_tests 走 Terminal::spawn 的完整生产路径，要一个真的 PTY、
-      #   真的 shell，以及本机活着的 smeltd。runner 上没有，跑起来只会超时或
-      #   互相抢同一个守护进程。
-      # - short_ordered_list_bubble_does_not_collapse_below_min_width 在
-      #   main 上就是红的：gpui 的测试平台对 test window 抛
-      #   `not implemented: Test Windows are not backed by a real platform
-      #   window`，是 zed 依赖升级带来的，与被测逻辑无关。修好后把这行删掉。
+      #   真的 shell，以及本机活着的 smeltd。runner 上没有。
+      # - short_ordered_list_bubble_does_not_collapse_below_min_width 在 main 上
+      #   就是红的：gpui 的测试平台对 test window 抛 `not implemented: Test
+      #   Windows are not backed by a real platform window`，是 zed 依赖升级带来
+      #   的，与被测逻辑无关。修好后把它从下面的表达式里去掉。
       - name: Run tests
         run: |
-          cargo test --workspace -- \
-            --skip damage_gate_tests \
-            --skip short_ordered_list_bubble_does_not_collapse_below_min_width
+          cargo nextest run --workspace -E '
+            not test(damage_gate_tests)
+            and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
+          '
 
   mobile:
     runs-on: macos-14
