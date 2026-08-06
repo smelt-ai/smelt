@@ -134,9 +134,8 @@ pub fn handle_task_claim(mut conn: UnixStream, task_state: &TaskState, v: &Value
         return ok(&mut conn, json!({ "task": Value::Null }));
     };
     let task = file.tasks[idx].clone();
-    let channel = task.channel.clone();
-    let launch = task.launch.clone().unwrap_or_else(|| "claude".into());
-    let Some(run) = begin_run_in_file(&mut file, &task.id, &launch, channel, now) else {
+    // Task 不再保存 agent 偏好；claim 的执行记录使用终端默认值。
+    let Some(run) = begin_run_in_file(&mut file, &task.id, "claude", TaskChannel::Pty, now) else {
         return ok(&mut conn, json!({ "task": Value::Null }));
     };
     save_tasks_file(&file);
@@ -285,7 +284,7 @@ mod tests {
         let task_state = new_task_state();
 
         let cwd = "/tmp/proj".to_string();
-        let mut t = Task::new(cwd.clone(), "任务一".into(), "首包指令".into(), None);
+        let mut t = Task::new(cwd.clone(), "任务一".into(), "首包指令".into());
         t.auto_run = true;
         let id = t.id.clone();
         let add = roundtrip(&task_state, json!({ "op": "task_add", "task": t }));
@@ -298,7 +297,7 @@ mod tests {
         let claim = roundtrip(&task_state, json!({ "op": "task_claim", "cwd": "/tmp/proj" }));
         assert_eq!(claim["task"]["id"], id);
         assert!(claim["run"]["id"].is_string());
-        let run_id = claim["run"]["id"].as_str().unwrap().to_string();
+        let _run_id = claim["run"]["id"].as_str().unwrap().to_string();
 
         // done：agent 声明完成 → 进 Review
         let done = roundtrip(&task_state, json!({ "op": "task_done", "id": id }));

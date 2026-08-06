@@ -5,10 +5,19 @@
 
 **UI：**
 - 侧栏「任务」：任务总览入口 · 新建 · 执行中快捷项  
+- 右侧 Inspector 的 **TASK** tab（位于 GIT 与 SKILL 之间）：仅显示当前项目及其子目录的任务，可直接新建、运行或打开
 - 主区 **任务总览**页（对齐会话总览：标题 + 状态 pill + 卡片网格）  
 - 会话「总览」只做会话监控，**不**列任务
 
-**开跑（当前唯一路径）：新开终端 + startup-arg**
+**Agent 绑定（当前阶段）：** `Task` 只保存目标、项目和调度信息，不保存 Agent、
+启动命令或执行通道。实际运行时才使用当前默认启动项，并把实际命令和通道写入
+`TaskRun` 作为执行记录。
+
+**执行目标（运行时选择）：** 普通「运行」走 TUI 终端；任务卡上的 **ACP** 菜单会按
+当次选择的 Agent 新开一个独立 ACP 对话，或把首包发送到一个空闲的已打开 ACP 对话。
+定时和自动续跑保持走默认 TUI，不会在后台替用户选择 ACP Agent。
+
+**TUI 开跑：新开终端 + startup-arg**
 
 ```text
 新开 smeltd 会话
@@ -30,14 +39,14 @@
 
 | 能力 | 本地版含义 |
 |------|------------|
-| **新建** | ⌘⇧N / 侧栏「新建任务…」：类型（普通/定时）、标题、首包 prompt、绑定 cwd / launch |
+| **新建** | ⌘⇧N / 侧栏「新建任务…」：类型（普通/定时）、标题、首包 prompt、项目 cwd；不绑定 Agent |
 | **仅创建** | 状态=待办，卡片显示 **运行** |
 | **定时** | 选「定时」+ 本地时间；到点由后台扫描自动 `run_task`（单次，不循环） |
-| **运行** | 待办点「运行」：有绑会话则注入，否则新开终端 + 首包参数 |
-| **打开** | 执行中/完成：只切到已绑终端 |
+| **运行** | 待办点「运行」：有执行中的会话则注入，否则按当前默认启动项新开终端 + 首包参数；**ACP** 菜单可在新 ACP 对话中执行 |
+| **打开** | 执行中/完成：切到已绑的 TUI 终端或 ACP 对话 |
 | **做完续跑** | 绑定任务 Done 后，同 cwd claim 下一条 **`auto_run` 待办** 自动 `run_task`（全局始终尝试） |
 | **自动执行** | **任务级**字段：开 = 可被续跑/定时扫描取走；关 = 仅手动「运行」 |
-| **自循环（方向）** | agent 写 TaskStore 塞队（`auto_run`）→ 完成边沿 drain → 同一套 launch 契约 |
+| **自循环（方向）** | agent 写 TaskStore 塞队（`auto_run`）→ 完成边沿 drain → 同一套运行时启动契约 |
 
 **不做定位：** 完整项目管理、云端任务库、`-p` 无头批跑、总览任务看板、cron 循环。
 
@@ -52,9 +61,8 @@ Task {
   body,                // 给 agent 的首包（开跑唯一进 CLI 的内容）
   column,              // 待办 | 执行中 | 待审查 | 失败 | 完成
   project_cwd,         // 在哪跑
-  session_id?,         // smeltd 会话
+  session_id?,         // 实际执行后关联的 smeltd 会话
   current_run_id?,     // 当前/最近一次执行
-  launch?,             // base 命令（不含首包拼接）
   kind,                // once | scheduled（缺省 once，兼容旧数据）
   run_at?,             // Unix 秒；kind=scheduled 时计划开跑时间
   auto_run,            // 是否允许系统自动开跑（缺省 true）；false = 仅手动
@@ -65,8 +73,8 @@ TaskRun {
   id,
   task_id,
   attempt,             // 第几次尝试
-  channel,             // pty（终端）| acp（ACP 结构化对话，预留远程）
-  launch,              // 本次执行使用的启动命令快照
+  channel,             // 本次实际执行的通道快照
+  launch,              // 本次实际执行的启动命令快照
   session_id?,
   status,              // starting | running | completed | failed | cancelled
   error?,
@@ -76,6 +84,7 @@ TaskRun {
 
 `Task` 表示用户要完成的目标，`TaskRun` 表示一次具体执行尝试；重试不会覆盖上次失败记录。
 agent 从 Running 变 Idle 时，本次 Run 标 `completed`，Task 进入「待审查」，由人确认后才算完成。
+旧任务中的 `launch` / `channel` 字段会被兼容读取但不再保留，后续保存时会移除。
 
 落盘：`~/.smelt/tasks.json`（`tasks` + `runs`）；首包文件：
 `~/.smelt/tasks/prompts/<id>.txt`（内容 = body）。旧文件没有 `runs/current_run_id` 时按空值兼容读取。
@@ -106,7 +115,7 @@ spinner 落下（Running→Idle）
 |------|------|------|
 | **T0** ✅ | `Task` + 全局 store + 单测 | 重启不丢 |
 | **T1** ✅ | 侧栏入口 + 主区任务总览页 + 新建弹窗 | 全量可管 |
-| **T2** ✅ | 终端开跑（launch + startup-arg 首包） | agent 自动开干 |
+| **T2** ✅ | 终端开跑（运行时默认启动项 + startup-arg 首包） | agent 自动开干 |
 | **T2.5** ✅ | 任务类型：普通 + 单次定时（`run_at` + 扫描） | 到点自动开跑 |
 | **T2.6** ✅ | 完成边沿 → 同 cwd 自动 claim 下一条 | 队列串行续跑 |
 | **T3** | 会话「钉成任务」、右键删/改状态 | 双向不割裂 |
@@ -117,4 +126,4 @@ spinner 落下（Running→Idle）
 
 ## 与远程操作
 
-远程看/控的是 **session**；任务列表负责 **何时、用什么 launch（含首包）产生并记住该 session**。
+远程看/控的是 **session**；任务列表负责 **何时**产生并记住该 session，启动项在执行时才解析。
