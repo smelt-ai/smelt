@@ -47,7 +47,7 @@ if [[ "${1:-}" == "--build" ]]; then
 fi
 
 if [[ ! -f "$BIN" ]]; then
-  echo "✗ 找不到 ${BIN}，先跑一次：cargo build --release --bin $BIN_NAME（或加 --build）" >&2
+  echo "✗ 找不到 ${BIN}，先跑一次：cargo build --release --bin ${BIN_NAME}（或加 --build）" >&2
   exit 1
 fi
 if [[ ! -f "$DAEMON_BIN" ]]; then
