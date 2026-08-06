@@ -1844,6 +1844,22 @@ fn main() {
     smelt_core::app_log::install_panic_hook("smeltd");
     smelt_core::app_log::tee_stderr("smeltd");
     smelt_core::app_log::info("smeltd", "守护启动");
+    // 子进程（ACP agent 等）用的是低层 spawn_process 逃生口，SDK 不支持单独
+    // 指定子进程 cwd——它们一律继承本进程的 cwd。本进程的 cwd 又是从
+    // launchd/Finder 或上一次 `cd` 到的目录继承来的，可能是个已被删除/挪进
+    // 废纸篓的目录（比如某次在临时 worktree 里启动过守护，之后那个目录被
+    // 清理掉）。cwd 指向不存在的路径时，很多用 Node 写的 CLI（含 Copilot
+    // CLI）在启动阶段调 `process.cwd()` 直接抛异常退出——外部表现就是"所有
+    // ACP 会话的 initialize 都失败，transport closed"，坑了很久才排出来。
+    // 钉死到 HOME：一个几乎不可能被删除、稳定存在的目录，一劳永逸避免这个坑。
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Err(e) = std::env::set_current_dir(&home) {
+            smelt_core::app_log::error(
+                "smeltd",
+                &format!("启动时 cwd 校正失败（HOME={home:?}）：{e}"),
+            );
+        }
+    }
     // 尽早提 fd 上限：晚了的话，前面已经开的 fd 会先一步顶到旧上限。
     raise_fd_limit();
     // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
