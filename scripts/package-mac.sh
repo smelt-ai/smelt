@@ -188,7 +188,7 @@ echo "▶ 打 dmg（定制安装窗口）…"
 # 已经装好就复用（dist/ 在 .gitignore 里，不入库）。
 #
 # PyPI 在国内/部分网络会 ReadTimeout（卡在 mac-alias 等依赖）。支持：
-#   PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple make dist-build
+#   PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple ./scripts/package-mac.sh --build
 # 未设置时：先官方，失败再自动换清华镜像。
 VENV="$DIST/.dmgvenv"
 if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
@@ -215,7 +215,7 @@ if [[ ! -x "$VENV/bin/dmgbuild" ]]; then
   fi
   [[ -x "$VENV/bin/dmgbuild" ]] || {
     echo "✗ 安装 dmgbuild 失败。可手动：" >&2
-    echo "  PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple make dist-build" >&2
+    echo "  PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple ./scripts/package-mac.sh --build" >&2
     exit 1
   }
   echo "  ✓ dmgbuild 已就绪"

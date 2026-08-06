@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# macOS 桌面端（Rust + GPUI）的构建执行。环境由 ci/mac/env-setup.sh 准备，
+# macOS 桌面端（Rust + GPUI）的构建执行。环境由 .ci/mac/env-setup.sh 准备，
 # 本脚本只负责跑。
 #
 # 用法：
-#   ./ci/mac/ci.sh            build + test（默认）
-#   ./ci/mac/ci.sh build      只编译
-#   ./ci/mac/ci.sh test       只跑测试
-#   ./ci/mac/ci.sh package    编 release 并打 dmg（产物在 dist/）
+#   ./.ci/mac/ci.sh            build + test（默认）
+#   ./.ci/mac/ci.sh build      只编译
+#   ./.ci/mac/ci.sh test       只跑测试
+#   ./.ci/mac/ci.sh package    编 release 并打 dmg（产物在 dist/）
 #
 # 环境变量：
-#   SMELT_CI_SKIP_ENV=1          不 source ci/.env/mac.sh，直接用当前 PATH 上的工具
+#   SMELT_CI_SKIP_ENV=1          不 source .ci/.env/mac.sh，直接用当前 PATH 上的工具
 #   SMELT_CI_ALLOW_LONG_PATH=1   跳过 unix socket 路径长度检查（见 check_path_budget）
 #   CARGO_BUILD_JOBS             限制并行度。构建机多项目共用时值得设，GPUI 编译很吃内存
 set -euo pipefail
@@ -20,7 +20,7 @@ cd "$REPO_ROOT"
 load_ci_env mac
 
 for tool in cargo cargo-nextest; do
-  command -v "$tool" >/dev/null 2>&1 || die "PATH 上找不到 ${tool}，请先运行 ./ci/mac/env-setup.sh"
+  command -v "$tool" >/dev/null 2>&1 || die "PATH 上找不到 ${tool}，请先运行 ./.ci/mac/env-setup.sh"
 done
 
 # 这段排除表与 .github/workflows/ci.yml 保持一致，两边都改才有意义。原因：
@@ -95,7 +95,7 @@ stage_package() {
   "$py" -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
     || die "$py 版本低于 3.10，打包会失败。用 SMELT_PYTHON 指向更新的解释器。"
 
-  make dist-build
+  "$REPO_ROOT/scripts/package-mac.sh" --build
   ok "产物已生成在 dist/"
 }
 

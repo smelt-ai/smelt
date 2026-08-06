@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# iOS 端（Flutter）的构建执行。环境由 ci/ios/env-setup.sh 准备，本脚本只负责跑。
+# iOS 端（Flutter）的构建执行。环境由 .ci/ios/env-setup.sh 准备，本脚本只负责跑。
 #
 # 用法：
-#   ./ci/ios/ci.sh            analyze + test（默认，不需要签名）
-#   ./ci/ios/ci.sh analyze    只拉依赖 + 静态分析
-#   ./ci/ios/ci.sh test       只跑单元测试
-#   ./ci/ios/ci.sh build      编译 iOS release 产物
-#   ./ci/ios/ci.sh all        以上全部
+#   ./.ci/ios/ci.sh            analyze + test（默认，不需要签名）
+#   ./.ci/ios/ci.sh analyze    只拉依赖 + 静态分析
+#   ./.ci/ios/ci.sh test       只跑单元测试
+#   ./.ci/ios/ci.sh build      编译 iOS release 产物
+#   ./.ci/ios/ci.sh all        以上全部
 #
 # 环境变量：
-#   SMELT_CI_SKIP_ENV=1          不 source ci/.env/ios.sh，直接用当前 PATH 上的工具
+#   SMELT_CI_SKIP_ENV=1          不 source .ci/.env/ios.sh，直接用当前 PATH 上的工具
 #   SMELT_IOS_EXPORT_OPTIONS     指向 exportOptions.plist，设了就出可分发的 .ipa；
 #                                不设则只编 .app 且不签名（见 stage_build）
 set -euo pipefail
@@ -21,7 +21,7 @@ cd "$REPO_ROOT"
 
 load_ci_env ios
 
-command -v flutter >/dev/null 2>&1 || die "PATH 上找不到 flutter，请先运行 ./ci/ios/env-setup.sh"
+command -v flutter >/dev/null 2>&1 || die "PATH 上找不到 flutter，请先运行 ./.ci/ios/env-setup.sh"
 
 stage_deps() {
   info "Flutter：拉依赖"
