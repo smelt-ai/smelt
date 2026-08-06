@@ -2004,6 +2004,51 @@ fn load_ws_state() -> Option<WsState> {
     load_ws_state_from_path(&ws_state_path()?)
 }
 
+/// 一次 workspace.json 落盘任务的快照。主线程构建（纯内存），后台线程落盘。
+struct SnapshotJob {
+    path: PathBuf,
+    json: String,
+    /// 内存会话为空且恢复流程未跑完 → 落盘前需读盘检查，磁盘有数据则放弃写，
+    /// 避免启动恢复失败时用空列表抹掉旧存档。
+    guard_empty: bool,
+}
+
+/// 后台线程落盘：先做「空保护」读盘检查，再原子写（临时文件 + rename），避免
+/// 崩溃留下半截 json 导致下次启动读档失败。失败只告警，不打扰用户。
+fn persist_ws_snapshot(job: &SnapshotJob) {
+    if job.guard_empty {
+        if let Some(existing) = load_ws_state_from_path(&job.path) {
+            let had = !existing.sessions.is_empty()
+                || existing.layout.is_some()
+                || !existing.tabs.is_empty();
+            if had {
+                eprintln!(
+                    "[workspace] 内存会话为空但磁盘存档有数据，跳过写盘以免抹掉 workspace.json"
+                );
+                return;
+            }
+        }
+    }
+    let Some(dir) = job.path.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("[workspace] 创建存档目录失败: {e}");
+        return;
+    }
+    // 原子写：先写临时文件再 rename，避免崩溃留下半截 json。
+    let tmp = job.path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &job.json) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("[workspace] 写盘失败: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &job.path) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("[workspace] 写盘失败(rename): {e}");
+    }
+}
+
 /// 工作台根视图：多标签终端管理器。
 struct Workspace {
     /// 所有会话；每个会话 = 一棵独立分屏树 + 会话内活动 pane。
@@ -2374,6 +2419,11 @@ struct Workspace {
     /// 冷启动的会话恢复流程是否已经跑完（没有待恢复会话时启动即为 true）。
     /// save_state 的抹盘安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
     sessions_restored: bool,
+    /// 待落盘的 workspace.json 快照（最新一份）。写盘循环取走即清空；高频调用
+    /// 只保留最新快照，保证串行写盘时旧数据不会后到覆盖新数据。
+    pending_ws_snapshot: Option<SnapshotJob>,
+    /// 后台写盘循环是否在途。true 时新快照只替换 pending_ws_snapshot，不再新起循环。
+    ws_write_inflight: bool,
 }
 
 impl std::ops::Deref for Workspace {
@@ -2549,6 +2599,8 @@ impl Workspace {
             commit_msg_generating: false,
             // 没有待恢复会话 → 一开始就算「恢复完毕」，否则等 schedule_session_restore 置位。
             sessions_restored: pending_sessions.is_empty(),
+            pending_ws_snapshot: None,
+            ws_write_inflight: false,
             close_project_target: None,
             projects,
             active_project: None,
@@ -3809,9 +3861,47 @@ impl Workspace {
     }
 
     /// 把所有会话（各自分屏树 + 活动叶子遍历序）+ 侧栏宽度 + 文件树列宽写入
-    /// workspace.json（失败静默忽略）。
+    /// workspace.json。
+    ///
+    /// 主线程只做纯内存快照（构建 + 序列化），读盘/写盘一律挪到后台线程——
+    /// 历史上 open() 会被系统 EndpointSecurity 钩子（杀毒/EDR/打印管理等）拖住，
+    /// 同步写盘会直接冻结 UI（崩溃报告 0805）。后台写盘是串行的：高频调用只
+    /// 保留最新快照，旧快照不会后到覆盖新数据。
     fn save_state(&self, cx: &mut Context<Self>) {
         let Some(path) = ws_state_path() else { return };
+        let Some(job) = self.build_ws_snapshot(path, cx) else { return };
+        cx.spawn(async move |this, cx| {
+            // 入队：替换待写快照。若已有写盘循环在途，这笔会被它取走。
+            let already_writing = this
+                .update(cx, |this, _| {
+                    this.pending_ws_snapshot = Some(job);
+                    this.ws_write_inflight
+                })
+                .unwrap_or(true);
+            if already_writing {
+                return;
+            }
+            // 串行写盘循环：取走最新快照 → 后台落盘 → 回主线程看是否有新快照。
+            let executor = cx.background_executor().clone();
+            loop {
+                let job = this
+                    .update(cx, |this, _| this.pending_ws_snapshot.take())
+                    .ok()
+                    .flatten();
+                let Some(job) = job else {
+                    let _ = this.update(cx, |this, _| this.ws_write_inflight = false);
+                    break;
+                };
+                executor
+                    .spawn(async move { persist_ws_snapshot(&job) })
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// 主线程构建待写快照（纯内存，不碰磁盘）。返回 None 表示本次无需写。
+    fn build_ws_snapshot(&self, path: PathBuf, cx: &mut Context<Self>) -> Option<SnapshotJob> {
         let menu = self.workspace_menu_snapshot(cx);
         let mut sessions: Vec<SessionState> = self
             .sessions
@@ -3872,27 +3962,12 @@ impl Workspace {
         // 启动时恢复失败的会话按原位置写回，下次冷启动重试。
         sessions = merge_restore_pending(sessions, &self.restore_pending);
 
-        // 安全阀：内存里一个会话都没有、也没有待恢复条目，但磁盘上还有旧存档 → 绝不
-        // 用空列表覆盖（历史上「守护未就绪 → 恢复全失败 → save_state 抹盘」会把
-        // 用户所有侧栏会话永久清掉）。
-        //
-        // 但「用户自己把会话全关了」是合法状态（项目实体化后侧栏还有项目撑着），
-        // 那种情况必须允许写空，否则重启又全恢复回来。靠 sessions_restored 区分：
-        // 恢复流程跑完之前为 false，此时的空 = 还没恢复上来，护住；跑完之后为 true，
-        // 空就是用户真的关光了。
-        if sessions.is_empty() && !self.sessions_restored {
-            if let Some(existing) = load_ws_state() {
-                let had = !existing.sessions.is_empty()
-                    || existing.layout.is_some()
-                    || !existing.tabs.is_empty();
-                if had {
-                    eprintln!(
-                        "[workspace] 内存会话为空但磁盘存档有数据，跳过写盘以免抹掉 workspace.json"
-                    );
-                    return;
-                }
-            }
-        }
+        // 抹盘安全阀的决策输入：内存里一个会话都没有、也没有待恢复条目。
+        // 历史上「守护未就绪 → 恢复全失败 → save_state 抹盘」会把用户所有侧栏
+        // 会话永久清掉，所以这种「还没恢复上来的空」必须读盘确认磁盘真没数据才
+        // 允许写空（否则重启又全恢复回来——「用户自己把会话全关了」是合法状态，
+        // sessions_restored 跑完后的空允许写）。实际读盘判断在后台 persist 里做。
+        let guard_empty = sessions.is_empty() && !self.sessions_restored;
 
         let state = WsState {
             sessions,
@@ -3915,11 +3990,19 @@ impl Workspace {
             sidebar_grouping: self.sidebar_grouping,
             ..Default::default()
         };
-        if let Ok(json) = serde_json::to_string_pretty(&state) {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&path, json);
+        let json = serde_json::to_string_pretty(&state).ok()?;
+        Some(SnapshotJob {
+            path,
+            json,
+            guard_empty,
+        })
+    }
+
+    /// 退出前同步落盘：把还没写完的最新快照立刻写掉（后台写盘任务在进程退出时
+    /// 可能来不及跑完，on_app_quit 里调用本方法兜底）。
+    fn flush_ws_state(&mut self) {
+        if let Some(job) = self.pending_ws_snapshot.take() {
+            persist_ws_snapshot(&job);
         }
     }
 
@@ -8254,6 +8337,21 @@ fn main() {
 
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
         *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
+
+        // 退出前同步落盘最后一次 workspace.json：save_state 已异步化（避免 open()
+        // 被 EndpointSecurity 钩子拖住时冻结 UI），后台写盘任务在进程退出时可能
+        // 来不及跑完，这里兜底把 pending 快照立即写掉。
+        let current_ws_quit = current_ws.clone();
+        let _quit_ws_flush = cx.on_app_quit(move |cx| {
+            if let Some(ws) = current_ws_quit
+                .borrow()
+                .as_ref()
+                .and_then(|w| w.upgrade())
+            {
+                let _ = ws.update(cx, |ws, _| ws.flush_ws_state());
+            }
+            async {}
+        });
 
         // 消费 Dock / Finder 投递的目录：每个开一个会话（文件取父目录）。常驻到应用退出，
         // 不因主窗口一度被关掉而停——重开窗口后应继续能接文件投递。
