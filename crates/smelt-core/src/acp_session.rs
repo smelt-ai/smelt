@@ -520,6 +520,10 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             | AcpEvent::Status(_)
             | AcpEvent::AvailableCommands(_)
             | AcpEvent::Usage { .. }
+            | AcpEvent::Plan(_)
+            | AcpEvent::Model(_)
+            | AcpEvent::ConfigOptions(_)
+            | AcpEvent::Ready { .. }
     ) {
         state.awaiting_user_echo = false;
     }
@@ -584,6 +588,10 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             kind,
             supports_image,
         } => {
+            // 首条 prompt 可以在 `session/new` 完成前先入命令通道。Ready 到达时
+            // 它已经本地回显并开始计时，不能把这轮回合重置成 Idle，也不能为
+            // 它插入“新会话”分隔线。
+            let has_active_turn = state.turn_started_at_ms.is_some();
             state.acp_session_id = Some(session_id.to_string());
             if state.history_session_id.is_none() {
                 state.history_session_id = Some(session_id.to_string());
@@ -595,7 +603,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             match kind {
                 ReadyKind::ResumedWithReplay => {}
                 ReadyKind::ResumedKeepHistory => {}
-                ReadyKind::Fresh if !state.entries.is_empty() => {
+                ReadyKind::Fresh if !state.entries.is_empty() && !has_active_turn => {
                     outcome.entries_offset = Some(state.entries.len());
                     state.entries.push(AcpEntry::Divider(format!(
                         "新会话 · agent 不记得以上内容 · {}",
@@ -608,6 +616,8 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 AcpPhase::AwaitingApproval
             } else if state.elicitation.is_some() {
                 AcpPhase::AwaitingChoice
+            } else if has_active_turn {
+                AcpPhase::Running
             } else {
                 AcpPhase::Idle
             };
@@ -962,6 +972,9 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.usage = None;
     state.completed_unread = false;
     state.replaying_history = false;
+    state.awaiting_user_echo = false;
+    state.turn_started_at_ms = None;
+    state.last_turn_duration_ms = None;
     state.phase = AcpPhase::Starting;
 }
 
@@ -1369,6 +1382,31 @@ mod tests {
         assert_eq!(s.entries.len(), 2);
         assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
         assert!(matches!(s.entries[1], AcpEntry::Divider(_)));
+    }
+
+    #[test]
+    fn ready_keeps_a_pre_ready_prompt_running_without_a_divider() {
+        let mut s = fresh_state();
+        note_prompt_sent(&mut s, "你好".into(), Vec::new());
+        let started_at = s.turn_started_at_ms;
+
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+                kind: ReadyKind::Fresh,
+                supports_image: true,
+            },
+        );
+
+        assert!(matches!(s.phase, AcpPhase::Running));
+        assert_eq!(s.turn_started_at_ms, started_at);
+        assert!(s.awaiting_user_echo);
+        assert!(matches!(&s.entries[..], [AcpEntry::User(text)] if text == "你好"));
+
+        // session/new 完成后才出现的用户回声也必须吞掉，不能把首条消息重复一遍。
+        apply_event(&mut s, AcpEvent::UserChunk("你好".into()));
+        assert!(matches!(&s.entries[..], [AcpEntry::User(text)] if text == "你好"));
     }
 
     #[test]

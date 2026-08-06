@@ -3542,20 +3542,37 @@ impl Workspace {
                     if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, reason) {
                         this.pending_acp_task_continue = Some((sid, cwd));
                     }
-                    // 守护侧断连（smeltd 升级 exec / 重启 / 未就绪）→ 延迟自动重连：
-                    // 等守护恢复后再 attach，用户不用手动点「重新连接」。预算在
-                    // AcpView 内递减、连接成功后回满，防重连风暴；用户主动结束/
-                    // agent 正常完成不在此列。
+                    // 守护侧断连（smeltd 升级 exec / 重启 / 未就绪）→ 自动重连：
+                    // 指数退避循环（500ms 起、翻倍到 8s 上限），不写死单次等待——
+                    // 短故障（升级 exec 一两秒）很快重连，长故障间隔自动拉长，
+                    // 预算在 AcpView 内（6 次）防风暴；用户主动结束/agent 正常
+                    // 完成不在此列。
                     if reason.contains("连接已断开") || reason.contains("连不上 smeltd") {
                         let view = _view.clone();
                         cx.spawn_in(window, async move |_this, cx| {
                             let executor = cx.background_executor().clone();
-                            executor
-                                .timer(std::time::Duration::from_millis(1500))
-                                .await;
-                            let _ = view.update_in(cx, |view, window, cx| {
-                                view.maybe_auto_reconnect(window, cx);
-                            });
+                            let mut delay = std::time::Duration::from_millis(500);
+                            loop {
+                                executor.timer(delay).await;
+                                let step = view.update_in(cx, |view, window, cx| {
+                                    // 连接已活跃（用户手动重启 / 上轮重连成功）就停。
+                                    if !matches!(
+                                        view.phase(),
+                                        smelt_core::acp_session::AcpPhase::Ended(_)
+                                    ) {
+                                        return false;
+                                    }
+                                    view.maybe_auto_reconnect(window, cx)
+                                });
+                                match step {
+                                    Err(_) => break, // 视图销毁
+                                    Ok(false) => break, // 预算耗尽 / 已活跃
+                                    Ok(true) => {
+                                        delay = (delay * 2)
+                                            .min(std::time::Duration::from_secs(8));
+                                    }
+                                }
+                            }
                         })
                         .detach();
                     }
@@ -3580,7 +3597,7 @@ impl Workspace {
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
-            kind: SessionKind::Acp(view),
+            kind: SessionKind::Acp(view.clone()),
             last_updated_at: unix_now_secs(),
             custom_title: Some(title),
             remote_owned: false,
@@ -3589,6 +3606,7 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
+        view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
         cx.notify();
     }
@@ -3615,7 +3633,7 @@ impl Workspace {
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
-            kind: SessionKind::Acp(view),
+            kind: SessionKind::Acp(view.clone()),
             last_updated_at: unix_now_secs(),
             custom_title: None,
             remote_owned: false,
@@ -3624,6 +3642,7 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
+        view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
         cx.notify();
     }
