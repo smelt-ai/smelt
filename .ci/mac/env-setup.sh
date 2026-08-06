@@ -2,14 +2,14 @@
 # macOS 桌面端（Rust + GPUI）的构建环境初始化。
 #
 # 检查各工具版本，不达标的就地升级，最后把这次运行需要的环境变量写进
-# ci/.env/mac.sh，交给 ci/mac/ci.sh source。
+# .ci/.env/mac.sh，交给 .ci/mac/ci.sh source。
 #
 # 构建机的三条硬规矩（不写系统目录 / 全局配置只留在当前上下文 / 不复用机器上
-# 已有的工具链目录）见 ci/lib/common.sh 顶部。
+# 已有的工具链目录）见 .ci/lib/common.sh 顶部。
 #
 # 用法：
-#   ./ci/mac/env-setup.sh              检查并按需升级
-#   ./ci/mac/env-setup.sh --check      只检查不安装（不达标则退出码非 0）
+#   ./.ci/mac/env-setup.sh              检查并按需升级
+#   ./.ci/mac/env-setup.sh --check      只检查不安装（不达标则退出码非 0）
 #
 # 可用环境变量覆盖（内网机器如果连不上外网，用这些指向镜像）：
 #   SMELT_CI_TOOLCHAIN_ROOT   工具链安装位置，默认 ~/.smelt-ci/toolchains
@@ -43,7 +43,7 @@ preflight() {
 
   # 打包脚本会用 file 校验产物必须是 arm64，Intel 机器直接拒绝，早点说清楚。
   if [[ "$(uname -m)" != "arm64" ]]; then
-    warn "当前是 $(uname -m)，不是 arm64。跑测试没问题，但 make dist 打出的包会被 package-mac.sh 拒收。"
+    warn "当前是 $(uname -m)，不是 arm64。跑测试没问题，但 .ci/mac/ci.sh package 打出的包会被 package-mac.sh 拒收。"
   fi
 
   local py_version=""
@@ -52,7 +52,7 @@ preflight() {
   fi
   if [[ -z "$py_version" ]] || ! version_ge "$py_version" "$REQUIRED_PYTHON"; then
     # 只有打包用得到，所以不 die——跑测试的流水线不该被它挡住。
-    warn "Python ${py_version:-未安装} 低于打包所需的 ${REQUIRED_PYTHON}。只影响 make dist，不影响构建与测试。"
+    warn "Python ${py_version:-未安装} 低于打包所需的 ${REQUIRED_PYTHON}。只影响 .ci/mac/ci.sh package，不影响构建与测试。"
     warn "  需要打包的话，让管理员装一个 3.10+，或用 SMELT_PYTHON 指向已有的解释器。"
   else
     ok "Python ${py_version}（>= ${REQUIRED_PYTHON}，打包用）"
@@ -78,7 +78,7 @@ setup_rust() {
     curl -fsSL --retry 3 "${RUSTUP_UPDATE_ROOT:-https://sh.rustup.rs}" -o "$init" \
       || die "下载 rustup 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
     # --no-modify-path 是关键：默认行为会往 ~/.profile、~/.bashrc 里塞 PATH，
-    # 那是对构建机的永久污染。PATH 由本脚本写进 ci/.env/mac.sh，只在本次运行内有效。
+    # 那是对构建机的永久污染。PATH 由本脚本写进 .ci/.env/mac.sh，只在本次运行内有效。
     sh "$init" -y --no-modify-path --default-toolchain "$REQUIRED_RUST" --profile minimal \
       || die "rustup 安装失败"
     rm -f "$init"
@@ -163,8 +163,8 @@ main() {
 
   write_env_file
   echo
-  ok "环境就绪，已写入 ci/.env/mac.sh"
-  echo "  接下来执行构建：./ci/mac/ci.sh"
+  ok "环境就绪，已写入 .ci/.env/mac.sh"
+  echo "  接下来执行构建：./.ci/mac/ci.sh"
 }
 
 main "$@"

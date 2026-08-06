@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 各平台 CI 脚本共用的地基。由 ci/<平台>/*.sh source，不单独执行。
+# 各平台 CI 脚本共用的地基。由 .ci/<平台>/*.sh source，不单独执行。
 #
 # ────────────────────────────────────────────────────────────────────────────
 # 这些机器是 UP 发布系统的构建机，多个项目共用，且没有 sudo。据此有三条硬规矩，
@@ -12,7 +12,7 @@
 #
 # 2. 全局配置只留在当前运行上下文里。不写 ~/.bashrc、~/.zshrc、~/.profile，不碰
 #    git config --global，不跑 flutter config（那会写 ~/.flutter）。所有设置都以
-#    环境变量形式写进 ci/.env/<平台>.sh，进程退出即失效。
+#    环境变量形式写进 .ci/.env/<平台>.sh，进程退出即失效。
 #
 # 3. 不复用机器上已有的 ~/.cargo、~/.rustup、~/.pub-cache、~/.gem。那些可能是
 #    管理员或别的项目在用的，往里装东西等于改别人的环境。我们用 CARGO_HOME /
@@ -133,7 +133,7 @@ load_ci_env() {
   [[ "${SMELT_CI_SKIP_ENV:-0}" == 1 ]] && return 0
 
   if [[ ! -f "$file" ]]; then
-    die "没找到 ci/.env/${platform}.sh，请先运行：./ci/${platform}/env-setup.sh
+    die "没找到 .ci/.env/${platform}.sh，请先运行：./.ci/${platform}/env-setup.sh
   （若确认工具链已在 PATH 上，可用 SMELT_CI_SKIP_ENV=1 跳过）"
   fi
   # shellcheck source=/dev/null
@@ -147,8 +147,8 @@ begin_env_file() {
   file="$(env_file_for "$platform")"
   mkdir -p "$ENV_DIR"
   cat >"$file" <<EOF
-# 由 ci/${platform}/env-setup.sh 生成，请勿手改。
-# 重新生成：./ci/${platform}/env-setup.sh
+# 由 .ci/${platform}/env-setup.sh 生成，请勿手改。
+# 重新生成：./.ci/${platform}/env-setup.sh
 #
 # 这里的每一项都只在 source 它的那个 shell 里生效。之所以走文件而不是直接改
 # ~/.bashrc 之类，就是为了不污染构建机的标准环境——这些机器是多项目共用的。

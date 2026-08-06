@@ -4,12 +4,12 @@
 每个平台两个脚本：`env-setup.sh` 准备环境，`ci.sh` 执行构建。
 
 ```
-./ci/mac/env-setup.sh && ./ci/mac/ci.sh
-./ci/ios/env-setup.sh && ./ci/ios/ci.sh
+./.ci/mac/env-setup.sh && ./.ci/mac/ci.sh
+./.ci/ios/env-setup.sh && ./.ci/ios/ci.sh
 ```
 
 `env-setup.sh` 检查工具版本，不达标的就地升级，最后把这次运行需要的环境变量写进
-`ci/.env/<平台>.sh`（已 gitignore）。`ci.sh` source 它再干活。加 `--check` 可以
+`.ci/.env/<平台>.sh`（已 gitignore）。`ci.sh` source 它再干活。加 `--check` 可以
 只检查不安装，不达标时退出码非 0。
 
 两边的工具链共用 `~/.smelt-ci/toolchains`（可用 `SMELT_CI_TOOLCHAIN_ROOT` 改），
@@ -19,14 +19,14 @@
 
 | 命令 | 做什么 |
 | --- | --- |
-| `./ci/mac/ci.sh` | 编译 + 测试整个 Rust 工作区 |
-| `./ci/mac/ci.sh build` / `test` | 只做其中一步 |
-| `./ci/mac/ci.sh package` | 编 release 并打 dmg，产物在 `dist/` |
-| `./ci/ios/ci.sh` | 静态分析 + 单元测试 |
-| `./ci/ios/ci.sh analyze` / `test` / `build` | 只做其中一步 |
-| `./ci/ios/ci.sh all` | 以上全部 |
+| `./.ci/mac/ci.sh` | 编译 + 测试整个 Rust 工作区 |
+| `./.ci/mac/ci.sh build` / `test` | 只做其中一步 |
+| `./.ci/mac/ci.sh package` | 编 release 并打 dmg，产物在 `dist/` |
+| `./.ci/ios/ci.sh` | 静态分析 + 单元测试 |
+| `./.ci/ios/ci.sh analyze` / `test` / `build` | 只做其中一步 |
+| `./.ci/ios/ci.sh all` | 以上全部 |
 
-`ci/ios/ci.sh build` 默认不签名，只验证能不能编过。要出可分发的 `.ipa`，把
+`.ci/ios/ci.sh build` 默认不签名，只验证能不能编过。要出可分发的 `.ipa`，把
 `SMELT_IOS_EXPORT_OPTIONS` 指向 exportOptions.plist。
 
 ## 构建机上的约束
@@ -38,7 +38,7 @@
    跨次构建复用能省大量时间。
 2. **全局配置只留在当前运行上下文里。** 不写 `~/.bashrc` 之类，不碰
    `git config --global`，不跑 `flutter config`（那会写 `~/.flutter`）。所有设置
-   都以环境变量形式写进 `ci/.env/`，进程退出即失效。
+   都以环境变量形式写进 `.ci/.env/`，进程退出即失效。
 3. **不复用机器上已有的** `~/.cargo`、`~/.rustup`、`~/.pub-cache`、`~/.gem`。那些
    可能是管理员或别的项目在用的。
 
@@ -48,7 +48,7 @@
 ## 内网镜像
 
 连不上外网时，用环境变量指向镜像，`env-setup.sh` 会用它们下载并把相关项透传给
-`ci.sh`：
+`.ci/` 下的 `ci.sh`：
 
 - mac：`RUSTUP_UPDATE_ROOT`、`RUSTUP_DIST_SERVER`、`NEXTEST_DOWNLOAD_URL`、
   `CARGO_REGISTRY_MIRROR`
@@ -59,6 +59,6 @@
 
 smeltd 的测试要在 `<仓库根>/target/` 下 bind unix socket，macOS 限制整条路径不超过
 103 字符，算下来仓库根目录不能超过 53 字符。超了会有十来个测试报
-`path must be shorter than SUN_LEN`。`ci/mac/ci.sh` 会在跑测试前拦下来。
+`path must be shorter than SUN_LEN`。`.ci/mac/ci.sh` 会在跑测试前拦下来。
 
 工作区建议放在类似 `/Users/ci/w/smelt` 的短路径下。

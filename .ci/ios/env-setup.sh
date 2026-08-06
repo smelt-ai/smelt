@@ -2,14 +2,14 @@
 # iOS 端（Flutter）的构建环境初始化。
 #
 # 检查各工具版本，不达标的就地升级，最后把这次运行需要的环境变量写进
-# ci/.env/ios.sh，交给 ci/ios/ci.sh source。
+# .ci/.env/ios.sh，交给 .ci/ios/ci.sh source。
 #
 # 构建机的三条硬规矩（不写系统目录 / 全局配置只留在当前上下文 / 不复用机器上
-# 已有的工具链目录）见 ci/lib/common.sh 顶部。
+# 已有的工具链目录）见 .ci/lib/common.sh 顶部。
 #
 # 用法：
-#   ./ci/ios/env-setup.sh              检查并按需升级
-#   ./ci/ios/env-setup.sh --check      只检查不安装（不达标则退出码非 0）
+#   ./.ci/ios/env-setup.sh              检查并按需升级
+#   ./.ci/ios/env-setup.sh --check      只检查不安装（不达标则退出码非 0）
 #
 # 可用环境变量覆盖（内网机器如果连不上外网，用这些指向镜像）：
 #   SMELT_CI_TOOLCHAIN_ROOT   工具链安装位置，默认 ~/.smelt-ci/toolchains
@@ -177,8 +177,8 @@ main() {
 
   write_env_file
   echo
-  ok "环境就绪，已写入 ci/.env/ios.sh"
-  echo "  接下来执行构建：./ci/ios/ci.sh"
+  ok "环境就绪，已写入 .ci/.env/ios.sh"
+  echo "  接下来执行构建：./.ci/ios/ci.sh"
 }
 
 main "$@"
