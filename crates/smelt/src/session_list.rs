@@ -541,7 +541,9 @@ impl Workspace {
                             let e_pin = e_menu.clone();
                             let e_history = e_menu.clone();
                             let e_close_proj = e_menu.clone();
+                            let e_finder = e_menu.clone();
                             let path = cwd.clone();
+                            let finder_root = cwd.clone();
                             let close_root = cwd.clone();
                             let sess_n = ixs.len();
                             let del_main_root = worktree_main_root.clone();
@@ -557,6 +559,8 @@ impl Workspace {
                                 let e_pin = e_pin.clone();
                                 let e_history = e_history.clone();
                                 let e_close_proj = e_close_proj.clone();
+                                let e_finder = e_finder.clone();
+                                let finder_root = finder_root.clone();
                                 let history_root = path.clone();
                                 let close_root = close_root.clone();
                                 let del_main_root = del_main_root.clone();
@@ -583,6 +587,16 @@ impl Workspace {
                                             let pin_path = pin_path.clone();
                                             e_pin.update(cx, |ws, cx| {
                                                 ws.toggle_file_tree_root(pin_path, cx)
+                                            });
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("访达打开")
+                                        .icon(IconName::FolderOpen)
+                                        .on_click(move |_ev, _window, cx| {
+                                            let root = finder_root.clone();
+                                            e_finder.update(cx, |ws, cx| {
+                                                ws.reveal_path_in_finder(root, cx)
                                             });
                                         }),
                                 )
