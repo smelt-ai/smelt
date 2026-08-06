@@ -97,6 +97,8 @@ struct DiffHunk {
 /// Git 视图里当前选中查看的文件 diff：文件相对路径 + 结构化的 diff 行。
 /// 用 Rc 供 uniform_list 闭包共享。
 pub struct GitDiff {
+    /// 这份 diff 属于哪个仓库根目录；切换项目时不能复用旧 diff。
+    root: String,
     path: String,
     lines: Rc<Vec<DiffLine>>,
     /// 文件头原文（`diff --git` … `+++` 那几行），与单个 hunk 的 `raw` 拼起来
@@ -1550,6 +1552,34 @@ fn aggregate_diff_rows(lines: &[DiffLine], collapsed: &HashSet<String>) -> Vec<A
     rows
 }
 
+fn aggregate_file_row_index(
+    lines: &[DiffLine],
+    path: &str,
+    collapsed: &HashSet<String>,
+) -> Option<usize> {
+    aggregate_diff_rows(lines, collapsed).iter().position(
+        |row| matches!(row, AggregateDiffRow::Header { path: header, .. } if header == path),
+    )
+}
+
+fn diff_file_row_index(
+    lines: &[DiffLine],
+    path: &str,
+    collapsed: &HashSet<String>,
+    split: bool,
+) -> Option<usize> {
+    if split {
+        let header = lines
+            .iter()
+            .position(|line| line.file_header && line.text == path)?;
+        build_split_rows(lines)
+            .iter()
+            .position(|row| matches!(row, SplitRow::Full(index) if *index == header))
+    } else {
+        aggregate_file_row_index(lines, path, collapsed)
+    }
+}
+
 fn diff_review_rows(
     lines: &[DiffLine],
     aggregate: bool,
@@ -2408,23 +2438,21 @@ impl Workspace {
         Self::modal_shell(380., true, content, cx)
     }
 
-    /// 给某个 root 建一次性的文件监听（notify crate，macOS 走 FSEvents）：仓库目录树
-    /// 里任何东西变了就在 git_dirty 里标脏，配合下面 250ms 一次的检查循环，git 页
-    /// 基本能做到「文件一变就刷新」而不是干等 1.5s 轮询窗口。
+    /// 给某个 root 建一次性的文件监听（notify crate，macOS 走 FSEvents）：文件系统
+    /// 回调通过有界通道唤醒 GPUI 任务，git 页只在真实文件事件到达时刷新。
     ///
     /// 递归监听整棵目录树（含 .git/ 内部），**但过滤高频噪音路径**（构建产物/依赖
     /// 目录）——不滤的话，rust-analyzer/cargo 持续写 target/、node_modules 的每次
     /// 触碰都会触发一次 git status + 整窗重绘，空闲 CPU 高、耗电的主要来源。
-    /// 250ms 的检查节流把最坏情况锁定在每秒最多 4 次，但那是「每次都得跑外部 git
-    /// 进程」的 4 次，依然很贵。
     /// 只在这个 root 第一次进 Git 页时建一次；watcher 存进 git_watchers 常驻到应用退出
     /// （必须持有 watcher 不被 drop，否则会停止收事件）。
     pub fn ensure_git_watch(&mut self, root: String, cx: &mut Context<Self>) {
         if self.git_watchers.contains_key(&root) {
             return;
         }
-        let dirty = self.git_dirty.clone();
-        let root_for_cb = root.clone();
+        // 通道容量为 1：一批文件事件只需一次刷新唤醒，避免保存/构建产生的事件
+        // 在队列里无限堆积。GPUI 任务真正消费唤醒后再读取最新工作区状态。
+        let (dirty_tx, dirty_rx) = smol::channel::bounded::<()>(1);
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res {
                 // 噪音过滤：构建产物 / 依赖目录变化极频繁，监听它们只会让
@@ -2432,9 +2460,8 @@ impl Workspace {
                 if event.paths.iter().any(|p| is_git_noise_path(p)) {
                     return;
                 }
-                if let Ok(mut set) = dirty.lock() {
-                    set.insert(root_for_cb.clone());
-                }
+                // 回调运行在 notify 的线程上，不能直接触碰 GPUI；只发一个唤醒信号。
+                let _ = dirty_tx.try_send(());
             }
         });
         let Ok(mut watcher) = watcher else { return };
@@ -2445,20 +2472,14 @@ impl Workspace {
             return;
         }
         self.git_watchers.insert(root.clone(), watcher);
-        // 立刻拉一次初值：之后纯靠文件事件驱动（下面 250ms 循环），但首帧得先有数据，
+        // 立刻拉一次初值：之后纯靠文件事件驱动，但首帧得先有数据，
         // 否则文件一直不变时侧栏 GIT 角标永远出不来。
         self.ensure_git_status(root.clone(), cx);
 
-        let dirty = self.git_dirty.clone();
         cx.spawn(async move |this, cx| {
-            loop {
-                smol::Timer::after(std::time::Duration::from_millis(250)).await;
-                let hit = dirty.lock().is_ok_and(|mut set| set.remove(&root));
-                if !hit {
-                    continue;
-                }
+            while dirty_rx.recv().await.is_ok() {
                 // 文件变了：标脏并主动重拉 git_status，角标 / Git 页在任何页面都即时刷新，
-                // 不再依赖「当前正停在 Files/Git 页、render 每帧才调 ensure_git_status」。
+                // 不依赖「当前正停在 Files/Git 页、render 每帧才调 ensure_git_status」。
                 // ensure_git_status 内部有 inflight 去重，重复唤醒不会叠并发。
                 let r = this.update(cx, |this, cx| {
                     this.invalidate_git_status(&root);
@@ -2940,6 +2961,39 @@ impl Workspace {
         }
     }
 
+    /// 右侧文件树是聚合 diff 的导航，不应把主面板切成只能看到一个文件的视图。
+    /// 聚合 diff 尚未返回时先记住目标，下一帧在文件标题处定位。
+    pub fn open_aggregate_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+        self.pending_diff_file = Some(path);
+        let aggregate_ready = self.git_diff.as_ref().is_some_and(|diff| {
+            diff.root == root
+                && diff.path == "全部改动"
+                && diff.scope == self.diff_scope
+                && !diff.lines.is_empty()
+        });
+        let aggregate_loading = self.git_diff.as_ref().is_some_and(|diff| {
+            diff.root == root && diff.path == "全部改动" && diff.scope == self.diff_scope
+        });
+        if !aggregate_ready && !aggregate_loading {
+            self.open_all_diffs_at(root, cx);
+        }
+        cx.notify();
+    }
+
+    /// 清掉当前 Git diff 及其交互状态。进入新的 Git 改动页或切换仓库时必须失效
+    /// 正在加载的旧结果，否则异步回调可能把旧文件重新放回主面板。
+    pub(crate) fn reset_git_diff_view(&mut self) {
+        self.diff_gen = self.diff_gen.wrapping_add(1);
+        self.git_diff = None;
+        self.pending_diff_file = None;
+        self.diff_selected.clear();
+        self.diff_selection_anchor = None;
+        self.diff_selection_cursor = None;
+        self.diff_selection_dragging = false;
+        self.diff_comment_open = false;
+        self.active_hunk = None;
+    }
+
     /// 把第 `idx` 个 hunk 单独加入暂存区（`git apply --cached`）。
     ///
     /// 只暂存一块、其余留在工作区，是 agent 写的代码「对一半」时最需要的动作：挑出
@@ -3031,9 +3085,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let scope = self.diff_scope;
+        self.pending_diff_file = None;
         self.diff_gen = self.diff_gen.wrapping_add(1);
         let r#gen = self.diff_gen;
         self.git_diff = Some(GitDiff {
+            root: root.clone(),
             path: path.clone(),
             lines: Rc::new(Vec::new()),
             header: String::new(),
@@ -3096,6 +3152,7 @@ impl Workspace {
                     // 的文案），这时也不能让按块按钮亮着。
                     let patchable = patchable && !parsed.header.is_empty();
                     this.git_diff = Some(GitDiff {
+                        root: root.clone(),
                         path,
                         lines: Rc::new(parsed.lines),
                         header: parsed.header,
@@ -3112,9 +3169,16 @@ impl Workspace {
     }
 
     /// 默认预览工作区的全部改动。聚合视图只读，避免把跨文件的 hunk 误用于
-    /// stage/discard；点右侧某个文件后再进入原有的单文件可操作视图。
+    /// stage/discard；右侧文件树只负责在聚合列表中定位。
     fn open_all_diffs(&mut self, root: String, cx: &mut Context<Self>) {
+        self.pending_diff_file = None;
+        self.open_all_diffs_at(root, cx);
+    }
+
+    fn open_all_diffs_at(&mut self, root: String, cx: &mut Context<Self>) {
         let scope = self.diff_scope;
+        self.diff_scroll
+            .scroll_to_item(0, gpui::ScrollStrategy::Top);
         let untracked_paths = if matches!(scope, DiffScope::All | DiffScope::Unstaged) {
             self.git_status
                 .get(&root)
@@ -3133,6 +3197,7 @@ impl Workspace {
         self.diff_gen = self.diff_gen.wrapping_add(1);
         let r#gen = self.diff_gen;
         self.git_diff = Some(GitDiff {
+            root: root.clone(),
             path: "全部改动".into(),
             lines: Rc::new(Vec::new()),
             header: String::new(),
@@ -3173,6 +3238,7 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 if this.diff_gen == r#gen {
                     this.git_diff = Some(GitDiff {
+                        root: root.clone(),
                         path: "全部改动".into(),
                         lines: Rc::new(result.lines),
                         header: String::new(),
@@ -3186,6 +3252,37 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    fn reveal_pending_diff_file(&mut self) {
+        let Some(path) = self.pending_diff_file.clone() else {
+            return;
+        };
+        let (loaded, row) = self
+            .git_diff
+            .as_ref()
+            .and_then(|diff| {
+                (diff.path == "全部改动").then(|| {
+                    (
+                        !diff.lines.is_empty(),
+                        diff_file_row_index(
+                            &diff.lines,
+                            &path,
+                            &self.git_collapsed_diff_files,
+                            self.diff_split,
+                        ),
+                    )
+                })
+            })
+            .unwrap_or((false, None));
+        if !loaded {
+            return;
+        }
+        self.pending_diff_file = None;
+        if let Some(row) = row {
+            self.diff_scroll
+                .scroll_to_item(row, gpui::ScrollStrategy::Top);
+        }
     }
 
     /// 开始一次代码审查式拖选。每次新的按下都替换旧选区，语义稳定且不会留下
@@ -3656,8 +3753,8 @@ impl Workspace {
 
 impl Workspace {
     /// inspector 的窄版 GIT 面板（344px）：SOURCE CONTROL 头（↑ahead ↓behind）+
-    /// STAGED / CHANGES 分组文件列表 + commit 输入条；打开某个文件的 diff 后切
-    /// DIFF 预览子视图（只读行 + 文件级暂存按钮）。放本文件是因为要读
+    /// STAGED / CHANGES 分组文件列表 + commit 输入条；打开全部改动后切到
+    /// DIFF 预览子视图（聚合行 + 文件级暂存按钮）。放本文件是因为要读
     /// GitStatusData / GitDiff / DiffLine 的模块内私有字段。
     pub(crate) fn git_narrow_panel(
         &mut self,
@@ -3693,11 +3790,15 @@ impl Workspace {
             .unwrap_or((0, 0));
         let stash_n = status.as_ref().map(|d| d.stash_count).unwrap_or(0);
         let has_changes = status.as_ref().is_some_and(|d| !d.files.is_empty());
-        // 默认进入改动页时预览全部文件；用户点文件后 `git_diff` 已有值，就保留
-        // 单文件详情，不在每一帧重新覆盖选择。
+        if self.git_diff.as_ref().is_some_and(|diff| diff.root != root) {
+            self.reset_git_diff_view();
+        }
+        // 默认进入改动页时预览全部文件；单文件操作通过右键菜单显式进入，不在每一帧
+        // 重新覆盖用户选择。
         if self.git_tab == crate::GitTab::Changes && self.git_diff.is_none() && has_changes {
             self.open_all_diffs(root.clone(), cx);
         }
+        self.reveal_pending_diff_file();
         let ws_ops = cx.entity();
         let root_ops = root.clone();
         // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
@@ -3743,6 +3844,9 @@ impl Workspace {
                             view.update(cx, |workspace, cx| {
                                 if workspace.git_tab != tab {
                                     workspace.git_tab = tab;
+                                    if tab == GitTab::Changes {
+                                        workspace.reset_git_diff_view();
+                                    }
                                     cx.notify();
                                 }
                             });
@@ -3922,7 +4026,7 @@ impl Workspace {
                                 }),
                         );
                     }
-                    // 文件行：勾选框暂存/取消暂存，点行开 diff。
+                    // 文件行：勾选框暂存/取消暂存，点行定位聚合 diff。
                     Some(code) => {
                         let untracked = code == "??";
                         let letter = code.trim().chars().next().unwrap_or('M').to_string();
@@ -3968,6 +4072,9 @@ impl Workspace {
                         let ws = ws.clone();
                         let root = root.clone();
                         let open_path = row.path.clone();
+                        let single_diff_ws = ws.clone();
+                        let single_diff_root = root.clone();
+                        let single_diff_path = open_path.clone();
                         let row_el = div()
                             .id((key, rix))
                             .flex()
@@ -3993,7 +4100,7 @@ impl Workspace {
                             .on_click(move |_ev, _window, cx| {
                                 let root = root.clone();
                                 let path = open_path.clone();
-                                ws.update(cx, |ws, cx| ws.open_diff(root, path, untracked, cx));
+                                ws.update(cx, |ws, cx| ws.open_aggregate_file(root, path, cx));
                             });
                         // 右键菜单：丢弃改动 / 复制路径 / 在 Finder 中显示（跟以前全屏
                         // Git 页那份一致，不再是「展开了才有、停靠时没有」）。
@@ -4022,6 +4129,21 @@ impl Workspace {
                                                 });
                                             }),
                                         )
+                                        .item(PopupMenuItem::new("打开单文件 Diff").on_click({
+                                            let ws = single_diff_ws.clone();
+                                            let root = single_diff_root.clone();
+                                            let path = single_diff_path.clone();
+                                            move |_ev, _window, cx| {
+                                                ws.update(cx, |ws, cx| {
+                                                    ws.open_diff(
+                                                        root.clone(),
+                                                        path.clone(),
+                                                        untracked,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        }))
                                         .separator()
                                         .item(PopupMenuItem::new("复制文件路径").on_click(
                                             move |_ev, _window, cx| {
@@ -4372,9 +4494,9 @@ mod tests {
     // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩。只导入真正
     // 用到的名字。
     use super::{
-        AggregateDiffRow, DiffKind, DiffReviewRow, aggregate_diff_rows, build_git_tree,
-        diff_review_rows, hunk_patch, parse_diff, parse_diff_with_file_headers, run_git,
-        run_git_stdin,
+        AggregateDiffRow, DiffKind, DiffReviewRow, aggregate_diff_rows, aggregate_file_row_index,
+        build_git_tree, diff_review_rows, hunk_patch, parse_diff, parse_diff_with_file_headers,
+        run_git, run_git_stdin,
     };
 
     fn files(paths: &[&str]) -> Vec<(String, String)> {
@@ -4419,6 +4541,22 @@ mod tests {
             rows.iter()
                 .any(|row| matches!(row, AggregateDiffRow::Line(_)))
         );
+    }
+
+    #[test]
+    fn aggregate_file_navigation_uses_the_continuous_row_index() {
+        let raw = concat!(
+            "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
+        );
+        let parsed = parse_diff_with_file_headers(raw);
+        let rows = aggregate_diff_rows(&parsed.lines, &Default::default());
+        let row = aggregate_file_row_index(&parsed.lines, "two.rs", &Default::default())
+            .expect("later file must be reachable from the aggregate list");
+        assert!(matches!(
+            rows[row],
+            AggregateDiffRow::Header { ref path, .. } if path == "two.rs"
+        ));
     }
 
     /// 分叉处必须停止压缩，各分支自己成行。

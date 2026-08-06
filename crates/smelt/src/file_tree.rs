@@ -775,6 +775,7 @@ pub struct FileContentParts {
 pub fn file_content_parts(
     open_file: &Option<OpenFile>,
     roots: &[String],
+    file_tree_open: bool,
     cx: &mut Context<Workspace>,
 ) -> FileContentParts {
     let (muted, fg, border, warning) = {
@@ -814,7 +815,9 @@ pub fn file_content_parts(
                     ]
                 });
             let is_image = is_previewable_image(&of.path);
-            let dirty = !is_image && of.editor.read(cx).value().to_string() != *of.saved_content;
+            let dirty = of.readable
+                && !is_image
+                && of.editor.read(cx).value().to_string() != *of.saved_content;
             // Markdown 用一个动作切换源码/预览，其它文件类型没有预览这一说。
             let is_md = editor_language_for_path(&of.path) == "md";
             let preview = of.preview && is_md;
@@ -874,7 +877,39 @@ pub fn file_content_parts(
                                 ws.set_file_preview(!preview, cx)
                             })),
                     )
-                });
+                })
+                .child(
+                    div()
+                        .id("file-tree-toggle")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size_6()
+                        .rounded_md()
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .text_color(fg)
+                        .hover(|el| el.bg(border))
+                        .child(
+                            Icon::new(if file_tree_open {
+                                IconName::PanelRight
+                            } else {
+                                IconName::PanelLeft
+                            })
+                            .size_4(),
+                        )
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(if file_tree_open {
+                                "收起文件树"
+                            } else {
+                                "展开文件树"
+                            })
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(|ws, _ev, _window, cx| {
+                            ws.toggle_file_tree(cx);
+                        })),
+                );
             let body: AnyElement = if is_image {
                 div()
                     .id("image-file-preview")
@@ -1213,10 +1248,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let dirty = self
-            .open_file
-            .as_ref()
-            .is_some_and(|of| of.editor.read(cx).value().to_string() != *of.saved_content);
+        let dirty = self.open_file.as_ref().is_some_and(|of| {
+            of.readable && of.editor.read(cx).value().to_string() != *of.saved_content
+        });
         if dirty {
             // 脏切换暂不带行号（确认后再 open 整文件即可）
             self.pending_file_switch = Some(path);

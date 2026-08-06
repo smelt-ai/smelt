@@ -1681,7 +1681,7 @@ pub struct Terminal {
     daemon_geometry: Arc<Mutex<DaemonGeometrySignal>>,
     daemon_geometry_generation: u64,
     remote_geometry_locked: bool,
-    /// 普通 OSC 9/99/777 通知槽（UI 轮询 take_notification 取走）。
+    /// 普通 OSC 9/99/777 通知槽（UI 在 PTY 唤醒事件中取走）。
     notify: NotifySlot,
     /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
     bell_notify: NotifySlot,
@@ -2069,8 +2069,8 @@ impl Terminal {
     /// 它认为选区高亮是渲染层的事）、Cmd 悬停链接高亮——这两个在 TerminalView
     /// 各自的鼠标事件处理里已经各自调用 cx.notify()，不依赖这里。
     ///
-    /// 只应由每个 TerminalView 自己的定时刷新循环调用（每个 Terminal 独占一个
-    /// Term，不会有多个消费者互相"偷"对方读到的脏区）。
+    /// 由 TerminalView 在 PTY 唤醒事件中调用（每个 Terminal 独占一个 Term，不会有
+    /// 多个消费者互相"偷"对方读到的脏区）。
     pub fn take_damage(&self) -> bool {
         let Ok(mut term) = self.term.lock() else {
             // 拿不到锁（锁中毒）：保守起见当作有变化，避免画面从此卡死不再刷新。
