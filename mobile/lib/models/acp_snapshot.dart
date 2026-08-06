@@ -423,6 +423,15 @@ class AcpEntryUnknown extends AcpEntry {
   const AcpEntryUnknown();
 }
 
+bool isTaskCompletionToolTitle(String title) =>
+    title.trim().toLowerCase() == 'task_complete';
+
+String completionSummaryText(List<ToolOutputPart> output) => output
+    .whereType<ToolOutputText>()
+    .map((part) => part.text.trim())
+    .where((text) => text.isNotEmpty)
+    .join('\n\n');
+
 dynamic _phaseToJson(AcpPhase phase) => switch (phase) {
   AcpPhaseStarting() => 'Starting',
   AcpPhaseIdle() => 'Idle',

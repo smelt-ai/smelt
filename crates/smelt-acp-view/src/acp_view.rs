@@ -45,7 +45,8 @@ use smelt_ui::ui_theme;
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
 pub use smelt_core::acp_chat::{
     AcpEntry, AcpImage, DiffLine, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart,
-    compact_diff_lines, diff_line_stats, diff_lines, is_interrupt_marker, strip_code_fence,
+    compact_diff_lines, diff_line_stats, diff_lines, is_interrupt_marker,
+    is_task_completion_tool_title, strip_code_fence,
 };
 
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
@@ -1005,6 +1006,16 @@ impl AcpView {
                     thought: false,
                 } => text.lines().last().unwrap_or_default().to_string(),
                 AcpEntry::Assistant { thought: true, .. } => continue,
+                AcpEntry::ToolCall {
+                    title, output, ..
+                } if is_task_completion_tool_title(title) => {
+                    let summary = completion_summary_text(output);
+                    if summary.trim().is_empty() {
+                        "完成".to_string()
+                    } else {
+                        summary.lines().last().unwrap_or("完成").to_string()
+                    }
+                }
                 AcpEntry::ToolCall { title, .. } => format!("🔧 {title}"),
                 AcpEntry::Divider(_) => continue,
             };
@@ -2497,6 +2508,84 @@ impl Render for AcpView {
                         }
                     }
                     AcpEntry::ToolCall {
+                        title,
+                        status,
+                        output,
+                        ..
+                    } if is_task_completion_tool_title(title) => {
+                        let (status_label, status_color) = match status {
+                            ToolCallStatus::Pending => {
+                                ("等待完成", gpui::rgb(ui_theme::text_muted()))
+                            }
+                            ToolCallStatus::InProgress => {
+                                ("正在完成", gpui::rgb(ui_theme::blue()))
+                            }
+                            ToolCallStatus::Completed => {
+                                ("完成", gpui::rgb(ui_theme::green()))
+                            }
+                            ToolCallStatus::Failed => {
+                                ("完成失败", gpui::rgb(ui_theme::red()))
+                            }
+                        };
+                        let summary = completion_summary_text(output);
+                        let has_summary = !summary.trim().is_empty();
+                        let body = if has_summary {
+                            summary
+                        } else {
+                            "任务完成".to_string()
+                        };
+                        let body_markdown = if !has_summary {
+                            markdown_text_for_cwd(&body, this.cwd.as_deref()).into()
+                        } else {
+                            cached_entry_markdown(
+                                &this.rendered_markdown,
+                                i,
+                                entry,
+                                this.cwd.as_deref(),
+                            )
+                        };
+                        let mut answer = v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1()
+                            .text_sm()
+                            .when(!final_answer, |col| col.text_color(muted))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(IconName::Check)
+                                            .size(px(14.))
+                                            .text_color(status_color),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_medium()
+                                            .text_color(status_color)
+                                            .child(status_label),
+                                    ),
+                            )
+                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
+                                ("acp-completion-md", i),
+                                body_markdown,
+                            ));
+                        if final_answer {
+                            answer = answer.child(
+                                h_flex()
+                                    .pt_1()
+                                    .gap_1()
+                                    .child(
+                                        Clipboard::new(("acp-copy-completion", i))
+                                            .value(body)
+                                            .tooltip("复制完成摘要"),
+                                    ),
+                            );
+                        }
+                        answer.into_any_element()
+                    }
+                    AcpEntry::ToolCall {
                         id,
                         title,
                         kind,
@@ -2795,10 +2884,9 @@ impl Render for AcpView {
                                             };
                                         let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
                                         // 真正的控制台输出（bash stdout、文件内容……）保持等宽纯文本，
-                                        // 星号、井号都是内容本身，不能被当 markdown 解析。但像
-                                        // task_complete 这类没有专门 kind、靠 agent 自己写一段总结
-                                        // 陈述的工具（落到 `ToolKind::Other`），内容本来就是按 markdown
-                                        // 写的（`##`/`**`/列表），纯文本渲染只会把这些符号原样吐出来。
+                                        // 星号、井号都是内容本身，不能被当 markdown 解析。其他
+                                        // 自由格式工具输出可能本来就是按 markdown 写的
+                                        // （`##`/`**`/列表），`Other` 工具要保留这种格式。
                                         let body_el: gpui::AnyElement =
                                             if matches!(kind, ToolKind::Other) {
                                                 smelt_ui::markdown_mermaid::markdown_view_clickable(
@@ -2947,6 +3035,9 @@ impl Render for AcpView {
                 // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
                 // 虚拟项本身，否则测得的高度不包含消息间的留白。
                 let bottom = match entry {
+                    AcpEntry::ToolCall { title, .. } if is_task_completion_tool_title(title) => {
+                        16.
+                    }
                     AcpEntry::ToolCall { .. } => 8.,
                     AcpEntry::Assistant { thought: true, .. } => 4.,
                     _ => 16.,
@@ -4088,6 +4179,27 @@ fn is_user_entry(entry: &AcpEntry) -> bool {
     matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
 }
 
+fn is_completion_entry(entry: &AcpEntry) -> bool {
+    matches!(
+        entry,
+        AcpEntry::ToolCall { title, .. } if is_task_completion_tool_title(title)
+    )
+}
+
+fn completion_summary_text(output: &[ToolOutputPart]) -> String {
+    output
+        .iter()
+        .filter_map(|part| match part {
+            ToolOutputPart::Text(text) => {
+                let text = strip_code_fence(text).trim();
+                (!text.is_empty()).then(|| text.to_string())
+            }
+            ToolOutputPart::Diff { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// 模型的思考摘要标题经常整行套 `**像这样**`/`__这样__`；折叠预览是纯文本
 /// `div`，不走 markdown 渲染，裸露的星号看着像漏渲染的格式错误。只在整行
 /// 前后都包着同一种标记时才剥掉，避免误伤正文里本来就有的单个星号。
@@ -4148,6 +4260,22 @@ fn build_handoff_prompt(
                 truncate_chars(text.trim(), HANDOFF_MESSAGE_MAX_CHARS)
             )),
             AcpEntry::Assistant { thought: true, .. } | AcpEntry::Divider(_) => None,
+            AcpEntry::ToolCall {
+                title, output, ..
+            } if is_task_completion_tool_title(title) => {
+                let summary = completion_summary_text(output);
+                Some(format!(
+                    "助手：{}",
+                    truncate_chars(
+                        if summary.trim().is_empty() {
+                            "任务完成"
+                        } else {
+                            summary.as_str()
+                        },
+                        HANDOFF_MESSAGE_MAX_CHARS
+                    )
+                ))
+            }
             AcpEntry::ToolCall {
                 title,
                 kind,
@@ -4263,9 +4391,9 @@ struct EntryPresentation {
     process_group: Option<ProcessGroupInfo>,
 }
 
-/// 把协议 entries 一次归约成渲染布局。已结束回合的最后一段正式正文是最终回答；
-/// 活跃回合没有最终回答，避免流式过程中最新正文反复在“过程/结论”之间跳动。
-/// 最终正文之后迟到的工具通知仍属于同一过程组，不能散落成独立卡片。
+/// 把协议 entries 一次归约成渲染布局。已结束回合的最后一段正式正文或完成摘要
+/// 是最终回答；活跃回合没有最终回答，避免流式过程中最新正文反复在“过程/结论”
+/// 之间跳动。最终回答之后迟到的普通工具通知仍属于同一过程组，不能散落成独立卡片。
 fn build_conversation_layout(
     entries: &[AcpEntry],
     current_turn_active: bool,
@@ -4286,13 +4414,20 @@ fn build_conversation_layout(
             .then(|| {
                 (start..end)
                     .rev()
-                    .find(|ix| matches!(entries[*ix], AcpEntry::Assistant { thought: false, .. }))
+                    .find(|ix| {
+                        matches!(
+                            entries[*ix],
+                            AcpEntry::Assistant { thought: false, .. }
+                        ) || is_completion_entry(&entries[*ix])
+                    })
             })
             .flatten();
         if let Some(final_ix) = final_ix {
             layout[final_ix].final_answer = true;
         }
-        let process_indices: Vec<usize> = (start..end).filter(|ix| Some(*ix) != final_ix).collect();
+        let process_indices: Vec<usize> = (start..end)
+            .filter(|ix| Some(*ix) != final_ix && !is_completion_entry(&entries[*ix]))
+            .collect();
         if let Some(&first) = process_indices.first() {
             let tools = process_indices
                 .iter()
@@ -4387,6 +4522,13 @@ fn markdown_for_entry(entry: &AcpEntry, cwd: Option<&str>) -> Option<gpui::Share
         AcpEntry::User(text) if !is_interrupt_marker(text) => markdown_user_text_for_cwd(text, cwd),
         AcpEntry::UserWithImages { text, .. } => markdown_user_text_for_cwd(text, cwd),
         AcpEntry::Assistant { text, .. } => markdown_text_for_cwd(text, cwd),
+        AcpEntry::ToolCall { title, output, .. } if is_task_completion_tool_title(title) => {
+            let text = completion_summary_text(output);
+            if text.trim().is_empty() {
+                return None;
+            }
+            markdown_text_for_cwd(&text, cwd)
+        }
         _ => return None,
     };
     Some(rendered.into())
@@ -4685,9 +4827,9 @@ fn tool_accent_u32(kind: &ToolKind) -> u32 {
         ToolKind::Review => ui_theme::yellow(),
         ToolKind::Image => ui_theme::accent(),
         ToolKind::Compact | ToolKind::Wait => ui_theme::text_muted(),
-        // `Other`（如 task_complete 这类协议里没有专门 kind 的调用）以及 SwitchMode：
-        // 之前跟着 muted 灰走，跟卡片本身的灰色边框撞色，左边的强调条看起来像
-        // "边框没删干净"。换成 purple 一眼能看出这也是一根有意画的强调条。
+        // `Other` 以及 SwitchMode：之前跟着 muted 灰走，跟卡片本身的灰色边框
+        // 撞色，左边的强调条看起来像"边框没删干净"。换成 purple 一眼能看出
+        // 这也是一根有意画的强调条。
         _ => ui_theme::purple(),
     }
 }
@@ -5166,7 +5308,7 @@ mod tests {
     }
 
     #[test]
-    fn late_tool_after_final_answer_stays_in_the_same_process_group() {
+    fn task_complete_is_final_and_not_counted_as_a_process_tool() {
         let entries = vec![
             AcpEntry::User("修一下".into()),
             AcpEntry::ToolCall {
@@ -5191,12 +5333,30 @@ mod tests {
 
         let layout = build_conversation_layout(&entries, false);
 
-        assert!(layout[2].final_answer);
+        assert!(layout[3].final_answer);
         let before = layout[1].process_group.expect("编辑应在过程组");
-        let late = layout[3].process_group.expect("迟到工具仍应在过程组");
-        assert_eq!(before.first, late.first);
-        assert_eq!(before.end, 4);
-        assert_eq!(before.tools, 2);
+        assert_eq!(before.end, 3);
+        assert_eq!(before.tools, 1);
+        assert!(layout[3].process_group.is_none());
+    }
+
+    #[test]
+    fn task_complete_is_final_when_no_assistant_answer_exists() {
+        let entries = vec![
+            AcpEntry::User("检查状态".into()),
+            AcpEntry::ToolCall {
+                id: "done".into(),
+                title: "task_complete".into(),
+                kind: ToolKind::Other,
+                status: ToolCallStatus::Completed,
+                output: vec![ToolOutputPart::Text("全部完成".into())],
+            },
+        ];
+
+        let layout = build_conversation_layout(&entries, false);
+
+        assert!(layout[1].final_answer);
+        assert!(layout[1].process_group.is_none());
     }
 
     #[test]

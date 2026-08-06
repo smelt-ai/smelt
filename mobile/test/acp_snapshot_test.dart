@@ -3,6 +3,18 @@ import 'package:smelt_mobile/models/acp_snapshot.dart';
 
 void main() {
   group('AcpSnapshot', () {
+    test('recognizes task completion summaries separately from tools', () {
+      expect(isTaskCompletionToolTitle(' task_complete '), isTrue);
+      expect(
+        completionSummaryText([
+          const ToolOutputText(text: '第一段'),
+          const ToolOutputText(text: '第二段'),
+        ]),
+        '第一段\n\n第二段',
+      );
+      expect(isTaskCompletionToolTitle('run_command'), isFalse);
+    });
+
     test('accepts prompts while idle or running', () {
       expect(const AcpPhaseIdle().acceptsPrompt, isTrue);
       expect(const AcpPhaseRunning().acceptsPrompt, isTrue);
