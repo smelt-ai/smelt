@@ -118,6 +118,9 @@ const PAGE_LINES: i32 = 20;
 /// 一个内嵌终端视图。
 pub struct TerminalView {
     terminal: Terminal,
+    /// 每次替换底层连接递增。旧连接的 redraw 任务退出时只能重连自己的 generation，
+    /// 避免显式重启/其它成功重连已经装上新 Terminal 后又被迟到任务覆盖。
+    terminal_generation: u64,
     focus_handle: FocusHandle,
     did_focus: bool,
     /// 上一帧的焦点状态，用来把「焦点变了」这件事上报给应用（DEC 1004，见 report_focus）。
@@ -298,7 +301,7 @@ impl TerminalView {
         launch_label: Option<&str>,
     ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
-        Self::drive_redraws(terminal.redraw_channel(), cx);
+        Self::drive_redraws(terminal.redraw_channel(), 0, cx);
         let launch_kind = classify_launch(launch);
         let launch_cmd = launch
             .map(str::trim)
@@ -319,6 +322,7 @@ impl TerminalView {
 
         let mut view = Self {
             terminal,
+            terminal_generation: 0,
             focus_handle: cx.focus_handle(),
             did_focus: false,
             was_focused: false,
@@ -398,11 +402,9 @@ impl TerminalView {
     }
 
     /// 驱动重绘的常驻任务：await 读线程的唤醒 → `cx.notify()`。内容一到就画，
-    /// 不靠轮询。读线程退出（发送端 drop）时 recv 返回 Err——此时若当前 Terminal
-    /// 已标记 dead（连接被守护 exec/离线切断），触发自动重连；`adopt_terminal`
-    /// 换上新连接后旧 channel 的 Err 虽然也会走到这里，但新 Terminal 不是 dead，
-    /// 不会误触发。
-    fn drive_redraws(rx: smol::channel::Receiver<()>, cx: &mut Context<Self>) {
+    /// 不靠轮询。读线程退出（发送端 drop）时若当前连接仍是这一代且已标记 dead，
+    /// 则触发自动重连；换上新连接后旧 channel 的 Err 不会误触发。
+    fn drive_redraws(rx: smol::channel::Receiver<()>, generation: u64, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
                 if this
@@ -414,8 +416,8 @@ impl TerminalView {
             }
             // 读线程退出：连接断了。dead 判断放在 update 里，读的是「当前」Terminal。
             let _ = this.update(cx, |this, cx| {
-                if this.terminal.is_dead() {
-                    this.schedule_auto_reconnect(cx);
+                if this.terminal_generation == generation && this.terminal.is_dead() {
+                    this.schedule_auto_reconnect(generation, cx);
                 }
             });
         })
@@ -634,7 +636,7 @@ impl TerminalView {
     /// handoff、异常重启），那些路径断开连接后没有任何人重连终端 → 全部终端
     /// 永久冻结、只能重启 GUI。这里跟状态订阅通道的 2s 重连循环同一个思路，
     /// 让终端自己长出一条命来，不依赖调用方。
-    fn schedule_auto_reconnect(&mut self, cx: &mut Context<Self>) {
+    fn schedule_auto_reconnect(&mut self, generation: u64, cx: &mut Context<Self>) {
         if self.reconnecting {
             return;
         }
@@ -645,6 +647,12 @@ impl TerminalView {
             // 退避：500ms 起步，翻倍到 10s 封顶，重到成功或会话消失为止。
             let mut delay = Duration::from_millis(500);
             loop {
+                let still_current = this
+                    .update(cx, |this, _| this.terminal_generation == generation)
+                    .unwrap_or(false);
+                if !still_current {
+                    return;
+                }
                 // 1) 守护活着吗？exec 期间 socket 短暂不可连 / 守护还没起来时，
                 //    都不能判「会话没了」——那是要等的，不是要放弃的。
                 let daemon_up = cx
@@ -674,15 +682,16 @@ impl TerminalView {
                 let cwd3 = cwd.clone();
                 let term = cx
                     .background_executor()
-                    .spawn(async move {
-                        terminal::Terminal::spawn(24, 80, cwd3.as_deref(), &sid3, None)
-                    })
+                    .spawn(async move { Terminal::reattach(24, 80, cwd3.as_deref(), &sid3) })
                     .await;
                 match term {
                     Ok(t) => {
                         // 主线程挂回：adopt_terminal 换 Terminal、清 attention、
                         // 重置交互态并触发重绘。
                         let done = this.update(cx, |this, cx| {
+                            if this.terminal_generation != generation {
+                                return;
+                            }
                             this.reconnecting = false;
                             this.adopt_terminal(t, cx);
                         });
@@ -699,7 +708,9 @@ impl TerminalView {
             }
             // 会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
             let _ = this.update(cx, |this, _| {
-                this.reconnecting = false;
+                if this.terminal_generation == generation {
+                    this.reconnecting = false;
+                }
             });
         })
         .detach();
@@ -723,10 +734,11 @@ impl TerminalView {
 
     /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
     pub fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
+        self.terminal_generation = self.terminal_generation.wrapping_add(1);
         self.terminal = terminal;
         // 旧 Terminal 一 drop，它读线程的发送端随之关闭，老的 redraw 任务 recv 到 Err
         // 自行退出；这里给新连接挂一个新的重绘任务。
-        Self::drive_redraws(self.terminal.redraw_channel(), cx);
+        Self::drive_redraws(self.terminal.redraw_channel(), self.terminal_generation, cx);
         self.clear_attention(cx);
         self.was_running = false;
         self.was_structured_succeeded = false;
@@ -1198,6 +1210,11 @@ impl Render for TerminalView {
             window.focus(&self.focus_handle, cx);
         }
 
+        // smeltd may hand geometry ownership to a mobile renderer. Apply that
+        // canonical grid first and do not echo the change back as a resize.
+        self.terminal.sync_daemon_geometry();
+        let remote_geometry_locked = self.terminal.remote_geometry_locked();
+
         // 依据「本终端自身尺寸」重算行列（网格 Hub 里每个终端只占一格）。
         {
             let (w, h) = self.grid_size.get();
@@ -1226,7 +1243,7 @@ impl Render for TerminalView {
             self.cell_w = cell_w; // 供鼠标坐标换算
             // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
             // 等 canvas 量到真实尺寸再调（避免 w=0 把终端缩成最小 4 列）。
-            if w > 1.0 && h > 1.0 {
+            if w > 1.0 && h > 1.0 && !remote_geometry_locked {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
                 let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
@@ -1265,9 +1282,8 @@ impl Render for TerminalView {
         if focused != self.was_focused {
             self.was_focused = focused;
             self.terminal.report_focus(focused);
-            // 获得焦点时强制重发 resize：远程端（手机）可能在这个终端失焦期间改过
-            // PTY 尺寸，需要把本机尺寸同步回去。标记 pty_kick_pending，下一帧会走
-            // force_resize 路径（见上面 if self.pty_kick_pending 分支）。
+            // 获得焦点时强制重发 resize。若移动端当前持有尺寸租约，标记会保留到
+            // 租约释放，届时下一帧才走 force_resize，避免两端形成 resize 循环。
             if focused {
                 self.pty_kick_pending = true;
             }

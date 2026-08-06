@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'models/pairing_config.dart';
 import 'models/saved_desktop.dart';
 import 'pages/qr_scanner_page.dart';
+import 'pages/terminal_session_page.dart';
 import 'services/gateway_service.dart';
 import 'services/message_draft_store.dart';
 import 'models/acp_snapshot.dart';
@@ -30,7 +31,8 @@ bool shouldAutoFollowSnapshot({
 
 String sessionListTitle(SessionSummary session) {
   final title = session.title.trim();
-  return title.isEmpty ? 'ACP conversation' : title;
+  if (title.isNotEmpty) return title;
+  return session.kind == SessionKind.terminal ? 'Terminal' : 'ACP conversation';
 }
 
 String? sessionListSubtitle(SessionSummary session) {
@@ -64,6 +66,18 @@ List<SessionSummary> filterSessions(
   SessionListFilter.running => sessions.where(sessionIsRunning).toList(),
   SessionListFilter.all => sessions.toList(),
 };
+
+bool shouldShowAttentionNotification({
+  required LifecycleAttention attention,
+  required String? activeSessionId,
+  required String? subscribedSessionId,
+}) {
+  if (activeSessionId == attention.sessionId) return false;
+  if (subscribedSessionId == attention.sessionId && !attention.requiresAction) {
+    return false;
+  }
+  return true;
+}
 
 Future<String?> showDesktopRenameDialog(
   BuildContext context,
@@ -417,6 +431,7 @@ class _HomePageState extends State<HomePage> {
   SessionListFilter _sessionFilter = SessionListFilter.all;
   bool _acceptConnectionNotifications = true;
   String? _pendingOpenSessionId;
+  String? _activeSessionId;
 
   final _pairingCodeController = TextEditingController();
 
@@ -459,8 +474,17 @@ class _HomePageState extends State<HomePage> {
     _attentionSubscription = gatewayService.attentionStream.listen((item) {
       if (!mounted || !_acceptConnectionNotifications) return;
       gatewayService.listSessions();
+      if (_activeSessionId == item.sessionId) {
+        gatewayService.markRead(item.sessionId);
+      }
       final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
-      if (isCurrent && !item.requiresAction) return;
+      if (!shouldShowAttentionNotification(
+        attention: item,
+        activeSessionId: _activeSessionId,
+        subscribedSessionId: gatewayService.subscribedSessionId,
+      )) {
+        return;
+      }
       final session = _sessions
           .where((candidate) => candidate.id == item.sessionId)
           .firstOrNull;
@@ -766,7 +790,7 @@ class _HomePageState extends State<HomePage> {
           controlAffinity: ListTileControlAffinity.leading,
           title: Text(project.title),
           subtitle: Text(
-            '${sessions.length} conversation${sessions.length == 1 ? '' : 's'}',
+            '${sessions.length} session${sessions.length == 1 ? '' : 's'}',
           ),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
@@ -848,6 +872,8 @@ class _HomePageState extends State<HomePage> {
       leading: Icon(
         attentionStyle
             ? Icons.notification_important_outlined
+            : session.kind == SessionKind.terminal
+            ? Icons.terminal
             : Icons.chat_bubble_outline,
       ),
       title: Text(sessionListTitle(session)),
@@ -861,7 +887,7 @@ class _HomePageState extends State<HomePage> {
             isLabelVisible: session.unread,
             child: _getStatusChip(session.status),
           ),
-          if (showActions)
+          if (showActions && session.kind == SessionKind.acp)
             PopupMenuButton<String>(
               tooltip: 'Conversation actions',
               onSelected: (action) {
@@ -1249,14 +1275,28 @@ class _HomePageState extends State<HomePage> {
 
   void _openSession(SessionSummary session) {
     gatewayService.markRead(session.id);
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => SessionPage(
-          session: session,
-          messageDraftStore: _messageDraftStore,
+    if (_shownAttentionSessionId == session.id) {
+      _shownAttentionSessionId = null;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    }
+    final previousActiveSessionId = _activeSessionId;
+    _activeSessionId = session.id;
+    unawaited(
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => session.kind == SessionKind.terminal
+              ? TerminalSessionPage(session: session)
+              : SessionPage(
+                  session: session,
+                  messageDraftStore: _messageDraftStore,
+                ),
         ),
-      ),
+      ).whenComplete(() {
+        if (mounted && _activeSessionId == session.id) {
+          _activeSessionId = previousActiveSessionId;
+        }
+      }),
     );
   }
 
