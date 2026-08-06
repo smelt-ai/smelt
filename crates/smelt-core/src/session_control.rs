@@ -63,6 +63,23 @@ struct RemoteAcpSessions {
     sessions: Vec<RemoteAcpSession>,
 }
 
+/// 手机端远程新建的终端会话（不依赖 PC GUI 写 workspace.json 才能显示/管理）。
+/// 跟 `RemoteAcpSession` 是同一套思路，见文件顶部注释。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RemoteTerminalSession {
+    pub id: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub title: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct RemoteTerminalSessions {
+    #[serde(default)]
+    sessions: Vec<RemoteTerminalSession>,
+}
+
 fn smelt_path(name: &str) -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -172,6 +189,42 @@ pub fn forget_remote_session(id: &str) {
     save_remote_sessions(sessions);
 }
 
+fn remote_terminal_sessions_path() -> PathBuf {
+    smelt_path("remote_terminal_sessions.json")
+}
+
+pub fn load_remote_terminal_sessions() -> Vec<RemoteTerminalSession> {
+    let _guard = REMOTE_STORE_LOCK.lock().unwrap();
+    load_remote_terminal_sessions_unlocked()
+}
+
+fn load_remote_terminal_sessions_unlocked() -> Vec<RemoteTerminalSession> {
+    crate::json_store::load_json::<RemoteTerminalSessions>(Some(remote_terminal_sessions_path()))
+        .sessions
+}
+
+fn save_remote_terminal_sessions(sessions: Vec<RemoteTerminalSession>) {
+    crate::json_store::save_json_private(
+        Some(remote_terminal_sessions_path()),
+        &RemoteTerminalSessions { sessions },
+    );
+}
+
+pub fn remember_remote_terminal_session(session: RemoteTerminalSession) {
+    let _guard = REMOTE_STORE_LOCK.lock().unwrap();
+    let mut sessions = load_remote_terminal_sessions_unlocked();
+    sessions.retain(|existing| existing.id != session.id);
+    sessions.push(session);
+    save_remote_terminal_sessions(sessions);
+}
+
+pub fn forget_remote_terminal_session(id: &str) {
+    let _guard = REMOTE_STORE_LOCK.lock().unwrap();
+    let mut sessions = load_remote_terminal_sessions_unlocked();
+    sessions.retain(|session| session.id != id);
+    save_remote_terminal_sessions(sessions);
+}
+
 /// smeltd 当前活着的会话 id（终端 + ACP，靠前缀区分）。任务对账用：判断绑定会话
 /// 是否还活着，不活的任务标失败，避免「会话没了但任务永远卡 Running」。
 pub fn list_sessions() -> Result<Vec<String>, String> {
@@ -225,6 +278,27 @@ pub fn create_acp_session(session: &RemoteAcpSession) -> Result<(), String> {
 pub fn delete_acp_session(id: &str) -> Result<(), String> {
     daemon_request(serde_json::json!({"op": "acp_kill", "id": id}))?;
     forget_remote_session(id);
+    Ok(())
+}
+
+/// 新建一个终端 PTY 会话。走 smeltd 的 `open` op：会话在守护里落地（进程已
+/// spawn、已存进 sessions map）发生在它回第一行 JSON 之前，所以这条请求/响应
+/// 一来一回就够——不需要像交互 attach 那样占住连接进流模式，回完这行 socket
+/// 直接丢掉，PTY 照样常驻（同一套"GUI 退出会话不死"的保证）。
+pub fn create_terminal_session(id: &str, cwd: &str) -> Result<(), String> {
+    daemon_request(serde_json::json!({
+        "op": "open",
+        "id": id,
+        "cwd": cwd,
+        "cols": 100,
+        "rows": 32,
+    }))?;
+    Ok(())
+}
+
+pub fn delete_terminal_session(id: &str) -> Result<(), String> {
+    daemon_request(serde_json::json!({"op": "kill", "id": id}))?;
+    forget_remote_terminal_session(id);
     Ok(())
 }
 

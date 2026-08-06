@@ -33,23 +33,28 @@ use crate::workspace_menu::{
     WorkspaceMenuSnapshot,
 };
 
+/// 找到（或按 cwd 现造一个）`menu.projects` 里的项目，返回其下标。给"手机远程
+/// 建的会话没有对应 PC 项目"兜底——终端和 ACP 会话共用同一份兜底逻辑。
+fn ensure_menu_project(menu: &mut WorkspaceMenuSnapshot, cwd: &str) -> usize {
+    menu.projects
+        .iter()
+        .position(|project| project.root == cwd)
+        .unwrap_or_else(|| {
+            let order = menu.projects.len();
+            menu.projects.push(WorkspaceMenuProject {
+                root: cwd.to_string(),
+                title: path_title(cwd),
+                order: order.min(u32::MAX as usize) as u32,
+            });
+            order
+        })
+}
+
 fn mobile_workspace_menu() -> WorkspaceMenuSnapshot {
     let mut menu = load_workspace_menu();
     let remote_sessions = crate::session_control::load_remote_sessions();
     for remote in remote_sessions {
-        let project_order = menu
-            .projects
-            .iter()
-            .position(|project| project.root == remote.cwd)
-            .unwrap_or_else(|| {
-                let order = menu.projects.len();
-                menu.projects.push(WorkspaceMenuProject {
-                    root: remote.cwd.clone(),
-                    title: path_title(&remote.cwd),
-                    order: order.min(u32::MAX as usize) as u32,
-                });
-                order
-            });
+        let project_order = ensure_menu_project(&mut menu, &remote.cwd);
         if menu.sessions.iter().any(|session| session.id == remote.id) {
             continue;
         }
@@ -70,6 +75,31 @@ fn mobile_workspace_menu() -> WorkspaceMenuSnapshot {
             session_order: menu.sessions.len().min(u32::MAX as usize) as u32,
             leaf_order: 0,
             agent: Some(remote.agent),
+        });
+    }
+    let remote_terminal_sessions = crate::session_control::load_remote_terminal_sessions();
+    for remote in remote_terminal_sessions {
+        let project_order = ensure_menu_project(&mut menu, &remote.cwd);
+        if menu.sessions.iter().any(|session| session.id == remote.id) {
+            continue;
+        }
+        let project = &menu.projects[project_order];
+        menu.sessions.push(WorkspaceMenuSession {
+            id: remote.id,
+            kind: WorkspaceMenuSessionKind::Terminal,
+            title: if remote.title.trim().is_empty() {
+                "Terminal".to_string()
+            } else {
+                remote.title
+            },
+            custom_title: false,
+            cwd: Some(remote.cwd),
+            project_root: Some(project.root.clone()),
+            project_title: Some(project.title.clone()),
+            project_order: project.order,
+            session_order: menu.sessions.len().min(u32::MAX as usize) as u32,
+            leaf_order: 0,
+            agent: None,
         });
     }
     menu
@@ -1292,20 +1322,63 @@ struct SessionHistoryParams {
 struct CreateSessionParams {
     #[serde(rename = "projectRoot")]
     project_root: String,
-    #[serde(rename = "agentOptionId")]
-    agent_option_id: String,
+    #[serde(default, rename = "agentOptionId")]
+    agent_option_id: Option<String>,
     #[serde(default, rename = "resumeId")]
     resume_id: Option<String>,
+    /// `"acp"`（默认，向后兼容旧客户端）或 `"terminal"`。
+    #[serde(default, rename = "kind")]
+    kind: Option<String>,
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
 }
 
 fn create_mobile_session(params: CreateSessionParams) -> Result<String, String> {
+    match params.kind.as_deref() {
+        Some("terminal") => create_mobile_terminal_session(params.project_root),
+        _ => create_mobile_acp_session(params),
+    }
+}
+
+fn create_mobile_terminal_session(project_root: String) -> Result<String, String> {
+    let menu = mobile_workspace_menu();
+    if !menu
+        .projects
+        .iter()
+        .any(|project| project.root == project_root)
+    {
+        return Err("project is not in the Smelt workspace".to_string());
+    }
+    let id = format!("term-{}", uuid::Uuid::new_v4());
+    crate::session_control::create_terminal_session(&id, &project_root)?;
+    crate::session_control::remember_remote_terminal_session(
+        crate::session_control::RemoteTerminalSession {
+            id: id.clone(),
+            cwd: project_root,
+            title: String::new(),
+            created_at: now_unix(),
+        },
+    );
+    Ok(id)
+}
+
+fn create_mobile_acp_session(params: CreateSessionParams) -> Result<String, String> {
     let menu = mobile_workspace_menu();
     let project = menu
         .projects
         .iter()
         .find(|project| project.root == params.project_root)
         .ok_or_else(|| "project is not in the Smelt workspace".to_string())?;
-    let option = crate::session_control::find_agent_option(&params.agent_option_id)
+    let agent_option_id = params
+        .agent_option_id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "missing agentOptionId".to_string())?;
+    let option = crate::session_control::find_agent_option(&agent_option_id)
         .ok_or_else(|| "unknown ACP agent or profile".to_string())?;
     let resume_id = params.resume_id.filter(|id| !id.trim().is_empty());
     let title = resume_id
@@ -1317,10 +1390,7 @@ fn create_mobile_session(params: CreateSessionParams) -> Result<String, String> 
                 .map(|session| session.title)
         })
         .unwrap_or_else(|| format!("{} conversation", option.label));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
-        .unwrap_or(0);
+    let now = now_unix();
     let session = crate::session_control::RemoteAcpSession {
         id: format!("acp-{}", uuid::Uuid::new_v4()),
         cwd: project.root.clone(),
@@ -1573,8 +1643,19 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                             continue;
                         }
                         let id = params.session_id;
+                        // 会话种类以共享菜单快照为准（跟列表展示同一份数据源），
+                        // 终端走 PTY kill，ACP 走 acp_kill；查不到时按老行为当 ACP 处理。
+                        let is_terminal = mobile_workspace_menu()
+                            .session(&id)
+                            .is_some_and(|session| session.kind == WorkspaceMenuSessionKind::Terminal);
                         let delete_id = id.clone();
-                        let response = tokio::task::spawn_blocking(move || crate::session_control::delete_acp_session(&delete_id)).await;
+                        let response = tokio::task::spawn_blocking(move || {
+                            if is_terminal {
+                                crate::session_control::delete_terminal_session(&delete_id)
+                            } else {
+                                crate::session_control::delete_acp_session(&delete_id)
+                            }
+                        }).await;
                         let resp = match response {
                             Ok(Ok(())) => {
                                 state.mobile_lifecycle.remove_session(&id);
@@ -2241,8 +2322,26 @@ mod tests {
         .unwrap();
         match create {
             AcpWsRequest::CreateSession { params } => {
-                assert_eq!(params.agent_option_id, "codex");
+                assert_eq!(params.agent_option_id.as_deref(), Some("codex"));
                 assert_eq!(params.resume_id.as_deref(), Some("history-1"));
+                assert_eq!(params.kind, None);
+            }
+            _ => panic!("expected createSession"),
+        }
+
+        let create_terminal: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "createSession",
+            "params": {
+                "projectRoot": "/repo/smelt",
+                "kind": "terminal"
+            }
+        }))
+        .unwrap();
+        match create_terminal {
+            AcpWsRequest::CreateSession { params } => {
+                assert_eq!(params.project_root, "/repo/smelt");
+                assert_eq!(params.agent_option_id, None);
+                assert_eq!(params.kind.as_deref(), Some("terminal"));
             }
             _ => panic!("expected createSession"),
         }

@@ -810,6 +810,13 @@ class _HomePageState extends State<HomePage> {
                     ? null
                     : () => _createSession(project),
               ),
+              IconButton(
+                icon: const Icon(Icons.terminal),
+                tooltip: 'New terminal',
+                onPressed: !gatewayService.writeEnabled
+                    ? null
+                    : () => _createTerminalSession(project),
+              ),
             ],
           ),
           children: sessions
@@ -887,9 +894,11 @@ class _HomePageState extends State<HomePage> {
             isLabelVisible: session.unread,
             child: _getStatusChip(session.status),
           ),
-          if (showActions && session.kind == SessionKind.acp)
+          if (showActions)
             PopupMenuButton<String>(
-              tooltip: 'Conversation actions',
+              tooltip: session.kind == SessionKind.terminal
+                  ? 'Terminal actions'
+                  : 'Conversation actions',
               onSelected: (action) {
                 if (action == 'delete') _deleteSession(session);
               },
@@ -961,6 +970,10 @@ class _HomePageState extends State<HomePage> {
     gatewayService.createSession(project.root, agent.id);
   }
 
+  void _createTerminalSession(WorkspaceProject project) {
+    gatewayService.createTerminalSession(project.root);
+  }
+
   Future<void> _openHistory(WorkspaceProject project) async {
     await Navigator.push<void>(
       context,
@@ -972,12 +985,15 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _deleteSession(SessionSummary session) async {
+    final isTerminal = session.kind == SessionKind.terminal;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete conversation?'),
+        title: Text(isTerminal ? 'Delete terminal?' : 'Delete conversation?'),
         content: Text(
-          'This stops ${sessionListTitle(session)} and removes it from the active list. The agent transcript remains available in History.',
+          isTerminal
+              ? 'This closes ${sessionListTitle(session)} and ends the shell process.'
+              : 'This stops ${sessionListTitle(session)} and removes it from the active list. The agent transcript remains available in History.',
         ),
         actions: [
           TextButton(
