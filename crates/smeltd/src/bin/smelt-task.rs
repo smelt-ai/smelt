@@ -20,15 +20,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use smelt_core::task::{
-    Task, TaskChannel, TaskKind, parse_local_datetime, task_prompt, title_from_prompt,
+    Task, TaskKind, parse_local_datetime, task_prompt, title_from_prompt,
 };
 
 const USAGE: &str = "\
 smelt-task — 向 smelt 任务队列塞/查任务（agent 自循环）
 
 用法:
-  smelt-task add --cwd <dir> --title <标题> --body <首包指令> [--launch <命令>]
-                 [--channel pty|acp] [--agent claude|copilot|codex|grok]
+  smelt-task add --cwd <dir> --title <标题> --body <首包指令>
                  [--dep <id>]... [--auto-run on|off] [--retry-max <n>]
                  [--retry-delay <秒>] [--schedule 'YYYY-MM-DD HH:MM']
   smelt-task list [--cwd <dir>] [--all] [--json]
@@ -109,22 +108,16 @@ fn has_flag(args: &[String], name: &str) -> bool {
 }
 
 fn cmd_add(args: &[String], sock: &str) -> Result<(), String> {
+    if has_flag(args, "launch") || has_flag(args, "channel") || has_flag(args, "agent") {
+        return Err("任务暂不支持绑定 Agent；会在实际运行时按当前默认启动项执行".into());
+    }
     let cwd = opt(args, "cwd").unwrap_or_else(|| ".".to_string());
     let body = opt(args, "body").unwrap_or_default();
     if body.trim().is_empty() {
         return Err("add 需要 --body（给 agent 的首包指令）".into());
     }
     let title = opt(args, "title").unwrap_or_else(|| title_from_prompt(&body));
-    let launch = opt(args, "launch");
-    let mut task = Task::new(cwd, title, body, launch);
-
-    let channel = opt(args, "channel").unwrap_or_else(|| "pty".into());
-    if channel == "acp" {
-        task.channel = TaskChannel::Acp {
-            agent: opt(args, "agent").unwrap_or_else(|| "claude".into()),
-            profile_id: None,
-        };
-    }
+    let mut task = Task::new(cwd, title, body);
 
     for (i, a) in args.iter().enumerate() {
         if a.as_str() == "--dep"
@@ -226,9 +219,6 @@ fn cmd_show(args: &[String], sock: &str) -> Result<(), String> {
     println!("# {}（{}）", task.title, task.column.label());
     println!("  cwd:   {}", task.project_cwd);
     println!("  body:  {}", task_prompt(task));
-    if let Some(launch) = &task.launch {
-        println!("  launch: {}", launch);
-    }
     if !task.depends_on.is_empty() {
         println!("  depends_on: {}", task.depends_on.join(", "));
     }
@@ -258,4 +248,3 @@ fn cmd_run(args: &[String], sock: &str) -> Result<(), String> {
         Ok(())
     }
 }
-

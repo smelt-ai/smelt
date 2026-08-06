@@ -1,15 +1,18 @@
 //! inspector：面板内横向 tabs + 右侧面板（默认 320px，可整体隐藏）。
-//! FILES / GIT / SKILL 三个 tab，点击切换或收合；面板头
+//! FILES / GIT / TASK / SKILL 四个 tab，点击切换或收合；面板头
 //! 带「展开」把对应的旧全屏页盖到会话舞台上（stage_override），功能零删除。
-//! （TASKS 已经升格成一级导航，见 session_list.rs 的「任务」入口，不再是这里的 tab。）
+//! TASK 面板只显示当前项目的任务；完整任务总览仍由 session_list.rs 的一级导航提供。
 //!
 //! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
+use crate::tasks::TaskStore;
 use crate::{MainView, Workspace, ui_theme, workspace_frame};
 
 /// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
@@ -20,12 +23,13 @@ pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
 /// 宽度，也能保证编辑器至少保有可读空间。该值只在恢复或拖树自身分隔条时变化。
 pub(crate) const MAX_FILE_TREE_WIDTH: f32 = 320.0;
 
-/// inspector 面板的三个 tab。
+/// inspector 面板的四个 tab。
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum InspectorTab {
     Files,
     Git,
+    Tasks,
     Skills,
 }
 
@@ -40,6 +44,7 @@ impl InspectorTab {
         match self {
             Self::Files => "FILES",
             Self::Git => "GIT",
+            Self::Tasks => "TASK",
             Self::Skills => "SKILL",
         }
     }
@@ -49,9 +54,35 @@ impl InspectorTab {
         match self {
             Self::Files => Some(MainView::Files),
             Self::Git => Some(MainView::Git),
+            Self::Tasks => None,
             Self::Skills => Some(MainView::Skills),
         }
     }
+}
+
+/// 任务 cwd 与项目根相同或位于其下才属于该项目。路径边界必须完整匹配，
+/// 避免 `/work/api-next` 被误归到 `/work/api`。
+fn task_belongs_to_project(task_cwd: &str, project_root: &str) -> bool {
+    let task_cwd = task_cwd.trim();
+    let project_root = project_root.trim();
+    if project_root == "/" {
+        return task_cwd == "/" || task_cwd.starts_with('/');
+    }
+    let task_cwd = task_cwd.trim_end_matches('/');
+    let project_root = project_root.trim_end_matches('/');
+    if task_cwd.is_empty() || project_root.is_empty() {
+        return false;
+    }
+    task_cwd == project_root || task_cwd.starts_with(&format!("{project_root}/"))
+}
+
+fn project_label(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 impl Workspace {
@@ -166,7 +197,7 @@ impl Workspace {
         if self.inspector_panel_promoted() {
             // 展开态下点了别的 tab：FILES / GIT 展开都跟横条共用一份停靠
             // UI（只是变宽，见 main.rs 舞台分派），能直接切过去、继续保持展开态；
-            // 只有 SKILL 没有展开形态（stage_view() = None），这时才退回停靠。
+            // TASK / SKILL 没有展开形态（stage_view() = None），这时才退回停靠。
             if let Some(view) = tab.stage_view() {
                 self.set_stage_override(Some(view), window, cx);
                 if tab == InspectorTab::Git {
@@ -219,9 +250,23 @@ impl Workspace {
             .and_then(|cwd| self.git_status.get(&cwd))
             .map(|(_, d)| d.files.len())
             .unwrap_or(0);
+        let task_count = self
+            .active_project_root(cx)
+            .map(|root| {
+                TaskStore::load()
+                    .tasks
+                    .iter()
+                    .filter(|task| task_belongs_to_project(&task.project_cwd, &root))
+                    .count()
+            })
+            .unwrap_or(0);
 
-        const TABS: [InspectorTab; 3] =
-            [InspectorTab::Files, InspectorTab::Git, InspectorTab::Skills];
+        const TABS: [InspectorTab; 4] = [
+            InspectorTab::Files,
+            InspectorTab::Git,
+            InspectorTab::Tasks,
+            InspectorTab::Skills,
+        ];
         let cur = self.inspector_tab;
         let open = self.inspector_open;
         // 面板已展开且落在这个 tab 上才算「选中」——跟旧实现一致：收合时无高亮。
@@ -286,6 +331,7 @@ impl Workspace {
                 }
                 bar.child(tab(InspectorTab::Files, 0))
                     .child(tab(InspectorTab::Git, git_changes))
+                    .child(tab(InspectorTab::Tasks, task_count))
                     .child(tab(InspectorTab::Skills, 0))
             })
     }
@@ -325,6 +371,7 @@ impl Workspace {
         let body: AnyElement = match self.inspector_tab {
             InspectorTab::Files => self.render_inspector_files(window, cx),
             InspectorTab::Git => self.render_inspector_git(window, cx),
+            InspectorTab::Tasks => self.render_inspector_tasks(window, cx),
             InspectorTab::Skills => self.render_inspector_skills(cx),
         };
         div()
@@ -481,6 +528,319 @@ impl Workspace {
     /// 需要访问 GitStatusData / DiffLine 的模块内私有字段）。
     fn render_inspector_git(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.git_narrow_panel(window, cx)
+    }
+
+    /// TASK 面板：只列当前活动项目根下的任务。完整任务总览仍保留在左侧一级导航，
+    /// 这里提供和 Git / Skill 一样的项目上下文快捷入口。
+    fn render_inspector_tasks(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let project_root = self.active_project_root(cx);
+        let project_name = project_root.as_deref().map(project_label);
+        let mut tasks = TaskStore::load().tasks;
+        if let Some(root) = project_root.as_deref() {
+            tasks.retain(|task| task_belongs_to_project(&task.project_cwd, root));
+            tasks.sort_by(|a, b| {
+                a.column
+                    .sidebar_rank()
+                    .cmp(&b.column.sidebar_rank())
+                    .then_with(|| b.updated_at.cmp(&a.updated_at))
+            });
+        } else {
+            tasks.clear();
+        }
+
+        let project_for_new = project_root.clone();
+        let task_count = tasks.len();
+        let header = div()
+            .h(px(36.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .border_b_1()
+            .border_color(rgb(ui_theme::border_dim()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .child("TASKS"),
+                    )
+                    .children(project_name.map(|name| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(rgb(ui_theme::text_faint()))
+                            .child(name)
+                    }))
+                    .when(project_root.is_some(), |d| {
+                        d.child(
+                            div()
+                                .rounded_full()
+                                .px_1()
+                                .bg(rgb(ui_theme::bg_elev()))
+                                .text_size(px(10.))
+                                .text_color(rgb(ui_theme::text_faint()))
+                                .child(task_count.to_string()),
+                        )
+                    }),
+            )
+            .when(project_for_new.is_some(), |d| {
+                d.child(
+                    Button::new("inspector-tasks-new")
+                        .icon(IconName::Plus)
+                        .xsmall()
+                        .ghost()
+                        .tooltip("新建当前项目任务")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(root) = project_for_new.clone() {
+                                this.open_new_task_for_project(root, window, cx);
+                            }
+                        })),
+                )
+            });
+
+        let mut list = div()
+            .id("inspector-task-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .p_2p5();
+
+        if project_root.is_none() {
+            list = list.child(
+                div()
+                    .pt_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .text_color(rgb(ui_theme::text_faint()))
+                    .child(div().text_sm().child("还没有打开项目"))
+                    .child(div().text_xs().child("打开或切换一个项目后显示其任务")),
+            );
+        } else if tasks.is_empty() {
+            list = list.child(
+                div()
+                    .pt_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .text_color(rgb(ui_theme::text_faint()))
+                    .child(div().text_sm().child("当前项目还没有任务"))
+                    .child(div().text_xs().child("点右上角 + 新建一条任务")),
+            );
+        } else {
+            let acp_targets = self.idle_acp_task_targets(cx);
+            for task in tasks {
+                let task_id = task.id.clone();
+                let action_id = task_id.clone();
+                let acp_task_id = task_id.clone();
+                let acp_targets = acp_targets.clone();
+                let can_run_in_acp =
+                    task.column.is_todo() || task.column == crate::tasks::TaskColumn::Failed;
+                let acp_runner = cx.entity().clone();
+                let status_color = rgb(task.column.color());
+                let status_label = task.column.label();
+                let body = {
+                    let body = task.body.trim();
+                    if body.chars().count() > 80 {
+                        format!("{}…", body.chars().take(80).collect::<String>())
+                    } else {
+                        body.to_string()
+                    }
+                };
+                let action = if task.column.is_todo() {
+                    Some("运行")
+                } else if task.column == crate::tasks::TaskColumn::Failed {
+                    Some("重试")
+                } else if task.session_id.is_some() {
+                    Some("打开")
+                } else if task.column.is_active() {
+                    Some("运行")
+                } else {
+                    None
+                };
+
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("inspector-task-{task_id}")))
+                        .rounded(ui_theme::card_radius())
+                        .border_1()
+                        .border_color(rgb(ui_theme::border_mid()))
+                        .bg(ui_theme::glass_card())
+                        .px_2p5()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1p5()
+                        .hover(|d| d.border_color(rgb(ui_theme::border_focus())))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .size(px(6.))
+                                        .rounded_xs()
+                                        .bg(status_color)
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(rgb(ui_theme::text_bright()))
+                                        .child(task.title),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .rounded_xs()
+                                        .px_1()
+                                        .bg(crate::ui_theme::tint(task.column.color(), 0x20))
+                                        .text_size(px(9.))
+                                        .text_color(status_color)
+                                        .child(status_label),
+                                ),
+                        )
+                        .when(!body.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .line_height(px(14.))
+                                    .text_color(rgb(ui_theme::text_muted()))
+                                    .line_clamp(2)
+                                    .child(body),
+                            )
+                        })
+                        .children(action.map(|label| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "inspector-task-action-{task_id}"
+                                    )))
+                                    .label(label)
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.primary_task_action(&action_id, window, cx);
+                                    })),
+                                )
+                                .when(can_run_in_acp, |d| {
+                                    d.child(
+                                        Button::new(SharedString::from(format!(
+                                            "inspector-task-acp-{task_id}"
+                                        )))
+                                        .label("ACP")
+                                        .xsmall()
+                                        .ghost()
+                                        .tooltip("发送到已有或新建 ACP 对话")
+                                        .dropdown_menu(move |menu, _window, _cx| {
+                                            let mut menu = menu;
+                                            if acp_targets.is_empty() {
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(
+                                                        "没有空闲的 ACP 对话",
+                                                    )
+                                                    .disabled(true),
+                                                );
+                                            } else {
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(
+                                                        "发送到空闲的已打开 ACP 对话",
+                                                    )
+                                                    .disabled(true),
+                                                );
+                                                for target in &acp_targets {
+                                                    let task_id = acp_task_id.clone();
+                                                    let session_id = target.session_id.clone();
+                                                    let label = target.label.clone();
+                                                    let runner = acp_runner.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(label).on_click(
+                                                            move |_, window, cx| {
+                                                                let task_id = task_id.clone();
+                                                                let session_id =
+                                                                    session_id.clone();
+                                                                runner.update(cx, |ws, cx| {
+                                                                    ws.run_task_in_open_acp(
+                                                                        &task_id,
+                                                                        &session_id,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                            },
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                            menu = menu
+                                                .separator()
+                                                .item(
+                                                    PopupMenuItem::new("新建 ACP 对话")
+                                                        .disabled(true),
+                                                );
+                                            for agent in crate::settings::AcpAgentKind::ALL {
+                                                let task_id = acp_task_id.clone();
+                                                let runner = acp_runner.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(format!(
+                                                        "{} ACP 对话",
+                                                        agent.label()
+                                                    ))
+                                                    .on_click(move |_, window, cx| {
+                                                        let task_id = task_id.clone();
+                                                        runner.update(cx, |ws, cx| {
+                                                            ws.run_task_in_acp(
+                                                                &task_id, agent, window, cx,
+                                                            );
+                                                        });
+                                                    }),
+                                                );
+                                            }
+                                            menu
+                                        }),
+                                    )
+                                })
+                        })),
+                );
+            }
+        }
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(list)
+            .into_any_element()
     }
 
     /// SKILLS 面板：列出用户级 / 项目级 skill（`~/.claude/skills`、
@@ -857,6 +1217,7 @@ impl Workspace {
                     );
                 }
             }
+
         }
 
         div()
@@ -867,5 +1228,20 @@ impl Workspace {
             .child(header)
             .child(list)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_belongs_to_project;
+
+    #[test]
+    fn task_project_match_respects_path_boundaries() {
+        assert!(task_belongs_to_project("/work/api", "/work/api"));
+        assert!(task_belongs_to_project("/work/api/src", "/work/api/"));
+        assert!(task_belongs_to_project("/", "/"));
+        assert!(task_belongs_to_project("/work/api", "/"));
+        assert!(!task_belongs_to_project("/work/api-next", "/work/api"));
+        assert!(!task_belongs_to_project("/work/other", "/work/api"));
     }
 }
