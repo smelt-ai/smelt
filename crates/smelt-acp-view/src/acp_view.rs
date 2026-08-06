@@ -81,6 +81,39 @@ fn should_queue_prompt(
     prompt_dispatch_pending || !matches!(phase, AcpPhase::Idle) || !queue_is_empty
 }
 
+/// 新建的空白会话可以静默准备：输入框已经可用，用户无需先等 ACP 握手完成。
+/// 续接历史、自动交接和已有消息的会话仍展示启动状态，避免隐藏实际的恢复工作。
+fn is_fresh_conversation_start(
+    phase: &AcpPhase,
+    entries_are_empty: bool,
+    has_history_session: bool,
+    has_initial_prompt: bool,
+) -> bool {
+    matches!(phase, AcpPhase::Starting)
+        && entries_are_empty
+        && !has_history_session
+        && !has_initial_prompt
+}
+
+/// 新建空白会话的第一条 prompt 可以直接交给 smeltd：它会先本地回显并把命令
+/// 留在 ACP 通道里，等握手完成后再真正发给 agent。后续 prompt 仍按单回合排队。
+fn can_dispatch_fresh_start_prompt(
+    phase: &AcpPhase,
+    entries_are_empty: bool,
+    has_history_session: bool,
+    has_initial_prompt: bool,
+    prompt_dispatch_pending: bool,
+    queue_is_empty: bool,
+) -> bool {
+    is_fresh_conversation_start(
+        phase,
+        entries_are_empty,
+        has_history_session,
+        has_initial_prompt,
+    ) && !prompt_dispatch_pending
+        && queue_is_empty
+}
+
 fn should_cancel_for_immediate_prompt(phase: &AcpPhase, prompt_dispatch_pending: bool) -> bool {
     prompt_dispatch_pending
         || matches!(
@@ -218,8 +251,9 @@ pub struct AcpView {
     /// 一次就一直持有到视图销毁，Drop 时只会断开 socket（见 `AcpClientHandle`
     /// 文件头注释），不影响 smeltd 那边的会话存活。
     handle: Option<AcpClientHandle>,
-    /// 守护侧断连（smeltd 升级/重启）后自动重连的剩余预算。每次自动重连递减，
-    /// 收到活跃快照（连接成功）回满 3；耗尽则停止自动重连，等用户手动。
+    /// 守护侧断连（smeltd 升级/重启）后自动重连的剩余预算。配合指数退避重试
+    /// （main.rs 里延迟 500ms 起、翻倍到 8s 上限），每次自动重连递减，收到活跃
+    /// 快照（连接成功）回满；耗尽则停止自动重连，等用户手动。
     auto_reconnect_left: u32,
     /// 重启用的启动规格（placeholder / restart 共用）。
     launch: AcpLaunchSpec,
@@ -233,8 +267,9 @@ pub struct AcpView {
     /// 已粘进来、等着随下一条 prompt 发出去的图片（缩略图条显示，发完清空）。
     /// 只在内存里待到发送为止：图片体积大，不进 workspace.json。
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
-    /// ACP 同一 session 一次只能运行一个 turn。运行中、启动中或上一条 prompt
-    /// 还没收到 Running 快照时，新消息先排队，等 Idle 后按顺序发送。
+    /// ACP 同一 session 一次只能运行一个 turn。新建空白会话的首条 prompt 会直接
+    /// 交给 smeltd（它在握手完成后发送）；运行中或上一条 prompt 尚未确认时，
+    /// 新消息仍先排队，等 Idle 后按顺序发送。
     queued_prompts: std::collections::VecDeque<(String, Vec<std::sync::Arc<gpui::Image>>)>,
     /// action 已交给 smeltd，但 Running 快照尚未回来。防止快点两次时本地 phase
     /// 仍是 Idle，第二条 prompt 越过队列直接并发发送。
@@ -282,7 +317,7 @@ pub struct AcpView {
     available_commands: Vec<(String, String)>,
     /// 上下文用量：(已用 token, 窗口大小)。None = agent 没上报过，不显示。
     usage: Option<(u64, u64)>,
-    /// 本次启动/续接的起点，用来在横幅上报「已等了几秒」。
+    /// 非新建会话启动/续接的起点，用来在横幅上报「已等了几秒」。
     /// 实测 `session/new` 里 Claude Code 自身要约 10 秒（跟下载无关，同一适配器
     /// 进程建第二个会话一样慢），没有进度反馈会让人以为卡死了。
     starting_since: Option<std::time::Instant>,
@@ -313,8 +348,9 @@ pub struct AcpView {
     /// 前几行 + 「展开」，回合态不落盘。
     expanded_tools: std::collections::HashSet<String>,
     /// 手动展开 / 收起了整个工具卡片（key = tool_call_id）。默认规则：
-    /// completed 收起，pending/in-progress/failed/等权限展开；用户点过后按这两组
-    /// 覆盖默认值。只属于本地浏览状态，不落盘。
+    /// 仅有可展示输出的 completed 收起，pending/in-progress/failed/等权限展开；
+    /// 没有输出的卡片静态展示。用户点过后按这两组覆盖默认值。只属于本地浏览
+    /// 状态，不落盘。
     expanded_tool_cards: std::collections::HashSet<String>,
     collapsed_tool_cards: std::collections::HashSet<String>,
     /// 可变高度消息虚拟列表：只测量和构建视口附近的 Markdown/工具卡。
@@ -525,7 +561,7 @@ impl AcpView {
             phase: AcpPhase::Ended(reason),
             input: None,
             handle: None,
-            auto_reconnect_left: 3,
+            auto_reconnect_left: 6,
             launch,
             refresh_launch_from_settings,
             profile_id,
@@ -629,18 +665,20 @@ impl AcpView {
     }
 
     /// 守护侧断连（smeltd 升级/重启/未就绪）后自动重连：预算内直接 restart。
-    /// 由 main.rs 在 `AcpViewEvent::Ended`（断连原因）时延迟调用；预算耗尽后
-    /// 不再自动重连，等用户手动（收到活跃快照时预算回满）。
-    pub fn maybe_auto_reconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 由 main.rs 在 `AcpViewEvent::Ended`（断连原因）时按指数退避循环调用。
+    /// 返回 true = 本次发起了重连；false = 预算耗尽 / 连接已活跃 / 视图态不对
+    /// （调用方据此结束退避循环）。
+    pub fn maybe_auto_reconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // 连接已重建（用户手动重启 / 上轮自动重连已生效）就不重复。
         if !matches!(self.phase, AcpPhase::Ended(_)) || self.handle.is_some() {
-            return;
+            return false;
         }
         if self.auto_reconnect_left == 0 {
-            return;
+            return false;
         }
         self.auto_reconnect_left -= 1;
         self.restart(window, cx);
+        true
     }
 
     /// 舞台头状态胶囊用的相位文案 + 颜色。
@@ -654,6 +692,12 @@ impl AcpView {
 
     pub fn phase_label(&self) -> (&'static str, u32) {
         match &self.phase {
+            AcpPhase::Starting if self.has_pending_fresh_start_prompt() => {
+                ("运行中", ui_theme::blue())
+            }
+            AcpPhase::Starting if self.is_fresh_conversation_start() => {
+                ("新对话", ui_theme::text_faint())
+            }
             AcpPhase::Starting => ("启动中", ui_theme::blue()),
             AcpPhase::Idle => ("空闲", ui_theme::text_faint()),
             AcpPhase::Running => ("运行中", ui_theme::blue()),
@@ -661,6 +705,30 @@ impl AcpView {
             AcpPhase::AwaitingChoice => ("等你选择", ui_theme::yellow()),
             AcpPhase::Ended(_) => ("已结束", ui_theme::text_faint()),
         }
+    }
+
+    fn is_fresh_conversation_start(&self) -> bool {
+        is_fresh_conversation_start(
+            &self.phase,
+            self.entries.is_empty(),
+            self.history_session_id.is_some(),
+            self.pending_initial_prompt.is_some(),
+        )
+    }
+
+    fn has_pending_fresh_start_prompt(&self) -> bool {
+        self.is_fresh_conversation_start() && self.prompt_dispatch_pending
+    }
+
+    fn has_active_turn(&self) -> bool {
+        matches!(
+            self.phase,
+            AcpPhase::Running | AcpPhase::AwaitingApproval | AcpPhase::AwaitingChoice
+        ) || self.has_pending_fresh_start_prompt()
+    }
+
+    fn is_visibly_running(&self) -> bool {
+        matches!(self.phase, AcpPhase::Running) || self.has_pending_fresh_start_prompt()
     }
 
     /// 切到本会话时自动启动：冷恢复占位（Ended）第一次被激活就 restart，
@@ -706,7 +774,7 @@ impl AcpView {
         self.input = Some(input);
     }
 
-    /// 启动期每秒重绘一次，让横幅上的「已 N 秒」真的在走。
+    /// 非静默启动期每秒重绘一次，让横幅上的「已 N 秒」真的在走。
     /// 相位离开 Starting 就自然停（不占常驻定时器）。
     fn tick_starting(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -733,7 +801,9 @@ impl AcpView {
     fn attach_handle(&mut self, handle: AcpClientHandle, cx: &mut Context<Self>) {
         let snapshot_rx = handle.snapshot_rx.clone();
         self.handle = Some(handle);
-        self.tick_starting(cx);
+        if !self.is_fresh_conversation_start() {
+            self.tick_starting(cx);
+        }
         cx.spawn(async move |this, cx| {
             while let Ok(snap) = snapshot_rx.recv().await {
                 if this
@@ -1135,11 +1205,19 @@ impl AcpView {
         }
         self.awaiting_initial_history_snapshot = false;
         let images = std::mem::take(&mut self.pending_images);
+        let dispatch_during_fresh_start = can_dispatch_fresh_start_prompt(
+            &self.phase,
+            self.entries.is_empty(),
+            self.history_session_id.is_some(),
+            self.pending_initial_prompt.is_some(),
+            self.prompt_dispatch_pending,
+            self.queued_prompts.is_empty(),
+        );
         if should_queue_prompt(
             &self.phase,
             self.prompt_dispatch_pending,
             self.queued_prompts.is_empty(),
-        ) {
+        ) && !dispatch_during_fresh_start {
             self.queued_prompts.push_back((text, images));
             cx.notify();
         } else if !self.send_prompt_now(&text, &images, cx) {
@@ -1491,14 +1569,18 @@ impl AcpView {
         id: &str,
         status: ToolCallStatus,
         has_pending_permission: bool,
+        has_expandable_content: bool,
     ) -> bool {
+        if !has_expandable_content {
+            return false;
+        }
         if self.expanded_tool_cards.contains(id) {
             return true;
         }
         if self.collapsed_tool_cards.contains(id) {
             return false;
         }
-        tool_card_default_expanded(status, has_pending_permission)
+        tool_card_default_expanded(status, has_pending_permission, has_expandable_content)
     }
 
     fn toggle_tool_card(
@@ -1507,9 +1589,18 @@ impl AcpView {
         id: String,
         status: ToolCallStatus,
         has_pending_permission: bool,
+        has_expandable_content: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.tool_card_is_expanded(&id, status, has_pending_permission) {
+        if !has_expandable_content {
+            return;
+        }
+        if self.tool_card_is_expanded(
+            &id,
+            status,
+            has_pending_permission,
+            has_expandable_content,
+        ) {
             self.expanded_tool_cards.remove(&id);
             self.collapsed_tool_cards.insert(id);
         } else {
@@ -1875,9 +1966,9 @@ impl Render for AcpView {
         let muted = t.muted_foreground;
         let acp_surface: gpui::Hsla = gpui::transparent_black().into();
 
-        // 相位横幅：启动中 / 已结束（含失败原因）时显示；正常运行不占空间。
+        // 新建空白会话在后台静默准备，用户可以立刻输入；续接/失败仍明确展示状态。
         let banner: Option<gpui::AnyElement> = match &self.phase {
-            AcpPhase::Starting => Some(
+            AcpPhase::Starting if !self.is_fresh_conversation_start() => Some(
                 div()
                     .p_2()
                     .text_sm()
@@ -1899,6 +1990,7 @@ impl Render for AcpView {
                     }))
                     .into_any_element(),
             ),
+            AcpPhase::Starting => None,
             AcpPhase::Ended(msg) => Some(
                 v_flex()
                     .p_2()
@@ -2176,10 +2268,7 @@ impl Render for AcpView {
                         ),
                 )
         });
-        let current_turn_active = matches!(
-            self.phase,
-            AcpPhase::Running | AcpPhase::AwaitingApproval | AcpPhase::AwaitingChoice
-        );
+        let current_turn_active = self.has_active_turn();
         let conversation_layout = std::rc::Rc::new(build_conversation_layout(
             &self.entries,
             current_turn_active,
@@ -2218,8 +2307,12 @@ impl Render for AcpView {
                     }) => {
                         let has_pending_permission =
                             active_permission_tool_id.as_deref() == Some(id.as_str());
-                        let card_expanded =
-                            this.tool_card_is_expanded(id, *status, has_pending_permission);
+                        let card_expanded = this.tool_card_is_expanded(
+                            id,
+                            *status,
+                            has_pending_permission,
+                            tool_output_has_content(output),
+                        );
                         let compact_in_process = process_expanded
                             && process_group.is_some()
                             && !card_expanded
@@ -2660,8 +2753,13 @@ impl Render for AcpView {
 
                         let has_pending_permission =
                             active_permission_tool_id.as_deref() == Some(id.as_str());
-                        let card_expanded =
-                            this.tool_card_is_expanded(id, *status, has_pending_permission);
+                        let has_expandable_content = tool_output_has_content(output);
+                        let card_expanded = this.tool_card_is_expanded(
+                            id,
+                            *status,
+                            has_pending_permission,
+                            has_expandable_content,
+                        );
                         let compact_in_process = process_expanded
                             && process_group.is_some()
                             && !card_expanded
@@ -2670,7 +2768,7 @@ impl Render for AcpView {
                         // 已完成工具在展开的过程组里占绝大多数。提前返回紧凑行，
                         // 只保留必要的 diff 统计，不构建随后会被丢弃的完整卡片。
                         if compact_in_process {
-                            let can_expand = tool_output_has_content(output);
+                            let can_expand = has_expandable_content;
                             let diff_stats = cached_diff_stats(
                                 this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
                             )
@@ -2735,6 +2833,7 @@ impl Render for AcpView {
                                             id_for_compact_toggle.clone(),
                                             status_for_toggle,
                                             has_pending_permission,
+                                            can_expand,
                                             cx,
                                         );
                                     }));
@@ -2837,86 +2936,98 @@ impl Render for AcpView {
                             }
                         };
 
-                        let id_for_toggle = id.clone();
-                        let status_for_toggle = *status;
                         let mut card = v_flex()
                             .w_full()
                             .overflow_hidden()
                             .rounded_lg()
                             .border_1()
                             .border_color(t.border)
-                            .bg(ui_theme::glass_card())
-                            .hover(|card| {
+                            .bg(ui_theme::glass_card());
+                        if has_expandable_content {
+                            card = card.hover(|card| {
                                 card.border_color(ui_theme::tint(bar_u32, 0x66))
                                     .shadow_md()
+                            });
+                        }
+                        let mut header = h_flex()
+                            .id(("acp-tool-card-toggle", i))
+                            .px_3()
+                            .py_1()
+                            .gap_2()
+                            .items_center();
+                        if has_expandable_content {
+                            let id_for_toggle = id.clone();
+                            let status_for_toggle = *status;
+                            header = header
+                                .cursor_pointer()
+                                .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        this.toggle_tool_card(
+                                            i,
+                                            id_for_toggle.clone(),
+                                            status_for_toggle,
+                                            has_pending_permission,
+                                            has_expandable_content,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    }),
+                                );
+                        }
+                        let header = header
+                            .when(has_expandable_content, |row| {
+                                row.child(
+                                    div()
+                                        .w(px(10.))
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(if card_expanded { "▾" } else { "▸" }),
+                                )
                             })
                             .child(
-                                h_flex()
-                                    .id(("acp-tool-card-toggle", i))
-                                    .px_3()
-                                    .py_1()
-                                    .gap_2()
+                                // 图标套一个同色软底的圆角徽章，而不是裸图标——
+                                // Discord 那种带色块的小 icon chip，比纯线框图标
+                                // 更有「彩色标签」的活泼感，扫描时也更抓眼。
+                                div()
+                                    .flex_shrink_0()
+                                    .size(px(20.))
+                                    .rounded_md()
+                                    .bg(ui_theme::tint(accent_u32, 0x24))
+                                    .flex()
                                     .items_center()
-                                    .cursor_pointer()
-                                    .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(move |this, _ev, _window, cx| {
-                                            this.toggle_tool_card(
-                                                i,
-                                                id_for_toggle.clone(),
-                                                status_for_toggle,
-                                                has_pending_permission,
-                                                cx,
-                                            );
-                                            cx.stop_propagation();
-                                        }),
-                                    )
+                                    .justify_center()
                                     .child(
-                                        div()
-                                            .w(px(10.))
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(if card_expanded { "▾" } else { "▸" }),
-                                    )
-                                    .child(
-                                        // 图标套一个同色软底的圆角徽章，而不是裸图标——
-                                        // Discord 那种带色块的小 icon chip，比纯线框图标
-                                        // 更有「彩色标签」的活泼感，扫描时也更抓眼。
-                                        div()
-                                            .flex_shrink_0()
-                                            .size(px(20.))
-                                            .rounded_md()
-                                            .bg(ui_theme::tint(accent_u32, 0x24))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(Icon::new(tool_kind_icon(kind)).size(px(12.)).text_color(accent)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_full()
-                                            .bg(ui_theme::tint(accent_u32, 0x18))
-                                            .text_xs()
-                                            .font_semibold()
-                                            .text_color(accent)
-                                            .child(tool_kind_label(kind)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_xs()
-                                            .font_family("monospace")
-                                            .text_color(muted)
-                                            .truncate()
-                                            .child(title.clone()),
-                                    )
-                                    .child(header_right),
-                            );
+                                        Icon::new(tool_kind_icon(kind))
+                                            .size(px(12.))
+                                            .text_color(accent),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(ui_theme::tint(accent_u32, 0x18))
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(accent)
+                                    .child(tool_kind_label(kind)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .font_family("monospace")
+                                    .text_color(muted)
+                                    .truncate()
+                                    .child(title.clone()),
+                            )
+                            .child(header_right);
+                        card = card.child(header);
                         if card_expanded {
                             for (part_ix, part) in output.iter().enumerate() {
                                 card = match part {
@@ -3142,7 +3253,7 @@ impl Render for AcpView {
         // 落地之间是一整屏纯黑——Copilot 这类首字延迟长的 agent 上看着像卡死。
         // 用 Spinner 而不是「已 N 秒」：GPUI 没有定时重绘，秒数会僵在原地，
         // 反而更像死了；spinner 自带动画帧，转着就说明进程还在。
-        let show_thinking = matches!(self.phase, AcpPhase::Running)
+        let show_thinking = self.is_visibly_running()
             && !matches!(
                 self.entries.last(),
                 Some(AcpEntry::Assistant {
@@ -3709,6 +3820,8 @@ impl Render for AcpView {
                 // 「排队中」，还能撤回，避免误以为消息已丢失。
                 .when(!self.queued_prompts.is_empty(), |col| {
                     let mut strip = v_flex().px_4().pt_3().gap_1p5();
+                    let can_prioritize =
+                        !matches!(self.phase, AcpPhase::Starting | AcpPhase::Ended(_));
                     for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
                         let preview: String = text.chars().take(60).collect();
                         let preview = if text.chars().count() > 60 {
@@ -3745,22 +3858,26 @@ impl Render for AcpView {
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .child(format!("排队中 · {preview}{img_suffix}")),
                                 )
-                                .child(
-                                    div()
-                                        .id(("acp-queued-prompt-send", ix))
-                                        .text_xs()
-                                        .text_color(gpui::rgb(ui_theme::accent()))
-                                        .cursor_pointer()
-                                        .hover(|d| d.opacity(0.8))
-                                        .child(if self.immediate_cancel_pending && ix == 0 {
-                                            "取消中…"
-                                        } else {
-                                            "立即发送"
-                                        })
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            this.prioritize_queued_prompt(ix, cx);
-                                        })),
-                                )
+                                .when(can_prioritize, |row| {
+                                    row.child(
+                                        div()
+                                            .id(("acp-queued-prompt-send", ix))
+                                            .text_xs()
+                                            .text_color(gpui::rgb(ui_theme::accent()))
+                                            .cursor_pointer()
+                                            .hover(|d| d.opacity(0.8))
+                                            .child(if self.immediate_cancel_pending && ix == 0 {
+                                                "取消中…"
+                                            } else {
+                                                "立即发送"
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _ev, _window, cx| {
+                                                    this.prioritize_queued_prompt(ix, cx);
+                                                },
+                                            )),
+                                    )
+                                })
                                 .child(
                                     div()
                                         .id(("acp-queued-prompt-remove", ix))
@@ -3854,7 +3971,7 @@ impl Render for AcpView {
                                 .child(model_pill)
                                 .children(config_pills),
                         )
-                        .when(matches!(self.phase, AcpPhase::Running), |row| {
+                        .when(self.is_visibly_running(), |row| {
                             row.child(
                                 div()
                                     .id("acp-stop")
@@ -3915,10 +4032,13 @@ impl Render for AcpView {
         });
 
         let plan_bar = self.render_plan_bar(cx);
-        let activity_status = matches!(self.phase, AcpPhase::Running).then(|| {
+        let activity_status = self.is_visibly_running().then(|| {
             let elapsed = self
                 .turn_started_at_ms
                 .map(|started| unix_time_ms().saturating_sub(started));
+            let activity_label = elapsed
+                .map(|elapsed| format!("进行中 · 已用 {}", format_duration(elapsed)))
+                .unwrap_or_else(|| "进行中".to_string());
             h_flex().w_full().justify_center().px_4().child(
                 h_flex()
                     .w_full()
@@ -3933,12 +4053,12 @@ impl Render for AcpView {
                     .border_1()
                     .border_color(t.border)
                     .bg(gpui::rgb(ui_theme::bg_bar()))
-                    .children(elapsed.map(|elapsed| {
+                    .child(
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child(format!("进行中 · 已用 {}", format_duration(elapsed)))
-                    }))
+                            .child(activity_label),
+                    )
                     .when(show_thinking, |row| {
                         row.child(div().w(px(1.)).h_3().bg(t.border)).child(
                             h_flex()
@@ -4409,10 +4529,16 @@ fn build_handoff_prompt(
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 
-/// 已完成工具默认折叠；进行中、失败和待审批项展开，让当前动作与异常保持可见。
-/// 用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards` 覆盖这个默认值。
-fn tool_card_default_expanded(status: ToolCallStatus, has_pending_permission: bool) -> bool {
-    has_pending_permission || !matches!(status, ToolCallStatus::Completed)
+/// 有可展示输出时，已完成工具默认折叠；进行中、失败和待审批项展开，让当前动作与
+/// 异常保持可见。用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards`
+/// 覆盖这个默认值。
+fn tool_card_default_expanded(
+    status: ToolCallStatus,
+    has_pending_permission: bool,
+    has_expandable_content: bool,
+) -> bool {
+    has_expandable_content
+        && (has_pending_permission || !matches!(status, ToolCallStatus::Completed))
 }
 
 /// 展开“执行过程”时，所有已完成且无需用户授权的工具使用相同的紧凑轨迹行。
@@ -4430,7 +4556,7 @@ fn tool_output_has_diff(output: &[ToolOutputPart]) -> bool {
 /// 没有可展示输出的工具只有标题，不提供点击展开，避免展开后得到空卡片。
 fn tool_output_has_content(output: &[ToolOutputPart]) -> bool {
     output.iter().any(|part| match part {
-        ToolOutputPart::Text(text) => !text.trim().is_empty(),
+        ToolOutputPart::Text(text) => !strip_code_fence(text).trim().is_empty(),
         ToolOutputPart::Diff { .. } => true,
     })
 }
@@ -5057,8 +5183,9 @@ mod tests {
     use super::{
         CachedDiff, HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
         build_handoff_prompt, build_markdown_cache, cached_diff_stats, can_load_older_history,
-        diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
-        is_active_permission_selection, is_match_count_line, loaded_entries_end,
+        can_dispatch_fresh_start_prompt, diff_cache_matches_output, diff_stats_for_output,
+        escape_html_tags_for_markdown, is_active_permission_selection,
+        is_fresh_conversation_start, is_match_count_line, loaded_entries_end,
         markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
         refresh_markdown_cache, resolve_restart_launch, search_summary_text,
         should_cancel_for_immediate_prompt, should_queue_prompt, should_replace_session_title,
@@ -5182,6 +5309,76 @@ mod tests {
         assert!(should_queue_prompt(&AcpPhase::Starting, false, true));
         assert!(should_queue_prompt(&AcpPhase::Idle, true, true));
         assert!(should_queue_prompt(&AcpPhase::Idle, false, false));
+    }
+
+    #[test]
+    fn fresh_conversation_start_is_the_only_silent_startup() {
+        assert!(is_fresh_conversation_start(
+            &AcpPhase::Starting,
+            true,
+            false,
+            false,
+        ));
+        assert!(!is_fresh_conversation_start(
+            &AcpPhase::Idle,
+            true,
+            false,
+            false,
+        ));
+        assert!(!is_fresh_conversation_start(
+            &AcpPhase::Starting,
+            false,
+            false,
+            false,
+        ));
+        assert!(!is_fresh_conversation_start(
+            &AcpPhase::Starting,
+            true,
+            true,
+            false,
+        ));
+        assert!(!is_fresh_conversation_start(
+            &AcpPhase::Starting,
+            true,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn fresh_start_dispatches_only_its_first_prompt_immediately() {
+        assert!(can_dispatch_fresh_start_prompt(
+            &AcpPhase::Starting,
+            true,
+            false,
+            false,
+            false,
+            true,
+        ));
+        assert!(!can_dispatch_fresh_start_prompt(
+            &AcpPhase::Starting,
+            true,
+            false,
+            false,
+            true,
+            true,
+        ));
+        assert!(!can_dispatch_fresh_start_prompt(
+            &AcpPhase::Starting,
+            true,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(!can_dispatch_fresh_start_prompt(
+            &AcpPhase::Starting,
+            true,
+            true,
+            false,
+            false,
+            true,
+        ));
     }
 
     #[test]
@@ -5651,18 +5848,37 @@ mod tests {
     }
 
     #[test]
-    fn tool_cards_expand_by_default_only_when_actionable() {
+    fn tool_card_default_expansion_follows_its_status() {
         assert!(!tool_card_default_expanded(
             ToolCallStatus::Completed,
-            false
+            false,
+            true,
         ));
-        assert!(tool_card_default_expanded(ToolCallStatus::Completed, true));
-        assert!(tool_card_default_expanded(ToolCallStatus::Pending, false));
+        assert!(tool_card_default_expanded(
+            ToolCallStatus::Completed,
+            true,
+            true,
+        ));
+        assert!(tool_card_default_expanded(
+            ToolCallStatus::Pending,
+            false,
+            true,
+        ));
         assert!(tool_card_default_expanded(
             ToolCallStatus::InProgress,
-            false
+            false,
+            true,
         ));
-        assert!(tool_card_default_expanded(ToolCallStatus::Failed, false));
+        assert!(tool_card_default_expanded(
+            ToolCallStatus::Failed,
+            false,
+            true,
+        ));
+        assert!(!tool_card_default_expanded(
+            ToolCallStatus::Failed,
+            false,
+            false,
+        ));
     }
 
     #[test]
@@ -5732,6 +5948,9 @@ mod tests {
     fn empty_tool_output_does_not_offer_expandable_content() {
         assert!(!tool_output_has_content(&[]));
         assert!(!tool_output_has_content(&[ToolOutputPart::Text(" \n".into())]));
+        assert!(!tool_output_has_content(&[ToolOutputPart::Text(
+            "```console\n```".into()
+        )]));
         assert!(tool_output_has_content(&[ToolOutputPart::Text("result".into())]));
         assert!(tool_output_has_content(&[ToolOutputPart::Diff {
             path: "src/lib.rs".into(),
