@@ -3542,6 +3542,23 @@ impl Workspace {
                     if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, reason) {
                         this.pending_acp_task_continue = Some((sid, cwd));
                     }
+                    // 守护侧断连（smeltd 升级 exec / 重启 / 未就绪）→ 延迟自动重连：
+                    // 等守护恢复后再 attach，用户不用手动点「重新连接」。预算在
+                    // AcpView 内递减、连接成功后回满，防重连风暴；用户主动结束/
+                    // agent 正常完成不在此列。
+                    if reason.contains("连接已断开") || reason.contains("连不上 smeltd") {
+                        let view = _view.clone();
+                        cx.spawn_in(window, async move |_this, cx| {
+                            let executor = cx.background_executor().clone();
+                            executor
+                                .timer(std::time::Duration::from_millis(1500))
+                                .await;
+                            let _ = view.update_in(cx, |view, window, cx| {
+                                view.maybe_auto_reconnect(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
                 }
             },
         )
