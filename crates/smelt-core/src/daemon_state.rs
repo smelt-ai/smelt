@@ -50,6 +50,13 @@ pub struct DaemonSessionState {
     /// 默认 true——宁可不删，不误杀。
     #[serde(default = "default_connected")]
     pub connected: bool,
+    /// PTY `open` 的交互 attachment 数。ACP/旧版 daemon 没有该字段时为 0；结合
+    /// `connected` 与 watcher 数可区分“桌面渲染层在线”和“仅移动旁观层在线”。
+    #[serde(default)]
+    pub interactive_connections: usize,
+    /// PTY `watch` 的只读订阅数；移动端终端画面目前使用这条输出通道。
+    #[serde(default)]
+    pub watcher_connections: usize,
 }
 
 fn default_connected() -> bool {

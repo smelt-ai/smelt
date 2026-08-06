@@ -1,0 +1,80 @@
+# 每次 PR 与 main 推送都跑 Rust 与 Flutter 的检查。发版流程另见 release.yml。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新推送会取消仍在跑的旧任务，两个 job 都要装重量级工具链，
+# 排队重跑没有意义。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # GPUI 只在 macOS 上编得过，且 runner 必须是 Apple Silicon（同 release.yml）。
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 这里不跑 cargo fmt --check：仓库从来没有 rustfmt 干净过（main 上百余处
+      # 漂移），加上去只会一上来就红，把真正的信号淹掉。要么先整体格式化一次，
+      # 那是独立的一次改动。
+      #
+      # 用 nextest 而不是 cargo test：smeltd 的 resume_handoff 测试摆弄的是进程级
+      # 的全局状态（fd 表、waitpid、进程组），同一个进程里跑就会互相串味——原样
+      # 跑大约五次挂一次，串行也照挂。nextest 每个测试起一个独立进程，这个干扰
+      # 就不存在了。
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # 跳掉的两组测试都不是这里能给出有效信号的：
+      #
+      # - damage_gate_tests 走 Terminal::spawn 的完整生产路径，要一个真的 PTY、
+      #   真的 shell，以及本机活着的 smeltd。runner 上没有。
+      # - short_ordered_list_bubble_does_not_collapse_below_min_width 在 main 上
+      #   就是红的：gpui 的测试平台对 test window 抛 `not implemented: Test
+      #   Windows are not backed by a real platform window`，是 zed 依赖升级带来
+      #   的，与被测逻辑无关。修好后把它从下面的表达式里去掉。
+      - name: Run tests
+        run: |
+          cargo nextest run --workspace -E '
+            not test(damage_gate_tests)
+            and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
+          '
+
+  mobile:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      # 也是在验证 xterm 那条 git 依赖能解析：它指向 smelt-ai/xterm.dart 的一个
+      # commit，pub 上没有，解析不了的话这一步就直接红。
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Run tests
+        run: flutter test

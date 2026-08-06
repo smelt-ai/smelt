@@ -1,6 +1,6 @@
 # Smelt Mobile
 
-Flutter client for Smelt remote ACP conversations.
+Flutter client for Smelt remote ACP conversations and live terminal sessions.
 
 ## iOS development signing
 

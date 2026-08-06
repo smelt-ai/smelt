@@ -92,6 +92,18 @@ void main() {
     expect(sessionListSubtitle(session), isNull);
   });
 
+  test('terminal sessions use a terminal fallback title', () {
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: ' ',
+      phase: 'idle',
+      agent: 'codex',
+    );
+
+    expect(sessionListTitle(session), 'Terminal');
+  });
+
   test('session filters separate actionable and running conversations', () {
     const approval = SessionSummary(
       id: 'approval',
@@ -137,6 +149,72 @@ void main() {
       ['running'],
     );
     expect(filterSessions(sessions, SessionListFilter.all), sessions);
+  });
+
+  test('attention notifications stay hidden for the active session', () {
+    const completed = LifecycleAttention(
+      sessionId: 'current',
+      title: 'Completed',
+      message: 'Task completed',
+      kind: 'success',
+    );
+    const input = LifecycleAttention(
+      sessionId: 'current',
+      title: 'Waiting for you',
+      message: 'Agent needs input',
+      kind: 'input',
+    );
+
+    for (final attention in [completed, input]) {
+      expect(
+        shouldShowAttentionNotification(
+          attention: attention,
+          activeSessionId: 'current',
+          subscribedSessionId: null,
+        ),
+        isFalse,
+      );
+    }
+  });
+
+  test('attention notifications still surface for other sessions', () {
+    const completed = LifecycleAttention(
+      sessionId: 'background',
+      title: 'Completed',
+      message: 'Task completed',
+      kind: 'success',
+    );
+    const input = LifecycleAttention(
+      sessionId: 'background',
+      title: 'Waiting for you',
+      message: 'Agent needs input',
+      kind: 'input',
+    );
+
+    expect(
+      shouldShowAttentionNotification(
+        attention: completed,
+        activeSessionId: 'current',
+        subscribedSessionId: null,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldShowAttentionNotification(
+        attention: completed,
+        activeSessionId: null,
+        subscribedSessionId: 'background',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowAttentionNotification(
+        attention: input,
+        activeSessionId: null,
+        subscribedSessionId: 'background',
+      ),
+      isTrue,
+    );
   });
 
   testWidgets('session filter bar fits a compact phone width', (tester) async {
