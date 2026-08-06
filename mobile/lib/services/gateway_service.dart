@@ -670,16 +670,25 @@ class GatewayService {
 
   void createSession(
     String projectRoot,
-    String agentOptionId, {
+    String? agentOptionId, {
     String? resumeId,
   }) {
     _send({
       'method': 'createSession',
       'params': {
         'projectRoot': projectRoot,
-        'agentOptionId': agentOptionId,
+        'agentOptionId': ?agentOptionId,
         'resumeId': ?resumeId,
       },
+    });
+  }
+
+  /// 新建一个终端会话（PTY），跟 [createSession] 走同一个 `createSession`
+  /// 请求，只是 `kind: 'terminal'` 且不需要 agent。
+  void createTerminalSession(String projectRoot) {
+    _send({
+      'method': 'createSession',
+      'params': {'projectRoot': projectRoot, 'kind': 'terminal'},
     });
   }
 
