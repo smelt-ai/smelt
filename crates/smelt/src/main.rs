@@ -2720,7 +2720,15 @@ impl Workspace {
         };
         // pending 已挂上全部待恢复会话 → 写盘不会抹掉存档。
         ws.save_state(cx);
-        updater::cleanup_stale_backup();
+        // 清上次更新残留的 .bak 挪后台：remove_dir_all 整份 .app 可能耗时，
+        // ES 慢 open() 会拖慢首窗。
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move { updater::cleanup_stale_backup() })
+                .await;
+        })
+        .detach();
         ws.check_for_update(true, cx);
         // 有待恢复会话：ensure+reattach 在 restore 线程串行做完后再 check_daemon_outdated，
         // 避免与 ensure handoff 三线并行踩踏。无会话则直接查守护状态。
@@ -5975,9 +5983,22 @@ impl Workspace {
                             if let updater::UpdateStatus::ReadyToInstall { staged_app, .. } =
                                 &this.update_status
                             {
-                                // 与设置页「立即重启更新」相同：先 handoff 守护再换包。
-                                let _ =
-                                    crate::terminal::install_app_preserving_sessions(staged_app);
+                                let staged = staged_app.clone();
+                                // 装包挪后台：内部有 copy/rename 整份 .app + 30s 级等待，
+                                // ES 慢 open() 时会冻结主线程；装完回主线程再退出。
+                                cx.spawn(async move |_this, cx| {
+                                    let _ = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            crate::terminal::install_app_preserving_sessions(
+                                                &staged,
+                                            )
+                                        })
+                                        .await;
+                                    cx.update(|cx| cx.quit());
+                                })
+                                .detach();
+                                return;
                             }
                             cx.quit();
                         },
