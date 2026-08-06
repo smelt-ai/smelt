@@ -264,12 +264,14 @@ pub fn markdown_view(id: impl Into<ElementId>, text: impl Into<SharedString>) ->
     markdown_view_with_selection(id, text, true)
 }
 
-/// ACP 对话里的 Markdown 需要保持链接点击可用，避免文本选择状态拦截链接事件。
+/// ACP 对话里的 Markdown：正文可框选复制，同时链接保持可点击——gpui-component
+/// 的链接打开（MouseUp）会先检查是否已有文本选择，拖拽选择时不会误触链接，
+/// 因此打开 selectable 不会破坏链接点击。
 pub fn markdown_view_clickable(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
 ) -> TextView {
-    markdown_view_with_selection(id, text, false)
+    markdown_view_with_selection(id, text, true)
 }
 
 fn markdown_view_with_selection(
