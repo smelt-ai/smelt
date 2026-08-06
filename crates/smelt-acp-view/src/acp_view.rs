@@ -218,6 +218,9 @@ pub struct AcpView {
     /// 一次就一直持有到视图销毁，Drop 时只会断开 socket（见 `AcpClientHandle`
     /// 文件头注释），不影响 smeltd 那边的会话存活。
     handle: Option<AcpClientHandle>,
+    /// 守护侧断连（smeltd 升级/重启）后自动重连的剩余预算。每次自动重连递减，
+    /// 收到活跃快照（连接成功）回满 3；耗尽则停止自动重连，等用户手动。
+    auto_reconnect_left: u32,
     /// 重启用的启动规格（placeholder / restart 共用）。
     launch: AcpLaunchSpec,
     /// true = 普通会话重启时按当前设置刷新命令；false = 保留持久化下来的 launch。
@@ -522,6 +525,7 @@ impl AcpView {
             phase: AcpPhase::Ended(reason),
             input: None,
             handle: None,
+            auto_reconnect_left: 3,
             launch,
             refresh_launch_from_settings,
             profile_id,
@@ -621,6 +625,21 @@ impl AcpView {
     /// 历史页再次点“继续”时主动重新连接 smeltd。若 daemon 会话仍在，这只是
     /// attach 并立即返回完整快照；若 GUI 之前断线留下了旧 View，也能由此修复。
     pub fn reattach_to_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restart(window, cx);
+    }
+
+    /// 守护侧断连（smeltd 升级/重启/未就绪）后自动重连：预算内直接 restart。
+    /// 由 main.rs 在 `AcpViewEvent::Ended`（断连原因）时延迟调用；预算耗尽后
+    /// 不再自动重连，等用户手动（收到活跃快照时预算回满）。
+    pub fn maybe_auto_reconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 连接已重建（用户手动重启 / 上轮自动重连已生效）就不重复。
+        if !matches!(self.phase, AcpPhase::Ended(_)) || self.handle.is_some() {
+            return;
+        }
+        if self.auto_reconnect_left == 0 {
+            return;
+        }
+        self.auto_reconnect_left -= 1;
         self.restart(window, cx);
     }
 
@@ -1336,6 +1355,11 @@ impl AcpView {
             self.awaiting_initial_history_snapshot = false;
         }
         self.phase = snap.phase;
+        // 连接活跃（非 Ended）→ 自动重连预算回满；Ended（含断连）时不重置，
+        // 让 maybe_auto_reconnect 的递减生效，防重连风暴。
+        if !matches!(self.phase, AcpPhase::Ended(_)) {
+            self.auto_reconnect_left = 3;
+        }
         self.permissions = snap.pending_permissions;
         let current_permission = self
             .permissions
