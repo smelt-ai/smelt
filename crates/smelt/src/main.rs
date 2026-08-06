@@ -2202,8 +2202,6 @@ struct Workspace {
     task_selected: Option<String>,
     /// 新建任务绑定的项目 cwd。
     task_bind_project: Option<String>,
-    /// 新建任务选用的 launch 命令（与设置页启动项 command 对齐）。
-    task_bind_launch: Option<String>,
     /// 在已有终端执行：Some(smeltd session id)；None = 新开终端。
     /// 由「终端/会话右键 → 新建任务」写入。
     task_bind_session: Option<String>,
@@ -2220,11 +2218,7 @@ struct Workspace {
     /// ACP 任务回合结束/失败挂旗（sid, cwd）：render 头与终端挂旗汇流到
     /// `on_session_task_idle` 触发自动续跑/重试。None = 无待续跑。
     pending_acp_task_continue: Option<(String, String)>,
-    /// 新建任务弹窗：执行通道（false=终端，true=ACP 对话）。
-    task_channel_acp: bool,
-    /// 新建任务弹窗：ACP 通道接哪家 agent（`AcpAgentKind::id()`，默认 claude）。
-    task_acp_agent: String,
-    /// 新建任务弹窗：高级选项（通道/类型/自动执行等）是否展开。默认折叠，只留主字段。
+    /// 新建任务弹窗：高级选项（类型/自动执行等）是否展开。默认折叠，只留主字段。
     task_show_advanced: bool,
     /// 文件树搜索结果（文件名 + 文件内容）：后台遍历项目填充，render 只读。
     /// query 非空时左栏由树形切换为扁平命中列表。
@@ -2638,7 +2632,6 @@ impl Workspace {
             task_auto_run: true,
             task_selected: None,
             task_bind_project: None,
-            task_bind_launch: None,
             task_bind_session: None,
             task_column_filter: None,
             _task_title_sub: None,
@@ -2646,8 +2639,6 @@ impl Workspace {
             task_editing: None,
             task_schedule_started: false,
             pending_acp_task_continue: None,
-            task_channel_acp: false,
-            task_acp_agent: "claude".into(),
             task_show_advanced: false,
             search_results: None,
             search_gen: 0,

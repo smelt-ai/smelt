@@ -81,6 +81,15 @@ fn should_queue_prompt(
     prompt_dispatch_pending || !matches!(phase, AcpPhase::Idle) || !queue_is_empty
 }
 
+fn can_dispatch_prompt_immediately(
+    phase: &AcpPhase,
+    prompt_dispatch_pending: bool,
+    queue_is_empty: bool,
+    has_handle: bool,
+) -> bool {
+    matches!(phase, AcpPhase::Idle) && !prompt_dispatch_pending && queue_is_empty && has_handle
+}
+
 /// 新建的空白会话可以静默准备：输入框已经可用，用户无需先等 ACP 握手完成。
 /// 续接历史、自动交接和已有消息的会话仍展示启动状态，避免隐藏实际的恢复工作。
 fn is_fresh_conversation_start(
@@ -1224,6 +1233,26 @@ impl AcpView {
             self.queued_prompts.push_back((text, images));
             cx.notify();
         }
+    }
+
+    /// 任务等外部调用者需要把 prompt 和一次执行记录严格对应，不能把消息排到
+    /// 正在运行的 turn 后面。仅在当前会话可立即发送时返回 true。
+    pub fn can_send_prompt_immediately(&self) -> bool {
+        can_dispatch_prompt_immediately(
+            &self.phase,
+            self.prompt_dispatch_pending,
+            self.queued_prompts.is_empty(),
+            self.handle.is_some(),
+        )
+    }
+
+    /// 立即发送纯文本 prompt，绝不排队。返回 false 表示会话不再空闲或连接不可用。
+    pub fn try_send_prompt_immediately(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        if text.trim().is_empty() || !self.can_send_prompt_immediately() {
+            return false;
+        }
+        self.awaiting_initial_history_snapshot = false;
+        self.send_prompt_now(&text, &[], cx)
     }
 
     /// 真正把一条 prompt 打给 smeltd——不碰 `self.pending_images`，图片由调用方
@@ -5183,7 +5212,8 @@ mod tests {
     use super::{
         CachedDiff, HANDOFF_MAX_CHARS, RESTORED_ENTRY_HEIGHT_HINT_PX, build_conversation_layout,
         build_handoff_prompt, build_markdown_cache, cached_diff_stats, can_load_older_history,
-        can_dispatch_fresh_start_prompt, diff_cache_matches_output, diff_stats_for_output,
+        can_dispatch_fresh_start_prompt, can_dispatch_prompt_immediately,
+        diff_cache_matches_output, diff_stats_for_output,
         escape_html_tags_for_markdown, is_active_permission_selection,
         is_fresh_conversation_start, is_match_count_line, loaded_entries_end,
         markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
@@ -5309,6 +5339,40 @@ mod tests {
         assert!(should_queue_prompt(&AcpPhase::Starting, false, true));
         assert!(should_queue_prompt(&AcpPhase::Idle, true, true));
         assert!(should_queue_prompt(&AcpPhase::Idle, false, false));
+    }
+
+    #[test]
+    fn task_prompt_can_only_dispatch_to_an_idle_connected_session() {
+        assert!(can_dispatch_prompt_immediately(
+            &AcpPhase::Idle,
+            false,
+            true,
+            true,
+        ));
+        assert!(!can_dispatch_prompt_immediately(
+            &AcpPhase::Running,
+            false,
+            true,
+            true,
+        ));
+        assert!(!can_dispatch_prompt_immediately(
+            &AcpPhase::Idle,
+            true,
+            true,
+            true,
+        ));
+        assert!(!can_dispatch_prompt_immediately(
+            &AcpPhase::Idle,
+            false,
+            false,
+            true,
+        ));
+        assert!(!can_dispatch_prompt_immediately(
+            &AcpPhase::Idle,
+            false,
+            true,
+            false,
+        ));
     }
 
     #[test]

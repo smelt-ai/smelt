@@ -1,7 +1,8 @@
 //! 本地任务：侧栏统一查看与开跑，**全部走交互终端**（不 `-p` 无头批跑）。
 //!
 //! - 总览只做会话监控；任务列表在左侧「任务」分组
-//! - 开跑 = 新开侧栏终端 + `launch "首包"`（CLI 启动参数，**不**模拟粘贴/回车）
+//! - 默认开跑 = 新开侧栏终端 + `launch "首包"`（CLI 启动参数，**不**模拟粘贴/回车）
+//! - 手动可从任务卡的 ACP 菜单新建独立结构化对话；选择仅属于本次 `TaskRun`
 //! - 已有会话续聊才用 paste + 裸 `\r`（见 `send_text_and_submit`）
 //! - 见 docs/local-tasks.md
 
@@ -19,7 +20,7 @@ use gpui_component::notification::Notification;
 use gpui_component::*;
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{active_launch_entries, icon_for_launch_command};
+use crate::settings::{AcpAgentKind, active_launch_entries};
 use crate::terminal_view::TerminalView;
 use crate::{Workspace, new_sid};
 
@@ -190,8 +191,9 @@ pub struct TaskRun {
     pub id: String,
     pub task_id: String,
     pub attempt: u32,
-    /// 第一阶段只接 PTY；枚举先保留 ACP 形态。
+    /// 本次实际执行时选择的通道；不属于 Task 的长期配置。
     pub channel: TaskChannel,
+    /// 本次实际执行时解析出的启动命令快照。
     pub launch: String,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -262,13 +264,11 @@ fn default_max_attempts() -> u32 {
 /// - `title`：**给人看**的侧栏名；可空，创建时用首包首行生成
 /// - `body`：**给 agent 的首包**（唯一写入 launch 启动参数的内容）
 /// - `project_cwd`：在哪个项目目录开终端
-/// - `launch`：base 启动命令（不含首包拼接）
 /// - `session_id`：执行体（smeltd 会话）
 /// - `kind` / `run_at`：普通 vs 单次定时
 /// - `auto_run`：是否允许系统自动开跑（完成续跑 / 定时扫描）；手动点「运行」始终可以
 /// - `depends_on`：前置任务 id，全部 Done 才允许执行
 /// - `retry_policy` / `retry_at`：失败自动重试策略与当前冷却到点时刻
-/// - `channel`：执行通道（PTY / ACP）
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -287,9 +287,6 @@ pub struct Task {
     /// 当前/最近一次执行。旧 tasks.json 缺少该字段时自动为空。
     #[serde(default)]
     pub current_run_id: Option<String>,
-    /// 快捷启动 base 命令（如 `claude --dangerously-skip-permissions`）。
-    #[serde(default)]
-    pub launch: Option<String>,
     /// 普通 / 单次定时。缺省 = 普通（兼容旧 tasks.json）。
     #[serde(default)]
     pub kind: TaskKind,
@@ -309,9 +306,6 @@ pub struct Task {
     /// 重试冷却到点时刻（Unix 秒）。None = 立即可 claim。开跑/领用即清。
     #[serde(default)]
     pub retry_at: Option<u64>,
-    /// 执行通道（PTY / ACP）。旧数据缺省 = PTY。
-    #[serde(default)]
-    pub channel: TaskChannel,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -323,7 +317,7 @@ fn default_true() -> bool {
 }
 
 impl Task {
-    pub fn new(project_cwd: String, title: String, body: String, launch: Option<String>) -> Self {
+    pub fn new(project_cwd: String, title: String, body: String) -> Self {
         let now = now_secs();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -333,14 +327,12 @@ impl Task {
             project_cwd,
             session_id: None,
             current_run_id: None,
-            launch,
             kind: TaskKind::Once,
             run_at: None,
             auto_run: true,
             depends_on: Vec::new(),
             retry_policy: TaskRetryPolicy::default(),
             retry_at: None,
-            channel: TaskChannel::Pty,
             created_at: now,
             updated_at: now,
         }
@@ -536,6 +528,13 @@ pub struct NewTaskPrefill {
 
 impl Global for NewTaskPrefill {}
 
+/// 可立即接收任务首包的已打开 ACP 对话。仅用于运行时菜单，不会写进任务。
+#[derive(Clone)]
+pub(crate) struct AcpTaskTarget {
+    pub session_id: String,
+    pub label: String,
+}
+
 // ===================== TaskStore（全局）=====================
 //
 // TaskStore 持有**进程级内存缓存**（render 读它不碰 socket），写操作同步发给
@@ -649,17 +648,20 @@ impl TaskStore {
         Self::begin_run(task_id, launch, TaskChannel::Pty)
     }
 
-    /// 为任务创建一次 ACP 执行尝试（记录接哪家 agent 与可选 workspace profile）。
+    /// 为任务创建一次 ACP 对话执行尝试。agent 是本次运行时选择，不写回 Task。
     pub fn begin_acp_run(
         task_id: &str,
         launch: &str,
-        agent: &str,
+        agent: AcpAgentKind,
         profile_id: Option<String>,
     ) -> Option<TaskRun> {
         Self::begin_run(
             task_id,
             launch,
-            TaskChannel::Acp { agent: agent.to_string(), profile_id },
+            TaskChannel::Acp {
+                agent: agent.id().to_string(),
+                profile_id,
+            },
         )
     }
 
@@ -1024,25 +1026,8 @@ impl Workspace {
         self.known_project_cwds(cx).into_iter().next()
     }
 
-    /// 新建任务选用的 launch；无则取启动项第一项。
-    pub fn task_bind_launch_cmd(&self, cx: &App) -> Option<String> {
-        if let Some(c) = &self.task_bind_launch {
-            if !c.trim().is_empty() {
-                return Some(c.clone());
-            }
-        }
-        active_launch_entries(cx).first().map(|e| e.command.clone())
-    }
-
     pub fn set_task_bind_project(&mut self, cwd: String, cx: &mut Context<Self>) {
         self.task_bind_project = Some(cwd);
-        cx.notify();
-    }
-
-    pub fn set_task_bind_launch(&mut self, command: String, cx: &mut Context<Self>) {
-        self.task_bind_launch = Some(command);
-        // 手动选 Agent 时改回「新开终端」
-        self.task_bind_session = None;
         cx.notify();
     }
 
@@ -1063,6 +1048,19 @@ impl Workspace {
         self.open_new_task_modal(window, cx);
     }
 
+    /// 从项目 TASK 面板新建：固定项目 cwd，但不预绑任何已有会话。
+    pub fn open_new_task_for_project(
+        &mut self,
+        cwd: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_new_task_modal(window, cx);
+        self.task_bind_session = None;
+        self.task_bind_project = Some(cwd);
+        cx.notify();
+    }
+
     pub fn ensure_task_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.task_title_input.is_some() {
             return;
@@ -1072,7 +1070,7 @@ impl Workspace {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(4, 12)
-                .placeholder("写给 agent 的第一条指令…")
+                .placeholder("描述要完成的工作…")
         });
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("留空则用指令首行"));
         let run_at =
@@ -1120,9 +1118,6 @@ impl Workspace {
                 self.task_bind_project = self.known_project_cwds(cx).into_iter().next();
             }
         }
-        if self.task_bind_launch.is_none() {
-            self.task_bind_launch = active_launch_entries(cx).first().map(|e| e.command.clone());
-        }
         // 每次打开：默认普通 + 可自动执行，清空文案；焦点落在首包。
         self.task_kind = TaskKind::Once;
         self.task_auto_run = true;
@@ -1163,15 +1158,8 @@ impl Workspace {
         // 编辑不涉及「注入哪个终端」——清掉会话绑定，避免保存被当成开跑上下文。
         self.task_bind_session = None;
         self.task_bind_project = Some(task.project_cwd.clone());
-        self.task_bind_launch = task.launch.clone();
         self.task_kind = task.kind;
         self.task_auto_run = task.auto_run;
-        self.task_channel_acp = matches!(&task.channel, TaskChannel::Acp { .. });
-        if let TaskChannel::Acp { agent, .. } = &task.channel {
-            if !agent.is_empty() {
-                self.task_acp_agent = agent.clone();
-            }
-        }
 
         if let Some(input) = &self.task_body_input {
             let body = task.body.clone();
@@ -1240,12 +1228,6 @@ impl Workspace {
         } else {
             title_in
         };
-        let launch = self.task_bind_launch_cmd(cx);
-        let channel = if self.task_channel_acp {
-            TaskChannel::Acp { agent: self.task_acp_agent.clone(), profile_id: None }
-        } else {
-            TaskChannel::Pty
-        };
         TaskStore::update(&id, |t| {
             t.title = title;
             t.body = body;
@@ -1253,8 +1235,6 @@ impl Workspace {
             t.run_at = run_at;
             t.auto_run = auto_run;
             t.project_cwd = cwd;
-            t.launch = launch;
-            t.channel = channel;
         });
         self.close_new_task_modal(cx);
     }
@@ -1308,19 +1288,12 @@ impl Workspace {
         } else {
             title_in
         };
-        let launch = self.task_bind_launch_cmd(cx);
         // 清掉绑定，避免下次侧栏新建仍绑旧终端
         let sid = self.task_bind_session.take();
-        let mut task = Task::new(cwd, title, body, launch);
+        let mut task = Task::new(cwd, title, body);
         task.kind = kind;
         task.run_at = run_at;
         task.auto_run = auto_run;
-        if self.task_channel_acp {
-            task.channel = TaskChannel::Acp {
-                agent: self.task_acp_agent.clone(),
-                profile_id: None,
-            };
-        }
         let id = task.id.clone();
         self.task_selected = Some(id.clone());
         TaskStore::upsert(task);
@@ -1339,12 +1312,14 @@ impl Workspace {
             kind == TaskKind::Scheduled && run_at.map(|at| at > now_secs()).unwrap_or(true);
         let should_run = run && !schedule_only;
 
-        if let Some(sid) = sid {
-            self.assign_task_to_session(&id, &sid, should_run, window, cx);
-        } else if should_run {
-            // 走 run_task：按通道路由（终端新开 / ACP 对话），并守依赖。
-            self.run_task(&id, window, cx);
+        if should_run {
+            if let Some(sid) = sid {
+                self.assign_task_to_session(&id, &sid, true, window, cx);
+            } else {
+                self.run_task(&id, window, cx);
+            }
         } else {
+            // 「仅创建」不预绑当前会话；任务保持与 Agent 无关，直到实际运行。
             cx.notify();
         }
     }
@@ -1449,18 +1424,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 弹窗切执行通道：false=终端，true=ACP 对话。
-    pub fn set_task_channel_acp(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.task_channel_acp = on;
-        cx.notify();
-    }
-
-    /// 弹窗切 ACP 通道接哪家 agent（`AcpAgentKind::id()`）。
-    pub fn set_task_acp_agent(&mut self, agent: &str, cx: &mut Context<Self>) {
-        self.task_acp_agent = agent.to_string();
-        cx.notify();
-    }
-
     /// 按 smeltd session id 查终端 cwd。
     fn cwd_for_session(&self, session_id: &str, cx: &App) -> Option<String> {
         for sess in &self.sessions {
@@ -1500,41 +1463,18 @@ impl Workspace {
             project_label(&cur_proj)
         };
 
-        let launches = active_launch_entries(cx);
-        let cur_launch_cmd = self.task_bind_launch_cmd(cx).unwrap_or_default();
-        let agent_btn_label = launches
-            .iter()
-            .find(|e| e.command == cur_launch_cmd)
-            .map(|e| e.label.clone())
-            .unwrap_or_else(|| {
-                if cur_launch_cmd.is_empty() {
-                    "默认启动项".into()
-                } else {
-                    cur_launch_cmd.clone()
-                }
-            });
-        let agent_icon = if cur_launch_cmd.is_empty() {
-            IconName::Bot
-        } else {
-            icon_for_launch_command(&cur_launch_cmd)
-        };
-
         let editing = self.task_editing.is_some();
         let on_existing = self.task_bind_session.is_some();
         let is_scheduled = self.task_kind == TaskKind::Scheduled;
         let auto_run = self.task_auto_run || is_scheduled;
-        let channel_acp = self.task_channel_acp;
-        let acp_agent_btn = smelt_core::agent_kind::AcpAgentKind::from_id(&self.task_acp_agent)
-            .map(|a| a.label().to_string())
-            .unwrap_or_else(|| "Claude Code".into());
         let exec_hint = if is_scheduled {
-            "到点后自动新开终端开跑（单次）；也可提前点「运行」"
+            "到点后按当前默认启动项新开终端（单次）；任务本身不绑定 Agent"
         } else if auto_run {
-            "可自动执行：前一条做完 / 队列有空时系统会接着跑；也可手动「运行」"
+            "可自动执行：前一条做完 / 队列有空时系统会接着跑；运行时才解析默认启动项"
         } else if on_existing {
             "仅手动：不会被完成续跑取走；运行 = 键入指令并回车进当前终端"
         } else {
-            "仅手动：点「运行」才开终端；不会被系统自动取走"
+            "仅手动：点「运行」时按当前默认启动项开终端；不会被系统自动取走"
         };
         let primary_label = if editing {
             "保存"
@@ -1553,8 +1493,6 @@ impl Workspace {
         };
 
         let e = cx.entity().clone();
-        let e2 = e.clone();
-        let e3 = e.clone();
         // 主区：项目（高频，默认当前项目）。
         let project_row = v_flex()
             .gap_1()
@@ -1593,51 +1531,6 @@ impl Workspace {
                         }
                     }),
             );
-        // 高级区：Agent（启动命令）。当前终端时忽略。
-        let agent_row = v_flex()
-            .gap_1()
-            .opacity(if on_existing { 0.45 } else { 1. })
-            .child(field_label(if on_existing {
-                "Agent · 当前终端时忽略"
-            } else {
-                "Agent · 可选"
-            }))
-            .child(
-                Button::new("task-pick-agent")
-                    .label(agent_btn_label)
-                    .icon(agent_icon)
-                    .small()
-                    .w_full()
-                    .dropdown_menu({
-                        let launches = launches.clone();
-                        move |menu, _window, _cx| {
-                            let mut menu = menu;
-                            if launches.is_empty() {
-                                return menu.item(
-                                    PopupMenuItem::new("设置里暂无启动项").disabled(true),
-                                );
-                            }
-                            for entry in &launches {
-                                let label = entry.label.clone();
-                                let command = entry.command.clone();
-                                let e = e2.clone();
-                                let icon = icon_for_launch_command(&command);
-                                menu = menu.item(
-                                    PopupMenuItem::new(label).icon(icon).on_click(
-                                        move |_, _, cx| {
-                                            let command = command.clone();
-                                            e.update(cx, |ws, cx| {
-                                                ws.set_task_bind_launch(command, cx);
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            menu
-                        }
-                    }),
-            );
-
         // 类型：普通 / 定时
         let kind_row = h_flex()
             .gap_2()
@@ -1702,62 +1595,7 @@ impl Workspace {
                 "只等人点运行"
             }));
 
-        // 执行通道：终端（新开交互终端 + 首包指令）/ ACP 对话（结构化消息流）。
-        let channel_row = h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                Button::new("task-channel-terminal")
-                    .label("终端")
-                    .small()
-                    .when(!channel_acp, |b| b.primary())
-                    .when(channel_acp, |b| b.ghost())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_task_channel_acp(false, cx);
-                    })),
-            )
-            .child(
-                Button::new("task-channel-acp")
-                    .label("ACP 对话")
-                    .small()
-                    .when(channel_acp, |b| b.primary())
-                    .when(!channel_acp, |b| b.ghost())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_task_channel_acp(true, cx);
-                    })),
-            )
-            .child(div().text_xs().text_color(muted).child(if channel_acp {
-                "对话通道：结构化消息流"
-            } else {
-                "终端通道：交互终端 + 首包指令"
-            }));
-
-        // ACP 通道时选 agent（默认 claude）。
-        let e_agent = e3.clone();
-        let acp_agent_row = v_flex()
-            .gap_1()
-            .child(field_label("Agent · ACP 对话接哪家"))
-            .child(
-                Button::new("task-acp-agent")
-                    .label(acp_agent_btn)
-                    .small()
-                    .w_full()
-                    .dropdown_menu(move |menu, _window, _cx| {
-                        let mut menu = menu;
-                        for agent in smelt_core::agent_kind::AcpAgentKind::ALL {
-                            let label = agent.label().to_string();
-                            let id = agent.id().to_string();
-                            let e = e_agent.clone();
-                            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                                let id = id.clone();
-                                e.update(cx, |ws, cx| ws.set_task_acp_agent(&id, cx));
-                            }));
-                        }
-                        menu
-                    }),
-            );
-
-        // 高级选项折叠区：通道/类型/自动执行/Agent/定时时间都收进来。
+        // 高级选项折叠区：类型、自动执行和定时时间都收进来。
         // 新建默认折叠（只留「指令 + 项目」主字段）；编辑模式恒展开（改已有配置）。
         let advanced_open = self.task_show_advanced || editing;
         let advanced_toggle = div()
@@ -1792,8 +1630,6 @@ impl Workspace {
                 .py_3()
                 .rounded_lg()
                 .bg(rgb(crate::ui_theme::bg_rail()))
-                .child(v_flex().gap_1().child(field_label("执行通道")).child(channel_row))
-                .when(channel_acp, |d| d.child(acp_agent_row))
                 .child(v_flex().gap_1().child(field_label("类型")).child(kind_row))
                 .when(is_scheduled, |d| {
                     let run_at_in = self.task_run_at_input.as_ref();
@@ -1810,7 +1646,6 @@ impl Workspace {
                         .child(field_label("自动执行"))
                         .child(auto_row),
                 )
-                .child(agent_row)
                 .when(editing, |d| {
                     d.child(
                         v_flex()
@@ -1853,7 +1688,7 @@ impl Workspace {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(field_label("指令 · 给 agent 的首包（必填）"))
+                    .child(field_label("任务说明 · 运行时首包（必填）"))
                     .child(Input::new(body_in)),
             )
             // 主字段：项目（默认当前项目）
@@ -2167,6 +2002,7 @@ impl Workspace {
         let card_border = card_border.into();
         let id = task.id.clone();
         let id_run = id.clone();
+        let id_acp = id.clone();
         let id_col = id.clone();
         let id_edit = id.clone();
         let id_del = id.clone();
@@ -2237,6 +2073,9 @@ impl Workspace {
         });
         let e_status = cx.entity().clone();
         let id_status = id_col.clone();
+        let e_acp = cx.entity().clone();
+        let acp_targets = self.idle_acp_task_targets(cx);
+        let can_run_in_acp = col.is_todo() || col == TaskColumn::Failed;
 
         // 状态徽章可点：下拉改状态（不占操作行）
         let status_badge = Button::new(SharedString::from(format!("tc-st-{id}")))
@@ -2400,6 +2239,73 @@ impl Workspace {
                                 this.primary_task_action(&id_run, window, cx);
                             }))
                     }))
+                    .when(can_run_in_acp, |d| {
+                        d.child(
+                            Button::new(SharedString::from(format!("tc-acp-{id}")))
+                                .label("ACP")
+                                .small()
+                                .ghost()
+                                .tooltip("发送到已有或新建 ACP 对话")
+                                .dropdown_menu(move |menu, _window, _cx| {
+                                    let mut menu = menu;
+                                    if acp_targets.is_empty() {
+                                        menu = menu.item(
+                                            PopupMenuItem::new("没有空闲的 ACP 对话")
+                                                .disabled(true),
+                                        );
+                                    } else {
+                                        menu = menu.item(
+                                            PopupMenuItem::new("发送到空闲的已打开 ACP 对话")
+                                                .disabled(true),
+                                        );
+                                        for target in &acp_targets {
+                                            let task_id = id_acp.clone();
+                                            let session_id = target.session_id.clone();
+                                            let label = target.label.clone();
+                                            let e = e_acp.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(label).on_click(
+                                                    move |_, window, cx| {
+                                                        let task_id = task_id.clone();
+                                                        let session_id = session_id.clone();
+                                                        e.update(cx, |ws, cx| {
+                                                            ws.run_task_in_open_acp(
+                                                                &task_id,
+                                                                &session_id,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    },
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    menu = menu
+                                        .separator()
+                                        .item(PopupMenuItem::new("新建 ACP 对话").disabled(true));
+                                    for agent in AcpAgentKind::ALL {
+                                        let task_id = id_acp.clone();
+                                        let e = e_acp.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(format!(
+                                                "{} ACP 对话",
+                                                agent.label()
+                                            ))
+                                            .on_click(move |_, window, cx| {
+                                                let task_id = task_id.clone();
+                                                e.update(cx, |ws, cx| {
+                                                    ws.run_task_in_acp(
+                                                        &task_id, agent, window, cx,
+                                                    );
+                                                });
+                                            }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
+                    })
                     .child(
                         Button::new(SharedString::from(format!("tc-edit-{id}")))
                             .label("编辑")
@@ -2421,7 +2327,7 @@ impl Workspace {
             )
     }
 
-    /// 绑到指定终端；`inject` 时键入首包并回车（当前终端上下文执行）。
+    /// 在指定终端执行任务，并在 `inject` 时键入首包并回车。
     pub fn assign_task_to_session(
         &mut self,
         id: &str,
@@ -2459,9 +2365,7 @@ impl Workspace {
 
         let cwd = leaf.read(cx).cwd();
         let run = if inject {
-            let Some(run) =
-                TaskStore::begin_pty_run(id, task.launch.as_deref().unwrap_or("existing-session"))
-            else {
+            let Some(run) = TaskStore::begin_pty_run(id, "existing-session") else {
                 return;
             };
             Some(run)
@@ -2475,8 +2379,6 @@ impl Workspace {
         });
         if let Some(run) = run {
             TaskStore::mark_run_started(id, &run.id, sid);
-        } else if !inject {
-            TaskStore::update(id, |t| t.session_id = Some(sid.to_string()));
         }
 
         self.activate(ix, window, cx);
@@ -2492,7 +2394,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 按 session_id 聚焦已有侧栏终端；找到返回 true。
+    /// 按 session_id 聚焦已有侧栏终端或 ACP 对话；找到返回 true。
     /// ACP 等待子态文案：绑定会话正在等批准 / 等选择 → 「等你批准」/「等你选择」；
     /// 否则 None（任务仍显示通用列状态）。
     fn acp_waiting_label(&self, sid: &str, cx: &mut Context<Self>) -> Option<&'static str> {
@@ -2527,8 +2429,49 @@ impl Workspace {
                     return true;
                 }
             }
+            let acp_view = match &self.sessions[i].kind {
+                crate::SessionKind::Acp(view) => Some(view.clone()),
+                crate::SessionKind::Term { .. } => None,
+            };
+            if acp_view.is_some_and(|view| view.read(cx).session_id() == sid) {
+                self.activate(i, window, cx);
+                return true;
+            }
         }
         false
+    }
+
+    /// 已打开且能立即接收首包的 ACP 对话。忙碌的对话不出现在任务菜单中，避免
+    /// 当前回合结束时把尚未发送的任务错误标记为完成。
+    pub(crate) fn idle_acp_task_targets(&self, cx: &App) -> Vec<AcpTaskTarget> {
+        let active_task_sessions: HashSet<String> = TaskStore::load()
+            .tasks
+            .into_iter()
+            .filter(|task| task.column.is_active())
+            .filter_map(|task| task.session_id)
+            .collect();
+        self.sessions
+            .iter()
+            .filter_map(|session| {
+                let crate::SessionKind::Acp(view) = &session.kind else {
+                    return None;
+                };
+                let (session_id, agent) = {
+                    let view = view.read(cx);
+                    if !view.can_send_prompt_immediately() {
+                        return None;
+                    }
+                    (view.session_id().to_string(), view.agent_kind())
+                };
+                if active_task_sessions.contains(&session_id) {
+                    return None;
+                }
+                Some(AcpTaskTarget {
+                    session_id,
+                    label: format!("{} · {}", agent.short_label(), session.title(cx)),
+                })
+            })
+            .collect()
     }
 
     /// 卡片主按钮：待办 → [`Self::run_task`]；已跑过 → 聚焦会话。
@@ -2546,13 +2489,9 @@ impl Workspace {
                 return;
             }
         }
-        // 执行中但会话已丢 → 再新开（按通道路由：ACP 走对话会话）
+        // 执行中但会话已丢 → 再新开终端。
         if task.column.is_active() {
-            if matches!(task.channel, TaskChannel::Acp { .. }) {
-                self.run_task_in_acp(id, window, cx);
-            } else {
-                self.run_task_in_terminal(id, window, cx);
-            }
+            self.run_task_in_terminal(id, window, cx);
         }
         cx.notify();
     }
@@ -2567,10 +2506,6 @@ impl Workspace {
         if !task.dependencies_met(&all.tasks) {
             window.push_notification(Notification::error("前置任务未完成，无法运行"), cx);
             return;
-        }
-        // ACP 通道：建独立对话会话（有存活 ACP 会话也不注入，任务是独立现场）。
-        if matches!(task.channel, TaskChannel::Acp { .. }) {
-            return self.run_task_in_acp(id, window, cx);
         }
         if let Some(sid) = task.session_id.clone() {
             // 会话还在：把首包打进该终端（右键新建仅创建后的「开跑」）
@@ -2603,11 +2538,9 @@ impl Workspace {
             Some(task.project_cwd.clone())
         };
         let entries = active_launch_entries(cx);
-        let base_launch = task
-            .launch
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| entries.first().map(|e| e.command.clone()))
+        let base_launch = entries
+            .first()
+            .map(|e| e.command.clone())
             .unwrap_or_else(|| "claude".into());
         let label = task.title.clone();
         let prompt = task_prompt(&task);
@@ -2652,10 +2585,6 @@ impl Workspace {
         });
         self.sessions.push(crate::Session::single(view.clone()));
         self.active_session = self.sessions.len() - 1;
-        // 存 base（不含 prompt 拼接），再跑时重新拼首包；执行现场归 TaskRun。
-        TaskStore::update(id, |t| {
-            t.launch = Some(base_launch);
-        });
         TaskStore::mark_run_started(id, &run.id, &sid);
 
         self.save_state(cx);
@@ -2663,45 +2592,41 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 在**对话通道**跑任务：建一个独立 ACP 会话（接任务指定的 agent），握手完成后
-    /// 自动发首包 prompt（`pending_initial_prompt` 机制）。sid 固定 `acp-<uuid>`，
-    /// 供完成/失败边沿按 sid 回查任务。
-    pub fn run_task_in_acp(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// 在新的 ACP 对话中执行任务。agent 仅是这次执行的运行时选择，会作为
+    /// `TaskRun::channel` 快照落盘，不会绑定到 Task。
+    pub fn run_task_in_acp(
+        &mut self,
+        id: &str,
+        agent: AcpAgentKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(task) = TaskStore::get(id) else {
             return;
         };
-        let TaskChannel::Acp { agent, profile_id } = &task.channel else {
+        let all = TaskStore::load();
+        if !task.dependencies_met(&all.tasks) {
+            window.push_notification(Notification::error("前置任务未完成，无法运行"), cx);
             return;
-        };
-        let agent_kind = smelt_core::agent_kind::AcpAgentKind::from_id(agent)
-            .unwrap_or(smelt_core::agent_kind::AcpAgentKind::Claude);
-        let base_launch = task
-            .launch
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| agent_kind.default_cmd());
-        let cwd = if task.project_cwd.trim().is_empty() {
-            None
-        } else {
-            Some(task.project_cwd.clone())
-        };
+        }
 
-        let Some(run) = TaskStore::begin_acp_run(id, &base_launch, agent_kind.id(), profile_id.clone())
-        else {
+        let cwd = (!task.project_cwd.trim().is_empty()).then(|| task.project_cwd.clone());
+        let launch = crate::settings::acp_cmd_for(agent, cx);
+        let Some(run) = TaskStore::begin_acp_run(id, &launch, agent, None) else {
             return;
         };
         let sid = format!("acp-{}", uuid::Uuid::new_v4());
-
         let request = crate::acp_view::AcpHandoffRequest {
             source: None,
             cwd: cwd.clone(),
-            agent: agent_kind,
-            launch: smelt_core::agent_kind::AcpLaunchSpec::from_command(base_launch.clone()),
-            refresh_launch_from_settings: false,
-            profile_id: profile_id.clone(),
+            agent,
+            launch: smelt_core::agent_kind::AcpLaunchSpec::from_command(launch),
+            refresh_launch_from_settings: true,
+            profile_id: None,
             config_values: Vec::new(),
             prompt: task_prompt(&task),
         };
+        self.remember_session_project(cwd.as_deref());
         let view = cx.new(|cx| {
             crate::acp_view::AcpView::start_with_handoff_sid(window, cx, request, Some(sid.clone()))
         });
@@ -2710,23 +2635,97 @@ impl Workspace {
             ui_id: crate::next_session_ui_id(),
             kind: crate::SessionKind::Acp(view),
             last_updated_at: crate::unix_now_secs(),
-            custom_title: Some(task.title.clone()),
+            custom_title: Some(task.title),
             remote_owned: false,
             _acp_persist_sub,
             ui_state: crate::SessionUiState::default(),
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
-        self.active_session = self.sessions.len() - 1;
-        // 存 base（重跑时重新拼首包），并把 Run 绑到固定 acp-* sid。
-        TaskStore::update(id, |t| {
-            t.launch = Some(base_launch);
-        });
         TaskStore::mark_run_started(id, &run.id, &sid);
-
-        self.save_state(cx);
-        self.focus_active(window, cx);
-        cx.notify();
+        self.activate(self.sessions.len() - 1, window, cx);
     }
+
+    /// 将任务首包发到已打开、空闲的 ACP 对话。执行现场的 agent、profile 与启动
+    /// 命令只写进 `TaskRun`，任务本身仍与 agent 无关。
+    pub fn run_task_in_open_acp(
+        &mut self,
+        id: &str,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = TaskStore::get(id) else {
+            return;
+        };
+        let all = TaskStore::load();
+        if !task.dependencies_met(&all.tasks) {
+            window.push_notification(Notification::error("前置任务未完成，无法运行"), cx);
+            return;
+        }
+        if all.tasks.iter().any(|task| {
+            task.id != id
+                && task.column.is_active()
+                && task.session_id.as_deref() == Some(session_id)
+        }) {
+            window.push_notification(
+                Notification::error("ACP 对话仍有任务在执行，请等它完成后重试"),
+                cx,
+            );
+            return;
+        }
+
+        let Some((session_index, view)) = self
+            .sessions
+            .iter()
+            .enumerate()
+            .find_map(|(index, session)| match &session.kind {
+                crate::SessionKind::Acp(view) if view.read(cx).session_id() == session_id => {
+                    Some((index, view.clone()))
+                }
+                crate::SessionKind::Acp(_) | crate::SessionKind::Term { .. } => None,
+            })
+        else {
+            window.push_notification(Notification::error("ACP 对话已关闭，请重新选择"), cx);
+            return;
+        };
+        let (agent, launch, profile_id, ready) = {
+            let view = view.read(cx);
+            (
+                view.agent_kind(),
+                view.launch_spec().command,
+                view.profile_id().map(str::to_string),
+                view.can_send_prompt_immediately(),
+            )
+        };
+        if !ready {
+            window.push_notification(
+                Notification::error("ACP 对话正在处理其他消息，请等它空闲后重试"),
+                cx,
+            );
+            return;
+        }
+
+        let Some(run) = TaskStore::begin_acp_run(id, &launch, agent, profile_id) else {
+            return;
+        };
+        if !TaskStore::mark_run_started(id, &run.id, session_id) {
+            TaskStore::mark_run_failed(id, &run.id, "无法关联 ACP 对话");
+            window.push_notification(Notification::error("无法关联 ACP 对话，请重试"), cx);
+            return;
+        }
+        let prompt = task_prompt(&task);
+        let sent = view.update(cx, |view, cx| view.try_send_prompt_immediately(prompt, cx));
+        if !sent {
+            TaskStore::mark_run_failed(id, &run.id, "ACP 对话发送首包失败");
+            window.push_notification(
+                Notification::error("ACP 对话已不在空闲状态，任务未发送"),
+                cx,
+            );
+            return;
+        }
+        self.activate(session_index, window, cx);
+    }
+
 }
 
 // ===================== 测试 =====================
@@ -2767,7 +2766,6 @@ mod task_model_tests {
             "/tmp/p".into(),
             "t1".into(),
             "body".into(),
-            Some("claude".into()),
         );
         t.column = TaskColumn::Running;
         t.kind = TaskKind::Scheduled;
@@ -2775,7 +2773,6 @@ mod task_model_tests {
         t.depends_on = vec!["dep-1".into()];
         t.retry_policy = TaskRetryPolicy { max_attempts: 5, retry_delay_secs: 30, remix_on_retry: true };
         t.retry_at = Some(1_700_000_100);
-        t.channel = TaskChannel::Acp { agent: "claude".into(), profile_id: Some("p1".into()) };
         let run = TaskRun {
             id: "run-1".into(),
             task_id: t.id.clone(),
@@ -2805,10 +2802,7 @@ mod task_model_tests {
         assert_eq!(back.tasks[0].depends_on, vec!["dep-1".to_string()]);
         assert_eq!(back.tasks[0].retry_policy.max_attempts, 5);
         assert_eq!(back.tasks[0].retry_at, Some(1_700_000_100));
-        assert_eq!(
-            back.tasks[0].channel,
-            TaskChannel::Acp { agent: "claude".into(), profile_id: Some("p1".into()) }
-        );
+        assert_eq!(back.runs[0].channel, TaskChannel::Pty);
         assert_eq!(TaskColumn::Ready.label(), "待办");
         assert_eq!(TaskColumn::Waiting.label(), "执行中");
     }
@@ -2831,15 +2825,13 @@ mod task_model_tests {
         assert!(t.depends_on.is_empty());
         assert_eq!(t.retry_policy, TaskRetryPolicy::default());
         assert!(t.retry_at.is_none());
-        assert_eq!(t.channel, TaskChannel::Pty);
     }
 
     #[test]
     fn channel_serde_old_pty_string() {
         // 旧数据：裸 "pty"
-        let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x","channel":"pty"}]}"#;
-        let back: TaskFile = serde_json::from_str(json).unwrap();
-        assert_eq!(back.tasks[0].channel, TaskChannel::Pty);
+        let back: TaskChannel = serde_json::from_str(r#""pty""#).unwrap();
+        assert_eq!(back, TaskChannel::Pty);
     }
 
     #[test]
@@ -2851,19 +2843,63 @@ mod task_model_tests {
     }
 
     #[test]
-    fn channel_serde_hand_edited_acp_string() {
-        // 手改 tasks.json 写裸 "acp" → 映射成 Acp{默认}，防止 load_json 整体回退清空
-        let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x","channel":"acp"}]}"#;
-        let back: TaskFile = serde_json::from_str(json).unwrap();
+    fn acp_agent_is_recorded_on_the_run_not_the_task() {
+        let task = Task::new("/tmp/p".into(), "t1".into(), "body".into());
+        let run = TaskRun {
+            id: "run-1".into(),
+            task_id: task.id.clone(),
+            attempt: 1,
+            channel: TaskChannel::Acp {
+                agent: "codex".into(),
+                profile_id: Some("workspace-1".into()),
+            },
+            launch: "codex app-server".into(),
+            session_id: Some("acp-run-1".into()),
+            status: TaskRunStatus::Running,
+            error: None,
+            created_at: 1,
+            started_at: Some(1),
+            finished_at: None,
+        };
+        let value = serde_json::to_value(TaskFile {
+            tasks: vec![task],
+            runs: vec![run],
+        })
+        .unwrap();
+
+        assert!(value["tasks"][0].get("channel").is_none());
+        assert!(value["tasks"][0].get("launch").is_none());
+        assert_eq!(value["runs"][0]["channel"]["acp"]["agent"], "codex");
         assert_eq!(
-            back.tasks[0].channel,
+            value["runs"][0]["channel"]["acp"]["profile_id"],
+            "workspace-1"
+        );
+        assert_eq!(value["runs"][0]["launch"], "codex app-server");
+    }
+
+    #[test]
+    fn channel_serde_hand_edited_acp_string() {
+        // 旧执行记录里的裸 "acp" → 映射成 Acp{默认}，防止 load_json 整体回退清空。
+        let back: TaskChannel = serde_json::from_str(r#""acp""#).unwrap();
+        assert_eq!(
+            back,
             TaskChannel::Acp { agent: String::new(), profile_id: None }
         );
     }
 
     #[test]
+    fn legacy_task_agent_fields_are_discarded() {
+        let old = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x","launch":"copilot","channel":{"acp":{"agent":"copilot"}}}]}"#;
+        let file: TaskFile = serde_json::from_str(old).unwrap();
+        let saved = serde_json::to_value(file).unwrap();
+        let task = &saved["tasks"][0];
+        assert!(task.get("launch").is_none());
+        assert!(task.get("channel").is_none());
+    }
+
+    #[test]
     fn scheduled_is_due_when_past() {
-        let mut t = Task::new("/x".into(), "t".into(), "b".into(), None);
+        let mut t = Task::new("/x".into(), "t".into(), "b".into());
         t.kind = TaskKind::Scheduled;
         t.run_at = Some(100);
         assert!(t.is_due(100));
@@ -2893,14 +2929,14 @@ mod task_model_tests {
     #[test]
     fn is_auto_runnable_skips_future_scheduled_and_manual() {
         let now = 1_000u64;
-        let once = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let once = Task::new("/p".into(), "a".into(), "b".into());
         assert!(TaskStore::is_auto_runnable(&once, &[], now));
 
-        let mut manual = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut manual = Task::new("/p".into(), "a".into(), "b".into());
         manual.auto_run = false;
         assert!(!TaskStore::is_auto_runnable(&manual, &[], now));
 
-        let mut sched = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut sched = Task::new("/p".into(), "a".into(), "b".into());
         sched.kind = TaskKind::Scheduled;
         sched.run_at = Some(2_000);
         assert!(!TaskStore::is_auto_runnable(&sched, &[], now));
@@ -2912,12 +2948,12 @@ mod task_model_tests {
 
     #[test]
     fn claim_next_is_fifo_same_cwd_auto_only() {
-        let mut a = Task::new("/proj".into(), "1".into(), "b1".into(), None);
+        let mut a = Task::new("/proj".into(), "1".into(), "b1".into());
         a.created_at = 10;
-        let mut b = Task::new("/proj".into(), "2".into(), "b2".into(), None);
+        let mut b = Task::new("/proj".into(), "2".into(), "b2".into());
         b.created_at = 5;
         b.auto_run = false; // 更早但不自动 → 跳过
-        let mut c = Task::new("/proj".into(), "3".into(), "b3".into(), None);
+        let mut c = Task::new("/proj".into(), "3".into(), "b3".into());
         c.created_at = 20;
         let list = vec![a, b, c];
         // claim_next_runnable 读磁盘，这里复刻它的筛选逻辑（同 cwd + auto_runnable + FIFO）。
@@ -2933,7 +2969,7 @@ mod task_model_tests {
     #[test]
     fn is_auto_runnable_respects_retry_at() {
         let now = 1_000u64;
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         // 重试冷却未到 → 不可取跑
         t.retry_at = Some(now + 10);
         assert!(!TaskStore::is_auto_runnable(&t, &[], now));
@@ -2947,9 +2983,9 @@ mod task_model_tests {
     #[test]
     fn is_auto_runnable_respects_deps() {
         let now = 1_000u64;
-        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into());
         dep.column = TaskColumn::Running;
-        let t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let t = Task::new("/p".into(), "a".into(), "b".into());
         let tasks = vec![t.clone()];
         // 空依赖 → 可跑
         assert!(TaskStore::is_auto_runnable(&t, &tasks, now));
@@ -2962,13 +2998,13 @@ mod task_model_tests {
 
     #[test]
     fn claim_next_skips_blocked_by_deps_then_fifo() {
-        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into());
         dep.column = TaskColumn::Backlog; // 未完成
         dep.auto_run = false; // 它只是阻塞条件，自身不参与候选
-        let mut a = Task::new("/p".into(), "1".into(), "b1".into(), None);
+        let mut a = Task::new("/p".into(), "1".into(), "b1".into());
         a.created_at = 10;
         a.depends_on = vec![dep.id.clone()];
-        let mut b = Task::new("/p".into(), "2".into(), "b2".into(), None);
+        let mut b = Task::new("/p".into(), "2".into(), "b2".into());
         b.created_at = 20;
         let list = vec![dep, a, b];
         let mut filtered: Vec<&Task> = list
@@ -2990,9 +3026,9 @@ mod task_model_tests {
 
     #[test]
     fn dependencies_met_all_done() {
-        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into());
         dep.column = TaskColumn::Done;
-        let t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let t = Task::new("/p".into(), "a".into(), "b".into());
         let mut with_dep = t.clone();
         with_dep.depends_on = vec![dep.id.clone()];
         let tasks = vec![dep, with_dep.clone()];
@@ -3001,9 +3037,9 @@ mod task_model_tests {
 
     #[test]
     fn dependency_pending_or_running_blocks() {
-        let mut dep = Task::new("/p".into(), "dep".into(), "b".into(), None);
+        let mut dep = Task::new("/p".into(), "dep".into(), "b".into());
         dep.column = TaskColumn::Backlog;
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         t.depends_on = vec![dep.id.clone()];
         let tasks = vec![dep.clone(), t.clone()];
         assert!(!t.dependencies_met(&tasks));
@@ -3014,7 +3050,7 @@ mod task_model_tests {
 
     #[test]
     fn dependency_deleted_treated_met() {
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         t.depends_on = vec!["已删除的id".into()];
         let tasks = vec![t.clone()];
         assert!(t.dependencies_met(&tasks));
@@ -3022,14 +3058,14 @@ mod task_model_tests {
 
     #[test]
     fn self_dependency_met() {
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         t.depends_on = vec![t.id.clone()];
         assert!(t.dependencies_met(&[t.clone()]));
     }
 
     #[test]
     fn apply_failure_retries_within_limit() {
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 0, remix_on_retry: false };
         t.column = TaskColumn::Running;
         t.session_id = Some("sid".into());
@@ -3059,7 +3095,7 @@ mod task_model_tests {
 
     #[test]
     fn apply_failure_delay_sets_retry_at() {
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 60, remix_on_retry: false };
         t.column = TaskColumn::Running;
         let mut run = TaskRun {
@@ -3083,7 +3119,7 @@ mod task_model_tests {
 
     #[test]
     fn apply_failure_exhausted_goes_failed_column() {
-        let mut t = Task::new("/p".into(), "a".into(), "b".into(), None);
+        let mut t = Task::new("/p".into(), "a".into(), "b".into());
         t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 0, remix_on_retry: false };
         t.column = TaskColumn::Running;
         let mut run = TaskRun {
@@ -3127,14 +3163,13 @@ mod task_model_tests {
             "/x".into(),
             "侧栏标题".into(),
             "真正给 agent 的指令".into(),
-            None,
         );
         assert_eq!(super::task_prompt(&t), "真正给 agent 的指令");
     }
 
     #[test]
     fn task_prompt_falls_back_to_title_when_body_empty() {
-        let t = Task::new("/x".into(), "only title".into(), String::new(), None);
+        let t = Task::new("/x".into(), "only title".into(), String::new());
         assert_eq!(super::task_prompt(&t), "only title");
     }
 

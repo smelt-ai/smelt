@@ -152,7 +152,9 @@ pub struct TaskRun {
     pub id: String,
     pub task_id: String,
     pub attempt: u32,
+    /// 本次实际执行时选择的通道；不属于 Task 的长期配置。
     pub channel: TaskChannel,
+    /// 本次实际执行时解析出的启动命令快照。
     pub launch: String,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -222,8 +224,6 @@ pub struct Task {
     #[serde(default)]
     pub current_run_id: Option<String>,
     #[serde(default)]
-    pub launch: Option<String>,
-    #[serde(default)]
     pub kind: TaskKind,
     #[serde(default)]
     pub run_at: Option<u64>,
@@ -236,15 +236,13 @@ pub struct Task {
     #[serde(default)]
     pub retry_at: Option<u64>,
     #[serde(default)]
-    pub channel: TaskChannel,
-    #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
 }
 
 impl Task {
-    pub fn new(project_cwd: String, title: String, body: String, launch: Option<String>) -> Self {
+    pub fn new(project_cwd: String, title: String, body: String) -> Self {
         let now = now_secs();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -254,14 +252,12 @@ impl Task {
             project_cwd,
             session_id: None,
             current_run_id: None,
-            launch,
             kind: TaskKind::Once,
             run_at: None,
             auto_run: true,
             depends_on: Vec::new(),
             retry_policy: TaskRetryPolicy::default(),
             retry_at: None,
-            channel: TaskChannel::Pty,
             created_at: now,
             updated_at: now,
         }
@@ -680,7 +676,7 @@ mod tests {
     use super::*;
 
     fn task(cwd: &str, title: &str) -> Task {
-        Task::new(cwd.into(), title.into(), "body".into(), None)
+        Task::new(cwd.into(), title.into(), "body".into())
     }
 
     #[test]
@@ -691,7 +687,6 @@ mod tests {
         t.run_at = Some(1_700_000_000);
         t.depends_on = vec!["dep".into()];
         t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 60, remix_on_retry: true };
-        t.channel = TaskChannel::Acp { agent: "claude".into(), profile_id: None };
         let run = TaskRun {
             id: "r1".into(),
             task_id: t.id.clone(),
@@ -709,14 +704,23 @@ mod tests {
         let json = serde_json::to_string(&file).unwrap();
         let back: TaskFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tasks[0].depends_on, vec!["dep".to_string()]);
-        assert_eq!(back.tasks[0].channel, TaskChannel::Acp { agent: "claude".into(), profile_id: None });
+        assert_eq!(back.runs[0].channel, TaskChannel::Pty);
         assert_eq!(back.runs[0].status, TaskRunStatus::Completed);
         // 旧数据缺字段 → 默认值
         let old = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x"}]}"#;
         let old: TaskFile = serde_json::from_str(old).unwrap();
-        assert_eq!(old.tasks[0].channel, TaskChannel::Pty);
         assert!(old.tasks[0].depends_on.is_empty());
         assert!(old.tasks[0].auto_run);
+    }
+
+    #[test]
+    fn legacy_task_agent_fields_are_discarded() {
+        let old = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x","launch":"copilot","channel":{"acp":{"agent":"copilot"}}}]}"#;
+        let file: TaskFile = serde_json::from_str(old).unwrap();
+        let saved = serde_json::to_value(file).unwrap();
+        let task = &saved["tasks"][0];
+        assert!(task.get("launch").is_none());
+        assert!(task.get("channel").is_none());
     }
 
     #[test]
@@ -796,7 +800,7 @@ mod tests {
         t.column = TaskColumn::Running;
         t.session_id = Some("s1".into());
         let mut file = TaskFile { tasks: vec![t.clone()], runs: Vec::new() };
-        let run = begin_run_in_file(&mut file, &t.id, "claude", TaskChannel::Pty, 100).unwrap();
+        let _run = begin_run_in_file(&mut file, &t.id, "claude", TaskChannel::Pty, 100).unwrap();
         // 绑会话
         file.tasks[0].session_id = Some("s1".into());
         file.runs[0].session_id = Some("s1".into());
