@@ -28,8 +28,7 @@ use gpui_component::{
 use agent_client_protocol::schema::v1::SessionId;
 
 use smelt_core::acp_client::{
-    ACP_HISTORY_PAGE_LIMIT, AcpClientHandle, AcpClientLaunch, load_acp_history,
-    spawn_acp_client,
+    ACP_HISTORY_PAGE_LIMIT, AcpClientHandle, AcpClientLaunch, load_acp_history, spawn_acp_client,
 };
 use smelt_core::acp_conn::{ModelState, PromptImage, SessionConfigState};
 use smelt_core::acp_session::{
@@ -168,6 +167,14 @@ fn can_dispatch_fresh_start_prompt(
         && queue_is_empty
 }
 
+fn move_queue_item_to_front<T>(queue: &mut std::collections::VecDeque<T>, index: usize) -> bool {
+    let Some(item) = queue.remove(index) else {
+        return false;
+    };
+    queue.push_front(item);
+    true
+}
+
 fn should_cancel_for_immediate_prompt(phase: &AcpPhase, prompt_dispatch_pending: bool) -> bool {
     prompt_dispatch_pending
         || matches!(
@@ -176,8 +183,24 @@ fn should_cancel_for_immediate_prompt(phase: &AcpPhase, prompt_dispatch_pending:
         )
 }
 
+/// smeltd 会为每份实时快照分配单调递增版本。版本为 0 的是旧 daemon 或本地
+/// 断线兜底快照，仍需接受；其余过期/重复快照不能把较新的 Running 倒退成 Idle。
+fn should_apply_snapshot_revision(last_applied: u64, incoming: u64) -> bool {
+    incoming == 0 || incoming > last_applied
+}
+
 fn should_replace_session_title(incoming_has_title: bool, entries_changed: bool) -> bool {
     incoming_has_title || entries_changed
+}
+
+fn is_stale_blank_history_id(
+    entries_are_empty: bool,
+    history_session_id: Option<&SessionId>,
+    acp_session_id: Option<&SessionId>,
+) -> bool {
+    entries_are_empty
+        && history_session_id.is_some()
+        && history_session_id == acp_session_id
 }
 
 fn merge_snapshot_entries(
@@ -343,6 +366,10 @@ pub struct AcpView {
     /// 一次就一直持有到视图销毁，Drop 时只会断开 socket（见 `AcpClientHandle`
     /// 文件头注释），不影响 smeltd 那边的会话存活。
     handle: Option<AcpClientHandle>,
+    /// 每次换掉 ACP socket 都递增。旧 socket 的断线兜底快照不能覆盖新连接。
+    snapshot_stream_generation: u64,
+    /// 当前 socket 已应用的最高 daemon 快照版本，0 表示尚未收到带版本的快照。
+    last_snapshot_revision: u64,
     /// 守护侧断连（smeltd 升级/重启）后自动重连的剩余预算。配合指数退避重试
     /// （main.rs 里延迟 500ms 起、翻倍到 8s 上限），每次自动重连递减，收到活跃
     /// 快照（连接成功）回满；耗尽则停止自动重连，等用户手动。
@@ -361,12 +388,13 @@ pub struct AcpView {
     pending_images: Vec<std::sync::Arc<gpui::Image>>,
     /// ACP 同一 session 一次只能运行一个 turn。新建空白会话的首条 prompt 会直接
     /// 交给 smeltd（它在握手完成后发送）；运行中或上一条 prompt 尚未确认时，
-    /// 新消息仍先排队，等 Idle 后按顺序发送。
+    /// 新消息仍先排队，等 Idle 后按顺序发送。「下一条发送」只调整顺序；
+    /// 用户明确选择「立即发送」时才会中断当前回合。
     queued_prompts: std::collections::VecDeque<(String, Vec<std::sync::Arc<gpui::Image>>)>,
     /// action 已交给 smeltd，但 Running 快照尚未回来。防止快点两次时本地 phase
     /// 仍是 Idle，第二条 prompt 越过队列直接并发发送。
     prompt_dispatch_pending: bool,
-    /// 用户点了某条排队消息的「立即发送」，正在等待当前 turn 被取消并回到 Idle。
+    /// 用户明确要求「立即发送」后，已请求停止当前 turn，等待 Idle 再派发队首。
     immediate_cancel_pending: bool,
     /// 已发送消息的解码图片缓存，避免流式输出或 spinner 重绘时反复解码 base64。
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
@@ -652,6 +680,8 @@ impl AcpView {
             phase: AcpPhase::Ended(reason),
             input: None,
             handle: None,
+            snapshot_stream_generation: 0,
+            last_snapshot_revision: 0,
             auto_reconnect_left: 6,
             launch,
             refresh_launch_from_settings,
@@ -712,6 +742,21 @@ impl AcpView {
     /// 服务端已经清空 entries 让 replay 重建，`Fresh` 且本地有历史时服务端
     /// 已经插好分割线——这层拿到的快照就是最终结果，不用再猜）。
     fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 历史为空且两个 id 相同，是旧版本把空白会话的 runtime id
+        // 错当成 history id 留下的脏状态；这种会话没有可 load 的内容，直接
+        // 开一轮新的 session/new。真正的历史恢复占位只有 history id、没有
+        // runtime id，因此仍保留 session/load 路径。
+        let stale_blank_history_id = is_stale_blank_history_id(
+            self.entries.is_empty(),
+            self.history_session_id.as_ref(),
+            self.acp_session_id.as_ref(),
+        );
+        let resume_id = (!stale_blank_history_id)
+            .then(|| self.history_session_id.as_ref().map(ToString::to_string))
+            .flatten();
+        if stale_blank_history_id {
+            self.history_session_id = None;
+        }
         if let Some(cfg) = cx.try_global::<smelt_ui::agent_ui_config::AgentUiConfig>() {
             self.launch = resolve_restart_launch(
                 &self.launch,
@@ -739,7 +784,7 @@ impl AcpView {
             cwd: self.cwd.clone(),
             launch: self.launch.clone(),
             agent_id: self.agent.id().to_string(),
-            resume_id: self.history_session_id.as_ref().map(|s| s.to_string()),
+            resume_id,
             retained_entries_end: loaded_entries_end(
                 self.loaded_entries_offset,
                 self.entries.len(),
@@ -891,6 +936,9 @@ impl AcpView {
     /// 挂上连接句柄并起快照 drain（start / restart 共用）。
     fn attach_handle(&mut self, handle: AcpClientHandle, cx: &mut Context<Self>) {
         let snapshot_rx = handle.snapshot_rx.clone();
+        self.snapshot_stream_generation = self.snapshot_stream_generation.wrapping_add(1);
+        let stream_generation = self.snapshot_stream_generation;
+        self.last_snapshot_revision = 0;
         self.handle = Some(handle);
         if !self.is_fresh_conversation_start() {
             self.tick_starting(cx);
@@ -898,7 +946,11 @@ impl AcpView {
         cx.spawn(async move |this, cx| {
             while let Ok(snap) = snapshot_rx.recv().await {
                 if this
-                    .update(cx, |view, cx| view.apply_snapshot(snap, cx))
+                    .update(cx, |view, cx| {
+                        if view.snapshot_stream_generation == stream_generation {
+                            view.apply_snapshot(snap, cx);
+                        }
+                    })
                     .is_err()
                 {
                     return; // 视图已销毁
@@ -918,9 +970,7 @@ impl AcpView {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    load_acp_history(&sid, before, ACP_HISTORY_PAGE_LIMIT)
-                })
+                .spawn(async move { load_acp_history(&sid, before, ACP_HISTORY_PAGE_LIMIT) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.history_loading = false;
@@ -955,10 +1005,8 @@ impl AcpView {
             .drain()
             .map(|((entry_ix, image_ix), image)| ((entry_ix + page_len, image_ix), image))
             .collect();
-        self.rendered_images.extend(decode_entry_images(
-            &self.entries[..page_len],
-            0,
-        ));
+        self.rendered_images
+            .extend(decode_entry_images(&self.entries[..page_len], 0));
 
         let mut markdown = build_markdown_cache(&self.entries[..page_len], self.cwd.as_deref());
         markdown.append(&mut self.rendered_markdown);
@@ -1087,9 +1135,7 @@ impl AcpView {
             // list_files 返回 Rc（非 Send），后台只产出 Vec，回主线程再包 Rc。
             let list = cx
                 .background_executor()
-                .spawn(async move {
-                    smelt_ui::acp_completion::list_files(&cwd).as_ref().clone()
-                })
+                .spawn(async move { smelt_ui::acp_completion::list_files(&cwd).as_ref().clone() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.file_list_loading = false;
@@ -1208,9 +1254,9 @@ impl AcpView {
                     thought: false,
                 } => text.lines().last().unwrap_or_default().to_string(),
                 AcpEntry::Assistant { thought: true, .. } => continue,
-                AcpEntry::ToolCall {
-                    title, output, ..
-                } if is_task_completion_tool_title(title) => {
+                AcpEntry::ToolCall { title, output, .. }
+                    if is_task_completion_tool_title(title) =>
+                {
                     let summary = completion_summary_text(output);
                     if summary.trim().is_empty() {
                         "完成".to_string()
@@ -1308,7 +1354,8 @@ impl AcpView {
             &self.phase,
             self.prompt_dispatch_pending,
             self.queued_prompts.is_empty(),
-        ) && !dispatch_during_fresh_start {
+        ) && !dispatch_during_fresh_start
+        {
             self.queued_prompts.push_back((text, images));
             cx.notify();
         } else if !self.send_prompt_now(&text, &images, cx) {
@@ -1384,21 +1431,30 @@ impl AcpView {
         }
     }
 
-    fn prioritize_queued_prompt(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.queued_prompts.len() {
+    /// 把一条排队消息移到队首。这里只改变下一条顺序，**绝不**取消正在进行的
+    /// turn；需要中断时用户必须明确点击底部「停止」。
+    fn move_queued_prompt_next(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !move_queue_item_to_front(&mut self.queued_prompts, ix) {
             return;
         }
-        if ix > 0 {
-            if let Some(prompt) = self.queued_prompts.remove(ix) {
-                self.queued_prompts.push_front(prompt);
-            }
+
+        if matches!(self.phase, AcpPhase::Idle) {
+            self.flush_queued_prompt(cx);
+        }
+        cx.notify();
+    }
+
+    /// 立即发送必须先停止当前 turn；ACP 同一 session 不支持并发 prompt。这个
+    /// 动作只由队列项里明确标注的「立即发送（停止当前回答）」触发。
+    fn send_queued_prompt_immediately(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.immediate_cancel_pending || !move_queue_item_to_front(&mut self.queued_prompts, ix)
+        {
+            return;
         }
 
         if should_cancel_for_immediate_prompt(&self.phase, self.prompt_dispatch_pending) {
-            if !self.immediate_cancel_pending {
-                self.immediate_cancel_pending = true;
-                self.cancel_turn();
-            }
+            self.immediate_cancel_pending = true;
+            self.cancel_turn();
         } else if matches!(self.phase, AcpPhase::Idle) {
             self.flush_queued_prompt(cx);
         }
@@ -1470,6 +1526,13 @@ impl AcpView {
     /// 2. 持久化 / 重绘时机跟着快照走。四色状态、Dock 角标、待处理通知都由
     ///    外面的集中状态订阅维护，这里不再自己判相位跳变。
     fn apply_snapshot(&mut self, mut snap: AcpSnapshot, cx: &mut Context<Self>) {
+        if !should_apply_snapshot_revision(self.last_snapshot_revision, snap.snapshot_revision) {
+            return;
+        }
+        if snap.snapshot_revision != 0 {
+            self.last_snapshot_revision = snap.snapshot_revision;
+        }
+
         let should_persist = snap.should_persist;
         let previous_history_session_id = self.history_session_id.clone();
         let old_entries_len = self.entries.len();
@@ -1569,8 +1632,13 @@ impl AcpView {
         self.acp_session_id = runtime_session_id.clone();
         if let Some(history_session_id) = snap.history_session_id {
             self.history_session_id = Some(SessionId::new(history_session_id));
-        } else if self.history_session_id.is_none() {
-            // 兼容尚未携带 history_session_id 的旧 daemon 快照。
+        } else if new_entries_len == 0 && snap.snapshot_revision != 0 {
+            // 当前 daemon 明确告诉我们这是一个没有历史身份的空快照；
+            // 清掉旧版本遗留的 runtime-as-history 值，后续按钮应创建新会话。
+            self.history_session_id = None;
+        } else if self.history_session_id.is_none() && new_entries_len > 0 {
+            // 兼容尚未携带 history_session_id 的旧 daemon 快照，但不要把
+            // 空白会话的运行时 id 当成可恢复历史身份。
             self.history_session_id = runtime_session_id;
         }
         self.supports_image = snap.supports_image;
@@ -1675,11 +1743,7 @@ impl AcpView {
         self.rendered_diffs.insert(id, parts);
     }
 
-    fn tool_card_is_expanded(
-        &self,
-        id: &str,
-        has_expandable_content: bool,
-    ) -> bool {
+    fn tool_card_is_expanded(&self, id: &str, has_expandable_content: bool) -> bool {
         if !has_expandable_content {
             return false;
         }
@@ -2087,6 +2151,8 @@ impl Render for AcpView {
             self.history_session_id.is_some(),
             self.pending_initial_prompt.is_some(),
         );
+        let show_ended_placeholder =
+            matches!(self.phase, AcpPhase::Ended(_)) && self.entries.is_empty();
 
         // 新建空白会话在后台静默准备，用户可以立刻输入；续接/失败仍明确展示状态。
         let banner: Option<gpui::AnyElement> = match (&self.phase, starting_copy.as_ref()) {
@@ -2124,39 +2190,55 @@ impl Render for AcpView {
                     .into_any_element(),
             ),
             (AcpPhase::Starting, _) => None,
+            (AcpPhase::Ended(_), _) if show_ended_placeholder => None,
             (AcpPhase::Ended(msg), _) => Some(
                 v_flex()
-                    .p_2()
+                    .w_full()
+                    .px_4()
+                    .py_2()
                     .gap_2()
-                    .text_sm()
-                    .child(div().text_color(t.danger).child("会话已结束"))
+                    .border_b_1()
+                    .border_color(t.border)
+                    .bg(gpui::rgb(ui_theme::bg_bar()))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Icon::new(IconName::CircleX)
+                                    .size(px(16.))
+                                    .text_color(t.danger),
+                            )
+                            .child(div().text_sm().text_color(t.danger).child("会话已结束"))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("acp-restart")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.8))
+                                    .child("重新开始")
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.restart(window, cx);
+                                    })),
+                            ),
+                    )
                     .when(!msg.is_empty(), |d| {
                         d.child(
                             div()
+                                .pl_6()
                                 .text_xs()
                                 .text_color(muted)
                                 .font_family("monospace")
                                 .child(msg.clone()),
                         )
                     })
-                    .child(
-                        div()
-                            .id("acp-restart")
-                            .w(px(120.))
-                            .px_3()
-                            .py_1p5()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(t.border)
-                            .text_sm()
-                            .text_center()
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.8))
-                            .child("重新开始")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.restart(window, cx);
-                            })),
-                    )
                     .into_any_element(),
             ),
             _ => None,
@@ -2245,6 +2327,87 @@ impl Render for AcpView {
                         ),
                 )
         });
+        let ended_placeholder = show_ended_placeholder.then(|| {
+            let message = match &self.phase {
+                AcpPhase::Ended(message) if !message.is_empty() => message.clone(),
+                _ => "与 smeltd 的连接已断开".to_string(),
+            };
+            let action_label = if self.history_session_id.is_some() {
+                "恢复会话"
+            } else {
+                "新建会话"
+            };
+            v_flex()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .child(
+                    v_flex()
+                        .id("acp-ended-placeholder")
+                        .w_full()
+                        .max_w(px(420.))
+                        .items_center()
+                        .gap_3()
+                        .p_5()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(ui_theme::tint(ui_theme::red(), 0x38))
+                        .bg(gpui::rgb(ui_theme::bg_bar()))
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .size(px(48.))
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(ui_theme::tint(ui_theme::red(), 0x48))
+                                .bg(ui_theme::tint(ui_theme::red(), 0x14))
+                                .child(
+                                    Icon::new(IconName::CircleX)
+                                        .size(px(24.))
+                                        .text_color(gpui::rgb(ui_theme::red())),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_semibold()
+                                .text_color(t.foreground)
+                                .text_center()
+                                .child("会话已结束"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .text_center()
+                                .child(message),
+                        )
+                        .child(
+                            div()
+                                .id("acp-restart")
+                                .px_4()
+                                .py_1p5()
+                                .rounded_lg()
+                                .bg(gpui::rgb(ui_theme::accent()))
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(gpui::rgb(ui_theme::on_accent()))
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.9))
+                                .child(action_label)
+                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                    this.restart(window, cx);
+                                })),
+                        ),
+                )
+        });
         let fork_banner = self.fork_origin.clone().map(|origin| {
             let source_id = origin.session_id.clone();
             h_flex()
@@ -2304,34 +2467,38 @@ impl Render for AcpView {
                     PermissionOptionKindView::AllowOnce | PermissionOptionKindView::AllowAlways
                 )
             });
-            let mut allow_buttons = h_flex().w_full().gap_2().items_center().flex_wrap();
-            let mut reject_buttons = h_flex().w_full().gap_2().items_center().flex_wrap();
+            // `flex_wrap` 在这个固定于 composer 上方的纵向卡片里会漏算换行后的
+            // 高度，导致第二行画到卡片外。每个操作独占一行，既保证卡片测量正确，
+            // 也让长选项名称不会挤压或遮住其它操作。
+            let mut buttons = v_flex().w_full().min_w_0().flex_shrink_0().gap_2();
             if let Some(pix) = primary_ix {
                 let name = card.options[pix].name.clone();
                 let option_id = card.options[pix].option_id.clone();
                 let tool_call_id = tool_call_id.clone();
                 // 主按钮改胶囊 + hover 时轻微上浮带阴影——批准是这张卡最想让人点的
                 // 动作，得比其余选项更有「弹一下」的手感，不只是纯色块换个透明度。
-                allow_buttons = allow_buttons.child(
-                    div()
-                        .id(format!("acp-perm-primary-{option_id}"))
-                        .relative()
-                        .h(px(36.))
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .rounded_full()
-                        .bg(gpui::rgb(ui_theme::green()))
-                        .text_color(gpui::rgb(ui_theme::on_accent()))
-                        .text_sm()
-                        .font_semibold()
-                        .cursor_pointer()
-                        .shadow_sm()
-                        .hover(|d| d.opacity(0.9).shadow_md().top(px(-1.)))
-                        .child(format!("{name} ⌘⏎"))
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.pick_permission(&tool_call_id, &option_id, cx);
-                        })),
+                buttons = buttons.child(
+                    h_flex().w_full().min_w_0().child(
+                        div()
+                            .id(format!("acp-perm-primary-{option_id}"))
+                            .relative()
+                            .h(px(36.))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .rounded_full()
+                            .bg(gpui::rgb(ui_theme::green()))
+                            .text_color(gpui::rgb(ui_theme::on_accent()))
+                            .text_sm()
+                            .font_semibold()
+                            .cursor_pointer()
+                            .shadow_sm()
+                            .hover(|d| d.opacity(0.9).shadow_md().top(px(-1.)))
+                            .child(format!("{name} ⌘⏎"))
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.pick_permission(&tool_call_id, &option_id, cx);
+                            })),
+                    ),
                 );
             }
             for (ix, opt) in card.options.iter().enumerate() {
@@ -2368,18 +2535,9 @@ impl Render for AcpView {
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.pick_permission(&tool_call_id, &option_id, cx);
                     }));
-                if danger {
-                    reject_buttons = reject_buttons.child(button);
-                } else {
-                    allow_buttons = allow_buttons.child(button);
-                }
+                buttons = buttons.child(h_flex().w_full().min_w_0().child(button));
             }
-            v_flex()
-                .w_full()
-                .gap_2()
-                .child(allow_buttons)
-                .child(reject_buttons)
-                .into_any_element()
+            buttons.into_any_element()
         };
 
         // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
@@ -4073,8 +4231,14 @@ impl Render for AcpView {
                 // 「排队中」，还能撤回，避免误以为消息已丢失。
                 .when(!self.queued_prompts.is_empty(), |col| {
                     let mut strip = v_flex().px_4().pt_3().gap_1p5();
-                    let can_prioritize =
+                    let can_move_next =
                         !matches!(self.phase, AcpPhase::Starting | AcpPhase::Ended(_));
+                    let immediate_cancels_turn = should_cancel_for_immediate_prompt(
+                        &self.phase,
+                        self.prompt_dispatch_pending,
+                    );
+                    let immediate_action_available =
+                        can_move_next && !self.immediate_cancel_pending;
                     for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
                         let preview: String = text.chars().take(60).collect();
                         let preview = if text.chars().count() > 60 {
@@ -4111,26 +4275,73 @@ impl Render for AcpView {
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .child(format!("排队中 · {preview}{img_suffix}")),
                                 )
-                                .when(can_prioritize, |row| {
+                                .when(self.immediate_cancel_pending && ix == 0, |row| {
                                     row.child(
                                         div()
-                                            .id(("acp-queued-prompt-send", ix))
                                             .text_xs()
-                                            .text_color(gpui::rgb(ui_theme::accent()))
+                                            .text_color(gpui::rgb(ui_theme::text_muted()))
+                                            .child("正在停止当前回答…"),
+                                    )
+                                })
+                                .when(immediate_action_available, |row| {
+                                    row.child(
+                                        div()
+                                            .id(("acp-queued-prompt-immediate", ix))
+                                            .text_xs()
+                                            .text_color(gpui::rgb(if immediate_cancels_turn {
+                                                ui_theme::yellow()
+                                            } else {
+                                                ui_theme::accent()
+                                            }))
                                             .cursor_pointer()
                                             .hover(|d| d.opacity(0.8))
-                                            .child(if self.immediate_cancel_pending && ix == 0 {
-                                                "取消中…"
+                                            .tooltip(move |window, cx| {
+                                                gpui_component::tooltip::Tooltip::new(
+                                                    if immediate_cancels_turn {
+                                                        "停止当前回答后，立即发送这条消息"
+                                                    } else {
+                                                        "立即发送这条消息"
+                                                    },
+                                                )
+                                                .build(window, cx)
+                                            })
+                                            .child(if immediate_cancels_turn {
+                                                "立即发送（停止当前回答）"
                                             } else {
                                                 "立即发送"
                                             })
                                             .on_click(cx.listener(
                                                 move |this, _ev, _window, cx| {
-                                                    this.prioritize_queued_prompt(ix, cx);
+                                                    this.send_queued_prompt_immediately(ix, cx);
                                                 },
                                             )),
                                     )
                                 })
+                                .when(
+                                    can_move_next && !self.immediate_cancel_pending && ix > 0,
+                                    |row| {
+                                        row.child(
+                                            div()
+                                                .id(("acp-queued-prompt-send", ix))
+                                                .text_xs()
+                                                .text_color(gpui::rgb(ui_theme::accent()))
+                                                .cursor_pointer()
+                                                .hover(|d| d.opacity(0.8))
+                                                .tooltip(|window, cx| {
+                                                    gpui_component::tooltip::Tooltip::new(
+                                                        "当前回合结束后，优先发送这条消息",
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .child("下一条发送")
+                                                .on_click(cx.listener(
+                                                    move |this, _ev, _window, cx| {
+                                                        this.move_queued_prompt_next(ix, cx);
+                                                    },
+                                                )),
+                                        )
+                                    },
+                                )
                                 .child(
                                     div()
                                         .id(("acp-queued-prompt-remove", ix))
@@ -4306,12 +4517,7 @@ impl Render for AcpView {
                     .border_1()
                     .border_color(t.border)
                     .bg(gpui::rgb(ui_theme::bg_bar()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(activity_label),
-                    )
+                    .child(div().text_xs().text_color(muted).child(activity_label))
                     .when(show_thinking, |row| {
                         row.child(div().w(px(1.)).h_3().bg(t.border)).child(
                             h_flex()
@@ -4495,7 +4701,8 @@ impl Render for AcpView {
                     }))
                     .children(sticky_prompt)
                     .children(jump_to_latest)
-                    .children(starting_placeholder),
+                    .children(starting_placeholder)
+                    .children(ended_placeholder),
             )
             .children(activity_status)
             .children(permission)
@@ -4610,8 +4817,7 @@ fn diff_cache_matches_output(cached: &[Option<CachedDiff>], output: &[ToolOutput
             .iter()
             .zip(output)
             .all(|(cached, part)| match (part, cached) {
-                (ToolOutputPart::Diff { .. }, Some(_))
-                | (ToolOutputPart::Text(_), None) => true,
+                (ToolOutputPart::Diff { .. }, Some(_)) | (ToolOutputPart::Text(_), None) => true,
                 _ => false,
             })
 }
@@ -4834,10 +5040,7 @@ fn is_match_count_line(line: &str) -> bool {
     let t = line.trim().trim_matches(['(', ')']).trim();
     let lower = t.to_ascii_lowercase();
     let rest = lower.strip_prefix("found ").unwrap_or(&lower);
-    let digits: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return false;
     }
@@ -4903,14 +5106,10 @@ fn build_conversation_layout(
         let closed = end < entries.len() || !current_turn_active;
         let final_ix = closed
             .then(|| {
-                (start..end)
-                    .rev()
-                    .find(|ix| {
-                        matches!(
-                            entries[*ix],
-                            AcpEntry::Assistant { thought: false, .. }
-                        ) || is_completion_entry(&entries[*ix])
-                    })
+                (start..end).rev().find(|ix| {
+                    matches!(entries[*ix], AcpEntry::Assistant { thought: false, .. })
+                        || is_completion_entry(&entries[*ix])
+                })
             })
             .flatten();
         if let Some(final_ix) = final_ix {
@@ -5435,11 +5634,13 @@ mod tests {
         escape_html_tags_for_markdown, is_active_permission_selection,
         is_fresh_conversation_start, is_match_count_line, loaded_entries_end,
         markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
+        is_stale_blank_history_id, move_queue_item_to_front,
         refresh_markdown_cache, resolve_restart_launch, search_summary_text,
-        should_cancel_for_immediate_prompt, should_queue_prompt, should_replace_session_title,
-        should_seed_restored_height_hints, task_body_from_selection,
+        should_apply_snapshot_revision, should_cancel_for_immediate_prompt, should_queue_prompt,
+        should_replace_session_title, should_seed_restored_height_hints, task_body_from_selection,
         tool_card_default_expanded, tool_output_has_content, tool_uses_compact_process_row,
     };
+    use agent_client_protocol::schema::v1::SessionId;
     use gpui::{ListAlignment, ListState, px};
     use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
     use smelt_core::acp_session::{
@@ -5448,6 +5649,7 @@ mod tests {
     };
     use smelt_core::agent_kind::{AcpAgentKind, AcpLaunchSpec, AcpProfile};
     use smelt_ui::agent_ui_config::AgentUiConfig;
+    use std::collections::VecDeque;
 
     #[test]
     fn restored_history_height_hints_cover_unmeasured_entries() {
@@ -5515,17 +5717,23 @@ mod tests {
         let parts = vec![ToolOutputPart::Text(
             "src/a.rs:12: foo\nsrc/b.rs:5: bar\n\nfound 3 matches".into(),
         )];
-        assert_eq!(search_summary_text(&parts), Some("found 3 matches".to_string()));
+        assert_eq!(
+            search_summary_text(&parts),
+            Some("found 3 matches".to_string())
+        );
 
         // 无汇总行 → None（头部不显示摘要）
-        let parts2 = vec![ToolOutputPart::Text("src/a.rs:12: foo\nsrc/b.rs:5: bar".into())];
+        let parts2 = vec![ToolOutputPart::Text(
+            "src/a.rs:12: foo\nsrc/b.rs:5: bar".into(),
+        )];
         assert_eq!(search_summary_text(&parts2), None);
 
         // 代码围栏包裹也要能认出汇总行
-        let parts3 = vec![ToolOutputPart::Text(
-            "```console\n(3 matches)\n```".into(),
-        )];
-        assert_eq!(search_summary_text(&parts3), Some("(3 matches)".to_string()));
+        let parts3 = vec![ToolOutputPart::Text("```console\n(3 matches)\n```".into())];
+        assert_eq!(
+            search_summary_text(&parts3),
+            Some("(3 matches)".to_string())
+        );
     }
 
     #[test]
@@ -5673,6 +5881,26 @@ mod tests {
     }
 
     #[test]
+    fn stale_blank_history_id_is_not_reused_for_restart() {
+        let runtime = SessionId::new("runtime");
+        assert!(is_stale_blank_history_id(
+            true,
+            Some(&runtime),
+            Some(&runtime)
+        ));
+        assert!(!is_stale_blank_history_id(
+            false,
+            Some(&runtime),
+            Some(&runtime)
+        ));
+        assert!(!is_stale_blank_history_id(
+            true,
+            Some(&runtime),
+            None
+        ));
+    }
+
+    #[test]
     fn starting_status_copy_explains_resume_and_wait() {
         use super::starting_status_copy;
 
@@ -5731,15 +5959,50 @@ mod tests {
     }
 
     #[test]
-    fn immediate_prompt_cancels_only_an_active_turn() {
-        assert!(!should_cancel_for_immediate_prompt(&AcpPhase::Starting, false));
+    fn queued_prompt_can_be_moved_next_without_dropping_any_message() {
+        let mut queue = VecDeque::from(["first", "second", "third"]);
+        assert!(move_queue_item_to_front(&mut queue, 2));
+        assert_eq!(
+            queue.into_iter().collect::<Vec<_>>(),
+            vec!["third", "first", "second"]
+        );
+
+        let mut queue = VecDeque::from(["only"]);
+        assert!(!move_queue_item_to_front(&mut queue, 1));
+        assert_eq!(queue.into_iter().collect::<Vec<_>>(), vec!["only"]);
+    }
+
+    #[test]
+    fn immediate_send_cancels_only_after_the_user_chooses_it() {
+        assert!(!should_cancel_for_immediate_prompt(
+            &AcpPhase::Starting,
+            false
+        ));
         assert!(!should_cancel_for_immediate_prompt(&AcpPhase::Idle, false));
         assert!(should_cancel_for_immediate_prompt(&AcpPhase::Idle, true));
-        assert!(should_cancel_for_immediate_prompt(&AcpPhase::Running, false));
+        assert!(should_cancel_for_immediate_prompt(
+            &AcpPhase::Running,
+            false
+        ));
         assert!(should_cancel_for_immediate_prompt(
             &AcpPhase::AwaitingApproval,
             false
         ));
+        assert!(should_cancel_for_immediate_prompt(
+            &AcpPhase::AwaitingChoice,
+            false
+        ));
+    }
+
+    #[test]
+    fn stale_snapshot_cannot_reopen_the_prompt_dispatch_gate() {
+        assert!(should_apply_snapshot_revision(0, 1));
+        assert!(should_apply_snapshot_revision(1, 2));
+        assert!(!should_apply_snapshot_revision(2, 2));
+        assert!(!should_apply_snapshot_revision(2, 1));
+        // 旧 daemon 和本地 socket 断开都使用 revision 0；当前连接的兜底终态
+        // 必须仍能显示，旧连接则由 stream generation 在 attach_handle 处过滤。
+        assert!(should_apply_snapshot_revision(2, 0));
     }
 
     #[test]
@@ -6267,11 +6530,15 @@ mod tests {
     #[test]
     fn empty_tool_output_does_not_offer_expandable_content() {
         assert!(!tool_output_has_content(&[]));
-        assert!(!tool_output_has_content(&[ToolOutputPart::Text(" \n".into())]));
+        assert!(!tool_output_has_content(&[ToolOutputPart::Text(
+            " \n".into()
+        )]));
         assert!(!tool_output_has_content(&[ToolOutputPart::Text(
             "```console\n```".into()
         )]));
-        assert!(tool_output_has_content(&[ToolOutputPart::Text("result".into())]));
+        assert!(tool_output_has_content(&[ToolOutputPart::Text(
+            "result".into()
+        )]));
         assert!(tool_output_has_content(&[ToolOutputPart::Diff {
             path: "src/lib.rs".into(),
             old_text: None,
@@ -6333,20 +6600,16 @@ mod tests {
             // 复刻 acp_view 里用户气泡的真实结构：外层限宽窗口 -> 右对齐 flex 行
             // -> 收缩到内容大小、带 max_w/min_w 的气泡 -> markdown 正文。
             div().w(px(500.)).child(
-                div()
-                    .flex()
-                    .w_full()
-                    .justify_end()
-                    .child(
-                        div()
-                            .max_w(px(400.))
-                            .min_w(px(160.))
-                            .debug_selector(|| "BUBBLE".to_string())
-                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                "list-bubble-test",
-                                self.text.to_string(),
-                            )),
-                    ),
+                div().flex().w_full().justify_end().child(
+                    div()
+                        .max_w(px(400.))
+                        .min_w(px(160.))
+                        .debug_selector(|| "BUBBLE".to_string())
+                        .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
+                            "list-bubble-test",
+                            self.text.to_string(),
+                        )),
+                ),
             )
         }
     }

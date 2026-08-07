@@ -4745,6 +4745,14 @@ fn select_resume_id(requested: Option<String>, known_history: Option<String>) ->
     requested.or(known_history)
 }
 
+fn known_acp_resume_id(reduced: &smelt_core::acp_session::AcpSessionState) -> Option<String> {
+    reduced.history_session_id.clone().or_else(|| {
+        (!reduced.entries.is_empty())
+            .then(|| reduced.acp_session_id.clone())
+            .flatten()
+    })
+}
+
 fn acp_open_needs_relaunch(created: bool, alive: bool, has_launch_command: bool) -> bool {
     created || (!alive && has_launch_command)
 }
@@ -5236,10 +5244,7 @@ fn ensure_acp_session(
         if acp_open_needs_relaunch(created, alive, !req.launch.command.is_empty()) {
             let known_history = {
                 let reduced = slot.value.reduced.lock().unwrap();
-                reduced
-                    .history_session_id
-                    .clone()
-                    .or_else(|| reduced.acp_session_id.clone())
+                known_acp_resume_id(&reduced)
             };
             acp_relaunch(
                 &slot,
@@ -5400,10 +5405,7 @@ fn handle_acp_restart(
         };
         let resume_id = {
             let reduced = sess.reduced.lock().unwrap();
-            reduced
-                .history_session_id
-                .clone()
-                .or_else(|| reduced.acp_session_id.clone())
+            known_acp_resume_id(&reduced)
         };
         // 先礼貌地跟旧进程说 Shutdown（drive_session 收到就退出循环，栈展开时
         // KillProcessGroupOnDrop 对整个进程组 SIGKILL——跟 acp_kill 同一条路），
@@ -8279,6 +8281,28 @@ mod acp_tests {
 
         assert_eq!(req.launch.command, "claude --dangerously-skip-permissions");
         assert!(req.launch.env.is_empty());
+    }
+
+    #[test]
+    fn blank_acp_session_does_not_reuse_runtime_id_as_history() {
+        let mut reduced = smelt_core::acp_session::AcpSessionState::default();
+        reduced.acp_session_id = Some("runtime-only".into());
+
+        assert_eq!(known_acp_resume_id(&reduced), None);
+    }
+
+    #[test]
+    fn acp_session_with_entries_can_fallback_to_runtime_history_id() {
+        let mut reduced = smelt_core::acp_session::AcpSessionState::default();
+        reduced.acp_session_id = Some("runtime-history".into());
+        reduced
+            .entries
+            .push(smelt_core::acp_chat::AcpEntry::User("hello".into()));
+
+        assert_eq!(
+            known_acp_resume_id(&reduced).as_deref(),
+            Some("runtime-history")
+        );
     }
 
     #[test]
