@@ -128,6 +128,18 @@ impl TaskBoardLane {
         }
     }
 
+    /// 拖入该看板列时写入的规范状态。旧 ready/waiting 仍会展示在对应列，但不会
+    /// 被新操作重新写入。
+    fn target_column(self) -> TaskColumn {
+        match self {
+            Self::Todo => TaskColumn::Backlog,
+            Self::Running => TaskColumn::Running,
+            Self::Blocked => TaskColumn::Failed,
+            Self::Review => TaskColumn::Review,
+            Self::Done => TaskColumn::Done,
+        }
+    }
+
     fn matches(self, column: TaskColumn) -> bool {
         match self {
             Self::Todo => column.is_todo(),
@@ -136,6 +148,31 @@ impl TaskBoardLane {
             Self::Review => column == TaskColumn::Review,
             Self::Done => column == TaskColumn::Done,
         }
+    }
+}
+
+/// 看板卡片拖拽时跟随鼠标的预览。
+#[derive(Clone)]
+struct TaskDrag {
+    id: String,
+    title: SharedString,
+}
+
+impl Render for TaskDrag {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .id("task-drag-preview")
+            .cursor_grab()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_xs()
+            .text_color(theme.foreground)
+            .child(self.title.clone())
     }
 }
 
@@ -1813,6 +1850,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 将看板卡片移到目标列。落在同一语义列时保留旧 ready/waiting 状态，不制造
+    /// 无意义的写盘；跨列时复用状态下拉的更新路径。
+    fn move_task_to_board_lane(&mut self, id: &str, lane: TaskBoardLane, cx: &mut Context<Self>) {
+        if TaskStore::get(id).is_some_and(|task| !lane.matches(task.column)) {
+            self.set_task_column(id, lane.target_column(), cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     /// 任务总览 pill：点同一状态再点一次回到「全部」。
     pub fn set_task_column_filter(&mut self, col: Option<TaskColumn>, cx: &mut Context<Self>) {
         self.task_column_filter = if self.task_column_filter == col {
@@ -1977,7 +2024,7 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child("按状态分列 · 点状态徽章可改状态 · 终端右键可绑当前会话新建"),
+                                    .child("拖动卡片到状态列可改状态 · 点状态徽章也可修改"),
                             ),
                     )
                     .child(
@@ -2118,12 +2165,18 @@ impl Workspace {
             );
         } else {
             for task in tasks {
-                cards = cards.child(
-                    self.render_task_board_card(task, card_bg, card_border, fg, muted, cx),
-                );
+                cards = cards.child(self.render_task_board_card(
+                    task,
+                    card_bg,
+                    card_border,
+                    fg,
+                    muted,
+                    cx,
+                ));
             }
         }
 
+        let e_drop = cx.entity().clone();
         div()
             .w(px(304.))
             .flex_none()
@@ -2131,10 +2184,20 @@ impl Workspace {
             .flex_col()
             .gap_3()
             .p_3()
+            .min_h(px(360.))
             .rounded(px(12.))
             .border_1()
             .border_color(crate::ui_theme::overlay(0x10))
             .bg(crate::ui_theme::overlay(0x08))
+            .drag_over::<TaskDrag>(move |style, _, _, _| {
+                style.border_color(lane_color).bg(lane_tint)
+            })
+            .on_drop(move |drag: &TaskDrag, _window, cx| {
+                let task_id = drag.id.clone();
+                e_drop.update(cx, |ws, cx| {
+                    ws.move_task_to_board_lane(&task_id, lane, cx);
+                });
+            })
             .child(
                 div()
                     .flex()
@@ -2201,6 +2264,7 @@ impl Workspace {
         let id_edit = id.clone();
         let id_del = id.clone();
         let title = task.title.clone();
+        let drag_title: SharedString = title.clone().into();
         let proj = project_label(&task.project_cwd);
         let col = task.column;
         // ACP 等待态覆盖通用的「执行中」：让人一眼看到任务卡在等人批/等人答。
@@ -2314,10 +2378,23 @@ impl Workspace {
             // 标题：状态点 + 名
             .child(
                 div()
+                    .id(SharedString::from(format!("task-card-drag-{id}")))
                     .flex()
                     .items_start()
                     .gap_2()
                     .min_w_0()
+                    .cursor_grab()
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("拖动到状态列可改变状态")
+                            .build(window, cx)
+                    })
+                    .on_drag(
+                        TaskDrag {
+                            id: id.clone(),
+                            title: drag_title,
+                        },
+                        move |drag, _, _, cx| cx.new(|_| drag.clone()),
+                    )
                     .child(
                         div()
                             .size(px(9.))
@@ -2976,6 +3053,15 @@ mod task_model_tests {
                 "{column:?} must appear in exactly one board lane"
             );
         }
+    }
+
+    #[test]
+    fn task_board_lanes_write_canonical_target_columns() {
+        assert_eq!(TaskBoardLane::Todo.target_column(), TaskColumn::Backlog);
+        assert_eq!(TaskBoardLane::Running.target_column(), TaskColumn::Running);
+        assert_eq!(TaskBoardLane::Blocked.target_column(), TaskColumn::Failed);
+        assert_eq!(TaskBoardLane::Review.target_column(), TaskColumn::Review);
+        assert_eq!(TaskBoardLane::Done.target_column(), TaskColumn::Done);
     }
 
     #[test]
