@@ -889,18 +889,18 @@ impl Session {
     }
 
     /// 侧栏行图标：终端会话按启动方式（LaunchKind）对应，与「+」菜单图标一一对应。
-    /// 新会话列表改用类型点（agent 紫圆 / 终端绿方），此图标暂时闲置——
-    /// 收尾阶段决定是否用回行首或删除。
+    /// 图标映射本体是 `settings::icon_for_agent_kind`，跟快捷终端菜单
+    /// （`icon_for_launch_command`）共用同一份。新会话列表改用类型点（agent 紫圆
+    /// / 终端绿方），此图标暂时闲置——收尾阶段决定是否用回行首或删除。
     #[allow(dead_code)]
     fn row_icon(&self, cx: &App) -> IconName {
         match &self.kind {
-            SessionKind::Term { active, .. } => match active.read(cx).launch_kind() {
-                terminal_view::LaunchKind::Claude => IconName::Asterisk,
-                terminal_view::LaunchKind::Codex => IconName::Bot,
-                terminal_view::LaunchKind::Copilot => IconName::Github,
-                terminal_view::LaunchKind::Grok => IconName::Bot,
-                terminal_view::LaunchKind::Terminal => IconName::SquareTerminal,
-            },
+            SessionKind::Term { active, .. } => active
+                .read(cx)
+                .launch_kind()
+                .agent_kind()
+                .map(settings::icon_for_agent_kind)
+                .unwrap_or(IconName::SquareTerminal),
             SessionKind::Acp(_) => IconName::Bot,
         }
     }
@@ -8130,18 +8130,11 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
 }
 
 /// 旧存档没记 agent 种类时，从启动命令反推一把（命令里出现过 copilot / codex
-/// 字样就归给它们）；认不出当 Claude——多 agent 之前的存档只可能是它。
+/// 字样就归给它们）；认不出当 Claude——多 agent 之前的存档只可能是它。判断本体
+/// 是 `AcpAgentKind::from_command_loose`，跟 `remote_gateway::agent_from_launch`
+/// （mobile 网关展示名）共用同一份「命令里出现哪家关键字就算哪家」逻辑。
 fn acp_agent_from_cmd(cmd: &str) -> settings::AcpAgentKind {
-    let c = cmd.to_ascii_lowercase();
-    if c.contains("copilot") {
-        settings::AcpAgentKind::Copilot
-    } else if c.contains("codex") {
-        settings::AcpAgentKind::Codex
-    } else if c.contains("grok") {
-        settings::AcpAgentKind::Grok
-    } else {
-        settings::AcpAgentKind::Claude
-    }
+    settings::AcpAgentKind::from_command_loose(cmd).unwrap_or(settings::AcpAgentKind::Claude)
 }
 
 /// 返回 shell 中第一个真正的程序 token，跳过 `VAR=value` 前缀和 `env`。

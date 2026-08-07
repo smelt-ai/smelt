@@ -287,15 +287,32 @@ pub enum LaunchKind {
     Grok,
 }
 
+impl LaunchKind {
+    /// 反过来映射回 `AcpAgentKind`（`Terminal` 没有对应种类）。侧栏行图标
+    /// （main.rs 的 `row_icon`）拿这个接到 `settings::icon_for_agent_kind`，
+    /// 不用再维护一份 Claude→Asterisk 这种 match。
+    pub fn agent_kind(self) -> Option<crate::settings::AcpAgentKind> {
+        match self {
+            Self::Terminal => None,
+            Self::Claude => Some(crate::settings::AcpAgentKind::Claude),
+            Self::Codex => Some(crate::settings::AcpAgentKind::Codex),
+            Self::Copilot => Some(crate::settings::AcpAgentKind::Copilot),
+            Self::Grok => Some(crate::settings::AcpAgentKind::Grok),
+        }
+    }
+}
+
 /// 从 `launch` 命令行猜启动方式（见各「+」菜单项的 on_click：'claude'/'claude
-/// --dangerously-skip-permissions'/'codex'/'copilot'/'grok'），用前缀匹配以后加参数不失配。
+/// --dangerously-skip-permissions'/'codex'/'copilot'/'grok'），前缀匹配的判断本体
+/// 是 `AcpAgentKind::from_command_prefix`——跟「+」菜单图标（`icon_for_launch_command`）
+/// 共用同一份逻辑，以后加参数不失配、加新 agent 也不用两处一起改。
 fn classify_launch(launch: Option<&str>) -> LaunchKind {
-    match launch.map(str::trim) {
-        Some(l) if l.starts_with("claude") => LaunchKind::Claude,
-        Some(l) if l.starts_with("codex") => LaunchKind::Codex,
-        Some(l) if l.starts_with("copilot") => LaunchKind::Copilot,
-        Some(l) if l.starts_with("grok") => LaunchKind::Grok,
-        _ => LaunchKind::Terminal,
+    match launch.and_then(crate::settings::AcpAgentKind::from_command_prefix) {
+        Some(crate::settings::AcpAgentKind::Claude) => LaunchKind::Claude,
+        Some(crate::settings::AcpAgentKind::Codex) => LaunchKind::Codex,
+        Some(crate::settings::AcpAgentKind::Copilot) => LaunchKind::Copilot,
+        Some(crate::settings::AcpAgentKind::Grok) => LaunchKind::Grok,
+        None => LaunchKind::Terminal,
     }
 }
 
