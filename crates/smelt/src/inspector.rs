@@ -667,13 +667,13 @@ impl Workspace {
                     }
                 };
                 let action = if task.column.is_todo() {
-                    Some("运行")
+                    Some("终端")
                 } else if task.column == crate::tasks::TaskColumn::Failed {
                     Some("重试")
                 } else if task.session_id.is_some() {
                     Some("打开")
                 } else if task.column.is_active() {
-                    Some("运行")
+                    Some("终端")
                 } else {
                     None
                 };
@@ -756,10 +756,10 @@ impl Workspace {
                                         Button::new(SharedString::from(format!(
                                             "inspector-task-acp-{task_id}"
                                         )))
-                                        .label("ACP")
+                                        .label("对话")
                                         .xsmall()
                                         .ghost()
-                                        .tooltip("发送到已有或新建 ACP 对话")
+                                        .tooltip("在原生对话中执行任务，可选择或复用 Agent 对话")
                                         .dropdown_menu(move |menu, _window, _cx| {
                                             let mut menu = menu;
                                             if acp_targets.is_empty() {

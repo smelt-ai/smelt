@@ -89,6 +89,56 @@ impl TaskColumn {
     }
 }
 
+/// 任务总览看板的视觉列。旧状态在各自语义列中归并展示，避免任务从总览消失。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskBoardLane {
+    Todo,
+    Running,
+    Blocked,
+    Review,
+    Done,
+}
+
+impl TaskBoardLane {
+    const ALL: [Self; 5] = [
+        Self::Todo,
+        Self::Running,
+        Self::Blocked,
+        Self::Review,
+        Self::Done,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Todo => "待办",
+            Self::Running => "执行中",
+            Self::Blocked => "遇到阻碍",
+            Self::Review => "待确认",
+            Self::Done => "已完成",
+        }
+    }
+
+    fn color(self) -> u32 {
+        match self {
+            Self::Todo => crate::ui_theme::text_muted(),
+            Self::Running => crate::ui_theme::blue(),
+            Self::Blocked => crate::ui_theme::red(),
+            Self::Review => crate::ui_theme::yellow(),
+            Self::Done => crate::ui_theme::green(),
+        }
+    }
+
+    fn matches(self, column: TaskColumn) -> bool {
+        match self {
+            Self::Todo => column.is_todo(),
+            Self::Running => column.is_active(),
+            Self::Blocked => column == TaskColumn::Failed,
+            Self::Review => column == TaskColumn::Review,
+            Self::Done => column == TaskColumn::Done,
+        }
+    }
+}
+
 /// 执行通道。`Pty` = 交互终端（startup-arg 首包）；`Acp` = ACP 结构化对话
 /// （建独立 ACP 会话 + 首包 prompt）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1780,14 +1830,22 @@ impl Workspace {
             (t.foreground, t.muted_foreground, t.border)
         };
         let soft_bg: Hsla = crate::ui_theme::overlay(0x0d).into();
-        let card_bg = rgb(crate::ui_theme::bg_card());
-        let card_border = crate::ui_theme::overlay(0x12);
+        let card_bg: Hsla = rgb(crate::ui_theme::bg_card()).into();
+        let card_border: Hsla = crate::ui_theme::overlay(0x12).into();
 
         let mut all = TaskStore::load().tasks;
         all.sort_by_key(|t| (t.column.sidebar_rank(), std::cmp::Reverse(t.updated_at)));
         let n_all = all.len();
-        let n_run = all.iter().filter(|t| t.column.is_active()).count();
         let n_todo = all.iter().filter(|t| t.column.is_todo()).count();
+        let n_run = all.iter().filter(|t| t.column.is_active()).count();
+        let n_failed = all
+            .iter()
+            .filter(|t| t.column == TaskColumn::Failed)
+            .count();
+        let n_review = all
+            .iter()
+            .filter(|t| t.column == TaskColumn::Review)
+            .count();
         let n_done = all.iter().filter(|t| t.column == TaskColumn::Done).count();
         if let Some(f) = self.task_column_filter {
             all.retain(|t| match f {
@@ -1839,9 +1897,13 @@ impl Workspace {
 
         let c_blue: Hsla = rgb(crate::ui_theme::blue()).into();
         let c_gray: Hsla = rgb(crate::ui_theme::text_muted()).into();
+        let c_red: Hsla = rgb(crate::ui_theme::red()).into();
+        let c_yellow: Hsla = rgb(crate::ui_theme::yellow()).into();
         let c_green: Hsla = rgb(crate::ui_theme::green()).into();
         let blue_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::blue(), 0x28).into();
         let gray_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::text_muted(), 0x28).into();
+        let red_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::red(), 0x28).into();
+        let yellow_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::yellow(), 0x28).into();
         let green_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::green(), 0x28).into();
 
         let summary = div()
@@ -1849,24 +1911,44 @@ impl Workspace {
             .items_center()
             .gap_2()
             .flex_wrap()
-            .child(pill("tp-all", format!("{n_all} 任务"), None, fg, soft_bg))
             .child(pill(
-                "tp-run",
-                format!("{n_run} 执行中"),
-                Some(TaskColumn::Running),
-                c_blue,
-                blue_tint,
+                "tp-all",
+                format!("全部 {n_all}"),
+                None,
+                fg,
+                soft_bg,
             ))
             .child(pill(
                 "tp-todo",
-                format!("{n_todo} 待办"),
+                format!("待办 {n_todo}"),
                 Some(TaskColumn::Backlog),
                 c_gray,
                 gray_tint,
             ))
             .child(pill(
+                "tp-run",
+                format!("执行中 {n_run}"),
+                Some(TaskColumn::Running),
+                c_blue,
+                blue_tint,
+            ))
+            .child(pill(
+                "tp-blocked",
+                format!("阻碍 {n_failed}"),
+                Some(TaskColumn::Failed),
+                c_red,
+                red_tint,
+            ))
+            .child(pill(
+                "tp-review",
+                format!("待确认 {n_review}"),
+                Some(TaskColumn::Review),
+                c_yellow,
+                yellow_tint,
+            ))
+            .child(pill(
                 "tp-done",
-                format!("{n_done} 完成"),
+                format!("完成 {n_done}"),
                 Some(TaskColumn::Done),
                 c_green,
                 green_tint,
@@ -1895,7 +1977,7 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child("点状态徽章可改状态 · 终端右键可绑当前会话新建"),
+                                    .child("按状态分列 · 点状态徽章可改状态 · 终端右键可绑当前会话新建"),
                             ),
                     )
                     .child(
@@ -1957,10 +2039,28 @@ impl Workspace {
                     )
                 })
         } else {
-            let mut grid = div().flex().flex_wrap().gap_4();
-            for task in &all {
-                grid = grid.child(self.render_task_overview_card(
-                    task,
+            let visible_lanes: Vec<_> = TaskBoardLane::ALL
+                .into_iter()
+                .filter(|lane| match self.task_column_filter {
+                    Some(filter) => lane.matches(filter),
+                    None => true,
+                })
+                .collect();
+            let board_width = visible_lanes.len() as f32 * 304.
+                + visible_lanes.len().saturating_sub(1) as f32 * 16.;
+            let mut board = div()
+                .flex()
+                .items_start()
+                .gap_4()
+                .min_w(px(board_width));
+            for lane in visible_lanes {
+                let tasks: Vec<_> = all
+                    .iter()
+                    .filter(|task| lane.matches(task.column))
+                    .collect();
+                board = board.child(self.render_task_board_lane(
+                    lane,
+                    &tasks,
                     card_bg,
                     card_border,
                     fg,
@@ -1968,7 +2068,7 @@ impl Workspace {
                     cx,
                 ));
             }
-            grid
+            board
         };
 
         div()
@@ -1982,6 +2082,7 @@ impl Workspace {
                     .id("tasks-overview-scroll")
                     .flex_1()
                     .min_h_0()
+                    .overflow_x_scroll()
                     .overflow_y_scroll()
                     .px_6()
                     .py_5()
@@ -1989,17 +2090,110 @@ impl Workspace {
             )
     }
 
-    fn render_task_overview_card(
+    fn render_task_board_lane(
+        &self,
+        lane: TaskBoardLane,
+        tasks: &[&Task],
+        card_bg: Hsla,
+        card_border: Hsla,
+        fg: Hsla,
+        muted: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let lane_color: Hsla = rgb(lane.color()).into();
+        let lane_tint: Hsla = crate::ui_theme::tint(lane.color(), 0x20).into();
+        let mut cards = v_flex().gap_3();
+        if tasks.is_empty() {
+            cards = cards.child(
+                div()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(crate::ui_theme::overlay(0x12))
+                    .bg(crate::ui_theme::overlay(0x08))
+                    .px_3()
+                    .py_5()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("暂无任务"),
+            );
+        } else {
+            for task in tasks {
+                cards = cards.child(
+                    self.render_task_board_card(task, card_bg, card_border, fg, muted, cx),
+                );
+            }
+        }
+
+        div()
+            .w(px(304.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(crate::ui_theme::overlay(0x10))
+            .bg(crate::ui_theme::overlay(0x08))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(lane_tint)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .bg(lane_color)
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .text_color(fg)
+                                    .child(lane.label()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(22.))
+                            .h(px(22.))
+                            .rounded_full()
+                            .bg(lane_tint)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(lane_color)
+                            .child(tasks.len().to_string()),
+                    ),
+            )
+            .child(cards)
+    }
+
+    fn render_task_board_card(
         &self,
         task: &Task,
-        card_bg: impl Into<Hsla>,
-        card_border: impl Into<Hsla>,
+        card_bg: Hsla,
+        card_border: Hsla,
         fg: Hsla,
         muted: Hsla,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let card_bg = card_bg.into();
-        let card_border = card_border.into();
         let id = task.id.clone();
         let id_run = id.clone();
         let id_acp = id.clone();
@@ -2032,13 +2226,13 @@ impl Workspace {
         };
         let has_session = task.session_id.is_some();
         let primary: Option<&'static str> = if col.is_todo() {
-            Some("运行")
+            Some("终端")
         } else if col == TaskColumn::Failed {
             Some("重试")
         } else if has_session {
             Some("打开")
         } else if col.is_active() {
-            Some("运行")
+            Some("终端")
         } else {
             None
         };
@@ -2102,9 +2296,9 @@ impl Workspace {
         // 卡片只靠 hover 反馈。
         div()
             .id(SharedString::from(format!("task-card-{id}")))
-            .w(px(300.))
-            .p_4()
-            .rounded(px(18.))
+            .w_full()
+            .p_3()
+            .rounded(px(10.))
             .border_1()
             .border_color(card_border)
             .bg(card_bg)
@@ -2116,12 +2310,12 @@ impl Workspace {
             })
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             // 标题：状态点 + 名
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap_2()
                     .min_w_0()
                     .child(
@@ -2129,13 +2323,14 @@ impl Workspace {
                             .size(px(9.))
                             .rounded_full()
                             .bg(col_color)
+                            .mt(px(5.))
                             .flex_shrink_0(),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .line_clamp(2)
                             .font_semibold()
                             .text_color(fg)
                             .child(title),
@@ -2146,6 +2341,7 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
+                    .flex_wrap()
                     .gap_2()
                     .min_w_0()
                     .child(
@@ -2220,7 +2416,7 @@ impl Workspace {
                         .bg(rgb(crate::ui_theme::bg_rail()))
                         .text_xs()
                         .text_color(muted)
-                        .line_clamp(3)
+                        .line_clamp(2)
                         .child(body_prev),
                 )
             })
@@ -2242,10 +2438,10 @@ impl Workspace {
                     .when(can_run_in_acp, |d| {
                         d.child(
                             Button::new(SharedString::from(format!("tc-acp-{id}")))
-                                .label("ACP")
+                                .label("对话")
                                 .small()
                                 .ghost()
-                                .tooltip("发送到已有或新建 ACP 对话")
+                                .tooltip("在原生对话中执行任务，可选择或复用 Agent 对话")
                                 .dropdown_menu(move |menu, _window, _cx| {
                                     let mut menu = menu;
                                     if acp_targets.is_empty() {
@@ -2733,8 +2929,8 @@ impl Workspace {
 #[cfg(test)]
 mod task_model_tests {
     use super::{
-        Task, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRetryPolicy, TaskRun, TaskRunStatus,
-        TaskStore, build_launch_with_prompt, parse_local_datetime, shell_single_quote,
+        Task, TaskBoardLane, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRetryPolicy, TaskRun,
+        TaskRunStatus, TaskStore, build_launch_with_prompt, parse_local_datetime, shell_single_quote,
     };
     use std::path::Path;
 
@@ -2758,6 +2954,28 @@ mod task_model_tests {
         let k = project_key("/Users/foo/bar baz");
         assert!(!k.contains('/'));
         assert!(!k.is_empty());
+    }
+
+    #[test]
+    fn task_board_lanes_cover_each_task_column_once() {
+        for column in [
+            TaskColumn::Backlog,
+            TaskColumn::Ready,
+            TaskColumn::Running,
+            TaskColumn::Waiting,
+            TaskColumn::Review,
+            TaskColumn::Failed,
+            TaskColumn::Done,
+        ] {
+            assert_eq!(
+                TaskBoardLane::ALL
+                    .into_iter()
+                    .filter(|lane| lane.matches(column))
+                    .count(),
+                1,
+                "{column:?} must appear in exactly one board lane"
+            );
+        }
     }
 
     #[test]
