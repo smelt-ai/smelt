@@ -85,6 +85,19 @@ fn project_label(path: &str) -> String {
         .to_string()
 }
 
+fn stage_matches_docked_tab(stage_override: Option<MainView>, docked_tab: InspectorTab) -> bool {
+    stage_override.and_then(MainView::inspector_stage_tab) == Some(docked_tab)
+}
+
+/// 请求打开右侧 Git 时是否真的是一次新导航。中央已经显示 Git 时，右侧切回 Git
+/// 只是合并面板，必须保留当前 diff。
+pub(crate) fn should_reset_git_diff_on_dock_selection(
+    docked_tab: InspectorTab,
+    stage_override: Option<MainView>,
+) -> bool {
+    docked_tab != InspectorTab::Git && stage_override != Some(MainView::Git)
+}
+
 impl Workspace {
     /// Files 与 Git 右侧树列的固定像素分隔条。父 Inspector 改宽时，普通 flex 布局
     /// 只会让左侧内容区伸缩；树列的 `.w(file_tree_w).flex_none()` 不会被重新分配。
@@ -166,11 +179,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 当前 tab 是不是已经「提升到舞台」（⤢ 展开）。
-    /// 提升后本体在舞台上，右侧就别再停靠一份——否则同一个文件树 / 变更列表
-    /// 左右各渲染一遍，看着像出了两个面板。
+    /// 当前右侧 tab 是否已提升到舞台。只有两边是同一种内容时才隐藏右侧面板；
+    /// 例如中央展开 Git 后在右侧打开完整文件，中央 Git 与右侧 Files 应同时保留。
     pub(crate) fn inspector_panel_promoted(&self) -> bool {
-        self.stage_override.is_some() && self.inspector_tab.stage_view() == self.stage_override
+        stage_matches_docked_tab(self.stage_override, self.inspector_tab)
     }
 
     /// 唯一改 `inspector_open` 的入口：持久状态与可复用过渡状态同步更新。
@@ -221,9 +233,51 @@ impl Workspace {
         if self.inspector_tab == tab && self.inspector_open {
             self.set_inspector_open(false);
         } else {
-            if tab == InspectorTab::Git && self.inspector_tab != tab {
+            if tab == InspectorTab::Git
+                && should_reset_git_diff_on_dock_selection(self.inspector_tab, self.stage_override)
+            {
+                // 中央已经在看 Git 时，右侧切回 Git 只是合并两个面板，不能丢掉
+                // 当前选中的 diff / 评论上下文。
                 self.reset_git_diff_view();
             }
+            self.inspector_tab = tab;
+            self.set_inspector_open(true);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// 中央展开页的 tab 操作与右侧面板独立。中央 Git 配合右侧 Files 时，收回 Git
+    /// 只能影响中央区域，不能覆盖用户正在查看的文件。
+    fn toggle_stage_inspector_tab(
+        &mut self,
+        stage_tab: InspectorTab,
+        tab: InspectorTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        debug_assert!(
+            self.stage_override.and_then(MainView::inspector_stage_tab) == Some(stage_tab)
+        );
+
+        if tab == stage_tab {
+            self.set_stage_override(None, window, cx);
+            // 右侧和中央原本是同一个面板时，收回后恢复为停靠态；若右侧已切到
+            // 其他内容（如 Files），则保持用户当前的右侧上下文。
+            if self.inspector_tab == stage_tab {
+                self.set_inspector_open(true);
+            }
+        } else if let Some(view) = tab.stage_view() {
+            if tab == InspectorTab::Git {
+                self.reset_git_diff_view();
+            }
+            // 选择另一个可展开 tab 就把中央换成该内容；右侧相同的重复面板会由
+            // inspector_panel_promoted 自动隐藏。
+            self.inspector_tab = tab;
+            self.set_stage_override(Some(view), window, cx);
+        } else {
+            // TASK 没有中央展开形态，切回会话并在右侧打开任务面板。
+            self.set_stage_override(None, window, cx);
             self.inspector_tab = tab;
             self.set_inspector_open(true);
         }
@@ -239,6 +293,29 @@ impl Workspace {
     /// inspector 卡片里就永远不是最左边那块，传 0。宽度由调用方按全屏状态算好。
     pub(crate) fn render_inspector_rail(
         &mut self,
+        left_guard: Pixels,
+        right_edge: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.render_inspector_rail_for(self.inspector_tab, false, left_guard, right_edge, cx)
+    }
+
+    /// 中央展开页用独立的 rail：选中态和点击行为都属于中央内容，不能复用右侧
+    /// 当前选中的 tab，否则 Git + Files 分栏时会把中央 Git 标成 FILES。
+    pub(crate) fn render_stage_inspector_rail(
+        &mut self,
+        stage_tab: InspectorTab,
+        left_guard: Pixels,
+        right_edge: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.render_inspector_rail_for(stage_tab, true, left_guard, right_edge, cx)
+    }
+
+    fn render_inspector_rail_for(
+        &mut self,
+        active_tab: InspectorTab,
+        stage_rail: bool,
         left_guard: Pixels,
         right_edge: bool,
         cx: &mut Context<Self>,
@@ -267,10 +344,11 @@ impl Workspace {
             InspectorTab::Tasks,
             InspectorTab::Skills,
         ];
-        let cur = self.inspector_tab;
-        let open = self.inspector_open;
-        // 面板已展开且落在这个 tab 上才算「选中」——跟旧实现一致：收合时无高亮。
-        let selected_index = open.then(|| TABS.iter().position(|t| *t == cur)).flatten();
+        // 停靠 rail 收起期间不保留高亮；中央 rail 本身正在显示内容，始终高亮自己的
+        // tab。两者能同时出现，因此不能共享选中状态。
+        let selected_index = (stage_rail || self.inspector_open)
+            .then(|| TABS.iter().position(|t| *t == active_tab))
+            .flatten();
 
         let tab = |t: InspectorTab, badge: usize| {
             let mut b = Tab::new().label(t.label());
@@ -312,20 +390,28 @@ impl Workspace {
             // 同款注释。
             .when(right_edge, |d| d.pr(px(100.)))
             .child({
-                let mut bar = TabBar::new("inspector-rail")
-                    .underline()
-                    // Underline 默认（Medium）内建行高 36px、字号 text_sm(14px)，
-                    // 比这一行固定的 34px 容器高，还跟旁边侧栏/搜索框的次级文字
-                    // 比显得偏大。XSmall 的行高是 26px（塞进 34px 绰绰有余），
-                    // 字号也降到 text_xs(12px)，跟 FILES/GIT/SKILL 该有的「次级
-                    // 导航」分量更配。
-                    .with_size(gpui_component::Size::XSmall)
-                    .flex_1()
-                    .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
-                        if let Some(tab) = TABS.get(*ix).copied() {
+                let mut bar = TabBar::new(if stage_rail {
+                    "stage-inspector-rail"
+                } else {
+                    "inspector-rail"
+                })
+                .underline()
+                // Underline 默认（Medium）内建行高 36px、字号 text_sm(14px)，
+                // 比这一行固定的 34px 容器高，还跟旁边侧栏/搜索框的次级文字
+                // 比显得偏大。XSmall 的行高是 26px（塞进 34px 绰绰有余），
+                // 字号也降到 text_xs(12px)，跟 FILES/GIT/SKILL 该有的「次级
+                // 导航」分量更配。
+                .with_size(gpui_component::Size::XSmall)
+                .flex_1()
+                .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
+                    if let Some(tab) = TABS.get(*ix).copied() {
+                        if stage_rail {
+                            ws.toggle_stage_inspector_tab(active_tab, tab, window, cx);
+                        } else {
                             ws.toggle_inspector_tab(tab, window, cx);
                         }
-                    }));
+                    }
+                }));
                 if let Some(ix) = selected_index {
                     bar = bar.selected_index(ix);
                 }
@@ -1233,7 +1319,11 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::task_belongs_to_project;
+    use super::{
+        InspectorTab, should_reset_git_diff_on_dock_selection, stage_matches_docked_tab,
+        task_belongs_to_project,
+    };
+    use crate::MainView;
 
     #[test]
     fn task_project_match_respects_path_boundaries() {
@@ -1243,5 +1333,37 @@ mod tests {
         assert!(task_belongs_to_project("/work/api", "/"));
         assert!(!task_belongs_to_project("/work/api-next", "/work/api"));
         assert!(!task_belongs_to_project("/work/other", "/work/api"));
+    }
+
+    #[test]
+    fn stage_and_dock_only_merge_when_tabs_match() {
+        assert!(stage_matches_docked_tab(
+            Some(MainView::Git),
+            InspectorTab::Git
+        ));
+        assert!(!stage_matches_docked_tab(
+            Some(MainView::Git),
+            InspectorTab::Files
+        ));
+        assert!(!stage_matches_docked_tab(
+            Some(MainView::History),
+            InspectorTab::Files
+        ));
+    }
+
+    #[test]
+    fn returning_to_center_git_keeps_the_existing_diff() {
+        assert!(!should_reset_git_diff_on_dock_selection(
+            InspectorTab::Files,
+            Some(MainView::Git)
+        ));
+        assert!(should_reset_git_diff_on_dock_selection(
+            InspectorTab::Files,
+            None
+        ));
+        assert!(!should_reset_git_diff_on_dock_selection(
+            InspectorTab::Git,
+            None
+        ));
     }
 }

@@ -128,16 +128,18 @@ pub fn handle_task_done(mut conn: UnixStream, task_state: &TaskState, v: &Value)
 /// 响应带 task + run；无可用任务时 `task: null`。
 pub fn handle_task_claim(mut conn: UnixStream, task_state: &TaskState, v: &Value) {
     let cwd = v["cwd"].as_str().unwrap_or_default();
+    let launch = v["launch"].as_str().unwrap_or("claude");
     let mut file = task_state.lock().unwrap();
     let now = now_secs();
     let Some(idx) = pick_claimable(&file.tasks, cwd, now) else {
         return ok(&mut conn, json!({ "task": Value::Null }));
     };
-    let task = file.tasks[idx].clone();
-    // Task 不再保存 agent 偏好；claim 的执行记录使用终端默认值。
-    let Some(run) = begin_run_in_file(&mut file, &task.id, "claude", TaskChannel::Pty, now) else {
+    let task_id = file.tasks[idx].id.clone();
+    // The run snapshots the active GUI launch command; Task remains agent-neutral.
+    let Some(run) = begin_run_in_file(&mut file, &task_id, launch, TaskChannel::Pty, now) else {
         return ok(&mut conn, json!({ "task": Value::Null }));
     };
+    let task = file.tasks[idx].clone();
     save_tasks_file(&file);
     ok(&mut conn, json!({ "task": task, "run": run }));
 }
@@ -294,9 +296,14 @@ mod tests {
         assert_eq!(list["file"]["tasks"][0]["id"], id);
 
         // claim：任务在 /tmp/proj，claim 同 cwd → 取到并 begin_run
-        let claim = roundtrip(&task_state, json!({ "op": "task_claim", "cwd": "/tmp/proj" }));
+        let claim = roundtrip(&task_state, json!({
+            "op": "task_claim",
+            "cwd": "/tmp/proj",
+            "launch": "codex --quiet",
+        }));
         assert_eq!(claim["task"]["id"], id);
         assert!(claim["run"]["id"].is_string());
+        assert_eq!(claim["run"]["launch"], "codex --quiet");
         let _run_id = claim["run"]["id"].as_str().unwrap().to_string();
 
         // done：agent 声明完成 → 进 Review

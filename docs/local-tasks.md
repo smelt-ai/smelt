@@ -44,8 +44,8 @@
 | **定时** | 选「定时」+ 本地时间；到点由后台扫描自动 `run_task`（单次，不循环） |
 | **运行** | 待办点「运行」：有执行中的会话则注入，否则按当前默认启动项新开终端 + 首包参数；**ACP** 菜单可在新 ACP 对话中执行 |
 | **打开** | 执行中/完成：切到已绑的 TUI 终端或 ACP 对话 |
-| **做完续跑** | 绑定任务 Done 后，同 cwd claim 下一条 **`auto_run` 待办** 自动 `run_task`（全局始终尝试） |
-| **自动执行** | **任务级**字段：开 = 可被续跑/定时扫描取走；关 = 仅手动「运行」 |
+| **做完续跑** | 绑定任务 Done 后，同 cwd 由 smeltd 原子 claim 下一条 **`auto_run` 待办** 并后台启动 |
+| **自动执行** | 顶部全局「自动认领中 / 暂停」控制后续领取；任务级字段决定任务能否被领取 |
 | **自循环（方向）** | agent 写 TaskStore 塞队（`auto_run`）→ 完成边沿 drain → 同一套运行时启动契约 |
 
 **不做定位：** 完整项目管理、云端任务库、`-p` 无头批跑、cron 循环。
@@ -89,9 +89,11 @@ agent 从 Running 变 Idle 时，本次 Run 标 `completed`，Task 进入「待�
 落盘：`~/.smelt/tasks.json`（`tasks` + `runs`）；首包文件：
 `~/.smelt/tasks/prompts/<id>.txt`（内容 = body）。旧文件没有 `runs/current_run_id` 时按空值兼容读取。
 
-**全局行为（无 config 总开关）：** 只要存在「待办 + `auto_run` + 可跑」的任务，系统会在合适时机自动执行。
+**全局行为：** 任务面板顶部的「自动认领中 / 暂停」持久化到工作区。暂停时不领取新任务，
+但不会打断已运行任务；旧工作区默认开启。
 
-**定时执行：** 每 30s 扫描 `auto_run && scheduled && 待办 && run_at<=now` → `run_task`（同 cwd 已有 Running 则跳过）。
+**定时执行：** 每 30s 扫描候选，由 smeltd 原子领取
+`auto_run && scheduled && 待办 && run_at<=now` 的任务；同 cwd 保持串行。
 
 **做完自动续跑：**
 
@@ -99,13 +101,14 @@ agent 从 Running 变 Idle 时，本次 Run 标 `completed`，Task 进入「待�
 spinner 落下（Running→Idle）
   → 当前 TaskRun → Completed
   → 绑了该 session 的任务 → Review
-  → claim 同 project_cwd 下一条 auto_run 待办（FIFO / created_at）
-  → run_task（新开终端 + startup-arg）
+  → smeltd 原子 claim 同 project_cwd 下一条 auto_run 待办（FIFO / created_at）
+  → 后台启动新终端 + startup-arg（不抢当前焦点）
 ```
 
 - 仅当本 session **确实收尾了任务** 才续跑
 - 同 cwd **串行**；`auto_run=false` 的待办不会被 claim（仍可手动「运行」）
 - 定时任务创建时强制 `auto_run=true`
+- GUI 与 `smelt-task run` 共用 smeltd 的原子 claim，不会重复领取同一条任务
 
 ---
 

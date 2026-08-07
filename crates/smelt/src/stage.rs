@@ -364,7 +364,10 @@ impl Workspace {
                                     if ws.inspector_panel_promoted() {
                                         ws.set_stage_override(None, window, cx);
                                     }
-                                    if ws.inspector_tab != InspectorTab::Git {
+                                    if crate::inspector::should_reset_git_diff_on_dock_selection(
+                                        ws.inspector_tab,
+                                        ws.stage_override,
+                                    ) {
                                         ws.reset_git_diff_view();
                                     }
                                     ws.inspector_tab = InspectorTab::Git;
