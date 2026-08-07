@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use smelt_core::task::{
     Task, TaskChannel, TaskColumn, TaskFile, TaskRunStatus, begin_run_in_file,
     due_retry_ids_in_file, due_scheduled_ids_in_file, load_tasks_file, mark_run_failed_in_file,
-    mark_session_done_in_file, mark_session_failed_in_file, now_secs, pick_claimable,
+    mark_session_done_in_file, mark_session_failed_in_file, mark_task_done_in_file, now_secs, pick_claimable,
     runs_for_task_in_file, save_tasks_file,
 };
 
@@ -104,21 +104,13 @@ pub fn handle_task_remove(mut conn: UnixStream, task_state: &TaskState, v: &Valu
     ok(&mut conn, json!({}));
 }
 
-/// `task_done`：agent 自循环「我做完了」→ 任务进待审查，当前 Run 记 Completed。
+/// `task_done`：agent 自循环「我做完了」→ 单次任务进待审查，重复任务安排下一次执行。
 pub fn handle_task_done(mut conn: UnixStream, task_state: &TaskState, v: &Value) {
     let Some(id) = get_task_id(v, &mut conn) else { return };
     let mut file = task_state.lock().unwrap();
     let now = now_secs();
-    let Some(task) = file.tasks.iter_mut().find(|t| t.id == id) else {
+    if !mark_task_done_in_file(&mut file, &id, now) {
         return err(&mut conn, "任务不存在");
-    };
-    task.column = TaskColumn::Review;
-    task.updated_at = now;
-    if let Some(run_id) = task.current_run_id.clone()
-        && let Some(run) = file.runs.iter_mut().find(|r| r.id == run_id && r.status.is_active())
-    {
-        run.status = TaskRunStatus::Completed;
-        run.finished_at = Some(now);
     }
     save_tasks_file(&file);
     ok(&mut conn, json!({}));
@@ -222,7 +214,7 @@ pub fn handle_task_run_failed(mut conn: UnixStream, task_state: &TaskState, v: &
     ok(&mut conn, json!({ "cwd": cwd }));
 }
 
-/// `task_due`：已到期的定时 + 重试冷却到点的任务 id 列表。
+/// `task_due`：已到期的指定时间任务 + 重试冷却到点的任务 id 列表。
 pub fn handle_task_due(mut conn: UnixStream, task_state: &TaskState, _v: &Value) {
     let file = task_state.lock().unwrap();
     let now = now_secs();
@@ -315,6 +307,38 @@ mod tests {
         // 再 claim 同 cwd：无待办可领（已 Review）→ task null
         let claim2 = roundtrip(&task_state, json!({ "op": "task_claim", "cwd": "/tmp/proj" }));
         assert!(claim2["task"].is_null());
+
+        // 重复任务完成后不进入 Review，而是回待办并安排下一次执行。
+        let mut recurring = Task::new(cwd, "每小时任务".into(), "首包指令".into());
+        recurring.kind = smelt_core::task::TaskKind::Scheduled;
+        recurring.schedule_frequency = smelt_core::task::TaskScheduleFrequency::Hourly;
+        recurring.run_at = Some(1);
+        let recurring_id = recurring.id.clone();
+        let add_recurring = roundtrip(&task_state, json!({ "op": "task_add", "task": recurring }));
+        assert_eq!(add_recurring["ok"], true);
+        let claim_recurring = roundtrip(
+            &task_state,
+            json!({ "op": "task_claim", "cwd": "/tmp/proj", "launch": "codex" }),
+        );
+        assert_eq!(claim_recurring["task"]["id"], recurring_id);
+        let done_recurring = roundtrip(
+            &task_state,
+            json!({ "op": "task_done", "id": recurring_id }),
+        );
+        assert_eq!(done_recurring["ok"], true);
+        let list3 = roundtrip(&task_state, json!({ "op": "task_list" }));
+        let recurring = list3["file"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == recurring_id)
+            .unwrap();
+        assert_eq!(recurring["column"], "backlog");
+        assert_eq!(recurring["schedule_frequency"], "hourly");
+        assert!(
+            recurring["run_at"].as_u64().unwrap() > smelt_core::task::now_secs(),
+            "completed recurring task must move to a future occurrence"
+        );
 
         // 清理临时目录
         std::fs::remove_dir_all(&tmp).ok();

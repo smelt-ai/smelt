@@ -39,6 +39,38 @@ const PANE_ROW_GROUP: &str = "sess-pane-row-hover";
 /// 才提亮到白，明确告诉用户「这一行本身可点，点了折叠」。
 const PROJ_HEADER_GROUP: &str = "proj-header-hover";
 
+/// 四家 agent 的身份图标统一走本地单色 SVG，颜色由会话状态驱动：图标同时回答
+/// 「这是哪家的会话」和「当前处于什么状态」。
+fn provider_icon_path(agent: AcpAgentKind) -> &'static str {
+    match agent {
+        AcpAgentKind::Claude => "smelt-icons/agent-claude.svg",
+        AcpAgentKind::Codex => "smelt-icons/agent-codex.svg",
+        AcpAgentKind::Copilot => "smelt-icons/agent-copilot.svg",
+        AcpAgentKind::Grok => "smelt-icons/agent-grok.svg",
+    }
+}
+
+fn provider_icon(agent: Option<AcpAgentKind>) -> Icon {
+    match agent {
+        Some(agent) => Icon::empty().path(provider_icon_path(agent)),
+        None => Icon::new(IconName::SquareTerminal),
+    }
+}
+
+/// 终端菜单里的内置 agent 跟 ACP 对话菜单共用同一排列；自定义命令排在它们后面。
+fn launch_agent_kind(command: &str) -> Option<AcpAgentKind> {
+    let command = command.trim();
+    AcpAgentKind::ALL
+        .into_iter()
+        .find(|agent| command.starts_with(agent.id()))
+}
+
+fn launch_agent_order(command: &str) -> usize {
+    launch_agent_kind(command)
+        .and_then(|agent| AcpAgentKind::ALL.iter().position(|item| *item == agent))
+        .unwrap_or(usize::MAX)
+}
+
 /// 任务页会保留上次活动会话，方便返回时恢复；但它不是任务页中的选中项。
 fn session_row_is_selected(session_route_active: bool, ix: usize, active: usize) -> bool {
     session_route_active && ix == active
@@ -421,29 +453,28 @@ impl Workspace {
                                             move |menu, _window, cx| {
                                                 let cwd_opt = (!menu_cwd.is_empty())
                                                     .then(|| menu_cwd.clone());
-                                                let entries = active_launch_entries(cx);
-                                                let e_term = e_menu.clone();
-                                                let cwd_new = cwd_opt.clone();
+                                                let mut entries = active_launch_entries(cx);
+                                                entries.sort_by_key(|entry| {
+                                                    launch_agent_order(&entry.command)
+                                                });
                                                 // 按「通道」分组：同一个 agent 既能跑在终端里
                                                 // （它自带的 TUI），也能接进 smelt 原生界面对话。
-                                                // 分组标题把差别说清，菜单项就不用背长名字了。
+                                                // 两组 agent 共用 AcpAgentKind::ALL 的顺序；裸终端
+                                                // 另起一组，避免和 agent 启动项混在一起。
                                                 let mut menu =
-                                                    menu.item(PopupMenuItem::label("终端")).item(
-                                                        PopupMenuItem::new("新建终端")
-                                                            .icon(IconName::SquareTerminal)
-                                                            .on_click(move |_ev, _window, cx| {
-                                                                let cwd = cwd_new.clone();
-                                                                e_term.update(cx, |ws, cx| {
-                                                                    ws.add_session(cwd, cx)
-                                                                });
-                                                            }),
-                                                    );
+                                                    menu.item(PopupMenuItem::label("终端"));
                                                 for entry in entries {
                                                     let label = entry.label.clone();
                                                     let command = entry.command.clone();
                                                     let cwd_launch = cwd_opt.clone();
                                                     let e_launch = e_menu.clone();
-                                                    let icon = icon_for_launch_command(&command);
+                                                    let icon = launch_agent_kind(&command)
+                                                        .map(|agent| provider_icon(Some(agent)))
+                                                        .unwrap_or_else(|| {
+                                                            Icon::new(icon_for_launch_command(
+                                                                &command,
+                                                            ))
+                                                        });
                                                     menu = menu.item(
                                                         PopupMenuItem::new(label.clone())
                                                             .icon(icon)
@@ -470,7 +501,7 @@ impl Workspace {
                                                     let cwd_acp = cwd_opt.clone();
                                                     menu = menu.item(
                                                         PopupMenuItem::new(agent.label())
-                                                            .icon(IconName::Bot)
+                                                            .icon(provider_icon(Some(agent)))
                                                             .on_click(move |_ev, window, cx| {
                                                                 let cwd = cwd_acp.clone();
                                                                 e_acp.update(cx, |ws, cx| {
@@ -491,10 +522,11 @@ impl Workspace {
                                                     let cwd_acp = cwd_opt.clone();
                                                     let launch =
                                                         config.profile_launch_spec(&profile);
+                                                    let profile_kind = profile.kind();
                                                     let profile_id = Some(profile.id.clone());
                                                     menu = menu.item(
                                                         PopupMenuItem::new(profile.label.clone())
-                                                            .icon(IconName::Bot)
+                                                            .icon(provider_icon(Some(profile_kind)))
                                                             .on_click(move |_ev, window, cx| {
                                                                 let cwd = cwd_acp.clone();
                                                                 let launch = launch.clone();
@@ -512,6 +544,21 @@ impl Workspace {
                                                             }),
                                                     );
                                                 }
+                                                let e_term = e_menu.clone();
+                                                let cwd_new = cwd_opt.clone();
+                                                menu = menu
+                                                    .separator()
+                                                    .item(PopupMenuItem::label("单独的终端"))
+                                                    .item(
+                                                        PopupMenuItem::new("新建终端")
+                                                            .icon(IconName::SquareTerminal)
+                                                            .on_click(move |_ev, _window, cx| {
+                                                                let cwd = cwd_new.clone();
+                                                                e_term.update(cx, |ws, cx| {
+                                                                    ws.add_session(cwd, cx)
+                                                                });
+                                                            }),
+                                                    );
                                                 menu
                                             }
                                         }),
@@ -706,6 +753,9 @@ impl Workspace {
             for &ix in ixs {
                 let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
                 let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
+                let provider = self.sessions[ix].provider_kind(cx);
+                let provider_label: &'static str =
+                    provider.map(|agent| agent.label()).unwrap_or("终端");
                 let is_active = session_row_is_selected(session_route_active, ix, active);
                 let entity_id = entity_ids[ix];
                 // 单行行高：副标题只保留「有增量信息」的部分——分屏数。
@@ -815,17 +865,20 @@ impl Workspace {
                                 .bg(rgb(ui_theme::text_bright())),
                         )
                     })
-                    // 状态点放在会话名之前，扫视列表时先读状态、再读会话；悬停显示
-                    // 完整状态名，颜色不再需要靠记忆猜。
+                    // provider 图标放在会话名之前，让四家 agent 的身份和会话状态一眼可见；
+                    // SVG 使用 currentColor，因此直接继承状态色。
                     .child(
                         div()
-                            .id(("sess-status-dot", ix))
+                            .id(("sess-provider-icon", ix))
                             .flex_shrink_0()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(ui_theme::session_dot_color(status))
+                            .size(px(15.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(ui_theme::session_dot_color(status))
+                            .child(provider_icon(provider).size(px(14.)))
                             .tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(status_text(status))
+                                gpui_component::tooltip::Tooltip::new(provider_label)
                                     .build(window, cx)
                             }),
                     )
