@@ -123,7 +123,6 @@ impl Workspace {
         let tasks_active = self.primary_route == WorkspaceRoute::Tasks;
         let session_route_active = self.primary_route == WorkspaceRoute::Session;
         let e_tasks = this.clone();
-        let e_new_task = this.clone();
         let tasks_entry = div()
             .id("sidebar-tasks")
             .mx_2()
@@ -160,17 +159,6 @@ impl Workspace {
                         ui_theme::text_mid()
                     }))
                     .child("任务面板"),
-            )
-            .child(
-                Button::new("sidebar-new-task")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Plus)
-                    .tooltip("新建任务")
-                    .on_click(move |_ev, window, cx| {
-                        cx.stop_propagation();
-                        e_new_task.update(cx, |ws, cx| ws.open_new_task_modal(window, cx));
-                    }),
             )
             .on_click(move |_ev, window, cx| {
                 e_tasks.update(cx, |ws, cx| {
