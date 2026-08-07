@@ -74,7 +74,7 @@ Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](htt
 配置放 `~/.smelt/`。
 
 工作区包含 `smelt`（GUI 主程序）、`smeltd`（终端持久化守护，类 tmux，由 GUI 按需拉起）、`gateway`（远程网关的独立可执行版，用于开发调试）、`smelt-notify`（Claude Code hooks 调用的状态上报小工具），以及用于开发和调试 P2P 隧道的 `smelt-iroh-host` / `smelt-iroh-connect`。普通用户主要使用 `smelt`，守护进程由 GUI 按需管理。
-移动端在 `mobile/`（Flutter），经 `crates/smelt-mobile` 复用 Rust 侧的 iroh 隧道，目前尚未上架，需要自行构建。
+移动端在 `mobile/`（Flutter），经 `crates/smelt-mobile` 复用 Rust 侧的 iroh 隧道，iOS 与 Android 均可运行，目前尚未上架，需要自行构建，见 [`mobile/README.md`](mobile/README.md)。
 
 详细架构、目录结构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，本地任务存储与执行机制见 [`docs/local-tasks.md`](docs/local-tasks.md)，产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)，远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
 
