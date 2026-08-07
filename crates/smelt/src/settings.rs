@@ -167,25 +167,18 @@ pub struct LaunchEntry {
 /// 出厂默认启动项：与当前常用配置对齐（各 agent 默认带全权限参数）。
 /// 用户可在设置里增删改；需要更保守时把参数删掉即可。
 /// 「继续上次」不放默认里，需要的人自己在设置里加。
+///
+/// 从 `AcpAgentKind::ALL` 派生，别再单独维护一份 agent 列表——加一家 agent
+/// 只需要在 `agent_kind.rs` 加枚举变体 + 填 `quick_terminal_label`/`quick_terminal_cmd`，
+/// 这里、ACP 对话菜单、设置页会同时认到。
 pub fn default_launch_entries() -> Vec<LaunchEntry> {
-    vec![
-        LaunchEntry {
-            label: "Claude Code".into(),
-            command: "claude --dangerously-skip-permissions".into(),
-        },
-        LaunchEntry {
-            label: "Codex".into(),
-            command: "codex --dangerously-bypass-approvals-and-sandbox".into(),
-        },
-        LaunchEntry {
-            label: "Copilot".into(),
-            command: "copilot --allow-all".into(),
-        },
-        LaunchEntry {
-            label: "Grok".into(),
-            command: "grok".into(),
-        },
-    ]
+    AcpAgentKind::ALL
+        .into_iter()
+        .map(|agent| LaunchEntry {
+            label: agent.quick_terminal_label().to_string(),
+            command: agent.quick_terminal_cmd().to_string(),
+        })
+        .collect()
 }
 
 /// 项目行「+」可配置启动项列表（全局单例，存 ~/.smelt/launch.json）。
@@ -203,20 +196,24 @@ impl Default for LaunchConfig {
     }
 }
 
-/// 按命令前缀猜侧栏/菜单图标（自定义 agent 走通用终端图标）。
-pub fn icon_for_launch_command(command: &str) -> IconName {
-    let cmd = command.trim();
-    if cmd.starts_with("claude") {
-        IconName::Asterisk
-    } else if cmd.starts_with("codex") {
-        IconName::Bot
-    } else if cmd.starts_with("copilot") {
-        IconName::Github
-    } else if cmd.starts_with("grok") {
-        IconName::Bot
-    } else {
-        IconName::SquareTerminal
+/// 各 agent 在图标类界面（侧栏行、「+」下拉菜单）的统一图标：`icon_for_launch_command`
+/// （快捷终端）、`row_icon`（侧栏行，main.rs）共用这份映射，别各自维护一遍。
+pub fn icon_for_agent_kind(agent: AcpAgentKind) -> IconName {
+    match agent {
+        AcpAgentKind::Claude => IconName::Asterisk,
+        AcpAgentKind::Codex => IconName::Bot,
+        AcpAgentKind::Copilot => IconName::Github,
+        AcpAgentKind::Grok => IconName::Bot,
     }
+}
+
+/// 按命令前缀猜侧栏/菜单图标（自定义 agent 走通用终端图标）。判断本体挪进
+/// `AcpAgentKind::from_command_prefix`——跟 `terminal_view::classify_launch`
+/// 共用同一份「这行命令是哪家 agent」逻辑。
+pub fn icon_for_launch_command(command: &str) -> IconName {
+    AcpAgentKind::from_command_prefix(command)
+        .map(icon_for_agent_kind)
+        .unwrap_or(IconName::SquareTerminal)
 }
 
 /// 过滤出可展示的启动项（名/命令非空）。

@@ -654,18 +654,13 @@ fn mobile_status_name(phase: DaemonPhase, unread: bool) -> &'static str {
     }
 }
 
+/// mobile 网关展示名：跟 main.rs 的 `acp_agent_from_cmd`（旧存档反推）共用
+/// `AcpAgentKind::from_command_loose` 这份「命令里出现哪家关键字就算哪家」判断，
+/// 只是认不出时的兜底值不同（这里是通用的 "other"，那边默认 Claude）。
 fn agent_from_launch(launch: &str) -> &'static str {
-    if launch.contains("claude") {
-        "claude"
-    } else if launch.contains("copilot") {
-        "copilot"
-    } else if launch.contains("codex") {
-        "codex"
-    } else if launch.contains("grok") {
-        "grok"
-    } else {
-        "other"
-    }
+    crate::agent_kind::AcpAgentKind::from_command_loose(launch)
+        .map(crate::agent_kind::AcpAgentKind::id)
+        .unwrap_or("other")
 }
 
 fn mobile_summary_from_daemon(
