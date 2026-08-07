@@ -10,18 +10,20 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Animation, AnimationExt, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window, div,
-    list as virtual_list, px,
+    Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window,
+    div, list as virtual_list, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::spinner::Spinner;
-use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, WindowExt as _, h_flex, v_flex,
+};
 
 use agent_client_protocol::schema::v1::SessionId;
 
@@ -255,11 +257,49 @@ pub enum AcpViewEvent {
     PreviewImage(std::sync::Arc<gpui::Image>),
     ContinueInNewSession(AcpHandoffRequest),
     NavigateToSession(String),
+    /// 由对话选区创建任务。任务不绑定当前 ACP 会话，而是作为同项目的新任务排队执行。
+    CreateTask {
+        body: String,
+        cwd: Option<String>,
+    },
     /// 回合结束且无人在等（无 pending_permissions / pending_elicitation）的上升沿。
     /// 绑定任务据此把 Run 标 Completed、Task 进待审查。
     CompletedTurn,
     /// 连接不可恢复地结束（AcpPhase::Ended）的上升沿，带原因。绑定任务据此走失败/重试。
     Ended(String),
+}
+
+fn task_body_from_selection(selection: String) -> Option<String> {
+    (!selection.trim().is_empty()).then_some(selection)
+}
+
+fn selected_text_context_menu(
+    menu: PopupMenu,
+    view: Entity<AcpView>,
+    cwd: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let Some(body) = task_body_from_selection(window.selected_text(cx)) else {
+        return menu.item(PopupMenuItem::label("请先选中文本"));
+    };
+    let copied_body = body.clone();
+
+    menu.item(
+        PopupMenuItem::new("复制").on_click(move |_event, _window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copied_body.clone()));
+        }),
+    )
+    .item(
+        PopupMenuItem::new("新建任务").on_click(move |_event, _window, cx| {
+            let _ = view.update(cx, |_, cx| {
+                cx.emit(AcpViewEvent::CreateTask {
+                    body: body.clone(),
+                    cwd: cwd.clone(),
+                });
+            });
+        }),
+    )
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -2514,43 +2554,59 @@ impl Render for AcpView {
                         .into_any_element(),
                     // 用户气泡右对齐限宽（对齐设计稿）：整行铺满时跟 agent 正文
                     // 混成一片，看不出谁在说话。
-                    AcpEntry::User(_) => h_flex()
-                        .w_full()
-                        .justify_end()
-                        .child(
-                            div()
-                                .max_w(gpui::relative(0.72))
+                    AcpEntry::User(_) => {
+                        let task_view = view.clone();
+                        let task_cwd = this.cwd.clone();
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .id(("acp-user-message", i))
+                                    .max_w(gpui::relative(0.72))
                                 // gpui-component 的 markdown 列表块（ol/ul）内部用
                                 // `w_full()`/`flex_1()` 排布"序号 + 正文"。这个气泡
                                 // 是收缩到内容大小（只有 max_w，没有 width）的 flex
                                 // item，短列表内容会被误测成只有序号那么宽，正文被
                                 // `overflow_hidden()` 悄悄裁掉——只剩"1." "2." 悬浮。
                                 // 兜个最小宽度，给列表正文留出可见空间。
-                                .min_w(gpui::px(160.))
-                                .px_4()
-                                .py_2p5()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
-                                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
-                                .hover(|bubble| {
-                                    bubble
-                                        .border_color(ui_theme::tint(ui_theme::accent(), 0x52))
-                                        .bg(ui_theme::tint(ui_theme::accent(), 0x20))
-                                })
-                                .text_sm()
-                                .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                    ("acp-user-md", i),
-                                    cached_entry_markdown(
-                                        &this.rendered_markdown,
-                                        i,
-                                        entry,
-                                        this.cwd.as_deref(),
-                                    ),
-                                )),
-                        )
-                        .into_any_element(),
+                                    .min_w(gpui::px(160.))
+                                    .px_4()
+                                    .py_2p5()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
+                                    .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                    .hover(|bubble| {
+                                        bubble
+                                            .border_color(ui_theme::tint(ui_theme::accent(), 0x52))
+                                            .bg(ui_theme::tint(ui_theme::accent(), 0x20))
+                                    })
+                                    .text_sm()
+                                    .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
+                                        ("acp-user-md", i),
+                                        cached_entry_markdown(
+                                            &this.rendered_markdown,
+                                            i,
+                                            entry,
+                                            this.cwd.as_deref(),
+                                        ),
+                                    ))
+                                    .context_menu(move |menu, window, cx| {
+                                        selected_text_context_menu(
+                                            menu,
+                                            task_view.clone(),
+                                            task_cwd.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .into_any_element()
+                    }
                     AcpEntry::UserWithImages { text, images } => {
+                        let task_view = view.clone();
+                        let task_cwd = this.cwd.clone();
                         let mut content = v_flex().gap_2();
                         if !text.trim().is_empty() {
                             content = content.child(
@@ -2598,6 +2654,7 @@ impl Render for AcpView {
                             .justify_end()
                             .child(
                                 div()
+                                    .id(("acp-user-images-message", i))
                                     .max_w(gpui::relative(0.8))
                                     // 同上：避免短的有序/无序列表被收缩到只剩序号宽度、
                                     // 正文被裁没。
@@ -2614,7 +2671,16 @@ impl Render for AcpView {
                                             .bg(ui_theme::tint(ui_theme::accent(), 0x20))
                                     })
                                     .text_sm()
-                                    .child(content.child(image_strip)),
+                                    .child(content.child(image_strip))
+                                    .context_menu(move |menu, window, cx| {
+                                        selected_text_context_menu(
+                                            menu,
+                                            task_view.clone(),
+                                            task_cwd.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }),
                             )
                             .into_any_element()
                     }
@@ -2706,7 +2772,10 @@ impl Render for AcpView {
                         text,
                         thought: false,
                     } => {
+                        let task_view = view.clone();
+                        let task_cwd = this.cwd.clone();
                         let answer = v_flex()
+                            .id(("acp-assistant-message", i))
                             .w_full()
                             .min_w_0()
                             .text_sm()
@@ -2804,7 +2873,16 @@ impl Render for AcpView {
                                         ),
                                 )
                             })
-                            .when(!final_answer, |col| col.text_color(muted).text_xs());
+                            .when(!final_answer, |col| col.text_color(muted).text_xs())
+                            .context_menu(move |menu, window, cx| {
+                                selected_text_context_menu(
+                                    menu,
+                                    task_view.clone(),
+                                    task_cwd.clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
                         if timed_answer_ix == Some(i) {
                             v_flex()
                                 .w_full()
@@ -2825,6 +2903,8 @@ impl Render for AcpView {
                         output,
                         ..
                     } if is_task_completion_tool_title(title) => {
+                        let task_view = view.clone();
+                        let task_cwd = this.cwd.clone();
                         let (status_label, status_color) = match status {
                             ToolCallStatus::Pending => {
                                 ("等待完成", gpui::rgb(ui_theme::text_muted()))
@@ -2857,6 +2937,7 @@ impl Render for AcpView {
                             )
                         };
                         let mut answer = v_flex()
+                            .id(("acp-completion-message", i))
                             .w_full()
                             .min_w_0()
                             .gap_1()
@@ -2882,7 +2963,16 @@ impl Render for AcpView {
                             .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                 ("acp-completion-md", i),
                                 body_markdown,
-                            ));
+                            ))
+                            .context_menu(move |menu, window, cx| {
+                                selected_text_context_menu(
+                                    menu,
+                                    task_view.clone(),
+                                    task_cwd.clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
                         if final_answer {
                             answer = answer.child(
                                 h_flex()
@@ -5347,7 +5437,7 @@ mod tests {
         markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
         refresh_markdown_cache, resolve_restart_launch, search_summary_text,
         should_cancel_for_immediate_prompt, should_queue_prompt, should_replace_session_title,
-        should_seed_restored_height_hints,
+        should_seed_restored_height_hints, task_body_from_selection,
         tool_card_default_expanded, tool_output_has_content, tool_uses_compact_process_row,
     };
     use gpui::{ListAlignment, ListState, px};
@@ -5391,6 +5481,15 @@ mod tests {
         assert!(!should_seed_restored_height_hints(
             true, true, true, true, 0, 0,
         ));
+    }
+
+    #[test]
+    fn selected_task_body_rejects_whitespace_and_preserves_selected_content() {
+        assert_eq!(task_body_from_selection(" \n\t ".into()), None);
+        assert_eq!(
+            task_body_from_selection("  keep this indentation\nnext line  ".into()),
+            Some("  keep this indentation\nnext line  ".into())
+        );
     }
 
     #[test]
