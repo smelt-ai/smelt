@@ -104,6 +104,49 @@ fn is_fresh_conversation_start(
         && !has_initial_prompt
 }
 
+fn should_show_starting_placeholder(
+    phase: &AcpPhase,
+    entries_are_empty: bool,
+    has_history_session: bool,
+    has_initial_prompt: bool,
+) -> bool {
+    matches!(phase, AcpPhase::Starting)
+        && entries_are_empty
+        && !is_fresh_conversation_start(
+            phase,
+            entries_are_empty,
+            has_history_session,
+            has_initial_prompt,
+        )
+}
+
+fn starting_status_copy(
+    status_line: Option<&str>,
+    is_resuming: bool,
+    agent_label: &str,
+    waited_seconds: u64,
+) -> (String, String, String) {
+    let title = if is_resuming {
+        "正在恢复上次的会话".to_string()
+    } else {
+        format!("正在启动 {agent_label}")
+    };
+    let detail = status_line
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if is_resuming {
+                "正在恢复历史消息和工作上下文".to_string()
+            } else {
+                "正在建立与 agent 的连接".to_string()
+            }
+        });
+    let elapsed = format!("已等待 {waited_seconds} 秒 · 通常约 10 秒");
+
+    (title, detail, elapsed)
+}
+
 /// 新建空白会话的第一条 prompt 可以直接交给 smeltd：它会先本地回显并把命令
 /// 留在 ACP 通道里，等握手完成后再真正发给 agent。后续 prompt 仍按单回合排队。
 fn can_dispatch_fresh_start_prompt(
@@ -1984,33 +2027,64 @@ impl Render for AcpView {
         let t = cx.theme();
         let muted = t.muted_foreground;
         let acp_surface: gpui::Hsla = gpui::transparent_black().into();
+        let non_fresh_starting =
+            matches!(self.phase, AcpPhase::Starting) && !self.is_fresh_conversation_start();
+        let starting_copy = non_fresh_starting.then(|| {
+            let waited_seconds = self
+                .starting_since
+                .map(|started| started.elapsed().as_secs())
+                .unwrap_or(0);
+            starting_status_copy(
+                self.status_line.as_deref(),
+                self.history_session_id.is_some(),
+                self.agent.label(),
+                waited_seconds,
+            )
+        });
+        let show_starting_placeholder = should_show_starting_placeholder(
+            &self.phase,
+            self.entries.is_empty(),
+            self.history_session_id.is_some(),
+            self.pending_initial_prompt.is_some(),
+        );
 
         // 新建空白会话在后台静默准备，用户可以立刻输入；续接/失败仍明确展示状态。
-        let banner: Option<gpui::AnyElement> = match &self.phase {
-            AcpPhase::Starting if !self.is_fresh_conversation_start() => Some(
-                div()
-                    .p_2()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(self.status_line.clone().unwrap_or_else(|| {
-                        // 说实话：慢的是 Claude Code 自己建会话（实测约 10 秒），
-                        // 不是「首次下载适配器」——那句每次都显示，是假的。
-                        // 报出已等秒数，免得看着像卡死。
-                        let waited = self
-                            .starting_since
-                            .map(|t| t.elapsed().as_secs())
-                            .unwrap_or(0);
-                        let what = if self.history_session_id.is_some() {
-                            "正在续接上次的会话".to_string()
-                        } else {
-                            format!("正在启动 {}", self.agent.label())
-                        };
-                        format!("{what}…（已 {waited} 秒，通常 10 秒左右）")
-                    }))
+        let banner: Option<gpui::AnyElement> = match (&self.phase, starting_copy.as_ref()) {
+            (AcpPhase::Starting, Some((_, detail, elapsed))) if !show_starting_placeholder => Some(
+                h_flex()
+                    .w_full()
+                    .px_4()
+                    .py_2()
+                    .gap_2()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .bg(gpui::rgb(ui_theme::bg_bar()))
+                    .child(
+                        Spinner::new()
+                            .xsmall()
+                            .color(gpui::rgb(ui_theme::accent()).into()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(detail.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(elapsed.clone()),
+                    )
                     .into_any_element(),
             ),
-            AcpPhase::Starting => None,
-            AcpPhase::Ended(msg) => Some(
+            (AcpPhase::Starting, _) => None,
+            (AcpPhase::Ended(msg), _) => Some(
                 v_flex()
                     .p_2()
                     .gap_2()
@@ -2047,6 +2121,90 @@ impl Render for AcpView {
             ),
             _ => None,
         };
+        let starting_placeholder = show_starting_placeholder.then(|| {
+            let (title, detail, elapsed) = starting_copy
+                .as_ref()
+                .expect("non-fresh startup always has loading copy");
+            v_flex()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .child(
+                    v_flex()
+                        .id("acp-starting-placeholder")
+                        .w_full()
+                        .max_w(px(400.))
+                        .items_center()
+                        .gap_3()
+                        .p_4()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(ui_theme::tint(ui_theme::accent(), 0x2c))
+                        .bg(gpui::rgb(ui_theme::bg_bar()))
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .size(px(48.))
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(ui_theme::tint(ui_theme::accent(), 0x48))
+                                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                .child(
+                                    Spinner::new()
+                                        .xsmall()
+                                        .color(gpui::rgb(ui_theme::accent()).into()),
+                                )
+                                .with_animation(
+                                    "acp-starting-pulse",
+                                    Animation::new(std::time::Duration::from_millis(1800)).repeat(),
+                                    |this, delta| {
+                                        let wave =
+                                            (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                                        this.opacity(0.72 + wave * 0.28)
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(t.foreground)
+                                .text_center()
+                                .child(title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .text_center()
+                                .child(detail.clone()),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_full()
+                                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                .text_xs()
+                                .text_color(muted)
+                                .child(elapsed.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .text_center()
+                                .child("可以先在下方输入，连接完成后会自动发送"),
+                        ),
+                )
+        });
         let fork_banner = self.fork_origin.clone().map(|origin| {
             let source_id = origin.session_id.clone();
             h_flex()
@@ -4246,7 +4404,8 @@ impl Render for AcpView {
                             .scrollbar_show(ScrollbarShow::Always)
                     }))
                     .children(sticky_prompt)
-                    .children(jump_to_latest),
+                    .children(jump_to_latest)
+                    .children(starting_placeholder),
             )
             .children(activity_status)
             .children(permission)
@@ -5376,6 +5535,64 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    #[test]
+    fn starting_placeholder_only_covers_non_fresh_empty_conversations() {
+        use super::should_show_starting_placeholder;
+
+        assert!(!should_show_starting_placeholder(
+            &AcpPhase::Starting,
+            true,
+            false,
+            false,
+        ));
+        assert!(should_show_starting_placeholder(
+            &AcpPhase::Starting,
+            true,
+            true,
+            false,
+        ));
+        assert!(should_show_starting_placeholder(
+            &AcpPhase::Starting,
+            true,
+            false,
+            true,
+        ));
+        assert!(!should_show_starting_placeholder(
+            &AcpPhase::Starting,
+            false,
+            true,
+            false,
+        ));
+        assert!(!should_show_starting_placeholder(
+            &AcpPhase::Idle,
+            true,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn starting_status_copy_explains_resume_and_wait() {
+        use super::starting_status_copy;
+
+        assert_eq!(
+            starting_status_copy(None, true, "Claude Code", 12),
+            (
+                "正在恢复上次的会话".to_string(),
+                "正在恢复历史消息和工作上下文".to_string(),
+                "已等待 12 秒 · 通常约 10 秒".to_string(),
+            )
+        );
+        assert_eq!(
+            starting_status_copy(Some("  正在连接 agent  "), false, "Codex", 1),
+            (
+                "正在启动 Codex".to_string(),
+                "正在连接 agent".to_string(),
+                "已等待 1 秒 · 通常约 10 秒".to_string(),
+            )
+        );
     }
 
     #[test]
