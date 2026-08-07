@@ -593,7 +593,12 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
             // 它插入“新会话”分隔线。
             let has_active_turn = state.turn_started_at_ms.is_some();
             state.acp_session_id = Some(session_id.to_string());
-            if state.history_session_id.is_none() {
+            // Fresh session/new 只有在已经有消息（或首条 prompt 已经排队）时
+            // 才具备可恢复的历史身份。空白会话的运行时 id 不能拿去走
+            // session/load，否则冷恢复会把一个从未产生历史的会话当成旧会话。
+            if state.history_session_id.is_none()
+                && (!matches!(kind, ReadyKind::Fresh) || !state.entries.is_empty())
+            {
                 state.history_session_id = Some(session_id.to_string());
             }
             state.supports_image = supports_image;
@@ -973,6 +978,7 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.completed_unread = false;
     state.replaying_history = false;
     state.awaiting_user_echo = false;
+    state.acp_session_id = None;
     state.turn_started_at_ms = None;
     state.last_turn_duration_ms = None;
     state.phase = AcpPhase::Starting;
@@ -986,6 +992,12 @@ pub fn note_prompt_sent(
     text: String,
     images: Vec<crate::acp_chat::AcpImage>,
 ) {
+    // 空白会话在 Ready 时不会登记 history_session_id；首条 prompt 真正发出
+    // 后，运行时 id 才升级为可跨进程恢复的历史身份。若 prompt 早于 Ready
+    // 排队，则由 Ready 分支在看到本地回显后补上。
+    if state.history_session_id.is_none() {
+        state.history_session_id = state.acp_session_id.clone();
+    }
     state.replaying_history = false;
     if images.is_empty() {
         state.entries.push(AcpEntry::User(text));
@@ -1382,6 +1394,40 @@ mod tests {
         assert_eq!(s.entries.len(), 2);
         assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
         assert!(matches!(s.entries[1], AcpEntry::Divider(_)));
+    }
+
+    #[test]
+    fn ready_fresh_blank_session_does_not_create_history_id() {
+        let mut s = fresh_state();
+
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+                kind: ReadyKind::Fresh,
+                supports_image: true,
+            },
+        );
+
+        assert_eq!(s.acp_session_id.as_deref(), Some("new-sid"));
+        assert!(s.history_session_id.is_none());
+    }
+
+    #[test]
+    fn first_prompt_after_ready_makes_blank_session_resumable() {
+        let mut s = fresh_state();
+        apply_event(
+            &mut s,
+            AcpEvent::Ready {
+                session_id: agent_client_protocol::schema::v1::SessionId::new("new-sid"),
+                kind: ReadyKind::Fresh,
+                supports_image: true,
+            },
+        );
+
+        note_prompt_sent(&mut s, "hello".into(), Vec::new());
+
+        assert_eq!(s.history_session_id.as_deref(), Some("new-sid"));
     }
 
     #[test]
@@ -1906,5 +1952,17 @@ mod tests {
         assert!(should_auto_resume(&s));
         s.phase = AcpPhase::Idle;
         assert!(!should_auto_resume(&s)); // 还活着，用不上「自动续接」
+    }
+
+    #[test]
+    fn restart_clears_old_runtime_id_but_keeps_history_identity() {
+        let mut s = fresh_state();
+        s.acp_session_id = Some("runtime".into());
+        s.history_session_id = Some("history".into());
+
+        reset_for_restart(&mut s);
+
+        assert!(s.acp_session_id.is_none());
+        assert_eq!(s.history_session_id.as_deref(), Some("history"));
     }
 }
