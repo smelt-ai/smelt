@@ -3682,6 +3682,15 @@ impl Workspace {
                         this.activate(ix, window, cx);
                     }
                 }
+                acp_view::AcpViewEvent::CreateTask { body, cwd } => {
+                    *cx.default_global::<crate::tasks::NewTaskPrefill>() =
+                        crate::tasks::NewTaskPrefill {
+                            session_id: None,
+                            cwd: cwd.clone(),
+                            body: Some(body.clone()),
+                        };
+                    this.open_new_task_modal(window, cx);
+                }
                 acp_view::AcpViewEvent::CompletedTurn => {
                     this.touch_acp_session(_view);
                     // ACP 回合真完成（无人在等）：绑定任务进待审查，挂旗续跑同 cwd 下一条。

@@ -661,11 +661,12 @@ fn project_label(cwd: &str) -> String {
         .to_string()
 }
 
-/// 终端右键「新建任务」时写入；`open_new_task_modal` 消费后清空。
+/// 终端或 ACP 对话右键「新建任务」时写入；`open_new_task_modal` 消费后清空。
 #[derive(Default, Clone)]
 pub struct NewTaskPrefill {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
+    pub body: Option<String>,
 }
 
 impl Global for NewTaskPrefill {}
@@ -1258,14 +1259,16 @@ impl Workspace {
         self.ensure_task_inputs(window, cx);
         // 明确进入「新建」模式（可能从上一次编辑残留）
         self.task_editing = None;
-        // 终端右键预填（若有）
+        // 终端 / ACP 对话右键预填（若有）
+        let mut prefilled_body = None;
         if let Some(pre) = cx.try_global::<NewTaskPrefill>() {
             let pre = pre.clone();
-            if pre.session_id.is_some() || pre.cwd.is_some() {
+            if pre.session_id.is_some() || pre.cwd.is_some() || pre.body.is_some() {
                 self.task_bind_session = pre.session_id;
                 if let Some(c) = pre.cwd {
                     self.task_bind_project = Some(c);
                 }
+                prefilled_body = pre.body;
             }
             *cx.default_global::<NewTaskPrefill>() = NewTaskPrefill::default();
         }
@@ -1282,8 +1285,9 @@ impl Workspace {
         self.task_auto_run = true;
         self.task_show_advanced = false;
         if let Some(input) = &self.task_body_input {
+            let body = prefilled_body.unwrap_or_default();
             input.update(cx, |s, cx| {
-                s.set_value("", window, cx);
+                s.set_value(body, window, cx);
                 s.focus(window, cx);
             });
         }

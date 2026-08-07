@@ -1808,6 +1808,7 @@ impl Render for TerminalView {
                         *cx.default_global::<NewTaskPrefill>() = NewTaskPrefill {
                             session_id: Some(sid.clone()),
                             cwd: cwd.clone(),
+                            body: None,
                         };
                         window.dispatch_action(Box::new(NewTask), cx);
                     }),
