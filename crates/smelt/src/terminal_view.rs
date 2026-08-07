@@ -19,11 +19,24 @@ use crate::terminal::{self, Terminal};
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
-fn sel_bg() -> u32 {
+///
+/// `pub(crate)`：下发给移动端的配色快照要带上同一份值，两端选区色才一致
+/// （见 `settings::publish_terminal_theme`）。
+pub(crate) fn sel_bg() -> u32 {
     if terminal::is_dark() {
         0x0033_4a6a
     } else {
         0x00ad_d6ff
+    }
+}
+
+/// 搜索命中底色：普通命中暗琥珀，当前命中亮琥珀（跟选区蓝区分开）；同样跟主题走。
+pub(crate) fn search_hit_bg(active: bool) -> u32 {
+    match (active, terminal::is_dark()) {
+        (true, true) => 0x00d4_a017,
+        (true, false) => 0x00ff_c107,
+        (false, true) => 0x007a_5c20,
+        (false, false) => 0x00ff_e9a8,
     }
 }
 
@@ -1316,14 +1329,11 @@ impl Render for TerminalView {
 
         // 背景层：底色（带透明度）+ 可选背景图，铺在终端内容之下。
         // 终端「默认底色」格子渲染时留空（见 render_row），故背景层能透出——所以这层
-        // 的颜色必须跟 terminal::default_bg() 是同一套逻辑：用户没手动选过背景色时
-        // 跟主题模式走，选过了就保留用户的选择（不因为切深浅色模式而被顶掉）。
+        // 的颜色必须跟 terminal::default_bg() 是同一个值。用户自选的底色已经并进
+        // default_bg()（见 terminal::set_bg_override），OSC 11 应答和下发给手机的
+        // 配色快照也都取它，四处同源。
         let ap = cx.global::<crate::Appearance>().clone();
-        let bg_color = if ap.bg_color_is_default() {
-            terminal::default_bg()
-        } else {
-            ap.bg_color
-        };
+        let bg_color = terminal::default_bg();
         let mut bg_layer = div().absolute().inset_0().bg(rgb(bg_color));
         if let Some(path) = &ap.bg_image {
             bg_layer = bg_layer.child(
@@ -2029,18 +2039,7 @@ fn paint_row(
         } else if c.selected {
             bg = Some(sel_bg());
         } else if let Some(active) = search_at(i) {
-            // 搜索：普通命中暗琥珀，当前命中亮琥珀（跟选区蓝区分开）。
-            bg = Some(if active {
-                if terminal::is_dark() {
-                    0x00d4_a017
-                } else {
-                    0x00ff_c107
-                }
-            } else if terminal::is_dark() {
-                0x007a_5c20
-            } else {
-                0x00ff_e9a8
-            });
+            bg = Some(search_hit_bg(active));
         }
         CellStyle {
             fg,

@@ -111,6 +111,35 @@ pub fn apply_theme_mode(mode: ThemeMode, cx: &mut App) {
     // 把组件库主题覆写成 ui_theme 的值，色真源收敛成一个。
     // 覆写必须在 Theme::change 之后：它会整套 apply_config 覆盖回默认。
     crate::ui_theme::apply_to_component_theme(cx);
+    publish_terminal_theme();
+}
+
+/// 把「当前生效的终端配色」落盘给守护/网关，转发给移动端。
+///
+/// 移动端渲染的是同一份 PTY 字节流，而 TUI 会用 OSC 11 查背景色来决定用哪档灰
+/// （应答见 `terminal::EventProxy::resolve_color`）。手机若用自己写死的配色，
+/// TUI 以为的底色跟实际底色对不上，就是对比度问题。所以颜色真源只有 PC 这一份，
+/// 而且一部手机可以连多台设备，配色必须**按设备**下发而不是客户端内置。
+///
+/// 主题模式、用户自选底色变化时都要调（见 `apply_theme_mode` / `apply_appearance`）。
+pub fn publish_terminal_theme() {
+    smelt_core::terminal_theme::publish(&current_terminal_theme());
+}
+
+/// 按当前主题 + 外观设置组装配色快照。
+fn current_terminal_theme() -> smelt_core::terminal_theme::TerminalThemeSnapshot {
+    smelt_core::terminal_theme::TerminalThemeSnapshot {
+        version: smelt_core::terminal_theme::TERMINAL_THEME_VERSION,
+        dark: terminal::is_dark(),
+        background: terminal::default_bg(),
+        foreground: terminal::default_fg(),
+        // 光标是实心块反显（见 terminal_view 的 in_block 分支），块本身就是前景色。
+        cursor: terminal::default_fg(),
+        selection: terminal_view::sel_bg(),
+        palette: terminal::ansi_palette().to_vec(),
+        search_hit: terminal_view::search_hit_bg(false),
+        search_hit_current: terminal_view::search_hit_bg(true),
+    }
 }
 
 /// 外观设置文件路径：~/.smelt/appearance.json。
@@ -1242,7 +1271,15 @@ fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
     let mut a = cx.global::<Appearance>().clone();
     f(&mut a);
     save_appearance(&a);
+    // 用户自选底色要镜像给 PTY 线程（OSC 11 应答）和移动端配色快照，三处同源。
+    apply_bg_color(&a);
     cx.set_global(a);
+}
+
+/// 把 `Appearance.bg_color` 落到终端默认底色：没被用户改过就跟主题走。
+pub fn apply_bg_color(a: &Appearance) {
+    terminal::set_bg_override((!a.bg_color_is_default()).then_some(a.bg_color));
+    publish_terminal_theme();
 }
 
 /// 改 LLM 配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
@@ -3511,5 +3548,55 @@ mod daemon_info_tests {
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(value["hooks"]["Stop"], serde_json::json!([]));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// 下发给移动端的配色快照必须跟 PC 实际渲染色同源——这里锁住两件事：
+/// 快照读的就是当前主题色（切浅色能跟着变、用户自选底色能盖掉主题色），以及
+/// `smelt-core` 侧那份「守护读不到快照文件时」的默认值没跟深色主题漂移。
+#[cfg(test)]
+mod terminal_theme_tests {
+    use super::current_terminal_theme;
+    use crate::terminal;
+    use smelt_core::terminal_theme::TerminalThemeSnapshot;
+
+    #[test]
+    fn dark_snapshot_matches_core_fallback() {
+        let _guard = terminal::lock_theme_globals();
+        terminal::set_dark_mode(true);
+        crate::ui_theme::set_light(false);
+        terminal::set_bg_override(None);
+        assert_eq!(
+            current_terminal_theme(),
+            TerminalThemeSnapshot::default(),
+            "smelt-core 的默认快照要跟 PC 深色主题实际色值一致：守护先于 GUI 起来时用的就是它"
+        );
+    }
+
+    #[test]
+    fn snapshot_follows_theme_mode_and_user_background() {
+        let _guard = terminal::lock_theme_globals();
+        terminal::set_dark_mode(false);
+        crate::ui_theme::set_light(true);
+        terminal::set_bg_override(None);
+        let light = current_terminal_theme();
+        assert!(!light.dark);
+        assert_eq!(light.background, crate::ui_theme::bg_panel());
+        assert_ne!(
+            light.palette,
+            TerminalThemeSnapshot::default().palette,
+            "浅色主题要发浅色板，不能原样发深色板"
+        );
+
+        terminal::set_bg_override(Some(0x00123456));
+        assert_eq!(
+            current_terminal_theme().background,
+            0x00123456,
+            "用户自选底色要盖过主题色"
+        );
+
+        terminal::set_bg_override(None);
+        terminal::set_dark_mode(true);
+        crate::ui_theme::set_light(false);
     }
 }

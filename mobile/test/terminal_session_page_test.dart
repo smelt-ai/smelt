@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/pages/terminal_session_page.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/terminal_stream_service.dart';
+import 'package:smelt_mobile/theme/terminal_theme_wire.dart';
 import 'package:xterm/xterm.dart';
 
 class _FakeTerminalStream implements TerminalStreamClient {
@@ -471,6 +472,59 @@ void main() {
 
     expect(inputs, ['\x1b', '\x03', '\x1b[A']);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('terminal adopts the theme sent by the connected device', (
+    tester,
+  ) async {
+    final stream = _FakeTerminalStream();
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+    );
+
+    // 连上之前只能用兜底深色（= PC 出厂主题）。
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).theme.background,
+      SmeltTerminalTheme.fallbackDark.background,
+    );
+
+    stream.connect();
+    // PC 端切了浅色主题：手机必须跟着换。否则 TUI 按 OSC 11 查到的浅底挑灰度，
+    // 手机上却渲染在深底上，直接是对比度问题。
+    stream.emit(
+      TerminalReadyEvent(
+        cols: 40,
+        rows: 20,
+        replayBytes: 0,
+        writeEnabled: true,
+        theme: SmeltTerminalTheme.fromWire(const {
+          'dark': false,
+          'background': '#ffffff',
+          'foreground': '#24292e',
+        }),
+        themeIsDark: false,
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.theme.background, const Color(0xffffffff));
+    expect(view.theme.foreground, const Color(0xff24292e));
+    expect(
+      tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
+      const Color(0xffffffff),
+      reason: '浅色终端不该嵌在纯黑页面里',
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
 }
