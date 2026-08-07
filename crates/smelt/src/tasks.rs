@@ -26,6 +26,8 @@ use crate::{Workspace, new_sid};
 
 // ===================== 模型 =====================
 
+const MAX_AUTO_TASK_LAUNCHES: usize = 4;
+
 /// 任务列。UI 只暴露三态：**待办 / 执行中 / 完成**。
 /// `ready` / `waiting` 仍可从旧 tasks.json 读入，展示时归并到待办 / 执行中。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -399,6 +401,24 @@ pub struct Task {
     pub updated_at: u64,
 }
 
+/// 删除确认期间保留用户实际点选的任务快照。
+#[derive(Clone, Debug)]
+pub(crate) struct TaskDeleteTarget {
+    id: String,
+    title: String,
+    has_active_execution: bool,
+}
+
+impl TaskDeleteTarget {
+    fn from_task(task: &Task) -> Self {
+        Self {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            has_active_execution: task.column.is_active() || task.session_id.is_some(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -476,7 +496,7 @@ fn apply_failure_to_task(task: &mut Task, run: &mut TaskRun, error: &str, now: u
         task.session_id = None;
         task.updated_at = now;
         if task.retry_policy.allows_retry(run.attempt) {
-            // 未超限：回待办，冷却后由 due_retry_ids / claim 重新取跑。
+            // 未超限：回待办，冷却后由自动认领重新取跑。
             task.column = TaskColumn::Backlog;
             task.retry_at = if task.retry_policy.retry_delay_secs > 0 {
                 Some(now + task.retry_policy.retry_delay_secs)
@@ -983,15 +1003,6 @@ impl TaskStore {
         done_cwd
     }
 
-    /// 该项目是否已有执行中任务（同 cwd 串行 worker）。
-    pub fn has_running_for_cwd(cwd: &str) -> bool {
-        let cwd = cwd.trim_end_matches('/');
-        Self::load()
-            .tasks
-            .iter()
-            .any(|t| t.column.is_active() && t.project_cwd.trim_end_matches('/') == cwd)
-    }
-
     /// 任务此刻是否可被**系统**自动取跑（待办 + `auto_run`；依赖满足 + 重试冷却过；
     /// 定时须已到期）。人手点「运行」不走此判断。
     fn is_auto_runnable(t: &Task, tasks: &[Task], now: u64) -> bool {
@@ -1008,78 +1019,104 @@ impl TaskStore {
         }
         match t.kind {
             TaskKind::Once => true,
-            TaskKind::Scheduled => t.run_at.map(|at| at <= now).unwrap_or(false),
+            TaskKind::Scheduled => t.is_due(now),
         }
     }
 
-    /// 选择下一条**可自动执行**的待办。真正的 Running 状态由 begin_pty_run
-    /// 与执行记录一起写入，避免领取后启动失败留下幽灵 Running。
-    ///
-    /// - 只取 `prefer_cwd` 同项目（串行续跑）
-    /// - 仅 `auto_run == true`、依赖满足、重试冷却已过 且可跑
-    /// - 该 cwd 已有 Running/Waiting 则不领
-    /// - FIFO：`created_at` 升序
-    pub fn claim_next_runnable(prefer_cwd: &str) -> Option<String> {
-        let prefer = prefer_cwd.trim_end_matches('/');
-        if prefer.is_empty() {
+    /// Return at most one eligible task project per scan, ordered FIFO.
+    pub fn auto_claim_cwds() -> Vec<String> {
+        let file = Self::load();
+        auto_claim_cwds_from_tasks(&file.tasks, now_secs())
+    }
+
+    /// Atomically claim and create a run through smeltd, preventing GUI and
+    /// `smelt-task` from launching the same task concurrently.
+    pub fn claim_next_runnable(prefer_cwd: &str, launch: &str) -> Option<(Task, TaskRun)> {
+        let cwd = prefer_cwd.trim_end_matches('/');
+        if cwd.is_empty() {
             return None;
         }
-        let file = Self::load();
-        let now = now_secs();
-        if file
-            .tasks
-            .iter()
-            .any(|t| t.column.is_active() && t.project_cwd.trim_end_matches('/') == prefer)
-        {
+        let response = match smelt_core::task::request_task_op(serde_json::json!({
+            "op": "task_claim",
+            "cwd": cwd,
+            "launch": launch,
+        })) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("[tasks] 自动认领请求失败，保留待办等待重试：{error}");
+                return None;
+            }
+        };
+        if response["task"].is_null() {
             return None;
         }
-        let mut idxs: Vec<usize> = file
-            .tasks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                t.project_cwd.trim_end_matches('/') == prefer
-                    && Self::is_auto_runnable(t, &file.tasks, now)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        idxs.sort_by_key(|&i| file.tasks[i].created_at);
-        idxs.first().map(|&idx| file.tasks[idx].id.clone())
+        let task: Task = match serde_json::from_value(response["task"].clone()) {
+            Ok(task) => task,
+            Err(error) => {
+                Self::fail_malformed_claim(&response, &error.to_string());
+                return None;
+            }
+        };
+        let run: TaskRun = match serde_json::from_value(response["run"].clone()) {
+            Ok(run) => run,
+            Err(error) => {
+                Self::fail_malformed_claim(&response, &error.to_string());
+                return None;
+            }
+        };
+        Self::mutate(|file| {
+            if let Some(slot) = file.tasks.iter_mut().find(|known| known.id == task.id) {
+                *slot = task.clone();
+            } else {
+                file.tasks.push(task.clone());
+            }
+            if let Some(slot) = file.runs.iter_mut().find(|known| known.id == run.id) {
+                *slot = run.clone();
+            } else {
+                file.runs.push(run.clone());
+            }
+        });
+        Some((task, run))
     }
 
-    /// 已到期、可自动执行的单次定时任务 id（按 `run_at` 升序）。
-    /// 依赖未满足的定时任务不会被领取。
-    pub fn due_scheduled_ids() -> Vec<String> {
-        let now = now_secs();
-        let file = Self::load();
-        let mut due: Vec<(u64, String)> = file
-            .tasks
-            .iter()
-            .filter(|t| t.is_due(now) && t.dependencies_met(&file.tasks))
-            .map(|t| (t.run_at.unwrap_or(0), t.id.clone()))
-            .collect();
-        due.sort_by_key(|(at, _)| *at);
-        due.into_iter().map(|(_, id)| id).collect()
+    fn fail_malformed_claim(response: &serde_json::Value, error: &str) {
+        eprintln!("[tasks] 自动认领响应无法解析：{error}");
+        let Some(task_id) = response["task"]["id"].as_str() else {
+            return;
+        };
+        let Some(run_id) = response["run"]["id"].as_str() else {
+            return;
+        };
+        let failure = serde_json::json!({
+            "op": "task_run_failed",
+            "task_id": task_id,
+            "run_id": run_id,
+            "error": "自动认领响应无法解析",
+        });
+        if smelt_core::task::request_task_op(failure).is_ok() {
+            Self::refresh_from_smeltd();
+        }
     }
 
-    /// 重试冷却已到、可重新取跑的任务 id（按 `retry_at` 升序）。
-    pub fn due_retry_ids() -> Vec<String> {
-        let now = now_secs();
-        let file = Self::load();
-        let mut due: Vec<(u64, String)> = file
-            .tasks
-            .iter()
-            .filter(|t| {
-                t.retry_at.is_some_and(|at| at <= now)
-                    && t.auto_run
-                    && t.column.is_todo()
-                    && t.dependencies_met(&file.tasks)
-            })
-            .map(|t| (t.retry_at.unwrap_or(0), t.id.clone()))
-            .collect();
-        due.sort_by_key(|(at, _)| *at);
-        due.into_iter().map(|(_, id)| id).collect()
+}
+
+fn auto_claim_cwds_from_tasks(tasks: &[Task], now: u64) -> Vec<String> {
+    let mut candidates: Vec<_> = tasks
+        .iter()
+        .filter(|task| TaskStore::is_auto_runnable(task, tasks, now))
+        .filter_map(|task| {
+            let cwd = task.project_cwd.trim_end_matches('/');
+            (!cwd.is_empty()).then(|| (task.created_at, cwd.to_string()))
+        })
+        .collect();
+    candidates.sort_by_key(|(created_at, _)| *created_at);
+    let mut cwds = Vec::new();
+    for (_, cwd) in candidates {
+        if !cwds.iter().any(|known| known == &cwd) {
+            cwds.push(cwd);
+        }
     }
+    cwds
 }
 
 // ===================== Workspace =====================
@@ -1411,38 +1448,37 @@ impl Workspace {
         }
     }
 
-    /// 后台扫描：到期定时任务 → 复用 [`Self::run_task`]。
-    /// 同 cwd 已有执行中任务时跳过（串行，留给完成边沿续跑）。
-    pub fn tick_scheduled_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 先刷缓存：让 `smelt-task`（agent 自循环）塞进来的任务对 GUI 可见。
-        TaskStore::refresh_from_smeltd();
-        self.reconcile_tasks(cx);
-        let mut ids = TaskStore::due_scheduled_ids();
-        ids.extend(TaskStore::due_retry_ids());
-        ids.sort();
-        ids.dedup();
-        if ids.is_empty() {
+    /// Toggle future automatic claims. Running tasks are not interrupted.
+    pub fn set_task_auto_claim_enabled(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.task_auto_claim_enabled == enabled {
             return;
         }
-        for id in ids {
-            let Some(t) = TaskStore::get(&id) else {
-                continue;
-            };
-            if t.retry_at.is_some_and(|at| at <= now_secs()) {
-                eprintln!("[tasks] retry due id={}", id);
-            } else if !t.is_due(now_secs()) {
-                continue;
-            }
-            if TaskStore::has_running_for_cwd(&t.project_cwd) {
-                continue;
-            }
-            eprintln!("[tasks] scheduled due id={} run_at={:?}", id, t.run_at);
-            self.run_task(&id, window, cx);
+        self.task_auto_claim_enabled = enabled;
+        self.save_state(cx);
+        cx.notify();
+        if enabled {
+            self.tick_auto_claim_tasks(window, cx);
         }
     }
 
-    /// agent 会话刚从 Running→Idle 且收尾了绑定任务：
-    /// 同项目 claim 下一条 **auto_run** 待办并 `run_task`（全局始终尝试，闸门在任务字段）。
+    /// Reconcile task state, then atomically claim one runnable task per project.
+    pub fn tick_auto_claim_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        TaskStore::refresh_from_smeltd();
+        self.reconcile_tasks(cx);
+        if !self.task_auto_claim_enabled {
+            return;
+        }
+        for cwd in TaskStore::auto_claim_cwds() {
+            self.claim_and_launch_next_task(&cwd, window, cx);
+        }
+    }
+
+    /// A completed task can free its project's serialized automatic queue.
     pub fn on_session_task_idle(
         &mut self,
         session_id: &str,
@@ -1458,11 +1494,31 @@ impl Workspace {
         if cwd.trim().is_empty() {
             return;
         }
-        let Some(id) = TaskStore::claim_next_runnable(&cwd) else {
-            return;
+        if self.task_auto_claim_enabled {
+            self.claim_and_launch_next_task(&cwd, window, cx);
+        }
+    }
+
+    fn claim_and_launch_next_task(
+        &mut self,
+        cwd: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.task_auto_claim_enabled
+            || self.auto_task_launches_inflight >= MAX_AUTO_TASK_LAUNCHES
+        {
+            return false;
+        }
+        let base_launch = active_launch_entries(cx)
+            .first()
+            .map(|entry| entry.command.clone())
+            .unwrap_or_else(|| "claude".into());
+        let Some((task, run)) = TaskStore::claim_next_runnable(cwd, &base_launch) else {
+            return false;
         };
-        eprintln!("[tasks] auto_run after session={session_id} → next={id} cwd={cwd}");
-        self.run_task(&id, window, cx);
+        self.launch_task_in_terminal(task, run, base_launch, false, window, cx);
+        true
     }
 
     /// 对账：`Running` 但绑定会话已不存在（GUI 崩溃后 smeltd 会话也丢了）的任务
@@ -1836,7 +1892,87 @@ impl Workspace {
         Workspace::modal_shell(500., false, content, cx)
     }
 
-    pub fn delete_task(&mut self, id: &str, cx: &mut Context<Self>) {
+    /// Request deletion without immediately removing the task or its runs.
+    pub fn start_delete_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(task) = TaskStore::get(id) else {
+            return;
+        };
+        self.task_delete_target = Some(TaskDeleteTarget::from_task(&task));
+        cx.notify();
+    }
+
+    pub fn cancel_delete_task(&mut self, cx: &mut Context<Self>) {
+        self.task_delete_target = None;
+        cx.notify();
+    }
+
+    pub fn confirm_delete_task(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.task_delete_target.take() else {
+            return;
+        };
+        self.delete_task(&target.id, cx);
+    }
+
+    pub fn render_delete_task_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let Some(target) = self.task_delete_target.as_ref() else {
+            return div();
+        };
+        let (fg, muted) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
+            Self::modal_accent_colors(true);
+        let title = if target.title.trim().is_empty() {
+            "未命名任务"
+        } else {
+            target.title.as_str()
+        };
+        let content = v_flex()
+            .gap_3()
+            .child(div().font_bold().text_color(fg).text_lg().child("确定删除这个任务吗？"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(format!("将永久删除「{title}」及其运行记录，此操作不可撤销。")),
+            )
+            .when(target.has_active_execution, |content| {
+                content.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(crate::ui_theme::red()))
+                        .child("任务正在执行或已关联会话；删除不会停止会话。"),
+                )
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-delete-task",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_delete_task(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-delete-task",
+                        "确定删除",
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_delete_task(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(380., true, content, cx)
+    }
+
+    fn delete_task(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.task_delete_target = None;
         TaskStore::remove(id);
         if self.task_selected.as_deref() == Some(id) {
             self.task_selected = None;
@@ -1952,6 +2088,40 @@ impl Workspace {
         let red_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::red(), 0x28).into();
         let yellow_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::yellow(), 0x28).into();
         let green_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::green(), 0x28).into();
+        let auto_claim_enabled = self.task_auto_claim_enabled;
+        let auto_claim_color = if auto_claim_enabled { c_green } else { c_gray };
+        let auto_claim = div()
+            .id("tasks-auto-claim-toggle")
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .border_1()
+            .border_color(auto_claim_color)
+            .bg(if auto_claim_enabled { green_tint } else { gray_tint })
+            .cursor_pointer()
+            .text_sm()
+            .text_color(auto_claim_color)
+            .hover(|style| style.opacity(0.82))
+            .child(if auto_claim_enabled {
+                "自动认领中 · 暂停"
+            } else {
+                "自动认领已暂停 · 恢复"
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    let enabled = !this.task_auto_claim_enabled;
+                    this.set_task_auto_claim_enabled(enabled, window, cx);
+                    window.push_notification(
+                        if enabled {
+                            Notification::success("已恢复自动认领")
+                        } else {
+                            Notification::info("已暂停自动认领；正在执行的任务不会中断")
+                        },
+                        cx,
+                    );
+                }),
+            );
 
         let summary = div()
             .flex()
@@ -1999,7 +2169,8 @@ impl Workspace {
                 Some(TaskColumn::Done),
                 c_green,
                 green_tint,
-            ));
+            ))
+            .child(auto_claim);
 
         let header = div()
             .px_6()
@@ -2594,7 +2765,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.delete_task(&id_del, cx);
+                                this.start_delete_task(&id_del, cx);
                             })),
                     ),
             )
@@ -2805,64 +2976,146 @@ impl Workspace {
         let Some(task) = TaskStore::get(id) else {
             return;
         };
-        let cwd = if task.project_cwd.trim().is_empty() {
-            None
-        } else {
-            Some(task.project_cwd.clone())
-        };
+        if self.task_launching.contains(id) {
+            window.push_notification(Notification::info("任务终端正在启动"), cx);
+            return;
+        }
         let entries = active_launch_entries(cx);
         let base_launch = entries
             .first()
             .map(|e| e.command.clone())
             .unwrap_or_else(|| "claude".into());
-        let label = task.title.clone();
-        let prompt = task_prompt(&task);
-
-        // 有首包 → 写文件后拼进 launch；无首包 → 只起空 agent。
-        let launch_cmd = if prompt.trim().is_empty() {
-            base_launch.clone()
-        } else if let Some(path) = write_prompt_file(&task.id, &prompt) {
-            build_launch_with_prompt(&base_launch, &path)
-        } else {
-            // 落盘失败：内联单引号（多行可能不完美，但强于静默失败）
-            format!("{base_launch} {}", shell_single_quote(&prompt))
-        };
-
-        eprintln!("[tasks] run launch={launch_cmd}");
-
         let Some(run) = TaskStore::begin_pty_run(id, &base_launch) else {
             return;
         };
-        let sid = new_sid();
-        // 同 add_session_with_launch：FFI 回调栈上 panic = abort 整个 app，
-        // spawn 失败就不起任务终端，留日志。
-        let terminal =
-            match crate::terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, Some(&launch_cmd))
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("[tasks] 任务终端启动失败（{cwd:?}）：{e:#}");
-                    TaskStore::mark_run_failed(id, &run.id, format!("{e:#}"));
-                    return;
-                }
-            };
-        let view = cx.new(|cx| {
-            TerminalView::from_terminal(
-                cx,
-                terminal,
-                cwd.clone(),
-                sid.clone(),
-                Some(base_launch.as_str()),
-                Some(label.as_str()),
-            )
-        });
-        self.sessions.push(crate::Session::single(view.clone()));
-        self.active_session = self.sessions.len() - 1;
-        TaskStore::mark_run_started(id, &run.id, &sid);
+        self.launch_task_in_terminal(task, run, base_launch, true, window, cx);
+    }
 
-        self.save_state(cx);
-        self.focus_active(window, cx);
-        cx.notify();
+    /// Start an already-created run off the UI thread. Automatic launches do
+    /// not take focus, while manual launches retain the previous behavior.
+    fn launch_task_in_terminal(
+        &mut self,
+        task: Task,
+        run: TaskRun,
+        base_launch: String,
+        focus_on_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let task_id = task.id.clone();
+        let run_id = run.id.clone();
+        let cwd = (!task.project_cwd.trim().is_empty()).then(|| task.project_cwd.clone());
+        let label = task.title.clone();
+        let sid = new_sid();
+        let task_id_for_ui = task_id.clone();
+        let task_id_bg = task_id.clone();
+        let run_id_bg = run_id.clone();
+        let task_bg = task.clone();
+        let cwd_bg = cwd.clone();
+        let sid_bg = sid.clone();
+        let base_launch_bg = base_launch.clone();
+        let automatic = !focus_on_open;
+        let (tx, rx) = smol::channel::bounded(1);
+        self.task_launching.insert(task_id.clone());
+        if automatic {
+            self.auto_task_launches_inflight += 1;
+        }
+
+        let spawn = std::thread::Builder::new()
+            .name("smelt-spawn-task".into())
+            .spawn(move || {
+                let prompt = task_prompt(&task_bg);
+                let launch_cmd = if prompt.trim().is_empty() {
+                    base_launch_bg.clone()
+                } else if let Some(path) = write_prompt_file(&task_bg.id, &prompt) {
+                    build_launch_with_prompt(&base_launch_bg, &path)
+                } else {
+                    format!("{base_launch_bg} {}", shell_single_quote(&prompt))
+                };
+                let result = match crate::terminal::Terminal::spawn(
+                    24,
+                    80,
+                    cwd_bg.as_deref(),
+                    &sid_bg,
+                    Some(&launch_cmd),
+                ) {
+                    Ok(terminal) => {
+                        let attached =
+                            TaskStore::mark_run_started(&task_id_bg, &run_id_bg, &sid_bg);
+                        Ok((terminal, attached))
+                    }
+                    Err(error) => {
+                        let message = format!("任务终端启动失败（{cwd_bg:?}）：{error:#}");
+                        TaskStore::mark_run_failed(&task_id_bg, &run_id_bg, message.clone());
+                        Err(message)
+                    }
+                };
+                let _ = tx.send_blocking(result);
+            });
+        if let Err(error) = spawn {
+            let message = format!("无法创建任务启动线程：{error}");
+            TaskStore::mark_run_failed(&task_id, &run_id, message.clone());
+            self.task_launching.remove(&task_id);
+            if automatic {
+                self.auto_task_launches_inflight =
+                    self.auto_task_launches_inflight.saturating_sub(1);
+            }
+            if focus_on_open {
+                window.push_notification(Notification::error(message), cx);
+            }
+            return;
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("任务启动线程意外断开".into()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.task_launching.remove(&task_id_for_ui);
+                if automatic {
+                    this.auto_task_launches_inflight =
+                        this.auto_task_launches_inflight.saturating_sub(1);
+                }
+                match result {
+                    Ok((terminal, attached)) => {
+                        let view = cx.new(|cx| {
+                            TerminalView::from_terminal(
+                                cx,
+                                terminal,
+                                cwd.clone(),
+                                sid,
+                                Some(base_launch.as_str()),
+                                Some(label.as_str()),
+                            )
+                        });
+                        this.sessions.push(crate::Session::single(view));
+                        this.session_list_revision = this.session_list_revision.wrapping_add(1);
+                        if focus_on_open {
+                            this.active_session = this.sessions.len() - 1;
+                        }
+                        this.save_state(cx);
+                        if !attached {
+                            window.push_notification(
+                                Notification::error("任务已删除或变更，终端未关联到任务记录"),
+                                cx,
+                            );
+                        }
+                        if focus_on_open {
+                            this.focus_active(window, cx);
+                        } else if attached && this.task_auto_claim_enabled {
+                            this.tick_auto_claim_tasks(window, cx);
+                        }
+                    }
+                    Err(message) if focus_on_open => {
+                        window.push_notification(Notification::error(message), cx);
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 在新的 ACP 对话中执行任务。agent 仅是这次执行的运行时选择，会作为
@@ -3007,7 +3260,8 @@ impl Workspace {
 mod task_model_tests {
     use super::{
         Task, TaskBoardLane, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRetryPolicy, TaskRun,
-        TaskRunStatus, TaskStore, build_launch_with_prompt, parse_local_datetime, shell_single_quote,
+        TaskRunStatus, TaskStore, auto_claim_cwds_from_tasks, build_launch_with_prompt,
+        parse_local_datetime, shell_single_quote,
     };
     use std::path::Path;
 
@@ -3248,6 +3502,31 @@ mod task_model_tests {
         assert!(TaskStore::is_auto_runnable(&sched, &[], now));
         sched.auto_run = false;
         assert!(!TaskStore::is_auto_runnable(&sched, &[], now));
+    }
+
+    #[test]
+    fn auto_claim_projects_are_fifo_and_unique() {
+        let now = 1_000u64;
+        let mut first = Task::new("/first/".into(), "first".into(), "b".into());
+        first.created_at = 10;
+        let mut duplicate = Task::new("/first".into(), "duplicate".into(), "b".into());
+        duplicate.created_at = 20;
+        let mut second = Task::new("/second".into(), "second".into(), "b".into());
+        second.created_at = 30;
+        let mut manual = Task::new("/ignored".into(), "manual".into(), "b".into());
+        manual.created_at = 1;
+        manual.auto_run = false;
+        let mut future = Task::new("/future".into(), "future".into(), "b".into());
+        future.created_at = 2;
+        future.kind = TaskKind::Scheduled;
+        future.run_at = Some(now + 1);
+
+        let projects = auto_claim_cwds_from_tasks(
+            &[second, manual, duplicate, future, first],
+            now,
+        );
+
+        assert_eq!(projects, vec!["/first", "/second"]);
     }
 
     #[test]

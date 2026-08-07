@@ -356,10 +356,9 @@ pub struct AcpView {
     /// 手动展开了完整输出的工具调用（key = tool_call_id）。长输出默认折叠成
     /// 前几行 + 「展开」，回合态不落盘。
     expanded_tools: std::collections::HashSet<String>,
-    /// 手动展开 / 收起了整个工具卡片（key = tool_call_id）。默认规则：
-    /// 仅有可展示输出的 completed 收起，pending/in-progress/failed/等权限展开；
-    /// 没有输出的卡片静态展示。用户点过后按这两组覆盖默认值。只属于本地浏览
-    /// 状态，不落盘。
+    /// 手动展开 / 收起了整个工具卡片（key = tool_call_id）。有可展示输出的卡片
+    /// 默认收起；没有输出的卡片静态展示。用户点过后按这两组覆盖默认值。只属于
+    /// 本地浏览状态，不落盘。
     expanded_tool_cards: std::collections::HashSet<String>,
     collapsed_tool_cards: std::collections::HashSet<String>,
     /// 可变高度消息虚拟列表：只测量和构建视口附近的 Markdown/工具卡。
@@ -1596,8 +1595,6 @@ impl AcpView {
     fn tool_card_is_expanded(
         &self,
         id: &str,
-        status: ToolCallStatus,
-        has_pending_permission: bool,
         has_expandable_content: bool,
     ) -> bool {
         if !has_expandable_content {
@@ -1609,27 +1606,20 @@ impl AcpView {
         if self.collapsed_tool_cards.contains(id) {
             return false;
         }
-        tool_card_default_expanded(status, has_pending_permission, has_expandable_content)
+        tool_card_default_expanded()
     }
 
     fn toggle_tool_card(
         &mut self,
         entry_ix: usize,
         id: String,
-        status: ToolCallStatus,
-        has_pending_permission: bool,
         has_expandable_content: bool,
         cx: &mut Context<Self>,
     ) {
         if !has_expandable_content {
             return;
         }
-        if self.tool_card_is_expanded(
-            &id,
-            status,
-            has_pending_permission,
-            has_expandable_content,
-        ) {
+        if self.tool_card_is_expanded(&id, has_expandable_content) {
             self.expanded_tool_cards.remove(&id);
             self.collapsed_tool_cards.insert(id);
         } else {
@@ -2336,12 +2326,8 @@ impl Render for AcpView {
                     }) => {
                         let has_pending_permission =
                             active_permission_tool_id.as_deref() == Some(id.as_str());
-                        let card_expanded = this.tool_card_is_expanded(
-                            id,
-                            *status,
-                            has_pending_permission,
-                            tool_output_has_content(output),
-                        );
+                        let card_expanded =
+                            this.tool_card_is_expanded(id, tool_output_has_content(output));
                         let compact_in_process = process_expanded
                             && process_group.is_some()
                             && !card_expanded
@@ -2783,12 +2769,8 @@ impl Render for AcpView {
                         let has_pending_permission =
                             active_permission_tool_id.as_deref() == Some(id.as_str());
                         let has_expandable_content = tool_output_has_content(output);
-                        let card_expanded = this.tool_card_is_expanded(
-                            id,
-                            *status,
-                            has_pending_permission,
-                            has_expandable_content,
-                        );
+                        let card_expanded =
+                            this.tool_card_is_expanded(id, has_expandable_content);
                         let compact_in_process = process_expanded
                             && process_group.is_some()
                             && !card_expanded
@@ -2803,7 +2785,6 @@ impl Render for AcpView {
                             )
                             .or_else(|| diff_stats_for_output(output));
                             let id_for_compact_toggle = id.clone();
-                            let status_for_toggle = *status;
                             let mut row = h_flex()
                                 .id(("acp-tool-compact", i))
                                 .w_full()
@@ -2860,8 +2841,6 @@ impl Render for AcpView {
                                         this.toggle_tool_card(
                                             i,
                                             id_for_compact_toggle.clone(),
-                                            status_for_toggle,
-                                            has_pending_permission,
                                             can_expand,
                                             cx,
                                         );
@@ -2986,7 +2965,6 @@ impl Render for AcpView {
                             .items_center();
                         if has_expandable_content {
                             let id_for_toggle = id.clone();
-                            let status_for_toggle = *status;
                             header = header
                                 .cursor_pointer()
                                 .hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
@@ -2996,8 +2974,6 @@ impl Render for AcpView {
                                         this.toggle_tool_card(
                                             i,
                                             id_for_toggle.clone(),
-                                            status_for_toggle,
-                                            has_pending_permission,
                                             has_expandable_content,
                                             cx,
                                         );
@@ -4558,16 +4534,9 @@ fn build_handoff_prompt(
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
 
-/// 有可展示输出时，已完成工具默认折叠；进行中、失败和待审批项展开，让当前动作与
-/// 异常保持可见。用户手动点过后由 `expanded_tool_cards` / `collapsed_tool_cards`
-/// 覆盖这个默认值。
-fn tool_card_default_expanded(
-    status: ToolCallStatus,
-    has_pending_permission: bool,
-    has_expandable_content: bool,
-) -> bool {
-    has_expandable_content
-        && (has_pending_permission || !matches!(status, ToolCallStatus::Completed))
+/// 工具调用的输出不自动抢占对话空间；需要细节时由用户展开卡片。
+fn tool_card_default_expanded() -> bool {
+    false
 }
 
 /// 展开“执行过程”时，所有已完成且无需用户授权的工具使用相同的紧凑轨迹行。
@@ -5912,37 +5881,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_card_default_expansion_follows_its_status() {
-        assert!(!tool_card_default_expanded(
-            ToolCallStatus::Completed,
-            false,
-            true,
-        ));
-        assert!(tool_card_default_expanded(
-            ToolCallStatus::Completed,
-            true,
-            true,
-        ));
-        assert!(tool_card_default_expanded(
-            ToolCallStatus::Pending,
-            false,
-            true,
-        ));
-        assert!(tool_card_default_expanded(
-            ToolCallStatus::InProgress,
-            false,
-            true,
-        ));
-        assert!(tool_card_default_expanded(
-            ToolCallStatus::Failed,
-            false,
-            true,
-        ));
-        assert!(!tool_card_default_expanded(
-            ToolCallStatus::Failed,
-            false,
-            false,
-        ));
+    fn tool_cards_start_collapsed() {
+        assert!(!tool_card_default_expanded());
     }
 
     #[test]

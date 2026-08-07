@@ -39,6 +39,11 @@ const PANE_ROW_GROUP: &str = "sess-pane-row-hover";
 /// 才提亮到白，明确告诉用户「这一行本身可点，点了折叠」。
 const PROJ_HEADER_GROUP: &str = "proj-header-hover";
 
+/// 任务页会保留上次活动会话，方便返回时恢复；但它不是任务页中的选中项。
+fn session_row_is_selected(session_route_active: bool, ix: usize, active: usize) -> bool {
+    session_route_active && ix == active
+}
+
 /// 会话行副标题里的状态文案（与菜单栏下拉同一套口径）。
 fn status_text(status: AgentStatus) -> &'static str {
     match status {
@@ -116,6 +121,7 @@ impl Workspace {
 
         // ---- 一级导航：任务（独立于项目/会话，放在 WORKSPACES 之上）----
         let tasks_active = self.primary_route == WorkspaceRoute::Tasks;
+        let session_route_active = self.primary_route == WorkspaceRoute::Session;
         let e_tasks = this.clone();
         let e_new_task = this.clone();
         let tasks_entry = div()
@@ -712,7 +718,7 @@ impl Workspace {
             for &ix in ixs {
                 let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
                 let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
-                let is_active = ix == active;
+                let is_active = session_row_is_selected(session_route_active, ix, active);
                 let entity_id = entity_ids[ix];
                 // 单行行高：副标题只保留「有增量信息」的部分——分屏数。
                 let subtitle = match &self.sessions[ix].kind {
@@ -1085,7 +1091,8 @@ impl Workspace {
                             base
                         };
                         let p_status = pane_status(&view, cx);
-                        let is_current_view = ix == active && view.entity_id() == active_pane_id;
+                        let is_current_view =
+                            is_active && view.entity_id() == active_pane_id;
                         let e_pane_act = this.clone();
                         let e_pane_menu = this.clone();
                         let e_pane_close = this.clone();
@@ -1462,5 +1469,17 @@ impl Workspace {
             .child(header)
             .child(rows)
             .child(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_row_is_selected;
+
+    #[test]
+    fn task_panel_does_not_select_the_last_active_session() {
+        assert!(session_row_is_selected(true, 2, 2));
+        assert!(!session_row_is_selected(false, 2, 2));
+        assert!(!session_row_is_selected(true, 1, 2));
     }
 }

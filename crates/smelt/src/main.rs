@@ -108,6 +108,12 @@ enum Cmd {
     SwitchTab(usize),
 }
 
+fn task_auto_claim_enabled_from_state(state: Option<&WsState>) -> bool {
+    state
+        .and_then(|saved| saved.task_auto_claim_enabled)
+        .unwrap_or(true)
+}
+
 /// 命令面板的单个列表项：标签 + 选中态。
 #[derive(IntoElement)]
 struct CmdItem {
@@ -253,6 +259,19 @@ enum MainView {
     Git,
     Skills,
     History,
+}
+
+impl MainView {
+    /// Inspector 类型的舞台页对应哪个右侧面板 tab。任务和历史不是 Inspector 内容，
+    /// 因此不能把它们当成「已提升的右侧面板」。
+    pub(crate) fn inspector_stage_tab(self) -> Option<inspector::InspectorTab> {
+        match self {
+            Self::Files => Some(inspector::InspectorTab::Files),
+            Self::Git => Some(inspector::InspectorTab::Git),
+            Self::Skills => Some(inspector::InspectorTab::Skills),
+            Self::Tasks | Self::History => None,
+        }
+    }
 }
 
 /// 左侧一级导航。任务页与当前 session 是并列 route，不借用 session 内部的
@@ -1335,6 +1354,9 @@ struct WsState {
     /// 会话侧栏的分组方式；旧存档默认按项目。
     #[serde(default)]
     sidebar_grouping: SidebarGrouping,
+    /// 自动认领总开关。旧工作区没有该字段时延续原有自动续跑行为。
+    #[serde(default)]
+    task_auto_claim_enabled: Option<bool>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
     /// 旧格式：单棵分屏树。
     #[serde(default)]
@@ -2198,8 +2220,16 @@ struct Workspace {
     task_kind: tasks::TaskKind,
     /// 新建任务是否允许系统自动执行（任务级 `auto_run`；定时强制 true）。
     task_auto_run: bool,
+    /// 自动认领总开关：暂停只阻止后续领取，不会中断已经启动的任务。
+    task_auto_claim_enabled: bool,
+    /// 已领取、正在建立后台终端的任务，防止终端挂载前重复启动。
+    task_launching: HashSet<String>,
+    /// 自动任务后台启动数，限制同时建立终端的项目数。
+    auto_task_launches_inflight: usize,
     /// 任务列表选中项 id。
     task_selected: Option<String>,
+    /// 当前等待删除确认的任务。
+    task_delete_target: Option<tasks::TaskDeleteTarget>,
     /// 新建任务绑定的项目 cwd。
     task_bind_project: Option<String>,
     /// 在已有终端执行：Some(smeltd session id)；None = 新开终端。
@@ -2213,8 +2243,8 @@ struct Workspace {
     show_new_task_modal: bool,
     /// 弹窗处于「编辑」模式时的任务 id；None = 新建模式。
     task_editing: Option<String>,
-    /// 定时任务扫描循环是否已启动（避免 render 重复 spawn）。
-    task_schedule_started: bool,
+    /// 自动认领扫描循环是否已启动（避免 render 重复 spawn）。
+    task_auto_claim_started: bool,
     /// ACP 任务回合结束/失败挂旗（sid, cwd）：render 头与终端挂旗汇流到
     /// `on_session_task_idle` 触发自动续跑/重试。None = 无待续跑。
     pending_acp_task_continue: Option<(String, String)>,
@@ -2630,14 +2660,18 @@ impl Workspace {
             task_run_at_input: None,
             task_kind: tasks::TaskKind::Once,
             task_auto_run: true,
+            task_auto_claim_enabled: task_auto_claim_enabled_from_state(saved.as_ref()),
+            task_launching: HashSet::new(),
+            auto_task_launches_inflight: 0,
             task_selected: None,
+            task_delete_target: None,
             task_bind_project: None,
             task_bind_session: None,
             task_column_filter: None,
             _task_title_sub: None,
             show_new_task_modal: false,
             task_editing: None,
-            task_schedule_started: false,
+            task_auto_claim_started: false,
             pending_acp_task_continue: None,
             task_show_advanced: false,
             search_results: None,
@@ -4153,6 +4187,7 @@ impl Workspace {
             collapsed_file_tree_roots: self.collapsed_roots.iter().cloned().collect(),
             collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,
+            task_auto_claim_enabled: Some(self.task_auto_claim_enabled),
             ..Default::default()
         };
         let json = serde_json::to_string_pretty(&state).ok()?;
@@ -6582,6 +6617,30 @@ impl Workspace {
     }
 }
 
+/// External file drags have no cursor style; application drags explicitly set one.
+fn should_show_file_drop_overlay(
+    has_active_drag: bool,
+    drag_cursor_style: Option<CursorStyle>,
+) -> bool {
+    has_active_drag && drag_cursor_style.is_none()
+}
+
+#[cfg(test)]
+mod file_drop_overlay_tests {
+    use super::should_show_file_drop_overlay;
+    use gpui::CursorStyle;
+
+    #[test]
+    fn only_external_file_drags_show_the_import_overlay() {
+        assert!(should_show_file_drop_overlay(true, None));
+        assert!(!should_show_file_drop_overlay(false, None));
+        assert!(!should_show_file_drop_overlay(
+            true,
+            Some(CursorStyle::OpenHand)
+        ));
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_session_ui(window, cx);
@@ -6658,15 +6717,15 @@ impl Render for Workspace {
             self.status_menu_snapshot = Some(menu_snapshot);
         }
 
-        // 定时任务扫描：启动后约 2s 首扫，之后 30s 一轮；到期 → run_task。
-        if !self.task_schedule_started {
-            self.task_schedule_started = true;
+        // 自动认领扫描：启动后约 2s 首扫，之后每 30s 一轮。
+        if !self.task_auto_claim_started {
+            self.task_auto_claim_started = true;
             cx.spawn_in(window, async move |this, cx| {
                 smol::Timer::after(std::time::Duration::from_secs(2)).await;
                 loop {
                     let alive = this
                         .update_in(cx, |this, window, cx| {
-                            this.tick_scheduled_tasks(window, cx);
+                            this.tick_auto_claim_tasks(window, cx);
                         })
                         .is_ok();
                     if !alive {
@@ -7089,7 +7148,12 @@ impl Render for Workspace {
                 Some(MainView::Files) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(left_guard, right_edge, cx))
+                    .child(self.render_stage_inspector_rail(
+                        inspector::InspectorTab::Files,
+                        left_guard,
+                        right_edge,
+                        cx,
+                    ))
                     .child(self.render_inspector_files(window, cx))
                     .into_any_element(),
                 // GIT 同理：展开只是复用停靠面板（rail + git_narrow_panel）铺满
@@ -7098,13 +7162,23 @@ impl Render for Workspace {
                 Some(MainView::Git) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(left_guard, right_edge, cx))
+                    .child(self.render_stage_inspector_rail(
+                        inspector::InspectorTab::Git,
+                        left_guard,
+                        right_edge,
+                        cx,
+                    ))
                     .child(self.git_narrow_panel(window, cx))
                     .into_any_element(),
                 Some(MainView::Skills) => v_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_inspector_rail(left_guard, right_edge, cx))
+                    .child(self.render_stage_inspector_rail(
+                        inspector::InspectorTab::Skills,
+                        left_guard,
+                        right_edge,
+                        cx,
+                    ))
                     .child(self.render_inspector_skills(cx))
                     .into_any_element(),
                 Some(v) => v_flex()
@@ -7880,6 +7954,11 @@ impl Render for Workspace {
                 self.show_new_task_modal
                     .then(|| self.render_new_task_modal(cx)),
             )
+            .children(
+                self.task_delete_target
+                    .is_some()
+                    .then(|| self.render_delete_task_confirm(cx)),
+            )
             // 删除 Worktree 确认拦截弹层
             .children(
                 self.delete_worktree_target
@@ -7941,16 +8020,10 @@ impl Render for Workspace {
             // 常驻 hitbox 会盖住按钮（「新建终端」像没反应）；对齐「有 drag 才出现」。
             // 终端 hitbox 会挡住根 on_drop，所以必须用上层目标接 ExternalPaths。
             .when(
-                cx.has_active_drag()
-                    && !matches!(
-                        cx.active_drag_cursor_style(),
-                        Some(
-                            CursorStyle::ResizeColumn
-                                | CursorStyle::ResizeLeftRight
-                                | CursorStyle::ResizeRow
-                                | CursorStyle::ResizeUpDown
-                        )
-                    ),
+                should_show_file_drop_overlay(
+                    cx.has_active_drag(),
+                    cx.active_drag_cursor_style(),
+                ),
                 |root| {
                     root.child(
                         div()
@@ -8906,10 +8979,22 @@ mod pane_state_tests {
 
 #[cfg(test)]
 mod workspace_state_tests {
-    use super::{SidebarGrouping, WsState};
+    use super::{SidebarGrouping, WsState, task_auto_claim_enabled_from_state};
     use smelt_core::workspace_menu::{
         WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
     };
+
+    #[test]
+    fn legacy_workspaces_default_auto_claim_to_enabled() {
+        let legacy = WsState::default();
+        assert!(task_auto_claim_enabled_from_state(Some(&legacy)));
+
+        let paused = WsState {
+            task_auto_claim_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!task_auto_claim_enabled_from_state(Some(&paused)));
+    }
 
     #[test]
     fn collapsed_projects_roundtrip() {
