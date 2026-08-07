@@ -1806,24 +1806,20 @@ fn list_sessions_for(
     override_dir: Option<&str>,
     cwd: &str,
 ) -> Vec<SessionSummary> {
-    let mut custom_titles = smelt_core::session_metadata::custom_titles(agent, profile_id);
-    smelt_core::session_control::list_history_for(agent, cwd, override_dir)
+    // 自定义名称的覆盖已经在 smelt-core 那层贴好（移动端读的是同一份），这里只做
+    // 结构转换。
+    smelt_core::session_control::list_history_for(agent, profile_id, cwd, override_dir)
         .into_iter()
-        .map(|session| {
-            let custom_title = custom_titles.remove(&session.resume_id);
-            SessionSummary {
-                path: session.path,
-                title: custom_title
-                    .clone()
-                    .unwrap_or_else(|| session.title.clone()),
-                agent_title: session.title,
-                custom_title,
-                resume_id: session.resume_id,
-                started_at: session.started_at,
-                last_active_at: session.last_active_at,
-                message_count: session.message_count,
-                total_tokens: session.total_tokens,
-            }
+        .map(|session| SessionSummary {
+            title: session.display_title().to_string(),
+            path: session.path,
+            agent_title: session.title,
+            custom_title: session.custom_title,
+            resume_id: session.resume_id,
+            started_at: session.started_at,
+            last_active_at: session.last_active_at,
+            message_count: session.message_count,
+            total_tokens: session.total_tokens,
         })
         .collect()
 }
