@@ -65,6 +65,51 @@ impl AcpAgentKind {
             Self::Grok => default_acp_grok_cmd(),
         }
     }
+
+    /// 快捷终端「+」菜单默认启动项的展示名。跟 `label()` 分开维护是因为这几个
+    /// 字符串已经被当字面量用在别处识别默认标题（比如 main.rs 判断终端标题是
+    /// 不是「Claude Code」这种 agent 默认标题、不算用户任务名）——`label()`
+    /// 未来想改得更完整（比如 Copilot → GitHub Copilot）不该悄悄带崩这条判断。
+    pub fn quick_terminal_label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Copilot => "Copilot",
+            Self::Codex => "Codex",
+            Self::Grok => "Grok",
+        }
+    }
+
+    /// 快捷终端「+」菜单出厂默认命令：直接跑各家 CLI 自带的 TUI（不走 ACP 协议），
+    /// 带各自的全权限/跳过审批参数，与 `default_cmd()`（ACP 适配器命令）是两个
+    /// 概念，别混用。
+    pub fn quick_terminal_cmd(self) -> &'static str {
+        match self {
+            Self::Claude => "claude --dangerously-skip-permissions",
+            Self::Codex => "codex --dangerously-bypass-approvals-and-sandbox",
+            Self::Copilot => "copilot --allow-all",
+            Self::Grok => "grok",
+        }
+    }
+
+    /// 从终端命令行严格猜属于哪家 agent：命令（去掉首尾空白后）以 agent 的
+    /// `id()` 开头才算命中，不认 `env FOO=bar claude` 这种前缀（那种用
+    /// `command_program` + 逐 token 跳过更准确，见 `smelt::main::command_matches_agent`）。
+    /// 侧栏行图标分类（`LaunchKind`）、「+」下拉菜单图标，两处都要认同一份
+    /// 「这行命令是哪家 agent」的判断，别各自维护一遍 claude/codex/copilot/grok
+    /// 字符串匹配。
+    pub fn from_command_prefix(cmd: &str) -> Option<Self> {
+        let c = cmd.trim();
+        Self::ALL.into_iter().find(|k| c.starts_with(k.id()))
+    }
+
+    /// 从任意命令字符串宽松猜 agent 种类（`contains`，忽略大小写；不认参数
+    /// 位置、也不管命令是不是以这家开头——旧存档反推、mobile 网关展示名都是
+    /// 「命令里出现过这家关键字就算它」这种粗粒度判断）。按 `ALL` 的顺序找
+    /// 第一个命中的；同时出现多家关键字这种边缘情况谁在前谁赢。
+    pub fn from_command_loose(cmd: &str) -> Option<Self> {
+        let c = cmd.to_ascii_lowercase();
+        Self::ALL.into_iter().find(|k| c.contains(k.id()))
+    }
 }
 
 pub fn default_acp_cmd() -> String {
@@ -189,6 +234,41 @@ impl AcpProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_command_prefix_matches_leading_agent_name_only() {
+        assert_eq!(
+            AcpAgentKind::from_command_prefix("claude --dangerously-skip-permissions"),
+            Some(AcpAgentKind::Claude)
+        );
+        assert_eq!(
+            AcpAgentKind::from_command_prefix("copilot --allow-all"),
+            Some(AcpAgentKind::Copilot)
+        );
+        assert_eq!(
+            AcpAgentKind::from_command_prefix("grok --minimal"),
+            Some(AcpAgentKind::Grok)
+        );
+        // env 前缀不算「以 agent 开头」，严格版本认不出来。
+        assert_eq!(
+            AcpAgentKind::from_command_prefix("CLAUDE_CONFIG_DIR=/tmp claude"),
+            None
+        );
+        assert_eq!(AcpAgentKind::from_command_prefix("zsh"), None);
+    }
+
+    #[test]
+    fn from_command_loose_matches_anywhere_in_command() {
+        assert_eq!(
+            AcpAgentKind::from_command_loose("bunx --bun @agentclientprotocol/codex-acp"),
+            Some(AcpAgentKind::Codex)
+        );
+        assert_eq!(
+            AcpAgentKind::from_command_loose("copilot --acp"),
+            Some(AcpAgentKind::Copilot)
+        );
+        assert_eq!(AcpAgentKind::from_command_loose("some-other-agent"), None);
+    }
 
     #[test]
     fn launch_spec_collects_structured_env() {
