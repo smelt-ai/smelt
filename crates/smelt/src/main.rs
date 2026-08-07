@@ -244,7 +244,7 @@ impl ListDelegate for CmdDelegate {
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MainView {
-    /// 任务总览（卡片网格，内容只含任务）。
+    /// 任务总览（按状态分列的看板，内容只含任务）。
     Tasks,
     /// 「文件树 + 内容」双栏全宽（inspector FILES 面板 ⤢ 提升上来；此时面板收起）。
     Files,
