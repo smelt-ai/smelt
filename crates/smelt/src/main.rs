@@ -111,7 +111,7 @@ enum Cmd {
 fn task_auto_claim_enabled_from_state(state: Option<&WsState>) -> bool {
     state
         .and_then(|saved| saved.task_auto_claim_enabled)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// 命令面板的单个列表项：标签 + 选中态。
@@ -1354,7 +1354,7 @@ struct WsState {
     /// 会话侧栏的分组方式；旧存档默认按项目。
     #[serde(default)]
     sidebar_grouping: SidebarGrouping,
-    /// 自动认领总开关。旧工作区没有该字段时延续原有自动续跑行为。
+    /// 自动认领总开关。旧工作区没有该字段时默认暂停，避免意外自动执行。
     #[serde(default)]
     task_auto_claim_enabled: Option<bool>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
@@ -8985,15 +8985,16 @@ mod workspace_state_tests {
     };
 
     #[test]
-    fn legacy_workspaces_default_auto_claim_to_enabled() {
+    fn legacy_workspaces_default_auto_claim_to_paused() {
         let legacy = WsState::default();
-        assert!(task_auto_claim_enabled_from_state(Some(&legacy)));
+        assert!(!task_auto_claim_enabled_from_state(Some(&legacy)));
+        assert!(!task_auto_claim_enabled_from_state(None));
 
-        let paused = WsState {
-            task_auto_claim_enabled: Some(false),
+        let enabled = WsState {
+            task_auto_claim_enabled: Some(true),
             ..Default::default()
         };
-        assert!(!task_auto_claim_enabled_from_state(Some(&paused)));
+        assert!(task_auto_claim_enabled_from_state(Some(&enabled)));
     }
 
     #[test]
