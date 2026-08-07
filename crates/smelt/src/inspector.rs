@@ -12,7 +12,7 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
-use crate::tasks::TaskStore;
+use crate::tasks::{TaskStore, task_primary_action_label};
 use crate::{MainView, Workspace, ui_theme, workspace_frame};
 
 /// SKILLS 面板卡片的 hover group 名，同上一个套路（卡片 `.group()` + 操作条
@@ -738,9 +738,15 @@ impl Workspace {
                 let task_id = task.id.clone();
                 let action_id = task_id.clone();
                 let acp_task_id = task_id.clone();
+                let complete_task_id = task_id.clone();
                 let acp_targets = acp_targets.clone();
                 let can_run_in_acp =
                     task.column.is_todo() || task.column == crate::tasks::TaskColumn::Failed;
+                let is_review = task.column == crate::tasks::TaskColumn::Review;
+                let has_open_session = task
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|sid| self.task_session_is_open(sid, cx));
                 let acp_runner = cx.entity().clone();
                 let status_color = rgb(task.column.color());
                 let status_label = task.column.label();
@@ -752,17 +758,7 @@ impl Workspace {
                         body.to_string()
                     }
                 };
-                let action = if task.column.is_todo() {
-                    Some("终端")
-                } else if task.column == crate::tasks::TaskColumn::Failed {
-                    Some("重试")
-                } else if task.session_id.is_some() {
-                    Some("打开")
-                } else if task.column.is_active() {
-                    Some("终端")
-                } else {
-                    None
-                };
+                let action = task_primary_action_label(task.column, has_open_session);
 
                 list = list.child(
                     div()
@@ -821,100 +817,131 @@ impl Workspace {
                                     .child(body),
                             )
                         })
-                        .children(action.map(|label| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "inspector-task-action-{task_id}"
-                                    )))
-                                    .label(label)
-                                    .xsmall()
-                                    .ghost()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.primary_task_action(&action_id, window, cx);
-                                    })),
-                                )
-                                .when(can_run_in_acp, |d| {
-                                    d.child(
+                        .when(action.is_some() || is_review || can_run_in_acp, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .children(action.map(|label| {
                                         Button::new(SharedString::from(format!(
-                                            "inspector-task-acp-{task_id}"
+                                            "inspector-task-action-{task_id}"
                                         )))
-                                        .label("对话")
+                                        .label(label)
                                         .xsmall()
                                         .ghost()
-                                        .tooltip("在原生对话中执行任务，可选择或复用 Agent 对话")
-                                        .dropdown_menu(move |menu, _window, _cx| {
-                                            let mut menu = menu;
-                                            if acp_targets.is_empty() {
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(
-                                                        "没有空闲的 ACP 对话",
-                                                    )
-                                                    .disabled(true),
-                                                );
-                                            } else {
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(
-                                                        "发送到空闲的已打开 ACP 对话",
-                                                    )
-                                                    .disabled(true),
-                                                );
-                                                for target in &acp_targets {
-                                                    let task_id = acp_task_id.clone();
-                                                    let session_id = target.session_id.clone();
-                                                    let label = target.label.clone();
-                                                    let runner = acp_runner.clone();
-                                                    menu = menu.item(
-                                                        PopupMenuItem::new(label).on_click(
-                                                            move |_, window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.primary_task_action(&action_id, window, cx);
+                                        }))
+                                    }))
+                                    .when(is_review, |d| {
+                                        d.child(
+                                            Button::new(SharedString::from(format!(
+                                                "inspector-task-complete-{task_id}"
+                                            )))
+                                            .label("确认完成")
+                                            .xsmall()
+                                            .primary()
+                                            .tooltip("确认验收后，将任务移入完成列")
+                                            .on_click(cx.listener(
+                                                move |this, _, window, cx| {
+                                                    this.confirm_task_completion(
+                                                        &complete_task_id,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            )),
+                                        )
+                                    })
+                                    .when(can_run_in_acp, |d| {
+                                        d.child(
+                                            Button::new(SharedString::from(format!(
+                                                "inspector-task-acp-{task_id}"
+                                            )))
+                                            .label("对话")
+                                            .xsmall()
+                                            .ghost()
+                                            .tooltip(
+                                                "在原生对话中执行任务，可选择或复用 Agent 对话",
+                                            )
+                                            .dropdown_menu(
+                                                move |menu, _window, _cx| {
+                                                    let mut menu = menu;
+                                                    if acp_targets.is_empty() {
+                                                        menu = menu.item(
+                                                            PopupMenuItem::new(
+                                                                "没有空闲的 ACP 对话",
+                                                            )
+                                                            .disabled(true),
+                                                        );
+                                                    } else {
+                                                        menu = menu.item(
+                                                            PopupMenuItem::new(
+                                                                "发送到空闲的已打开 ACP 对话",
+                                                            )
+                                                            .disabled(true),
+                                                        );
+                                                        for target in &acp_targets {
+                                                            let task_id = acp_task_id.clone();
+                                                            let session_id =
+                                                                target.session_id.clone();
+                                                            let label = target.label.clone();
+                                                            let runner = acp_runner.clone();
+                                                            menu = menu.item(
+                                                                PopupMenuItem::new(label).on_click(
+                                                                    move |_, window, cx| {
+                                                                        let task_id =
+                                                                            task_id.clone();
+                                                                        let session_id =
+                                                                            session_id.clone();
+                                                                        runner.update(
+                                                                            cx,
+                                                                            |ws, cx| {
+                                                                                ws.run_task_in_open_acp(
+                                                                                    &task_id,
+                                                                                    &session_id,
+                                                                                    window,
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                    menu = menu.separator().item(
+                                                        PopupMenuItem::new("新建 ACP 对话")
+                                                            .disabled(true),
+                                                    );
+                                                    for agent in crate::settings::AcpAgentKind::ALL
+                                                    {
+                                                        let task_id = acp_task_id.clone();
+                                                        let runner = acp_runner.clone();
+                                                        menu = menu.item(
+                                                            PopupMenuItem::new(format!(
+                                                                "{} ACP 对话",
+                                                                agent.label()
+                                                            ))
+                                                            .on_click(move |_, window, cx| {
                                                                 let task_id = task_id.clone();
-                                                                let session_id =
-                                                                    session_id.clone();
                                                                 runner.update(cx, |ws, cx| {
-                                                                    ws.run_task_in_open_acp(
-                                                                        &task_id,
-                                                                        &session_id,
-                                                                        window,
+                                                                    ws.run_task_in_acp(
+                                                                        &task_id, agent, window,
                                                                         cx,
                                                                     );
                                                                 });
-                                                            },
-                                                        ),
-                                                    );
-                                                }
-                                            }
-                                            menu = menu
-                                                .separator()
-                                                .item(
-                                                    PopupMenuItem::new("新建 ACP 对话")
-                                                        .disabled(true),
-                                                );
-                                            for agent in crate::settings::AcpAgentKind::ALL {
-                                                let task_id = acp_task_id.clone();
-                                                let runner = acp_runner.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(format!(
-                                                        "{} ACP 对话",
-                                                        agent.label()
-                                                    ))
-                                                    .on_click(move |_, window, cx| {
-                                                        let task_id = task_id.clone();
-                                                        runner.update(cx, |ws, cx| {
-                                                            ws.run_task_in_acp(
-                                                                &task_id, agent, window, cx,
-                                                            );
-                                                        });
-                                                    }),
-                                                );
-                                            }
-                                            menu
-                                        }),
-                                    )
-                                })
-                        })),
+                                                            }),
+                                                        );
+                                                    }
+                                                    menu
+                                                },
+                                            ),
+                                        )
+                                    }),
+                            )
+                        }),
                 );
             }
         }
