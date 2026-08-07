@@ -73,6 +73,13 @@
 `/acp/ws`，每个打开的终端通过独立的 `/terminal/{id}/ws` 接收二进制 PTY/ANSI 流，
 并以 JSON 控制帧发送输入与 resize；两条流共享同一组 token 与 iroh 隧道。
 
+终端配色**由 PC 按连接下发**：`terminalReady` 帧带 `theme`（`#rrggbb` 字符串，含
+背景/前景/光标/选区/ANSI 16 色/搜索命中色 + `dark` 标志），来源是 PC 当前主题模式与
+用户自选终端底色（见 `crates/smelt-core/src/terminal_theme.rs`，PC 侧发布点在
+`smelt::settings::publish_terminal_theme`）。客户端不许内置固定色板：主题可配置，
+一部手机也可以同时连多台设备。这不只是好看——TUI 会用 OSC 11 查背景色决定用哪档灰，
+应答由 PC 端终端给出，两端底色不一致就是对比度问题。
+
 ---
 
 ## 网关 API 草图（契约中心）

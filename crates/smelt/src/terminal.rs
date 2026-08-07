@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -38,6 +38,14 @@ pub fn is_dark() -> bool {
     DARK_MODE.load(Ordering::Relaxed)
 }
 
+/// 测试用：深浅色模式和用户自选底色都是进程级全局态，同一个测试二进制里的用例
+/// 并行跑会互相踩。凡是要定住这些全局态的用例统一在这把锁上排队。
+#[cfg(test)]
+pub(crate) fn lock_theme_globals() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 默认前景色：深色取 iTerm2 风格灰白正文，浅色取近白底 + 深灰正文。
 const DEFAULT_FG_DARK: u32 = 0x00d8_d8d8;
 const DEFAULT_FG_LIGHT: u32 = 0x0024_292e;
@@ -54,8 +62,26 @@ pub fn default_fg() -> u32 {
 /// Night 深蓝黑——终端面板紧贴在舞台头下面，两者用不同色系时，标题栏透明后
 /// 反而更显眼地露出一条界缝。ANSI 16 色板（下面 PALETTE_DARK/LIGHT）仍保留
 /// Tokyo Night 配色，只有「没手动设置背景色」时兜底的这个默认底色跟着卡片走。
+///
+/// 用户在设置里自选过底色时以用户的为准（见 `set_bg_override`）：渲染层、OSC 11
+/// 应答、下发给手机的配色快照必须是同一个值，否则 TUI 按查到的底色挑灰度就会
+/// 挑错档。
 pub fn default_bg() -> u32 {
-    crate::ui_theme::bg_panel()
+    match BG_OVERRIDE.load(Ordering::Relaxed) {
+        NO_BG_OVERRIDE => crate::ui_theme::bg_panel(),
+        color => color,
+    }
+}
+
+/// 「没有用户自选底色」的哨兵值：合法色值只占低 24 位，这个值不可能撞上。
+const NO_BG_OVERRIDE: u32 = u32::MAX;
+static BG_OVERRIDE: AtomicU32 = AtomicU32::new(NO_BG_OVERRIDE);
+
+/// 设置/清除用户自选终端底色（`Appearance.bg_color` 被改过时传 Some）。
+/// 由 `settings::apply_appearance` 统一调用，跟 `set_dark_mode` 一个套路：
+/// PTY 线程上的 `EventProxy` 读不到 GPUI 全局态，只能靠原子量镜像一份。
+pub fn set_bg_override(color: Option<u32>) {
+    BG_OVERRIDE.store(color.unwrap_or(NO_BG_OVERRIDE), Ordering::Relaxed);
 }
 
 /// 16 色 ANSI 调色板：深色沿用 Tokyo Night（白/亮白改为灰白/纯白，iTerm2 风格）；
@@ -104,6 +130,11 @@ fn palette() -> &'static [u32; 16] {
     } else {
         &PALETTE_LIGHT
     }
+}
+
+/// 当前 ANSI 16 色板（构建下发给移动端的配色快照用，见 `settings::publish_terminal_theme`）。
+pub fn ansi_palette() -> &'static [u32; 16] {
+    palette()
 }
 
 /// 一个渲染用的终端单元：字符 + 前景/背景 rgb + 字形修饰 + 是否在选区内。
@@ -3337,7 +3368,9 @@ mod event_proxy_answers_tests {
     /// 默认背景色（深色下 `bg_panel` = `0x313338`，跟随卡片配色）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
+        let _guard = lock_theme_globals();
         set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
+        set_bg_override(None);
         let (proxy, mut probe) = make_proxy();
         let size = TermSize { rows: 24, cols: 80 };
         let mut term = Term::new(Config::default(), &size, proxy);
@@ -3350,6 +3383,34 @@ mod event_proxy_answers_tests {
         assert!(
             resp.contains("rgb:3131/3333/3838"),
             "应含默认背景色（bg_panel 深色 0x313338）的 rgb 十六进制，实际: {resp:?}"
+        );
+    }
+
+    /// 用户在设置里自选了终端底色时，OSC 11 必须回**用户那个色**：TUI 就是靠这个
+    /// 回应挑灰度的，回主题色而渲染成用户色，等于让 TUI 按错的底色配色。
+    #[test]
+    fn background_color_query_reports_user_override() {
+        let _guard = lock_theme_globals();
+        set_dark_mode(true);
+        set_bg_override(Some(0x00ab_cdef));
+        assert_eq!(default_bg(), 0x00ab_cdef);
+
+        let (proxy, mut probe) = make_proxy();
+        let size = TermSize { rows: 24, cols: 80 };
+        let mut term = Term::new(Config::default(), &size, proxy);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b]11;?\x07");
+        let (_, resp) = read_frame(&mut probe);
+        assert!(
+            resp.contains("rgb:abab/cdcd/efef"),
+            "应回用户自选底色 0xabcdef，实际: {resp:?}"
+        );
+
+        set_bg_override(None);
+        assert_eq!(
+            default_bg(),
+            crate::ui_theme::bg_panel(),
+            "清掉自选色后应回到跟随主题"
         );
     }
 

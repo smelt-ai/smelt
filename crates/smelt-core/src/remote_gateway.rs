@@ -1037,6 +1037,12 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
                 let Some(frame) = frame else { break };
                 let message = match frame {
                     TerminalFrame::Header { cols, rows, replay_len } => {
+                        // 配色跟着每条连接下发：一部手机可以连多台设备，各台的
+                        // 主题（深浅色 / 用户自选底色）不一样，客户端不能写死。
+                        // 也必须跟 PC 对 OSC 11 的应答同源，否则 TUI 按查到的底色
+                        // 挑灰度，手机上就是对比度不对。
+                        // PC 中途改主题要等这条连接重连才生效——重连是常态（切前后台、
+                        // 换网），不值得为此再加一条推送通道。
                         let ready = serde_json::json!({
                             "type": "terminalReady",
                             "sessionId": id,
@@ -1044,6 +1050,7 @@ async fn terminal_ws_pump(socket: WebSocket, state: AppState, id: String) {
                             "rows": rows,
                             "replayBytes": replay_len,
                             "writeEnabled": state.write_enabled,
+                            "theme": crate::terminal_theme::load().to_wire(),
                         });
                         Message::Text(ready.to_string().into())
                     }

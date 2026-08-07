@@ -8498,6 +8498,8 @@ fn main() {
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         settings::apply_theme_mode(appearance.theme_mode, cx);
+        // 用户自选终端底色要在首帧前生效，并连同主题一起发布给守护（移动端配色）。
+        settings::apply_bg_color(&appearance);
         terminal_view::set_font_px(appearance.font_px);
         terminal_view::set_font_family(&appearance.font_family);
         cx.set_global(appearance);
