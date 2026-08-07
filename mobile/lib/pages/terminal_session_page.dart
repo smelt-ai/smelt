@@ -6,6 +6,7 @@ import 'package:xterm/xterm.dart';
 
 import '../services/gateway_service.dart';
 import '../services/terminal_stream_service.dart';
+import '../theme/terminal_theme_wire.dart';
 import '../utils/xterm_input_filter.dart';
 
 class TerminalSessionPage extends StatefulWidget {
@@ -32,6 +33,11 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
 
   TerminalStreamState _streamState = TerminalStreamState.waitingForGateway;
   String? _error;
+
+  /// 终端配色：连上后由那台设备下发（见 `terminalReady.theme`），在此之前用兜底深色。
+  /// PC 主题可配置，而且一部手机可以连多台设备，客户端不能写死色板。
+  TerminalTheme _theme = SmeltTerminalTheme.fallbackDark;
+  bool _themeIsDark = true;
   bool _writeEnabled = false;
   bool _softwareKeyboardEnabled = false;
   bool _softwareKeyboardWasVisible = false;
@@ -162,6 +168,10 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
           _softwareKeyboardEnabled = false;
           _replayGeometryLocked = true;
           _error = null;
+          // 配色由这台设备下发（可能深色也可能浅色，还可能是用户自选底色）；
+          // 老网关不下发时沿用兜底深色。
+          _theme = event.theme ?? SmeltTerminalTheme.fallbackDark;
+          _themeIsDark = event.themeIsDark;
         });
       case TerminalDataEvent():
         final bytes = _inputFilter.add(event.bytes);
@@ -330,7 +340,11 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         ? 'Terminal'
         : widget.session.title;
     return Scaffold(
-      backgroundColor: const Color(0xff0b0d0f),
+      // 页面底色跟着设备的终端配色走：PC 切成浅色主题后，浅色终端嵌在纯黑页面里
+      // 会在边缘炸出刺眼的对比。
+      backgroundColor: _themeIsDark
+          ? const Color(0xff0b0d0f)
+          : _theme.background,
       appBar: AppBar(
         title: Text(title),
         actions: [
@@ -373,7 +387,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                 simulateScroll: true,
                 onTapUp: (_, _) => _enableSoftwareKeyboard(),
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                theme: TerminalThemes.defaultTheme,
+                theme: _theme,
                 textStyle: const TerminalStyle(
                   fontSize: 13,
                   height: 1.15,

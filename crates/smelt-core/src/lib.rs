@@ -27,6 +27,7 @@ pub mod session_control;
 pub mod session_metadata;
 pub mod task;
 pub mod term_text;
+pub mod terminal_theme;
 pub mod title_spinner;
 pub mod workspace_menu;
 pub mod workspace_override;

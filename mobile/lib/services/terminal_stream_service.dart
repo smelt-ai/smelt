@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:xterm/xterm.dart';
 
+import '../theme/terminal_theme_wire.dart';
 import 'gateway_service.dart';
 
 typedef TerminalChannelFactory = WebSocketChannel Function(Uri uri);
@@ -52,12 +54,20 @@ class TerminalReadyEvent extends TerminalStreamEvent {
     required this.rows,
     required this.replayBytes,
     required this.writeEnabled,
+    this.theme,
+    this.themeIsDark = true,
   });
 
   final int cols;
   final int rows;
   final int replayBytes;
   final bool writeEnabled;
+
+  /// 这台设备（PC）当前的终端配色。老网关不下发时为 null，客户端沿用兜底深色。
+  final TerminalTheme? theme;
+
+  /// 配色是不是深色主题——手机侧周边 chrome 跟着走。
+  final bool themeIsDark;
 }
 
 class TerminalDataEvent extends TerminalStreamEvent {
@@ -277,12 +287,21 @@ class TerminalStreamService implements TerminalStreamClient {
           _replayComplete = false;
           _reconnectDelayMs = 500;
           _setState(TerminalStreamState.connected);
+          // 配色跟着每条连接来：同一部手机连不同设备，各自的主题（深浅色、
+          // 用户自选底色）不一样，客户端不能有全局固定色板。
+          final rawTheme = message['theme'];
           _eventsController.add(
             TerminalReadyEvent(
               cols: cols,
               rows: rows,
               replayBytes: message['replayBytes'] as int? ?? 0,
               writeEnabled: _writeEnabled,
+              theme: rawTheme is Map<String, dynamic>
+                  ? SmeltTerminalTheme.fromWire(rawTheme)
+                  : null,
+              themeIsDark: rawTheme is Map<String, dynamic>
+                  ? SmeltTerminalTheme.isDark(rawTheme)
+                  : true,
             ),
           );
           final latest = _geometry;
