@@ -90,7 +90,7 @@ agent 从 Running 变 Idle 时，本次 Run 标 `completed`，Task 进入「待�
 `~/.smelt/tasks/prompts/<id>.txt`（内容 = body）。旧文件没有 `runs/current_run_id` 时按空值兼容读取。
 
 **全局行为：** 任务面板顶部的「自动认领中 / 暂停」持久化到工作区。暂停时不领取新任务，
-但不会打断已运行任务；旧工作区默认开启。
+但不会打断已运行任务；新建及旧工作区未保存该设置时默认暂停。
 
 **定时执行：** 每 30s 扫描候选，由 smeltd 原子领取
 `auto_run && scheduled && 待办 && run_at<=now` 的任务；同 cwd 保持串行。
