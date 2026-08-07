@@ -1,3 +1,3 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-  package="com.flutter_rust_bridge.rust_lib_smelt_mobile">
+<!-- AGP 8+ 起 package 属性由 build.gradle 的 namespace 提供，写在这里会直接报错。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 </manifest>

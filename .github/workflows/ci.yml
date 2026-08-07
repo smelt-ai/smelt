@@ -78,3 +78,54 @@ jobs:
 
       - name: Run tests
         run: flutter test
+
+  # 上面的 mobile job 只跑纯 Dart，碰不到原生那一半。Android 的风险恰恰都在原生
+  # 侧：cargokit 要用 NDK 把 crates/smelt-mobile 交叉编成 .so 再塞进 APK，
+  # Gradle / AGP / cargokit 三者的版本组合很容易在升级时炸掉，而这只有真编一次
+  # 才看得出来。
+  #
+  # 只编 arm64：真机几乎全是 arm64，多编一个 ABI 就多一份 Rust 依赖树的交叉编译。
+  # 用 ubuntu 而不是 macos runner：Android 构建不需要 macOS，且 Linux runner 更
+  # 便宜、配额更宽松。
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Gradle 9.1 / AGP 9 目前支持到 JDK 25，runner 默认的 JDK 未必在范围内，
+      # 钉一个已知可用的。
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 版本要和 mobile/rust_builder/android/build.gradle 里写死的那份一致，
+      # 也就是 Flutter 模板的 flutter.ndkVersion。
+      - name: Install NDK
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/smelt-mobile
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      # 不带签名配置，app/build.gradle.kts 会退回 debug 签名。这里只验证能不能
+      # 编过，可分发的包由发版流水线单独出。
+      - name: Build release APK
+        working-directory: mobile
+        run: flutter build apk --release --target-platform android-arm64
