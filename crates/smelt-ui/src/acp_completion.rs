@@ -91,10 +91,17 @@ pub fn candidates(
     let needle = &trigger.needle;
     match trigger.kind {
         Kind::Slash => {
-            let mut matches: Vec<_> = commands
+            // These Smelt commands are handled locally rather than sent as prompts.
+            let mut matches: Vec<(String, String)> = commands
                 .iter()
-                .filter(|(name, _)| needle.is_empty() || name.to_lowercase().contains(needle))
+                .filter(|(name, _)| {
+                    !name.eq_ignore_ascii_case("new") && !name.eq_ignore_ascii_case("status")
+                })
+                .cloned()
                 .collect();
+            matches.push(("new".to_string(), "新建一条独立对话".to_string()));
+            matches.push(("status".to_string(), "查看当前会话状态".to_string()));
+            matches.retain(|(name, _)| needle.is_empty() || name.to_lowercase().contains(needle));
             matches.sort_by_key(|(name, _)| match_rank(name, needle));
             matches
                 .into_iter()
@@ -102,7 +109,7 @@ pub fn candidates(
                 .map(|(name, desc)| Candidate {
                     label: format!("/{name}"),
                     insert: format!("/{name} "),
-                    hint: meaningful_hint(desc),
+                    hint: meaningful_hint(&desc),
                     match_range: label_match_range(&format!("/{name}"), needle),
                 })
                 .collect()
@@ -344,6 +351,38 @@ mod tests {
                 .unwrap()
                 .hint,
             "显示工作区改动"
+        );
+    }
+
+    #[test]
+    fn always_exposes_smelt_commands() {
+        let items = candidates(&detect_trigger("/new").unwrap(), &[], &[]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "/new");
+        assert_eq!(items[0].insert, "/new ");
+        assert_eq!(items[0].hint, "新建一条独立对话");
+
+        let commands = vec![
+            ("new".to_string(), "agent 自己的说明".to_string()),
+            ("status".to_string(), "agent 自己的说明".to_string()),
+        ];
+        let items = candidates(&detect_trigger("/").unwrap(), &[], &commands);
+        assert_eq!(items.iter().filter(|item| item.label == "/new").count(), 1);
+        assert_eq!(
+            items.iter().find(|item| item.label == "/new").unwrap().hint,
+            "新建一条独立对话"
+        );
+        assert_eq!(
+            items.iter().filter(|item| item.label == "/status").count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "/status")
+                .unwrap()
+                .hint,
+            "查看当前会话状态"
         );
     }
 
