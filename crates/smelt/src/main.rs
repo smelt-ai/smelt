@@ -3689,6 +3689,16 @@ impl Workspace {
                 acp_view::AcpViewEvent::ContinueInNewSession(request) => {
                     this.add_acp_handoff_session(request.clone(), window, cx);
                 }
+                acp_view::AcpViewEvent::NewSession(request) => {
+                    this.add_acp_session(
+                        request.agent,
+                        Some(request.launch.clone()),
+                        request.profile_id.clone(),
+                        request.cwd.clone(),
+                        window,
+                        cx,
+                    );
+                }
                 acp_view::AcpViewEvent::NavigateToSession(session_id) => {
                     if let Some(ix) = this
                         .sessions

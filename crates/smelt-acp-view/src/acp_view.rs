@@ -91,6 +91,14 @@ fn can_dispatch_prompt_immediately(
     matches!(phase, AcpPhase::Idle) && !prompt_dispatch_pending && queue_is_empty && has_handle
 }
 
+fn is_new_conversation_command(text: &str) -> bool {
+    text.trim().eq_ignore_ascii_case("/new")
+}
+
+fn is_status_command(text: &str) -> bool {
+    text.trim().eq_ignore_ascii_case("/status")
+}
+
 /// 新建的空白会话可以静默准备：输入框已经可用，用户无需先等 ACP 握手完成。
 /// 续接历史、自动交接和已有消息的会话仍展示启动状态，避免隐藏实际的恢复工作。
 fn is_fresh_conversation_start(
@@ -279,6 +287,7 @@ pub enum AcpViewEvent {
     Changed,
     PreviewImage(std::sync::Arc<gpui::Image>),
     ContinueInNewSession(AcpHandoffRequest),
+    NewSession(AcpNewSessionRequest),
     NavigateToSession(String),
     /// 由对话选区创建任务。任务不绑定当前 ACP 会话，而是作为同项目的新任务排队执行。
     CreateTask {
@@ -342,6 +351,14 @@ pub struct AcpHandoffRequest {
     pub profile_id: Option<String>,
     pub config_values: Vec<(String, String)>,
     pub prompt: String,
+}
+
+#[derive(Clone)]
+pub struct AcpNewSessionRequest {
+    pub agent: AcpAgentKind,
+    pub launch: AcpLaunchSpec,
+    pub profile_id: Option<String>,
+    pub cwd: Option<String>,
 }
 
 impl EventEmitter<AcpViewEvent> for AcpView {}
@@ -419,6 +436,8 @@ pub struct AcpView {
     paste_hint: Option<String>,
     /// `@` / `/` 补全弹层的当前状态；None = 没在补全。
     completion: Option<CompletionPopup>,
+    /// `/status` 打开的本地只读状态面板，不发送给 agent，也不写入对话历史。
+    status_panel_open: bool,
     /// 补全候选列表的滚动位置；键盘移动选中项时同步保证其可见。
     completion_scroll: ScrollHandle,
     /// cwd 下的文件清单缓存（`@` 的候选源）。每敲一个字符跑一次 git ls-files
@@ -701,6 +720,7 @@ impl AcpView {
             supports_image: true,
             paste_hint: None,
             completion: None,
+            status_panel_open: false,
             completion_scroll: ScrollHandle::new(),
             file_cache: None,
             file_list_loading: false,
@@ -1375,6 +1395,15 @@ impl AcpView {
         )
     }
 
+    fn emit_new_session(&self, cx: &mut Context<Self>) {
+        cx.emit(AcpViewEvent::NewSession(AcpNewSessionRequest {
+            agent: self.agent,
+            launch: self.launch.clone(),
+            profile_id: self.profile_id.clone(),
+            cwd: self.cwd.clone(),
+        }));
+    }
+
     /// 立即发送纯文本 prompt，绝不排队。返回 false 表示会话不再空闲或连接不可用。
     pub fn try_send_prompt_immediately(&mut self, text: String, cx: &mut Context<Self>) -> bool {
         if text.trim().is_empty() || !self.can_send_prompt_immediately() {
@@ -1517,6 +1546,18 @@ impl AcpView {
             return;
         }
         input.update(cx, |s, cx| s.set_value("", window, cx));
+        if is_status_command(&text) {
+            self.status_panel_open = true;
+            self.completion = None;
+            cx.notify();
+            return;
+        }
+        if self.pending_images.is_empty() && is_new_conversation_command(&text) {
+            self.status_panel_open = false;
+            self.emit_new_session(cx);
+            return;
+        }
+        self.status_panel_open = false;
         self.send_prompt(text, cx);
     }
 
@@ -4600,6 +4641,256 @@ impl Render for AcpView {
             )
         });
 
+        let status_panel = self.status_panel_open.then(|| {
+            let (phase_label, phase_color) = self.phase_label();
+            let phase_detail = match &self.phase {
+                AcpPhase::Starting => self
+                    .status_line
+                    .clone()
+                    .unwrap_or_else(|| "正在建立连接".to_string()),
+                AcpPhase::Idle => "等待下一条消息".to_string(),
+                AcpPhase::Running => self
+                    .status_line
+                    .clone()
+                    .unwrap_or_else(|| "正在执行".to_string()),
+                AcpPhase::AwaitingApproval => {
+                    format!("等待批准 · {} 项", self.permissions.len())
+                }
+                AcpPhase::AwaitingChoice => "等待你的选择".to_string(),
+                AcpPhase::Ended(message) if message.is_empty() => "连接已结束".to_string(),
+                AcpPhase::Ended(message) => message.clone(),
+            };
+            let connection = match (&self.phase, self.handle.is_some()) {
+                (AcpPhase::Ended(_), _) => "已断开",
+                (_, true) => "已连接",
+                (_, false) => "未连接",
+            };
+            let model = self
+                .model_name()
+                .unwrap_or_else(|| format!("未上报（适配器 {}）", self.agent_label()));
+            let context = self
+                .usage
+                .map(|(used, size)| {
+                    if size == 0 {
+                        format!("{used} tokens")
+                    } else {
+                        let pct = (((used as f64 / size as f64) * 100.0).round() as u32).min(100);
+                        format!("{used} / {size} tokens · {pct}%")
+                    }
+                })
+                .unwrap_or_else(|| "未上报".to_string());
+            let title = self
+                .auto_title()
+                .unwrap_or_else(|| "未命名会话".to_string());
+            let runtime_id = self
+                .acp_session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "尚未建立".to_string());
+            let history_id = self
+                .history_session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "无（新会话）".to_string());
+            let cwd = self.cwd.clone().unwrap_or_else(|| "未设置".to_string());
+            let commands = if self.available_commands.is_empty() {
+                "未上报".to_string()
+            } else {
+                let names = self
+                    .available_commands
+                    .iter()
+                    .take(6)
+                    .map(|(name, _)| format!("/{name}"))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                let suffix = (self.available_commands.len() > 6).then(|| " …");
+                format!(
+                    "{} 条 · {}{}",
+                    self.available_commands.len(),
+                    names,
+                    suffix.unwrap_or("")
+                )
+            };
+            let last_turn = self
+                .last_turn_duration_ms
+                .map(format_duration)
+                .unwrap_or_else(|| "暂无".to_string());
+            let status_row = |label: &'static str, value: String| {
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_start()
+                    .py_1()
+                    .child(
+                        div()
+                            .w(px(112.))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(t.foreground)
+                            .child(value),
+                    )
+                    .into_any_element()
+            };
+
+            v_flex()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(0x00000066))
+                .child(
+                    v_flex()
+                        .id("acp-status-panel")
+                        .w_full()
+                        .max_w(px(560.))
+                        .max_h(gpui::relative(0.9))
+                        .mx_4()
+                        .p_5()
+                        .gap_1()
+                        .overflow_y_scroll()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(ui_theme::glass_floating())
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap_2()
+                                .pb_2()
+                                .child(
+                                    Icon::new(IconName::Info)
+                                        .size(px(18.))
+                                        .text_color(gpui::rgb(ui_theme::accent())),
+                                )
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_semibold()
+                                        .text_color(t.foreground)
+                                        .child("会话状态"),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .id("acp-status-close")
+                                        .size(px(24.))
+                                        .rounded_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(muted)
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(ui_theme::overlay(0x20)))
+                                        .child(Icon::new(IconName::Close).size(px(14.)))
+                                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                                            this.status_panel_open = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .pb_2()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("只读信息，不会改变当前会话"),
+                        )
+                        .child(status_row(
+                            "状态",
+                            format!("{phase_label} · {phase_detail}"),
+                        ))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_3()
+                                .items_start()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .w(px(112.))
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child("状态颜色"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .text_color(gpui::rgb(phase_color))
+                                        .child(phase_label),
+                                ),
+                        )
+                        .child(status_row("连接", connection.to_string()))
+                        .child(status_row("Agent", self.agent.label().to_string()))
+                        .child(status_row("模型", model))
+                        .child(status_row("上下文", context))
+                        .child(status_row("工作目录", cwd))
+                        .child(status_row("会话标题", title))
+                        .child(status_row("运行时 ID", runtime_id))
+                        .child(status_row("历史 ID", history_id))
+                        .child(status_row(
+                            "消息",
+                            format!(
+                                "{} 条已加载 / {} 条总计",
+                                self.entries.len(),
+                                self.entries_total
+                            ),
+                        ))
+                        .child(status_row(
+                            "排队",
+                            if self.queued_prompts.is_empty() {
+                                "无".to_string()
+                            } else {
+                                format!("{} 条消息", self.queued_prompts.len())
+                            },
+                        ))
+                        .child(status_row(
+                            "待处理",
+                            if self.permissions.is_empty() && self.elicitation.is_none() {
+                                "无".to_string()
+                            } else {
+                                format!(
+                                    "{} 项审批 · {} 项选择",
+                                    self.permissions.len(),
+                                    usize::from(self.elicitation.is_some())
+                                )
+                            },
+                        ))
+                        .child(status_row(
+                            "图片",
+                            if self.supports_image {
+                                "支持".to_string()
+                            } else {
+                                "不支持".to_string()
+                            },
+                        ))
+                        .child(status_row("可用命令", commands))
+                        .child(status_row("上次回合", last_turn))
+                        .when(self.status_line.is_some(), |panel| {
+                            panel.child(status_row(
+                                "当前提示",
+                                self.status_line.clone().unwrap_or_default(),
+                            ))
+                        }),
+                )
+                .into_any_element()
+        });
+
         v_flex()
             .size_full()
             .relative()
@@ -4650,7 +4941,12 @@ impl Render for AcpView {
             ))
             .capture_action(
                 cx.listener(|this, _: &gpui_component::input::Escape, _window, cx| {
-                    if this.completion.take().is_some() {
+                    if this.status_panel_open {
+                        this.status_panel_open = false;
+                        this.completion = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                    } else if this.completion.take().is_some() {
                         cx.notify();
                         cx.stop_propagation();
                     }
@@ -4721,6 +5017,7 @@ impl Render for AcpView {
                     .child(msg.clone())
             }))
             .children(input_row)
+            .children(status_panel)
     }
 }
 
@@ -5632,9 +5929,10 @@ mod tests {
         can_dispatch_fresh_start_prompt, can_dispatch_prompt_immediately,
         diff_cache_matches_output, diff_stats_for_output,
         escape_html_tags_for_markdown, is_active_permission_selection,
-        is_fresh_conversation_start, is_match_count_line, loaded_entries_end,
-        markdown_text_for_cwd, markdown_user_text_for_cwd, merge_snapshot_entries,
-        is_stale_blank_history_id, move_queue_item_to_front,
+        is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
+        loaded_entries_end, markdown_text_for_cwd, markdown_user_text_for_cwd,
+        merge_snapshot_entries, is_stale_blank_history_id, is_status_command,
+        move_queue_item_to_front,
         refresh_markdown_cache, resolve_restart_launch, search_summary_text,
         should_apply_snapshot_revision, should_cancel_for_immediate_prompt, should_queue_prompt,
         should_replace_session_title, should_seed_restored_height_hints, task_body_from_selection,
@@ -5808,6 +6106,22 @@ mod tests {
             true,
             false,
         ));
+    }
+
+    #[test]
+    fn recognizes_only_the_builtin_new_command() {
+        assert!(is_new_conversation_command("/new"));
+        assert!(is_new_conversation_command("  /NEW  "));
+        assert!(!is_new_conversation_command("/new please"));
+        assert!(!is_new_conversation_command("please /new"));
+    }
+
+    #[test]
+    fn recognizes_only_the_builtin_status_command() {
+        assert!(is_status_command("/status"));
+        assert!(is_status_command("  /STATUS  "));
+        assert!(!is_status_command("/status please"));
+        assert!(!is_status_command("please /status"));
     }
 
     #[test]
