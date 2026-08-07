@@ -2510,6 +2510,7 @@ impl Workspace {
             .child(auto_claim);
 
         let header = div()
+            .w_full()
             .px_6()
             .pt_5()
             .pb_4()
@@ -2603,13 +2604,15 @@ impl Workspace {
                     None => true,
                 })
                 .collect();
-            let board_width = visible_lanes.len() as f32 * 304.
+            // 宽屏均分可用空间，窄屏仍保留最小宽度并允许横向滚动。
+            let board_min_width = visible_lanes.len() as f32 * 304.
                 + visible_lanes.len().saturating_sub(1) as f32 * 16.;
             let mut board = div()
+                .w_full()
                 .flex()
                 .items_start()
                 .gap_4()
-                .min_w(px(board_width));
+                .min_w(px(board_min_width));
             for lane in visible_lanes {
                 let tasks: Vec<_> = all
                     .iter()
@@ -2630,6 +2633,8 @@ impl Workspace {
 
         div()
             .flex_1()
+            .w_full()
+            .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
@@ -2638,6 +2643,8 @@ impl Workspace {
                 div()
                     .id("tasks-overview-scroll")
                     .flex_1()
+                    .w_full()
+                    .min_w_0()
                     .min_h_0()
                     .overflow_x_scroll()
                     .overflow_y_scroll()
@@ -2689,13 +2696,13 @@ impl Workspace {
         let accepts_drops = lane.drop_target_column().is_some();
         let e_drop = cx.entity().clone();
         div()
-            .w(px(304.))
-            .flex_none()
+            .flex_1()
+            .min_w(px(288.))
             .flex()
             .flex_col()
             .gap_3()
             .p_3()
-            .min_h(px(360.))
+            .when(tasks.is_empty(), |lane_view| lane_view.min_h(px(220.)))
             .rounded(px(12.))
             .border_1()
             .border_color(crate::ui_theme::overlay(0x10))
