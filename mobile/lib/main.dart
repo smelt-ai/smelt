@@ -1349,6 +1349,7 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
   List<HistorySessionSummary> _sessions = const [];
   bool _loading = true;
   late final StreamSubscription<SessionHistoryResult> _historySubscription;
+  late final StreamSubscription<SessionHistoryRenameResult> _renameSubscription;
 
   @override
   void initState() {
@@ -1365,6 +1366,21 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
         _loading = false;
       });
     });
+    // 改名的结果由 PC 算好回传（恢复默认时要拿回 agent 原始标题），这里就地替换，
+    // 不用为了一个名字重扫一遍历史目录。
+    _renameSubscription = gatewayService.sessionHistoryRenameStream.listen((
+      result,
+    ) {
+      if (!mounted || result.agentOptionId != _agent.id) return;
+      setState(() {
+        _sessions = [
+          for (final session in _sessions)
+            session.resumeId == result.resumeId
+                ? session.withCustomTitle(result.customTitle)
+                : session,
+        ];
+      });
+    });
     _load();
   }
 
@@ -1376,6 +1392,8 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
     gatewayService.listSessionHistory(widget.project.root, _agent.id);
   }
 
+  /// 跟 PC 历史页同一套：改过名的会话，副标题前面补一段 agent 原始标题，好让人
+  /// 知道这条历史本来叫什么。
   String _historySubtitle(HistorySessionSummary session) {
     final active = session.lastActiveAt?.toLocal();
     final date = active == null
@@ -1384,7 +1402,57 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
               '${active.hour.toString().padLeft(2, '0')}:${active.minute.toString().padLeft(2, '0')}';
     final messages =
         '${session.messageCount} message${session.messageCount == 1 ? '' : 's'}';
-    return date == null ? messages : '$date · $messages';
+    final when = date == null ? messages : '$date · $messages';
+    return session.hasCustomTitle && session.title.trim().isNotEmpty
+        ? '${session.title} · $when'
+        : when;
+  }
+
+  Future<void> _rename(HistorySessionSummary session) async {
+    final controller = TextEditingController(text: session.displayTitle);
+    final title = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename conversation'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (title == null) return;
+    final trimmed = title.trim();
+    // 清空 = 恢复默认名称，跟 PC 的「恢复默认名称」落到同一条路径。
+    gatewayService.renameSessionHistory(
+      widget.project.root,
+      _agent.id,
+      session.resumeId,
+      title: trimmed.isEmpty ? null : trimmed,
+    );
+  }
+
+  void _resetName(HistorySessionSummary session) {
+    gatewayService.renameSessionHistory(
+      widget.project.root,
+      _agent.id,
+      session.resumeId,
+    );
   }
 
   void _resume(HistorySessionSummary session) {
@@ -1440,17 +1508,46 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
                         return ListTile(
                           leading: const Icon(Icons.history),
                           title: Text(
-                            session.title,
+                            session.displayTitle,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          subtitle: Text(_historySubtitle(session)),
-                          trailing: IconButton(
-                            tooltip: 'Resume conversation',
-                            icon: const Icon(Icons.play_arrow),
-                            onPressed: gatewayService.writeEnabled
-                                ? () => _resume(session)
-                                : null,
+                          subtitle: Text(
+                            _historySubtitle(session),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Resume conversation',
+                                icon: const Icon(Icons.play_arrow),
+                                onPressed: gatewayService.writeEnabled
+                                    ? () => _resume(session)
+                                    : null,
+                              ),
+                              PopupMenuButton<String>(
+                                tooltip: 'More',
+                                enabled: gatewayService.writeEnabled,
+                                onSelected: (action) => switch (action) {
+                                  'rename' => _rename(session),
+                                  'reset' => _resetName(session),
+                                  _ => null,
+                                },
+                                itemBuilder: (context) => [
+                                  const PopupMenuItem(
+                                    value: 'rename',
+                                    child: Text('Rename'),
+                                  ),
+                                  if (session.hasCustomTitle)
+                                    const PopupMenuItem(
+                                      value: 'reset',
+                                      child: Text('Reset name'),
+                                    ),
+                                ],
+                              ),
+                            ],
                           ),
                           onTap: gatewayService.writeEnabled
                               ? () => _resume(session)
@@ -1468,6 +1565,7 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
   @override
   void dispose() {
     _historySubscription.cancel();
+    _renameSubscription.cancel();
     super.dispose();
   }
 }
@@ -2223,7 +2321,8 @@ class _SessionPageState extends State<SessionPage> {
         title: final title,
         status: final status,
         output: final output,
-      ) when isTaskCompletionToolTitle(title) =>
+      )
+          when isTaskCompletionToolTitle(title) =>
         AcpCompletionMessage(
           output: output,
           status: status,

@@ -29,18 +29,38 @@ pub struct AcpAgentOption {
     pub history_dir: Option<String>,
 }
 
+impl AcpAgentOption {
+    /// 手动添加的 workspace profile 在 option id 里带 `profile:` 前缀，而
+    /// `session_metadata` 的身份三元组要的是裸 profile id——两边不是同一个字符串，
+    /// 转换只此一处，别在调用方各切各的。
+    pub fn profile_id(&self) -> Option<&str> {
+        self.id.strip_prefix("profile:")
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistorySessionSummary {
     #[serde(skip)]
     pub path: PathBuf,
     pub resume_id: String,
+    /// agent transcript / summary 自己生成的标题，永远是原始值。
     pub title: String,
+    /// 用户在 Smelt 里手动改的名字（`session_metadata` 那份覆盖层）。PC 和移动端
+    /// 读的是同一份存储，所以列表要展示哪个名字必须在这里就算好，不能各端各判。
+    pub custom_title: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub last_active_at: Option<DateTime<Utc>>,
     pub message_count: usize,
     #[serde(skip)]
     pub total_tokens: u64,
+}
+
+impl HistorySessionSummary {
+    /// 实际展示的标题：用户改过名就用用户的，否则用 agent 原始标题。
+    pub fn display_title(&self) -> &str {
+        self.custom_title.as_deref().unwrap_or(&self.title)
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -182,6 +202,27 @@ pub fn remember_remote_session(session: RemoteAcpSession) {
     save_remote_sessions(sessions);
 }
 
+/// 历史会话改名后，把已经从这条历史续接出来的远程 ACP 会话标题一并改掉，免得会话
+/// 列表里还挂着旧名字。只动 Smelt 自己记的这份远程会话表——PC 快照里的会话由 PC
+/// 那边负责改。
+pub fn rename_remote_sessions_by_resume_id(agent_option_id: &str, resume_id: &str, title: &str) {
+    let _guard = REMOTE_STORE_LOCK.lock().unwrap();
+    let mut sessions = load_remote_sessions_unlocked();
+    let mut changed = false;
+    for session in &mut sessions {
+        if session.agent_option_id == agent_option_id
+            && session.resume_id.as_deref() == Some(resume_id)
+            && session.title != title
+        {
+            session.title = title.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        save_remote_sessions(sessions);
+    }
+}
+
 pub fn forget_remote_session(id: &str) {
     let _guard = REMOTE_STORE_LOCK.lock().unwrap();
     let mut sessions = load_remote_sessions_unlocked();
@@ -304,11 +345,12 @@ pub fn delete_terminal_session(id: &str) -> Result<(), String> {
 
 pub fn list_history(option: &AcpAgentOption, cwd: &str) -> Vec<HistorySessionSummary> {
     let kind = AcpAgentKind::from_id(&option.kind).unwrap_or(AcpAgentKind::Claude);
-    list_history_for(kind, cwd, option.history_dir.as_deref())
+    list_history_for(kind, option.profile_id(), cwd, option.history_dir.as_deref())
 }
 
 pub fn list_history_for(
     kind: AcpAgentKind,
+    profile_id: Option<&str>,
     cwd: &str,
     override_dir: Option<&str>,
 ) -> Vec<HistorySessionSummary> {
@@ -318,6 +360,13 @@ pub fn list_history_for(
         AcpAgentKind::Grok => list_grok_history(cwd, override_dir),
         AcpAgentKind::Copilot => list_copilot_history(cwd, override_dir),
     };
+    // 用户改过的名字在这一层贴上去，桌面端和移动端就拿到同一份展示标题。
+    let mut custom_titles = crate::session_metadata::custom_titles(kind, profile_id);
+    if !custom_titles.is_empty() {
+        for session in &mut sessions {
+            session.custom_title = custom_titles.remove(&session.resume_id);
+        }
+    }
     sessions.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
     sessions
 }
@@ -422,6 +471,7 @@ fn list_claude_history(cwd: &str, override_dir: Option<&str>) -> Vec<HistorySess
                 path: path.clone(),
                 resume_id: path.file_stem()?.to_str()?.to_string(),
                 title: title?,
+                custom_title: None,
                 started_at,
                 last_active_at,
                 message_count,
@@ -473,7 +523,7 @@ fn list_codex_history(cwd: &str, override_dir: Option<&str>) -> Vec<HistorySessi
             message_count += 1;
             if role == Some("user") && title.is_none() { title = Some(truncate(&text)); }
         }
-        Some(HistorySessionSummary { path, resume_id: resume_id.clone(), title: title.unwrap_or(resume_id), started_at, last_active_at, message_count, total_tokens: 0 })
+        Some(HistorySessionSummary { path, resume_id: resume_id.clone(), title: title.unwrap_or(resume_id), custom_title: None, started_at, last_active_at, message_count, total_tokens: 0 })
     }).collect()
 }
 
@@ -491,7 +541,7 @@ fn list_grok_history(cwd: &str, override_dir: Option<&str>) -> Vec<HistorySessio
             if summary.get("info").and_then(|info| info.get("cwd")).and_then(Value::as_str) != Some(cwd) { continue; }
             let Some(resume_id) = dir.file_name().and_then(|name| name.to_str()).map(String::from) else { continue };
             let title = summary.get("session_summary").and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(truncate).unwrap_or_else(|| resume_id.clone());
-            sessions.push(HistorySessionSummary { path: dir, resume_id, title, started_at: parse_time(summary.get("created_at")), last_active_at: parse_time(summary.get("updated_at")), message_count: summary.get("num_chat_messages").and_then(Value::as_u64).unwrap_or(0) as usize, total_tokens: 0 });
+            sessions.push(HistorySessionSummary { path: dir, resume_id, title, custom_title: None, started_at: parse_time(summary.get("created_at")), last_active_at: parse_time(summary.get("updated_at")), message_count: summary.get("num_chat_messages").and_then(Value::as_u64).unwrap_or(0) as usize, total_tokens: 0 });
         }
     }
     sessions
@@ -515,7 +565,7 @@ fn list_copilot_history(cwd: &str, override_dir: Option<&str>) -> Vec<HistorySes
         let resume_id = dir.file_name()?.to_str()?.to_string();
         let title = fields.get("summary").or_else(|| fields.get("name")).filter(|text| !text.trim().is_empty()).map(|text| truncate(text)).unwrap_or_else(|| resume_id.clone());
         let message_count = std::fs::read_to_string(dir.join("events.jsonl")).ok().map(|body| body.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter(|row| matches!(row.get("type").and_then(Value::as_str), Some("user.message" | "assistant.message"))).count()).unwrap_or(0);
-        Some(HistorySessionSummary { path: dir, resume_id, title, started_at: fields.get("created_at").and_then(|text| DateTime::parse_from_rfc3339(text).ok()).map(|time| time.with_timezone(&Utc)), last_active_at: fields.get("updated_at").and_then(|text| DateTime::parse_from_rfc3339(text).ok()).map(|time| time.with_timezone(&Utc)), message_count, total_tokens: 0 })
+        Some(HistorySessionSummary { path: dir, resume_id, title, custom_title: None, started_at: fields.get("created_at").and_then(|text| DateTime::parse_from_rfc3339(text).ok()).map(|time| time.with_timezone(&Utc)), last_active_at: fields.get("updated_at").and_then(|text| DateTime::parse_from_rfc3339(text).ok()).map(|time| time.with_timezone(&Utc)), message_count, total_tokens: 0 })
     }).collect()
 }
 
@@ -531,6 +581,45 @@ mod tests {
             assert_eq!(option.kind, kind.id());
             assert!(!option.launch.command.trim().is_empty());
         }
+    }
+
+    /// option id 与 `session_metadata` 的 profile id 之间的换算：默认 agent 没有
+    /// profile，手动加的 workspace profile 要把 `profile:` 前缀剥掉——两端重命名
+    /// 落到同一条记录，全靠这一步。
+    #[test]
+    fn profile_id_strips_the_option_prefix() {
+        let options = agent_options();
+        for kind in AcpAgentKind::ALL {
+            let option = options.iter().find(|option| option.id == kind.id()).unwrap();
+            assert_eq!(option.profile_id(), None);
+        }
+
+        let profile = AcpAgentOption {
+            id: "profile:quant".to_string(),
+            kind: AcpAgentKind::Codex.id().to_string(),
+            label: "Quant".to_string(),
+            profile: true,
+            launch: AcpLaunchSpec::from_command("codex".to_string()),
+            history_dir: None,
+        };
+        assert_eq!(profile.profile_id(), Some("quant"));
+    }
+
+    #[test]
+    fn display_title_prefers_the_user_name() {
+        let mut session = HistorySessionSummary {
+            path: PathBuf::from("/tmp/session.jsonl"),
+            resume_id: "session-1".to_string(),
+            title: "Fix the flaky test".to_string(),
+            custom_title: None,
+            started_at: None,
+            last_active_at: None,
+            message_count: 0,
+            total_tokens: 0,
+        };
+        assert_eq!(session.display_title(), "Fix the flaky test");
+        session.custom_title = Some("夜里那次排查".to_string());
+        assert_eq!(session.display_title(), "夜里那次排查");
     }
 
     #[test]

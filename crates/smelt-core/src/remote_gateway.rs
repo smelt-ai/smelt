@@ -1306,6 +1306,10 @@ enum AcpWsRequest {
     ListWorkspace,
     #[serde(rename = "listSessionHistory")]
     ListSessionHistory { params: SessionHistoryParams },
+    #[serde(rename = "renameSessionHistory")]
+    RenameSessionHistory {
+        params: RenameSessionHistoryParams,
+    },
     #[serde(rename = "createSession")]
     CreateSession { params: CreateSessionParams },
     #[serde(rename = "deleteSession")]
@@ -1323,6 +1327,21 @@ struct SessionHistoryParams {
     project_root: String,
     #[serde(rename = "agentOptionId")]
     agent_option_id: String,
+}
+
+/// 历史会话重命名：`title` 缺省 / 空串 = 恢复 agent 原始标题。`projectRoot` 不参与
+/// 存储身份（自定义名称按 agent + profile + resumeId 存），只用于把结果回传给发起
+/// 的那一页，好让它对上自己正在展示的列表。
+#[derive(serde::Deserialize)]
+struct RenameSessionHistoryParams {
+    #[serde(default, rename = "projectRoot")]
+    project_root: String,
+    #[serde(rename = "agentOptionId")]
+    agent_option_id: String,
+    #[serde(rename = "resumeId")]
+    resume_id: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1343,6 +1362,43 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
         .unwrap_or(0)
+}
+
+/// 历史会话改名：写的是 PC 端同一份 `session_metadata` 覆盖层，所以两端立刻一致。
+/// 返回 `(展示标题, 自定义标题)`——恢复默认时展示标题得回到 agent 原始标题，那个值
+/// 只有重新扫一遍 transcript 才知道，不能让手机自己猜。
+fn rename_mobile_history_session(
+    params: RenameSessionHistoryParams,
+) -> Result<(String, Option<String>), String> {
+    let option = crate::session_control::find_agent_option(&params.agent_option_id)
+        .ok_or_else(|| "unknown ACP agent or profile".to_string())?;
+    let kind = crate::agent_kind::AcpAgentKind::from_id(&option.kind)
+        .ok_or_else(|| "unknown ACP agent".to_string())?;
+    let resume_id = params.resume_id.trim();
+    if resume_id.is_empty() {
+        return Err("missing resumeId".to_string());
+    }
+    let custom_title = params
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    crate::session_metadata::set_custom_title(kind, option.profile_id(), resume_id, custom_title)?;
+
+    let display_title = crate::session_control::list_history(&option, &params.project_root)
+        .into_iter()
+        .find(|session| session.resume_id == resume_id)
+        .map(|session| session.display_title().to_string())
+        .or_else(|| custom_title.map(str::to_string))
+        .unwrap_or_default();
+    if !display_title.is_empty() {
+        crate::session_control::rename_remote_sessions_by_resume_id(
+            &option.id,
+            resume_id,
+            &display_title,
+        );
+    }
+    Ok((display_title, custom_title.map(str::to_string)))
 }
 
 fn create_mobile_session(params: CreateSessionParams) -> Result<String, String> {
@@ -1394,7 +1450,7 @@ fn create_mobile_acp_session(params: CreateSessionParams) -> Result<String, Stri
             crate::session_control::list_history(&option, &project.root)
                 .into_iter()
                 .find(|session| session.resume_id == resume_id)
-                .map(|session| session.title)
+                .map(|session| session.display_title().to_string())
         })
         .unwrap_or_else(|| format!("{} conversation", option.label));
     let now = now_unix();
@@ -1626,6 +1682,30 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                             }),
                             Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
                             Err(error) => serde_json::json!({"type": "error", "error": format!("failed to scan session history: {error}")}),
+                        };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
+                    AcpWsRequest::RenameSessionHistory { params } => {
+                        if !write_enabled {
+                            let resp = serde_json::json!({"type": "error", "error": "write not enabled"});
+                            let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                            continue;
+                        }
+                        let project_root = params.project_root.clone();
+                        let agent_option_id = params.agent_option_id.clone();
+                        let resume_id = params.resume_id.clone();
+                        let response = tokio::task::spawn_blocking(move || rename_mobile_history_session(params)).await;
+                        let resp = match response {
+                            Ok(Ok((title, custom_title))) => serde_json::json!({
+                                "type": "sessionHistoryRenamed",
+                                "projectRoot": project_root,
+                                "agentOptionId": agent_option_id,
+                                "resumeId": resume_id,
+                                "title": title,
+                                "customTitle": custom_title,
+                            }),
+                            Ok(Err(error)) => serde_json::json!({"type": "error", "error": error}),
+                            Err(error) => serde_json::json!({"type": "error", "error": format!("failed to rename session: {error}")}),
                         };
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
@@ -2316,6 +2396,39 @@ mod tests {
                 assert_eq!(params.agent_option_id, "profile:quant");
             }
             _ => panic!("expected listSessionHistory"),
+        }
+
+        let rename: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "renameSessionHistory",
+            "params": {
+                "projectRoot": "/repo/smelt",
+                "agentOptionId": "profile:quant",
+                "resumeId": "history-1",
+                "title": "夜里那次排查"
+            }
+        }))
+        .unwrap();
+        match rename {
+            AcpWsRequest::RenameSessionHistory { params } => {
+                assert_eq!(params.resume_id, "history-1");
+                assert_eq!(params.title.as_deref(), Some("夜里那次排查"));
+            }
+            _ => panic!("expected renameSessionHistory"),
+        }
+
+        // 省掉 title = 恢复默认名称，不能被当成缺字段解析失败。
+        let reset: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "renameSessionHistory",
+            "params": {
+                "projectRoot": "/repo/smelt",
+                "agentOptionId": "codex",
+                "resumeId": "history-1"
+            }
+        }))
+        .unwrap();
+        match reset {
+            AcpWsRequest::RenameSessionHistory { params } => assert_eq!(params.title, None),
+            _ => panic!("expected renameSessionHistory"),
         }
 
         let create: AcpWsRequest = serde_json::from_value(serde_json::json!({
