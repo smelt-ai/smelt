@@ -142,7 +142,7 @@ fn starting_status_copy(
                 "正在建立与 agent 的连接".to_string()
             }
         });
-    let elapsed = format!("已等待 {waited_seconds} 秒 · 通常约 10 秒");
+    let elapsed = format!("已等待 {waited_seconds} 秒");
 
     (title, detail, elapsed)
 }
@@ -5582,7 +5582,7 @@ mod tests {
             (
                 "正在恢复上次的会话".to_string(),
                 "正在恢复历史消息和工作上下文".to_string(),
-                "已等待 12 秒 · 通常约 10 秒".to_string(),
+                "已等待 12 秒".to_string(),
             )
         );
         assert_eq!(
@@ -5590,7 +5590,7 @@ mod tests {
             (
                 "正在启动 Codex".to_string(),
                 "正在连接 agent".to_string(),
-                "已等待 1 秒 · 通常约 10 秒".to_string(),
+                "已等待 1 秒".to_string(),
             )
         );
     }
