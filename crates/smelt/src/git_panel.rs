@@ -100,6 +100,10 @@ pub struct GitDiff {
     /// 这份 diff 属于哪个仓库根目录；切换项目时不能复用旧 diff。
     root: String,
     path: String,
+    /// Aggregated diffs do not identify one file that can be opened in FILES.
+    aggregate: bool,
+    /// Existing ordinary worktree file; deleted paths and submodules remain None.
+    worktree_file: Option<String>,
     lines: Rc<Vec<DiffLine>>,
     /// 文件头原文（`diff --git` … `+++` 那几行），与单个 hunk 的 `raw` 拼起来
     /// 才是一份能喂给 `git apply` 的完整 patch。
@@ -115,6 +119,14 @@ pub struct GitDiff {
     /// 没暂存过，`diff HEAD` 就等价于 `diff`，按块操作照样对得上号（这是最常见的
     /// 情况，不该逼用户先去切视图）。
     has_staged: bool,
+}
+
+fn full_file_path(root: &str, path: &str, aggregate: bool) -> Option<String> {
+    (!aggregate).then(|| Path::new(root).join(path).to_string_lossy().into_owned())
+}
+
+fn is_regular_worktree_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 impl GitDiff {
@@ -1664,27 +1676,33 @@ fn git_diff_pane(
                 ),
                 active: active_hunk,
             };
-            // 完整文件路径：diff 里的 path 是相对仓库根的，拼上 root 才是 view_file
-            // 要的绝对路径。
-            let full_path = Path::new(root).join(&d.path).to_string_lossy().to_string();
-            let ws_open = ws.clone();
-            let open_full_file = div()
-                .id("diff-view-full-file")
-                .flex_none()
-                .px_2()
-                .py(px(1.0))
-                .text_xs()
-                .whitespace_nowrap()
-                .cursor_pointer()
-                .text_color(muted)
-                .hover(|s| s.text_color(fg))
-                .child("查看完整文件 ↗")
-                .on_click(move |_ev, window, cx| {
-                    let path = full_path.clone();
-                    ws_open.update(cx, |wsx, cx| {
-                        wsx.stage_override = Some(crate::MainView::Files);
-                        wsx.view_file(path, window, cx);
-                    });
+            let open_full_file = (!d.aggregate)
+                .then(|| d.worktree_file.clone())
+                .flatten()
+                .map(|full_path| {
+                    let ws_open = ws.clone();
+                    div()
+                        .id("diff-view-full-file")
+                        .flex_none()
+                        .px_2()
+                        .py(px(1.0))
+                        .text_xs()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .text_color(muted)
+                        .hover(|s| s.text_color(fg))
+                        .child("在右侧 FILES 打开")
+                        .on_click(move |_ev, window, cx| {
+                            let path = full_path.clone();
+                            ws_open.update(cx, |wsx, cx| {
+                                // Keep an expanded central Git view in place while opening Files
+                                // in the docked inspector.
+                                wsx.inspector_tab = crate::inspector::InspectorTab::Files;
+                                wsx.set_inspector_open(true);
+                                wsx.view_file(path, window, cx);
+                                wsx.save_state(cx);
+                            });
+                        })
                 });
 
             let list: AnyElement = if split {
@@ -1893,7 +1911,7 @@ fn git_diff_pane(
                         .border_b_1()
                         .border_color(border)
                         .justify_end()
-                        .child(open_full_file)
+                        .children(open_full_file)
                         .child(toggle),
                 )
                 .child(
@@ -3091,6 +3109,8 @@ impl Workspace {
         self.git_diff = Some(GitDiff {
             root: root.clone(),
             path: path.clone(),
+            aggregate: false,
+            worktree_file: None,
             lines: Rc::new(Vec::new()),
             header: String::new(),
             hunks: Rc::new(Vec::new()),
@@ -3142,10 +3162,17 @@ impl Workspace {
                     // submodule 的 diff 里是子仓库的文件路径，主仓库 apply 不了；
                     // 未跟踪走 --no-index，路径同样对不上索引。两者都退回整文件操作。
                     let is_submodule = text.lines().any(|l| l.starts_with("Submodule "));
-                    (parse_diff(&text), !untracked && !is_submodule, has_staged)
+                    let worktree_file = full_file_path(&r, &p, false)
+                        .filter(|full_path| is_regular_worktree_file(Path::new(full_path)));
+                    (
+                        parse_diff(&text),
+                        !untracked && !is_submodule,
+                        has_staged,
+                        worktree_file,
+                    )
                 })
                 .await;
-            let (parsed, patchable, has_staged) = parsed;
+            let (parsed, patchable, has_staged, worktree_file) = parsed;
             let _ = this.update(cx, |this, cx| {
                 if this.diff_gen == r#gen {
                     // 没解析出文件头就拼不出合法 patch（比如 diff 为空、或 git 报错
@@ -3154,6 +3181,8 @@ impl Workspace {
                     this.git_diff = Some(GitDiff {
                         root: root.clone(),
                         path,
+                        aggregate: false,
+                        worktree_file,
                         lines: Rc::new(parsed.lines),
                         header: parsed.header,
                         hunks: Rc::new(parsed.hunks),
@@ -3199,6 +3228,8 @@ impl Workspace {
         self.git_diff = Some(GitDiff {
             root: root.clone(),
             path: "全部改动".into(),
+            aggregate: true,
+            worktree_file: None,
             lines: Rc::new(Vec::new()),
             header: String::new(),
             hunks: Rc::new(Vec::new()),
@@ -3240,6 +3271,8 @@ impl Workspace {
                     this.git_diff = Some(GitDiff {
                         root: root.clone(),
                         path: "全部改动".into(),
+                        aggregate: true,
+                        worktree_file: None,
                         lines: Rc::new(result.lines),
                         header: String::new(),
                         hunks: Rc::new(Vec::new()),
@@ -4495,8 +4528,8 @@ mod tests {
     // 用到的名字。
     use super::{
         AggregateDiffRow, DiffKind, DiffReviewRow, aggregate_diff_rows, aggregate_file_row_index,
-        build_git_tree, diff_review_rows, hunk_patch, parse_diff, parse_diff_with_file_headers,
-        run_git, run_git_stdin,
+        build_git_tree, diff_review_rows, full_file_path, hunk_patch, parse_diff,
+        parse_diff_with_file_headers, run_git, run_git_stdin,
     };
 
     fn files(paths: &[&str]) -> Vec<(String, String)> {
@@ -4504,6 +4537,15 @@ mod tests {
             .iter()
             .map(|p| (" M".to_string(), p.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn aggregate_diff_has_no_full_worktree_file() {
+        assert!(full_file_path("/repo", "全部改动", true).is_none());
+        assert_eq!(
+            full_file_path("/repo", "src/main.rs", false).as_deref(),
+            Some("/repo/src/main.rs")
+        );
     }
 
     /// 只有一个孩子的目录链要压成一行，否则深路径全是空缩进。
