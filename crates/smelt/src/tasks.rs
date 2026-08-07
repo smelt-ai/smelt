@@ -582,6 +582,41 @@ pub fn title_from_prompt(prompt: &str) -> String {
     }
 }
 
+/// 卡片标题已由首包首行生成时，不再把同一行作为摘要重复显示；有后续说明时只显示它。
+fn task_card_body_preview(title: &str, body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return String::new();
+    }
+
+    let title = title.trim();
+    let details = if title == body {
+        String::new()
+    } else if title == title_from_prompt(body) {
+        let mut found_title_line = false;
+        let mut remaining = Vec::new();
+        for line in body.lines() {
+            if !found_title_line {
+                if !line.trim().is_empty() {
+                    found_title_line = true;
+                }
+            } else {
+                remaining.push(line);
+            }
+        }
+        remaining.join("\n")
+    } else {
+        body.to_string()
+    };
+
+    let details = details.trim();
+    if details.chars().count() > 96 {
+        format!("{}…", details.chars().take(96).collect::<String>())
+    } else {
+        details.to_string()
+    }
+}
+
 /// shell 单引号包裹（路径 / 内联短 prompt）。
 pub fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -2449,16 +2484,7 @@ impl Workspace {
         let col_color: Hsla = rgb(col.color()).into();
         // 徽章底 = 该列语义色的低透明度版本，与 `col.color()` 同源
         let col_tint: Hsla = crate::ui_theme::tint(col.color(), 0x22).into();
-        let body_prev = {
-            let t = task.body.trim();
-            if t.is_empty() {
-                String::new()
-            } else if t.chars().count() > 96 {
-                format!("{}…", t.chars().take(96).collect::<String>())
-            } else {
-                t.to_string()
-            }
-        };
+        let body_prev = task_card_body_preview(&title, &task.body);
         let has_session = task.session_id.is_some();
         let primary: Option<&'static str> = if col.is_todo() {
             Some("终端")
@@ -3759,6 +3785,25 @@ mod task_model_tests {
     #[test]
     fn title_from_prompt_takes_first_line() {
         assert_eq!(super::title_from_prompt("第一行\n第二行"), "第一行");
+    }
+
+    #[test]
+    fn task_card_preview_omits_duplicated_title() {
+        assert_eq!(super::task_card_body_preview("同一任务", "同一任务"), "");
+        assert_eq!(
+            super::task_card_body_preview("同一任务", "同一任务\n补充说明"),
+            "补充说明"
+        );
+        assert_eq!(
+            super::task_card_body_preview("手工标题", "完整任务说明"),
+            "完整任务说明"
+        );
+
+        let long = "a".repeat(41);
+        assert_eq!(
+            super::task_card_body_preview(&super::title_from_prompt(&long), &long),
+            ""
+        );
     }
 
     #[test]
