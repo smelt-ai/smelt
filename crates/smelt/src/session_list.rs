@@ -153,7 +153,7 @@ impl Workspace {
                     } else {
                         ui_theme::text_mid()
                     }))
-                    .child("任务"),
+                    .child("任务面板"),
             )
             .child(
                 Button::new("sidebar-new-task")
