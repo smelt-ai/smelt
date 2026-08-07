@@ -20,7 +20,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use smelt_core::task::{
-    Task, TaskKind, parse_local_datetime, task_prompt, title_from_prompt,
+    Task, TaskKind, TaskScheduleFrequency, parse_local_datetime, task_prompt, title_from_prompt,
 };
 
 const USAGE: &str = "\
@@ -30,6 +30,7 @@ smelt-task — 向 smelt 任务队列塞/查任务（agent 自循环）
   smelt-task add --cwd <dir> --title <标题> --body <首包指令>
                  [--dep <id>]... [--auto-run on|off] [--retry-max <n>]
                  [--retry-delay <秒>] [--schedule 'YYYY-MM-DD HH:MM']
+                 [--frequency once|hourly|daily]
   smelt-task list [--cwd <dir>] [--all] [--json]
   smelt-task done <id>
   smelt-task remove <id>
@@ -107,6 +108,17 @@ fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a.as_str() == format!("--{name}"))
 }
 
+fn parse_schedule_frequency(raw: &str) -> Result<TaskScheduleFrequency, String> {
+    match raw {
+        "once" => Ok(TaskScheduleFrequency::Once),
+        "hourly" => Ok(TaskScheduleFrequency::Hourly),
+        "daily" => Ok(TaskScheduleFrequency::Daily),
+        _ => Err(format!(
+            "frequency 不支持：{raw}（可用 once|hourly|daily）"
+        )),
+    }
+}
+
 fn cmd_add(args: &[String], sock: &str) -> Result<(), String> {
     if has_flag(args, "launch") || has_flag(args, "channel") || has_flag(args, "agent") {
         return Err("任务暂不支持绑定 Agent；会在实际运行时按当前默认启动项执行".into());
@@ -150,6 +162,13 @@ fn cmd_add(args: &[String], sock: &str) -> Result<(), String> {
         } else {
             return Err(format!("schedule 格式无法解析：{schedule}（期望 YYYY-MM-DD HH:MM）"));
         }
+    }
+    if let Some(raw_frequency) = opt(args, "frequency") {
+        let frequency = parse_schedule_frequency(&raw_frequency)?;
+        if task.kind != TaskKind::Scheduled {
+            return Err("--frequency 需要与 --schedule 一起使用".into());
+        }
+        task.schedule_frequency = frequency;
     }
 
     let id = task.id.clone();
@@ -246,5 +265,31 @@ fn cmd_run(args: &[String], sock: &str) -> Result<(), String> {
         let claimed = resp["task"]["id"].as_str().unwrap_or(id);
         println!("已认领：{claimed}");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_frequency_parser_accepts_supported_values() {
+        assert_eq!(
+            parse_schedule_frequency("once"),
+            Ok(TaskScheduleFrequency::Once)
+        );
+        assert_eq!(
+            parse_schedule_frequency("hourly"),
+            Ok(TaskScheduleFrequency::Hourly)
+        );
+        assert_eq!(
+            parse_schedule_frequency("daily"),
+            Ok(TaskScheduleFrequency::Daily)
+        );
+    }
+
+    #[test]
+    fn schedule_frequency_parser_rejects_unknown_values() {
+        assert!(parse_schedule_frequency("weekly").is_err());
     }
 }

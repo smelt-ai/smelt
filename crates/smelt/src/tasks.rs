@@ -19,6 +19,7 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::*;
 use serde::{Deserialize, Serialize};
+use smelt_core::task::{TaskScheduleFrequency, next_scheduled_run_at};
 
 use crate::settings::{AcpAgentKind, active_launch_entries};
 use crate::terminal_view::TerminalView;
@@ -49,8 +50,8 @@ impl TaskColumn {
         match self {
             Self::Backlog | Self::Ready => "待办",
             Self::Running | Self::Waiting => "执行中",
-            Self::Review => "待审查",
-            Self::Failed => "失败",
+            Self::Review => "待确认",
+            Self::Failed => "遇到阻碍",
             Self::Done => "完成",
         }
     }
@@ -85,9 +86,61 @@ impl TaskColumn {
         matches!(self, Self::Backlog | Self::Ready)
     }
 
-    /// 状态下拉可选的三态（写入 store 用规范化值）。
-    pub fn ui_choices() -> [TaskColumn; 4] {
-        [Self::Backlog, Self::Running, Self::Review, Self::Done]
+    /// 是否需要用户介入：Agent 交付待确认，或执行遇到阻碍。
+    pub fn needs_attention(self) -> bool {
+        matches!(self, Self::Review | Self::Failed)
+    }
+
+    /// 状态下拉可选的规范值。
+    pub fn ui_choices() -> [TaskColumn; 5] {
+        [
+            Self::Backlog,
+            Self::Running,
+            Self::Review,
+            Self::Failed,
+            Self::Done,
+        ]
+    }
+}
+
+/// 任务总览的聚合筛选。看板上的“待处理”同时容纳待确认和遇到阻碍的任务，
+/// 但卡片仍展示各自的真实状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskBoardFilter {
+    Todo,
+    Running,
+    Attention,
+    Done,
+}
+
+impl TaskBoardFilter {
+    fn matches(self, column: TaskColumn) -> bool {
+        match self {
+            Self::Todo => column.is_todo(),
+            Self::Running => column.is_active(),
+            Self::Attention => column.needs_attention(),
+            Self::Done => column == TaskColumn::Done,
+        }
+    }
+}
+
+/// 任务卡的主操作必须描述实际结果，而不是笼统地说“打开”。
+/// `has_open_session` 只表示关联会话仍在当前窗口中可切换。
+pub(crate) fn task_primary_action_label(
+    column: TaskColumn,
+    has_open_session: bool,
+) -> Option<&'static str> {
+    match column {
+        TaskColumn::Backlog | TaskColumn::Ready => Some("开始执行"),
+        TaskColumn::Failed => Some("重试"),
+        TaskColumn::Running | TaskColumn::Waiting => Some(if has_open_session {
+            "查看进度"
+        } else {
+            "重新执行"
+        }),
+        TaskColumn::Review if has_open_session => Some("查看结果"),
+        TaskColumn::Done if has_open_session => Some("查看会话"),
+        TaskColumn::Review | TaskColumn::Done => None,
     }
 }
 
@@ -96,17 +149,15 @@ impl TaskColumn {
 enum TaskBoardLane {
     Todo,
     Running,
-    Blocked,
-    Review,
+    Attention,
     Done,
 }
 
 impl TaskBoardLane {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 4] = [
         Self::Todo,
         Self::Running,
-        Self::Blocked,
-        Self::Review,
+        Self::Attention,
         Self::Done,
     ];
 
@@ -114,8 +165,7 @@ impl TaskBoardLane {
         match self {
             Self::Todo => "待办",
             Self::Running => "执行中",
-            Self::Blocked => "遇到阻碍",
-            Self::Review => "待确认",
+            Self::Attention => "待处理",
             Self::Done => "已完成",
         }
     }
@@ -124,32 +174,33 @@ impl TaskBoardLane {
         match self {
             Self::Todo => crate::ui_theme::text_muted(),
             Self::Running => crate::ui_theme::blue(),
-            Self::Blocked => crate::ui_theme::red(),
-            Self::Review => crate::ui_theme::yellow(),
+            Self::Attention => crate::ui_theme::yellow(),
             Self::Done => crate::ui_theme::green(),
         }
     }
 
-    /// 拖入该看板列时写入的规范状态。旧 ready/waiting 仍会展示在对应列，但不会
-    /// 被新操作重新写入。
-    fn target_column(self) -> TaskColumn {
+    /// 只有语义单一的列允许拖入改变状态。“待处理”混合了待确认与遇到阻碍，
+    /// 不能猜测用户想写入哪种状态，须从卡片状态菜单明确选择。
+    fn drop_target_column(self) -> Option<TaskColumn> {
         match self {
-            Self::Todo => TaskColumn::Backlog,
-            Self::Running => TaskColumn::Running,
-            Self::Blocked => TaskColumn::Failed,
-            Self::Review => TaskColumn::Review,
-            Self::Done => TaskColumn::Done,
+            Self::Todo => Some(TaskColumn::Backlog),
+            Self::Running => Some(TaskColumn::Running),
+            Self::Attention => None,
+            Self::Done => Some(TaskColumn::Done),
+        }
+    }
+
+    fn filter(self) -> TaskBoardFilter {
+        match self {
+            Self::Todo => TaskBoardFilter::Todo,
+            Self::Running => TaskBoardFilter::Running,
+            Self::Attention => TaskBoardFilter::Attention,
+            Self::Done => TaskBoardFilter::Done,
         }
     }
 
     fn matches(self, column: TaskColumn) -> bool {
-        match self {
-            Self::Todo => column.is_todo(),
-            Self::Running => column.is_active(),
-            Self::Blocked => column == TaskColumn::Failed,
-            Self::Review => column == TaskColumn::Review,
-            Self::Done => column == TaskColumn::Done,
-        }
+        self.filter().matches(column)
     }
 }
 
@@ -296,7 +347,7 @@ pub struct TaskRun {
     pub finished_at: Option<u64>,
 }
 
-/// 任务类型：普通（手动运行）/ 单次定时（到点自动 `run_task`）。
+/// 任务类型：普通（手动运行）/ 指定时间开始执行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskKind {
@@ -305,15 +356,6 @@ pub enum TaskKind {
     Once,
     /// 到 `run_at` 后由 Workspace 扫描器自动开跑（单次，不循环）。
     Scheduled,
-}
-
-impl TaskKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Once => "普通",
-            Self::Scheduled => "定时",
-        }
-    }
 }
 
 /// 失败自动重试策略（任务级）。`max_attempts=1` = 不重试；`0` = 无限。
@@ -354,7 +396,7 @@ fn default_max_attempts() -> u32 {
 /// - `body`：**给 agent 的首包**（唯一写入 launch 启动参数的内容）
 /// - `project_cwd`：在哪个项目目录开终端
 /// - `session_id`：执行体（smeltd 会话）
-/// - `kind` / `run_at`：普通 vs 单次定时
+/// - `kind` / `schedule_frequency` / `run_at`：按队列、单次或重复执行
 /// - `auto_run`：是否允许系统自动开跑（完成续跑 / 定时扫描）；手动点「运行」始终可以
 /// - `depends_on`：前置任务 id，全部 Done 才允许执行
 /// - `retry_policy` / `retry_at`：失败自动重试策略与当前冷却到点时刻
@@ -376,10 +418,13 @@ pub struct Task {
     /// 当前/最近一次执行。旧 tasks.json 缺少该字段时自动为空。
     #[serde(default)]
     pub current_run_id: Option<String>,
-    /// 普通 / 单次定时。缺省 = 普通（兼容旧 tasks.json）。
+    /// 普通 / 指定时间执行。缺省 = 普通（兼容旧 tasks.json）。
     #[serde(default)]
     pub kind: TaskKind,
-    /// 计划开跑时间（Unix 秒，本地语义写入）。仅 `kind = Scheduled` 有意义。
+    /// 指定时间任务的重复频率。旧任务缺省为单次，保持原有行为。
+    #[serde(default)]
+    pub schedule_frequency: TaskScheduleFrequency,
+    /// 下一次计划开跑时间（Unix 秒，本地语义写入）。仅 `kind = Scheduled` 有意义。
     #[serde(default)]
     pub run_at: Option<u64>,
     /// 是否可被系统自动执行（完成边沿续跑、定时扫描）。
@@ -435,6 +480,7 @@ impl Task {
             session_id: None,
             current_run_id: None,
             kind: TaskKind::Once,
+            schedule_frequency: TaskScheduleFrequency::Once,
             run_at: None,
             auto_run: true,
             depends_on: Vec::new(),
@@ -445,12 +491,16 @@ impl Task {
         }
     }
 
-    /// 定时任务是否已到点（`run_at <= now`）且允许自动执行。
+    /// 指定时间任务是否已到点（`run_at <= now`）且允许自动执行。
     pub fn is_due(&self, now: u64) -> bool {
         self.auto_run
             && self.kind == TaskKind::Scheduled
             && self.column.is_todo()
             && self.run_at.map(|at| at <= now).unwrap_or(false)
+    }
+
+    fn has_recurring_schedule(&self) -> bool {
+        self.kind == TaskKind::Scheduled && self.schedule_frequency.is_recurring()
     }
 
     /// 前置依赖是否全部满足：`depends_on` 引用的任务都处于 Done。
@@ -484,6 +534,18 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn advance_task_after_success(task: &mut Task, now: u64) {
+    task.session_id = None;
+    task.retry_at = None;
+    task.updated_at = now;
+    if task.has_recurring_schedule() {
+        task.column = TaskColumn::Backlog;
+        task.run_at = next_scheduled_run_at(task.schedule_frequency, task.run_at, now);
+    } else {
+        task.column = TaskColumn::Review;
+    }
+}
+
 /// 把一次失败落到 Run + Task：
 /// - Run 记 Failed（保留 error / finished_at）
 /// - 若该 Run 仍是当前 run：任务回待办（未超限，冷却内不可 claim）或落 Failed 列（超限）
@@ -503,6 +565,11 @@ fn apply_failure_to_task(task: &mut Task, run: &mut TaskRun, error: &str, now: u
             } else {
                 None
             };
+        } else if task.has_recurring_schedule() {
+            // 重复任务本轮重试耗尽后，跳到下一次计划执行，不因单次故障永久停表。
+            task.column = TaskColumn::Backlog;
+            task.retry_at = None;
+            task.run_at = next_scheduled_run_at(task.schedule_frequency, task.run_at, now);
         } else {
             // 超限：落 Failed 列，不再自动跑。
             task.column = TaskColumn::Failed;
@@ -1000,31 +1067,38 @@ impl TaskStore {
         runs
     }
 
-    /// 终端 agent 停转（完成一轮）时：把当前 Run 标 Completed，Task 进入待审查。
+    /// 终端 agent 停转（完成一轮）时：单次任务进入待确认，重复任务安排下一次执行。
     /// 返回 `Some(project_cwd)` 表示确实收尾了至少一条任务（用于触发自动续跑）。
     pub fn mark_session_done(session_id: &str) -> Option<String> {
         let (done_cwd, file) = Self::mutate(|file| {
             let mut done_cwd: Option<String> = None;
             let now = now_secs();
-            for t in &mut file.tasks {
-                if t.session_id.as_deref() != Some(session_id) {
+            for task_index in 0..file.tasks.len() {
+                if file.tasks[task_index].session_id.as_deref() != Some(session_id) {
                     continue;
                 }
-                if matches!(t.column, TaskColumn::Running | TaskColumn::Waiting) {
-                    t.column = TaskColumn::Review;
-                    t.updated_at = now;
-                    if let Some(run_id) = t.current_run_id.as_deref()
-                        && let Some(run) = file.runs.iter_mut().find(|run| {
+                if matches!(
+                    file.tasks[task_index].column,
+                    TaskColumn::Running | TaskColumn::Waiting
+                ) {
+                    let run_id = file.tasks[task_index].current_run_id.clone();
+                    if let Some(run_id) = run_id
+                        && let Some(run_index) = file.runs.iter().position(|run| {
                             run.id == run_id
                                 && run.session_id.as_deref() == Some(session_id)
                                 && run.status.is_active()
                         })
                     {
+                        let task = &mut file.tasks[task_index];
+                        let run = &mut file.runs[run_index];
                         run.status = TaskRunStatus::Completed;
                         run.finished_at = Some(now);
+                        advance_task_after_success(task, now);
+                    } else {
+                        advance_task_after_success(&mut file.tasks[task_index], now);
                     }
                     if done_cwd.is_none() {
-                        done_cwd = Some(t.project_cwd.clone());
+                        done_cwd = Some(file.tasks[task_index].project_cwd.clone());
                     }
                 }
             }
@@ -1230,11 +1304,13 @@ impl Workspace {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(4, 12)
-                .placeholder("描述要完成的工作…")
+                .placeholder("例如：定位登录页白屏的原因，修复后补充回归测试。")
         });
-        let title = cx.new(|cx| InputState::new(window, cx).placeholder("留空则用指令首行"));
-        let run_at =
-            cx.new(|cx| InputState::new(window, cx).placeholder("YYYY-MM-DD HH:MM（本地时间）"));
+        let title =
+            cx.new(|cx| InputState::new(window, cx).placeholder("留空则使用任务目标的第一行"));
+        let run_at = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("例如：2026-08-08 09:30（本地时间）")
+        });
         self._task_title_sub = None;
         self.task_body_input = Some(body);
         self.task_title_input = Some(title);
@@ -1253,6 +1329,17 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    pub fn set_task_schedule_frequency(
+        &mut self,
+        frequency: TaskScheduleFrequency,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.task_kind = TaskKind::Scheduled;
+        self.task_schedule_frequency = frequency;
+        self.set_task_kind(TaskKind::Scheduled, window, cx);
     }
 
     pub fn open_new_task_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1280,8 +1367,9 @@ impl Workspace {
                 self.task_bind_project = self.known_project_cwds(cx).into_iter().next();
             }
         }
-        // 每次打开：默认普通 + 可自动执行，清空文案；焦点落在首包。
+        // 每次打开：默认按队列 + 可自动执行，清空文案与图片；焦点落在首包。
         self.task_kind = TaskKind::Once;
+        self.task_schedule_frequency = TaskScheduleFrequency::Once;
         self.task_auto_run = true;
         self.task_show_advanced = false;
         if let Some(input) = &self.task_body_input {
@@ -1306,6 +1394,7 @@ impl Workspace {
         self.task_bind_session = None;
         self.task_editing = None;
         self.task_kind = TaskKind::Once;
+        self.task_schedule_frequency = TaskScheduleFrequency::Once;
         self.task_auto_run = true;
         cx.notify();
     }
@@ -1322,6 +1411,7 @@ impl Workspace {
         self.task_bind_session = None;
         self.task_bind_project = Some(task.project_cwd.clone());
         self.task_kind = task.kind;
+        self.task_schedule_frequency = task.schedule_frequency;
         self.task_auto_run = task.auto_run;
 
         if let Some(input) = &self.task_body_input {
@@ -1346,9 +1436,21 @@ impl Workspace {
         cx.notify();
     }
 
+    fn show_task_input_error(
+        message: &str,
+        input: Option<&Entity<InputState>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.push_notification(Notification::error(message), cx);
+        if let Some(input) = input {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        }
+    }
+
     /// 编辑弹窗「保存」：把输入写回 [`TaskStore`]（不新建、不开跑）。
-    /// 校验同新建：首包必填；定时须合法时间。校验不过则保持弹窗。
-    pub fn save_task_from_inputs(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// 校验同新建：首包必填；指定时间执行须合法时间。校验不过则保持弹窗。
+    pub fn save_task_from_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.task_editing.clone() else {
             return;
         };
@@ -1361,6 +1463,12 @@ impl Workspace {
             .map(|s| s.read(cx).value().to_string())
             .unwrap_or_default();
         if body.trim().is_empty() {
+            Self::show_task_input_error(
+                "请先写清任务目标。",
+                self.task_body_input.as_ref(),
+                window,
+                cx,
+            );
             return;
         }
         let title_in = self
@@ -1371,7 +1479,12 @@ impl Workspace {
             .trim()
             .to_string();
         let kind = self.task_kind;
-        // 定时任务恒为自动执行；普通任务跟弹窗开关。
+        let schedule_frequency = if kind == TaskKind::Scheduled {
+            self.task_schedule_frequency
+        } else {
+            TaskScheduleFrequency::Once
+        };
+        // 指定时间任务恒为自动执行；按队列任务跟弹窗开关。
         let auto_run = kind == TaskKind::Scheduled || self.task_auto_run;
         let run_at = if kind == TaskKind::Scheduled {
             let raw = self
@@ -1380,6 +1493,12 @@ impl Workspace {
                 .map(|s| s.read(cx).value().to_string())
                 .unwrap_or_default();
             let Some(at) = parse_local_datetime(&raw) else {
+                Self::show_task_input_error(
+                    "请输入本地执行时间，例如 2026-08-08 09:30。",
+                    self.task_run_at_input.as_ref(),
+                    window,
+                    cx,
+                );
                 return;
             };
             Some(at)
@@ -1395,6 +1514,7 @@ impl Workspace {
             t.title = title;
             t.body = body;
             t.kind = kind;
+            t.schedule_frequency = schedule_frequency;
             t.run_at = run_at;
             t.auto_run = auto_run;
             t.project_cwd = cwd;
@@ -1403,7 +1523,7 @@ impl Workspace {
     }
 
     /// 从弹窗创建任务。`run` 时：有 `task_bind_session` → 注入该终端；否则新开终端。
-    /// 定时且 `run_at` 仍在未来：只入库，等扫描器到点再 `run_task`。
+    /// 指定时间任务且 `run_at` 仍在未来：只入库，等扫描器到点再 `run_task`。
     pub fn create_task_from_inputs(
         &mut self,
         run: bool,
@@ -1427,10 +1547,21 @@ impl Workspace {
             .to_string();
         // 必填：首包。标题可选。
         if body.trim().is_empty() {
+            Self::show_task_input_error(
+                "请先写清任务目标。",
+                self.task_body_input.as_ref(),
+                window,
+                cx,
+            );
             return;
         }
         let kind = self.task_kind;
-        // 定时本身就是到点自动跑 → 强制 auto_run；普通任务跟弹窗开关。
+        let schedule_frequency = if kind == TaskKind::Scheduled {
+            self.task_schedule_frequency
+        } else {
+            TaskScheduleFrequency::Once
+        };
+        // 指定时间本身就是到点自动跑 → 强制 auto_run；按队列任务跟弹窗开关。
         let auto_run = kind == TaskKind::Scheduled || self.task_auto_run;
         let run_at = if kind == TaskKind::Scheduled {
             let raw = self
@@ -1439,7 +1570,12 @@ impl Workspace {
                 .map(|s| s.read(cx).value().to_string())
                 .unwrap_or_default();
             let Some(at) = parse_local_datetime(&raw) else {
-                // 时间非法：不创建（保持弹窗，用户改完再提交）
+                Self::show_task_input_error(
+                    "请输入本地执行时间，例如 2026-08-08 09:30。",
+                    self.task_run_at_input.as_ref(),
+                    window,
+                    cx,
+                );
                 return;
             };
             Some(at)
@@ -1455,6 +1591,7 @@ impl Workspace {
         let sid = self.task_bind_session.take();
         let mut task = Task::new(cwd, title, body);
         task.kind = kind;
+        task.schedule_frequency = schedule_frequency;
         task.run_at = run_at;
         task.auto_run = auto_run;
         let id = task.id.clone();
@@ -1470,7 +1607,7 @@ impl Workspace {
         self.task_kind = TaskKind::Once;
         self.task_auto_run = true;
 
-        // 定时且未到点：只创建，扫描器稍后开跑。
+        // 指定时间且未到点：只创建，扫描器稍后开跑。
         let schedule_only =
             kind == TaskKind::Scheduled && run_at.map(|at| at > now_secs()).unwrap_or(true);
         let should_run = run && !schedule_only;
@@ -1481,6 +1618,17 @@ impl Workspace {
             } else {
                 self.run_task(&id, window, cx);
             }
+            self.show_new_task_modal = false;
+            self.task_kind = TaskKind::Once;
+            self.task_schedule_frequency = TaskScheduleFrequency::Once;
+            self.task_auto_run = true;
+        } else if kind == TaskKind::Scheduled {
+            // 指定时间任务创建完成即关弹窗：到点由扫描器自动开跑，无需连续创建。
+            self.show_new_task_modal = false;
+            self.task_kind = TaskKind::Once;
+            self.task_schedule_frequency = TaskScheduleFrequency::Once;
+            self.task_auto_run = true;
+            cx.notify();
         } else {
             // 「仅创建」不预绑当前会话；任务保持与 Agent 无关，直到实际运行。
             cx.notify();
@@ -1648,22 +1796,33 @@ impl Workspace {
         let editing = self.task_editing.is_some();
         let on_existing = self.task_bind_session.is_some();
         let is_scheduled = self.task_kind == TaskKind::Scheduled;
+        let schedule_frequency = self.task_schedule_frequency;
         let auto_run = self.task_auto_run || is_scheduled;
-        let exec_hint = if is_scheduled {
-            "到点后按当前默认启动项新开终端（单次）；任务本身不绑定 Agent"
-        } else if auto_run {
-            "可自动执行：前一条做完 / 队列有空时系统会接着跑；运行时才解析默认启动项"
-        } else if on_existing {
-            "仅手动：不会被完成续跑取走；运行 = 键入指令并回车进当前终端"
-        } else {
-            "仅手动：点「运行」时按当前默认启动项开终端；不会被系统自动取走"
-        };
         let primary_label = if editing {
-            "保存"
+            "保存修改"
         } else if is_scheduled {
-            "创建定时"
+            "安排任务"
+        } else if auto_run {
+            "加入队列并继续"
         } else {
-            "创建并运行"
+            "创建待办并继续"
+        };
+        let run_now_label = if on_existing {
+            "立即发送"
+        } else {
+            "创建并立即运行"
+        };
+        let header_hint = if editing {
+            "修改任务内容和执行方式；保存不会立即启动任务。"
+        } else {
+            "写清目标、范围和完成标准；执行方式可在下方调整。"
+        };
+        let project_hint = if on_existing && !is_scheduled && auto_run {
+            "立即发送会复用当前终端；加入队列则会从这个项目新开会话。"
+        } else if on_existing && !is_scheduled {
+            "立即发送会复用当前终端；之后手动运行会从这个项目新开会话。"
+        } else {
+            "新会话会在这个项目目录中启动。"
         };
 
         let field_label = |text: &str| {
@@ -1678,7 +1837,7 @@ impl Workspace {
         // 主区：项目（高频，默认当前项目）。
         let project_row = v_flex()
             .gap_1()
-            .child(field_label("项目 · 可选"))
+            .child(field_label("执行项目"))
             .child(
                 Button::new("task-pick-project")
                     .label(proj_btn_label)
@@ -1692,92 +1851,166 @@ impl Workspace {
                             let mut menu = menu;
                             if projects.is_empty() {
                                 return menu.item(
-                                    PopupMenuItem::new("暂无项目（先打开终端）")
-                                        .disabled(true),
+                                    PopupMenuItem::new("暂无可用项目（请先打开终端）").disabled(true),
                                 );
                             }
                             for p in &projects {
                                 let cwd = p.clone();
                                 let e = e.clone();
                                 let label = project_label(p);
-                                menu = menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, _, cx| {
+                                menu =
+                                    menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                                         let cwd = cwd.clone();
                                         e.update(cx, |ws, cx| {
                                             ws.set_task_bind_project(cwd, cx);
                                         });
-                                    },
-                                ));
+                                    }));
                             }
                             menu
                         }
                     }),
+            )
+            .child(div().text_xs().text_color(muted).child(project_hint));
+        // 执行频率：按项目队列 / 指定时间的一次或重复执行。
+        let frequency_row = v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .flex_wrap()
+                    .child(
+                        Button::new("task-kind-once")
+                            .label("按队列")
+                            .small()
+                            .when(!is_scheduled, |b| b.primary())
+                            .when(is_scheduled, |b| b.ghost())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_task_kind(TaskKind::Once, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("task-frequency-once")
+                            .label(TaskScheduleFrequency::Once.label())
+                            .small()
+                            .when(
+                                is_scheduled
+                                    && schedule_frequency == TaskScheduleFrequency::Once,
+                                |b| b.primary(),
+                            )
+                            .when(
+                                !is_scheduled
+                                    || schedule_frequency != TaskScheduleFrequency::Once,
+                                |b| b.ghost(),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_task_schedule_frequency(
+                                    TaskScheduleFrequency::Once,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("task-frequency-hourly")
+                            .label(TaskScheduleFrequency::Hourly.label())
+                            .small()
+                            .when(
+                                is_scheduled
+                                    && schedule_frequency == TaskScheduleFrequency::Hourly,
+                                |b| b.primary(),
+                            )
+                            .when(
+                                !is_scheduled
+                                    || schedule_frequency != TaskScheduleFrequency::Hourly,
+                                |b| b.ghost(),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_task_schedule_frequency(
+                                    TaskScheduleFrequency::Hourly,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("task-frequency-daily")
+                            .label(TaskScheduleFrequency::Daily.label())
+                            .small()
+                            .when(
+                                is_scheduled
+                                    && schedule_frequency == TaskScheduleFrequency::Daily,
+                                |b| b.primary(),
+                            )
+                            .when(
+                                !is_scheduled
+                                    || schedule_frequency != TaskScheduleFrequency::Daily,
+                                |b| b.ghost(),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_task_schedule_frequency(
+                                    TaskScheduleFrequency::Daily,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(match (is_scheduled, schedule_frequency) {
+                        (false, _) => "按项目队列安排，可在下方选择自动或手动开始",
+                        (true, TaskScheduleFrequency::Once) => "在指定的本地时间执行一次",
+                        (true, TaskScheduleFrequency::Hourly) => {
+                            "从首次执行时间起，每小时执行一次"
+                        }
+                        (true, TaskScheduleFrequency::Daily) => {
+                            "从首次执行时间起，每天在同一当地时刻执行一次"
+                        }
+                    }),
             );
-        // 类型：普通 / 定时
-        let kind_row = h_flex()
-            .gap_2()
-            .items_center()
+
+        // 任务级：是否允许系统自动执行。
+        let auto_row = v_flex()
+            .gap_1()
             .child(
-                Button::new("task-kind-once")
-                    .label("普通")
-                    .small()
-                    .when(self.task_kind == TaskKind::Once, |b| b.primary())
-                    .when(self.task_kind != TaskKind::Once, |b| b.ghost())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_task_kind(TaskKind::Once, window, cx);
-                    })),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("task-auto-run-on")
+                            .label("自动开始")
+                            .small()
+                            .when(auto_run, |b| b.primary())
+                            .when(!auto_run, |b| b.ghost())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_task_auto_run(true, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("task-auto-run-off")
+                            .label("仅手动开始")
+                            .small()
+                            .when(!auto_run, |b| b.primary())
+                            .when(auto_run, |b| b.ghost())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_task_auto_run(false, cx);
+                            })),
+                    ),
             )
-            .child(
-                Button::new("task-kind-scheduled")
-                    .label("定时")
-                    .small()
-                    .when(is_scheduled, |b| b.primary())
-                    .when(!is_scheduled, |b| b.ghost())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_task_kind(TaskKind::Scheduled, window, cx);
-                    })),
-            )
-            .child(div().text_xs().text_color(muted).child(if is_scheduled {
-                "单次 · 到点自动开跑"
+            .child(div().text_xs().text_color(muted).child(if auto_run {
+                if self.task_auto_claim_enabled {
+                    "同一项目没有进行中的任务时，系统会开始执行。"
+                } else {
+                    "已允许自动执行；恢复自动认领后会在项目空闲时开始。"
+                }
             } else {
-                "普通待办"
+                "任务会留在待办列表，直到你主动点击「运行」。"
             }));
 
-        // 任务级：是否允许系统自动执行（定时强制开）
-        let auto_row = h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                Button::new("task-auto-run-on")
-                    .label("可自动执行")
-                    .small()
-                    .when(auto_run, |b| b.primary())
-                    .when(!auto_run, |b| b.ghost())
-                    .disabled(is_scheduled)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_task_auto_run(true, cx);
-                    })),
-            )
-            .child(
-                Button::new("task-auto-run-off")
-                    .label("仅手动")
-                    .small()
-                    .when(!auto_run, |b| b.primary())
-                    .when(auto_run, |b| b.ghost())
-                    .disabled(is_scheduled)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_task_auto_run(false, cx);
-                    })),
-            )
-            .child(div().text_xs().text_color(muted).child(if is_scheduled {
-                "定时任务默认自动"
-            } else if auto_run {
-                "完成续跑 / 队列会取它"
-            } else {
-                "只等人点运行"
-            }));
-
-        // 高级选项折叠区：类型、自动执行和定时时间都收进来。
+        // 执行设置折叠区：频率、自动执行和首次执行时间都收进来。
         // 新建默认折叠（只留「指令 + 项目」主字段）；编辑模式恒展开（改已有配置）。
         let advanced_open = self.task_show_advanced || editing;
         let advanced_toggle = div()
@@ -1804,7 +2037,7 @@ impl Workspace {
                 })
                 .size(px(14.)),
             )
-            .child(div().child("高级选项"));
+            .child(div().child("执行方式与频率"));
         let advanced_section = || {
             v_flex()
                 .gap_3()
@@ -1812,31 +2045,76 @@ impl Workspace {
                 .py_3()
                 .rounded_lg()
                 .bg(rgb(crate::ui_theme::bg_rail()))
-                .child(v_flex().gap_1().child(field_label("类型")).child(kind_row))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(field_label("执行频率"))
+                        .child(frequency_row),
+                )
                 .when(is_scheduled, |d| {
+                    let time_label = if schedule_frequency.is_recurring() {
+                        "首次执行时间（本地）"
+                    } else {
+                        "执行时间（本地）"
+                    };
+                    let time_hint = if schedule_frequency.is_recurring() {
+                        "格式：2026-08-08 09:30；之后按所选频率继续执行"
+                    } else {
+                        "格式：2026-08-08 09:30"
+                    };
                     let run_at_in = self.task_run_at_input.as_ref();
                     d.child(
                         v_flex()
                             .gap_1()
-                            .child(field_label("执行时间 · 本地（YYYY-MM-DD HH:MM）"))
-                            .children(run_at_in.map(|i| Input::new(i))),
+                            .child(field_label(time_label))
+                            .children(run_at_in.map(|i| Input::new(i)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(time_hint),
+                            ),
+                    )
+                })
+                .when(!is_scheduled, |d| {
+                    d.child(
+                        v_flex()
+                            .gap_1()
+                            .child(field_label("开始方式"))
+                            .child(auto_row),
                     )
                 })
                 .child(
                     v_flex()
                         .gap_1()
-                        .child(field_label("自动执行"))
-                        .child(auto_row),
+                        .child(field_label("任务标题（可选）"))
+                        .child(Input::new(title_in))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("仅用于任务列表显示，不会发送给 Agent。"),
+                        ),
                 )
-                .when(editing, |d| {
+                .when(is_scheduled, |d| {
+                    let schedule_hint = match schedule_frequency {
+                        TaskScheduleFrequency::Once => {
+                            "到设定的本地时间后，Smelt 会为该项目新开一次会话并执行这条任务。"
+                        }
+                        TaskScheduleFrequency::Hourly => {
+                            "到首次执行时间后，Smelt 会每小时为该项目新开一次会话执行这条任务；错过的周期不会补跑。"
+                        }
+                        TaskScheduleFrequency::Daily => {
+                            "到首次执行时间后，Smelt 会每天在同一当地时刻为该项目新开一次会话执行这条任务；错过的周期不会补跑。"
+                        }
+                    };
                     d.child(
-                        v_flex()
-                            .gap_1()
-                            .child(field_label("侧栏标题 · 可选"))
-                            .child(Input::new(title_in)),
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(schedule_hint),
                     )
                 })
-                .child(div().text_xs().text_color(muted).child(exec_hint))
         };
 
         let content = v_flex()
@@ -1848,12 +2126,11 @@ impl Workspace {
                     .text_lg()
                     .child(if editing {
                         "编辑任务"
-                    } else if on_existing {
-                        "新建任务 · 当前终端"
                     } else {
                         "新建任务"
                     }),
             )
+            .child(div().text_sm().text_color(muted).child(header_hint))
             .when(on_existing, |d| {
                 d.child(
                     div()
@@ -1863,19 +2140,33 @@ impl Workspace {
                         .bg(crate::ui_theme::tint(crate::ui_theme::blue(), 0x18))
                         .text_xs()
                         .text_color(rgb(crate::ui_theme::blue()))
-                        .child("已绑定侧栏选中的终端，运行会把指令发进该会话。"),
+                        .child(if is_scheduled {
+                            "指定时间任务到点后会新开会话执行，不会发送到当前终端。"
+                        } else if auto_run {
+                            "点击「立即发送」会把任务发进当前终端；加入队列会按项目队列执行。"
+                        } else {
+                            "点击「立即发送」会把任务发进当前终端；创建待办后可从项目列表手动运行。"
+                        }),
                 )
             })
             // 主字段：指令（唯一必填，最显眼）
             .child(
                 v_flex()
                     .gap_1()
-                    .child(field_label("任务说明 · 运行时首包（必填）"))
-                    .child(Input::new(body_in)),
+                    .child(field_label("任务目标（必填）"))
+                    .child(Input::new(body_in))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(
+                                "这会作为 Agent 的第一条消息。建议写明目标、范围、限制和完成标准。",
+                            ),
+                    ),
             )
             // 主字段：项目（默认当前项目）
             .child(project_row)
-            // 高级选项：编辑恒展开（advanced_open 已含 editing）；新建点「高级选项」展开
+            // 执行设置：编辑恒展开（advanced_open 已含 editing）；新建按需展开
             .when(!editing, |d| d.child(advanced_toggle))
             .when(advanced_open, |d| d.child(advanced_section()))
             .child(
@@ -1894,11 +2185,11 @@ impl Workspace {
                         |this, _, _, cx| this.close_new_task_modal(cx),
                         cx,
                     ))
-                    // 编辑模式无「仅创建」——保存即写回。
-                    .when(!editing, |d| {
+                    // 定时任务只安排到点执行；不显示会让人误解为立即运行的次级按钮。
+                    .when(!editing && !is_scheduled, |d| {
                         d.child(Workspace::modal_button(
-                            "create-only-task",
-                            "仅创建",
+                            "run-new-task",
+                            run_now_label,
                             neutral_bg,
                             neutral_hover,
                             fg,
@@ -2019,28 +2310,54 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Agent 完成一轮后，任务进入待确认；只有人工确认才真正进入完成列。
+    pub fn confirm_task_completion(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(task) = TaskStore::get(id) else {
+            return;
+        };
+        if task.column != TaskColumn::Review {
+            return;
+        }
+        TaskStore::update(id, |task| task.column = TaskColumn::Done);
+        window.push_notification(Notification::success("任务已标记为完成"), cx);
+        cx.notify();
+    }
+
     /// 直接设为指定列（任务卡片状态下拉用）。
     pub fn set_task_column(&mut self, id: &str, col: TaskColumn, cx: &mut Context<Self>) {
         TaskStore::update(id, |t| t.column = col);
         cx.notify();
     }
 
-    /// 将看板卡片移到目标列。落在同一语义列时保留旧 ready/waiting 状态，不制造
-    /// 无意义的写盘；跨列时复用状态下拉的更新路径。
+    /// 将看板卡片移到语义明确的目标列。待处理是聚合视图，不接受拖放，避免把
+    /// “待确认”误写成“遇到阻碍”或反过来。
     fn move_task_to_board_lane(&mut self, id: &str, lane: TaskBoardLane, cx: &mut Context<Self>) {
+        let Some(target) = lane.drop_target_column() else {
+            cx.notify();
+            return;
+        };
         if TaskStore::get(id).is_some_and(|task| !lane.matches(task.column)) {
-            self.set_task_column(id, lane.target_column(), cx);
+            self.set_task_column(id, target, cx);
         } else {
             cx.notify();
         }
     }
 
     /// 任务总览 pill：点同一状态再点一次回到「全部」。
-    pub fn set_task_column_filter(&mut self, col: Option<TaskColumn>, cx: &mut Context<Self>) {
-        self.task_column_filter = if self.task_column_filter == col {
+    pub fn set_task_column_filter(
+        &mut self,
+        filter: Option<TaskBoardFilter>,
+        cx: &mut Context<Self>,
+    ) {
+        self.task_column_filter = if self.task_column_filter == filter {
             None
         } else {
-            col
+            filter
         };
         cx.notify();
     }
@@ -2060,32 +2377,22 @@ impl Workspace {
         let n_all = all.len();
         let n_todo = all.iter().filter(|t| t.column.is_todo()).count();
         let n_run = all.iter().filter(|t| t.column.is_active()).count();
-        let n_failed = all
-            .iter()
-            .filter(|t| t.column == TaskColumn::Failed)
-            .count();
-        let n_review = all
-            .iter()
-            .filter(|t| t.column == TaskColumn::Review)
-            .count();
+        let n_attention = all.iter().filter(|t| t.column.needs_attention()).count();
         let n_done = all.iter().filter(|t| t.column == TaskColumn::Done).count();
         if let Some(f) = self.task_column_filter {
-            all.retain(|t| match f {
-                TaskColumn::Running | TaskColumn::Waiting => t.column.is_active(),
-                TaskColumn::Backlog | TaskColumn::Ready => t.column.is_todo(),
-                TaskColumn::Review => t.column == TaskColumn::Review,
-                TaskColumn::Failed => t.column == TaskColumn::Failed,
-                TaskColumn::Done => t.column == TaskColumn::Done,
-            });
+            all.retain(|t| f.matches(t.column));
         }
 
-        let pill =
-            |id: &'static str, text: String, col: Option<TaskColumn>, color: Hsla, bg: Hsla| {
+        let pill = |id: &'static str,
+                    text: String,
+                    filter: Option<TaskBoardFilter>,
+                    color: Hsla,
+                    bg: Hsla| {
                 // 「全部」仅在无筛选时高亮
-                let active = if col.is_none() {
+                let active = if filter.is_none() {
                     self.task_column_filter.is_none()
                 } else {
-                    self.task_column_filter == col
+                    self.task_column_filter == filter
                 };
                 div()
                     .id(id)
@@ -2112,19 +2419,17 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.set_task_column_filter(col, cx);
+                            this.set_task_column_filter(filter, cx);
                         }),
                     )
             };
 
         let c_blue: Hsla = rgb(crate::ui_theme::blue()).into();
         let c_gray: Hsla = rgb(crate::ui_theme::text_muted()).into();
-        let c_red: Hsla = rgb(crate::ui_theme::red()).into();
         let c_yellow: Hsla = rgb(crate::ui_theme::yellow()).into();
         let c_green: Hsla = rgb(crate::ui_theme::green()).into();
         let blue_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::blue(), 0x28).into();
         let gray_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::text_muted(), 0x28).into();
-        let red_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::red(), 0x28).into();
         let yellow_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::yellow(), 0x28).into();
         let green_tint: Hsla = crate::ui_theme::tint(crate::ui_theme::green(), 0x28).into();
         let auto_claim_enabled = self.task_auto_claim_enabled;
@@ -2177,35 +2482,28 @@ impl Workspace {
             .child(pill(
                 "tp-todo",
                 format!("待办 {n_todo}"),
-                Some(TaskColumn::Backlog),
+                Some(TaskBoardFilter::Todo),
                 c_gray,
                 gray_tint,
             ))
             .child(pill(
                 "tp-run",
                 format!("执行中 {n_run}"),
-                Some(TaskColumn::Running),
+                Some(TaskBoardFilter::Running),
                 c_blue,
                 blue_tint,
             ))
             .child(pill(
-                "tp-blocked",
-                format!("阻碍 {n_failed}"),
-                Some(TaskColumn::Failed),
-                c_red,
-                red_tint,
-            ))
-            .child(pill(
-                "tp-review",
-                format!("待确认 {n_review}"),
-                Some(TaskColumn::Review),
+                "tp-attention",
+                format!("待处理 {n_attention}"),
+                Some(TaskBoardFilter::Attention),
                 c_yellow,
                 yellow_tint,
             ))
             .child(pill(
                 "tp-done",
                 format!("完成 {n_done}"),
-                Some(TaskColumn::Done),
+                Some(TaskBoardFilter::Done),
                 c_green,
                 green_tint,
             ))
@@ -2234,7 +2532,9 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(muted)
-                                    .child("拖动卡片到状态列可改状态 · 点状态徽章也可修改"),
+                                    .child(
+                                        "遇到阻碍或 Agent 交付都会进入待处理 · 确认完成后才归档",
+                                    ),
                             ),
                     )
                     .child(
@@ -2299,7 +2599,7 @@ impl Workspace {
             let visible_lanes: Vec<_> = TaskBoardLane::ALL
                 .into_iter()
                 .filter(|lane| match self.task_column_filter {
-                    Some(filter) => lane.matches(filter),
+                    Some(filter) => lane.filter() == filter,
                     None => true,
                 })
                 .collect();
@@ -2386,6 +2686,7 @@ impl Workspace {
             }
         }
 
+        let accepts_drops = lane.drop_target_column().is_some();
         let e_drop = cx.entity().clone();
         div()
             .w(px(304.))
@@ -2399,14 +2700,18 @@ impl Workspace {
             .border_1()
             .border_color(crate::ui_theme::overlay(0x10))
             .bg(crate::ui_theme::overlay(0x08))
-            .drag_over::<TaskDrag>(move |style, _, _, _| {
-                style.border_color(lane_color).bg(lane_tint)
-            })
-            .on_drop(move |drag: &TaskDrag, _window, cx| {
-                let task_id = drag.id.clone();
-                e_drop.update(cx, |ws, cx| {
-                    ws.move_task_to_board_lane(&task_id, lane, cx);
-                });
+            .when(accepts_drops, |lane_view| {
+                let e_drop = e_drop.clone();
+                lane_view
+                    .drag_over::<TaskDrag>(move |style, _, _, _| {
+                        style.border_color(lane_color).bg(lane_tint)
+                    })
+                    .on_drop(move |drag: &TaskDrag, _window, cx| {
+                        let task_id = drag.id.clone();
+                        e_drop.update(cx, |ws, cx| {
+                            ws.move_task_to_board_lane(&task_id, lane, cx);
+                        });
+                    })
             })
             .child(
                 div()
@@ -2473,6 +2778,7 @@ impl Workspace {
         let id_col = id.clone();
         let id_edit = id.clone();
         let id_del = id.clone();
+        let id_complete = id.clone();
         let title = task.title.clone();
         let drag_title: SharedString = title.clone().into();
         let proj = project_label(&task.project_cwd);
@@ -2490,33 +2796,27 @@ impl Workspace {
         let col_tint: Hsla = crate::ui_theme::tint(col.color(), 0x22).into();
         let body_prev = task_card_body_preview(&title, &task.body);
         let has_session = task.session_id.is_some();
-        let primary: Option<&'static str> = if col.is_todo() {
-            Some("终端")
-        } else if col == TaskColumn::Failed {
-            Some("重试")
-        } else if has_session {
-            Some("打开")
-        } else if col.is_active() {
-            Some("终端")
-        } else {
-            None
-        };
+        let has_open_session = task
+            .session_id
+            .as_deref()
+            .is_some_and(|sid| self.task_session_is_open(sid, cx));
+        let primary = task_primary_action_label(col, has_open_session);
         let schedule_label = if task.kind == TaskKind::Scheduled {
             task.run_at.map(|at| {
                 let when = format_run_at_short(at);
-                let kind = TaskKind::Scheduled.label();
+                let frequency = task.schedule_frequency.label();
                 if col.is_todo() && at <= now_secs() {
-                    format!("{kind} · 已到期 {when}")
-                } else if col.is_todo() {
-                    format!("{kind} · {when}")
+                    format!("{frequency} · 已到期 {when}")
+                } else if task.schedule_frequency.is_recurring() {
+                    format!("{frequency} · 下次 {when}")
                 } else {
-                    format!("{kind} · 计划 {when}")
+                    format!("{frequency} · {when}")
                 }
             })
         } else {
             None
         };
-        // 待办且可自动执行时标一下（定时已有徽章可省略）
+        // 待办且可自动执行时标一下（指定时间任务已有徽章可省略）
         let auto_label = if task.kind == TaskKind::Once && col.is_todo() {
             Some(if task.auto_run { "自动" } else { "手动" })
         } else {
@@ -2533,6 +2833,7 @@ impl Workspace {
         let e_status = cx.entity().clone();
         let id_status = id_col.clone();
         let e_acp = cx.entity().clone();
+        let e_actions = cx.entity().clone();
         let acp_targets = self.idle_acp_task_targets(cx);
         let can_run_in_acp = col.is_todo() || col == TaskColumn::Failed;
 
@@ -2586,8 +2887,10 @@ impl Workspace {
                     .min_w_0()
                     .cursor_grab()
                     .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("拖动到状态列可改变状态")
-                            .build(window, cx)
+                        gpui_component::tooltip::Tooltip::new(
+                            "拖动到待办、执行中或已完成可改变状态；待处理会保留具体状态",
+                        )
+                        .build(window, cx)
                     })
                     .on_drag(
                         TaskDrag {
@@ -2698,7 +3001,7 @@ impl Workspace {
                         .child(body_prev),
                 )
             })
-            // 操作：主操作 + 删除（不再把状态塞进这一行）
+            // 操作：先看运行结果，再由人确认完成；不把“打开”这种模糊动作留给用户猜。
             .child(
                 div()
                     .flex()
@@ -2708,11 +3011,24 @@ impl Workspace {
                         Button::new(SharedString::from(format!("tc-run-{id}")))
                             .label(label)
                             .small()
-                            .primary()
+                            .when(col == TaskColumn::Review, |button| button.ghost())
+                            .when(col != TaskColumn::Review, |button| button.primary())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.primary_task_action(&id_run, window, cx);
                             }))
                     }))
+                    .when(col == TaskColumn::Review, |d| {
+                        d.child(
+                            Button::new(SharedString::from(format!("tc-complete-{id}")))
+                                .label("确认完成")
+                                .small()
+                                .primary()
+                                .tooltip("确认验收后，将任务移入完成列")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_task_completion(&id_complete, window, cx);
+                                })),
+                        )
+                    })
                     .when(can_run_in_acp, |d| {
                         d.child(
                             Button::new(SharedString::from(format!("tc-acp-{id}")))
@@ -2781,22 +3097,34 @@ impl Workspace {
                         )
                     })
                     .child(
-                        Button::new(SharedString::from(format!("tc-edit-{id}")))
-                            .label("编辑")
+                        Button::new(SharedString::from(format!("tc-more-{id}")))
+                            .label("更多")
                             .small()
                             .ghost()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_edit_task_modal(&id_edit, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("tc-del-{id}")))
-                            .label("删除")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.start_delete_task(&id_del, cx);
-                            })),
+                            .dropdown_menu(move |menu, _window, _cx| {
+                                let edit_id = id_edit.clone();
+                                let delete_id = id_del.clone();
+                                let e_edit = e_actions.clone();
+                                let e_delete = e_actions.clone();
+                                menu.item(
+                                    PopupMenuItem::new("编辑任务").on_click(
+                                        move |_, window, cx| {
+                                            let edit_id = edit_id.clone();
+                                            e_edit.update(cx, |ws, cx| {
+                                                ws.open_edit_task_modal(&edit_id, window, cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                                .item(
+                                    PopupMenuItem::new("删除任务").on_click(move |_, _, cx| {
+                                        let delete_id = delete_id.clone();
+                                        e_delete.update(cx, |ws, cx| {
+                                            ws.start_delete_task(&delete_id, cx);
+                                        });
+                                    }),
+                                )
+                            }),
                     ),
             )
     }
@@ -2887,6 +3215,21 @@ impl Workspace {
         None
     }
 
+    /// 关联任务的会话是否仍在当前窗口中。任务记录会跨应用重启保留，不能只凭
+    /// `session_id` 判断“查看结果”一定可用。
+    pub(crate) fn task_session_is_open(&self, sid: &str, cx: &App) -> bool {
+        self.sessions.iter().any(|session| {
+            session
+                .term_leaves()
+                .iter()
+                .any(|leaf| leaf.read(cx).session_id() == sid)
+                || matches!(
+                    &session.kind,
+                    crate::SessionKind::Acp(view) if view.read(cx).session_id() == sid
+                )
+        })
+    }
+
     pub fn focus_session_by_id(
         &mut self,
         sid: &str,
@@ -2948,7 +3291,7 @@ impl Workspace {
             .collect()
     }
 
-    /// 卡片主按钮：待办 → [`Self::run_task`]；已跑过 → 聚焦会话。
+    /// 卡片主按钮：待办/失败 → 执行；运行中/待确认/完成 → 聚焦关联会话。
     pub fn primary_task_action(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.task_selected = Some(id.to_string());
         let Some(task) = TaskStore::get(id) else {
@@ -2963,7 +3306,21 @@ impl Workspace {
                 return;
             }
         }
-        // 执行中但会话已丢 → 再新开终端。
+        if matches!(task.column, TaskColumn::Review | TaskColumn::Done) {
+            let message = if task.column == TaskColumn::Review {
+                "关联会话已关闭，暂时无法查看结果"
+            } else {
+                "关联会话已关闭，暂时无法查看会话"
+            };
+            window.push_notification(Notification::info(message), cx);
+            cx.notify();
+            return;
+        }
+        if self.task_launching.contains(id) {
+            window.push_notification(Notification::info("任务终端正在启动"), cx);
+            return;
+        }
+        // 执行中但会话已丢 → 明确以一次新尝试重新执行。
         if task.column.is_active() {
             self.run_task_in_terminal(id, window, cx);
         }
@@ -3289,10 +3646,12 @@ impl Workspace {
 #[cfg(test)]
 mod task_model_tests {
     use super::{
-        Task, TaskBoardLane, TaskChannel, TaskColumn, TaskFile, TaskKind, TaskRetryPolicy, TaskRun,
-        TaskRunStatus, TaskStore, auto_claim_cwds_from_tasks, build_launch_with_prompt,
-        parse_local_datetime, shell_single_quote,
+        Task, TaskBoardFilter, TaskBoardLane, TaskChannel, TaskColumn,
+        TaskFile, TaskKind, TaskRetryPolicy, TaskRun, TaskRunStatus, TaskStore,
+        auto_claim_cwds_from_tasks, build_launch_with_prompt, parse_local_datetime,
+        shell_single_quote, task_primary_action_label,
     };
+    use smelt_core::task::TaskScheduleFrequency;
     use std::path::Path;
 
     fn project_key(cwd: &str) -> String {
@@ -3340,12 +3699,58 @@ mod task_model_tests {
     }
 
     #[test]
-    fn task_board_lanes_write_canonical_target_columns() {
-        assert_eq!(TaskBoardLane::Todo.target_column(), TaskColumn::Backlog);
-        assert_eq!(TaskBoardLane::Running.target_column(), TaskColumn::Running);
-        assert_eq!(TaskBoardLane::Blocked.target_column(), TaskColumn::Failed);
-        assert_eq!(TaskBoardLane::Review.target_column(), TaskColumn::Review);
-        assert_eq!(TaskBoardLane::Done.target_column(), TaskColumn::Done);
+    fn task_board_lanes_only_accept_unambiguous_drops() {
+        assert_eq!(
+            TaskBoardLane::Todo.drop_target_column(),
+            Some(TaskColumn::Backlog)
+        );
+        assert_eq!(
+            TaskBoardLane::Running.drop_target_column(),
+            Some(TaskColumn::Running)
+        );
+        assert_eq!(TaskBoardLane::Attention.drop_target_column(), None);
+        assert_eq!(
+            TaskBoardLane::Done.drop_target_column(),
+            Some(TaskColumn::Done)
+        );
+    }
+
+    #[test]
+    fn attention_filter_groups_review_and_blocked_tasks() {
+        assert!(TaskBoardFilter::Attention.matches(TaskColumn::Review));
+        assert!(TaskBoardFilter::Attention.matches(TaskColumn::Failed));
+        assert!(!TaskBoardFilter::Attention.matches(TaskColumn::Running));
+        assert_eq!(TaskColumn::Failed.label(), "遇到阻碍");
+    }
+
+    #[test]
+    fn task_primary_action_labels_describe_the_outcome() {
+        assert_eq!(
+            task_primary_action_label(TaskColumn::Backlog, false),
+            Some("开始执行")
+        );
+        assert_eq!(
+            task_primary_action_label(TaskColumn::Failed, false),
+            Some("重试")
+        );
+        assert_eq!(
+            task_primary_action_label(TaskColumn::Running, true),
+            Some("查看进度")
+        );
+        assert_eq!(
+            task_primary_action_label(TaskColumn::Running, false),
+            Some("重新执行")
+        );
+        assert_eq!(
+            task_primary_action_label(TaskColumn::Review, true),
+            Some("查看结果")
+        );
+        assert_eq!(task_primary_action_label(TaskColumn::Review, false), None);
+        assert_eq!(
+            task_primary_action_label(TaskColumn::Done, true),
+            Some("查看会话")
+        );
+        assert_eq!(TaskColumn::Review.label(), "待确认");
     }
 
     #[test]
@@ -3357,6 +3762,7 @@ mod task_model_tests {
         );
         t.column = TaskColumn::Running;
         t.kind = TaskKind::Scheduled;
+        t.schedule_frequency = TaskScheduleFrequency::Hourly;
         t.run_at = Some(1_700_000_000);
         t.depends_on = vec!["dep-1".into()];
         t.retry_policy = TaskRetryPolicy { max_attempts: 5, retry_delay_secs: 30, remix_on_retry: true };
@@ -3383,6 +3789,10 @@ mod task_model_tests {
         let back: TaskFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tasks[0].title, "t1");
         assert_eq!(back.tasks[0].kind, TaskKind::Scheduled);
+        assert_eq!(
+            back.tasks[0].schedule_frequency,
+            TaskScheduleFrequency::Hourly
+        );
         assert_eq!(back.tasks[0].run_at, Some(1_700_000_000));
         assert_eq!(back.tasks[0].current_run_id.as_deref(), Some("run-1"));
         assert_eq!(back.runs[0].status, TaskRunStatus::Completed);
@@ -3400,6 +3810,7 @@ mod task_model_tests {
         let json = r#"{"tasks":[{"id":"a","title":"t","body":"b","project_cwd":"/x"}]}"#;
         let back: TaskFile = serde_json::from_str(json).unwrap();
         assert_eq!(back.tasks[0].kind, TaskKind::Once);
+        assert_eq!(back.tasks[0].schedule_frequency, TaskScheduleFrequency::Once);
         assert!(back.tasks[0].run_at.is_none());
         assert!(back.tasks[0].current_run_id.is_none());
         assert!(back.runs.is_empty());
@@ -3754,6 +4165,57 @@ mod task_model_tests {
         assert_eq!(t.column, TaskColumn::Failed);
         assert!(t.retry_at.is_none());
         assert!(t.session_id.is_none());
+    }
+
+    #[test]
+    fn recurring_task_advances_after_success_in_local_fallback() {
+        let mut task = Task::new("/p".into(), "hourly".into(), "body".into());
+        task.kind = TaskKind::Scheduled;
+        task.schedule_frequency = TaskScheduleFrequency::Hourly;
+        task.run_at = Some(100);
+        task.column = TaskColumn::Running;
+        task.session_id = Some("sid".into());
+
+        super::advance_task_after_success(&mut task, 3_700);
+
+        assert_eq!(task.column, TaskColumn::Backlog);
+        assert_eq!(task.run_at, Some(7_300));
+        assert!(task.session_id.is_none());
+    }
+
+    #[test]
+    fn recurring_task_advances_after_exhausted_failure_in_local_fallback() {
+        let mut task = Task::new("/p".into(), "hourly".into(), "body".into());
+        task.kind = TaskKind::Scheduled;
+        task.schedule_frequency = TaskScheduleFrequency::Hourly;
+        task.run_at = Some(100);
+        task.column = TaskColumn::Running;
+        task.retry_policy = TaskRetryPolicy {
+            max_attempts: 1,
+            retry_delay_secs: 0,
+            remix_on_retry: false,
+        };
+        let mut run = TaskRun {
+            id: "run-1".into(),
+            task_id: task.id.clone(),
+            attempt: 1,
+            channel: TaskChannel::Pty,
+            launch: "claude".into(),
+            session_id: Some("sid".into()),
+            status: TaskRunStatus::Running,
+            error: None,
+            created_at: 100,
+            started_at: Some(100),
+            finished_at: None,
+        };
+        task.current_run_id = Some(run.id.clone());
+
+        super::apply_failure_to_task(&mut task, &mut run, "boom", 3_700);
+
+        assert_eq!(run.status, TaskRunStatus::Failed);
+        assert_eq!(task.column, TaskColumn::Backlog);
+        assert_eq!(task.run_at, Some(7_300));
+        assert!(task.retry_at.is_none());
     }
 
     #[test]

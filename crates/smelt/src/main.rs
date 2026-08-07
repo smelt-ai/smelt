@@ -905,6 +905,22 @@ impl Session {
         }
     }
 
+    /// 侧栏行的 agent 身份：ACP 直接取协议会话的 agent；终端取当前活动 pane
+    /// 的启动方式。图标是 UI 表现，不在这里持久化，恢复时由已有的 ACP agent
+    /// 存档或 PaneState.launch_cmd 重新得到同一个语义身份。
+    pub(crate) fn provider_kind(&self, cx: &App) -> Option<settings::AcpAgentKind> {
+        match &self.kind {
+            SessionKind::Term { active, .. } => match active.read(cx).launch_kind() {
+                terminal_view::LaunchKind::Claude => Some(settings::AcpAgentKind::Claude),
+                terminal_view::LaunchKind::Codex => Some(settings::AcpAgentKind::Codex),
+                terminal_view::LaunchKind::Copilot => Some(settings::AcpAgentKind::Copilot),
+                terminal_view::LaunchKind::Grok => Some(settings::AcpAgentKind::Grok),
+                terminal_view::LaunchKind::Terminal => None,
+            },
+            SessionKind::Acp(view) => Some(view.read(cx).agent_kind()),
+        }
+    }
+
     /// 会话标题：用户重命名过就用那个；否则仅当终端标题是 Claude Code 风格（✳ 或
     /// Braille spinner 开头）时取它的任务名，再否则回退 cwd 末段——避免把普通 shell 的
     /// user@host:path 标题当任务名。
@@ -2216,9 +2232,11 @@ struct Workspace {
     task_body_input: Option<Entity<gpui_component::input::InputState>>,
     /// 定时任务：执行时间输入（`YYYY-MM-DD HH:MM`，懒创建）。
     task_run_at_input: Option<Entity<gpui_component::input::InputState>>,
-    /// 新建任务类型（普通 / 单次定时）。
+    /// 新建任务执行方式（按队列 / 指定时间）。
     task_kind: tasks::TaskKind,
-    /// 新建任务是否允许系统自动执行（任务级 `auto_run`；定时强制 true）。
+    /// 指定时间任务的执行频率（仅一次 / 每小时 / 每天）。
+    task_schedule_frequency: smelt_core::task::TaskScheduleFrequency,
+    /// 新建任务是否允许系统自动执行（任务级 `auto_run`；指定时间任务强制 true）。
     task_auto_run: bool,
     /// 自动认领总开关：暂停只阻止后续领取，不会中断已经启动的任务。
     task_auto_claim_enabled: bool,
@@ -2235,8 +2253,8 @@ struct Workspace {
     /// 在已有终端执行：Some(smeltd session id)；None = 新开终端。
     /// 由「终端/会话右键 → 新建任务」写入。
     task_bind_session: Option<String>,
-    /// 任务总览状态筛选：None = 全部。
-    task_column_filter: Option<tasks::TaskColumn>,
+    /// 任务总览聚合筛选：None = 全部。
+    task_column_filter: Option<tasks::TaskBoardFilter>,
     /// 标题输入的 Enter 订阅（回车 = 创建并开跑）。
     _task_title_sub: Option<Subscription>,
     /// 新建任务弹窗（Cmd+Shift+N / 侧栏「新建任务」）。
@@ -2659,6 +2677,7 @@ impl Workspace {
             task_body_input: None,
             task_run_at_input: None,
             task_kind: tasks::TaskKind::Once,
+            task_schedule_frequency: smelt_core::task::TaskScheduleFrequency::Once,
             task_auto_run: true,
             task_auto_claim_enabled: task_auto_claim_enabled_from_state(saved.as_ref()),
             task_launching: HashSet::new(),
@@ -8319,6 +8338,26 @@ struct SmeltAssets;
 
 impl gpui::AssetSource for SmeltAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "smelt-icons/agent-claude.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/agent-claude.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/agent-codex.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/agent-codex.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/agent-copilot.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/agent-copilot.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/agent-grok.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/agent-grok.svg").as_slice(),
+            )));
+        }
         if path == "smelt-icons/git-branch.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
                 include_bytes!("../assets/icons/git-branch.svg").as_slice(),

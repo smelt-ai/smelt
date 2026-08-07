@@ -168,7 +168,31 @@ pub struct TaskRun {
     pub finished_at: Option<u64>,
 }
 
-/// 任务类型：普通（手动运行）/ 单次定时（到点自动 `run_task`）。
+/// 已指定时间任务的重复频率。`Once` 保持既有单次执行语义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskScheduleFrequency {
+    #[default]
+    Once,
+    Hourly,
+    Daily,
+}
+
+impl TaskScheduleFrequency {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Once => "仅一次",
+            Self::Hourly => "每小时",
+            Self::Daily => "每天",
+        }
+    }
+
+    pub fn is_recurring(self) -> bool {
+        !matches!(self, Self::Once)
+    }
+}
+
+/// 任务类型：普通（按队列）/ 指定时间开始执行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskKind {
@@ -225,6 +249,9 @@ pub struct Task {
     pub current_run_id: Option<String>,
     #[serde(default)]
     pub kind: TaskKind,
+    /// 指定时间任务的重复频率。旧任务缺省为单次，保持原有行为。
+    #[serde(default)]
+    pub schedule_frequency: TaskScheduleFrequency,
     #[serde(default)]
     pub run_at: Option<u64>,
     #[serde(default = "default_true")]
@@ -253,6 +280,7 @@ impl Task {
             session_id: None,
             current_run_id: None,
             kind: TaskKind::Once,
+            schedule_frequency: TaskScheduleFrequency::Once,
             run_at: None,
             auto_run: true,
             depends_on: Vec::new(),
@@ -263,12 +291,16 @@ impl Task {
         }
     }
 
-    /// 定时任务是否已到点（`run_at <= now`）且允许自动执行。
+    /// 指定时间任务是否已到点（`run_at <= now`）且允许自动执行。
     pub fn is_due(&self, now: u64) -> bool {
         self.auto_run
             && self.kind == TaskKind::Scheduled
             && self.column.is_todo()
             && self.run_at.map(|at| at <= now).unwrap_or(false)
+    }
+
+    pub fn has_recurring_schedule(&self) -> bool {
+        self.kind == TaskKind::Scheduled && self.schedule_frequency.is_recurring()
     }
 
     /// 前置依赖是否全部满足：`depends_on` 引用的任务都处于 Done。
@@ -357,6 +389,68 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 计算重复任务下一次可执行时间。按原计划时间对齐而不是按完成时间漂移；错过的
+/// 时段会跳过，避免恢复应用或项目解锁后连续补跑多次旧任务。
+pub fn next_scheduled_run_at(
+    frequency: TaskScheduleFrequency,
+    scheduled_at: Option<u64>,
+    now: u64,
+) -> Option<u64> {
+    let scheduled_at = scheduled_at.unwrap_or(now);
+    if scheduled_at > now {
+        return Some(scheduled_at);
+    }
+
+    match frequency {
+        TaskScheduleFrequency::Once => None,
+        TaskScheduleFrequency::Hourly => {
+            let elapsed = now.saturating_sub(scheduled_at);
+            let periods = elapsed / 3_600 + 1;
+            Some(scheduled_at.saturating_add(periods.saturating_mul(3_600)))
+        }
+        TaskScheduleFrequency::Daily => {
+            use chrono::{Local, LocalResult, TimeZone};
+
+            let Some(anchor) = Local.timestamp_opt(scheduled_at as i64, 0).single() else {
+                return Some(now.saturating_add(86_400));
+            };
+            let Some(current) = Local.timestamp_opt(now as i64, 0).single() else {
+                return Some(now.saturating_add(86_400));
+            };
+
+            let mut date = current.date_naive();
+            for _ in 0..8 {
+                let local = Local.from_local_datetime(&date.and_time(anchor.time()));
+                let timestamp = match local {
+                    LocalResult::Single(time) => time.timestamp().max(0) as u64,
+                    LocalResult::Ambiguous(earlier, _) => earlier.timestamp().max(0) as u64,
+                    LocalResult::None => {
+                        date = date.succ_opt()?;
+                        continue;
+                    }
+                };
+                if timestamp > now {
+                    return Some(timestamp);
+                }
+                date = date.succ_opt()?;
+            }
+            Some(now.saturating_add(86_400))
+        }
+    }
+}
+
+fn advance_task_after_success(task: &mut Task, now: u64) {
+    task.session_id = None;
+    task.retry_at = None;
+    task.updated_at = now;
+    if task.has_recurring_schedule() {
+        task.column = TaskColumn::Backlog;
+        task.run_at = next_scheduled_run_at(task.schedule_frequency, task.run_at, now);
+    } else {
+        task.column = TaskColumn::Review;
+    }
+}
+
 /// 把一次失败落到 Run + Task（见 GUI 侧同名 helper 的语义注释）。
 pub fn apply_failure_to_task(task: &mut Task, run: &mut TaskRun, error: &str, now: u64) {
     run.status = TaskRunStatus::Failed;
@@ -372,6 +466,10 @@ pub fn apply_failure_to_task(task: &mut Task, run: &mut TaskRun, error: &str, no
             } else {
                 None
             };
+        } else if task.has_recurring_schedule() {
+            task.column = TaskColumn::Backlog;
+            task.retry_at = None;
+            task.run_at = next_scheduled_run_at(task.schedule_frequency, task.run_at, now);
         } else {
             task.column = TaskColumn::Failed;
             task.retry_at = None;
@@ -379,8 +477,34 @@ pub fn apply_failure_to_task(task: &mut Task, run: &mut TaskRun, error: &str, no
     }
 }
 
+/// 由 agent 明确上报完成时收尾当前任务。重复任务会保留任务定义并安排下一次，
+/// 单次任务保持既有的待审查流转。
+pub fn mark_task_done_in_file(file: &mut TaskFile, task_id: &str, now: u64) -> bool {
+    let Some(task_index) = file.tasks.iter().position(|task| task.id == task_id) else {
+        return false;
+    };
+    let current_run_id = file.tasks[task_index].current_run_id.clone();
+    if let Some(run_id) = current_run_id
+        && let Some(run_index) = file
+            .runs
+            .iter()
+            .position(|run| run.id == run_id && run.status.is_active())
+    {
+        let task = &mut file.tasks[task_index];
+        let run = &mut file.runs[run_index];
+        run.status = TaskRunStatus::Completed;
+        run.finished_at = Some(now);
+        advance_task_after_success(task, now);
+        return true;
+    }
+
+    let task = &mut file.tasks[task_index];
+    advance_task_after_success(task, now);
+    true
+}
+
 /// 任务此刻是否可被**系统**自动取跑（待办 + `auto_run`；依赖满足 + 重试冷却过；
-/// 定时须已到期）。人手点「运行」不走此判断。
+/// 指定时间任务须已到期）。人手点「运行」不走此判断。
 pub fn is_auto_runnable(t: &Task, tasks: &[Task], now: u64) -> bool {
     if !t.auto_run || !t.column.is_todo() {
         return false;
@@ -539,7 +663,7 @@ pub fn mark_session_failed_in_file(
     cwd
 }
 
-/// 终端 agent 停转（完成一轮）时：把当前 Run 标 Completed，Task 进入待审查。
+/// 终端 agent 停转（完成一轮）时：单次任务进入待审查，重复任务安排下一次执行。
 /// 返回 `Some(project_cwd)` 表示确实收尾了至少一条任务。
 pub fn mark_session_done_in_file(
     file: &mut TaskFile,
@@ -547,32 +671,39 @@ pub fn mark_session_done_in_file(
     now: u64,
 ) -> Option<String> {
     let mut done_cwd: Option<String> = None;
-    for t in &mut file.tasks {
-        if t.session_id.as_deref() != Some(session_id) {
+    for task_index in 0..file.tasks.len() {
+        if file.tasks[task_index].session_id.as_deref() != Some(session_id) {
             continue;
         }
-        if matches!(t.column, TaskColumn::Running | TaskColumn::Waiting) {
-            t.column = TaskColumn::Review;
-            t.updated_at = now;
-            if let Some(run_id) = t.current_run_id.as_deref()
-                && let Some(run) = file.runs.iter_mut().find(|run| {
+        if matches!(
+            file.tasks[task_index].column,
+            TaskColumn::Running | TaskColumn::Waiting
+        ) {
+            let run_id = file.tasks[task_index].current_run_id.clone();
+            if let Some(run_id) = run_id
+                && let Some(run_index) = file.runs.iter().position(|run| {
                     run.id == run_id
                         && run.session_id.as_deref() == Some(session_id)
                         && run.status.is_active()
                 })
             {
+                let task = &mut file.tasks[task_index];
+                let run = &mut file.runs[run_index];
                 run.status = TaskRunStatus::Completed;
                 run.finished_at = Some(now);
+                advance_task_after_success(task, now);
+            } else {
+                advance_task_after_success(&mut file.tasks[task_index], now);
             }
             if done_cwd.is_none() {
-                done_cwd = Some(t.project_cwd.clone());
+                done_cwd = Some(file.tasks[task_index].project_cwd.clone());
             }
         }
     }
     done_cwd
 }
 
-/// 已到期、可自动执行的单次定时任务 id（按 `run_at` 升序），依赖未满足的不领取。
+/// 已到期、可自动执行的指定时间任务 id（按 `run_at` 升序），依赖未满足的不领取。
 pub fn due_scheduled_ids_in_file(file: &TaskFile, now: u64) -> Vec<String> {
     let mut due: Vec<(u64, String)> = file
         .tasks
@@ -684,6 +815,7 @@ mod tests {
         let mut t = task("/p", "t");
         t.column = TaskColumn::Running;
         t.kind = TaskKind::Scheduled;
+        t.schedule_frequency = TaskScheduleFrequency::Hourly;
         t.run_at = Some(1_700_000_000);
         t.depends_on = vec!["dep".into()];
         t.retry_policy = TaskRetryPolicy { max_attempts: 3, retry_delay_secs: 60, remix_on_retry: true };
@@ -711,6 +843,7 @@ mod tests {
         let old: TaskFile = serde_json::from_str(old).unwrap();
         assert!(old.tasks[0].depends_on.is_empty());
         assert!(old.tasks[0].auto_run);
+        assert_eq!(old.tasks[0].schedule_frequency, TaskScheduleFrequency::Once);
     }
 
     #[test]
@@ -812,9 +945,86 @@ mod tests {
     }
 
     #[test]
+    fn recurring_task_completion_returns_to_backlog_at_next_occurrence() {
+        let mut t = task("/p", "hourly");
+        t.kind = TaskKind::Scheduled;
+        t.schedule_frequency = TaskScheduleFrequency::Hourly;
+        t.run_at = Some(100);
+        let mut file = TaskFile {
+            tasks: vec![t.clone()],
+            runs: Vec::new(),
+        };
+        let run = begin_run_in_file(&mut file, &t.id, "claude", TaskChannel::Pty, 100).unwrap();
+        file.tasks[0].session_id = Some("s1".into());
+        file.runs[0].session_id = Some("s1".into());
+        file.runs[0].status = TaskRunStatus::Running;
+
+        assert_eq!(
+            mark_session_done_in_file(&mut file, "s1", 3_700),
+            Some("/p".into())
+        );
+        assert_eq!(file.runs[0].id, run.id);
+        assert_eq!(file.runs[0].status, TaskRunStatus::Completed);
+        assert_eq!(file.tasks[0].column, TaskColumn::Backlog);
+        assert!(file.tasks[0].session_id.is_none());
+        assert_eq!(file.tasks[0].run_at, Some(7_300));
+    }
+
+    #[test]
+    fn recurring_task_failure_advances_after_retries_are_exhausted() {
+        let mut t = task("/p", "hourly");
+        t.kind = TaskKind::Scheduled;
+        t.schedule_frequency = TaskScheduleFrequency::Hourly;
+        t.run_at = Some(100);
+        t.column = TaskColumn::Running;
+        t.current_run_id = Some("r1".into());
+        let mut run = TaskRun {
+            id: "r1".into(),
+            task_id: t.id.clone(),
+            attempt: 1,
+            channel: TaskChannel::Pty,
+            launch: "claude".into(),
+            session_id: Some("s1".into()),
+            status: TaskRunStatus::Running,
+            error: None,
+            created_at: 100,
+            started_at: Some(100),
+            finished_at: None,
+        };
+
+        apply_failure_to_task(&mut t, &mut run, "boom", 3_700);
+        assert_eq!(run.status, TaskRunStatus::Failed);
+        assert_eq!(t.column, TaskColumn::Backlog);
+        assert_eq!(t.run_at, Some(7_300));
+        assert!(t.retry_at.is_none());
+    }
+
+    #[test]
+    fn recurring_schedule_advances_without_catching_up_missed_runs() {
+        assert_eq!(
+            next_scheduled_run_at(TaskScheduleFrequency::Hourly, Some(100), 3_700),
+            Some(7_300)
+        );
+        assert_eq!(
+            next_scheduled_run_at(TaskScheduleFrequency::Hourly, Some(7_300), 1_000),
+            Some(7_300)
+        );
+
+        let now = now_secs();
+        let daily_anchor = now - 86_400;
+        let next = next_scheduled_run_at(TaskScheduleFrequency::Daily, Some(daily_anchor), now)
+            .expect("daily schedules have a next occurrence");
+        assert!(next > now);
+        use chrono::{Local, TimeZone};
+        let anchor = Local.timestamp_opt(daily_anchor as i64, 0).single().unwrap();
+        let next = Local.timestamp_opt(next as i64, 0).single().unwrap();
+        assert_eq!(next.time(), anchor.time());
+    }
+
+    #[test]
     fn due_ids_respect_retry_cooldown_and_deps() {
         let now = 1_000u64;
-        // 定时到期 + 依赖满足 → 出现
+        // 指定时间到期 + 依赖满足 → 出现
         let mut dep = task("/p", "dep");
         dep.column = TaskColumn::Done;
         let mut s = task("/p", "s");
