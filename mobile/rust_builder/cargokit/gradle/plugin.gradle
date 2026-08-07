@@ -1,84 +1,100 @@
-/// This is copied from Cargokit (which is the official way to use it currently)
-/// Details: https://fzyzcjy.github.io/flutter_rust_bridge/manual/integrate/builtin
+/// 源自 Cargokit（官方推荐的集成方式）：
+/// https://fzyzcjy.github.io/flutter_rust_bridge/manual/integrate/builtin
+///
+/// 相对上游做了 Gradle 9 / AGP 9 适配，上游那份在本仓库的工具链上直接跑不起来：
+///   * `project.exec {}`、`project.buildDir` —— Gradle 9 已移除
+///   * `android.applicationVariants` / `libraryVariants` —— AGP 8 起废弃、AGP 9 移除，
+///     改用 `androidComponents.onVariants`
+///   * `android.compileSdkVersion`（返回 "android-36" 字符串）—— 改用 `compileSdk`
+///   * jniLibs 目录不再手工往 sourceSets 里塞，改用变体 API 的
+///     `addGeneratedSourceDirectory`，由 AGP 自己接好任务依赖，省掉原来 hook
+///     `merge*NativeLibs` 那段脆弱的 whenTaskAdded 逻辑
+///
+/// 升级 cargokit 时留意：直接拿上游那份覆盖会把这些改动一并抹掉。上游原版见本
+/// 文件的 git 历史（首次提交即为未修改版本）。
 
 import java.nio.file.Paths
+import javax.inject.Inject
 import org.apache.tools.ant.taskdefs.condition.Os
+import org.gradle.process.ExecOperations
 
 CargoKitPlugin.file = buildscript.sourceFile
 
 apply plugin: CargoKitPlugin
 
 class CargoKitExtension {
-    String manifestDir; // Relative path to folder containing Cargo.toml
-    String libname; // Library name within Cargo.toml. Must be a cdylib
+    String manifestDir; // Cargo.toml 所在目录，相对本 build.gradle
+    String libname; // Cargo.toml 里的库名，必须是 cdylib
 }
 
 abstract class CargoKitBuildTask extends DefaultTask {
 
     @Input
-    String buildMode
+    abstract Property<String> getBuildMode()
+
+    @Internal
+    abstract DirectoryProperty getCargoBuildDir()
+
+    // 由 addGeneratedSourceDirectory 接管：AGP 通过这个 output 把产物并进 jniLibs
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDir()
 
     @Input
-    String buildDir
+    abstract Property<String> getNdkVersion()
 
     @Input
-    String outputDir
+    abstract Property<String> getSdkDirectory()
 
     @Input
-    String ndkVersion
+    abstract Property<Integer> getCompileSdkVersion()
 
     @Input
-    String sdkDirectory
+    abstract Property<Integer> getMinSdkVersion()
 
     @Input
-    int compileSdkVersion;
+    abstract Property<String> getPluginFile()
 
     @Input
-    int minSdkVersion;
+    abstract ListProperty<String> getTargetPlatforms()
 
     @Input
-    String pluginFile
+    abstract Property<String> getManifestDir()
 
     @Input
-    List<String> targetPlatforms
+    abstract Property<String> getLibname()
+
+    @Internal
+    abstract Property<String> getRootProjectDir()
+
+    @Inject
+    abstract ExecOperations getExecOperations()
 
     @TaskAction
-    def build() {
-        if (project.cargokit.manifestDir == null) {
-            throw new GradleException("Property 'manifestDir' must be set on cargokit extension");
-        }
-
-        if (project.cargokit.libname == null) {
-            throw new GradleException("Property 'libname' must be set on cargokit extension");
-        }
-
+    void build() {
         def executableName = Os.isFamily(Os.FAMILY_WINDOWS) ? "run_build_tool.cmd" : "run_build_tool.sh"
-        def path = Paths.get(new File(pluginFile).parent, "..", executableName);
-
-        def manifestDir = Paths.get(project.buildscript.sourceFile.parent, project.cargokit.manifestDir)
-
-        def rootProjectDir = project.rootProject.projectDir
+        def pluginFilePath = pluginFile.get()
+        def toolPath = Paths.get(new File(pluginFilePath).parent, "..", executableName).toString()
 
         if (!Os.isFamily(Os.FAMILY_WINDOWS)) {
-            project.exec {
-                commandLine 'chmod', '+x', path
+            execOperations.exec {
+                commandLine "chmod", "+x", toolPath
             }
         }
 
-        project.exec {
-            executable path
+        execOperations.exec {
+            executable toolPath
             args "build-gradle"
-            environment "CARGOKIT_ROOT_PROJECT_DIR", rootProjectDir
-            environment "CARGOKIT_TOOL_TEMP_DIR", "${buildDir}/build_tool"
-            environment "CARGOKIT_MANIFEST_DIR", manifestDir
-            environment "CARGOKIT_CONFIGURATION", buildMode
-            environment "CARGOKIT_TARGET_TEMP_DIR", buildDir
-            environment "CARGOKIT_OUTPUT_DIR", outputDir
-            environment "CARGOKIT_NDK_VERSION", ndkVersion
-            environment "CARGOKIT_SDK_DIR", sdkDirectory
-            environment "CARGOKIT_COMPILE_SDK_VERSION", compileSdkVersion
-            environment "CARGOKIT_MIN_SDK_VERSION", minSdkVersion
-            environment "CARGOKIT_TARGET_PLATFORMS", targetPlatforms.join(",")
+            environment "CARGOKIT_ROOT_PROJECT_DIR", rootProjectDir.get()
+            environment "CARGOKIT_TOOL_TEMP_DIR", "${cargoBuildDir.get().asFile}/build_tool"
+            environment "CARGOKIT_MANIFEST_DIR", manifestDir.get()
+            environment "CARGOKIT_CONFIGURATION", buildMode.get()
+            environment "CARGOKIT_TARGET_TEMP_DIR", cargoBuildDir.get().asFile.toString()
+            environment "CARGOKIT_OUTPUT_DIR", outputDir.get().asFile.toString()
+            environment "CARGOKIT_NDK_VERSION", ndkVersion.get()
+            environment "CARGOKIT_SDK_DIR", sdkDirectory.get()
+            environment "CARGOKIT_COMPILE_SDK_VERSION", compileSdkVersion.get().toString()
+            environment "CARGOKIT_MIN_SDK_VERSION", minSdkVersion.get().toString()
+            environment "CARGOKIT_TARGET_PLATFORMS", targetPlatforms.get().join(",")
             environment "CARGOKIT_JAVA_HOME", System.properties['java.home']
         }
     }
@@ -88,96 +104,83 @@ class CargoKitPlugin implements Plugin<Project> {
 
     static String file;
 
-    private Plugin findFlutterPlugin(Project rootProject) {
-        _findFlutterPlugin(rootProject.childProjects)
-    }
+    /// Flutter 只把要编的 ABI 通过 -Ptarget-platform 传下来。这里自己解析而不是调
+    /// FlutterPluginUtils.getTargetPlatforms()：后者是 Kotlin internal，跨 Flutter
+    /// 版本随时会改签名，而这个 property 的格式十几个版本没动过。
+    private static final List<String> DEFAULT_PLATFORMS = [
+        "android-arm", "android-arm64", "android-x64"
+    ]
 
-   private Plugin _findFlutterPlugin(Map projects) {
-        for (project in projects) {
-            for (plugin in project.value.getPlugins()) {
-                if (plugin.class.name == "com.flutter.gradle.FlutterPlugin" || plugin.class.name == "FlutterPlugin") {
-                    return plugin;
-                }
-            }
-            def plugin = _findFlutterPlugin(project.value.childProjects);
-            if (plugin != null) {
-                return plugin;
-            }
+    private static List<String> resolveTargetPlatforms(Project project, String buildType) {
+        if (project.hasProperty("target-platform")) {
+            // 显式点名了要哪些 ABI，就只编这些。上游 cargokit 在 debug 下无条件追加
+            // 模拟器 ABI，于是 `flutter build apk --target-platform android-arm64`
+            // 也会把 Rust 依赖树多交叉编译两遍，白等好几分钟。
+            return (project.property("target-platform") as String).split(",").findAll { it }.toList()
         }
-        return null;
+        def platforms = new ArrayList<String>(DEFAULT_PLATFORMS)
+        // 没点名时对齐 flutter.gradle 的 addFlutterDependencies：debug 要能装进
+        // x86/x86_64 模拟器。
+        if (buildType == "debug") {
+            if (!platforms.contains("android-x86")) platforms.add("android-x86")
+            if (!platforms.contains("android-x64")) platforms.add("android-x64")
+        }
+        return platforms
     }
 
     @Override
     void apply(Project project) {
-        def plugin = findFlutterPlugin(project.rootProject);
-
         project.extensions.create("cargokit", CargoKitExtension)
 
-        if (plugin == null) {
-            print("Flutter plugin not found, CargoKit plugin will not be applied.")
-            return;
-        }
-
-        def cargoBuildDir = "${project.buildDir}/build"
-
-        // Determine if the project is an application or library
-        def isApplication = plugin.project.plugins.hasPlugin('com.android.application')
-        def variants = isApplication ? plugin.project.android.applicationVariants : plugin.project.android.libraryVariants
-
-        variants.all { variant ->
-
-            final buildType = variant.buildType.name
-
-            def cargoOutputDir = "${project.buildDir}/jniLibs/${buildType}";
-            def jniLibs = project.android.sourceSets.maybeCreate(buildType).jniLibs;
-            jniLibs.srcDir(new File(cargoOutputDir))
-
-            def List<String> platforms
-            try {
-                platforms = com.flutter.gradle.FlutterPluginUtils.getTargetPlatforms(project).collect()
-            } catch (Exception ignored) {
-                platforms = plugin.getTargetPlatforms().collect()
+        project.plugins.withId("com.android.base") {
+            def androidComponents = project.extensions.findByName("androidComponents")
+            if (androidComponents == null) {
+                throw new GradleException("CargoKit: androidComponents extension not found; AGP 7.4+ is required.")
             }
 
-            // Same thing addFlutterDependencies does in flutter.gradle
-            if (buildType == "debug") {
-                platforms.add("android-x86")
-                platforms.add("android-x64")
-            }
+            androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+                def buildType = variant.buildType ?: variant.name
 
-            // The task name depends on plugin properties, which are not available
-            // at this point
-            project.getGradle().afterProject {
-                def taskName = "cargokitCargoBuild${project.cargokit.libname.capitalize()}${buildType.capitalize()}";
-
-                if (project.tasks.findByName(taskName)) {
+                def taskName = "cargokitCargoBuild${(project.cargokit.libname ?: 'Rust').capitalize()}${variant.name.capitalize()}"
+                if (project.tasks.findByName(taskName) != null) {
                     return
                 }
 
-                if (plugin.project.android.ndkVersion == null) {
-                    throw new GradleException("Please set 'android.ndkVersion' in 'app/build.gradle'.")
+                def android = project.extensions.getByName("android")
+
+                def taskProvider = project.tasks.register(taskName, CargoKitBuildTask) { task ->
+                    // manifestDir/libname 在扩展被配置之前读不到，所以整体延后到执行期解析
+                    task.manifestDir.set(project.provider {
+                        if (project.cargokit.manifestDir == null) {
+                            throw new GradleException("Property 'manifestDir' must be set on cargokit extension")
+                        }
+                        Paths.get(project.buildscript.sourceFile.parent, project.cargokit.manifestDir).toString()
+                    })
+                    task.libname.set(project.provider {
+                        if (project.cargokit.libname == null) {
+                            throw new GradleException("Property 'libname' must be set on cargokit extension")
+                        }
+                        project.cargokit.libname
+                    })
+                    task.buildMode.set(buildType)
+                    task.cargoBuildDir.set(project.layout.buildDirectory.dir("build/${variant.name}"))
+                    task.pluginFile.set(CargoKitPlugin.file)
+                    task.rootProjectDir.set(project.rootProject.projectDir.toString())
+                    task.targetPlatforms.set(resolveTargetPlatforms(project, buildType))
+                    task.sdkDirectory.set(project.provider { android.sdkDirectory.toString() })
+                    task.ndkVersion.set(project.provider {
+                        def version = android.ndkVersion
+                        if (version == null) {
+                            throw new GradleException("Please set 'android.ndkVersion' in 'app/build.gradle'.")
+                        }
+                        version
+                    })
+                    task.compileSdkVersion.set(project.provider { android.compileSdk as int })
+                    task.minSdkVersion.set(project.provider { android.defaultConfig.minSdk as int })
                 }
 
-                def task = project.tasks.create(taskName, CargoKitBuildTask.class) {
-                    buildMode = variant.buildType.name
-                    buildDir = cargoBuildDir
-                    outputDir = cargoOutputDir
-                    ndkVersion = plugin.project.android.ndkVersion
-                    sdkDirectory = plugin.project.android.sdkDirectory
-                    minSdkVersion = plugin.project.android.defaultConfig.minSdkVersion.apiLevel as int
-                    compileSdkVersion = plugin.project.android.compileSdkVersion.substring(8) as int
-                    targetPlatforms = platforms
-                    pluginFile = CargoKitPlugin.file
-                }
-                def onTask = { newTask ->
-                    if (newTask.name == "merge${buildType.capitalize()}NativeLibs") {
-                        newTask.dependsOn task
-                        // Fix gradle 7.4.2 not picking up JNI library changes
-                        newTask.outputs.upToDateWhen { false }
-                    }
-                }
-                project.tasks.each onTask
-                project.tasks.whenTaskAdded onTask
+                // AGP 负责把这个 output 目录接进 jniLibs，并自动建立任务依赖
+                variant.sources.jniLibs?.addGeneratedSourceDirectory(taskProvider) { t -> t.outputDir }
             }
         }
     }

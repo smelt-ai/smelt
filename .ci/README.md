@@ -1,11 +1,12 @@
 # 构建机脚本
 
-按平台分目录，目前有 `mac`（桌面端，Rust + GPUI）和 `ios`（移动端，Flutter）。
-每个平台两个脚本：`env-setup.sh` 准备环境，`ci.sh` 执行构建。
+按平台分目录，目前有 `mac`（桌面端，Rust + GPUI）、`ios` 和 `android`（移动端，
+Flutter）。每个平台两个脚本：`env-setup.sh` 准备环境，`ci.sh` 执行构建。
 
 ```
-./.ci/mac/env-setup.sh && ./.ci/mac/ci.sh
-./.ci/ios/env-setup.sh && ./.ci/ios/ci.sh
+./.ci/mac/env-setup.sh     && ./.ci/mac/ci.sh
+./.ci/ios/env-setup.sh     && ./.ci/ios/ci.sh
+./.ci/android/env-setup.sh && ./.ci/android/ci.sh
 ```
 
 `env-setup.sh` 检查工具版本，不达标的就地升级，最后把这次运行需要的环境变量写进
@@ -25,9 +26,22 @@
 | `./.ci/ios/ci.sh` | 静态分析 + 单元测试 |
 | `./.ci/ios/ci.sh analyze` / `test` / `build` | 只做其中一步 |
 | `./.ci/ios/ci.sh all` | 以上全部 |
+| `./.ci/android/ci.sh` | 静态分析 + 单元测试 |
+| `./.ci/android/ci.sh analyze` / `test` / `build` | 只做其中一步 |
+| `./.ci/android/ci.sh bundle` | 编 release AAB（上架 Google Play 用） |
+| `./.ci/android/ci.sh all` | analyze + test + build |
 
 `.ci/ios/ci.sh build` 默认不签名，只验证能不能编过。要出可分发的 `.ipa`，把
 `SMELT_IOS_EXPORT_OPTIONS` 指向 exportOptions.plist。
+
+`.ci/android/ci.sh build` 同理：不设 `SMELT_ANDROID_KEYSTORE` 时用 debug 签名，
+产物能装但不可分发。要出正式包，设 `SMELT_ANDROID_KEYSTORE` 及配套的
+`SMELT_ANDROID_KEYSTORE_PASSWORD` / `SMELT_ANDROID_KEY_ALIAS` /
+`SMELT_ANDROID_KEY_PASSWORD`，脚本会写临时的 `mobile/android/key.properties`，
+构建结束即删除。
+
+Android 默认只编 arm64，多一个 ABI 就多一遍 Rust 依赖树的交叉编译；要多 ABI 时
+设 `SMELT_ANDROID_ABIS`（逗号分隔，如 `android-arm64,android-arm`）。
 
 ## 构建机上的约束
 
@@ -42,8 +56,10 @@
 3. **不复用机器上已有的** `~/.cargo`、`~/.rustup`、`~/.pub-cache`、`~/.gem`。那些
    可能是管理员或别的项目在用的。
 
-装不了的东西（Xcode、Xcode CLT、Python 3.10+）脚本只检查并报出要管理员执行的
-具体命令。
+装不了的东西（Xcode、Xcode CLT、Python 3.10+、JDK）脚本只检查并报出要管理员执行
+的具体命令。Android 侧还多一条：Gradle 9.1 只接受 JDK 17~25，构建机上如果只有更
+新的 JDK，`env-setup.sh` 会直接报错而不是让 Gradle 抛一句难懂的
+"Unsupported class file major version"；可用 `SMELT_ANDROID_JAVA_HOME` 指定。
 
 ## 内网镜像
 
@@ -54,6 +70,9 @@
   `CARGO_REGISTRY_MIRROR`
 - ios：`FLUTTER_GIT_URL`、`FLUTTER_STORAGE_BASE_URL`、`PUB_HOSTED_URL`、
   `GEM_SOURCE_URL`、`COCOAPODS_CDN_URL`
+- android：`FLUTTER_GIT_URL`、`FLUTTER_STORAGE_BASE_URL`、`PUB_HOSTED_URL`、
+  `RUSTUP_UPDATE_ROOT`、`RUSTUP_DIST_SERVER`、`CARGO_REGISTRY_MIRROR`、
+  `ANDROID_SDK_URL_BASE`、`ANDROID_CMDLINE_TOOLS_URL`
 
 ## 检出路径要短
 

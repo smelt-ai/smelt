@@ -47,6 +47,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+# Gradle 的根项目 build 目录被 android/build.gradle.kts 重定向到 mobile/build/，
+# 但报告类产物仍会落在这里。
+/android/build/
 
 # cargokit 的构建缓存（rust_builder 本身要入库，它的产物不要）
 /rust_builder/**/.dart_tool/

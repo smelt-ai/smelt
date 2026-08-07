@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 main.dart 里 ColorScheme.fromSeed(deepPurple, Brightness.dark) 的
+         surface 对齐；App 不提供浅色主题，所以 values/ 和 values-night/ 同色。 -->
+    <color name="smeltLaunchBackground">#141218</color>
+</resources>

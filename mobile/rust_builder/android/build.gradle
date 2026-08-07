@@ -1,51 +1,32 @@
-// The Android Gradle Plugin builds the native code with the Android NDK.
+// Android Gradle Plugin 负责调 NDK 编 Rust（实际交给 cargokit）。
+//
+// 这里不再自带 `buildscript { classpath 'com.android.tools.build:gradle:x' }`：
+// 那是 cargokit/flutter_rust_bridge 老模板的写法，会和 app 侧
+// `android/settings.gradle.kts` 里 pluginManagement 声明的 AGP 版本打架，
+// AGP 8+ 直接报 plugin 版本冲突。作为 Flutter 插件模块，版本统一由宿主 app 决定。
 
-group 'com.flutter_rust_bridge.rust_lib_smelt_mobile'
-version '1.0'
+group = "com.flutter_rust_bridge.rust_lib_smelt_mobile"
+version = "1.0"
 
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-
-    dependencies {
-        // The Android Gradle Plugin knows how to build native code with the NDK.
-        classpath 'com.android.tools.build:gradle:7.3.0'
-    }
-}
-
-rootProject.allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-
-apply plugin: 'com.android.library'
+apply plugin: "com.android.library"
 
 android {
-    if (project.android.hasProperty("namespace")) {
-        namespace 'com.flutter_rust_bridge.rust_lib_smelt_mobile'
-    }
+    namespace = "com.flutter_rust_bridge.rust_lib_smelt_mobile"
 
-    // Bumping the plugin compileSdkVersion requires all clients of this plugin
-    // to bump the version in their app.
-    compileSdkVersion 33
-
-    // Use the NDK version
-    // declared in /android/app/build.gradle file of the Flutter project.
-    // Replace it with a version number if this plugin requires a specfic NDK version.
-    // (e.g. ndkVersion "23.1.7779620")
-    ndkVersion android.ndkVersion
+    // 跟随 Flutter 当前模板（flutter.compileSdkVersion / flutter.ndkVersion）。
+    // 插件的 compileSdk 不能高于宿主 app，改这里要同步 android/app/build.gradle.kts。
+    compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     defaultConfig {
-        minSdkVersion 19
+        // 与 Flutter 的 flutter.minSdkVersion 对齐；低于宿主 app 会在 manifest
+        // 合并时报 uses-sdk 冲突。
+        minSdk = 24
     }
 }
 

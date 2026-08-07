@@ -76,7 +76,7 @@ Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](htt
 Configuration is stored in `~/.smelt/`.
 
 The workspace contains `smelt` (the main GUI), `smeltd` (a terminal persistence daemon, similar to tmux, launched on demand by the GUI), `gateway` (a standalone executable for developing and debugging the remote gateway), `smelt-notify` (a small status-reporting utility called by Claude Code hooks), and the `smelt-iroh-host` / `smelt-iroh-connect` helpers for developing and debugging P2P tunnels. Most users only interact with `smelt`; the GUI manages `smeltd` as needed.
-The mobile client lives in `mobile/` (Flutter), reuses the iroh tunnel from the Rust side through `crates/smelt-mobile`, and is not published yet — it must be built locally.
+The mobile client lives in `mobile/` (Flutter), reuses the iroh tunnel from the Rust side through `crates/smelt-mobile`, and runs on both iOS and Android. It is not published yet — it must be built locally; see [`mobile/README.md`](mobile/README.md).
 
 For detailed architecture, directory structure, and the implemented feature list, see [`docs/workspace.md`](docs/workspace.md).
 For local task storage and execution behavior, see [`docs/local-tasks.md`](docs/local-tasks.md).

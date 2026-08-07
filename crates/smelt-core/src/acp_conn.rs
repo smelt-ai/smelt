@@ -1601,19 +1601,23 @@ pub fn tool_content_parts(
 /// 常量（URL 与 sha256 成对锁死），旧版本目录留着不碍事。
 /// agent 主体是 SDK 自带的原生 claude 二进制，bun 只跑适配器那层薄翻译。
 const BUN_VERSION: &str = "1.3.14";
-#[cfg(target_arch = "aarch64")]
+// 只有 macOS 有受管 bun：下面锁的是 darwin 版压缩包，且这条路径服务的是桌面端
+// ACP 适配器。移动端（crates/smelt-mobile 通过 smelt-core 间接依赖到这里）不跑
+// 适配器，交叉编到 android/ios 时这些常量会因为架构 cfg 不匹配而整个消失，
+// 于是 ensure_bun 里引用它们就成了编译错误。所以按 target_os 而不只是按架构 gate。
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
     "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip",
     "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620",
 );
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
     "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-x64.zip",
     "4183df3374623e5bab315c547cfa0974533cd457d86b73b639f7a87974cd6633",
 );
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-x64";
 
 fn managed_bun_path() -> Option<std::path::PathBuf> {
@@ -1626,6 +1630,15 @@ fn managed_bun_path() -> Option<std::path::PathBuf> {
 }
 
 /// 确保受管 bun 就位（不在则下载 + sha256 校验 + 冒烟），返回可执行路径。
+///
+/// 只在 macOS 上有实现：受管运行时锁的是 darwin 版压缩包，别的平台没有对应产物。
+/// 非 macOS 上直接报错，由调用方回退到 PATH 上用户自己装的 bun。
+#[cfg(not(target_os = "macos"))]
+fn ensure_bun(_status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
+    Err("受管 Bun 运行时只在 macOS 上提供".to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
     let bun = managed_bun_path().ok_or("找不到 home 目录")?;
     if bun.is_file() {
