@@ -500,6 +500,30 @@ pub struct ApplyOutcome {
     pub notify: Option<(String, String, bool)>,
 }
 
+/// 还挂着没人处理的卡片时对应的相位。审批优先于选择题，跟 `Ready` 分支里
+/// 那段判断同序。
+fn pending_action_phase(state: &AcpSessionState) -> Option<AcpPhase> {
+    if !state.permissions.is_empty() {
+        Some(AcpPhase::AwaitingApproval)
+    } else if state.elicitation.is_some() {
+        Some(AcpPhase::AwaitingChoice)
+    } else {
+        None
+    }
+}
+
+/// 流式事件（AgentChunk/ToolCall/Plan…）把相位推回 `Running` 时用这个，
+/// 而不是直接赋值：卡片没被回答之前，会话对外必须一直是「等你操作」。
+///
+/// 否则 agent 在发出审批请求后继续推任何一条 update（并行的另一个工具、
+/// 一段 thought、一次 plan 刷新都算），相位就会从 `AwaitingApproval` 掉回
+/// `Running`，smeltd 的四色相位跟着变成 Thinking/ExecutingTool，
+/// `attention::apply_daemon_transition` 便把这条会话的行动项判成"已解决"，
+/// 移动端的提醒闪一下就消失——可请求其实还挂着，重新进入会话又能看到。
+fn resume_running(state: &mut AcpSessionState) {
+    state.phase = pending_action_phase(state).unwrap_or(AcpPhase::Running);
+}
+
 /// 事件归约：entries 合并 + phase 机。跟旧版 `AcpView::apply_event` 逐行对应，
 /// 唯一的行为差异是旁路效果收进返回值而不是直接执行。
 pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
@@ -643,7 +667,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 }
             }
             if !state.replaying_history && state.turn_started_at_ms.is_some() {
-                state.phase = AcpPhase::Running;
+                resume_running(state);
             }
         }
         AcpEvent::ToolCall(tc) => {
@@ -669,7 +693,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 state.phase = AcpPhase::AwaitingChoice;
             } else {
                 if !state.replaying_history && state.turn_started_at_ms.is_some() {
-                    state.phase = AcpPhase::Running;
+                    resume_running(state);
                 }
             }
         }
@@ -746,7 +770,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
                 output: Vec::new(),
             });
             if !state.replaying_history && state.turn_started_at_ms.is_some() {
-                state.phase = AcpPhase::Running;
+                resume_running(state);
             }
         }
         AcpEvent::ToolOutputDelta { id, delta } => {
@@ -788,7 +812,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: AcpEvent) -> ApplyOutcome {
         AcpEvent::Plan(p) => {
             state.plan = Some(plan_view_from_acp(&p));
             if !state.replaying_history && state.turn_started_at_ms.is_some() {
-                state.phase = AcpPhase::Running;
+                resume_running(state);
             }
         }
         AcpEvent::Permission {
@@ -1033,11 +1057,7 @@ pub fn select_permission(state: &mut AcpSessionState, tool_call_id: &str, option
     if let Some(responder) = card.responder.take() {
         responder.select(option_id.to_string());
     }
-    state.phase = if state.permissions.is_empty() {
-        AcpPhase::Running
-    } else {
-        AcpPhase::AwaitingApproval
-    };
+    resume_running(state);
 }
 
 /// 选择题点选：单选替换，多选 toggle，跟旧版 `pick_elicit_option` 一致。
@@ -1133,7 +1153,7 @@ pub fn submit_elicitation(state: &mut AcpSessionState) {
         }
     }
     responder.accept(content);
-    state.phase = AcpPhase::Running;
+    resume_running(state);
 }
 
 /// 「跳过」：丢卡片，responder Drop 自动回 Cancel（见 `ElicitationResponder`
@@ -1144,11 +1164,11 @@ pub fn dismiss_elicitation(state: &mut AcpSessionState) {
         .as_ref()
         .is_some_and(|card| card.responder.is_none());
     state.elicitation = None;
-    state.phase = if recovered {
-        AcpPhase::Idle
+    if recovered {
+        state.phase = pending_action_phase(state).unwrap_or(AcpPhase::Idle);
     } else {
-        AcpPhase::Running
-    };
+        resume_running(state);
+    }
 }
 
 /// 一份 turn 结束/连接终止后要不要自动续接（冷恢复占位第一次被访问时）：
@@ -1601,6 +1621,51 @@ mod tests {
 
         assert_eq!(s.permissions.len(), 1);
         assert_eq!(s.permissions[0].tool_call_id, "tool-1");
+    }
+
+    #[test]
+    fn streaming_updates_keep_awaiting_approval_while_a_card_is_pending() {
+        // 回归：agent 在发出审批请求后继续推流（并行工具、思考片段、plan 刷新
+        // 都会），相位一旦掉回 Running，smeltd 的四色相位就变成
+        // Thinking/ExecutingTool，移动端会把这条会话的行动项判成已解决，
+        // 提醒闪一下就没了——但请求其实还挂着。
+        let mut s = fresh_state();
+        note_prompt_sent(&mut s, "hi".into(), Vec::new());
+        s.permissions.push(LivePermission {
+            question: "允许写文件？".into(),
+            tool_call_id: "tool-1".into(),
+            options: vec![PermissionOptionView {
+                option_id: "allow".into(),
+                name: "Allow".into(),
+                kind: PermissionOptionKindView::AllowOnce,
+            }],
+            details: ApprovalDetailsView::Generic,
+            responder: None,
+            raw_request_line: None,
+        });
+        s.phase = AcpPhase::AwaitingApproval;
+
+        apply_event(
+            &mut s,
+            AcpEvent::AgentChunk {
+                thought: false,
+                text: "还在想".into(),
+            },
+        );
+        assert!(matches!(s.phase, AcpPhase::AwaitingApproval));
+
+        apply_event(
+            &mut s,
+            AcpEvent::ToolStarted {
+                id: "tool-2".into(),
+                title: "并行工具".into(),
+                kind: crate::acp_chat::ToolKind::Other,
+            },
+        );
+        assert!(matches!(s.phase, AcpPhase::AwaitingApproval));
+
+        select_permission(&mut s, "tool-1", "allow");
+        assert!(matches!(s.phase, AcpPhase::Running));
     }
 
     #[test]
