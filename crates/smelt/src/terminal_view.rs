@@ -1340,6 +1340,7 @@ impl Render for TerminalView {
         let entity = cx.entity();
         let origin_cell = self.grid_origin.clone();
         let size_cell = self.grid_size.clone();
+        let size_cell_prepaint = size_cell.clone();
         let search_open = self.search_open;
         let search_input = self.search_input.clone();
         let scroll_info = self.terminal.scroll_info();
@@ -1750,8 +1751,21 @@ impl Render for TerminalView {
             // 透明覆盖层：paint 阶段注册 IME 输入处理器，并记录网格原点。
             .child(
                 canvas(
-                    // prepaint：建一个覆盖终端区的 hitbox（供设置鼠标样式用）
-                    move |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                    // prepaint：建一个覆盖终端区的 hitbox（供设置鼠标样式用），并在
+                    // 首次拿到真实布局尺寸后请求下一帧。尺寸是在这一阶段才可用的；
+                    // 若首帧终端输出已经触发过重绘，下一次 render 可能永远不来，
+                    // PTY 就会一直停在默认网格，直到用户开合抽屉等操作碰巧触发它。
+                    move |bounds, window, _cx| {
+                        let size = (
+                            f32::from(bounds.size.width),
+                            f32::from(bounds.size.height),
+                        );
+                        if size_cell_prepaint.get() != size {
+                            size_cell_prepaint.set(size);
+                            window.request_animation_frame();
+                        }
+                        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+                    },
                     move |bounds, hitbox, window, cx| {
                         // 鼠标样式：悬停链接时手型，否则文本 I-beam
                         window.set_cursor_style(
