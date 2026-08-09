@@ -912,45 +912,39 @@ pub fn uninstall_agent_hooks() -> Result<(), String> {
 
 // ===================== 远程操作网关（见 docs/remote-ops-roadmap.md） =====================
 
-/// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。用户填写的
-/// relay 地址会持久化；设备配对 token 由 smeltd 单独保存在 owner-only 文件中。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct RemoteConfig {
-    pub enabled: bool,
-    /// 用户自己的 iroh relay。空值表示未配置，不会回退到公共 relay。
-    #[serde(default)]
-    pub iroh_relay: String,
-    /// 这条链接是否允许 approve/deny/reply（Phase 6，见 smeltd.rs「远程操控」）。
-    /// `#[serde(default)]`：比 `enabled` 更晚加，旧配置缺省按只读处理——不能让
-    /// 老用户的配置在升级后突然变成可写。链接分享出去本身就是授权，这里没有
-    /// 额外的"当面确认"一说，开这个开关前的取舍由用户自己判断。
-    #[serde(default)]
-    pub write_enabled: bool,
+/// 远程操作网关的持久化配置（全局单例，存 ~/.smelt/collab.json）。
+///
+/// 结构体本体在 `smelt_core::remote_config`——守护也要读同一份文件来自愈
+/// （见那边的模块注释）。这里只是给它套一层 newtype，好实现 GPUI 的 `Global`
+/// （孤儿规则不允许给外部类型实现外部 trait）。`#[serde(transparent)]` 保证
+/// 落盘格式与守护读到的一模一样。
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct RemoteConfig(pub smelt_core::remote_config::RemoteConfig);
+
+impl std::ops::Deref for RemoteConfig {
+    type Target = smelt_core::remote_config::RemoteConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-impl Default for RemoteConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            iroh_relay: String::new(),
-            write_enabled: false,
-        }
+impl std::ops::DerefMut for RemoteConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
 impl Global for RemoteConfig {}
 
-fn remote_config_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".smelt").join("collab.json"))
-}
-
 /// 读取远程网关开关；缺失/损坏回退默认（关闭）。
 pub fn load_remote_config() -> RemoteConfig {
-    crate::json_store::load_json(remote_config_path())
+    RemoteConfig(smelt_core::remote_config::load())
 }
 
 fn save_remote_config(c: &RemoteConfig) {
-    crate::json_store::save_json_private(remote_config_path(), c)
+    smelt_core::remote_config::save(&c.0)
 }
 
 /// 内嵌远程网关的运行时状态（不落盘，纯展示用）。网关只作为 iroh 的本机落点，
@@ -989,7 +983,7 @@ impl Global for IrohRuntimeState {}
 /// 异步拉起 iroh 隧道。绑定要连接用户配置的 relay，可能耗时数秒，**必须**走后台。
 fn spawn_iroh_start(write: bool, cx: &mut App) {
     let config = cx.global::<RemoteConfig>().clone();
-    let relay = config.iroh_relay;
+    let relay = config.iroh_relay.clone();
     cx.set_global(IrohRuntimeState {
         connecting: true,
         ..Default::default()
@@ -1124,6 +1118,107 @@ fn qr_png_for_url(url: &str) -> Option<Vec<u8>> {
 pub fn spawn_iroh_start_public(cx: &mut App) {
     let write = cx.global::<RemoteConfig>().write_enabled;
     spawn_iroh_start(write, cx);
+}
+
+/// 幂等地把远程访问拉到「配置里希望的状态」：先问守护现状，已经跑着就复用，
+/// 没有才 start，最后刷新配对码。
+///
+/// 三处调用：GUI 冷启动、硬重启守护之后、无缝升级之后。后两者以前完全没做这件事
+/// ——守护换了进程，网关和隧道都随旧进程死了，而 GUI 只在冷启动拉过一次，于是
+/// 手机侧静默失联，只有去设置页「关掉再打开」才恢复。守护侧现在也会按配置自愈
+/// （见 smeltd 的 `autostart_remote_from_config`），这里是第二道保险，同时负责把
+/// UI 上那份可能已经过期的配对码刷新掉。
+///
+/// 网关和隧道**串在同一条后台任务**里：并行时隧道可能先回而 token 还是空的，
+/// UI 会拼出 `?token=` 的死链。
+pub fn spawn_remote_bootstrap(cx: &mut App) {
+    if !cx.global::<RemoteConfig>().enabled {
+        return;
+    }
+    let write = cx.global::<RemoteConfig>().write_enabled;
+    cx.spawn(async move |cx| {
+        let remote_rt = cx
+            .background_executor()
+            .spawn(async move {
+                crate::terminal::ensure_daemon_running();
+                // 本机网关：已在跑就复用 token，否则按配置 start。
+                // iroh 也需要本机网关 token（配对码里带着它）。
+                let existing = crate::terminal::remote_status();
+                if existing.running && existing.token.as_ref().is_some_and(|t| !t.is_empty()) {
+                    RemoteRuntimeState { error: None }
+                } else {
+                    match crate::terminal::remote_start("127.0.0.1", write) {
+                        Ok(_) => RemoteRuntimeState { error: None },
+                        Err(e) => RemoteRuntimeState { error: Some(e) },
+                    }
+                }
+            })
+            .await;
+        cx.update(|cx| {
+            cx.set_global(remote_rt);
+            // 网关 token 就绪后再拉 iroh：配对码要把 token 拼进去，早拉会拿到空的。
+            spawn_iroh_start_public(cx);
+        });
+    })
+    .detach();
+}
+
+/// 看门狗轮询间隔。远程掉线是低频事件，20s 足够快，也不至于让守护 socket 变忙。
+const REMOTE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(20);
+/// 连续失败时最多跳过多少个轮询周期再试（≈ 20s → 5min 的退避上限）。
+const REMOTE_WATCHDOG_MAX_SKIP: u32 = 15;
+
+/// 远程访问看门狗：定期核对「守护里是不是真的还开着」，掉了就自动拉回来。
+///
+/// 守护侧的 `autostart_remote_from_config` 已经覆盖了守护自己重启的情况，这里补的
+/// 是另外两件事：
+/// 1. 老版本守护（没有自愈逻辑）被拉起时，仍然有人负责把远程恢复；
+/// 2. UI 不再撒谎——`IrohRuntimeState` 是一次 `iroh_start` 的结果快照，隧道早就没了
+///    它还在显示二维码，用户对着一个死码扫半天。
+///
+/// 退避：连续失败（典型是 relay 连不上）时逐步拉长间隔，避免每 20s 砸一次 relay。
+pub fn spawn_remote_watchdog(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut failures: u32 = 0;
+        let mut skip: u32 = 0;
+        loop {
+            cx.background_executor()
+                .timer(REMOTE_WATCHDOG_INTERVAL)
+                .await;
+            let config = cx.update(|cx| cx.global::<RemoteConfig>().clone());
+            // 没开远程、或 relay 还没配（配了才谈得上隧道）就什么都不做。
+            if !config.enabled || config.iroh_relay.trim().is_empty() {
+                failures = 0;
+                skip = 0;
+                continue;
+            }
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            // 正在连的时候别插一脚：iroh 绑定最长 30s，比一个轮询周期还久。
+            let connecting = cx.update(|cx| cx.global::<IrohRuntimeState>().connecting);
+            if connecting {
+                continue;
+            }
+            let alive = cx
+                .background_executor()
+                .spawn(async {
+                    crate::terminal::iroh_status().is_some()
+                        && crate::terminal::remote_status().running
+                })
+                .await;
+            if alive {
+                failures = 0;
+                continue;
+            }
+            failures = failures.saturating_add(1);
+            skip = (failures - 1).min(REMOTE_WATCHDOG_MAX_SKIP);
+            eprintln!("[remote] 隧道已不在运行，自动重连（第 {failures} 次）");
+            cx.update(spawn_remote_bootstrap);
+        }
+    })
+    .detach();
 }
 
 /// 复制按钮的短暂「已复制 ✓」状态（设置页读它改按钮文案）。

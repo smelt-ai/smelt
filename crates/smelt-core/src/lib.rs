@@ -22,6 +22,7 @@ pub mod json_store;
 pub mod login_env;
 pub mod osc;
 pub mod pairing;
+pub mod remote_config;
 pub mod remote_gateway;
 pub mod session_control;
 pub mod session_metadata;

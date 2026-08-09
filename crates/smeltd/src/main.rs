@@ -105,9 +105,12 @@
 //! 幂等：已经开着时 `remote_start` 直接回现有的 token/addr，不重启、不换 token。
 //! token 单独保存在 `~/.smelt/remote-token`（0600），冷启动和无缝升级都复用；只有
 //! `remote_rotate_token` 会轮换并让旧配对失效。网关运行态本身**不**参与无缝升级交接：
-//! `upgrade` 之后如果之前开着远程网关，会随旧进程退出而关闭，新进程里默认是关的
-//! （GUI 那边在 upgrade 完成后按需重新 `remote_start`）。安全默认跟 `watch` 一致：
-//! 默认关闭、绑回环，见 collaboration.md 的安全底线。
+//! `upgrade` 之后旧进程里的网关随之关闭，新进程内存里是空的——但新进程启动时会读
+//! `~/.smelt/collab.json`，用户之前开着远程就自动拉回来（见
+//! `autostart_remote_from_config`）。这条自愈路径不能少：守护重启（硬重启 / 升级 exec /
+//! 崩溃后被拉起）之后若没人重新 `remote_start`，手机侧就会静默失联，只能靠用户去设置页
+//! 把远程「关掉再打开」。安全默认跟 `watch` 一致：没配置过就是关闭、绑回环，
+//! 见 collaboration.md 的安全底线。
 //!
 //! 网关运行期间在 macOS 持有 `PreventUserIdleSystemSleep` 电源断言：屏幕仍可按系统设置
 //! 正常熄灭，但整机不会因空闲睡眠而把网关和 iroh 挂起。`RemoteGateway` 销毁即释放，
@@ -1098,7 +1101,8 @@ struct Session {
 type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 
 /// 内嵌远程网关开着时的状态：token、绑定地址、写权限、喊停用的信号。见文件头
-/// 「内嵌远程网关」一节——这条不参与无缝升级交接，`upgrade` 后新进程里永远是 None。
+/// 「内嵌远程网关」一节——这条不参与无缝升级交接，`upgrade` 后新进程里初值永远是
+/// None，由 `autostart_remote_from_config` 按落盘配置重新拉起。
 struct RemoteGateway {
     token: String,
     addr: std::net::SocketAddr,
@@ -1395,6 +1399,12 @@ struct IrohTunnel {
 
 type IrohState = Arc<Mutex<Option<IrohTunnel>>>;
 
+/// 串行化 `start_iroh`：绑定要联网、最长 30s，期间不能一直攥着 `IrohState`
+/// （`iroh_status` 等只读路径会被一起堵死），可一旦放开，两个并发调用就会各自
+/// 绑一个 endpoint，后写入的顶掉先写入的。守护自愈与 GUI 补发正好可能同时发生，
+/// 所以这里单独用一把「启动锁」，把幂等检查和绑定圈在同一段临界区里。
+static IROH_START_LOCK: Mutex<()> = Mutex::new(());
+
 /// 幂等：已经开着直接回现有 endpoint_id。会先确保远程网关按 `write` 开着
 /// （隧道要转发给它），语义与 `start_tunnel` 一致。
 ///
@@ -1408,7 +1418,10 @@ fn start_iroh(
 ) -> Result<(String, String, std::net::SocketAddr, bool, String), String> {
     let relay = smelt_iroh::RelaySettings::parse(relay_address)
         .map_err(|e| format!("iroh relay 配置无效：{e:#}"))?;
+    // 锁中毒（某次启动 panic 过）不该让远程从此再也起不来：拿回内层的 () 继续。
+    let _start_guard = IROH_START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(t) = iroh_state.lock().unwrap().as_ref() {
+
         if t.relay != relay {
             return Err("iroh relay 配置已变化，请先停止旧隧道再重试".into());
         }
@@ -1521,6 +1534,142 @@ fn iroh_status(state: &IrohState) -> Option<(String, smelt_iroh::RelaySettings)>
         .unwrap()
         .as_ref()
         .map(|t| (t.endpoint_id.clone(), t.relay.clone()))
+}
+
+/// 守护启动时按落盘配置自动恢复远程访问。
+///
+/// 为什么必须由守护自己做：网关和隧道的运行态**不**参与无缝升级交接，每个新进程
+/// 起来都是空的。而「远程开着」这个意愿只记在 `~/.smelt/collab.json` 里，以前只有
+/// GUI 冷启动那一次会去 `remote_start`/`iroh_start`。于是只要守护单独重启过
+/// （设置页「重启守护进程」、无缝升级 exec、崩溃后被 `ensure_daemon_running` 拉起），
+/// 就没有任何人再把它们拉回来——手机侧表现为「连不上，得去设置页把远程关掉再打开」。
+/// 关掉再打开之所以有效，只是因为那条路径重新发了这两条 op。
+///
+/// 走后台线程：iroh 绑定要联网发现 relay，最坏 30s，绝不能挡住 accept 循环。
+/// 登录后网络还没就绪很常见，因此失败要退避重试，而不是一次失败就放弃到下次重启。
+fn autostart_remote_from_config(remote_state: RemoteState, iroh_state: IrohState) {
+    // 逃生阀：跑测试 / 排障时不希望守护自作主张连网。
+    if std::env::var_os("SMELT_NO_REMOTE_AUTOSTART").is_some() {
+        return;
+    }
+    spawn_remote_autostart(
+        smelt_core::remote_config::load(),
+        remote_state,
+        iroh_state,
+    );
+}
+
+/// `autostart_remote_from_config` 里除「读配置」以外的部分。拆出来是为了能测
+/// 「配置说关就一动不动」这条——读配置那步依赖 `$HOME`，改环境变量的测试跨线程不可靠。
+///
+/// 返回是否真的起了后台恢复线程。
+fn spawn_remote_autostart(
+    config: smelt_core::remote_config::RemoteConfig,
+    remote_state: RemoteState,
+    iroh_state: IrohState,
+) -> bool {
+    if !config.enabled {
+        return false;
+    }
+
+    thread::spawn(move || {
+        // 网关只绑回环、不联网，先起它：即使 relay 没配好，GUI 侧「本机链接」
+        // 和后续的 iroh_start 幂等路径也有东西可用。
+        match ensure_remote_gateway_with_write(&remote_state, config.write_enabled) {
+            Ok((_, addr, _)) => dlog(&format!("按配置自动恢复远程网关：{addr}")),
+            Err(e) => {
+                dlog(&format!("自动恢复远程网关失败：{e}"));
+                return;
+            }
+        }
+
+        if config.iroh_relay.trim().is_empty() {
+            dlog("未配置 iroh relay，跳过隧道自动恢复");
+            return;
+        }
+
+        // 退避重试：绑定失败几乎都是「网络还没好」，隔一会儿就能成。
+        const BACKOFF: [u64; 5] = [0, 3, 10, 30, 60];
+        for (attempt, delay) in BACKOFF.iter().enumerate() {
+            if *delay > 0 {
+                thread::sleep(Duration::from_secs(*delay));
+            }
+            // 期间用户可能已经手动开好了（GUI 冷启动那条路），幂等直接认账。
+            if iroh_state.lock().unwrap().is_some() {
+                return;
+            }
+            match start_iroh(
+                &iroh_state,
+                &remote_state,
+                config.write_enabled,
+                &config.iroh_relay,
+            ) {
+                Ok((endpoint_id, _, _, _, _)) => {
+                    dlog(&format!("按配置自动恢复 iroh 隧道：{endpoint_id}"));
+                    return;
+                }
+                Err(e) => dlog(&format!(
+                    "自动恢复 iroh 隧道失败（第 {} 次）：{e}",
+                    attempt + 1
+                )),
+            }
+        }
+        dlog("iroh 隧道自动恢复重试用尽，等待 GUI 或用户手动重试");
+    });
+    true
+}
+
+#[cfg(test)]
+mod autostart_remote_tests {
+    use super::*;
+
+    fn config(enabled: bool) -> smelt_core::remote_config::RemoteConfig {
+        smelt_core::remote_config::RemoteConfig {
+            enabled,
+            // 留空：测试不碰网络，只验证网关那半段和门闩。
+            iroh_relay: String::new(),
+            write_enabled: false,
+        }
+    }
+
+    #[test]
+    fn disabled_config_starts_nothing() {
+        let remote = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
+        let iroh: IrohState = Arc::new(Mutex::new(None));
+        assert!(!spawn_remote_autostart(
+            config(false),
+            Arc::clone(&remote),
+            Arc::clone(&iroh)
+        ));
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            remote.lock().unwrap().gateway.is_none(),
+            "没开远程时守护绝不能自己把网关开起来"
+        );
+    }
+
+    #[test]
+    fn enabled_config_brings_the_gateway_back() {
+        let remote = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
+        let iroh: IrohState = Arc::new(Mutex::new(None));
+        assert!(spawn_remote_autostart(
+            config(true),
+            Arc::clone(&remote),
+            Arc::clone(&iroh)
+        ));
+        // 网关是本机回环 + 端口 0，起得很快；隧道因为没配 relay 会被跳过。
+        let mut started = false;
+        for _ in 0..50 {
+            if remote.lock().unwrap().gateway.is_some() {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(started, "守护重启后必须按配置把远程网关拉回来");
+        assert!(iroh.lock().unwrap().is_none(), "没配 relay 就不该起隧道");
+        stop_remote_gateway(&remote);
+    }
 }
 
 /// 进程退出 / upgrade exec 前清理远程网关与 iroh 隧道。菜单栏 quit 与 accept 线程
@@ -1928,13 +2077,18 @@ fn main() {
     let listen_fd = listener.as_raw_fd();
     let exe_mtime = exe_mtime_secs();
     // 不参与无缝升级交接：每次进程启动（含 upgrade 后的新进程）都是全新的 None，
-    // 见 RemoteGateway / IrohTunnel 定义处注释。
+    // 见 RemoteGateway / IrohTunnel 定义处注释。运行态丢了不等于用户意愿丢了——
+    // 下面的 autostart_remote_from_config 会按 collab.json 把它们拉回来。
     let remote_state = new_remote_state(None);
     let iroh_state: IrohState = Arc::new(Mutex::new(None));
     // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
     // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
     register_lifecycle(Arc::clone(&remote_state), Arc::clone(&iroh_state));
+
+    // 远程访问自愈：见 autostart_remote_from_config 的注释。必须在 accept 循环之前
+    // 挂起（它自己起线程，不阻塞），否则守护重启后手机要一直等到用户下次开 GUI。
+    autostart_remote_from_config(Arc::clone(&remote_state), Arc::clone(&iroh_state));
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。

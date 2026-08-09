@@ -1482,6 +1482,35 @@ pub fn iroh_stop() {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
+/// 查 iroh 隧道当前是否真的在守护里跑着。
+///
+/// 存在的理由：GUI 里的 `IrohRuntimeState` 只是一次 `iroh_start` 的结果快照，
+/// 守护换进程后它照样显示着一个早已失效的二维码。看门狗靠这条 op 拿到事实。
+/// 返回 `None` = 没跑（含守护根本连不上）。
+pub fn iroh_status() -> Option<IrohStatus> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return None;
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "iroh_status" })).is_err() {
+        return None;
+    }
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
+    if v["running"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(IrohStatus {
+        endpoint_id: v["endpoint_id"].as_str().map(String::from),
+        token: v["token"].as_str().map(String::from),
+        relay: v["relay"].as_str().map(String::from),
+        write: v["write"].as_bool().unwrap_or(false),
+    })
+}
+
 // ===================== 状态通道（见 docs/state-channel-plan.md） =====================
 //
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
