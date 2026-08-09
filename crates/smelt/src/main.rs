@@ -5650,6 +5650,13 @@ impl Workspace {
                 this.daemon_upgrading = false;
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
+                // exec 出来的新进程同样丢了网关和隧道（运行态不参与交接），理由与
+                // 硬重启那条路径一样，见 confirm_restart_daemon 里的注释。
+                if outcome == terminal::UpgradeOutcome::Upgraded
+                    || outcome == terminal::UpgradeOutcome::Failed
+                {
+                    settings::spawn_remote_bootstrap(cx);
+                }
                 this.daemon_upgrade_msg = Some(match outcome {
                     terminal::UpgradeOutcome::Upgraded => {
                         // 交接后守护侧 jolt 要等客户端 resize；略延迟再 reconnect，
@@ -6000,6 +6007,11 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
+                // 新守护进程里网关和隧道都是空的（运行态不参与交接）。守护自己会按
+                // 配置自愈，但老版本守护不会，且 UI 手里的配对码此刻已经过期——这里
+                // 幂等地补一发并刷新二维码。不补的话就是「重启守护后手机连不上，
+                // 必须去设置页把远程关掉再打开」那个 bug。
+                settings::spawn_remote_bootstrap(cx);
                 let mut failed = 0usize;
                 for (entity, term) in built {
                     match term {
@@ -8605,46 +8617,16 @@ fn main() {
         // 没有再 start。以前两条 spawn 并行时，隧道可能先回 URL、token 还是空的，
         // UI 会拼出 `?token=` 的死链。
         let remote_config = settings::load_remote_config();
-        let want_remote = remote_config.enabled;
-        let want_write = remote_config.write_enabled;
         cx.set_global(remote_config);
         cx.set_global(settings::RemoteRuntimeState::default());
         // ACP 会话不需要在退出时做任何事：agent 子进程现在是 smeltd 托管的
         // （见 smelt_core::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
         // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。
         // iroh 隧道同理跑在 smeltd 里，GUI 退出不影响手机端连接。
-        if want_remote {
-            cx.spawn(async move |cx| {
-                let remote_rt = cx
-                    .background_executor()
-                    .spawn(async move {
-                        terminal::ensure_daemon_running();
-
-                        // 本机网关：已在跑就复用 token，否则按配置 start。
-                        // iroh 也需要本机网关 token（配对码里带着它）。
-                        let existing = terminal::remote_status();
-                        let remote_rt = if existing.running
-                            && existing.token.as_ref().is_some_and(|t| !t.is_empty())
-                        {
-                            settings::RemoteRuntimeState { error: None }
-                        } else {
-                            match terminal::remote_start("127.0.0.1", want_write) {
-                                Ok(_) => settings::RemoteRuntimeState { error: None },
-                                Err(e) => settings::RemoteRuntimeState { error: Some(e) },
-                            }
-                        };
-
-                        remote_rt
-                    })
-                    .await;
-                let _ = cx.update(|cx| {
-                    cx.set_global(remote_rt);
-                    // 网关 token 就绪后再拉 iroh：配对码要把 token 拼进去，早拉会拿到空的
-                    settings::spawn_iroh_start_public(cx);
-                });
-            })
-            .detach();
-        }
+        settings::spawn_remote_bootstrap(cx);
+        // 之后由看门狗兜底：守护若被单独重启/升级过，远程会自动恢复，UI 也不会
+        // 继续挂着一个早已失效的配对码。
+        settings::spawn_remote_watchdog(cx);
         // 菜单栏常驻图标：点击唤出/前置主窗口，见 status_item.rs。
         status_item::setup(status_tx);
 
