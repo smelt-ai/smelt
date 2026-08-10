@@ -83,6 +83,24 @@ pub struct PathStatus {
 
 pub type PathObserver = Arc<dyn Fn(PathStatus) + Send + Sync + 'static>;
 
+/// 连接事件：移动端设备的连接与断开。
+#[derive(Clone, Debug)]
+pub enum ConnectionEvent {
+    /// 新设备连接。
+    Connected {
+        /// iroh 节点 ID（公钥的十六进制表示）。
+        remote_id: String,
+        /// 连接建立的时间戳（Unix 秒）。
+        connected_at: u64,
+    },
+    /// 设备断开连接。
+    Disconnected {
+        remote_id: String,
+    },
+}
+
+pub type ConnectionObserver = Arc<dyn Fn(ConnectionEvent) + Send + Sync + 'static>;
+
 /// 默认密钥路径：`~/.smelt/iroh-secret`。
 ///
 /// 密钥必须落盘：EndpointId 是密钥的公钥，**它就是配对二维码的内容**。
@@ -168,7 +186,7 @@ pub async fn serve_tunnel(
     gateway: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
-    serve_tunnel_inner(endpoint, gateway, shutdown, None).await;
+    serve_tunnel_inner(endpoint, gateway, shutdown, None, None).await;
 }
 
 /// 与 [`serve_tunnel`] 相同，但在 iroh 选中或切换传输路径时通知观察者。
@@ -178,14 +196,26 @@ pub async fn serve_tunnel_with_observer(
     shutdown: impl std::future::Future<Output = ()> + Send,
     observer: PathObserver,
 ) {
-    serve_tunnel_inner(endpoint, gateway, shutdown, Some(observer)).await;
+    serve_tunnel_inner(endpoint, gateway, shutdown, Some(observer), None).await;
+}
+
+/// 与 [`serve_tunnel_with_observer`] 相同，但同时监听连接事件（设备连接/断开）。
+pub async fn serve_tunnel_with_observers(
+    endpoint: Endpoint,
+    gateway: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    path_observer: PathObserver,
+    conn_observer: ConnectionObserver,
+) {
+    serve_tunnel_inner(endpoint, gateway, shutdown, Some(path_observer), Some(conn_observer)).await;
 }
 
 async fn serve_tunnel_inner(
     endpoint: Endpoint,
     gateway: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send,
-    observer: Option<PathObserver>,
+    path_observer: Option<PathObserver>,
+    conn_observer: Option<ConnectionObserver>,
 ) {
     tokio::pin!(shutdown);
     loop {
@@ -196,9 +226,10 @@ async fn serve_tunnel_inner(
                 None => break,
             },
         };
-        let observer = observer.clone();
+        let path_observer = path_observer.clone();
+        let conn_observer = conn_observer.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(incoming, gateway, observer).await {
+            if let Err(e) = serve_conn(incoming, gateway, path_observer, conn_observer).await {
                 warn!("iroh 连接处理失败：{e:#}");
             }
         });
@@ -210,21 +241,36 @@ async fn serve_tunnel_inner(
 async fn serve_conn(
     incoming: iroh::endpoint::Incoming,
     gateway: SocketAddr,
-    observer: Option<PathObserver>,
+    path_observer: Option<PathObserver>,
+    conn_observer: Option<ConnectionObserver>,
 ) -> Result<()> {
     let conn = incoming.await.context("握手失败")?;
     let remote = conn.remote_id();
+    let remote_id = remote.to_string();
     info!(%remote, "iroh 已接受连接");
-    observe_selected_paths(conn.clone(), remote.to_string(), observer);
+
+    // 通知连接事件
+    if let Some(ref obs) = conn_observer {
+        let connected_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        obs(ConnectionEvent::Connected {
+            remote_id: remote_id.clone(),
+            connected_at,
+        });
+    }
+
+    observe_selected_paths(conn.clone(), remote_id.clone(), path_observer);
 
     // 一条连接可以开多条流（手机上多个会话各占一条），每条流独立转发。
-    loop {
+    let result = loop {
         let (send, recv) = match conn.accept_bi().await {
             Ok(pair) => pair,
             // 对端正常关闭时 accept_bi 会返回错误，这里不算异常。
             Err(e) => {
                 info!(%remote, "iroh 连接结束：{e}");
-                return Ok(());
+                break Ok(());
             }
         };
         tokio::spawn(async move {
@@ -232,7 +278,14 @@ async fn serve_conn(
                 warn!("iroh 流转发失败：{e:#}");
             }
         });
+    };
+
+    // 通知断开事件
+    if let Some(obs) = conn_observer {
+        obs(ConnectionEvent::Disconnected { remote_id });
     }
+
+    result
 }
 
 fn observe_selected_paths(conn: Connection, remote: String, observer: Option<PathObserver>) {

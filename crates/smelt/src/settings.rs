@@ -980,6 +980,14 @@ pub struct IrohRuntimeState {
 
 impl Global for IrohRuntimeState {}
 
+/// 已连接的移动端设备列表（不落盘，定期轮询刷新）。
+#[derive(Clone, Default)]
+pub struct IrohConnectionsState {
+    pub connections: Vec<crate::terminal::IrohConnection>,
+}
+
+impl Global for IrohConnectionsState {}
+
 /// 异步拉起 iroh 隧道。绑定要连接用户配置的 relay，可能耗时数秒，**必须**走后台。
 fn spawn_iroh_start(write: bool, cx: &mut App) {
     let config = cx.global::<RemoteConfig>().clone();
@@ -1165,6 +1173,8 @@ pub fn spawn_remote_bootstrap(cx: &mut App) {
 
 /// 看门狗轮询间隔。远程掉线是低频事件，20s 足够快，也不至于让守护 socket 变忙。
 const REMOTE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(20);
+/// 已连接设备列表刷新间隔。比看门狗更频繁，以便及时显示新设备连接。
+const CONNECTIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// 连续失败时最多跳过多少个轮询周期再试（≈ 20s → 5min 的退避上限）。
 const REMOTE_WATCHDOG_MAX_SKIP: u32 = 15;
 
@@ -1178,6 +1188,10 @@ const REMOTE_WATCHDOG_MAX_SKIP: u32 = 15;
 ///
 /// 退避：连续失败（典型是 relay 连不上）时逐步拉长间隔，避免每 20s 砸一次 relay。
 pub fn spawn_remote_watchdog(cx: &mut App) {
+    // 启动时初始化已连接设备状态
+    cx.set_global(IrohConnectionsState::default());
+    // 启动连接列表刷新任务
+    spawn_connections_refresh(cx);
     cx.spawn(async move |cx| {
         let mut failures: u32 = 0;
         let mut skip: u32 = 0;
@@ -1216,6 +1230,31 @@ pub fn spawn_remote_watchdog(cx: &mut App) {
             skip = (failures - 1).min(REMOTE_WATCHDOG_MAX_SKIP);
             eprintln!("[remote] 隧道已不在运行，自动重连（第 {failures} 次）");
             cx.update(spawn_remote_bootstrap);
+        }
+    })
+    .detach();
+}
+
+/// 定期刷新已连接设备列表，以便 UI 及时显示移动端设备的连接/断开。
+fn spawn_connections_refresh(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(CONNECTIONS_REFRESH_INTERVAL)
+                .await;
+            let config = cx.update(|cx| cx.global::<RemoteConfig>().clone());
+            // 没开远程就不查
+            if !config.enabled {
+                cx.update(|cx| cx.set_global(IrohConnectionsState::default()));
+                continue;
+            }
+            let connections = cx
+                .background_executor()
+                .spawn(async { crate::terminal::iroh_connections() })
+                .await;
+            cx.update(|cx| {
+                cx.set_global(IrohConnectionsState { connections });
+            });
         }
     })
     .detach();
@@ -3302,6 +3341,87 @@ impl Workspace {
                             ),
                     );
                     card = card.child(row);
+
+                    card.into_any_element()
+                }),
+                // 已连接设备列表
+                SettingItem::render(move |_, _, cx: &mut App| {
+                    let cfg = cx.global::<RemoteConfig>().clone();
+                    let conns = cx
+                        .try_global::<IrohConnectionsState>()
+                        .cloned()
+                        .unwrap_or_default();
+                    let muted = cx.theme().muted_foreground;
+                    let fg = cx.theme().foreground;
+                    let success = gpui::rgb(crate::ui_theme::green());
+
+                    if !cfg.enabled {
+                        return div().into_any_element();
+                    }
+
+                    let mut card = v_flex().gap_2();
+                    card = card.child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(fg)
+                            .child("已连接设备"),
+                    );
+
+                    if conns.connections.is_empty() {
+                        card = card.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("暂无移动端设备连接。"),
+                        );
+                    } else {
+                        for conn in &conns.connections {
+                            let short_id = if conn.remote_id.len() > 16 {
+                                format!("{}…{}", &conn.remote_id[..8], &conn.remote_id[conn.remote_id.len()-8..])
+                            } else {
+                                conn.remote_id.clone()
+                            };
+                            let duration = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs().saturating_sub(conn.connected_at))
+                                .unwrap_or(0);
+                            let duration_str = if duration < 60 {
+                                format!("{duration} 秒前连接")
+                            } else if duration < 3600 {
+                                format!("{} 分钟前连接", duration / 60)
+                            } else {
+                                format!("{} 小时前连接", duration / 3600)
+                            };
+                            card = card.child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .size(px(8.))
+                                            .rounded_full()
+                                            .bg(success),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(fg)
+                                                    .child(format!("📱 {short_id}")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(duration_str),
+                                            ),
+                                    ),
+                            );
+                        }
+                    }
 
                     card.into_any_element()
                 }),

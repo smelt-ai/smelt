@@ -1511,6 +1511,39 @@ pub fn iroh_status() -> Option<IrohStatus> {
     })
 }
 
+/// 单个已连接的移动端设备信息。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct IrohConnection {
+    /// iroh 节点 ID（公钥的十六进制表示）。
+    pub remote_id: String,
+    /// 连接建立的时间戳（Unix 秒）。
+    pub connected_at: u64,
+}
+
+/// 查询当前通过 iroh 隧道连接的移动端设备列表。
+pub fn iroh_connections() -> Vec<IrohConnection> {
+    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+        return Vec::new();
+    };
+    if writeln!(s, "{}", serde_json::json!({ "op": "iroh_connections" })).is_err() {
+        return Vec::new();
+    }
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Vec::new();
+    }
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
+    v["connections"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ===================== 状态通道（见 docs/state-channel-plan.md） =====================
 //
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
