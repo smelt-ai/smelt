@@ -1395,9 +1395,22 @@ struct IrohTunnel {
     endpoint_id: String,
     relay: smelt_iroh::RelaySettings,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// 已连接的移动端设备（remote_id → 连接时间戳）。
+    connections: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+/// 单个已连接设备的信息。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct IrohConnection {
+    /// iroh 节点 ID（公钥的十六进制表示）。
+    pub remote_id: String,
+    /// 连接建立的时间戳（Unix 秒）。
+    pub connected_at: u64,
 }
 
 type IrohState = Arc<Mutex<Option<IrohTunnel>>>;
+/// 全局连接池：跨隧道重启仍可访问（隧道停后清空）。
+type IrohConnections = Arc<Mutex<HashMap<String, u64>>>;
 
 /// 串行化 `start_iroh`：绑定要联网、最长 30s，期间不能一直攥着 `IrohState`
 /// （`iroh_status` 等只读路径会被一起堵死），可一旦放开，两个并发调用就会各自
@@ -1415,6 +1428,7 @@ fn start_iroh(
     remote_state: &RemoteState,
     write: bool,
     relay_address: &str,
+    connections: IrohConnections,
 ) -> Result<(String, String, std::net::SocketAddr, bool, String), String> {
     let relay = smelt_iroh::RelaySettings::parse(relay_address)
         .map_err(|e| format!("iroh relay 配置无效：{e:#}"))?;
@@ -1448,6 +1462,7 @@ fn start_iroh(
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
 
     let tunnel_relay = relay.clone();
+    let conn_tracker = Arc::clone(&connections);
     thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -1489,13 +1504,26 @@ fn start_iroh(
                     status.rtt.as_millis()
                 ));
             });
-            smelt_iroh::serve_tunnel_with_observer(
+            let conn_observer = std::sync::Arc::new(move |event: smelt_iroh::ConnectionEvent| {
+                match event {
+                    smelt_iroh::ConnectionEvent::Connected { remote_id, connected_at } => {
+                        dlog(&format!("iroh 设备已连接：{remote_id}"));
+                        conn_tracker.lock().unwrap().insert(remote_id, connected_at);
+                    }
+                    smelt_iroh::ConnectionEvent::Disconnected { remote_id } => {
+                        dlog(&format!("iroh 设备已断开：{remote_id}"));
+                        conn_tracker.lock().unwrap().remove(&remote_id);
+                    }
+                }
+            });
+            smelt_iroh::serve_tunnel_with_observers(
                 endpoint,
                 addr,
                 async move {
                     let _ = shutdown_rx.await;
                 },
                 path_observer,
+                conn_observer,
             )
             .await;
         });
@@ -1508,6 +1536,7 @@ fn start_iroh(
                 endpoint_id: endpoint_id.clone(),
                 relay: relay.clone(),
                 shutdown_tx,
+                connections,
             });
             Ok((
                 endpoint_id,
@@ -1524,6 +1553,8 @@ fn start_iroh(
 
 fn stop_iroh(state: &IrohState) {
     if let Some(t) = state.lock().unwrap().take() {
+        // 发送关闭信号，连接会在 tunnel 关闭过程中自然移除
+        // 不在此处 clear() 以避免与 conn_observer 回调的竞态条件
         let _ = t.shutdown_tx.send(());
     }
 }
@@ -1534,6 +1565,26 @@ fn iroh_status(state: &IrohState) -> Option<(String, smelt_iroh::RelaySettings)>
         .unwrap()
         .as_ref()
         .map(|t| (t.endpoint_id.clone(), t.relay.clone()))
+}
+
+/// 查询当前已连接的移动端设备列表。
+fn get_iroh_connections(state: &IrohState) -> Vec<IrohConnection> {
+    state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|t| {
+            t.connections
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(remote_id, connected_at)| IrohConnection {
+                    remote_id: remote_id.clone(),
+                    connected_at: *connected_at,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 守护启动时按落盘配置自动恢复远程访问。
@@ -1547,7 +1598,7 @@ fn iroh_status(state: &IrohState) -> Option<(String, smelt_iroh::RelaySettings)>
 ///
 /// 走后台线程：iroh 绑定要联网发现 relay，最坏 30s，绝不能挡住 accept 循环。
 /// 登录后网络还没就绪很常见，因此失败要退避重试，而不是一次失败就放弃到下次重启。
-fn autostart_remote_from_config(remote_state: RemoteState, iroh_state: IrohState) {
+fn autostart_remote_from_config(remote_state: RemoteState, iroh_state: IrohState, iroh_connections: IrohConnections) {
     // 逃生阀：跑测试 / 排障时不希望守护自作主张连网。
     if std::env::var_os("SMELT_NO_REMOTE_AUTOSTART").is_some() {
         return;
@@ -1556,6 +1607,7 @@ fn autostart_remote_from_config(remote_state: RemoteState, iroh_state: IrohState
         smelt_core::remote_config::load(),
         remote_state,
         iroh_state,
+        iroh_connections,
     );
 }
 
@@ -1567,6 +1619,7 @@ fn spawn_remote_autostart(
     config: smelt_core::remote_config::RemoteConfig,
     remote_state: RemoteState,
     iroh_state: IrohState,
+    iroh_connections: IrohConnections,
 ) -> bool {
     if !config.enabled {
         return false;
@@ -1603,6 +1656,7 @@ fn spawn_remote_autostart(
                 &remote_state,
                 config.write_enabled,
                 &config.iroh_relay,
+                Arc::clone(&iroh_connections),
             ) {
                 Ok((endpoint_id, _, _, _, _)) => {
                     dlog(&format!("按配置自动恢复 iroh 隧道：{endpoint_id}"));
@@ -1636,10 +1690,12 @@ mod autostart_remote_tests {
     fn disabled_config_starts_nothing() {
         let remote = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let iroh: IrohState = Arc::new(Mutex::new(None));
+        let iroh_conns: IrohConnections = Arc::new(Mutex::new(HashMap::new()));
         assert!(!spawn_remote_autostart(
             config(false),
             Arc::clone(&remote),
-            Arc::clone(&iroh)
+            Arc::clone(&iroh),
+            Arc::clone(&iroh_conns),
         ));
         thread::sleep(Duration::from_millis(200));
         assert!(
@@ -1652,10 +1708,12 @@ mod autostart_remote_tests {
     fn enabled_config_brings_the_gateway_back() {
         let remote = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
         let iroh: IrohState = Arc::new(Mutex::new(None));
+        let iroh_conns: IrohConnections = Arc::new(Mutex::new(HashMap::new()));
         assert!(spawn_remote_autostart(
             config(true),
             Arc::clone(&remote),
-            Arc::clone(&iroh)
+            Arc::clone(&iroh),
+            Arc::clone(&iroh_conns),
         ));
         // 网关是本机回环 + 端口 0，起得很快；隧道因为没配 relay 会被跳过。
         let mut started = false;
@@ -2081,6 +2139,8 @@ fn main() {
     // 下面的 autostart_remote_from_config 会按 collab.json 把它们拉回来。
     let remote_state = new_remote_state(None);
     let iroh_state: IrohState = Arc::new(Mutex::new(None));
+    // 全局连接池，由 iroh 隧道回调更新，供 iroh_connections op 查询。
+    let iroh_connections: IrohConnections = Arc::new(Mutex::new(HashMap::new()));
     // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
     // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
@@ -2088,7 +2148,7 @@ fn main() {
 
     // 远程访问自愈：见 autostart_remote_from_config 的注释。必须在 accept 循环之前
     // 挂起（它自己起线程，不阻塞），否则守护重启后手机要一直等到用户下次开 GUI。
-    autostart_remote_from_config(Arc::clone(&remote_state), Arc::clone(&iroh_state));
+    autostart_remote_from_config(Arc::clone(&remote_state), Arc::clone(&iroh_state), Arc::clone(&iroh_connections));
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
@@ -2100,6 +2160,7 @@ fn main() {
             let task_state = Arc::clone(&task_state);
             let remote_state = Arc::clone(&remote_state);
             let iroh_state = Arc::clone(&iroh_state);
+            let iroh_connections = Arc::clone(&iroh_connections);
             let subscribers = Arc::clone(&subscribers);
             thread::spawn(move || {
                 handle_conn(
@@ -2111,6 +2172,7 @@ fn main() {
                     listen_fd,
                     remote_state,
                     iroh_state,
+                    iroh_connections,
                     subscribers,
                 )
             });
@@ -3716,6 +3778,7 @@ mod action_integration_tests {
             -1,
             remote_state,
             iroh_state,
+            Arc::new(Mutex::new(HashMap::new())),
             subscribers,
         );
         let mut resp = String::new();
@@ -3856,6 +3919,7 @@ mod input_integration_tests {
             -1,
             remote_state,
             iroh_state,
+            Arc::new(Mutex::new(HashMap::new())),
             subscribers,
         );
         let mut resp = String::new();
@@ -3936,6 +4000,7 @@ fn handle_conn(
     listen_fd: RawFd,
     remote_state: RemoteState,
     iroh_state: IrohState,
+    iroh_connections: IrohConnections,
     subscribers: Subscribers,
 ) {
     // 头一行 JSON。之后的帧字节可能已被 BufReader 预读，故帧循环必须复用同一个 reader。
@@ -4138,7 +4203,7 @@ fn handle_conn(
             let write = v["write"].as_bool().unwrap_or(false);
             let relay = v["relay"].as_str().unwrap_or_default();
             let mut c = conn;
-            match start_iroh(&iroh_state, &remote_state, write, relay) {
+            match start_iroh(&iroh_state, &remote_state, write, relay, Arc::clone(&iroh_connections)) {
                 Ok((endpoint_id, token, addr, write, relay)) => {
                     // token 一并回：配对码 = endpoint_id + token，缺一不可
                     // （隧道只负责把字节送到，鉴权仍归网关）。
@@ -4182,6 +4247,11 @@ fn handle_conn(
                 None => serde_json::json!({ "running": false }),
             };
             let _ = writeln!(c, "{}", body);
+        }
+        Some("iroh_connections") => {
+            let mut c = conn;
+            let connections = get_iroh_connections(&iroh_state);
+            let _ = writeln!(c, "{}", serde_json::json!({ "connections": connections }));
         }
         Some("agent_event") => {
             let id = v["id"].as_str().unwrap_or_default();
@@ -7533,6 +7603,7 @@ mod watch_tests {
                         -1,
                         new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string())),
                         Arc::new(Mutex::new(None)),
+                        Arc::new(Mutex::new(HashMap::new())),
                         Arc::clone(&subscribers),
                     );
                 }
