@@ -407,7 +407,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   WsState _connectionState = WsState.disconnected;
   List<SessionSummary> _sessions = [];
   WorkspaceCatalog _workspace = const WorkspaceCatalog(
@@ -438,6 +438,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pairingStorage = widget.pairingStorage ?? SecurePairingStorage();
     _messageDraftStore = widget.messageDraftStore ?? FileMessageDraftStore();
     _stateSubscription = gatewayService.stateStream.listen((state) {
@@ -524,6 +525,17 @@ class _HomePageState extends State<HomePage> {
       messenger.showSnackBar(SnackBar(content: Text(error)));
     });
     unawaited(_restorePairing());
+  }
+
+  /// 回到前台立刻确认连接还活着。系统在后台会冻结心跳定时器，这段时间里
+  /// 网络往往已经换过，而半开的 TCP 不会通知我们——不主动探一下，用户看到的
+  /// 就是进后台那一刻的旧会话。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      gatewayService.verifyConnection();
+    }
   }
 
   Future<void> _restorePairing() async {
@@ -1318,6 +1330,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _stateSubscription.cancel();
     _sessionsSubscription.cancel();
     _workspaceSubscription.cancel();
