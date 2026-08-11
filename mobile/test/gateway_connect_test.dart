@@ -419,6 +419,140 @@ void main() {
     await socket.close();
     await server.close(force: true);
   });
+
+  test('a half-open connection is detected and reconnected', () async {
+    // 手机切网/被系统冻结后，TCP 可能写得出去读不回来，且不触发 onDone。
+    // 心跳必须自己把这种连接判死，否则界面会永远停在掉线那一刻的旧会话。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var openCount = 0;
+    var respondToPing = true;
+    var pingCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      openCount++;
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] != 'ping') return;
+        pingCount++;
+        if (!respondToPing) return;
+        final params = message['params'] as Map<String, dynamic>;
+        socket.add(
+          jsonEncode({'type': 'pong', 'sentAtMs': params['sentAtMs']}),
+        );
+      });
+    });
+
+    final states = <WsState>[];
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 150),
+    );
+    final stateSub = service.stateStream.listen(states.add);
+
+    await service.connect('http://127.0.0.1:${server.port}', 'tok');
+    await _waitFor(() => service.state == WsState.connected && pingCount > 0);
+
+    respondToPing = false;
+    await _waitFor(() => states.contains(WsState.reconnecting));
+
+    respondToPing = true;
+    await _waitFor(() => service.state == WsState.connected && openCount >= 2);
+
+    service.disconnect();
+    await stateSub.cancel();
+    await server.close(force: true);
+  });
+
+  test('a stalled ping never wedges the heartbeat', () async {
+    // 回归点：`_pendingPingSentAt` 只在收到 pong 时清空。少了超时判死，它会
+    // 永久非空，后续每个周期都跳过发送——心跳就此停摆且无人察觉。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var pingCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'ping') pingCount++;
+      });
+    });
+
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 100),
+    );
+    await service.connect('http://127.0.0.1:${server.port}', 'tok');
+    await _waitFor(() => pingCount >= 3);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
+  test('an unsupported ping does not trip the liveness timeout', () async {
+    // 老桌面端不认识 ping，回 `invalid request`。那不是掉线，不该被判死。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var openCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      openCount++;
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'ping') {
+          socket.add(jsonEncode({'type': 'error', 'error': 'invalid request'}));
+        }
+      });
+    });
+
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 100),
+    );
+    await service.connect('http://127.0.0.1:${server.port}', 'tok');
+    await _waitFor(() => service.state == WsState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(service.state, WsState.connected);
+    expect(openCount, 1);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
+  test('returning to the foreground re-pulls sessions', () async {
+    // 后台期间定时器是冻结的，回前台必须主动拉一次，否则先看到的是旧数据。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var listCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'listSessions') listCount++;
+      });
+    });
+
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      metricsInterval: const Duration(seconds: 30),
+    );
+    await service.connect('http://127.0.0.1:${server.port}', 'tok');
+    await _waitFor(() => service.state == WsState.connected && listCount >= 1);
+    final afterConnect = listCount;
+
+    service.verifyConnection();
+    await _waitFor(() => listCount > afterConnect);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
 }
 
 Future<void> _waitFor(bool Function() predicate) async {

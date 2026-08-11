@@ -328,6 +328,7 @@ class GatewayService {
     this.reconnectDelay = const Duration(seconds: 2),
     this.metricsInterval = const Duration(seconds: 3),
     this.messageAckTimeout = const Duration(seconds: 20),
+    this.pongTimeout = const Duration(seconds: 15),
     this.cacheStore,
     IrohTunnelOpener? irohTunnelOpener,
     IrohTunnelStopper? irohTunnelStopper,
@@ -341,6 +342,13 @@ class GatewayService {
   final Duration reconnectDelay;
   final Duration metricsInterval;
   final Duration messageAckTimeout;
+
+  /// ping 发出后等 pong 的上限，超时即判定连接已死。
+  ///
+  /// 手机切换 WiFi/蜂窝、或被系统冻结后恢复，TCP 常常处于半开：写得出去、
+  /// 读不回来，且不触发 `onDone`/`onError`。没有这个上限的话状态会永远停在
+  /// `connected`，而推送早已收不到——界面于是一直显示掉线那一刻的旧会话。
+  final Duration pongTimeout;
   final SessionCacheStore? cacheStore;
 
   /// 启动 iroh 隧道的方式。默认会明确报错 —— 真正的实现由组装根（`main()`）
@@ -664,6 +672,28 @@ class GatewayService {
     await connect(endpoint, token);
   }
 
+  /// App 回到前台时调用：立刻确认这条连接还活着，别等下一个心跳周期。
+  ///
+  /// 系统在后台会冻结 Dart 的 Timer，心跳期间是停摆的；这段时间里网络多半
+  /// 已经换过（WiFi↔蜂窝）或者连接被运营商回收，而 TCP 半开不会触发
+  /// `onDone`。所以回前台既要重新催一次心跳，也要主动拉一次全量会话——
+  /// 连接若还活着，用户立刻看到最新状态，而不是先盯着一屏旧数据。
+  void verifyConnection() {
+    switch (_state) {
+      case WsState.connected:
+        _sampleMetrics();
+        listSessions();
+        listWorkspace();
+        final sessionId = _subscribedSessionId;
+        if (sessionId != null) subscribe(sessionId);
+      case WsState.disconnected:
+        unawaited(retryCurrentConnection());
+      case WsState.connecting:
+      case WsState.reconnecting:
+        break;
+    }
+  }
+
   /// 关闭底层通道并作废旧连接的回调，不改变对外状态。
   void _teardownSocket({bool preserveSubscription = false}) {
     _connectionGeneration++;
@@ -984,6 +1014,17 @@ class GatewayService {
 
   void _sampleMetrics() {
     if (_state != WsState.connected) return;
+    // 上一个 ping 迟迟没有回应 = 连接已经死了，只是 TCP 还没告诉我们。
+    // 这里必须主动把它判死并重连，否则 `_pendingPingSentAt` 永远非空，
+    // 下面的分支再也不会发出新的 ping，心跳就此停摆。
+    final pendingSince = _pendingPingSentAt;
+    if (pendingSince != null &&
+        DateTime.now().millisecondsSinceEpoch - pendingSince >
+            pongTimeout.inMilliseconds) {
+      _reportConnectionFailure('与桌面端失去响应');
+      _scheduleReconnect();
+      return;
+    }
     if (_pingSupported && _pendingPingSentAt == null) {
       final sentAt = DateTime.now().millisecondsSinceEpoch;
       _pendingPingSentAt = sentAt;
