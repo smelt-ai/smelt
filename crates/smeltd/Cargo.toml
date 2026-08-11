@@ -15,6 +15,8 @@ smelt-core = { path = "../smelt-core" }
 # iroh P2P 隧道（iroh_start/iroh_stop op）。放这儿而不是 smelt-core：
 # smelt-core 是 GUI 与守护共用的地基，不该被只有守护用得上的重依赖拖慢。
 smelt-iroh = { path = "../smelt-iroh" }
+# Multica 集成：移动端/PC 端追问统一走 smeltd 发评论到 Multica server。
+smelt-multica = { path = "../smelt-multica" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
