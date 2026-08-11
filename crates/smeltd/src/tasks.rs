@@ -245,6 +245,120 @@ fn parse_channel(v: &Value) -> Option<TaskChannel> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Multica 上下文辅助：移动端/PC 端追问统一从 smeltd 层发评论到 Multica server
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Multica 会话上下文，从 Task 中提取的 Multica 相关字段。
+#[derive(Clone, Debug)]
+pub struct MulticaContext {
+    pub issue_id: String,
+    pub workspace_id: String,
+    pub server_task_id: Option<String>,
+    pub parent_comment_id: Option<String>,
+    pub trigger_comment_content: Option<String>,
+}
+
+/// 通过 session_id 在 TaskFile 中查找对应的 Multica 上下文。
+/// 如果会话不是 Multica 任务或找不到，返回 None。
+pub fn find_multica_context_by_session(
+    file: &TaskFile,
+    session_id: &str,
+) -> Option<MulticaContext> {
+    let task = file
+        .tasks
+        .iter()
+        .find(|task| task.session_id.as_deref() == Some(session_id))?;
+    // 只有 Multica 任务（有 issue_id）才返回上下文
+    let issue_id = task.multica_issue_id.as_ref()?.clone();
+    if issue_id.trim().is_empty() {
+        return None;
+    }
+    let workspace_id = task.multica_workspace_id.clone().unwrap_or_default();
+    if workspace_id.trim().is_empty() {
+        return None;
+    }
+    Some(MulticaContext {
+        issue_id,
+        workspace_id,
+        server_task_id: task.multica_task_id.clone(),
+        parent_comment_id: task.multica_parent_comment_id.clone(),
+        trigger_comment_content: task.multica_trigger_comment_content.clone(),
+    })
+}
+
+/// Multica 凭据（server_url + token），从 ~/.smelt/multica.json 读取。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct MulticaCredentials {
+    #[serde(default)]
+    pub server_url: String,
+    #[serde(default)]
+    pub token: String,
+}
+
+/// 从 ~/.smelt/multica.json 读取 Multica 凭据。
+pub fn load_multica_credentials() -> MulticaCredentials {
+    let path = dirs::home_dir().map(|h| h.join(".smelt").join("multica.json"));
+    smelt_core::json_store::load_json(path)
+}
+
+/// 发送用户追问到 Multica server。
+///
+/// 这是移动端/PC 端统一的追问路径：用户输入 → 发评论到 Multica → Multica 分发给
+/// runtime → runtime 执行。成功返回 Ok(())，失败返回错误信息。
+pub async fn send_multica_prompt(
+    context: &MulticaContext,
+    credentials: &MulticaCredentials,
+    text: &str,
+) -> Result<(), String> {
+    if credentials.server_url.trim().is_empty() || credentials.token.trim().is_empty() {
+        return Err("Multica 未连接（凭据为空）".to_string());
+    }
+
+    let client = smelt_multica::MulticaClient::new(&credentials.server_url, &credentials.token)
+        .map_err(|e| format!("创建 Multica 客户端失败: {e}"))?;
+
+    // 旧会话可能只保存了 issue 绑定而没有 parent_id。先从 issue 评论列表恢复
+    // 线程根，再创建评论；否则这条输入会错误地变成新的主评论。
+    let has_trigger_comment = context
+        .trigger_comment_content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty());
+
+    let resolved_parent_id = match &context.parent_comment_id {
+        Some(parent_id) if !parent_id.trim().is_empty() => Some(parent_id.clone()),
+        _ if has_trigger_comment => client
+            .resolve_issue_reply_parent(
+                &context.issue_id,
+                &context.workspace_id,
+                context.server_task_id.as_deref(),
+                context.trigger_comment_content.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("解析 Multica 评论线程失败: {e}"))?,
+        _ => {
+            // direct Issue 没有原评论线程，首次本地输入按顶层评论发送
+            None
+        }
+    };
+
+    if has_trigger_comment && resolved_parent_id.is_none() {
+        return Err("未找到 Multica 原评论线程，已阻止创建新的主评论".to_string());
+    }
+
+    client
+        .add_issue_comment(
+            &context.issue_id,
+            &context.workspace_id,
+            text,
+            resolved_parent_id.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("Multica 评论发送失败: {e}"))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
