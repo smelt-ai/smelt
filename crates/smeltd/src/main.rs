@@ -4022,7 +4022,7 @@ fn handle_conn(
         Some("acp_create") => handle_acp_create(conn, &v, &acp_sessions, &subscribers),
         Some("acp_watch") => handle_acp_watch(conn, reader, &v, acp_sessions),
         Some("acp_snapshot") => handle_acp_snapshot(conn, &v, &acp_sessions),
-        Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &task_state, &subscribers),
+        Some("acp_action") => handle_acp_action(conn, &v, &acp_sessions, &subscribers),
         Some("acp_kill") => handle_acp_kill(conn, &v, &acp_sessions),
         Some("acp_restart") => handle_acp_restart(conn, &v, &acp_sessions, &subscribers),
         Some("task_add") => tasks::handle_task_add(conn, &task_state, &v),
@@ -5342,118 +5342,22 @@ fn submit_acp_elicitation(
 
 /// Apply one action without attaching a control client. Remote/mobile callers must not use
 /// `acp_open` for one-shot writes because opening the same id intentionally replaces the GUI.
-///
-/// 对于 Multica 任务的 Prompt action，会发送评论到 Multica server 而不是本地 ACP，
-/// 实现移动端/PC 端统一的追问路径。
 fn handle_acp_action(
     mut conn: UnixStream,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
-    task_state: &TaskState,
     subscribers: &Subscribers,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
-
-    // 解析 action，检查是否是 Prompt
-    let action_value = match v.get("action").cloned() {
-        Some(v) => v,
-        None => {
-            let _ = writeln!(conn, r#"{{"ok":false,"error":"missing ACP action"}}"#);
-            return;
-        }
-    };
-    let action: smelt_core::acp_session::AcpUserAction = match serde_json::from_value(action_value)
-    {
-        Ok(a) => a,
-        Err(_) => {
-            let _ = writeln!(conn, r#"{{"ok":false,"error":"invalid ACP action"}}"#);
-            return;
-        }
-    };
-
-    // 检查是否是 Multica 任务的 Prompt，是的话发到 Multica server
-    if let smelt_core::acp_session::AcpUserAction::Prompt { ref text, .. } = action {
-        let multica_context = {
-            let file = task_state.lock().unwrap();
-            tasks::find_multica_context_by_session(&file, id)
-        };
-        if let Some(context) = multica_context {
-            // 是 Multica 任务，发评论到 Multica server
-            let credentials = tasks::load_multica_credentials();
-            let text = text.clone();
-            let result = smelt_core::block_on::block_on_tokio(async move {
-                tasks::send_multica_prompt(&context, &credentials, &text).await
-            });
-            match result {
-                Ok(Ok(())) => {
-                    let _ = writeln!(conn, r#"{{"ok":true,"multica":true}}"#);
-                }
-                Ok(Err(e)) => {
-                    // Multica 发送失败，回退到本地 ACP
-                    eprintln!("[smeltd] Multica 发送失败，回退本地: {e}");
-                    let slot = match acp_sessions.get(id) {
-                        Some(s) => s,
-                        None => {
-                            let _ = writeln!(
-                                conn,
-                                r#"{{"ok":false,"error":"ACP session not found"}}"#
-                            );
-                            return;
-                        }
-                    };
-                    match apply_acp_user_action(&slot.value, action, subscribers) {
-                        Ok(()) => {
-                            let _ = writeln!(
-                                conn,
-                                r#"{{"ok":true,"multica_fallback":true,"multica_error":"{}"}}"#,
-                                e.replace('"', "\\\"")
-                            );
-                        }
-                        Err(error) => {
-                            let _ = writeln!(
-                                conn,
-                                r#"{{"ok":false,"error":"{}"}}"#,
-                                error.replace('"', "\\\"")
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    // tokio runtime 错误，回退到本地
-                    eprintln!("[smeltd] tokio runtime 错误: {e}");
-                    let slot = match acp_sessions.get(id) {
-                        Some(s) => s,
-                        None => {
-                            let _ = writeln!(
-                                conn,
-                                r#"{{"ok":false,"error":"ACP session not found"}}"#
-                            );
-                            return;
-                        }
-                    };
-                    match apply_acp_user_action(&slot.value, action, subscribers) {
-                        Ok(()) => {
-                            let _ = writeln!(conn, r#"{{"ok":true,"multica_fallback":true}}"#);
-                        }
-                        Err(error) => {
-                            let _ = writeln!(
-                                conn,
-                                r#"{{"ok":false,"error":"{}"}}"#,
-                                error.replace('"', "\\\"")
-                            );
-                        }
-                    }
-                }
-            }
-            return;
-        }
-    }
-
-    // 非 Multica 任务，走原来的本地 ACP 路径
-    let result = acp_sessions
-        .get(id)
-        .ok_or("ACP session not found")
-        .and_then(|slot| apply_acp_user_action(&slot.value, action, subscribers));
+    let result = v
+        .get("action")
+        .cloned()
+        .ok_or("missing ACP action")
+        .and_then(|action| serde_json::from_value(action).map_err(|_| "invalid ACP action"))
+        .and_then(|action| {
+            let slot = acp_sessions.get(id).ok_or("ACP session not found")?;
+            apply_acp_user_action(&slot.value, action, subscribers)
+        });
 
     let response = match result {
         Ok(()) => serde_json::json!({"ok": true}),
@@ -7871,7 +7775,6 @@ mod acp_tests {
                 "action": {"Prompt": {"text": "from mobile", "images": []}},
             }),
             &acp_sessions,
-            &tasks::new_task_state(),
             &Arc::new(Mutex::new(Vec::new())),
         );
 
@@ -7922,7 +7825,6 @@ mod acp_tests {
                 "action": {"Prompt": {"content": "wrong field", "images": []}},
             }),
             &acp_sessions,
-            &tasks::new_task_state(),
             &Arc::new(Mutex::new(Vec::new())),
         );
 

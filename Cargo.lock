@@ -8531,7 +8531,6 @@ dependencies = [
  "serde_json",
  "smelt-core",
  "smelt-iroh",
- "smelt-multica",
  "smol",
  "tokio",
  "uuid",
