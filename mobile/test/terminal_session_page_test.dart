@@ -39,8 +39,10 @@ class _FakeTerminalStream implements TerminalStreamClient {
   @override
   void resume() {}
 
+  final sentInput = <String>[];
+
   @override
-  void sendInput(String data) {}
+  void sendInput(String data) => sentInput.add(data);
 
   @override
   void start(TerminalGeometry geometry) {}
@@ -460,9 +462,16 @@ void main() {
     tester,
   ) async {
     final inputs = <String>[];
+    final keys = <String>[];
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(body: TerminalShortcutBar(onInput: inputs.add)),
+        home: Scaffold(
+          body: TerminalShortcutBar(
+            onInput: inputs.add,
+            onKey: (key, {shift = false, alt = false, ctrl = false}) =>
+                keys.add('$key shift=$shift alt=$alt ctrl=$ctrl'),
+          ),
+        ),
       ),
     );
 
@@ -470,9 +479,93 @@ void main() {
     await tester.tap(find.text('^C'));
     await tester.tap(find.byIcon(Icons.keyboard_arrow_up));
 
-    expect(inputs, ['\x1b', '\x03', '\x1b[A']);
+    // ^C 没有对应具名键，仍走字面量；其余交给页面按终端模式编码。
+    expect(inputs, ['\x03']);
+    expect(keys, [
+      'TermKey.escape shift=false alt=false ctrl=false',
+      'TermKey.up shift=false alt=false ctrl=false',
+    ]);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('shortcut bar exposes Shift+Tab and Shift+Enter', (
+    tester,
+  ) async {
+    final keys = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TerminalShortcutBar(
+            onInput: (_) {},
+            onKey: (key, {shift = false, alt = false, ctrl = false}) =>
+                keys.add('$key shift=$shift'),
+          ),
+        ),
+      ),
+    );
+
+    // 这两个组合软键盘上按不出来，只能靠快捷键栏。
+    await tester.tap(find.text('⇧Tab'));
+    await tester.tap(find.text('⇧↵'));
+
+    expect(keys, [
+      'TermKey.tab shift=true',
+      'TermKey.enter shift=true',
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+
+testWidgets(
+    'Shift+Tab 跟随对端的 kitty keyboard 模式切换编码',
+    (tester) async {
+      final stream = _FakeTerminalStream();
+      const session = SessionSummary(
+        id: 'terminal-kitty',
+        kind: SessionKind.terminal,
+        title: 'Shell',
+        phase: 'running',
+        agent: 'terminal',
+      );
+      await tester.pumpWidget(
+        MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+      );
+      stream.connect();
+      stream.emit(
+        const TerminalReadyEvent(
+          cols: 40,
+          rows: 20,
+          replayBytes: 0,
+          writeEnabled: true,
+        ),
+      );
+      stream.emit(const TerminalReplayCompleteEvent());
+      await tester.pump();
+      await tester.pump();
+
+      // 打开软键盘，快捷键栏才会出现。
+      await tester.tap(find.byIcon(Icons.keyboard_outlined));
+      await tester.pump();
+      await tester.pump();
+
+      // 对端还没开 kitty：走传统 backtab。
+      await tester.tap(find.text('⇧Tab'));
+      expect(stream.sentInput.last, '\x1b[Z');
+
+      // Claude Code v2.1 起启动时会发这条开启 kitty keyboard protocol。
+      stream.emit(TerminalDataEvent(Uint8List.fromList(utf8.encode('\x1b[>1u'))));
+      await tester.pump();
+
+      // 同一个按钮，编码必须跟着变——否则应用收不到（kitty 下 legacy 被抑制）。
+      await tester.tap(find.text('⇧Tab'));
+      expect(stream.sentInput.last, '\x1b[9;2u');
+
+      await tester.tap(find.text('⇧↵'));
+      expect(stream.sentInput.last, '\x1b[13;2u');
+
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets('terminal adopts the theme sent by the connected device', (
     tester,
