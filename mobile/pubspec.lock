@@ -911,8 +911,8 @@ packages:
     dependency: "direct main"
     description:
       path: "."
-      ref: "4dc01b95d99a1dc6eb71f1a5e8ee2d7aa8a95c33"
-      resolved-ref: "4dc01b95d99a1dc6eb71f1a5e8ee2d7aa8a95c33"
+      ref: "03eeb2732d519bde13262e078da7d79759a2046e"
+      resolved-ref: "03eeb2732d519bde13262e078da7d79759a2046e"
       url: "https://github.com/smelt-ai/xterm.dart.git"
     source: git
     version: "4.0.0"

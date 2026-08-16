@@ -7,7 +7,6 @@ import 'package:xterm/xterm.dart';
 import '../services/gateway_service.dart';
 import '../services/terminal_stream_service.dart';
 import '../theme/terminal_theme_wire.dart';
-import '../utils/terminal_key_encoder.dart';
 import '../utils/xterm_input_filter.dart';
 
 class TerminalSessionPage extends StatefulWidget {
@@ -397,32 +396,24 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
               ),
             ),
             if (_writeEnabled && _softwareKeyboardEnabled)
-              TerminalShortcutBar(onKey: _sendKey, onInput: _stream.sendInput),
+              TerminalShortcutBar(onKey: _sendKey),
           ],
         ),
       ),
     );
   }
 
-  /// 快捷键栏统一出口：编码依赖两个终端状态——对端有没有开 kitty keyboard
-  /// protocol（决定 Shift+Tab 发 `ESC[Z` 还是 `ESC[9;2u`），以及有没有开
-  /// application cursor 模式（决定方向键发 CSI 还是 SS3）。这两个都只有到了
-  /// 发送那一刻才知道，所以按键不能在构建时写死成字面量。
+  /// 快捷键栏统一出口。编码交给终端本身，它知道对端有没有开 kitty keyboard
+  /// protocol（决定 Shift+Tab 发 `ESC[Z` 还是 `ESC[9;2u`）和 application
+  /// cursor 模式（决定方向键发 CSI 还是 SS3），也和蓝牙键盘走的是同一条路径，
+  /// 两边不会各编各的。`onOutput` 已经接到守护，所以这里不用再自己发。
   void _sendKey(
-    TermKey key, {
+    TerminalKey key, {
     bool shift = false,
     bool alt = false,
     bool ctrl = false,
   }) {
-    final bytes = encodeTermKey(
-      key,
-      shift: shift,
-      alt: alt,
-      ctrl: ctrl,
-      kitty: _inputFilter.kittyKeyboardEnabled,
-      appCursor: _terminal.cursorKeysMode,
-    );
-    if (bytes.isNotEmpty) _stream.sendInput(bytes);
+    _terminal.keyInput(key, shift: shift, alt: alt, ctrl: ctrl);
   }
 
   Widget _buildConnectionIndicator() {
@@ -502,14 +493,10 @@ class TerminalShortcutBar extends StatelessWidget {
   const TerminalShortcutBar({
     super.key,
     required this.onKey,
-    required this.onInput,
   });
 
-  /// 具名键走这里：由页面按当前终端模式决定编码。
+  /// 所有键都走这里：编码由终端按其当前模式决定。
   final TerminalKeyHandler onKey;
-
-  /// 没有对应具名键的固定控制符（如 ^C）直接写字节。
-  final ValueChanged<String> onInput;
 
   @override
   Widget build(BuildContext context) {
@@ -522,55 +509,55 @@ class TerminalShortcutBar extends StatelessWidget {
         children: [
           _TerminalTextKey(
             label: 'Esc',
-            onPressed: () => onKey(TermKey.escape),
+            onPressed: () => onKey(TerminalKey.escape),
           ),
           _TerminalTextKey(
             label: 'Tab',
-            onPressed: () => onKey(TermKey.tab),
+            onPressed: () => onKey(TerminalKey.tab),
           ),
           // Claude Code 用它切换模式；手机软键盘上没有 Shift+Tab 可按，这一条
           // 只能靠快捷键栏给。
           _TerminalTextKey(
             label: '⇧Tab',
-            onPressed: () => onKey(TermKey.tab, shift: true),
+            onPressed: () => onKey(TerminalKey.tab, shift: true),
           ),
           // 多行输入：Enter 提交、Shift+Enter 换行。同样是软键盘按不出来的组合。
           _TerminalTextKey(
             label: '⇧↵',
             tooltip: 'Shift+Enter（换行）',
-            onPressed: () => onKey(TermKey.enter, shift: true),
+            onPressed: () => onKey(TerminalKey.enter, shift: true),
           ),
           _TerminalTextKey(
             label: '^C',
-            onPressed: () => onInput(encodeCtrlLetter('c') ?? '\x03'),
+            onPressed: () => onKey(TerminalKey.keyC, ctrl: true),
           ),
           _TerminalIconKey(
             icon: Icons.keyboard_arrow_left,
             tooltip: 'Left',
-            onPressed: () => onKey(TermKey.left),
+            onPressed: () => onKey(TerminalKey.arrowLeft),
           ),
           _TerminalIconKey(
             icon: Icons.keyboard_arrow_down,
             tooltip: 'Down',
-            onPressed: () => onKey(TermKey.down),
+            onPressed: () => onKey(TerminalKey.arrowDown),
           ),
           _TerminalIconKey(
             icon: Icons.keyboard_arrow_up,
             tooltip: 'Up',
-            onPressed: () => onKey(TermKey.up),
+            onPressed: () => onKey(TerminalKey.arrowUp),
           ),
           _TerminalIconKey(
             icon: Icons.keyboard_arrow_right,
             tooltip: 'Right',
-            onPressed: () => onKey(TermKey.right),
+            onPressed: () => onKey(TerminalKey.arrowRight),
           ),
           _TerminalTextKey(
             label: 'PgUp',
-            onPressed: () => onKey(TermKey.pageUp),
+            onPressed: () => onKey(TerminalKey.pageUp),
           ),
           _TerminalTextKey(
             label: 'PgDn',
-            onPressed: () => onKey(TermKey.pageDown),
+            onPressed: () => onKey(TerminalKey.pageDown),
           ),
         ],
       ),
@@ -579,7 +566,7 @@ class TerminalShortcutBar extends StatelessWidget {
 }
 
 typedef TerminalKeyHandler =
-    void Function(TermKey key, {bool shift, bool alt, bool ctrl});
+    void Function(TerminalKey key, {bool shift, bool alt, bool ctrl});
 
 class _TerminalTextKey extends StatelessWidget {
   const _TerminalTextKey({

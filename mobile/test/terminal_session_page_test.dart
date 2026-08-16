@@ -461,13 +461,11 @@ void main() {
   testWidgets('terminal shortcut bar emits PTY control sequences', (
     tester,
   ) async {
-    final inputs = <String>[];
     final keys = <String>[];
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: TerminalShortcutBar(
-            onInput: inputs.add,
             onKey: (key, {shift = false, alt = false, ctrl = false}) =>
                 keys.add('$key shift=$shift alt=$alt ctrl=$ctrl'),
           ),
@@ -479,11 +477,11 @@ void main() {
     await tester.tap(find.text('^C'));
     await tester.tap(find.byIcon(Icons.keyboard_arrow_up));
 
-    // ^C 没有对应具名键，仍走字面量；其余交给页面按终端模式编码。
-    expect(inputs, ['\x03']);
+    // 每个键都只报按了什么，编码由终端按其当前模式决定。
     expect(keys, [
-      'TermKey.escape shift=false alt=false ctrl=false',
-      'TermKey.up shift=false alt=false ctrl=false',
+      'TerminalKey.escape shift=false alt=false ctrl=false',
+      'TerminalKey.keyC shift=false alt=false ctrl=true',
+      'TerminalKey.arrowUp shift=false alt=false ctrl=false',
     ]);
     expect(tester.takeException(), isNull);
   });
@@ -496,7 +494,6 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: TerminalShortcutBar(
-            onInput: (_) {},
             onKey: (key, {shift = false, alt = false, ctrl = false}) =>
                 keys.add('$key shift=$shift'),
           ),
@@ -509,8 +506,8 @@ void main() {
     await tester.tap(find.text('⇧↵'));
 
     expect(keys, [
-      'TermKey.tab shift=true',
-      'TermKey.enter shift=true',
+      'TerminalKey.tab shift=true',
+      'TerminalKey.enter shift=true',
     ]);
     expect(tester.takeException(), isNull);
   });
@@ -561,6 +558,10 @@ testWidgets(
 
       await tester.tap(find.text('⇧↵'));
       expect(stream.sentInput.last, '\x1b[13;2u');
+
+      // ^C 现在也走同一条路。kitty 开着也不能变成 CSI u——readline 读的是 0x03。
+      await tester.tap(find.text('^C'));
+      expect(stream.sentInput.last, '\x03');
 
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
