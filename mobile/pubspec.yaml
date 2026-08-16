@@ -47,13 +47,14 @@ dependencies:
   # Fork of xterm 4.0.0 carrying fixes upstream has not taken: buffer lines
   # detached by a scroll region, a reflow reading through a stale ring
   # rotation, mouse wheel ticks reported as a modified click, kitty keyboard
-  # protocol support, and the arrow keys following DECCKM. Upstream has not
-  # merged a pull request since February 2024. Pinned by commit; see
+  # protocol support, the arrow keys following DECCKM, and the software
+  # keyboard's return key arriving twice. Upstream has not merged a pull
+  # request since February 2024. Pinned by commit; see
   # https://github.com/smelt-ai/xterm.dart/tree/smelt
   xterm:
     git:
       url: https://github.com/smelt-ai/xterm.dart.git
-      ref: 03eeb2732d519bde13262e078da7d79759a2046e
+      ref: 9f9fef10cf5896437bbe155977728576504bc596
   # 版本必须与 crates/smelt-mobile 里 pin 的 flutter_rust_bridge 完全一致，
   # 否则生成的绑定与运行时对不上，表现为启动即崩。
   flutter_rust_bridge: 2.12.0
