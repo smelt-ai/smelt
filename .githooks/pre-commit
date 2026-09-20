@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -e
+
+echo "🔍 [Pre-commit] Checking code formatting..."
+cargo fmt --check || {
+    echo "❌ Code format check failed! Run 'make fmt' to format."
+    exit 1
+}
+
+# 不传 -D warnings：存量 style 警告（redundant_clone 等）尚未清完。
+# 正确性闸门在 workspace.lints 里 deny（dbg_macro / todo），那些会让 clippy 失败。
+echo "🔍 [Pre-commit] Running Clippy..."
+cargo clippy --workspace --all-targets || {
+    echo "❌ Clippy check failed!"
+    exit 1
+}
+
+echo "✅ [Pre-commit] Checks passed!"
