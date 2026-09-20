@@ -1,0 +1,121 @@
+{
+  "comment": [
+    "各 agent 的 skills 目录能力表。改这里就能增删 agent，不用改代码。",
+    "home        —— 判断「这台机器在不在用它」的配置根，只有它存在才自动打兼容链接。",
+    "user_dir / project_dir —— 它自有的 skills 目录；null 表示它压根没有自己的目录，",
+    "              只认 .agents/skills（Codex、Grok 就是这样），此时绝不能给它建目录。",
+    "reads_agents_dir —— 它会不会自己读 .agents/skills。可以写 true/false，",
+    "              也可以按作用范围分开写 { \"user\": bool, \"project\": bool }：",
+    "              Antigravity 项目级读 .agents/skills，用户级只读 ~/.gemini/config/skills。",
+    "拿不准时填 false（多一条软链是安全的，漏了则 skill 静默不生效）。",
+    "用户可以用 ~/.smelt/skills-agents.json 整体覆盖这张表。",
+    "证据见 DESIGN.md 附录。"
+  ],
+  "agents": [
+    {
+      "label": "Claude Code",
+      "home": ".claude",
+      "user_dir": ".claude/skills",
+      "project_dir": ".claude/skills",
+      "reads_agents_dir": false
+    },
+    {
+      "label": "Codex",
+      "home": ".codex",
+      "user_dir": null,
+      "project_dir": null,
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Copilot",
+      "home": ".copilot",
+      "user_dir": ".copilot/skills",
+      "project_dir": ".github/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Cursor",
+      "home": ".cursor",
+      "user_dir": ".cursor/skills",
+      "project_dir": ".cursor/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Gemini CLI",
+      "home": ".gemini",
+      "user_dir": ".gemini/skills",
+      "project_dir": ".gemini/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Grok",
+      "home": ".grok",
+      "user_dir": null,
+      "project_dir": null,
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Antigravity",
+      "home": ".gemini/config",
+      "user_dir": ".gemini/config/skills",
+      "project_dir": null,
+      "reads_agents_dir": { "user": false, "project": true }
+    },
+    {
+      "label": "Kiro",
+      "home": ".kiro",
+      "user_dir": ".kiro/skills",
+      "project_dir": ".kiro/skills",
+      "reads_agents_dir": false
+    },
+    {
+      "label": "OpenCode",
+      "home": ".config/opencode",
+      "user_dir": ".config/opencode/skills",
+      "project_dir": ".opencode/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Amp",
+      "home": ".config/amp",
+      "user_dir": ".config/amp/skills",
+      "project_dir": null,
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Qwen Code",
+      "home": ".qwen",
+      "user_dir": ".qwen/skills",
+      "project_dir": ".qwen/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Cline",
+      "home": ".cline",
+      "user_dir": ".cline/skills",
+      "project_dir": ".cline/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Roo Code",
+      "home": ".roo",
+      "user_dir": ".roo/skills",
+      "project_dir": ".roo/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Windsurf",
+      "home": ".codeium",
+      "user_dir": ".codeium/windsurf/skills",
+      "project_dir": ".windsurf/skills",
+      "reads_agents_dir": true
+    },
+    {
+      "label": "Trae",
+      "home": ".trae",
+      "user_dir": ".trae/skills",
+      "project_dir": ".trae/skills",
+      "reads_agents_dir": true
+    }
+  ]
+}

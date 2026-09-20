@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>浏览器</title>
+<link rel="stylesheet" href="./browser.css">
+
+<header>
+  <div class="nav">
+    <button id="back" title="后退" disabled>‹</button>
+    <button id="forward" title="前进" disabled>›</button>
+    <button id="reload" title="重新加载">⟳</button>
+  </div>
+  <form id="omnibox">
+    <input id="url" type="text" placeholder="输入网址" spellcheck="false" autocomplete="off">
+  </form>
+  <button id="star" title="收藏">☆</button>
+</header>
+
+<nav id="bookmarks" hidden></nav>
+
+<main>
+  <!-- 网页由宿主的内容视图渲染，不是 iframe：iframe 会被 X-Frame-Options
+       挡掉，而内容视图就是浏览器本身。这里只留出它要占的位置。 -->
+  <div id="viewport"></div>
+
+  <section id="start">
+    <h1>浏览器插件</h1>
+    <p class="lede">这一整块由插件包内的网页渲染，宿主只负责摆放它。</p>
+
+    <div class="cols">
+      <div>
+        <h2>书签</h2>
+        <ul id="bookmark-list"><li class="empty">还没有书签</li></ul>
+      </div>
+      <div>
+        <h2>最近访问 <button id="clear-history" class="link">清空</button></h2>
+        <ul id="history-list"><li class="empty">还没有记录</li></ul>
+      </div>
+    </div>
+
+    <footer id="meta"></footer>
+  </section>
+
+
+</main>
+
+<script src="./browser.js"></script>

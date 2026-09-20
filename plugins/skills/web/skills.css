@@ -1,0 +1,157 @@
+/* 颜色全部取宿主注入的 --smelt-* 变量，面板才不会看起来像另一个应用。
+   回退值只在变量缺失时生效（例如插件被更老的宿主加载）。 */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--smelt-bg, #fff);
+  color: var(--smelt-fg, #111);
+  font: 12px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif;
+}
+
+header {
+  flex: none;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--smelt-hairline, #e5e5e5);
+}
+header .title { font-size: 11px; font-weight: 600; color: var(--smelt-muted, #888); }
+header .count { font-size: 10px; color: var(--smelt-muted, #999); }
+header .spacer { flex: 1; }
+
+button.link {
+  border: 0; background: transparent; padding: 0 2px;
+  color: var(--smelt-muted, #888); font: inherit; font-size: 11px;
+  cursor: pointer;
+}
+button.link:hover { color: var(--smelt-accent, #06f); }
+/* 刷新按钮在「扫描中／已刷新」两态下会短暂禁用，别让它看起来还能点。 */
+button.link:disabled { cursor: default; opacity: 0.7; }
+button.link:disabled:hover { color: var(--smelt-muted, #888); }
+button.link.accent { color: var(--smelt-accent, #06f); font-weight: 600; }
+button.link.danger:hover { color: #e5484d; }
+button.link.warn { color: #d9a441; }
+
+main {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+.empty { color: var(--smelt-muted, #999); text-align: center; margin: 32px 0; }
+.empty code {
+  display: block; margin-top: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.group {
+  padding: 6px 4px 2px;
+  font-size: 10px; font-weight: 600;
+  color: var(--smelt-muted, #999);
+}
+
+.row { padding: 6px 8px; border-radius: 6px; }
+.row:hover { background: var(--smelt-raised, #f4f4f4); }
+.row .head { display: flex; align-items: center; gap: 6px; }
+.row .dot { flex: none; width: 6px; height: 6px; border-radius: 2px; }
+.row .dot.project { background: var(--smelt-accent, #06f); }
+.row .dot.user { background: #3b82f6; }
+.row .name {
+  flex: 1; min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row .desc {
+  margin: 4px 0 0;
+  font-size: 10px; line-height: 14px;
+  max-height: 28px; overflow: hidden;
+  color: var(--smelt-muted, #888);
+}
+/* 操作条只在悬停时出现：静态列表里不摆一排随时可点的破坏性按钮。 */
+.row .actions { flex: none; display: flex; gap: 2px; opacity: 0; }
+.row:hover .actions, .row:focus-within .actions { opacity: 1; }
+
+.banner {
+  display: flex; align-items: center; gap: 8px;
+  margin: 4px 0 6px; padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(217, 164, 65, .12);
+  color: var(--smelt-muted, #888);
+  font-size: 10px;
+}
+.banner span { flex: 1; min-width: 0; }
+
+/* 作用范围只用一枚 chip 表达；坏掉的状态才变色，正常态不抢注意力。 */
+.chip {
+  display: inline-block; margin-top: 4px;
+  padding: 0 5px; border-radius: 3px;
+  border: 1px solid var(--smelt-hairline, #ddd);
+  font-size: 9px; color: var(--smelt-muted, #999);
+}
+.chip.warn { border-color: rgba(217, 164, 65, .5); color: #d9a441; }
+.chip.bad { border-color: rgba(229, 72, 77, .5); color: #e5484d; }
+
+#overlay {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  background: rgba(0, 0, 0, .35);
+}
+/* 必须显式写，不能只靠 HTML 的 hidden 属性：hidden 是浏览器默认样式表里的
+   [hidden] { display: none }，而作者样式表的普通声明一律优先于默认样式表，
+   上面那条 display: grid 会把它整个盖掉——遮罩于是从加载起就一直显示，
+   里面是空的 #dialog（只剩 padding 的一根扁条）。 */
+#overlay[hidden] { display: none; }
+#dialog {
+  width: min(300px, calc(100% - 32px));
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--smelt-raised, #fff);
+  border: 1px solid var(--smelt-hairline, #ddd);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .28);
+}
+#dialog h2 { margin: 0 0 8px; font-size: 12px; }
+#dialog p { margin: 0 0 10px; color: var(--smelt-muted, #888); font-size: 11px; }
+#dialog label { display: block; margin-bottom: 8px; font-size: 11px; }
+#dialog input[type=text], #dialog textarea {
+  width: 100%; margin-top: 3px; padding: 5px 7px;
+  border: 1px solid var(--smelt-hairline, #ddd); border-radius: 5px;
+  background: var(--smelt-bg, #fff); color: inherit; font: inherit; font-size: 11px;
+}
+#dialog textarea { resize: vertical; min-height: 46px; }
+#dialog .choice { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 11px; }
+#dialog .error { color: #e5484d; }
+#dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+#dialog .buttons button {
+  padding: 5px 12px; border: 0; border-radius: 5px;
+  font: inherit; font-size: 11px; cursor: pointer;
+  background: transparent; color: var(--smelt-muted, #888);
+}
+#dialog .buttons button.primary {
+  background: var(--smelt-accent, #06f); color: var(--smelt-on-accent, #fff);
+}
+#dialog .buttons button.destructive { background: #e5484d; color: #fff; }
+
+#dialog .section { margin: 10px 0 6px; font-size: 10px; font-weight: 600; color: var(--smelt-muted, #999); }
+#dialog .hint { color: var(--smelt-muted, #999); font-size: 10px; }
+#dialog .agent-boxes { margin: 0 0 4px 18px; }
+#dialog .choice.copy { align-items: flex-start; }
+#dialog .choice.copy span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+#dialog .choice.copy code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; overflow-wrap: anywhere;
+}
+#dialog .choice.copy .chip { margin-top: 0; align-self: flex-start; }
+/* 计划预览：应用前把将要发生的文件操作原样摆出来。 */
+#dialog .preview { max-height: 120px; overflow-y: auto; }
+#dialog .step {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; line-height: 15px;
+  color: var(--smelt-muted, #888);
+  overflow-wrap: anywhere;
+}

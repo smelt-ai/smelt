@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>技能</title>
+<link rel="stylesheet" href="./skills.css">
+
+<header>
+  <span class="title">技能</span>
+  <span id="count" class="count"></span>
+  <span class="spacer"></span>
+  <button id="refresh" class="link" title="重新扫描磁盘">刷新</button>
+  <button id="new" class="link">新建</button>
+  <button id="import" class="link accent">导入</button>
+</header>
+
+<main id="list"><p class="empty">加载中…</p></main>
+
+<!-- 弹层只有一个容器：同一时刻最多问用户一件事。 -->
+<div id="overlay" hidden>
+  <div id="dialog" role="dialog" aria-modal="true"></div>
+</div>
+
+<script src="./skills.js"></script>

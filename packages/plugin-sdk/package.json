@@ -1,0 +1,47 @@
+{
+  "name": "@smelt-ai/plugin-sdk",
+  "version": "0.1.0",
+  "description": "Contracts for trusted Bun plugins running in Smelt's shared host",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smelt-ai/smelt.git",
+    "directory": "packages/plugin-sdk"
+  },
+  "homepage": "https://github.com/smelt-ai/smelt/tree/main/packages/plugin-sdk#readme",
+  "keywords": [
+    "smelt",
+    "plugin",
+    "bun"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/**/*.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "if [ -d tests ]; then bun test tests; else echo 'No standalone SDK tests'; fi",
+    "prepublishOnly": "bun=$(../../scripts/bun.sh) || { echo '✗ 找不到 bun，发布前无法验证 SDK。跑一次 GUI 会自动装受管 bun，或自行安装到 PATH'; exit 1; }; \"$bun\" run typecheck && \"$bun\" run test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "dependencies": {
+    "@types/bun": "^1.4.0"
+  }
+}

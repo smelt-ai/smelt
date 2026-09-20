@@ -1,0 +1,16 @@
+[package]
+name = "smelt-plugin-host"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../smelt-plugin-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+sha2 = "0.10"
+clap.workspace = true

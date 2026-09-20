@@ -1,0 +1,120 @@
+/* 颜色全部取宿主注入的 --smelt-* 变量，面板才不会看起来像另一个应用。
+   回退值只在变量缺失时生效（例如插件被更老的宿主加载）。 */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--smelt-bg, #fff);
+  color: var(--smelt-fg, #111);
+  font: 13px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif;
+}
+
+header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--smelt-hairline, #e5e5e5);
+}
+.nav { display: flex; gap: 2px; }
+header button {
+  flex: none;
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 6px;
+  background: transparent; color: var(--smelt-fg, #111);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+header button:hover:not(:disabled) { background: var(--smelt-raised, #f0f0f0); }
+header button:disabled { opacity: .3; cursor: default; }
+#star.on { color: var(--smelt-accent, #06f); }
+
+#omnibox { flex: 1; min-width: 0; }
+#url {
+  width: 100%; height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--smelt-hairline, #ddd);
+  border-radius: 13px;
+  background: var(--smelt-raised, #f6f6f6);
+  color: inherit; font: inherit;
+}
+#url:focus { outline: none; border-color: var(--smelt-accent, #06f); }
+
+nav#bookmarks {
+  flex: none;
+  display: flex; gap: 4px;
+  padding: 5px 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--smelt-hairline, #e5e5e5);
+}
+/* 同 skills 面板：display: flex 会盖掉默认样式表的 [hidden]{display:none}，
+   不显式写这条的话，没有书签时仍会留下一条带下边框的空栏。 */
+nav#bookmarks[hidden] { display: none; }
+nav#bookmarks button {
+  flex: none;
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 3px 9px;
+  border: 0; border-radius: 5px;
+  background: var(--smelt-raised, #f0f0f0); color: inherit;
+  font: inherit; font-size: 11px; cursor: pointer;
+}
+nav#bookmarks button:hover { background: var(--smelt-accent, #06f); color: var(--smelt-on-accent, #fff); }
+
+main { flex: 1; min-height: 0; position: relative; }
+/* 宿主的内容视图会盖在这块区域上；这里只负责量出它的位置。 */
+#viewport { position: absolute; inset: 0; }
+
+section {
+  position: absolute; inset: 0;
+  overflow: auto;
+  padding: 22px 20px;
+  background: var(--smelt-bg, #fff);
+}
+h1 { font-size: 16px; margin: 0 0 4px; }
+h2 {
+  font-size: 11px; margin: 0 0 8px;
+  color: var(--smelt-muted, #888); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.lede { margin: 0 0 20px; color: var(--smelt-muted, #888); }
+.cols { display: grid; gap: 22px; }
+ul { list-style: none; margin: 0; padding: 0; }
+li { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; }
+li.empty { color: var(--smelt-muted, #999); font-size: 12px; }
+li a {
+  color: inherit; text-decoration: none; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+li a:hover { color: var(--smelt-accent, #06f); text-decoration: underline; }
+li .host { color: var(--smelt-muted, #999); font-size: 11px; flex: none; }
+li .del {
+  margin-left: auto; flex: none;
+  border: 0; background: transparent; color: var(--smelt-muted, #999);
+  cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px;
+}
+li .del:hover { color: var(--smelt-fg, #111); }
+button.link {
+  border: 0; background: transparent; padding: 0;
+  color: var(--smelt-muted, #888); font: inherit; font-size: 10px;
+  cursor: pointer; text-transform: none; letter-spacing: 0;
+}
+button.link:hover { color: var(--smelt-accent, #06f); }
+#open-external {
+  padding: 6px 14px; border: 0; border-radius: 6px;
+  background: var(--smelt-accent, #06f); color: var(--smelt-on-accent, #fff);
+  font: inherit; cursor: pointer;
+}
+footer {
+  margin-top: 26px; padding-top: 12px;
+  border-top: 1px solid var(--smelt-hairline, #eee);
+  color: var(--smelt-muted, #999); font-size: 11px;
+}
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--smelt-raised, #f0f0f0);
+  padding: 1px 4px; border-radius: 3px;
+}

@@ -1,0 +1,10 @@
+{
+  "contributions": [
+    {
+      "type": "tool_panel",
+      "id": "skills",
+      "title": "技能",
+      "entry": "web/index.html"
+    }
+  ]
+}
