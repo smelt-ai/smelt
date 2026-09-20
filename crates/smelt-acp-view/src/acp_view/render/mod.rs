@@ -426,6 +426,18 @@ impl AcpView {
                                 .child(Icon::new(IconName::File).size(px(12.)))
                                 .child(label)
                         }))
+                        .children((self.agent == ConversationAgentKind::Pi).then(|| {
+                            let count = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
+                                &self.launch,
+                                self.cwd.as_deref().map(std::path::Path::new),
+                            )
+                            .len();
+                            div().text_xs().text_color(muted).child(if count == 0 {
+                                "未加载技能".to_string()
+                            } else {
+                                format!("已加载 {count} 个技能")
+                            })
+                        }))
                         .child(prompt_chips),
                 )
         });

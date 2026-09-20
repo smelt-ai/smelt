@@ -12,10 +12,10 @@ use super::{
     consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
     conversation_phase_label, current_turn_has_agent_output, did_recover_from_ended,
     diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
-    external_clipboard_image_paths, format_attached_paths, is_active_permission_selection,
-    is_dispatch_in_flight, is_fresh_conversation_start, is_match_count_line,
-    is_new_conversation_command, is_stale_blank_history_id, loaded_entries_end,
-    markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
+    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
+    is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
+    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
+    loaded_entries_end, markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
     merge_snapshot_entries, model_label_with_provider, move_queue_item_to_front,
     native_queue_from_snapshot, native_queue_item_kind_label, next_snapshot_prompt_gate,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
@@ -23,11 +23,11 @@ use super::{
     process_group_header_label, process_group_label, progress_has_details, progress_summary,
     provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
     resolve_restart_launch, restorable_gui_prompt, search_summary_text, selected_provider_group,
-    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_replace_session_title,
     should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
-    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, usage_percent,
-    usage_warn_color,
+    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
+    usage_percent, usage_warn_color,
 };
 use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -356,10 +356,10 @@ fn next_turn_hint_only_when_pending_and_turn_is_active() {
 fn native_queue_copy_names_current_round_and_after_round() {
     assert_eq!(
         composer_native_queue_shortcut_hint(),
-        "↩ 插入当前回合 · ⌥↩ 回合后发送"
+        "Enter 插入当前回合 · ⌥Enter 回合后发送"
     );
-    assert_eq!(native_queue_item_kind_label(false), "插入当前回合");
-    assert_eq!(native_queue_item_kind_label(true), "回合后发送");
+    assert_eq!(native_queue_item_kind_label(false), "当前回合");
+    assert_eq!(native_queue_item_kind_label(true), "下一回合");
 }
 
 #[test]
@@ -1915,6 +1915,30 @@ fn completed_tool(id: &str, kind: ToolKind, title: &str) -> AcpEntry {
         output: Vec::new(),
         children: Vec::new(),
     }
+}
+
+#[test]
+fn session_trajectory_events_follow_dsh_lanes() {
+    let entries = vec![
+        AcpEntry::User("你好".into()),
+        completed_tool("s1", ToolKind::Search, "icon"),
+        completed_tool("done", ToolKind::Other, "task_complete"),
+        AcpEntry::Assistant {
+            text: "好了".into(),
+            thought: false,
+        },
+    ];
+    let events = session_trajectory_events(&entries, Some("skills: demo".into()));
+    assert_eq!(events[0].lane, super::TrajectoryLane::Context);
+    assert_eq!(events[1].lane, super::TrajectoryLane::User);
+    assert_eq!(events[1].text, "你好");
+    assert_eq!(events[2].lane, super::TrajectoryLane::Tool);
+    assert_eq!(events[2].text, "搜索 icon");
+    assert_eq!(events[3].lane, super::TrajectoryLane::Assistant);
+    assert_eq!(events[1].turn, 1);
+    assert_eq!(trajectory_counts(&entries), (1, 1));
+    assert_eq!(filter_trajectory_events(&events, "icon").len(), 1);
+    assert_eq!(filter_trajectory_events(&events, "turn 1").len(), 3);
 }
 
 #[test]

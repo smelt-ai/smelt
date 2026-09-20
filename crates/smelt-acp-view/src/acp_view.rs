@@ -12,8 +12,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window,
-    canvas, div, list as virtual_list, point, px,
+    ParentElement, PathBuilder, Render, ScrollHandle, StatefulInteractiveElement, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
+    list as virtual_list, point, px, size,
 };
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -59,6 +60,7 @@ pub use smelt_core::acp_chat::{
 mod render;
 #[cfg(test)]
 mod tests;
+mod trajectory;
 
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
 const AUTO_RECONNECT_ATTEMPTS: u32 = 6;
@@ -431,16 +433,16 @@ fn composer_next_turn_notice(names: &[String], turn_active: bool) -> Option<Stri
     }
 }
 
-/// 运行中原生队列的快捷键说明：回车插当前回合，⌥↩ 等本轮结束再发。
+/// 运行中输入框的快捷键说明：回车插当前回合，⌥Enter 等本轮结束再发。
 fn composer_native_queue_shortcut_hint() -> &'static str {
-    "↩ 插入当前回合 · ⌥↩ 回合后发送"
+    "Enter 插入当前回合 · ⌥Enter 回合后发送"
 }
 
 fn native_queue_item_kind_label(is_follow_up: bool) -> &'static str {
     if is_follow_up {
-        "回合后发送"
+        "下一回合"
     } else {
-        "插入当前回合"
+        "当前回合"
     }
 }
 
@@ -1315,6 +1317,8 @@ pub struct AcpView {
     usage_breakdown: Option<smelt_core::acp_conn::ContextUsageBreakdown>,
     /// 底栏用量圆环点开的 Context Usage 面板。只属于本地浏览状态。
     usage_popover_open: bool,
+    /// 独立 Trajectory 窗口。已打开则前置，不重复开。
+    trajectory_window: Option<WindowHandle<trajectory::TrajectoryWindow>>,
     supports_compaction: bool,
     supports_native_queue: bool,
     /// 驱动是否支持回退到历史消息重发（Pi 的 fork）。用户气泡上的
@@ -1685,6 +1689,7 @@ impl AcpView {
             usage_cost: None,
             usage_breakdown: None,
             usage_popover_open: false,
+            trajectory_window: None,
             supports_compaction: false,
             supports_native_queue: false,
             supports_rewind: false,
@@ -4617,6 +4622,129 @@ fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
         ToolKind::Image => format!("处理了 {}", compact_path_leaf(title)),
         _ => title.to_string(),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrajectoryLane {
+    User,
+    Assistant,
+    Tool,
+    Context,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectoryEvent {
+    seq: usize,
+    lane: TrajectoryLane,
+    /// 1-based 回合；0 表示第一轮用户消息之前（CONTEXT）。
+    turn: usize,
+    text: String,
+}
+
+/// 整场会话的轨迹事件，给轨迹窗口用。参考 DSH Trajectory 的 USER / CONTEXT / ASSISTANT / TOOL。
+fn session_trajectory_events(
+    entries: &[AcpEntry],
+    context_note: Option<String>,
+) -> Vec<TrajectoryEvent> {
+    let mut events = Vec::new();
+    let mut turn = 0usize;
+    if let Some(note) = context_note.filter(|note| !note.is_empty()) {
+        events.push(TrajectoryEvent {
+            seq: events.len(),
+            lane: TrajectoryLane::Context,
+            turn: 0,
+            text: note,
+        });
+    }
+    for entry in entries {
+        match entry {
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => {
+                turn += 1;
+                events.push(TrajectoryEvent {
+                    seq: events.len(),
+                    lane: TrajectoryLane::User,
+                    turn,
+                    text: text.clone(),
+                });
+            }
+            AcpEntry::Assistant { text, thought } if !thought && !text.trim().is_empty() => {
+                events.push(TrajectoryEvent {
+                    seq: events.len(),
+                    lane: TrajectoryLane::Assistant,
+                    turn: turn.max(1),
+                    text: text.clone(),
+                });
+            }
+            AcpEntry::ToolCall { kind, title, .. } if !is_task_completion_tool_title(title) => {
+                events.push(TrajectoryEvent {
+                    seq: events.len(),
+                    lane: TrajectoryLane::Tool,
+                    turn: turn.max(1),
+                    text: compact_tool_headline(*kind, title),
+                });
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
+fn filter_trajectory_events<'a>(
+    events: &'a [TrajectoryEvent],
+    query: &str,
+) -> Vec<&'a TrajectoryEvent> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return events.iter().collect();
+    }
+    events
+        .iter()
+        .filter(|event| {
+            let haystack = format!(
+                "{} {} {}",
+                trajectory_lane_label(event.lane),
+                event.text,
+                if event.turn == 0 {
+                    String::new()
+                } else {
+                    format!("turn {}", event.turn)
+                }
+            )
+            .to_lowercase();
+            terms.iter().all(|term| haystack.contains(term))
+        })
+        .collect()
+}
+
+fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
+    match lane {
+        TrajectoryLane::User => "USER",
+        TrajectoryLane::Assistant => "ASSISTANT",
+        TrajectoryLane::Tool => "TOOL",
+        TrajectoryLane::Context => "CONTEXT",
+    }
+}
+
+fn trajectory_lane_color(lane: TrajectoryLane) -> u32 {
+    match lane {
+        TrajectoryLane::User => ui_theme::blue(),
+        TrajectoryLane::Assistant => ui_theme::purple(),
+        TrajectoryLane::Tool => ui_theme::green(),
+        TrajectoryLane::Context => ui_theme::text_muted(),
+    }
+}
+
+fn trajectory_counts(entries: &[AcpEntry]) -> (usize, usize) {
+    let turns = entries.iter().filter(|entry| is_user_entry(entry)).count();
+    let calls = entries
+        .iter()
+        .filter(|entry| matches!(entry, AcpEntry::ToolCall { title, .. } if !is_task_completion_tool_title(title)))
+        .count();
+    (turns, calls)
 }
 
 fn compact_fetch_target(title: &str) -> String {
