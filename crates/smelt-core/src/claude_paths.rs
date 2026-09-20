@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// （已经拿 codux 的实现 `project_path.replace('/', '-').replace('.', '-')` 印证过，
 /// 跟本机实测的编码目录名完全对得上）。
 pub fn project_dir(cwd: &str) -> String {
-    cwd.replace('/', "-").replace('.', "-")
+    cwd.replace(['/', '.'], "-")
 }
 
 /// `override_dir`：多 workspace 场景下某个 profile 显式指定的 `CLAUDE_CONFIG_DIR`

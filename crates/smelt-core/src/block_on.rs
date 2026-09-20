@@ -29,3 +29,19 @@ where
         anyhow::anyhow!("后台任务崩溃（已拦截）：{msg}")
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::block_on_tokio;
+
+    #[test]
+    fn provides_tokio_timer_without_an_outer_runtime() {
+        let value = block_on_tokio(async {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            42
+        })
+        .expect("temporary Tokio runtime should drive the future");
+
+        assert_eq!(value, 42);
+    }
+}

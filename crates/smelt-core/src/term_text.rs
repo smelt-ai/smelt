@@ -27,7 +27,7 @@ pub fn text_lines<T: EventListener>(term: &Term<T>) -> Vec<String> {
             }
         }
         count += 1;
-        if count % cols == 0 {
+        if count.is_multiple_of(cols) {
             lines.push(std::mem::take(&mut cur).trim_end().to_string());
         }
     }

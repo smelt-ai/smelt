@@ -1,5 +1,5 @@
 //! Agent 状态变化产生的“需要告知用户的事”。状态描述当前事实，关注事件描述一次性
-//! 消息；两者分开后，铃铛、toast、系统通知和角标只需选择投递渠道，不再各自猜 phase。
+//! 消息；两者分开后，铃铛、系统通知和角标只需选择投递渠道，不再各自猜 phase。
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -22,19 +22,17 @@ pub enum AttentionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryChannel {
     Suppress,
-    Toast,
     System,
 }
 
 pub fn delivery_channel(
     enabled: bool,
-    window_active: bool,
+    app_active: bool,
+    notification_window_active: bool,
     is_current_view: bool,
 ) -> DeliveryChannel {
-    if !enabled || (window_active && is_current_view) {
+    if !enabled || (app_active && notification_window_active && is_current_view) {
         DeliveryChannel::Suppress
-    } else if window_active {
-        DeliveryChannel::Toast
     } else {
         DeliveryChannel::System
     }
@@ -73,6 +71,15 @@ impl AttentionStore {
     /// 记录未读并在需要时排入投递队列。同一会话、类型和正文 60 秒内只投递一次，
     /// 但未读始终更新为最新内容。
     pub fn publish(&mut self, item: AttentionItem, now: Instant) -> bool {
+        self.publish_from(item, now)
+    }
+
+    /// 记录终端产生的信息性 OSC/BEL 通知。它不包含 agent phase 或完成推断。
+    pub fn publish_terminal_notification(&mut self, item: AttentionItem, now: Instant) -> bool {
+        self.publish_from(item, now)
+    }
+
+    fn publish_from(&mut self, item: AttentionItem, now: Instant) -> bool {
         let should_deliver =
             !self
                 .last_delivery
@@ -102,23 +109,47 @@ impl AttentionStore {
         should_deliver
     }
 
+    /// 建立冷启动时已经存在的行动项事实。它会参与角标，但视为用户在上次运行中
+    /// 已经见过，因此既不记为未读，也不进入本次启动的系统投递队列。
+    fn seed_read_action(&mut self, item: AttentionItem) {
+        debug_assert!(item.kind.requires_action());
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.current.insert(
+            item.session_id.clone(),
+            AttentionRecord {
+                item,
+                read: true,
+                sequence,
+            },
+        );
+    }
+
     pub fn mark_read(&mut self, session_id: &str) -> Option<AttentionItem> {
         let record = self.current.get_mut(session_id)?;
+        if record.read {
+            return None;
+        }
         record.read = true;
         Some(record.item.clone())
     }
 
-    /// 当前 phase 已离开等待/失败状态，行动项才算真正解决。完成、响铃等非行动项
-    /// 在已读后也可用同一路径清理。
+    /// 当前 phase 已离开等待/失败/完成状态，旧关注周期才算真正结束。这里同时
+    /// 清掉投递指纹，让同一会话下一轮即使在 60 秒内产生相同文案也能正常提醒；
+    /// 单纯 `mark_read` 不会重置指纹，仍可压住同一状态的重复广播。
     pub fn resolve(&mut self, session_id: &str) -> Option<AttentionItem> {
-        self.current.remove(session_id).map(|record| record.item)
+        let item = self.current.remove(session_id).map(|record| record.item);
+        self.last_delivery.remove(session_id);
+        item
     }
 
-    pub fn remove_session(&mut self, session_id: &str) {
-        self.current.remove(session_id);
-        self.last_delivery.remove(session_id);
+    pub fn remove_session(&mut self, session_id: &str) -> bool {
+        let removed_current = self.current.remove(session_id).is_some();
+        let removed_fingerprint = self.last_delivery.remove(session_id).is_some();
+        let pending_before = self.pending_delivery.len();
         self.pending_delivery
             .retain(|item| item.session_id != session_id);
+        removed_current || removed_fingerprint || self.pending_delivery.len() != pending_before
     }
 
     pub fn unread(&self, session_id: &str) -> Option<&AttentionItem> {
@@ -145,6 +176,15 @@ impl AttentionStore {
         self.current.values().filter(|record| !record.read).count()
     }
 
+    /// Dock / 菜单栏数字：未读事件和仍未解决的行动项取并集，每个会话最多计 1。
+    /// 因而普通完成在看过后消失，审批/输入/失败即使看过也会保留到 daemon 确认继续。
+    pub fn badge_count(&self) -> usize {
+        self.current
+            .values()
+            .filter(|record| !record.read || record.item.kind.requires_action())
+            .count()
+    }
+
     pub fn unresolved_action_count(&self) -> usize {
         self.current
             .values()
@@ -158,18 +198,30 @@ impl AttentionStore {
             .is_some_and(|record| record.item.kind.requires_action())
     }
 
+    pub fn has_pending_deliveries(&self) -> bool {
+        !self.pending_delivery.is_empty()
+    }
+
     pub fn drain_deliveries(&mut self) -> Vec<AttentionItem> {
         std::mem::take(&mut self.pending_delivery)
     }
 }
 
-/// 仅在进入一个新的可通知 phase 时产生事件。未启用结构化事件的会话继续交给
-/// OSC/BEL fallback，避免同一回合从两条信源各投递一次。
+/// 仅在进入一个新的、由回合级结构化事件证明的可通知 phase 时产生事件。
 pub fn item_for_daemon_transition(
-    previous_phase: Option<DaemonPhase>,
+    previous: Option<&DaemonSessionState>,
     state: &DaemonSessionState,
 ) -> Option<AttentionItem> {
-    if !state.structured_events || previous_phase == Some(state.phase) {
+    if !state.has_runtime() || !state.phase_is_authoritative() {
+        return None;
+    }
+    if !state.structured_events
+        || previous.is_some_and(|previous| {
+            previous.phase == state.phase
+                && previous.structured_events
+                && previous.phase_is_authoritative()
+        })
+    {
         return None;
     }
 
@@ -180,6 +232,7 @@ pub fn item_for_daemon_transition(
         DaemonPhase::Failed => AttentionKind::Failure,
         DaemonPhase::Thinking
         | DaemonPhase::ExecutingTool
+        | DaemonPhase::Connecting
         | DaemonPhase::Idle
         | DaemonPhase::Dead => return None,
     };
@@ -196,23 +249,47 @@ pub fn item_for_daemon_transition(
     })
 }
 
+/// 用首次 daemon 快照建立 attention 基线。冷启动前就已经完成或失败的回合不能被
+/// 当成刚发生的边沿重新投递；其中审批、等待输入和失败仍是当前未解决事实，所以静默
+/// 保留为已读行动项，继续显示角标直到 daemon 状态离开该 phase。
+pub fn apply_daemon_baseline(
+    store: &mut AttentionStore,
+    state: &DaemonSessionState,
+) -> Option<AttentionItem> {
+    let item = item_for_daemon_transition(None, state)?;
+    if !item.kind.requires_action() {
+        return None;
+    }
+    store.seed_read_action(item.clone());
+    Some(item)
+}
+
 /// 将一次 daemon 更新完整应用到 store：可通知 phase 发布事件；结构化会话离开
 /// 等待/失败状态时解决旧行动项。调用者只负责保存最新 phase，不再复制生命周期判断。
 pub fn apply_daemon_transition(
     store: &mut AttentionStore,
-    previous_phase: Option<DaemonPhase>,
+    previous: Option<&DaemonSessionState>,
     state: &DaemonSessionState,
     now: Instant,
 ) -> Option<AttentionItem> {
-    if let Some(item) = item_for_daemon_transition(previous_phase, state) {
+    if !state.has_runtime() {
+        store.resolve(&state.id);
+        return None;
+    }
+    if !state.phase_is_authoritative() {
+        return None;
+    }
+    if let Some(item) = item_for_daemon_transition(previous, state) {
         store.publish(item.clone(), now);
         return Some(item);
     }
     if state.structured_events
+        && state.phase_is_authoritative()
         && matches!(
             state.phase,
             DaemonPhase::Thinking
                 | DaemonPhase::ExecutingTool
+                | DaemonPhase::Connecting
                 | DaemonPhase::Idle
                 | DaemonPhase::Dead
         )
@@ -227,8 +304,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AttentionItem, AttentionKind, AttentionStore, DeliveryChannel, apply_daemon_transition,
-        delivery_channel, item_for_daemon_transition,
+        AttentionItem, AttentionKind, AttentionStore, DeliveryChannel, apply_daemon_baseline,
+        apply_daemon_transition, delivery_channel, item_for_daemon_transition,
     };
     use crate::daemon_state::{DaemonPhase, DaemonSessionState};
 
@@ -237,6 +314,7 @@ mod tests {
             id: "session-12345678".into(),
             phase,
             structured_events: true,
+            turn_events: true,
             ..Default::default()
         }
     }
@@ -245,43 +323,154 @@ mod tests {
     fn transition_emits_one_typed_item() {
         let mut current = state(DaemonPhase::AwaitingApproval);
         current.pending_question = Some("允许执行？".into());
-        let item = item_for_daemon_transition(Some(DaemonPhase::ExecutingTool), &current).unwrap();
+        let previous = state(DaemonPhase::ExecutingTool);
+        let item = item_for_daemon_transition(Some(&previous), &current).unwrap();
         assert_eq!(item.kind, AttentionKind::Approval);
         assert_eq!(item.message, "⚠ 允许执行？");
         assert!(item.kind.requires_action());
-        assert!(item_for_daemon_transition(Some(current.phase), &current).is_none());
+        assert!(item_for_daemon_transition(Some(&current), &current).is_none());
+    }
+
+    #[test]
+    fn ghost_runtime_does_not_emit_stale_approval() {
+        let mut ghost = state(DaemonPhase::AwaitingApproval);
+        ghost.runtime = false;
+        ghost.pending_question = Some("允许执行？".into());
+        assert!(item_for_daemon_transition(None, &ghost).is_none());
+        let mut store = AttentionStore::default();
+        assert!(apply_daemon_transition(&mut store, None, &ghost, Instant::now()).is_none());
     }
 
     #[test]
     fn transition_maps_input_success_and_failure() {
         let mut input = state(DaemonPhase::WaitingForUser);
         input.pending_question = Some("Pick one".into());
-        let item = item_for_daemon_transition(Some(DaemonPhase::Thinking), &input).unwrap();
+        let thinking = state(DaemonPhase::Thinking);
+        let item = item_for_daemon_transition(Some(&thinking), &input).unwrap();
         assert_eq!(item.kind, AttentionKind::Input);
         assert_eq!(item.message, "💬 Pick one");
 
         let success = state(DaemonPhase::Succeeded);
-        let item = item_for_daemon_transition(Some(DaemonPhase::Thinking), &success).unwrap();
+        let item = item_for_daemon_transition(Some(&thinking), &success).unwrap();
         assert_eq!(item.kind, AttentionKind::Success);
         assert_eq!(item.message, "会话 session-");
         assert!(!item.kind.requires_action());
 
         let mut failure = state(DaemonPhase::Failed);
         failure.pending_question = Some("rate limited".into());
-        let item = item_for_daemon_transition(Some(DaemonPhase::Thinking), &failure).unwrap();
+        let item = item_for_daemon_transition(Some(&thinking), &failure).unwrap();
         assert_eq!(item.kind, AttentionKind::Failure);
         assert_eq!(item.message, "rate limited");
     }
 
     #[test]
-    fn fallback_sessions_and_non_attention_phases_do_not_emit() {
+    fn initial_snapshot_seeds_only_action_facts_without_delivery() {
+        for phase in [
+            DaemonPhase::AwaitingApproval,
+            DaemonPhase::WaitingForUser,
+            DaemonPhase::Failed,
+        ] {
+            let current = state(phase);
+            let mut store = AttentionStore::default();
+
+            let item = apply_daemon_baseline(&mut store, &current)
+                .expect("冷启动时仍应保留需要用户处理的状态事实");
+
+            assert!(item.kind.requires_action());
+            assert!(store.unread(&current.id).is_none());
+            assert!(store.has_unresolved_action(&current.id));
+            assert_eq!(store.badge_count(), 1);
+            assert!(!store.has_pending_deliveries());
+        }
+
+        let success = state(DaemonPhase::Succeeded);
+        let mut store = AttentionStore::default();
+        assert!(apply_daemon_baseline(&mut store, &success).is_none());
+        assert_eq!(store.badge_count(), 0);
+        assert!(!store.has_pending_deliveries());
+    }
+
+    #[test]
+    fn untrusted_sessions_and_non_attention_phases_do_not_emit() {
         let mut current = state(DaemonPhase::Succeeded);
         current.structured_events = false;
-        assert!(item_for_daemon_transition(Some(DaemonPhase::Thinking), &current).is_none());
+        current.turn_events = false;
+        let thinking = state(DaemonPhase::Thinking);
+        assert!(item_for_daemon_transition(Some(&thinking), &current).is_none());
 
         current.structured_events = true;
         current.phase = DaemonPhase::Thinking;
-        assert!(item_for_daemon_transition(Some(DaemonPhase::Idle), &current).is_none());
+        let idle = state(DaemonPhase::Idle);
+        assert!(item_for_daemon_transition(Some(&idle), &current).is_none());
+    }
+
+    #[test]
+    fn unproven_phase_cannot_create_or_resolve_attention() {
+        let now = Instant::now();
+        let mut previous = state(DaemonPhase::Thinking);
+        previous.turn_events = false;
+        let mut current = state(DaemonPhase::Succeeded);
+        current.turn_events = false;
+        assert!(item_for_daemon_transition(Some(&previous), &current).is_none());
+
+        let mut store = AttentionStore::default();
+        store.publish(
+            item(&current.id, AttentionKind::Approval, "允许执行？"),
+            now,
+        );
+        assert!(apply_daemon_transition(&mut store, Some(&previous), &current, now).is_none());
+        assert!(store.has_unresolved_action(&current.id));
+    }
+
+    #[test]
+    fn authoritative_success_after_an_untrusted_phase_emits_success() {
+        let mut untrusted_success = state(DaemonPhase::Succeeded);
+        untrusted_success.structured_events = false;
+        untrusted_success.turn_events = false;
+        let structured_success = state(DaemonPhase::Succeeded);
+        let mut store = AttentionStore::default();
+
+        let item = apply_daemon_transition(
+            &mut store,
+            Some(&untrusted_success),
+            &structured_success,
+            Instant::now(),
+        )
+        .expect("验证过的回合完成应产生提醒");
+
+        assert_eq!(item.kind, AttentionKind::Success);
+        assert_eq!(item.session_id, structured_success.id);
+        assert_eq!(
+            store.unread(&structured_success.id).unwrap().kind,
+            AttentionKind::Success
+        );
+        assert_eq!(store.drain_deliveries(), vec![item]);
+    }
+
+    #[test]
+    fn informational_terminal_notification_does_not_mask_structured_completion() {
+        let now = Instant::now();
+        let structured_success = state(DaemonPhase::Succeeded);
+        let mut store = AttentionStore::default();
+        store.publish_terminal_notification(
+            item(
+                &structured_success.id,
+                AttentionKind::Notice,
+                "OSC notification",
+            ),
+            now,
+        );
+        store.drain_deliveries();
+        let thinking = state(DaemonPhase::Thinking);
+        let completion = apply_daemon_transition(
+            &mut store,
+            Some(&thinking),
+            &structured_success,
+            now + Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(completion.kind, AttentionKind::Success);
+        assert_eq!(store.drain_deliveries(), vec![completion]);
     }
 
     fn item(session_id: &str, kind: AttentionKind, message: &str) -> AttentionItem {
@@ -331,9 +520,12 @@ mod tests {
         let now = Instant::now();
         let mut store = AttentionStore::default();
         store.publish(item("a", AttentionKind::Success, "done"), now);
+        assert_eq!(store.badge_count(), 1);
         assert!(store.mark_read("a").is_some());
+        assert!(store.mark_read("a").is_none());
         assert!(store.unread("a").is_none());
         assert_eq!(store.unresolved_action_count(), 0);
+        assert_eq!(store.badge_count(), 0);
 
         // 已读不重置投递去重，短时间重复事件不会再次打扰。
         assert!(!store.publish(
@@ -353,11 +545,14 @@ mod tests {
         let mut store = AttentionStore::default();
         store.publish(item("a", AttentionKind::Approval, "allow?"), now);
         assert_eq!(store.unresolved_action_count(), 1);
+        assert_eq!(store.badge_count(), 1);
         store.mark_read("a");
         assert!(store.unread("a").is_none());
         assert_eq!(store.unresolved_action_count(), 1);
+        assert_eq!(store.badge_count(), 1);
         store.resolve("a");
         assert_eq!(store.unresolved_action_count(), 0);
+        assert_eq!(store.badge_count(), 0);
     }
 
     #[test]
@@ -378,19 +573,29 @@ mod tests {
     #[test]
     fn delivery_policy_covers_focus_background_and_settings() {
         assert_eq!(
-            delivery_channel(true, true, true),
+            delivery_channel(true, true, true, true),
             DeliveryChannel::Suppress
         );
         assert_eq!(
-            delivery_channel(false, true, false),
+            delivery_channel(false, true, true, false),
             DeliveryChannel::Suppress
         );
-        assert_eq!(delivery_channel(true, true, false), DeliveryChannel::Toast);
         assert_eq!(
-            delivery_channel(true, false, false),
+            delivery_channel(true, true, true, false),
             DeliveryChannel::System
         );
-        assert_eq!(delivery_channel(true, false, true), DeliveryChannel::System);
+        assert_eq!(
+            delivery_channel(true, false, true, true),
+            DeliveryChannel::System
+        );
+        assert_eq!(
+            delivery_channel(true, true, false, true),
+            DeliveryChannel::System
+        );
+        assert_eq!(
+            delivery_channel(true, true, false, false),
+            DeliveryChannel::System
+        );
     }
 
     #[test]
@@ -398,18 +603,44 @@ mod tests {
         let now = Instant::now();
         let mut store = AttentionStore::default();
         let waiting = state(DaemonPhase::AwaitingApproval);
-        apply_daemon_transition(&mut store, Some(DaemonPhase::ExecutingTool), &waiting, now);
+        let executing = state(DaemonPhase::ExecutingTool);
+        apply_daemon_transition(&mut store, Some(&executing), &waiting, now);
         store.mark_read(&waiting.id);
         assert_eq!(store.unresolved_action_count(), 1);
 
         let running = state(DaemonPhase::Thinking);
         apply_daemon_transition(
             &mut store,
-            Some(DaemonPhase::AwaitingApproval),
+            Some(&waiting),
             &running,
             now + Duration::from_secs(1),
         );
         assert_eq!(store.unresolved_action_count(), 0);
         assert!(store.unread(&running.id).is_none());
+    }
+
+    #[test]
+    fn a_new_daemon_cycle_rearms_identical_delivery_immediately() {
+        let now = Instant::now();
+        let mut store = AttentionStore::default();
+        let thinking = state(DaemonPhase::Thinking);
+        let success = state(DaemonPhase::Succeeded);
+
+        apply_daemon_transition(&mut store, Some(&thinking), &success, now);
+        assert_eq!(store.drain_deliveries().len(), 1);
+
+        apply_daemon_transition(
+            &mut store,
+            Some(&success),
+            &thinking,
+            now + Duration::from_secs(1),
+        );
+        apply_daemon_transition(
+            &mut store,
+            Some(&thinking),
+            &success,
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(store.drain_deliveries().len(), 1);
     }
 }
