@@ -1,0 +1,22 @@
+# Git 领域层：仓库发现、状态解析、diff 与写操作。不含 GPUI，也不含面板状态。
+#
+# 从 smelt-core 拆出来的原因：git 是一整块有自己模型（Repository / RepoStatus /
+# Diff）的领域，留在 smelt-core 里只会让那个 crate 继续变成杂物间。这里只依赖
+# smelt-core 的执行接缝（Subprocess / FileSystem），因此同一套逻辑既能跑在本机，
+# 也能跑在远程 provider 上。
+[package]
+name = "smelt-git"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-core = { path = "../smelt-core" }
+serde = { version = "1", features = ["derive"] }
+# 行内词级 diff 高亮（mark_inline）用同一个算法库，跟 ACP 对话的逐行 diff 保持一致。
+similar = "2"
+
+[dev-dependencies]
+tempfile = "3"

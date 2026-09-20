@@ -1,0 +1,10 @@
+[package]
+name = "smelt-paths"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dirs = "5"

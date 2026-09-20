@@ -16,6 +16,7 @@ path = "src/bin/connect.rs"
 workspace = true
 
 [dependencies]
+smelt-paths = { path = "../smelt-paths" }
 iroh = "1"
 iroh-relay = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal"] }
@@ -24,3 +25,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 data-encoding = "2"
 futures-util = "0.3"
+
+# 命令行宿主/客户端只在桌面编。移动端只链 lib，不能把 clap 带进 iOS/Android。
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+clap.workspace = true

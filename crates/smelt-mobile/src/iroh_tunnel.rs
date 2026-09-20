@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use once_cell::sync::Lazy;
@@ -212,15 +212,6 @@ pub async fn stop() {
     }
 }
 
-/// 当前隧道的本地端口，没有则 `None`。
-pub async fn port() -> Option<u16> {
-    let guard = TUNNEL.lock().await;
-    guard
-        .as_ref()
-        .filter(|t| !t.accept_task.is_finished())
-        .map(|t| t.port)
-}
-
 /// 当前实际承载业务数据的 iroh 路径。网络迁移后再次调用会返回新路径。
 pub async fn path_status() -> Option<TunnelPathStatus> {
     let shared = {
@@ -290,12 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn port_is_none_before_start() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        assert_eq!(rt.block_on(port()), None);
-    }
-
-    #[test]
     fn classifies_private_and_public_ips() {
         assert!(is_private_ip("192.168.1.20".parse().unwrap()));
         assert!(is_private_ip("fd00::1".parse().unwrap()));
@@ -319,7 +304,6 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let p = start(&peer, &relay).await.expect("隧道应能建立");
-            assert_eq!(port().await, Some(p), "port() 应报告刚建立的隧道");
             // 幂等：同一个 peer 再来一次不该换端口。
             assert_eq!(start(&peer, &relay).await.unwrap(), p);
 
@@ -336,7 +320,7 @@ mod tests {
             assert!(head.contains(" 200 "), "应是 200：{head:.120}");
 
             stop().await;
-            assert_eq!(port().await, None, "stop 后不该再报告端口");
+            assert!(path_status().await.is_none(), "stop 后不该再报告传输路径");
         });
     }
 }
