@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Smelt 移动端重设计 · 设计稿 v1</title>
+<style>
+  :root{
+    --rail:#070707; --elev:#111111; --panel:#070707; --bar:#111111; --card:#181818;
+    --hover:#262626; --selected:#262626;
+    --border-dim:#151515; --border:#181818; --border-mid:#262626; --border-loud:#3d3d3d;
+    --t-bright:#fcfcfc; --t:#f3f3f3; --t-mid:#b7b7b7; --t-muted:#959595; --t-faint:#777777;
+    --accent:#1084fe; --green:#22c55e; --yellow:#ff9800; --blue:#3b82f6;
+    --purple:#9159fe; --red:#ff263c; --on-accent:#fcfcfc;
+    --add:#78e2b4; --del:#ff8c98; --add-bg:#001c10; --del-bg:#240508;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#070707;color:var(--t);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+    padding:40px 32px 80px;
+  }
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  h1{font-size:26px;color:var(--t-bright);font-weight:700;letter-spacing:-.01em}
+  .sub{color:var(--t-muted);margin-top:8px;max-width:900px}
+  .sub code{background:var(--elev);padding:1px 5px;border-radius:4px;font-size:12px}
+  h2{font-size:16px;color:var(--t-bright);margin:56px 0 6px;font-weight:600}
+  h2 .tag{font-size:11px;color:var(--accent);border:1px solid var(--accent);
+    border-radius:4px;padding:1px 6px;margin-left:8px;vertical-align:2px;font-weight:500}
+  .note{color:var(--t-muted);font-size:13px;max-width:1000px;margin-bottom:20px}
+
+  /* ---------- IA 对比 ---------- */
+  .ia{display:flex;gap:20px;flex-wrap:wrap;margin-top:20px}
+  .ia-box{background:var(--elev);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;flex:1;min-width:320px}
+  .ia-box h3{font-size:12px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px}
+  .ia-now h3{color:var(--red)} .ia-next h3{color:var(--green)}
+  .ia-box pre{font:12px/1.7 ui-monospace,Menlo,monospace;color:var(--t-mid);white-space:pre-wrap}
+  .ia-box .bad{color:var(--red)} .ia-box .good{color:var(--green)}
+
+  /* ---------- 手机框 ---------- */
+  .row{display:flex;gap:44px;flex-wrap:wrap;align-items:flex-start;margin-top:8px}
+  .unit{width:340px}
+  .cap{margin-top:14px}
+  .cap b{color:var(--t-bright);font-size:13px;display:block;margin-bottom:4px}
+  .cap p{color:var(--t-muted);font-size:12px;line-height:1.65}
+  .cap .why{color:var(--yellow);font-size:11.5px;display:block;margin-top:6px}
+
+  .phone{width:340px;height:800px;background:var(--panel);border-radius:34px;
+    border:1px solid var(--border-loud);box-shadow:0 20px 50px rgba(0,0,0,.55);
+    overflow:hidden;display:flex;flex-direction:column;position:relative}
+
+  /* 状态栏 */
+  .sbar{height:32px;background:var(--bar);display:flex;align-items:center;
+    justify-content:space-between;padding:0 18px;font-size:11px;color:var(--t-mid);flex:none}
+
+  /* AppBar */
+  .abar{height:52px;background:var(--bar);display:flex;align-items:center;
+    padding:0 6px 0 14px;gap:4px;flex:none;border-bottom:1px solid var(--border-dim)}
+  .abar .title{font-size:16px;font-weight:600;color:var(--t-bright);flex:1;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ib{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;
+    justify-content:center;color:var(--t-mid);font-size:16px;position:relative;flex:none}
+  .ib.on{color:var(--t-bright)}
+  .dot-badge{position:absolute;top:4px;right:4px;min-width:16px;height:16px;border-radius:8px;
+    background:var(--red);color:#fff;font-size:10px;font-weight:700;display:flex;
+    align-items:center;justify-content:center;padding:0 4px;border:2px solid var(--bar)}
+
+  /* 内容区 */
+  .body{flex:1;overflow:hidden;background:var(--panel);position:relative}
+  .scroll{height:100%;overflow:hidden;padding:12px 12px 8px}
+
+  /* 分组标题（Codex 三段式） */
+  .grp{display:flex;align-items:center;gap:8px;margin:16px 2px 9px}
+  .grp:first-child{margin-top:2px}
+  .grp .lbl{font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--t-faint);font-weight:700}
+  .grp .cnt{font-size:11px;color:var(--t-faint);background:var(--elev);
+    border-radius:9px;padding:1px 7px}
+  .grp .line{flex:1;height:1px;background:var(--border-dim)}
+
+  /* 卡片 */
+  .card{background:var(--card);border:1px solid var(--border-mid);border-radius:12px;
+    padding:13px 14px;margin-bottom:10px}
+  .card.act{border-color:var(--yellow);background:linear-gradient(180deg,rgba(240,178,50,.10),rgba(240,178,50,.03)),var(--card)}
+  .meta{display:flex;align-items:center;gap:7px;margin-bottom:9px;font-size:11px;color:var(--t-muted)}
+  .chip{background:var(--elev);border-radius:5px;padding:2px 7px;font-size:10.5px;color:var(--t-mid)}
+  .chip.ag{color:var(--purple)}
+  .sq{width:9px;height:9px;border-radius:3px;flex:none}
+  .spacer{flex:1}
+
+  .q{color:var(--t-bright);font-size:14px;font-weight:600;line-height:1.45;margin-bottom:9px}
+  .cmd{background:var(--rail);border-left:3px solid var(--yellow);border-radius:0 7px 7px 0;
+    padding:9px 11px;font:12px/1.6 ui-monospace,Menlo,monospace;color:var(--t);
+    overflow:hidden;white-space:pre-wrap;word-break:break-all;margin-bottom:6px}
+  .path{font-size:11px;color:var(--t-faint);margin-bottom:11px}
+  .path .mono{color:var(--t-muted)}
+
+  .btns{display:flex;gap:8px}
+  .btn{flex:1;height:40px;border-radius:9px;display:flex;align-items:center;
+    justify-content:center;font-size:13.5px;font-weight:600}
+  .btn.deny{background:transparent;border:1.5px solid var(--border-loud);color:var(--t-mid)}
+  .btn.allow{background:transparent;border:1.5px solid var(--green);color:var(--green)}
+  .btn.primary{background:var(--accent);color:var(--on-accent);border:none}
+  .btn.ghost{background:var(--elev);color:var(--t-mid);border:1px solid var(--border-mid)}
+  .btn.sm{height:34px;font-size:12.5px;flex:none;padding:0 14px}
+  .btn.wide{width:100%}
+
+  /* 行式条目 */
+  .rowitem{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:10px;
+    background:var(--elev);margin-bottom:8px}
+  .rowitem .txt{flex:1;min-width:0}
+  .rowitem .t1{color:var(--t-bright);font-size:13.5px;font-weight:500;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rowitem .t2{color:var(--t-muted);font-size:11.5px;margin-top:2px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rowitem .rt{font-size:11px;color:var(--t-faint);flex:none;text-align:right}
+
+  .pulse{width:8px;height:8px;border-radius:50%;flex:none;position:relative}
+  .pulse.run{background:var(--accent);box-shadow:0 0 0 4px rgba(88,101,242,.18)}
+  .pulse.wait{background:var(--yellow);box-shadow:0 0 0 4px rgba(240,178,50,.18)}
+  .pulse.ok{background:var(--green)}
+  .pulse.err{background:var(--red)}
+  .pulse.idle{background:var(--t-faint)}
+
+  /* 底部导航 */
+  .nav{height:60px;background:var(--elev);border-top:1px solid var(--border-dim);
+    display:flex;flex:none;padding-bottom:4px}
+  .nav .it{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:3px;color:var(--t-faint);font-size:10.5px;position:relative}
+  .nav .it.on{color:var(--accent)}
+  .nav .it .ic{font-size:19px;line-height:1}
+  .nav .it .nb{position:absolute;top:6px;left:calc(50% + 6px);min-width:15px;height:15px;
+    border-radius:8px;background:var(--red);color:#fff;font-size:9.5px;font-weight:700;
+    display:flex;align-items:center;justify-content:center;padding:0 4px;border:2px solid var(--elev)}
+
+  /* 项目行（身份识别） */
+  .proj{display:flex;align-items:center;gap:11px;padding:11px 10px;border-radius:10px;margin-bottom:2px}
+  .avatar{width:34px;height:34px;border-radius:10px;flex:none;display:flex;align-items:center;
+    justify-content:center;font-size:13px;font-weight:700;color:#fff;position:relative}
+  .avatar .st{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:50%;
+    border:2.5px solid var(--panel)}
+  .sub-item{padding-left:46px}
+
+  /* 会话流 */
+  .bubble{background:var(--accent);color:#fff;border-radius:14px 14px 4px 14px;
+    padding:9px 12px;font-size:13px;max-width:78%;margin:0 0 10px auto;line-height:1.5}
+  .asst{font-size:13px;line-height:1.6;color:var(--t);margin-bottom:12px}
+  .toolcard{background:var(--elev);border:1px solid var(--border-mid);border-radius:9px;
+    padding:9px 11px;margin-bottom:10px;display:flex;align-items:center;gap:9px;font-size:12px}
+  .toolcard .k{color:var(--accent);font-weight:700;font-size:10.5px;letter-spacing:.04em}
+  .composer{background:var(--bar);border-top:1px solid var(--border-dim);padding:9px 10px;flex:none}
+  .field{background:var(--elev);border:1px solid var(--border-mid);border-radius:11px;
+    height:42px;display:flex;align-items:center;padding:0 12px;gap:10px;color:var(--t-faint);font-size:13px}
+
+  /* 终端 */
+  .term{background:#0b0d0f;height:100%;padding:10px 8px;
+    font:11.5px/1.65 ui-monospace,Menlo,monospace;color:#c9d1d9;overflow:hidden;
+    white-space:pre}
+  .term .g{color:#22c55e} .term .b{color:#3b82f6} .term .y{color:#ff9800} .term .m{color:#9159fe}
+  .keybar{height:46px;background:var(--bar);border-top:1px solid var(--border-dim);
+    display:flex;align-items:center;gap:6px;padding:0 8px;flex:none;overflow:hidden}
+  .key{height:32px;min-width:40px;padding:0 10px;border-radius:8px;background:var(--card);
+    border:1px solid var(--border-mid);color:var(--t);display:flex;align-items:center;
+    justify-content:center;font-size:12.5px;flex:none}
+  .key.hot{border-color:var(--red);color:#ff9ba0}
+
+  /* sheet */
+  .dim{position:absolute;inset:0;background:rgba(0,0,0,.6)}
+  .sheet{position:absolute;left:0;right:0;bottom:0;background:var(--elev);
+    border-radius:20px 20px 0 0;border-top:1px solid var(--border-mid);padding:10px 16px 20px;
+    max-height:82%;overflow:hidden}
+  .handle{width:38px;height:4px;border-radius:2px;background:var(--border-loud);margin:0 auto 14px}
+  .sheet h4{font-size:16px;color:var(--t-bright);margin-bottom:3px}
+  .sheet .s{font-size:11.5px;color:var(--t-muted);margin-bottom:14px}
+  .kv{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-dim);font-size:12px}
+  .kv .k{color:var(--t-faint);width:74px;flex:none}
+  .kv .v{color:var(--t-mid);flex:1;word-break:break-all}
+  .diffline{font:11px/1.6 ui-monospace,Menlo,monospace;padding:1px 8px;border-radius:3px}
+  .diffline.a{background:var(--add-bg);color:var(--add)}
+  .diffline.d{background:var(--del-bg);color:var(--del)}
+
+  /* 设置 */
+  .seg{display:flex;background:var(--elev);border-radius:9px;padding:3px;gap:3px}
+  .seg .o{flex:1;height:30px;border-radius:7px;display:flex;align-items:center;
+    justify-content:center;font-size:12px;color:var(--t-muted)}
+  .seg .o.on{background:var(--accent);color:#fff;font-weight:600}
+  .setrow{display:flex;align-items:center;gap:11px;padding:12px 2px;border-bottom:1px solid var(--border-dim)}
+  .setrow .txt{flex:1}
+  .setrow .t1{font-size:13.5px;color:var(--t-bright)}
+  .setrow .t2{font-size:11.5px;color:var(--t-muted);margin-top:2px}
+  .sw{width:42px;height:24px;border-radius:12px;background:var(--accent);position:relative;flex:none}
+  .sw::after{content:"";position:absolute;right:3px;top:3px;width:18px;height:18px;
+    border-radius:50%;background:#fff}
+  .sw.off{background:var(--border-loud)}
+  .sw.off::after{right:21px}
+
+  .anno{margin-top:44px;background:var(--elev);border:1px solid var(--border);
+    border-radius:10px;padding:18px 20px}
+  .anno h3{font-size:13px;color:var(--t-bright);margin-bottom:10px}
+  .anno ol{margin-left:18px;color:var(--t-mid);font-size:13px;line-height:1.9}
+  .anno ol b{color:var(--t-bright)}
+  .anno .k{color:var(--yellow)}
+</style>
+</head>
+<body>
+
+<h1>Smelt 移动端重设计 · 设计稿 v1</h1>
+<p class="sub">
+配色直接取自桌面 <code>crates/smelt-ui/src/ui_theme.rs</code> 的 <code>DARK</code> 色板（Grok Bot 强调蓝 <code>#1084fe</code>），
+表面层级沿用同一条规则：<b>舞台最暗（#070707），会话列表和卡片往上抬（导航栏 #111111 / 卡片 #181818）</b>——
+不在手机上另起一套视觉。目标形态依据 <code>docs/product-roadmap.md §6</code>：<b>手机是指挥台，不是第二块小终端。</b>
+</p>
+
+<h2>0 · 信息架构：现在 vs 目标</h2>
+<div class="ia">
+  <div class="ia-box ia-now">
+    <h3>现在（桌面 IA 平移）</h3>
+<pre>AppBar [Smelt] [桌面] [扫码] [登出]
+├ 连接状态条（常驻，正常时也占位）
+├ SegmentedButton  Action │ Running │ All
+│     └ <span class="bad">伪装成筛选器，实际是导航</span>
+│        切 All   → 两级项目树
+│        切 Action → 平铺列表
+│        <span class="bad">同一控件切出两种信息结构</span>
+└ 默认落在 All = 项目 ExpansionTile 树
+   └ 展开 ─→ 会话
+        └ 点击 ─→ 聊天页
+             └ 顶部 banner 才是审批
+                <span class="bad">决策被藏在两层浏览动作后面</span>
+   终端会话 ─→ <span class="bad">直接掉进全屏 xterm</span></pre>
+  </div>
+  <div class="ia-box ia-next">
+    <h3>目标（指挥台优先）</h3>
+<pre>底部导航（真 · 导航）
+├ <span class="good">指挥台 Console（默认首屏）</span>
+│   ├ 等我处理  <span class="good">大卡片，就地批，不进会话</span>
+│   ├ 正在跑    相位 + 已耗时 + 停止
+│   └ 刚完成    结论摘要
+├ 项目 Projects
+│   └ 项目色块 + 状态点 + 角标
+│       └ 会话 ─→ 详情
+│            └ <span class="good">终端是「打开完整终端」二级入口</span>
+└ 设置 Settings
+    桌面 · 主题 · 字号 · 连接诊断
+      <span class="good">（常驻状态条收进这里）</span>
+
+全局待办徽标：<span class="good">任何页面可见可达</span> ✅已实现</pre>
+  </div>
+</div>
+
+<!-- ============ 第一排 ============ -->
+<h2>1 · 指挥台 Console<span class="tag">默认首屏</span></h2>
+<p class="note">
+打开 App 第一眼回答的是「有事等我吗」，而不是「我有哪些项目」。三段式分组沿用 <code>ui-design-language.md</code> 里 Codex 那条：
+同一面板内不同性质的信息要分组、每组有标题、组内才是列表。
+</p>
+<div class="row">
+
+  <!-- A. 指挥台 -->
+  <div class="unit">
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span>▮▮▮ ᯤ 84%</span></div>
+    <div class="abar">
+      <div class="title">指挥台</div>
+      <div class="ib on">🔔<div class="dot-badge">2</div></div>
+      <div class="ib">🖥</div>
+    </div>
+    <div class="body"><div class="scroll">
+
+      <div class="grp"><span class="lbl">等我处理</span><span class="cnt">2</span><span class="line"></span></div>
+
+      <div class="card act">
+        <div class="meta">
+          <span class="sq" style="background:var(--blue)"></span>
+          <span>smelt</span><span style="color:var(--t-faint)">›</span>
+          <span class="chip ag">claude</span>
+          <span class="spacer"></span><span>2 分钟前</span>
+        </div>
+        <div class="q">要执行一条命令</div>
+        <div class="cmd">cargo test -p smelt-ui \
+  --no-fail-fast</div>
+        <div class="path">工作目录 <span class="mono">~/code/smelt</span></div>
+        <div class="btns">
+          <div class="btn deny">拒绝</div>
+          <div class="btn allow">允许</div>
+        </div>
+      </div>
+
+      <div class="card act">
+        <div class="meta">
+          <span class="sq" style="background:var(--purple)"></span>
+          <span>docs-site</span><span style="color:var(--t-faint)">›</span>
+          <span class="chip ag">codex</span>
+          <span class="spacer"></span><span>11 分钟前</span>
+        </div>
+        <div class="q">要修改 3 个文件</div>
+        <div style="margin-bottom:10px;display:flex;gap:6px;font-size:11px">
+          <span style="color:var(--add)">+48</span>
+          <span style="color:var(--del)">−8</span>
+          <span class="mono" style="color:var(--t-faint);overflow:hidden;
+            text-overflow:ellipsis;white-space:nowrap">src/router.ts 等 3 个</span>
+        </div>
+        <div class="btns">
+          <div class="btn deny">拒绝</div>
+          <div class="btn allow">允许</div>
+        </div>
+      </div>
+
+      <div class="grp"><span class="lbl">正在跑</span><span class="cnt">2</span><span class="line"></span></div>
+
+      <div class="rowitem">
+        <span class="pulse run"></span>
+        <div class="txt">
+          <div class="t1">重构 gateway 重连逻辑</div>
+          <div class="t2">smelt · 正在编辑 gateway_service.dart</div>
+        </div>
+        <div class="rt">4m 12s<br><span style="color:var(--t-muted)">■ 停止</span></div>
+      </div>
+
+      <div class="rowitem">
+        <span class="pulse run"></span>
+        <div class="txt">
+          <div class="t1">zsh — pnpm build</div>
+          <div class="t2">docs-site · 终端</div>
+        </div>
+        <div class="rt">58s<br><span style="color:var(--t-muted)">■ 停止</span></div>
+      </div>
+
+      <div class="grp"><span class="lbl">刚完成</span><span class="line"></span></div>
+
+      <div class="rowitem">
+        <span class="pulse ok"></span>
+        <div class="txt">
+          <div class="t1">修复 iroh 隧道超时</div>
+          <div class="t2">已改 2 个文件，测试通过</div>
+        </div>
+        <div class="rt">17:02</div>
+      </div>
+      <div class="rowitem">
+        <span class="pulse err"></span>
+        <div class="txt">
+          <div class="t1">升级 flutter_secure_storage</div>
+          <div class="t2">失败 · 3 个测试未通过</div>
+        </div>
+        <div class="rt">16:40</div>
+      </div>
+
+    </div></div>
+    <div class="nav">
+      <div class="it on"><span class="ic">◎</span>指挥台<span class="nb">2</span></div>
+      <div class="it"><span class="ic">▤</span>项目</div>
+      <div class="it"><span class="ic">⚙</span>设置</div>
+    </div>
+  </div>
+  <div class="cap">
+    <b>A · 指挥台（默认）</b>
+    <p>等我处理 / 正在跑 / 刚完成三段。审批卡片自带命令全文与 diff 统计，<b>两个按钮就地做决策</b>。</p>
+    <span class="why">▲ 关键：不再需要「进会话 → 滚到顶 → 找 banner」。允许/拒绝按钮等宽并列，Allow 不做成最扎眼的实心绿——降低误触。</span>
+  </div>
+  </div>
+
+  <!-- B. 审批详情 sheet -->
+  <div class="unit">
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span>▮▮▮ ᯤ 84%</span></div>
+    <div class="abar">
+      <div class="title">指挥台</div>
+      <div class="ib on">🔔<div class="dot-badge">2</div></div>
+      <div class="ib">🖥</div>
+    </div>
+    <div class="body">
+      <div class="scroll" style="filter:blur(1px);opacity:.5">
+        <div class="grp"><span class="lbl">等我处理</span><span class="cnt">2</span><span class="line"></span></div>
+        <div class="card act">
+          <div class="meta"><span class="sq" style="background:var(--blue)"></span><span>smelt</span>
+            <span class="spacer"></span><span>2 分钟前</span></div>
+          <div class="q">要执行一条命令</div>
+          <div class="cmd">cargo test -p smelt-ui</div>
+        </div>
+      </div>
+      <div class="dim"></div>
+      <div class="sheet">
+        <div class="handle"></div>
+        <h4>执行命令</h4>
+        <div class="s">smelt · claude · 2 分钟前</div>
+
+        <div class="cmd" style="margin-bottom:12px">cargo test -p smelt-ui \
+  --no-fail-fast \
+  -- --nocapture</div>
+
+        <div class="kv"><span class="k">工作目录</span><span class="v mono">~/code/smelt</span></div>
+        <div class="kv"><span class="k">影响范围</span><span class="v">只读构建 · 不写入工作区</span></div>
+        <div class="kv" style="border:none"><span class="k">理由</span><span class="v">改完 ui_theme 后需要跑一遍单测确认色板没崩</span></div>
+
+        <div style="margin-top:16px;display:flex;flex-direction:column;gap:8px">
+          <div class="btn allow wide">仅此一次允许</div>
+          <div class="btn ghost wide">总是允许这类命令</div>
+          <div class="btn deny wide">拒绝</div>
+        </div>
+      </div>
+    </div>
+    <div class="nav">
+      <div class="it on"><span class="ic">◎</span>指挥台<span class="nb">2</span></div>
+      <div class="it"><span class="ic">▤</span>项目</div>
+      <div class="it"><span class="ic">⚙</span>设置</div>
+    </div>
+  </div>
+  <div class="cap">
+    <b>B · 审批详情（长按 / 点卡片展开）</b>
+    <p>长命令换行显示不横滚，补上「影响范围」「理由」。三个动作纵向排列，授权粒度显式区分。</p>
+    <span class="why">▲ 关键：现在的实现里 Allow 是绿色实心 Filled 按钮、位于拇指热区、无二次确认，执行 shell 命令也同款。这里改成描边、且「总是允许」不是默认落点。</span>
+  </div>
+  </div>
+
+  <!-- C. 项目 -->
+  <div class="unit">
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span>▮▮▮ ᯤ 84%</span></div>
+    <div class="abar">
+      <div class="title">项目</div>
+      <div class="ib on">🔔<div class="dot-badge">2</div></div>
+      <div class="ib">🖥</div>
+    </div>
+    <div class="body"><div class="scroll">
+
+      <div class="proj" style="background:var(--elev)">
+        <div class="avatar" style="background:var(--blue)">SM<span class="st" style="background:var(--yellow)"></span></div>
+        <div class="txt" style="flex:1">
+          <div class="t1" style="color:var(--t-bright);font-size:14px;font-weight:600">smelt</div>
+          <div class="t2" style="color:var(--t-muted);font-size:11.5px">3 个会话 · 1 个等你</div>
+        </div>
+        <div class="ib">⋮</div>
+      </div>
+
+      <div class="rowitem sub-item" style="background:transparent;padding:9px 12px">
+        <span class="pulse wait"></span>
+        <div class="txt"><div class="t1">重构 gateway 重连逻辑</div>
+          <div class="t2">等待批准 · cargo test</div></div>
+      </div>
+      <div class="rowitem sub-item" style="background:transparent;padding:9px 12px">
+        <span class="pulse run"></span>
+        <div class="txt"><div class="t1">补移动端 UX</div><div class="t2">正在跑 · 4m 12s</div></div>
+      </div>
+      <div class="rowitem sub-item" style="background:transparent;padding:9px 12px">
+        <span class="pulse idle"></span>
+        <div class="txt"><div class="t1">zsh</div><div class="t2">终端 · 空闲</div></div>
+      </div>
+
+      <div class="proj" style="background:var(--elev);margin-top:14px">
+        <div class="avatar" style="background:var(--purple)">DS<span class="st" style="background:var(--yellow)"></span></div>
+        <div class="txt" style="flex:1">
+          <div class="t1" style="color:var(--t-bright);font-size:14px;font-weight:600">docs-site</div>
+          <div class="t2" style="color:var(--t-muted);font-size:11.5px">2 个会话 · 1 个等你</div>
+        </div>
+        <div class="ib">⋮</div>
+      </div>
+
+      <div class="proj" style="margin-top:14px">
+        <div class="avatar" style="background:var(--border-loud)">IB<span class="st" style="background:var(--t-faint)"></span></div>
+        <div class="txt" style="flex:1">
+          <div class="t1" style="color:var(--t-bright);font-size:14px;font-weight:600">issue-bot</div>
+          <div class="t2" style="color:var(--t-muted);font-size:11.5px">无会话</div>
+        </div>
+        <div class="ib">⋮</div>
+      </div>
+
+      <div style="margin-top:18px">
+        <div class="btn ghost wide" style="height:44px">＋ 新建会话</div>
+      </div>
+
+    </div></div>
+    <div class="nav">
+      <div class="it"><span class="ic">◎</span>指挥台<span class="nb">2</span></div>
+      <div class="it on"><span class="ic">▤</span>项目</div>
+      <div class="it"><span class="ic">⚙</span>设置</div>
+    </div>
+  </div>
+  <div class="cap">
+    <b>C · 项目（降为浏览入口）</b>
+    <p>补上 <code>ui-design-language.md</code> 里点名缺失的 <b>身份识别</b>：每个项目一个色块图标 + 右下角状态点（黄=等批准 / 青=跑着 / 灰=空闲）。</p>
+    <span class="why">▲ 关键：状态不再只靠颜色——每条会话左侧状态点旁都有文字（「等待批准」「正在跑」），色盲可用。三个 IconButton 收成一个 ⋮。</span>
+  </div>
+  </div>
+
+</div>
+
+<!-- ============ 第二排 ============ -->
+<h2>2 · 会话详情与终端<span class="tag">二级</span></h2>
+<p class="note">
+会话详情保留现有的结构化消息流（工具卡片 / diff / markdown 这层质量够用，不重做）。变化在于：<b>审批不再只长在这里</b>，
+以及终端从「点会话直接掉进 xterm」改成会话内的显式二级入口。
+</p>
+<div class="row">
+
+  <!-- D. 会话详情 -->
+  <div class="unit">
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span>▮▮▮ ᯤ 84%</span></div>
+    <div class="abar">
+      <div class="ib">‹</div>
+      <div class="title">重构 gateway 重连逻辑</div>
+      <div class="ib on">🔔<div class="dot-badge">1</div></div>
+      <div class="ib">⋮</div>
+    </div>
+
+    <div style="background:rgba(88,101,242,.12);padding:8px 13px;display:flex;align-items:center;gap:9px;flex:none">
+      <span class="pulse run"></span>
+      <span style="font-size:12px;color:var(--t-mid);flex:1">正在编辑 gateway_service.dart</span>
+      <span style="font-size:12px;color:var(--t-faint)">4m 12s</span>
+      <span style="color:var(--t-muted);font-size:14px">■</span>
+    </div>
+
+    <div style="background:var(--elev);padding:9px 13px;display:flex;align-items:center;gap:9px;flex:none;border-bottom:1px solid var(--border-dim)">
+      <span style="font-size:13px">☑</span>
+      <span style="font-size:12px;color:var(--t-mid);flex:1">计划 · 2/4</span>
+      <span style="color:var(--t-faint);font-size:12px">▾</span>
+    </div>
+
+    <div class="body"><div class="scroll">
+      <div class="bubble">重连那块能不能不要每次都重开隧道</div>
+
+      <div class="asst">
+        看了下 <span class="mono" style="color:var(--blue)">retryCurrentConnection</span>，
+        问题在于它无条件调用 <span class="mono" style="color:var(--blue)">irohTunnelStart</span>，
+        没有先判断已有隧道是否还活着。
+      </div>
+
+      <div class="toolcard">
+        <span style="color:var(--accent)">👁</span><span class="k">读取</span>
+        <span class="mono" style="flex:1;color:var(--t-mid);overflow:hidden;text-overflow:ellipsis">gateway_service.dart</span>
+        <span style="color:var(--green)">✓</span>
+      </div>
+      <div class="toolcard">
+        <span style="color:var(--accent)">✎</span><span class="k">编辑</span>
+        <span class="mono" style="flex:1;color:var(--t-mid);overflow:hidden;text-overflow:ellipsis">gateway_service.dart</span>
+        <span style="color:var(--accent)">◍</span>
+      </div>
+
+      <div class="asst" style="color:var(--t-muted)">
+        <span style="font-size:11.5px">▸ 思考 · 先确认 stale tunnel 的判定条件…</span>
+      </div>
+    </div></div>
+
+    <div class="composer">
+      <div style="display:flex;gap:6px;margin-bottom:8px;overflow:hidden">
+        <span class="chip">上下文 38%</span>
+        <span class="chip" style="color:var(--purple)">◈ claude-opus</span>
+        <span class="chip">计划模式</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:var(--t-faint);font-size:17px">＋</span>
+        <div class="field" style="flex:1">发消息给 agent…</div>
+        <div style="width:40px;height:40px;border-radius:11px;background:var(--accent);
+          display:flex;align-items:center;justify-content:center;color:#fff;flex:none">➤</div>
+      </div>
+    </div>
+  </div>
+  <div class="cap">
+    <b>D · 会话详情（ACP）</b>
+    <p>结构化流不变。⋮ 菜单里是「打开完整终端」「重命名」「删除」——终端成为显式二级入口。</p>
+    <span class="why">▲ 关键：AppBar 上那个 🔔 是已经落地的全局待办徽标——在会话 A 里也看得见会话 B 在等我。</span>
+  </div>
+  </div>
+
+  <!-- E. 终端 -->
+  <div class="unit">
+  <div class="phone">
+    <div class="sbar" style="background:#0b0d0f"><span>9:41</span><span>▮▮▮ ᯤ 84%</span></div>
+    <div class="abar" style="background:#0b0d0f">
+      <div class="ib">‹</div>
+      <div class="title">zsh — pnpm build</div>
+      <div class="ib on">🔔<div class="dot-badge" style="border-color:#0b0d0f">1</div></div>
+      <div class="ib">Aa</div>
+      <div class="ib">⌨</div>
+    </div>
+    <div class="body" style="background:#0b0d0f"><div class="term">
+<span class="g">➜</span> <span class="b">docs-site</span> pnpm build
+
+<span class="m">></span> docs-site@0.1.0 build
+<span class="m">></span> vite build
+
+vite v5.4.2 <span class="y">building...</span>
+transforming (247) src/router.ts
+<span class="g">✓</span> 312 modules transformed.
+
+dist/index.html          <span class="y">1.24 kB</span>
+dist/assets/index.css   <span class="y">18.9 kB</span>
+dist/assets/index.js   <span class="y">184.3 kB</span>
+
+<span class="g">✓</span> built in 4.12s
+
+<span class="g">➜</span> <span class="b">docs-site</span> <span style="background:#c9d1d9;color:#0b0d0f">&nbsp;</span>
+    </div></div>
+    <div class="keybar">
+      <div class="key">Esc</div>
+      <div class="key">Tab</div>
+      <div class="key">⇧Tab</div>
+      <div class="key">⇧↵</div>
+      <div class="key hot">^C</div>
+      <div class="key">←</div>
+      <div class="key">↓</div>
+      <div class="key">↑</div>
+    </div>
+  </div>
+  <div class="cap">
+    <b>E · 完整终端（二级入口）</b>
+    <p>页面底色跟随那台设备下发的终端配色。快捷键栏<b>常驻</b>（已落地），^C 用红色描边标出——它是打断键，不该和 Tab 长一样。</p>
+    <span class="why">▲ 关键：新增 Aa 字号调节。现在字号写死 13pt，不跟随系统，小屏可读性差。</span>
+  </div>
+  </div>
+
+  <!-- F. 设置 -->
+  <div class="unit">
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span>▮▮▮ ᯤ 84%</span></div>
+    <div class="abar"><div class="title">设置</div></div>
+    <div class="body"><div class="scroll">
+
+      <div class="grp"><span class="lbl">连接</span><span class="line"></span></div>
+      <div class="card" style="padding:12px 13px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <span class="pulse ok"></span>
+          <span style="font-size:13.5px;color:var(--t-bright);flex:1;font-weight:500">Zehua 的 MacBook Pro</span>
+          <span class="chip">P2P · 42ms</span>
+        </div>
+        <div class="kv" style="border:none;padding:4px 0">
+          <span class="k">链路</span><span class="v">iroh 直连 · 未走中继</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <div class="btn ghost sm">切换设备</div>
+          <div class="btn ghost sm">诊断</div>
+        </div>
+      </div>
+
+      <div class="grp"><span class="lbl">通知</span><span class="line"></span></div>
+      <div class="setrow">
+        <div class="txt"><div class="t1">等待批准</div><div class="t2">agent 卡住要你拍板时推送</div></div>
+        <div class="sw"></div>
+      </div>
+      <div class="setrow">
+        <div class="txt"><div class="t1">任务完成 / 失败</div><div class="t2">跑完或失败时推送</div></div>
+        <div class="sw"></div>
+      </div>
+      <div class="setrow">
+        <div class="txt"><div class="t1">勿扰时段</div><div class="t2">23:00 – 08:00</div></div>
+        <div class="sw off"></div>
+      </div>
+
+      <div class="grp"><span class="lbl">外观</span><span class="line"></span></div>
+      <div style="margin-bottom:14px">
+        <div style="font-size:12px;color:var(--t-muted);margin-bottom:7px">主题</div>
+        <div class="seg">
+          <div class="o">浅色</div><div class="o">深色</div><div class="o on">跟随系统</div>
+        </div>
+      </div>
+      <div style="margin-bottom:6px">
+        <div style="font-size:12px;color:var(--t-muted);margin-bottom:7px">终端字号 · 13pt</div>
+        <div style="height:4px;background:var(--elev);border-radius:2px;position:relative">
+          <div style="width:40%;height:100%;background:var(--accent);border-radius:2px"></div>
+          <div style="position:absolute;left:calc(40% - 8px);top:-6px;width:16px;height:16px;
+            border-radius:50%;background:var(--accent);border:2px solid var(--panel)"></div>
+        </div>
+      </div>
+      <div class="setrow" style="border:none">
+        <div class="txt"><div class="t1">语言</div><div class="t2">跟随系统 · 简体中文</div></div>
+        <span style="color:var(--t-faint)">›</span>
+      </div>
+
+    </div></div>
+    <div class="nav">
+      <div class="it"><span class="ic">◎</span>指挥台<span class="nb">2</span></div>
+      <div class="it"><span class="ic">▤</span>项目</div>
+      <div class="it on"><span class="ic">⚙</span>设置</div>
+    </div>
+  </div>
+  <div class="cap">
+    <b>F · 设置</b>
+    <p>常驻的连接状态条收进这里——正常联通时「P2P · 42ms」对用户是噪音，异常时才需要（异常仍在顶部弹条）。</p>
+    <span class="why">▲ 关键：主题跟随系统、终端字号、语言三项对应目前写死 <code>Brightness.dark</code>、写死 13pt、无 i18n 三个缺口。</span>
+  </div>
+  </div>
+
+</div>
+
+<div class="anno">
+  <h3>设计稿对应的落地分片</h3>
+  <ol>
+    <li><b>分片 1 · 全局待办徽标</b> —— <span style="color:var(--green)">✅ 已实现</span>，见 D / E 两张图 AppBar 上的 🔔</li>
+    <li><b>分片 2 · 推送通知 + 深链</b> —— 图 F 的「通知」分组；需引入 <code>flutter_local_notifications</code></li>
+    <li><b>分片 3 · 操作台卡片</b> —— 图 A / B；<span class="k">⚠ 唯一需要动协议</span>：<code>subscribedSessionId</code> 目前是单数，要先定「多会话订阅 / 按需取 pending permission」的契约</li>
+    <li><b>分片 4 · 底部导航 + 首屏换指挥台</b> —— 图 A / C 的底部导航，项目树降级</li>
+    <li><b>分片 5 · 设计 token</b> —— 把上面这套色板搬成 Flutter <code>ThemeExtension</code>；<code>ThemeMode.system</code>、字号、<code>Semantics</code></li>
+    <li><b>分片 6 · i18n</b> —— 图里全中文只是示意；目前代码是全英文 + 零星中文、无 <code>localizationsDelegates</code></li>
+  </ol>
+</div>
+
+</body>
+</html>

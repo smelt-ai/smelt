@@ -1,6 +1,6 @@
 # 终端：与 Zed 对照的差距清单
 
-对着 Zed 的终端实现逐条核对（Zed 源码：`~/.cargo/git/checkouts/zed-*/1d217ee/crates/`，
+对着 Zed 的终端实现逐条核对（Zed 源码：`~/.cargo/git/checkouts/zed-*/e0931d5/crates/`，
 我们依赖的 gpui 就是这个 commit）。本文档**只记现状与未完成项**——已落地的条目放在
 「已完成」归档区，避免再被当成待办。
 
@@ -121,7 +121,7 @@
 smelt 有意多做的、Zed 没有或不同的部分：
 
 1. **smeltd 会话持久化** — GUI 崩了 shell 还在，reattach + 重放缓冲。
-2. **OSC 9/777 + 响铃 → 通知 / 侧栏状态** — 协议层感知 agent，不写死私有格式。
+2. **OSC 9/777 + 响铃 → 信息通知** — 协议层可感知终端通知，但不参与侧栏状态。
 3. **Kitty keyboard（Enter）** — 比 Zed 更贴 Claude Code Shift+Enter。
 4. **Shift 旁路应用鼠标** — 开了 `MOUSE_MODE` 仍能框选复制 agent 输出。
 
@@ -129,7 +129,8 @@ smelt 有意多做的、Zed 没有或不同的部分：
 
 ### smeltd reattach（会话持久化）
 
-- **✅ 完整**：常驻 `Term` + attach 吐 **history+可视区** ANSI 快照（软换行 / OSC 8 / 模式恢复）。
+- **✅ 完整**：常驻 `Term` + attach/watch/handoff 吐模式自洽的 ANSI keyframe；主屏含
+  **history+可视区**，`ALT_SCREEN` 备用屏只含 viewport（软换行 / OSC 8 / 模式恢复）。
 - **✅ 鼠标上报两位**（tracking `1000/1002/1003` + 编码 `1006`/`1005`）：快照**前缀**即恢复，
   末尾再写一次。缺了客户端 `scroll_wheel` 会误滚本地 history（「整个滚」）。
 - 可选：实机验收长 detach + TUI Ctrl+C；守护崩溃落盘。

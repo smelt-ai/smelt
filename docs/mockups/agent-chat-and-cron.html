@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智能体像聊天 · 自动化像 cron</title>
+<style>
+  :root {
+    --stage: #070707;
+    --column: #111111;
+    --card: #181818;
+    --hover: #1f1f1f;
+    --line: rgba(255,255,255,.08);
+    --text: #f4f4f4;
+    --muted: rgba(255,255,255,.55);
+    --faint: rgba(255,255,255,.38);
+    --blue: #1084fe;
+    --green: #22c55e;
+    --action: #f4f4f4;
+    --on-action: #111;
+    --radius-row: 8px;
+    --radius-card: 12px;
+    --radius-pill: 999px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--stage);
+    color: var(--text);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .app { display: flex; flex-direction: column; height: 100%; }
+  .tabs {
+    height: 44px; flex: none;
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 12px;
+    background: var(--column);
+    border-bottom: 1px solid var(--line);
+  }
+  .tab {
+    height: 28px; padding: 0 12px; border: 0;
+    background: transparent; color: var(--muted);
+    border-radius: var(--radius-row);
+  }
+  .tab:hover { color: var(--text); background: var(--hover); }
+  .tab.on { color: var(--text); background: rgba(16,132,254,.14); }
+  .shell { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+  .sidebar {
+    background: var(--column);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .side-top {
+    height: 52px; padding: 0 12px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .side-top h2 { margin: 0; font-size: 13px; font-weight: 650; }
+  .list { flex: 1; overflow: auto; padding: 8px; }
+  .row {
+    width: 100%; border: 0; background: transparent;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px; border-radius: var(--radius-row);
+    text-align: left; color: var(--text);
+  }
+  .row:hover { background: var(--hover); }
+  .row.on { background: rgba(16,132,254,.14); }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 10px;
+    display: grid; place-items: center;
+    background: #1a2740; color: #9ec7ff; font-weight: 650; flex: none;
+  }
+  .avatar.cron { background: #1a2a1d; color: #86efac; }
+  .meta { min-width: 0; flex: 1; }
+  .name { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .preview { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); flex: none; }
+  .caption { font-size: 11px; color: var(--faint); padding: 8px 12px 12px; }
+  .stage { display: flex; flex-direction: column; min-width: 0; background: var(--stage); }
+  .top {
+    height: 52px; padding: 0 16px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .top h1 { font-size: 14px; font-weight: 650; margin: 0; }
+  .top .hint { color: var(--faint); font-size: 12px; }
+  .spacer { flex: 1; }
+  .ghost, .primary, .chip {
+    border: 0; border-radius: var(--radius-pill);
+    height: 28px; padding: 0 12px;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .ghost { background: transparent; color: var(--muted); }
+  .ghost:hover { background: var(--hover); color: var(--text); }
+  .primary { background: var(--action); color: var(--on-action); font-weight: 600; }
+  .chip { background: var(--card); color: var(--muted); font-size: 12px; border: 1px solid var(--line); }
+  .body { flex: 1; display: flex; min-height: 0; }
+  .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .thread {
+    flex: 1; overflow: auto;
+    display: flex; flex-direction: column; gap: 16px;
+    max-width: 768px; width: 100%; margin: 0 auto;
+    padding: 24px;
+  }
+  .msg { max-width: 86%; }
+  .msg.user { align-self: flex-end; }
+  .bubble {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; padding: 10px 14px;
+  }
+  .process {
+    border: 1px solid var(--line); background: #121212;
+    border-radius: var(--radius-card); padding: 10px 12px;
+    display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px;
+  }
+  .composer {
+    max-width: 768px; width: calc(100% - 48px); margin: 0 auto 16px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 24px; min-height: 48px; padding: 8px 8px 8px 16px;
+    display: flex; align-items: flex-end; gap: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  }
+  .composer input {
+    flex: 1; border: 0; background: transparent; outline: none;
+    padding: 8px 0; color: var(--text);
+  }
+  .send {
+    width: 32px; height: 32px; border: 0; border-radius: 50%;
+    background: var(--action); color: var(--on-action); font-weight: 700;
+  }
+  .settings {
+    width: 360px; border-left: 1px solid var(--line);
+    background: var(--column); padding: 16px; overflow: auto;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius-card); padding: 14px; margin-bottom: 12px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 13px; }
+  .card p { margin: 0; color: var(--muted); font-size: 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
+  .field, textarea, select {
+    width: 100%; background: #101010; border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; outline: none;
+  }
+  textarea { min-height: 72px; resize: vertical; }
+  .cron { flex: 1; overflow: auto; padding: 20px 28px; }
+  .editor { display: grid; grid-template-columns: 1fr 280px; gap: 16px; max-width: 920px; margin: 0 auto; }
+  .draft {
+    border: 1px dashed rgba(255,255,255,.2);
+    color: var(--muted); border-radius: 8px; padding: 8px 10px;
+    font-size: 12px; margin-bottom: 12px;
+  }
+  .warn { color: #fbbf24; }
+  .toggle {
+    width: 36px; height: 20px; border-radius: 99px; border: 0;
+    background: #2a2a2a; position: relative;
+  }
+  .toggle.on { background: var(--blue); }
+  .toggle i {
+    position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: white; display: block;
+  }
+  .toggle.on i { left: 18px; }
+  .hidden { display: none !important; }
+  .ghost { border: 0; border-radius: var(--radius-pill); height: 28px; padding: 0 12px; background: transparent; color: var(--muted); }
+  .ghost:hover { background: var(--hover); color: var(--text); }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="tabs">
+    <button class="tab on" data-nav="agents" onclick="showNav('agents')">智能体</button>
+    <button class="tab" data-nav="cron" onclick="showNav('cron')">自动化</button>
+    <button class="tab" data-nav="sessions" onclick="showNav('sessions')">会话</button>
+  </nav>
+
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="side-top">
+        <h2 id="list-title">对话</h2>
+        <span class="spacer"></span>
+        <button class="primary" id="list-action" onclick="primaryAction()">新对话</button>
+      </div>
+      <div class="list" id="list"></div>
+      <div class="caption" id="list-caption">点名字进聊天。设置在对话顶栏齿轮。</div>
+    </aside>
+
+    <main class="stage">
+      <div id="view-agents">
+        <div class="top">
+          <h1 id="chat-title">量化交易助手</h1>
+          <span class="chip">Pi</span>
+          <span class="spacer"></span>
+          <button class="ghost" onclick="toggleSettings()">设置</button>
+        </div>
+        <div class="body">
+          <div class="chat">
+            <div class="thread" id="thread"></div>
+            <div class="composer">
+              <input placeholder="发给量化交易助手">
+              <button class="send">↑</button>
+            </div>
+          </div>
+          <aside class="settings hidden" id="settings">
+            <div class="card">
+              <h3>它是谁</h3>
+              <p>长期规则、目录、插件。对话和定时任务都会带上。</p>
+              <label>工作方式</label>
+              <textarea>你是量化交易助手。先给结论，再给依据。不替用户下单。</textarea>
+              <label>能看到的文件夹</label>
+              <div class="field">~/trading/playbooks</div>
+              <p style="margin-top:8px">不是打开那个仓库。会话在它自己的工作区，这些路径写进提示词。</p>
+            </div>
+            <button class="ghost" onclick="toggleSettings()">关闭</button>
+          </aside>
+        </div>
+      </div>
+
+      <div id="view-cron" class="hidden">
+        <div class="top">
+          <h1 id="job-title">早盘复盘</h1>
+          <span class="hint">何时 · 在哪 · 做什么</span>
+          <span class="spacer"></span>
+          <button class="primary">运行一次</button>
+        </div>
+        <div class="cron">
+          <div class="editor">
+            <div>
+              <div class="draft hidden" id="draft-banner">草稿：还没有保存，不会到点执行。</div>
+              <div class="card">
+                <label>任务名</label>
+                <input class="field" id="job-name" value="早盘复盘" oninput="syncDraft()">
+                <label>何时</label>
+                <div style="display:flex;gap:8px">
+                  <select class="field"><option>每天</option><option>工作日</option><option>每周</option></select>
+                  <input class="field" value="09:00" style="max-width:90px">
+                </div>
+                <label>在哪跑</label>
+                <select class="field" id="job-cwd">
+                  <option>/Users/me/nio/smelt</option>
+                  <option>/Users/me/trading</option>
+                </select>
+              </div>
+              <div class="card">
+                <label>做什么</label>
+                <select class="field"><option>用智能体</option><option>Shell</option></select>
+                <label>智能体</label>
+                <select class="field"><option>量化交易助手</option><option>写作助手</option></select>
+                <label>这一次的指令</label>
+                <textarea>复盘当前持仓，只输出异常和建议，不要下单。</textarea>
+              </div>
+            </div>
+            <div>
+              <div class="card">
+                <h3>状态</h3>
+                <p>下次 明天 09:00</p>
+                <p style="margin-top:8px">上次 今天 09:01 · 成功</p>
+                <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+                  <button class="toggle on" id="enabled"><i></i></button>
+                  <span style="color:var(--muted);font-size:12px">开启</span>
+                </div>
+              </div>
+              <div class="card">
+                <h3>运行记录</h3>
+                <p>今天 09:01 成功</p>
+                <p style="margin-top:6px">昨天 09:00 成功</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="view-sessions" class="hidden">
+        <div class="top"><h1>smelt</h1><span class="chip">终端</span></div>
+        <div class="thread">
+          <div class="card"><h3>项目会话</h3><p>仓库里的终端 / ACP。助手聊天不在这一页。</p></div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+<script>
+const chats = [
+  { id: 'quant', name: '量化交易助手', preview: '今早仓位已经按规则复盘完', live: true },
+  { id: 'quant-2', name: '量化交易助手', preview: '新对话 · 还没开口', live: false },
+  { id: 'writer', name: '写作助手', preview: '大纲第三版已改完', live: false },
+];
+const jobs = [
+  { id: 'morning', name: '早盘复盘', preview: '每天 09:00 · smelt', draft: false },
+  { id: 'changelog', name: '周一 changelog', preview: '每周一 10:00 · frontend', draft: false },
+  { id: 'draft', name: '未命名草稿', preview: '还差名字和工作目录', draft: true },
+];
+const sessions = [
+  { id: 'smelt', name: 'smelt', preview: '终端 · agy' },
+  { id: 'fe', name: 'frontend', preview: 'Claude · ACP' },
+];
+
+let nav = 'agents';
+let currentChat = 'quant';
+let currentJob = 'morning';
+
+function showNav(which) {
+  nav = which;
+  document.querySelectorAll('.tab').forEach(el => el.classList.toggle('on', el.dataset.nav === which));
+  document.getElementById('view-agents').classList.toggle('hidden', which !== 'agents');
+  document.getElementById('view-cron').classList.toggle('hidden', which !== 'cron');
+  document.getElementById('view-sessions').classList.toggle('hidden', which !== 'sessions');
+  renderList();
+}
+
+function renderList() {
+  const list = document.getElementById('list');
+  const title = document.getElementById('list-title');
+  const action = document.getElementById('list-action');
+  const caption = document.getElementById('list-caption');
+  let items, selected, kind;
+  if (nav === 'agents') {
+    title.textContent = '对话';
+    action.textContent = '新对话';
+    caption.textContent = '左边是聊天列表。点名字进对话，设置在顶栏。';
+    items = chats; selected = currentChat; kind = 'chat';
+  } else if (nav === 'cron') {
+    title.textContent = '任务';
+    action.textContent = '新建任务';
+    caption.textContent = '这是 cron 列表，不是助手列表。';
+    items = jobs; selected = currentJob; kind = 'cron';
+  } else {
+    title.textContent = '项目';
+    action.textContent = '新建会话';
+    caption.textContent = '仓库里的临时会话。';
+    items = sessions; selected = 'smelt'; kind = 'session';
+  }
+  list.innerHTML = items.map(item => `
+    <button class="row ${item.id === selected ? 'on' : ''}" onclick="pick('${kind}','${item.id}')">
+      <span class="avatar ${kind === 'cron' ? 'cron' : ''}">${item.name.slice(0,1)}</span>
+      <span class="meta">
+        <span class="name">${item.name}${item.live ? '<span class="dot"></span>' : ''}</span>
+        <div class="preview ${item.draft ? 'warn' : ''}">${item.preview}</div>
+      </span>
+    </button>
+  `).join('');
+}
+
+function pick(kind, id) {
+  if (kind === 'chat') openChat(id);
+  if (kind === 'cron') openJob(id);
+  if (kind === 'session') showNav('sessions');
+}
+
+function openChat(id) {
+  currentChat = id;
+  const chat = chats.find(c => c.id === id);
+  document.getElementById('chat-title').textContent = chat.name;
+  const thread = document.getElementById('thread');
+  if (id === 'quant-2') {
+    thread.innerHTML = '<div class="msg user"><div class="bubble">（空的新对话）</div></div>';
+  } else if (id === 'writer') {
+    thread.innerHTML = '<div class="msg"><div class="bubble">把第三章节奏再收紧一版。</div></div><div class="msg"><div class="bubble">已把过场段砍掉，冲突提前到第 2 节。</div></div>';
+  } else {
+    thread.innerHTML = '<div class="msg"><div class="bubble">把今早的持仓按风控规则过一遍，异常标出来。</div></div><div class="process">✓ 执行过程<span class="spacer"></span>4 项</div><div class="msg"><div class="bubble">三笔都在限额内。ETH 隔夜波动偏高，建议临时收紧单笔上限。</div></div>';
+  }
+  renderList();
+}
+
+function openJob(id) {
+  currentJob = id;
+  const job = jobs.find(j => j.id === id);
+  document.getElementById('job-title').textContent = job.draft ? '新任务' : job.name;
+  document.getElementById('draft-banner').classList.toggle('hidden', !job.draft);
+  document.getElementById('job-name').value = job.draft ? '' : job.name;
+  document.getElementById('job-cwd').selectedIndex = id === 'changelog' ? 1 : 0;
+  renderList();
+}
+
+function primaryAction() {
+  if (nav === 'agents') openChat('quant-2');
+  if (nav === 'cron') openJob('draft');
+}
+
+function toggleSettings() {
+  document.getElementById('settings').classList.toggle('hidden');
+}
+function syncDraft() {
+  document.getElementById('draft-banner').classList.toggle('hidden', !!document.getElementById('job-name').value.trim());
+}
+document.getElementById('enabled').onclick = function () { this.classList.toggle('on'); };
+renderList();
+</script>
+</body>
+</html>

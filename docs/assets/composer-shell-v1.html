@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ACP 输入区 · Grok Bot 对话壳</title>
+<style>
+  :root{
+    --rail:#070707; --stage:#070707; --card:#181818; --hover:#262626;
+    --t-bright:#fcfcfc; --t:#f3f3f3; --t-mid:#b7b7b7; --t-muted:#959595; --t-faint:#777777;
+    --accent:#1084fe; --red:#ff263c; --on:#070707; --border:#262626;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#111;color:var(--t);
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+    padding:36px 28px 64px;
+  }
+  h1{font-size:20px;color:var(--t-bright);font-weight:650;letter-spacing:-.02em}
+  .sub{color:var(--t-muted);margin:8px 0 28px;max-width:720px}
+  h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--t-faint);margin:28px 0 10px}
+  .row{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
+  .col{width:520px}
+  .stage{
+    background:var(--stage);border:1px solid #1a1a1a;border-radius:10px;
+    padding:18px 0 14px;min-height:280px;display:flex;flex-direction:column;
+  }
+  .msg{max-width:480px;margin:0 auto 10px;width:calc(100% - 40px);color:var(--t-mid);font-size:13px}
+  .tool{
+    font-size:12px;color:var(--t-faint);padding:6px 0 10px;
+  }
+  .tool b{color:var(--t-mid);font-weight:500}
+  .ans{color:var(--t);line-height:1.55}
+  .grow{flex:1}
+  .quiet{
+    max-width:480px;margin:0 auto 8px;width:calc(100% - 40px);
+    font-size:11px;color:var(--t-faint);
+  }
+  .comp{
+    max-width:480px;margin:0 auto;width:calc(100% - 40px);
+    background:var(--card);border:1px solid var(--border);border-radius:24px;
+    padding:10px 12px 10px;
+  }
+  .comp:focus-within{border-color:var(--accent)}
+  .ta{
+    min-height:44px;color:var(--t-faint);padding:6px 6px 10px;font-size:13px;
+  }
+  .ta.on{color:var(--t-bright)}
+  .bar{display:flex;align-items:center;gap:8px}
+  .ghost{
+    border:0;background:transparent;color:var(--t-muted);font:12px/1 inherit;
+    padding:4px 6px;border-radius:8px;cursor:default;
+  }
+  .plus{
+    width:28px;height:28px;border-radius:8px;border:1px solid var(--border);
+    color:var(--t-mid);display:flex;align-items:center;justify-content:center;
+    font-size:16px;flex:none;
+  }
+  .spacer{flex:1}
+  .send{
+    width:32px;height:32px;border-radius:16px;background:var(--t-bright);color:var(--on);
+    display:flex;align-items:center;justify-content:center;font-weight:700;flex:none;
+  }
+  .stop{
+    height:32px;padding:0 12px;border-radius:8px;background:#ff263c28;color:var(--red);
+    display:flex;align-items:center;font-size:12px;font-weight:600;flex:none;
+  }
+  .note{font-size:12px;color:var(--t-faint);margin-top:10px;line-height:1.65}
+  .now .busy{
+    max-width:480px;margin:8px auto;width:calc(100% - 40px);
+    background:var(--card);border-radius:12px;padding:10px 14px 12px;position:relative;overflow:hidden;
+    font-size:12px;color:var(--t-muted);
+  }
+  .now .busy .sweep{
+    position:absolute;left:0;right:0;bottom:0;height:2px;background:#1084fe22;
+  }
+  .now .busy .sweep::after{
+    content:"";position:absolute;left:20%;width:36%;height:100%;background:var(--accent);
+  }
+  .now .comp{border-radius:24px}
+  .now .chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;flex:1;min-width:0}
+  .chip{font-size:11px;padding:3px 8px;border-radius:99px;background:#ffffff12;color:var(--t-muted)}
+  .chip.purple{color:#9159fe}
+  .now .ta{border:2px solid var(--accent);border-radius:12px;margin:0 4px 8px;padding:10px;min-height:52px}
+  .cap{margin-top:8px;font-size:11px;color:var(--t-faint)}
+</style>
+</head>
+<body>
+<h1>输入区 · 对话壳</h1>
+<p class="sub">中间 + 底部这一块。左边是现在的密度，右边是收完之后：进行中不再单独成卡，底栏只留短模型名，停止和发送不同时出现。</p>
+
+<div class="row">
+  <div class="col">
+    <h2>现在</h2>
+    <div class="stage now">
+      <div class="msg tool">▸ 正在用工具　<b>task</b></div>
+      <div class="busy">
+        进行中 · 已用 35m 45s　|　◌ OpenCode 正在处理　···
+        <div class="sweep"></div>
+      </div>
+      <div class="comp">
+        <div class="ta">给 agent 的指令：@ 引文件，/ 用命令，Enter 发送，Shift+Enter 换行</div>
+        <div class="bar">
+          <div class="chips">
+            <span class="chip">上下文 5%</span>
+            <span class="chip purple">opencode-go · OpenCode Go/DeepSeek V4 Flash Vision Exp ▾</span>
+            <span class="chip">Low ▾</span>
+            <span class="chip">build ▾</span>
+          </div>
+          <div class="stop">停止</div>
+          <div class="send">↑</div>
+        </div>
+      </div>
+    </div>
+    <p class="note">三条圆卡片叠在一起。「我在跑」有过程组、文案、转圈、跳点、彗星。底栏一级控件过多，停止和发送并排。</p>
+  </div>
+
+  <div class="col">
+    <h2>空闲</h2>
+    <div class="stage">
+      <div class="msg ans">改完了，确认弹窗已经收成 12px 卡片。</div>
+      <div class="grow"></div>
+      <div class="comp">
+        <div class="ta">想让它做什么？</div>
+        <div class="bar">
+          <div class="plus">+</div>
+          <button class="ghost">OpenCode Go ▾</button>
+          <div class="spacer"></div>
+          <div class="send">↑</div>
+        </div>
+      </div>
+    </div>
+    <p class="cap">外壳即焦点，里面不再套蓝框。用量 / Low / build 进模型菜单。</p>
+  </div>
+
+  <div class="col">
+    <h2>运行中</h2>
+    <div class="stage">
+      <div class="msg tool">▸ 正在用工具　<b>task</b></div>
+      <div class="msg ans" style="color:var(--t-muted)">正在改 modal_shell…</div>
+      <div class="grow"></div>
+      <div class="quiet">已用 35m · OpenCode</div>
+      <div class="comp">
+        <div class="ta on">跟进一下权限卡的文案</div>
+        <div class="bar">
+          <div class="plus">+</div>
+          <button class="ghost">OpenCode Go ▾</button>
+          <div class="spacer"></div>
+          <div class="stop">停止</div>
+        </div>
+      </div>
+    </div>
+    <p class="cap">停止替换发送，主操作始终一个。进行中只剩一行弱字，不再第二条卡片。</p>
+  </div>
+</div>
+</body>
+</html>

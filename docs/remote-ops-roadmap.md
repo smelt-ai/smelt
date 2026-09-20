@@ -8,7 +8,7 @@
 > **产品主航道里的「手机与远程」见 [product-roadmap.md §6](product-roadmap.md)**（目标体验与交付切片）。  
 > 本文展开协议分层、网关契约与 phase 细节。
 
-配套：[collaboration.md](collaboration.md)、[state-channel-plan.md](state-channel-plan.md)。  
+配套：[collaboration.md](collaboration.md)、[state-channel-plan.md](archive/state-channel-plan.md)。  
 其它 backlog 见 [roadmap.md](roadmap.md)。
 
 ---
@@ -28,7 +28,7 @@
 
 | 层 | 用户感知 | 技术要点 | 现状 |
 |----|----------|----------|------|
-| **L1 远程查看** | 看到会话在输出什么 | stream API；客户端可选 xterm / 纯文本尾部 / 不看画面 | ✅ 已实现（手机 App 查看 ACP 会话对话；终端画面不在手机提供） |
+| **L1 远程查看** | 看到会话在输出什么 | stream API；客户端可选 xterm / 纯文本尾部 / 不看画面 | ✅ 已实现（手机 App 提供完整终端——`/terminal/{id}/ws` + `xterm.dart`） |
 | **L2 远程知情** | 在跑 / 等你 / 问什么 | state + subscribe（+ hook） | ✅ 已实现（session 列表、state/attention 推送、通知） |
 | **L3 远程操控** | 键入、粘贴、或「允许/拒绝/短回复」 | input / **action** API；phase 门闩 | ✅ 已实现（发消息 / 批准拒绝 / elicitation / 创建删除会话） |
 | **L4 远程协作** | 链接给同事、飞书推送、认领移交 | token、机器人、收件箱 | 🚧 部分（token 链接已有；飞书卡片 / 认领池未做） |
@@ -93,6 +93,11 @@
 | 原始输入 | `POST …/sessions/:id/input` body 字节/文本 | L3 完整键盘 |
 | **业务动作** | `POST …/sessions/:id/action` `{ type: approve\|deny\|reply, text? }` | **手机/飞书主路径**；服务端翻译成写入 PTY 的序列 |
 | 列表 | `GET …/sessions` | 选会话、发卡片 |
+
+> 上表是**示意草图**（约定了能力分层，不绑死路径拼写），真实路由见
+> `crates/smelt-remote-gateway/src/lib.rs`：`/acp/sessions`、`/acp/ws`、`/terminal/{id}/ws`；
+> 「action」实际落成 `respondApproval` / `chooseElicitation` / `submitElicitation` /
+> `sendMessage` 等 WebSocket 方法（`lib.rs:1163-1208`）。「契约先于皮肤」的声明依旧成立。
 
 鉴权：token / 链接密钥；MVP 可限本机或局域网。
 
@@ -206,7 +211,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 |------|------|
 | `crates/smelt-iroh` | 隧道本体：ALPN `smelt/tunnel/1`，iroh 双向流 ⟷ 本机网关 TCP，逐字节转发 |
 | smeltd 的 `iroh_start/stop/status` | 守护侧起停隧道；私钥落 `~/.smelt/iroh-secret`，与命令行 `smelt-iroh-host` 共用同一把 |
-| GUI 设置页「开启远程」 | 唯一远程开关 + iroh 配对二维码，格式 `smelt+iroh://<endpoint_id>/?token=<token>`（定义在 `smelt-core::pairing`） |
+| GUI 设置页「开启远程」 | 唯一远程开关 + iroh 配对二维码，格式 `smelt+iroh://<endpoint_id>/?token=<token>&relay=<relay_url>`（定义在 `smelt-pairing`）；**解析端 `parse_iroh_pairing_uri` 把 `relay` 当必填**——没有转发段就解析失败，不回落默认服务 |
 | `crates/smelt-mobile` + `mobile/` | 手机侧在本地开一个端口转发进 iroh 流，Dart 照常连本地端口，鉴权/重连逻辑一行没改 |
 
 **明确不做：**
@@ -223,7 +228,7 @@ iroh 隧道握手超时；移动端 `GatewayService` 的连接层超时默认 10
 
 ## Phase 4 — 远程知情（状态）✅ 已完成
 
-函数级改动见 [state-channel-plan.md](state-channel-plan.md)。  
+函数级改动见 [state-channel-plan.md](archive/state-channel-plan.md)。  
 状态是远程操作的**知情层**，服务 B/C 与侧栏灯。
 
 | 交付 | 说明 |
@@ -242,7 +247,7 @@ iroh 隧道握手超时；移动端 `GatewayService` 的连接层超时默认 10
 
 | 交付 | 说明 |
 |------|------|
-| **客户端 B** | 手机优先 H5：phase、问题文案、主按钮区；完整终端入口可选且降级预期 |
+| **客户端 B** | 移动端 Flutter App：phase、问题文案、主按钮区；完整终端入口可选且降级预期 |
 | 列表筛选 | 「等你处理」 |
 | 通知（可选） | waiting / approval |
 

@@ -18,12 +18,33 @@ dist/
 # Python 脚本缓存（.github/scripts/ 下的审核脚本）
 __pycache__/
 
-# remote H5
-remote-web/node_modules/
-remote-web/dist/
+# TypeScript 插件（plugins/*）：dsh 桥 `@smelt-ai/dsh-acp-rich` 已经独立成仓
+# （github.com/smelt-ai/dsh-acp-rich），本地一般就 clone 在 plugins/ 下面。
+# 默认忽略外部插件仓库；主仓维护的 bundled 插件逐个显式放行。
+plugins/*
+!plugins/browser/
+!plugins/browser/**
+!plugins/skills/
+!plugins/skills/**
 
 # 本地手测用的一次性文件
 /mermaid-test.md
 
-# CI 环境上下文，由 .ci/<平台>/env-setup.sh 生成
-/.ci/.env/
+# CI 环境上下文，由 ci/<平台>/env-setup.sh 生成
+/ci/.env/
+
+# dsh 实测（`dsh_live_tests`，见 crates/smelt-core/src/acp_conn.rs）跑起来的
+# harness 会话库。桥的 profile 里 `root: './.sessions'` 曾相对**进程 cwd** 解析，
+# 而 smelt 把 agent 子进程的 cwd 设成用户的项目目录，于是同一份 profile 会往每个
+# 打开过的项目里写这两个目录。已在桥仓修掉（bin 启动前 chdir 到 profile 所在目录，
+# 相对路径改为相对配置文件解析）。这两条留着，是防旧版桥还装在机器上。
+/.sessions/
+/.sessions-index/
+
+# TS 插件 SDK 的依赖树。SDK 零运行时依赖，装的只是 typescript / @types，
+# 不入库。注意 crates/smelt-plugin-host/tests/bun_runtime.rs 不依赖这里：它自己把
+# SDK 源码 vendor 进临时包，所以没跑过 bun install 也能验收。
+packages/*/node_modules/
+
+# npm pack 产物（本地验证发布内容时会生成）
+*.tgz
