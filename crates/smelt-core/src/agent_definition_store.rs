@@ -364,6 +364,18 @@ pub fn is_workbench_conversation_workspace(path: &Path) -> bool {
     path.starts_with(&root)
 }
 
+/// 工作台「聊天」每次新开一场对话用的空目录：`~/.smelt/workspaces/conversations/<uuid>`。
+///
+/// 跟智能体 space 不同——Pi 裸对话没有长期归属对象，不能共用一个 cwd，否则
+/// 多场对话会互相踩工作文件。目录落在工作台对话根下，侧栏会把它收进「对话」
+/// 而不是当成用户项目。
+pub fn ensure_workbench_conversation_workspace() -> Option<PathBuf> {
+    let root = workbench_conversation_workspace_root()?;
+    let dir = root.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// 智能体定义单行写入的失败原因。调用方按种类映射到 Control API 错误码。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentDefinitionError {
@@ -990,6 +1002,31 @@ mod tests {
         assert!(!is_workbench_conversation_workspace(std::path::Path::new(
             "/Users/c.chen/nio/smelt"
         )));
+    }
+
+    #[test]
+    fn ensure_workbench_conversation_workspace_lands_in_conversation_rail() {
+        let dir = ensure_workbench_conversation_workspace().expect("home dir");
+        assert!(is_workbench_conversation_workspace(&dir));
+        let cwd = dir.to_string_lossy();
+        assert!(crate::session_control::is_agent_conversation(
+            None,
+            None,
+            Some(cwd.as_ref())
+        ));
+        assert!(crate::session_control::is_product_conversation(
+            None,
+            None,
+            None,
+            Some(cwd.as_ref())
+        ));
+        // 自动化 Run 借用同一目录时仍然归自动化，不进「对话」。
+        assert!(!crate::session_control::is_agent_conversation(
+            Some("auto-1"),
+            None,
+            Some(cwd.as_ref())
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn open_store() -> (tempfile::TempDir, smelt_store::Store) {

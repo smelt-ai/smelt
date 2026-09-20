@@ -20,15 +20,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_faint()))
-                    .child("工作台"),
-            )
+            .child(self.render_workbench_chat_row(entity.clone()))
             .child(self.render_agent_product_navigation_row(
                 "agents-route",
                 "智能体",

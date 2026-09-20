@@ -45,9 +45,16 @@ const PANE_ROW_GROUP: &str = "sess-pane-row-hover";
 /// 整行点击展开/折叠；文件夹只表达项目身份和开合状态，hover 整行时同步提亮。
 const PROJ_HEADER_GROUP: &str = "proj-header-hover";
 
+/// 「项目」分组标题行：筛选和打开项目只在 hover 这行时出现，跟 Grok 一样。
+const PROJ_SECTION_GROUP: &str = "proj-section-hover";
+
+/// 侧栏正文统一 13px：分区标题、导航、项目名、会话名、对话名同一字号。
+/// 层级靠字重和颜色，不靠放大字——分区标题 medium + faint，辅助信息 11/10px faint。
+pub(crate) const SIDEBAR_FONT_SIZE: f32 = 13.;
+
 /// 项目标题与会话列表之间的固定层级尺寸。集中声明是为了避免项目头、会话缩进和
 /// 新建按钮各自改尺寸后失去对齐关系。
-const PROJECT_HEADER_FONT_SIZE: f32 = 13.;
+const PROJECT_HEADER_FONT_SIZE: f32 = SIDEBAR_FONT_SIZE;
 const PROJECT_NEW_BUTTON_SIZE: f32 = 28.;
 const PROJECT_ACTION_SLOT_HEIGHT: f32 = 20.;
 const PROJECT_DISCLOSURE_ICON_SIZE: f32 = 15.;
@@ -320,107 +327,64 @@ impl Workspace {
             Some(crate::SidebarDrag::Project(root)) => Some(root.clone()),
             _ => None,
         };
-        let e_filter = this.clone();
-        let header = crate::workspace_frame::with_window_drag(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_3()
-                .pt_3()
-                .pb_2()
-                .child(
-                    div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .flex()
-                        .items_center()
-                        .gap(px(2.))
-                        .children(
-                            [(false, "全部"), (true, "有会话")]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(ix, (hide, label))| {
-                                    let selected = hide_empty == hide;
-                                    let entity = e_filter.clone();
-                                    div()
-                                        .id(("sidebar-empty-filter", ix))
-                                        .px_2()
-                                        .py(px(3.))
-                                        .rounded_full()
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .text_color(rgb(if selected {
-                                            ui_theme::text()
-                                        } else {
-                                            ui_theme::text_faint()
-                                        }))
-                                        .when(selected, |d| d.bg(rgb(ui_theme::bg_hover())))
-                                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                                        .child(label)
-                                        .on_click(move |_ev, _window, cx| {
-                                            entity.update(cx, |ws, cx| {
-                                                if ws.sidebar_hide_empty_projects != hide {
-                                                    ws.sidebar_hide_empty_projects = hide;
-                                                    ws.save_state(cx);
-                                                    cx.notify();
-                                                }
-                                            });
-                                        })
-                                }),
-                        ),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            Button::new("session-grouping")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Settings)
-                                .dropdown_menu(move |menu, _window, _cx| {
-                                    let menu = menu.item(PopupMenuItem::label("分组依据"));
-                                    let add_item = |
-                                    menu: PopupMenu,
-                                    mode: SidebarGrouping,
-                                    label: &'static str,
-                                    entity: Entity<Workspace>,
-                                | {
-                                    let mut entry = PopupMenuItem::new(label);
-                                    if grouping == mode {
-                                        entry = entry.icon(IconName::Check);
-                                    }
-                                    menu.item(entry.on_click(move |_ev, _window, cx| {
-                                        entity.update(cx, |ws, cx| {
-                                            ws.sidebar_grouping = mode;
+        // 筛选 / 分组收进「项目」行右侧的滑块菜单，参考 Copilot Repositories 头。
+        let grouping_btn = div()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new("session-grouping")
+                    .ghost()
+                    .size(px(24.))
+                    .icon(IconName::Settings2)
+                    .tooltip("筛选与分组")
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let menu = menu.item(PopupMenuItem::label("分组依据"));
+                        let add_group =
+                            |menu: PopupMenu,
+                             mode: SidebarGrouping,
+                             label: &'static str,
+                             entity: Entity<Workspace>| {
+                                let mut entry = PopupMenuItem::new(label);
+                                if grouping == mode {
+                                    entry = entry.icon(IconName::Check);
+                                }
+                                menu.item(entry.on_click(move |_ev, _window, cx| {
+                                    entity.update(cx, |ws, cx| {
+                                        ws.sidebar_grouping = mode;
+                                        ws.save_state(cx);
+                                        cx.notify();
+                                    });
+                                }))
+                            };
+                        let menu =
+                            add_group(menu, SidebarGrouping::Project, "项目", e_group.clone());
+                        let menu =
+                            add_group(menu, SidebarGrouping::Status, "状态", e_group.clone());
+                        let menu =
+                            add_group(menu, SidebarGrouping::LastUpdated, "时间", e_group.clone());
+                        let menu = menu.separator().item(PopupMenuItem::label("显示"));
+                        let add_show =
+                            |menu: PopupMenu,
+                             hide: bool,
+                             label: &'static str,
+                             entity: Entity<Workspace>| {
+                                let mut entry = PopupMenuItem::new(label);
+                                if hide_empty == hide {
+                                    entry = entry.icon(IconName::Check);
+                                }
+                                menu.item(entry.on_click(move |_ev, _window, cx| {
+                                    entity.update(cx, |ws, cx| {
+                                        if ws.sidebar_hide_empty_projects != hide {
+                                            ws.sidebar_hide_empty_projects = hide;
                                             ws.save_state(cx);
                                             cx.notify();
-                                        });
-                                    }))
-                                };
-                                    let menu = add_item(
-                                        menu,
-                                        SidebarGrouping::Project,
-                                        "项目",
-                                        e_group.clone(),
-                                    );
-                                    let menu = add_item(
-                                        menu,
-                                        SidebarGrouping::Status,
-                                        "状态",
-                                        e_group.clone(),
-                                    );
-                                    add_item(
-                                        menu,
-                                        SidebarGrouping::LastUpdated,
-                                        "时间",
-                                        e_group.clone(),
-                                    )
-                                }),
-                        ),
-                ),
-        );
+                                        }
+                                    });
+                                }))
+                            };
+                        let menu = add_show(menu, false, "全部", e_group.clone());
+                        add_show(menu, true, "有会话", e_group.clone())
+                    }),
+            );
 
         let e_scroll_sess = this.clone();
         let e_scroll_proj = this.clone();
@@ -1733,7 +1697,8 @@ impl Workspace {
             );
         }
 
-        // ---- 底部操作条：设置 + 打开项目 ----
+        // ---- 底部操作条：设置 ----
+        // 「打开项目」已经挪到「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
         let e_open = this.clone();
         let e_settings = this.clone();
         let settings_needs_attention =
@@ -1833,7 +1798,6 @@ impl Workspace {
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap_1()
             .px_2()
             .py_2()
             .border_t_1()
@@ -1852,7 +1816,7 @@ impl Workspace {
                     .gap_2()
                     .rounded_full()
                     .cursor_pointer()
-                    .text_sm()
+                    .text_size(px(SIDEBAR_FONT_SIZE))
                     .font_medium()
                     .text_color(rgb(ui_theme::text_mid()))
                     .hover(|d| {
@@ -1873,7 +1837,7 @@ impl Workspace {
                                     .items_center()
                                     .justify_center()
                                     .gap_2()
-                                    .text_sm()
+                                    .text_size(px(SIDEBAR_FONT_SIZE))
                                     .font_medium()
                                     .text_color(rgb(ui_theme::text_mid()))
                                     .child(
@@ -2009,36 +1973,6 @@ impl Workspace {
                                 .bg(rgb(ui_theme::red())),
                         )
                     }),
-            )
-            .child(
-                div()
-                    .id("open-project")
-                    .h(px(32.))
-                    .flex_1()
-                    .min_w_0()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .hover(|d| {
-                        d.bg(rgb(ui_theme::bg_row_hover()))
-                            .text_color(rgb(ui_theme::text_bright()))
-                    })
-                    .child(
-                        Icon::new(IconName::FolderOpen)
-                            .size(px(14.))
-                            .text_color(rgb(ui_theme::text_muted())),
-                    )
-                    .child("打开项目")
-                    .on_click(move |_ev, _window, cx| {
-                        e_open.update(cx, |ws, cx| ws.open_project(cx));
-                    }),
             );
 
         div()
@@ -2060,16 +1994,61 @@ impl Workspace {
             .children(self.render_workspace_surface_rows(this, cx))
             .child(
                 div()
+                    .id("project-section-header")
+                    .group(PROJ_SECTION_GROUP)
                     .flex_shrink_0()
-                    .px_4()
-                    .pt_2()
-                    .pb_1()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child("项目"),
+                    .child(
+                        crate::workspace_frame::with_window_drag(
+                            div()
+                                .px_3()
+                                .pt_2()
+                                .pb_1()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .px_1()
+                                        .flex_shrink_0()
+                                        .text_size(px(SIDEBAR_FONT_SIZE))
+                                        .font_medium()
+                                        .text_color(rgb(ui_theme::text_faint()))
+                                        .child("项目"),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .opacity(0.0)
+                                        .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
+                                        .child(grouping_btn)
+                                        .child(
+                                            div()
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
+                                                .child(
+                                                    Button::new("open-project")
+                                                        .ghost()
+                                                        .size(px(24.))
+                                                        .icon(
+                                                            Icon::empty().path(
+                                                                "smelt-icons/folder-plus.svg",
+                                                            ),
+                                                        )
+                                                        .tooltip("打开项目")
+                                                        .on_click(move |_ev, _window, cx| {
+                                                            e_open.update(cx, |ws, cx| {
+                                                                ws.open_project(cx)
+                                                            });
+                                                        }),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                    ),
             )
-            .child(header)
             .child(
                 div()
                     .id("session-rows-pane")
@@ -2102,7 +2081,7 @@ impl Workspace {
                     div()
                         .px_2()
                         .pb_1()
-                        .text_xs()
+                        .text_size(px(SIDEBAR_FONT_SIZE))
                         .font_medium()
                         .text_color(rgb(ui_theme::text_faint()))
                         .child("插件"),
@@ -2156,7 +2135,7 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_sm()
+                                .text_size(px(SIDEBAR_FONT_SIZE))
                                 .text_color(rgb(if selected {
                                     ui_theme::text_bright()
                                 } else {

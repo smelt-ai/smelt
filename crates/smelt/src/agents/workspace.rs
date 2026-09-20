@@ -466,6 +466,31 @@ impl Workspace {
         );
     }
 
+    /// 侧栏最顶「聊天」：用 Pi 裸引擎新开一段工作台对话。
+    /// 进「对话」栏，不进项目列表，也不绑某个产品智能体定义。
+    pub(super) fn start_workbench_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(fallback_cwd) = ensure_workbench_conversation_cwd() else {
+            self.agent_surface.error = Some("无法创建对话工作区".to_string());
+            cx.notify();
+            return;
+        };
+        self.agent_surface.error = None;
+        self.add_acp_session(
+            NewAcpSessionRequest {
+                agent: settings::ConversationAgentKind::Pi,
+                launch_override: None,
+                profile_id: None,
+                agent_definition: None,
+                fallback_cwd: Some(fallback_cwd),
+                pending_prompt: None,
+                automation_id: None,
+                activate: true,
+            },
+            window,
+            cx,
+        );
+    }
+
     pub(crate) fn open_agent_conversation(
         &mut self,
         session_ix: usize,

@@ -27,7 +27,3 @@ impl DerefMut for WorktreeInheritSettings {
 pub fn load_settings() -> WorktreeInheritSettings {
     WorktreeInheritSettings(smelt_core::worktree_inherit::load_settings())
 }
-
-pub fn save_settings(settings: &WorktreeInheritSettings) {
-    smelt_core::worktree_inherit::save_settings(&settings.0);
-}

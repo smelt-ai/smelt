@@ -4480,6 +4480,21 @@ impl gpui::AssetSource for SmeltAssets {
                 include_bytes!("../assets/icons/git-branch.svg").as_slice(),
             )));
         }
+        if path == "smelt-icons/folder-plus.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/folder-plus.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/git-commit.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/git-commit.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/square-pen.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/square-pen.svg").as_slice(),
+            )));
+        }
         // panel-right-filled / panel-left-filled：bundled 的 panel-right /
         // panel-left 只是一根细分隔线，18px 图标下开合两态区分度太低；这两枚在
         // 分隔线的另一侧加了实心色块，开启态一眼可辨，跟 Codex 工具栏那种「大色块

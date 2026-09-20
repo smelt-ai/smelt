@@ -1,4 +1,4 @@
-//! 设置页：工作区文件继承与手机远程。
+//! 设置页：手机远程。
 
 use super::*;
 
@@ -301,62 +301,4 @@ pub(super) fn remote_page(
     SettingPage::new("手机远程")
         .description("配对 Smelt 手机 App，远程查看或操作当前工作台。")
         .group(remote_group)
-}
-
-pub(super) fn worktree_page() -> SettingPage {
-    SettingPage::new("Worktree 文件继承")
-        .description("设置之后新建的 Worktree 要共享或跳过哪些主仓库未跟踪文件。")
-        .group(worktree_inherit_group())
-}
-
-pub(super) fn worktree_inherit_group() -> SettingGroup {
-    let inherit_item = SettingItem::new(
-        "继承主仓库未跟踪文件",
-        SettingField::switch(
-            |cx: &App| {
-                cx.global::<crate::worktree_inherit::WorktreeInheritSettings>()
-                    .enabled
-            },
-            |enabled: bool, cx: &mut App| {
-                cx.global_mut::<crate::worktree_inherit::WorktreeInheritSettings>()
-                    .enabled = enabled;
-                let settings = cx
-                    .global::<crate::worktree_inherit::WorktreeInheritSettings>()
-                    .clone();
-                crate::worktree_inherit::save_settings(&settings);
-                cx.refresh_windows();
-            },
-        ),
-    )
-    .description(
-        "新建 Worktree 时，把主仓库里没被 Git 跟踪的 .env、本地凭据、IDE 配置等软链过去。\
-         软链共享同一份真源；已存在的文件不会被覆盖，只影响之后新建的 Worktree。",
-    )
-    .layout(gpui::Axis::Vertical);
-
-    let skip_item = SettingItem::new(
-        "跳过清单",
-        SettingField::input(
-            |cx: &App| {
-                cx.global::<crate::worktree_inherit::WorktreeInheritSettings>()
-                    .skip_patterns_text()
-                    .into()
-            },
-            |value: SharedString, cx: &mut App| {
-                cx.global_mut::<crate::worktree_inherit::WorktreeInheritSettings>()
-                    .set_skip_patterns_from_text(&value);
-                let settings = cx
-                    .global::<crate::worktree_inherit::WorktreeInheritSettings>()
-                    .clone();
-                crate::worktree_inherit::save_settings(&settings);
-                cx.refresh_windows();
-            },
-        ),
-    )
-    .description(
-        "这些条目不继承，逗号或空格分隔，支持 * 和 ? 通配。匹配完整相对路径或路径最后一段。",
-    )
-    .layout(gpui::Axis::Vertical);
-
-    SettingGroup::new().items(vec![inherit_item, skip_item])
 }

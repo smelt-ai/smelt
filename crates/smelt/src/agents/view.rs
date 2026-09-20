@@ -31,7 +31,7 @@ impl Workspace {
                     row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
                 }
             })
-            .child(Icon::new(icon).size(px(17.)).text_color(rgb(if selected {
+            .child(Icon::new(icon).size(px(16.)).text_color(rgb(if selected {
                 crate::ui_theme::accent()
             } else {
                 crate::ui_theme::text_muted()
@@ -39,7 +39,7 @@ impl Workspace {
             .child(
                 div()
                     .flex_1()
-                    .text_sm()
+                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
                     .font_medium()
                     .text_color(rgb(if selected {
                         crate::ui_theme::text_bright()
@@ -61,6 +61,42 @@ impl Workspace {
                     let route = route.clone();
                     entity.update(cx, |workspace, cx| {
                         workspace.open_agent_product_route(route, window, cx)
+                    });
+                }
+            })
+            .into_any_element()
+    }
+
+    /// 侧栏最顶「聊天」：动作行，不是路由。点一下就用 Pi 新开一段对话。
+    pub(super) fn render_workbench_chat_row(&self, entity: Entity<Workspace>) -> AnyElement {
+        div()
+            .id("workbench-chat")
+            .h(px(32.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(crate::ui_theme::row_radius())
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+            .child(
+                Icon::empty()
+                    .path("smelt-icons/square-pen.svg")
+                    .size(px(16.))
+                    .text_color(rgb(crate::ui_theme::text_muted())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                    .font_medium()
+                    .text_color(rgb(crate::ui_theme::text_mid()))
+                    .child("聊天"),
+            )
+            .on_click({
+                move |_, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.start_workbench_chat(window, cx)
                     });
                 }
             })
@@ -156,7 +192,7 @@ impl Workspace {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
+                            .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
                             .font_semibold()
                             .text_color(rgb(if group_active {
                                 crate::ui_theme::text_bright()
@@ -309,12 +345,11 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_sm()
-                                .font_medium()
+                                .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
                                 .text_color(rgb(if selected {
                                     crate::ui_theme::text_bright()
                                 } else {
-                                    crate::ui_theme::text_mid()
+                                    crate::ui_theme::text()
                                 }))
                                 .truncate()
                                 .child(title),
@@ -390,10 +425,10 @@ impl Workspace {
                 div()
                     .px_2()
                     .pb_1()
-                    .text_xs()
+                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
                     .font_medium()
                     .text_color(rgb(crate::ui_theme::text_faint()))
-                    .child("对话"),
+                    .child("聊天"),
             )
             .map(|section| {
                 if rows.is_empty() {
@@ -405,7 +440,7 @@ impl Workspace {
                             .items_center()
                             .text_xs()
                             .text_color(rgb(crate::ui_theme::text_faint()))
-                            .child("还没有对话"),
+                            .child("还没有聊天"),
                     )
                 } else {
                     section.children(rows)
