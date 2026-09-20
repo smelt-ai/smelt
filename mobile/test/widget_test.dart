@@ -1,10 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/main.dart';
+import 'package:smelt_mobile/models/acp_snapshot.dart';
 import 'package:smelt_mobile/models/pairing_config.dart';
 import 'package:smelt_mobile/models/saved_desktop.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/pages/console_page.dart';
 import 'package:smelt_mobile/services/pairing_storage.dart';
+import 'package:smelt_mobile/services/pending_actions_controller.dart';
+import 'package:smelt_mobile/widgets/approval_card.dart';
+import 'package:smelt_mobile/widgets/session_row.dart';
 
 class MemoryPairingStorage implements PairingStorage {
   SavedDesktopCollection value = const SavedDesktopCollection();
@@ -141,14 +148,10 @@ void main() {
     const sessions = [approval, running, idle, failed];
 
     expect(
-      filterSessions(sessions, SessionListFilter.attention).map((s) => s.id),
+      sessions.where(sessionNeedsAction).map((s) => s.id),
       ['approval', 'failed'],
     );
-    expect(
-      filterSessions(sessions, SessionListFilter.running).map((s) => s.id),
-      ['running'],
-    );
-    expect(filterSessions(sessions, SessionListFilter.all), sessions);
+    expect(sessions.where(sessionIsRunning).map((s) => s.id), ['running']);
   });
 
   test('attention notifications stay hidden for the active session', () {
@@ -217,62 +220,141 @@ void main() {
     );
   });
 
-  testWidgets('session filter bar fits a compact phone width', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(320, 160));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
+  testWidgets('console shows approvals from sessions you are not inside', (
+    tester,
+  ) async {
+    final sessions = StreamController<List<SessionSummary>>.broadcast();
+    final snapshots = StreamController<String>.broadcast();
+    addTearDown(sessions.close);
+    addTearDown(snapshots.close);
 
+    final cache = <String, AcpSnapshot>{
+      'acp-b': AcpSnapshot(
+        entries: const [],
+        phase: const AcpPhaseAwaitingApproval(),
+        pendingPermissions: const [
+          PendingPermission(
+            toolCallId: 'tool-b',
+            question: 'Run this command?',
+            options: [
+              PermissionOption(
+                optionId: 'reject',
+                name: 'Deny',
+                kind: 'RejectOnce',
+              ),
+              PermissionOption(
+                optionId: 'allow',
+                name: 'Allow',
+                kind: 'AllowOnce',
+              ),
+              PermissionOption(
+                optionId: 'always',
+                name: 'Always allow',
+                kind: 'AllowAlways',
+              ),
+            ],
+            details: ApprovalDetailsCommand(
+              command: 'cargo test -p smelt-ui --no-fail-fast',
+              cwd: '~/code/smelt',
+            ),
+          ),
+        ],
+      ),
+    };
+
+    final controller = PendingActionsController(
+      sessions: sessions.stream,
+      initialSessions: const [],
+      snapshotUpdates: snapshots.stream,
+      lookupSnapshot: (id) => cache[id],
+      requestDetails: (_) => true,
+    );
+    addTearDown(controller.dispose);
+
+    final responded = <String>[];
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: SessionFilterBar(
-            selected: SessionListFilter.attention,
-            attentionCount: 123,
-            runningCount: 45,
-            allCount: 234,
-            onChanged: (_) {},
+          body: ConsolePage(
+            controller: controller,
+            onOpenSession: (_) {},
+            onRespond: (session, tool, option) =>
+                responded.add('$session/$tool/$option'),
           ),
         ),
       ),
     );
 
-    expect(find.text('Action 99+'), findsOneWidget);
-    expect(find.text('Running 45'), findsOneWidget);
-    expect(find.text('All 99+'), findsOneWidget);
-    expect(tester.takeException(), isNull);
+    sessions.add([
+      const SessionSummary(
+        id: 'acp-b',
+        title: 'refactor gateway',
+        phase: 'idle',
+        status: 'waiting_approval',
+        agent: 'codex',
+      ),
+    ]);
+    snapshots.add('acp-b');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Run this command?'), findsOneWidget);
+    expect(
+      find.text('cargo test -p smelt-ui --no-fail-fast'),
+      findsOneWidget,
+      reason: 'the console must show what it is asking to approve',
+    );
+    expect(find.text('Working directory: ~/code/smelt'), findsOneWidget);
+
+    await tester.tap(find.text('Allow'));
+    await tester.pump();
+    expect(
+      responded,
+      ['acp-b/tool-b/allow'],
+      reason: 'deciding must not require opening the session',
+    );
   });
 
-  testWidgets('session filter labels stay on one line with large text', (
+  testWidgets('always-allow is demoted out of the primary button row', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 160));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-
+    final responded = <String>[];
     await tester.pumpWidget(
       MaterialApp(
-        home: MediaQuery(
-          data: const MediaQueryData(textScaler: TextScaler.linear(1.4)),
-          child: Scaffold(
-            body: SessionFilterBar(
-              selected: SessionListFilter.running,
-              attentionCount: 99,
-              runningCount: 99,
-              allCount: 99,
-              onChanged: (_) {},
+        home: Scaffold(
+          body: ApprovalCard(
+            permission: const PendingPermission(
+              toolCallId: 'tool-1',
+              question: 'Run this command?',
+              options: [
+                PermissionOption(
+                  optionId: 'reject',
+                  name: 'Deny',
+                  kind: 'RejectOnce',
+                ),
+                PermissionOption(
+                  optionId: 'allow',
+                  name: 'Allow',
+                  kind: 'AllowOnce',
+                ),
+                PermissionOption(
+                  optionId: 'always',
+                  name: 'Always allow',
+                  kind: 'AllowAlways',
+                ),
+              ],
             ),
+            onRespond: responded.add,
           ),
         ),
       ),
     );
 
-    for (final label in ['Action 99', 'Running 99', 'All 99']) {
-      final text = tester.widget<Text>(find.text(label));
-      expect(text.maxLines, 1);
-      expect(text.softWrap, isFalse);
-    }
-    expect(find.byIcon(Icons.priority_high), findsNothing);
-    expect(find.byIcon(Icons.autorenew), findsNothing);
-    expect(find.byIcon(Icons.forum_outlined), findsNothing);
-    expect(tester.takeException(), isNull);
+    // Allow must not be a filled button sitting in the thumb zone, and the
+    // irreversible option must not sit shoulder to shoulder with it.
+    expect(find.widgetWithText(FilledButton, 'Allow'), findsNothing);
+    expect(find.widgetWithText(OutlinedButton, 'Allow'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, 'Always allow'), findsNothing);
+    expect(find.widgetWithText(TextButton, 'Always allow'), findsOneWidget);
   });
 
   testWidgets('cached connection bar identifies stale content', (tester) async {
@@ -289,6 +371,82 @@ void main() {
 
     expect(find.text('Reconnecting · Saved 3m ago'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  });
+
+  testWidgets('pending action badge tracks sessions that need a decision', (
+    tester,
+  ) async {
+    const waiting = SessionSummary(
+      id: 'approval',
+      title: 'Needs approval',
+      phase: 'running',
+      status: 'waiting_approval',
+      agent: 'codex',
+    );
+    const idle = SessionSummary(
+      id: 'idle',
+      title: 'Finished task',
+      phase: 'idle',
+      agent: 'codex',
+    );
+    final sessions = StreamController<List<SessionSummary>>.broadcast();
+    addTearDown(sessions.close);
+    var taps = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          appBar: AppBar(
+            actions: [
+              PendingActionBadge(
+                onPressed: () => taps++,
+                sessions: sessions.stream,
+                initialSessions: const [idle],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // 没人等我的时候不占地方。
+    expect(find.byType(IconButton), findsNothing);
+
+    sessions.add(const [waiting, idle]);
+    await tester.pump();
+    expect(find.text('1'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.notification_important_outlined));
+    expect(taps, 1);
+
+    sessions.add(const [idle]);
+    await tester.pump();
+    expect(find.byType(IconButton), findsNothing);
+  });
+
+  testWidgets('offline connection bar offers a retry instead of a spinner', (
+    tester,
+  ) async {
+    var retries = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CachedConnectionBar(
+            state: WsState.disconnected,
+            cachedAt: DateTime.now().subtract(const Duration(hours: 2)),
+            onRetry: () => retries++,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Offline · Saved 2h ago'), findsOneWidget);
+    // 没有重连在跑的时候转菊花是在骗人。
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.byIcon(Icons.cloud_off_outlined), findsOneWidget);
+
+    await tester.tap(find.text('Retry'));
+    expect(retries, 1);
   });
 
   testWidgets('desktop rename dialog can be saved repeatedly', (tester) async {
@@ -337,6 +495,20 @@ void main() {
       shouldAutoFollowSnapshot(initialLoad: false, wasAtBottom: false),
       isFalse,
     );
+  });
+
+  testWidgets('no bottom navigation until there is something to navigate to', (
+    tester,
+  ) async {
+    await tester.pumpWidget(SmeltApp(pairingStorage: MemoryPairingStorage()));
+    await tester.pumpAndSettle();
+
+    // The shell must not offer tabs it cannot render: while disconnected with
+    // no cached sessions every tab collapses to the same connection screen.
+    expect(find.byType(NavigationBar), findsNothing);
+    expect(find.text('Not connected'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('shows pairing controls while disconnected', (tester) async {

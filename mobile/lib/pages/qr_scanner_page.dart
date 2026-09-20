@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../models/pairing_config.dart';
+import '../theme/smelt_theme.dart';
 
 class QrScannerPage extends StatefulWidget {
   const QrScannerPage({super.key});
@@ -17,6 +20,18 @@ class _QrScannerPageState extends State<QrScannerPage> {
   );
   bool _finishing = false;
   String? _error;
+  Timer? _errorTimer;
+
+  /// 错误提示占的就是那条指引文案的位置。不自动收回的话，用户扫错一次之后
+  /// 剩下的时间都在盯着一条过期的红字，反而不知道该怎么对准。
+  void _showError(String message) {
+    if (!mounted) return;
+    setState(() => _error = message);
+    _errorTimer?.cancel();
+    _errorTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _error = null);
+    });
+  }
 
   Future<void> _handleCapture(BarcodeCapture capture) async {
     if (_finishing) return;
@@ -26,13 +41,14 @@ class _QrScannerPageState extends State<QrScannerPage> {
       try {
         final pairing = PairingConfig.parse(raw);
         _finishing = true;
+        _errorTimer?.cancel();
         await _controller.stop();
         if (mounted) Navigator.pop(context, pairing);
         return;
       } on FormatException catch (error) {
-        if (mounted) setState(() => _error = error.message.toString());
+        _showError(error.message.toString());
       } catch (_) {
-        if (mounted) setState(() => _error = 'Invalid Smelt pairing code');
+        _showError('Invalid Smelt pairing code');
       }
     }
   }
@@ -108,7 +124,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
                   _error ?? 'Point the camera at the QR code shown by Smelt',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: _error == null ? Colors.white : Colors.red.shade200,
+                    color: _error == null ? Colors.white : SmeltColors.dark.danger,
                   ),
                 ),
               ),
@@ -121,6 +137,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
 
   @override
   void dispose() {
+    _errorTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }

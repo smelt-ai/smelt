@@ -1,5 +1,5 @@
 # flutter_rust_bridge 配置
-# 只桥 api_iroh：crate::api 是废弃方向的空壳实现，桥过去只会误导调用方
+# 只桥 api_iroh：手机端实际使用 iroh 隧道，不在 FFI 层暴露网关内部实现
 rust_input: crate::api_iroh
 rust_root: ../crates/smelt-mobile/
 dart_output: lib/src/rust/

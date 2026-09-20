@@ -7,6 +7,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/acp_snapshot.dart';
+import '../theme/smelt_theme.dart';
 
 class AcpMarkdown extends StatelessWidget {
   const AcpMarkdown({super.key, required this.data, this.muted = false});
@@ -382,14 +383,14 @@ class _ToolStatusIcon extends StatelessWidget {
       height: 16,
       child: CircularProgressIndicator(strokeWidth: 2),
     ),
-    ToolCallStatus.completed => const Icon(
+    ToolCallStatus.completed => Icon(
       Icons.check_circle,
-      color: Colors.green,
+      color: context.smeltColors.done,
       size: 17,
     ),
-    ToolCallStatus.failed => const Icon(
+    ToolCallStatus.failed => Icon(
       Icons.error,
-      color: Colors.red,
+      color: context.smeltColors.danger,
       size: 17,
     ),
   };
@@ -466,6 +467,7 @@ class _ToolOutputViewState extends State<_ToolOutputView> {
         .where((part) => part.operation == DIFF_DELETE)
         .fold<int>(0, (sum, part) => sum + _lineCount(part.text));
     final colors = Theme.of(context).colorScheme;
+    final smelt = context.smeltColors;
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border.all(color: colors.outlineVariant),
@@ -488,9 +490,15 @@ class _ToolOutputViewState extends State<_ToolOutputView> {
                     ),
                   ),
                 ),
-                Text('+$inserted', style: const TextStyle(color: Colors.green)),
+                Text(
+                  '+$inserted',
+                  style: TextStyle(color: context.smeltColors.done),
+                ),
                 const SizedBox(width: 8),
-                Text('-$deleted', style: const TextStyle(color: Colors.red)),
+                Text(
+                  '-$deleted',
+                  style: TextStyle(color: context.smeltColors.danger),
+                ),
               ],
             ),
           ),
@@ -503,12 +511,12 @@ class _ToolOutputViewState extends State<_ToolOutputView> {
                 children: parts.map((part) {
                   final (foreground, background) = switch (part.operation) {
                     DIFF_INSERT => (
-                      Colors.green.shade200,
-                      Colors.green.withAlpha(35),
+                      smelt.diffAdd,
+                      smelt.done.withAlpha(35),
                     ),
                     DIFF_DELETE => (
-                      Colors.red.shade200,
-                      Colors.red.withAlpha(35),
+                      smelt.diffDelete,
+                      smelt.danger.withAlpha(35),
                     ),
                     _ => (colors.onSurfaceVariant, Colors.transparent),
                   };

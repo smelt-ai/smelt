@@ -4,19 +4,36 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'models/pairing_config.dart';
 import 'models/saved_desktop.dart';
+import 'models/session_filters.dart';
+import 'widgets/agent_icon.dart';
+import 'widgets/project_avatar.dart';
+import 'pages/agents_page.dart';
+import 'pages/console_page.dart';
 import 'pages/qr_scanner_page.dart';
 import 'pages/terminal_session_page.dart';
 import 'services/gateway_service.dart';
 import 'services/message_draft_store.dart';
 import 'models/acp_snapshot.dart';
 import 'services/pairing_storage.dart';
+import 'services/pending_actions_controller.dart';
 import 'rust_lib.dart';
 import 'src/rust/api_iroh.dart';
 import 'utils/image_processing.dart';
+import 'pages/settings_page.dart';
+import 'services/appearance_prefs_store.dart';
+import 'services/terminal_prefs_store.dart';
+import 'theme/smelt_theme.dart';
 import 'widgets/acp_content.dart';
+import 'widgets/approval_card.dart';
+import 'widgets/elicitation_card.dart';
+import 'widgets/pending_action_badge.dart';
+import 'widgets/session_row.dart';
+
+// 现有调用方（含测试）仍从 main.dart 取这些筛选谓词，保持入口不变。
+export 'models/session_filters.dart';
+export 'widgets/pending_action_badge.dart';
 
 bool isNearMessageBottom(
   double pixels,
@@ -28,44 +45,6 @@ bool shouldAutoFollowSnapshot({
   required bool initialLoad,
   required bool wasAtBottom,
 }) => initialLoad || wasAtBottom;
-
-String sessionListTitle(SessionSummary session) {
-  final title = session.title.trim();
-  if (title.isNotEmpty) return title;
-  return session.kind == SessionKind.terminal ? 'Terminal' : 'ACP conversation';
-}
-
-String? sessionListSubtitle(SessionSummary session) {
-  final detail = session.detail?.trim();
-  return detail == null || detail.isEmpty ? null : detail;
-}
-
-enum SessionListFilter { attention, running, all }
-
-bool sessionNeedsAction(SessionSummary session) {
-  if (session.attention?.requiresAction == true) return true;
-  return switch (session.status.toLowerCase()) {
-    'waiting_approval' || 'needs_attention' => true,
-    _ => false,
-  };
-}
-
-bool sessionIsRunning(SessionSummary session) {
-  if (session.status.toLowerCase() == 'running') return true;
-  return switch (session.phase.toLowerCase()) {
-    'starting' || 'running' => true,
-    _ => false,
-  };
-}
-
-List<SessionSummary> filterSessions(
-  Iterable<SessionSummary> sessions,
-  SessionListFilter filter,
-) => switch (filter) {
-  SessionListFilter.attention => sessions.where(sessionNeedsAction).toList(),
-  SessionListFilter.running => sessions.where(sessionIsRunning).toList(),
-  SessionListFilter.all => sessions.toList(),
-};
 
 bool shouldShowAttentionNotification({
   required LifecycleAttention attention,
@@ -113,73 +92,70 @@ Future<String?> showDesktopRenameDialog(
   );
 }
 
-class SessionFilterBar extends StatelessWidget {
-  const SessionFilterBar({
-    super.key,
-    required this.selected,
-    required this.attentionCount,
-    required this.runningCount,
-    required this.allCount,
-    required this.onChanged,
-  });
+/// 底部导航的三个去处。顺序即优先级：先回答「有事等我吗」，再是「有哪些项目」。
+enum _HomeTab { console, projects, agents, settings }
 
-  final SessionListFilter selected;
-  final int attentionCount;
-  final int runningCount;
-  final int allCount;
-  final ValueChanged<SessionListFilter> onChanged;
+/// 指挥台图标上的待办角标。徽标从 AppBar 挪到 tab 上——底部导航常驻可见，
+/// 比顶栏更适合承载「还有几件事等我」。
+class _ConsoleTabIcon extends StatelessWidget {
+  const _ConsoleTabIcon({required this.sessions});
 
-  String _count(int value) => value > 99 ? '99+' : '$value';
-
-  Widget _label(String value) {
-    return FittedBox(
-      fit: BoxFit.scaleDown,
-      child: Text(value, maxLines: 1, softWrap: false),
-    );
-  }
+  final List<SessionSummary> sessions;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final textScale = MediaQuery.textScalerOf(context).scale(1);
-        final iconWidthThreshold = 390 * textScale.clamp(1, 1.4);
-        final showIcons = constraints.maxWidth >= iconWidthThreshold;
-        return SizedBox(
-          width: double.infinity,
-          child: SegmentedButton<SessionListFilter>(
-            showSelectedIcon: false,
-            expandedInsets: EdgeInsets.zero,
-            style: SegmentedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              visualDensity: VisualDensity.compact,
-            ),
-            segments: [
-              ButtonSegment(
-                value: SessionListFilter.attention,
-                icon: showIcons
-                    ? const Icon(Icons.priority_high, size: 17)
-                    : null,
-                label: _label('Action ${_count(attentionCount)}'),
-              ),
-              ButtonSegment(
-                value: SessionListFilter.running,
-                icon: showIcons ? const Icon(Icons.autorenew, size: 17) : null,
-                label: _label('Running ${_count(runningCount)}'),
-              ),
-              ButtonSegment(
-                value: SessionListFilter.all,
-                icon: showIcons
-                    ? const Icon(Icons.forum_outlined, size: 17)
-                    : null,
-                label: _label('All ${_count(allCount)}'),
-              ),
-            ],
-            selected: {selected},
-            onSelectionChanged: (selection) => onChanged(selection.single),
-          ),
-        );
+    final count = sessions.where(sessionNeedsAction).length;
+    const icon = Icon(Icons.inbox_outlined);
+    if (count == 0) return icon;
+    return Badge.count(count: count, child: icon);
+  }
+}
+
+class _ProjectActionsButton extends StatelessWidget {
+  const _ProjectActionsButton({
+    required this.canCreate,
+    required this.hasAgents,
+    required this.onNewSession,
+    required this.onHistory,
+  });
+
+  final bool canCreate;
+  final bool hasAgents;
+  final VoidCallback onNewSession;
+  final VoidCallback onHistory;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: 'Project actions',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (action) => switch (action) {
+        'session' => onNewSession(),
+        'history' => onHistory(),
+        _ => null,
       },
+      itemBuilder: (context) => [
+        // 对话和终端不再是两个入口：具体开哪一种是选择器里那一行的属性，跟桌面
+        // 「+」弹层一样。两个入口的时候，用户得先猜「Claude 终端」算哪一类。
+        PopupMenuItem(
+          value: 'session',
+          enabled: canCreate,
+          child: const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.add),
+            title: Text('New session'),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'history',
+          enabled: hasAgents,
+          child: const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.history),
+            title: Text('Conversation history'),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -229,56 +205,38 @@ class _TurnElapsedLabelState extends State<TurnElapsedLabel> {
   }
 }
 
-class ConnectionStatusBar extends StatelessWidget {
-  const ConnectionStatusBar({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<ConnectionMetrics>(
-      stream: gatewayService.metricsStream,
-      initialData: gatewayService.metrics,
-      builder: (context, snapshot) {
-        final metrics = snapshot.data ?? const ConnectionMetrics();
-        final (icon, label) = switch (metrics.kind) {
-          ConnectionPathKind.lan => (Icons.lan_outlined, 'LAN'),
-          ConnectionPathKind.p2p => (Icons.swap_horiz, 'P2P'),
-          ConnectionPathKind.relay => (Icons.cloud_outlined, 'Relay'),
-          ConnectionPathKind.direct => (Icons.public, 'Direct'),
-          ConnectionPathKind.unknown => (
-            Icons.route_outlined,
-            'Detecting path',
-          ),
-        };
-        final latency = metrics.latencyMs == null
-            ? '--'
-            : '${metrics.latencyMs} ms';
-        final colors = Theme.of(context).colorScheme;
-        return Container(
-          width: double.infinity,
-          height: 34,
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          color: colors.surfaceContainer,
-          child: Row(
-            children: [
-              Icon(icon, size: 16, color: colors.onSurfaceVariant),
-              const SizedBox(width: 7),
-              Text(
-                '$label · $latency',
-                style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
+/// 连接横幅。
+///
+/// 正常联通时**什么都不画**：`LAN · 4 ms` 这类链路遥测对用户是噪音，它的去处是
+/// 设置页的连接卡——设计稿全篇只有 F 出现过这个 chip。异常或在用缓存兜底时仍然
+/// 要画，那时它带的是「Offline · Showing saved data」和一个重试按钮，是真信息。
+///
+/// 三个屏幕（指挥台 / 项目 / 会话）共用这一个入口，翻页时不会忽隐忽现；`cached`
+/// 由各屏自己判断，因为「在用缓存」问的是**这一屏**的数据，不是全局。
+Widget buildConnectionBanner({
+  required WsState state,
+  required bool cached,
+  DateTime? cachedAt,
+  VoidCallback? onRetry,
+}) {
+  if (state == WsState.connected && !cached) return const SizedBox.shrink();
+  return CachedConnectionBar(state: state, cachedAt: cachedAt, onRetry: onRetry);
 }
 
 class CachedConnectionBar extends StatelessWidget {
-  const CachedConnectionBar({super.key, required this.state, this.cachedAt});
+  const CachedConnectionBar({
+    super.key,
+    required this.state,
+    this.cachedAt,
+    this.onRetry,
+  });
 
   final WsState state;
   final DateTime? cachedAt;
+
+  /// 断线时的重试入口。放在这条状态栏上，而不是浮动按钮里：用户是在这里读到
+  /// 「Offline」的，动作就该长在同一处。
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -290,6 +248,7 @@ class CachedConnectionBar extends StatelessWidget {
       WsState.disconnected => 'Offline',
     };
     final age = cachedAt == null ? null : _formatCacheAge(cachedAt!);
+    final offline = state == WsState.disconnected;
     return Container(
       width: double.infinity,
       constraints: const BoxConstraints(minHeight: 36),
@@ -297,13 +256,21 @@ class CachedConnectionBar extends StatelessWidget {
       color: colors.tertiaryContainer,
       child: Row(
         children: [
-          SizedBox.square(
-            dimension: 14,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
+          // 断线时不能转菊花：那会一直暗示「正在恢复」，而实际上没有任何重连在跑。
+          if (offline)
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 15,
               color: colors.onTertiaryContainer,
+            )
+          else
+            SizedBox.square(
+              dimension: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: colors.onTertiaryContainer,
+              ),
             ),
-          ),
           const SizedBox(width: 9),
           Expanded(
             child: Text(
@@ -315,6 +282,19 @@ class CachedConnectionBar extends StatelessWidget {
               style: TextStyle(color: colors.onTertiaryContainer, fontSize: 12),
             ),
           ),
+          if (onRetry case final retry?) ...[
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: retry,
+              style: TextButton.styleFrom(
+                foregroundColor: colors.onTertiaryContainer,
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: const Size(0, 32),
+              ),
+              child: const Text('Retry'),
+            ),
+          ],
         ],
       ),
     );
@@ -352,6 +332,8 @@ String _imageMimeFromName(String name) {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 图标名单来自资产清单，读一次缓存住；没读完之前所有 agent 都是兜底图标。
+  await loadAgentIcons();
   await initRustLib();
   // 在组装根接线，而不是让 GatewayService 直接依赖 FFI：服务层保持纯 Dart，
   // 单测才能不带动态库地跑。
@@ -372,33 +354,78 @@ Future<void> main() async {
   runApp(const SmeltApp());
 }
 
-class SmeltApp extends StatelessWidget {
-  const SmeltApp({super.key, this.pairingStorage, this.messageDraftStore});
+class SmeltApp extends StatefulWidget {
+  const SmeltApp({
+    super.key,
+    this.pairingStorage,
+    this.messageDraftStore,
+    this.appearancePrefsStore,
+  });
 
   final PairingStorage? pairingStorage;
   final MessageDraftStore? messageDraftStore;
+  final AppearancePrefsStore? appearancePrefsStore;
+
+  @override
+  State<SmeltApp> createState() => _SmeltAppState();
+}
+
+/// 主题模式必须住在 `MaterialApp` **之上**——它决定整棵树用哪套配色，放在 home
+/// 里改不动自己头顶的那个 MaterialApp。
+class _SmeltAppState extends State<SmeltApp> {
+  late final AppearancePrefsStore _appearanceStore;
+  AppearancePrefs _appearance = const AppearancePrefs();
+
+  @override
+  void initState() {
+    super.initState();
+    _appearanceStore = widget.appearancePrefsStore ?? FileAppearancePrefsStore();
+    _loadAppearance();
+  }
+
+  Future<void> _loadAppearance() async {
+    final prefs = await _appearanceStore.load();
+    if (!mounted) return;
+    setState(() => _appearance = prefs);
+  }
+
+  void _setThemeMode(ThemeMode mode) {
+    if (mode == _appearance.themeMode) return;
+    // 先改界面再落盘：主题切换要立刻可见，存不存得下去是另一回事。
+    setState(() => _appearance = _appearance.copyWith(themeMode: mode));
+    _appearanceStore.save(_appearance);
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Smelt',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: smeltTheme(Brightness.light),
+      darkTheme: smeltTheme(Brightness.dark),
+      themeMode: _appearance.themeMode,
       home: HomePage(
-        pairingStorage: pairingStorage,
-        messageDraftStore: messageDraftStore,
+        pairingStorage: widget.pairingStorage,
+        messageDraftStore: widget.messageDraftStore,
+        themeMode: _appearance.themeMode,
+        onThemeModeChanged: _setThemeMode,
       ),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.pairingStorage, this.messageDraftStore});
+  const HomePage({
+    super.key,
+    this.pairingStorage,
+    this.messageDraftStore,
+    this.themeMode = ThemeMode.system,
+    this.onThemeModeChanged,
+    this.terminalPrefsStore,
+  });
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode>? onThemeModeChanged;
+  final TerminalPrefsStore? terminalPrefsStore;
 
   final PairingStorage? pairingStorage;
   final MessageDraftStore? messageDraftStore;
@@ -428,7 +455,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _restoringPairing = true;
   SavedDesktopCollection _savedDesktops = const SavedDesktopCollection();
   bool _showPairingCode = false;
-  SessionListFilter _sessionFilter = SessionListFilter.all;
+  /// 首屏落在指挥台，不是项目树。`docs/product-roadmap.md §6`：手机是指挥台。
+  _HomeTab _tab = _HomeTab.console;
+
+  /// 指挥台的数据源建在 HomePage 上而不是页内，切 tab 时不重建，回到指挥台
+  /// 不用重新取一遍详情。
+  final PendingActionsController _pendingActions = PendingActionsController();
+
+  /// 终端字号在设置页也能调，所以状态提到这里；终端页每次都是新 push，会在
+  /// initState 从同一个文件读到最新值。
+  late final TerminalPrefsStore _terminalPrefsStore;
+  TerminalPrefs _terminalPrefs = const TerminalPrefs();
   bool _acceptConnectionNotifications = true;
   String? _pendingOpenSessionId;
   String? _activeSessionId;
@@ -441,6 +478,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _pairingStorage = widget.pairingStorage ?? SecurePairingStorage();
     _messageDraftStore = widget.messageDraftStore ?? FileMessageDraftStore();
+    _terminalPrefsStore = widget.terminalPrefsStore ?? FileTerminalPrefsStore();
+    _terminalPrefsStore.load().then((prefs) {
+      if (!mounted) return;
+      setState(() => _terminalPrefs = prefs);
+    });
     _stateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
@@ -579,70 +621,136 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    // 连不上、也没有缓存会话时，整屏只谈「怎么连上」——这时三个 tab 都没有内容，
+    // 显示导航栏只会给出可点却没反应的假选项。
+    final navigable = !_restoringPairing && !_showsConnectionTakeover;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Smelt'),
+        title: Text(
+          navigable
+              ? switch (_tab) {
+                  _HomeTab.console => 'Console',
+                  _HomeTab.projects => 'Projects',
+                  _HomeTab.agents => 'Agents',
+                  _HomeTab.settings => 'Settings',
+                }
+              : 'Smelt',
+        ),
         actions: [
-          if (_savedDesktops.desktops.isNotEmpty)
-            IconButton(
-              icon: Badge.count(
-                count: _savedDesktops.desktops.length,
-                isLabelVisible: _savedDesktops.desktops.length > 1,
-                child: const Icon(Icons.desktop_mac_outlined),
-              ),
-              onPressed: _showDesktopSwitcher,
-              tooltip: 'Desktops',
-            ),
-          IconButton(
-            icon: const Icon(Icons.qr_code_scanner),
-            onPressed: _scanQrCode,
-            tooltip: 'Pair with Desktop',
-          ),
-          if (_connectionState != WsState.disconnected)
-            IconButton(
-              icon: const Icon(Icons.logout),
-              onPressed: _disconnect,
-              tooltip: 'Disconnect',
-            ),
+          // 指挥台本身就是待办的落点，在那一页再挂徽标是重复的。
+          if (navigable && _tab != _HomeTab.console)
+            PendingActionBadge(onPressed: _showPendingActions),
         ],
       ),
-      body: _buildBody(),
-      floatingActionButton: _connectionState == WsState.connected
-          ? FloatingActionButton(
-              onPressed: () {
-                gatewayService.listSessions();
-                gatewayService.listWorkspace();
-              },
-              child: const Icon(Icons.refresh),
-            )
-          : _connectionState == WsState.disconnected && _sessions.isNotEmpty
-          ? FloatingActionButton(
-              tooltip: 'Retry connection',
-              onPressed: gatewayService.retryCurrentConnection,
-              child: const Icon(Icons.sync),
+      body: SafeArea(top: false, child: _buildBody()),
+      bottomNavigationBar: navigable
+          ? NavigationBar(
+              selectedIndex: _tab.index,
+              onDestinationSelected: (index) =>
+                  setState(() => _tab = _HomeTab.values[index]),
+              destinations: [
+                NavigationDestination(
+                  icon: _ConsoleTabIcon(sessions: _sessions),
+                  label: 'Console',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.folder_outlined),
+                  selectedIcon: Icon(Icons.folder),
+                  label: 'Projects',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.smart_toy_outlined),
+                  selectedIcon: Icon(Icons.smart_toy),
+                  label: 'Agents',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings),
+                  label: 'Settings',
+                ),
+              ],
             )
           : null,
     );
+  }
+
+  /// 还没有任何会话可谈的连接状态。此时不分 tab，整屏只讲连接。
+  bool get _showsConnectionTakeover =>
+      _sessions.isEmpty && _connectionState != WsState.connected;
+
+  /// 待办徽标的落点：切到指挥台。会话页里点它会先 pop 回来，两边落到同一处，
+  /// 用户不用记「刚才是从哪进来的」。
+  void _showPendingActions() {
+    setState(() => _tab = _HomeTab.console);
   }
 
   Widget _buildBody() {
     if (_restoringPairing) {
       return const Center(child: CircularProgressIndicator());
     }
-    switch (_connectionState) {
-      case WsState.disconnected:
-        return _sessions.isEmpty
-            ? _buildDisconnectedView()
-            : _buildSessionList();
-      case WsState.connecting:
-        return _sessions.isEmpty ? _buildConnectingView() : _buildSessionList();
-      case WsState.connected:
-        return _buildSessionList();
-      case WsState.reconnecting:
-        return _sessions.isEmpty
-            ? _buildReconnectingView()
-            : _buildSessionList();
+    // 跟导航栏用同一个判断，两者不会各说各话。
+    if (_showsConnectionTakeover) {
+      return switch (_connectionState) {
+        WsState.disconnected => _buildDisconnectedView(),
+        WsState.connecting => _buildConnectingView(),
+        WsState.reconnecting => _buildReconnectingView(),
+        WsState.connected => _buildSessionList(),
+      };
     }
+    return switch (_tab) {
+      _HomeTab.console => Column(
+        children: [
+          _buildConnectionBar(),
+          Expanded(
+            child: ConsolePage(
+              onOpenSession: _openSession,
+              controller: _pendingActions,
+            ),
+          ),
+        ],
+      ),
+      _HomeTab.projects => _buildSessionList(),
+      _HomeTab.agents => AgentsPage(
+        onOpenSession: _openSessionById,
+        startableAgentIds: _startableAgentIds,
+        onStartConversation: _startAgentConversation,
+      ),
+      _HomeTab.settings => _buildSettings(),
+    };
+  }
+
+  /// 设置页。内容在 `pages/settings_page.dart`，这里只把 home 手上的状态和动作
+  /// 递进去。见设计稿 F。
+  Widget _buildSettings() {
+    return SettingsPage(
+      desktops: _savedDesktops,
+      connectionState: _connectionState,
+      connectionBar: _buildConnectionBar(),
+      themeMode: widget.themeMode,
+      onThemeModeChanged: widget.onThemeModeChanged ?? (_) {},
+      terminalFontSize: _terminalPrefs.fontSize,
+      onTerminalFontSizeChanged: _setTerminalFontSize,
+      onSwitchDesktop: _showDesktopSwitcher,
+      onPair: _scanQrCode,
+      onDisconnect: _disconnect,
+    );
+  }
+
+  void _setTerminalFontSize(double size) {
+    if (size == _terminalPrefs.fontSize) return;
+    setState(() => _terminalPrefs = _terminalPrefs.copyWith(fontSize: size));
+    _terminalPrefsStore.save(_terminalPrefs);
+  }
+
+  Widget _buildConnectionBar() {
+    return buildConnectionBanner(
+      state: _connectionState,
+      cached: gatewayService.sessionsAreCached,
+      cachedAt: gatewayService.cachedAt,
+      onRetry: _connectionState == WsState.disconnected
+          ? gatewayService.retryCurrentConnection
+          : null,
+    );
   }
 
   Widget _buildDisconnectedView() {
@@ -651,7 +759,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Icon(Icons.link_off, size: 64, color: Colors.grey),
+          Icon(
+            Icons.link_off,
+            size: 64,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(height: 16),
           const Text('Not connected', textAlign: TextAlign.center),
           if (_savedDesktops.activeDesktop case final active?) ...[
@@ -729,41 +841,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _buildSessionList() {
-    final orderedSessions = List<SessionSummary>.of(_sessions)
+    final orderedSessions = _sessions
+        .where(sessionBelongsToProjectTree)
+        .toList()
       ..sort(compareSessionMenuOrder);
-    final visibleSessions = filterSessions(orderedSessions, _sessionFilter);
-    final attentionCount = orderedSessions.where(sessionNeedsAction).length;
-    final runningCount = orderedSessions.where(sessionIsRunning).length;
 
     return Column(
       children: [
-        if (_connectionState == WsState.connected &&
-            !gatewayService.sessionsAreCached)
-          const ConnectionStatusBar()
-        else
-          CachedConnectionBar(
-            state: _connectionState,
-            cachedAt: gatewayService.cachedAt,
-          ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-          child: SessionFilterBar(
-            selected: _sessionFilter,
-            attentionCount: attentionCount,
-            runningCount: runningCount,
-            allCount: orderedSessions.length,
-            onChanged: (filter) {
-              setState(() => _sessionFilter = filter);
-            },
-          ),
-        ),
-        Expanded(
-          child: _sessionFilter == SessionListFilter.all
-              ? _buildProjectSessionList(orderedSessions)
-              : _buildFocusedSessionList(visibleSessions),
-        ),
+        _buildConnectionBar(),
+        Expanded(child: _buildProjectSessionList(orderedSessions)),
       ],
     );
+  }
+
+  /// 下拉刷新。手机上「怀疑列表过期了」的第一反应是下拉，而不是去够右下角的
+  /// 浮动按钮。等一次 sessions 推送再收起指示器，超时兜底避免离线时一直转。
+  Future<void> _refreshSessions() async {
+    if (_connectionState == WsState.disconnected) {
+      await gatewayService.retryCurrentConnection();
+      return;
+    }
+    final next = gatewayService.sessionsStream.first;
+    gatewayService.listSessions();
+    gatewayService.listWorkspace();
+    try {
+      await next.timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      // 刷新没回来就直接收起指示器：状态栏已经在表达连接情况了。
+    }
+  }
+
+  /// 哪些项目是展开的。ExpansionTile 自己管展开状态，但我们要在 trailing 里画
+  /// 一个跟它同步的箭头，所以得在外面镜像一份。
+  final Set<String> _expandedProjects = <String>{};
+
+  String _projectSubtitle(int total, int needing) {
+    final sessions = '$total session${total == 1 ? '' : 's'}';
+    if (total == 0) return 'No sessions';
+    if (needing == 0) return sessions;
+    return '$sessions · $needing needs you';
   }
 
   Widget _buildProjectSessionList(List<SessionSummary> orderedSessions) {
@@ -789,201 +905,290 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     if (projects.isEmpty) {
-      return _buildEmptySessions(
-        icon: Icons.folder_off_outlined,
-        title: 'No projects',
+      return _refreshable(
+        _buildEmptySessions(
+          icon: Icons.folder_off_outlined,
+          title: 'No projects',
+          message:
+              'Open a project in Smelt Desktop, then pull down to refresh.',
+        ),
       );
     }
-    return ListView(
-      children: projects.entries.map((entry) {
-        final project = entry.value.project;
-        final sessions = entry.value.sessions;
-        return ExpansionTile(
-          controlAffinity: ListTileControlAffinity.leading,
-          title: Text(project.title),
-          subtitle: Text(
-            '${sessions.length} session${sessions.length == 1 ? '' : 's'}',
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.history),
-                tooltip: 'Conversation history',
-                onPressed: _workspace.agents.isEmpty
-                    ? null
-                    : () => _openHistory(project),
+    return RefreshIndicator(
+      onRefresh: _refreshSessions,
+      // 滑开一行删除按钮时，自动收起别行敞着的那个。
+      child: SessionRowGroup(
+        child: ListView(
+        // 底部留一点余量，最后一个项目分组不要贴着导航栏。
+        padding: const EdgeInsets.only(bottom: 16),
+        children: projects.entries.map((entry) {
+          final project = entry.value.project;
+          final sessions = entry.value.sessions;
+          final needing = sessions.where(sessionNeedsAction).length;
+          return ExpansionTile(
+            // ExpansionTile 展开时会把 trailing 的图标染成主色，导致 ⋮ 变蓝、
+            // 跟会话行里的灰 ⋯ 不是一套。这里钉死中性色。
+            iconColor: Theme.of(context).colorScheme.onSurfaceVariant,
+            collapsedIconColor: Theme.of(context).colorScheme.onSurfaceVariant,
+            textColor: Theme.of(context).colorScheme.onSurface,
+            collapsedTextColor: Theme.of(context).colorScheme.onSurface,
+            // 自定义了 leading，内置箭头必须让位——否则它会顶掉项目色块。
+            // 但直接不画箭头等于丢掉「这行可以展开」的提示，所以下面自己画一个
+            // 受控的，跟 ⋮ 并排。
+            controlAffinity: ListTileControlAffinity.trailing,
+            key: PageStorageKey('project-${project.root}'),
+            initiallyExpanded: _expandedProjects.contains(project.root),
+            onExpansionChanged: (expanded) => setState(() {
+              if (expanded) {
+                _expandedProjects.add(project.root);
+              } else {
+                _expandedProjects.remove(project.root);
+              }
+            }),
+            // 项目色块 + 状态点：设计稿 C 点名要补的身份识别。原来项目只有一行
+            // 文字，几个项目并排时全靠读字分辨。
+            leading: ProjectAvatar(
+              title: project.title,
+              identityKey: project.root.isEmpty ? project.title : project.root,
+              status: projectStatusColor(context, sessions),
+            ),
+            title: Text(
+              project.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              _projectSubtitle(sessions.length, needing),
+              style: TextStyle(
+                color: needing > 0
+                    ? context.smeltColors.needsAttention
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
               ),
-              IconButton(
-                icon: const Icon(Icons.add),
-                tooltip: 'New conversation',
-                onPressed:
-                    !gatewayService.writeEnabled || _workspace.agents.isEmpty
-                    ? null
-                    : () => _createSession(project),
-              ),
-              IconButton(
-                icon: const Icon(Icons.terminal),
-                tooltip: 'New terminal',
-                onPressed: !gatewayService.writeEnabled
-                    ? null
-                    : () => _createTerminalSession(project),
-              ),
-            ],
-          ),
-          children: sessions
-              .map(
-                (session) => _buildSessionTile(
-                  session,
-                  contentPadding: const EdgeInsets.only(left: 32, right: 16),
-                  showActions: true,
+            ),
+            // 三个独立 IconButton 要占掉 ~144dp，在 360dp 宽的屏上把项目名挤没了。
+            // 收成一个菜单：这些都是低频动作，标题的可读性更值钱。
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AnimatedRotation(
+                  turns: _expandedProjects.contains(project.root) ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 180),
+                  child: Icon(
+                    Icons.expand_more,
+                    size: 20,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
-              )
-              .toList(),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildFocusedSessionList(List<SessionSummary> sessions) {
-    if (sessions.isEmpty) {
-      return _buildEmptySessions(
-        icon: _sessionFilter == SessionListFilter.attention
-            ? Icons.check_circle_outline
-            : Icons.pause_circle_outline,
-        title: _sessionFilter == SessionListFilter.attention
-            ? 'Nothing needs attention'
-            : 'No conversations are running',
-      );
-    }
-    return ListView.separated(
-      itemCount: sessions.length,
-      separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
-      itemBuilder: (context, index) {
-        final session = sessions[index];
-        final project = _projectName(session);
-        final detail = _sessionFilter == SessionListFilter.attention
-            ? session.attention?.message.trim()
-            : sessionListSubtitle(session);
-        final subtitle = detail == null || detail.isEmpty
-            ? project
-            : '$project · $detail';
-        return _buildSessionTile(
-          session,
-          subtitle: subtitle,
-          showActions: true,
-          attentionStyle: _sessionFilter == SessionListFilter.attention,
-        );
-      },
+                _ProjectActionsButton(
+                  canCreate: gatewayService.writeEnabled,
+                  hasAgents: _workspace.agents.isNotEmpty,
+                  onNewSession: () => _createSession(project),
+                  onHistory: () => _openHistory(project),
+                ),
+              ],
+            ),
+            children: sessions
+                .map(
+                  (session) => _buildSessionTile(
+                    session,
+                    // 左边缩进到项目色块之后，行才明显是挂在这个项目下的。
+                    padding: const EdgeInsets.fromLTRB(32, 9, 12, 9),
+                  ),
+                )
+                .toList(),
+          );
+        }).toList(),
+        ),
+      ),
     );
   }
 
   Widget _buildSessionTile(
     SessionSummary session, {
-    EdgeInsetsGeometry? contentPadding,
-    String? subtitle,
-    bool showActions = false,
-    bool attentionStyle = false,
+    EdgeInsetsGeometry? padding,
   }) {
-    subtitle ??= sessionListSubtitle(session);
-    return ListTile(
-      contentPadding: contentPadding,
-      leading: Icon(
-        attentionStyle
-            ? Icons.notification_important_outlined
-            : session.kind == SessionKind.terminal
-            ? Icons.terminal
-            : Icons.chat_bubble_outline,
-      ),
-      title: Text(sessionListTitle(session)),
-      subtitle: subtitle == null
-          ? null
-          : Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Badge(
-            isLabelVisible: session.unread,
-            child: _getStatusChip(session.status),
-          ),
-          if (showActions)
-            PopupMenuButton<String>(
-              tooltip: session.kind == SessionKind.terminal
-                  ? 'Terminal actions'
-                  : 'Conversation actions',
-              onSelected: (action) {
-                if (action == 'delete') _deleteSession(session);
-              },
-              itemBuilder: (context) => [
-                PopupMenuItem(
-                  value: 'delete',
-                  enabled: gatewayService.writeEnabled,
-                  child: const ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.delete_outline),
-                    title: Text('Delete'),
-                  ),
-                ),
-              ],
-            ),
-        ],
-      ),
+    final theme = Theme.of(context);
+    return SessionRow(
+      session: session,
+      // 行已经在项目分组下面了，项目名不用再画一遍。
+      showProject: false,
+      padding:
+          padding ?? const EdgeInsets.symmetric(horizontal: 4, vertical: 9),
       onTap: () => _openSession(session),
-    );
-  }
-
-  Widget _buildEmptySessions({required IconData icon, required String title}) {
-    final colors = Theme.of(context).colorScheme;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 42, color: colors.onSurfaceVariant),
-          const SizedBox(height: 12),
-          Text(title, style: TextStyle(color: colors.onSurfaceVariant)),
-        ],
-      ),
-    );
-  }
-
-  Future<AcpAgentOption?> _chooseAgent({String title = 'New conversation'}) {
-    return showModalBottomSheet<AcpAgentOption>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(context).height * 0.7,
-          ),
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              ListTile(title: Text(title)),
-              ..._workspace.agents.map(
-                (agent) => ListTile(
-                  leading: const Icon(Icons.smart_toy_outlined),
-                  title: Text(agent.label),
-                  subtitle: agent.profile
-                      ? const Text('Custom workspace')
-                      : null,
-                  onTap: () => Navigator.pop(context, agent),
-                ),
+      // 只读配对下不给删除入口。手势和无障碍动作都由 SessionRow 自己挂。
+      onDelete: gatewayService.writeEnabled
+          ? () => _deleteSession(session)
+          : null,
+      trailing: session.unread
+          ? Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary,
+                shape: BoxShape.circle,
               ),
-            ],
+            )
+          : null,
+    );
+  }
+
+  /// 空状态也要能下拉刷新：列表空恰恰是最想手动拉一把的时候，而 Center 本身
+  /// 不可滚动，手势会落空。
+  Widget _refreshable(Widget child) {
+    return RefreshIndicator(
+      onRefresh: _refreshSessions,
+      child: LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: child,
           ),
         ),
       ),
     );
   }
 
-  Future<void> _createSession(WorkspaceProject project) async {
-    final agent = await _chooseAgent();
-    if (!mounted || agent == null) return;
-    gatewayService.createSession(project.root, agent.id);
+  /// 空状态带一句「接下来做什么」和可选动作。只画一个灰图标等于把用户扔在
+  /// 死胡同里，尤其 Action / Running 两个筛选很容易空。
+  Widget _buildEmptySessions({
+    required IconData icon,
+    required String title,
+    String? message,
+    ({String label, VoidCallback onPressed})? action,
+  }) {
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 42, color: colors.onSurfaceVariant),
+            const SizedBox(height: 12),
+            Text(title, style: TextStyle(color: colors.onSurfaceVariant)),
+            if (message != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: colors.onSurfaceVariant, fontSize: 12),
+              ),
+            ],
+            if (action case final action?) ...[
+              const SizedBox(height: 14),
+              FilledButton.tonal(
+                onPressed: action.onPressed,
+                child: Text(action.label),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
-  void _createTerminalSession(WorkspaceProject project) {
-    gatewayService.createTerminalSession(project.root);
+  /// 新建会话选择器。分组、顺序、Pin 都由电脑那边算好（跟桌面「+」弹层同一份
+  /// 目录），这里只把「常用 / 终端 / 对话」平铺出来——手机上多一层归类就多一次
+  /// 点击，而「常用」本来就是为了少点几下。
+  Future<LaunchAction?> _chooseLaunchAction() {
+    const sectionTitles = {
+      LaunchSection.common: 'Pinned',
+      LaunchSection.terminal: 'Terminals',
+      LaunchSection.conversation: 'Conversations',
+    };
+    return showModalBottomSheet<LaunchAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final theme = Theme.of(context);
+        final rows = <Widget>[
+          const ListTile(title: Text('New session')),
+        ];
+        for (final section in LaunchSection.values) {
+          final actions = _workspace.actionsIn(section);
+          if (actions.isEmpty) continue;
+          rows.add(
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Text(
+                sectionTitles[section]!,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          );
+          rows.addAll(
+            actions.map(
+              (action) => ListTile(
+                leading: _launchActionIcon(action),
+                title: Text(action.label),
+                subtitle: Text(action.kindLabel),
+                onTap: () => Navigator.pop(context, action),
+              ),
+            ),
+          );
+        }
+        if (_workspace.launchActions.isEmpty) {
+          rows.add(
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+              child: Text(
+                'No launch options yet. Update Smelt on your computer, then pull to refresh.',
+                style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ),
+          );
+        }
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+            ),
+            child: ListView(shrinkWrap: true, children: rows),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _launchActionIcon(LaunchAction action) {
+    if (action.target == LaunchTarget.blankTerminal) {
+      return const Icon(Icons.terminal);
+    }
+    return AgentGlyph(
+      agent: action.agent,
+      // 认不出是哪家时，终端动作就画终端，对话动作画机器人——别让一条终端动作
+      // 看起来像对话。
+      fallback: action.isConversation
+          ? Icons.smart_toy_outlined
+          : Icons.terminal,
+    );
+  }
+
+  Future<void> _createSession(WorkspaceProject project) async {
+    final action = await _chooseLaunchAction();
+    if (!mounted || action == null) return;
+    gatewayService.createSessionFromLaunch(project.root, action.key);
+  }
+
+  /// 工作区目录里真的能开对话的智能体。目录还没到就是空集——那时「开始对话」
+  /// 不出现，比出现一个按了会报错的按钮好。
+  Set<String> get _startableAgentIds => {
+    for (final agent in _workspace.agents) ?agent.agentDefinitionId,
+  };
+
+  /// 从「智能体」栏开对话：不绑项目，网关把它落在智能体自己的 space，跟桌面
+  /// 点智能体开对话是同一条路径。
+  void _startAgentConversation(String agentDefinitionId) {
+    final option = _workspace.agents
+        .where((agent) => agent.agentDefinitionId == agentDefinitionId)
+        .firstOrNull;
+    if (option == null) return;
+    gatewayService.createSession('', option.id);
   }
 
   Future<void> _openHistory(WorkspaceProject project) async {
@@ -1079,22 +1284,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _getStatusChip(String status) {
-    final (color, label) = switch (status.toLowerCase()) {
-      'waiting_approval' => (Colors.red, 'Approve'),
-      'needs_attention' => (Colors.orange, 'Attention'),
-      'running' => (Colors.blue, 'Running'),
-      'done' => (Colors.green, 'Done'),
-      _ => (Colors.grey, 'Idle'),
-    };
-    return Chip(
-      label: Text(label, style: const TextStyle(fontSize: 12)),
-      backgroundColor: color.withAlpha(50),
-      side: BorderSide.none,
-      padding: EdgeInsets.zero,
     );
   }
 
@@ -1301,6 +1490,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// 按 id 打开会话。自动化目录里只有 Run 的 session id，没有整条摘要——
+  /// 会话还没投影过来（比如刚触发）时什么都不做，不去伪造一条摘要，
+  /// 否则会话页会拿着空标题和空 cwd 打开一个「幽灵会话」。
+  void _openSessionById(String sessionId) {
+    final session = _sessions
+        .where((candidate) => candidate.id == sessionId)
+        .firstOrNull;
+    if (session == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('That run is not available yet')),
+      );
+      return;
+    }
+    _openSession(session);
+  }
+
   void _openSession(SessionSummary session) {
     gatewayService.markRead(session.id);
     if (_shownAttentionSessionId == session.id) {
@@ -1313,16 +1518,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => session.kind == SessionKind.terminal
-              ? TerminalSessionPage(session: session)
-              : SessionPage(
-                  session: session,
-                  messageDraftStore: _messageDraftStore,
-                ),
+          builder: (pageContext) {
+            // 会话页里点待办徽标：先退回列表，再切到 Action。两个入口落到同一处，
+            // 用户不用记「刚才是从哪进来的」。
+            void showPendingActions() {
+              Navigator.pop(pageContext);
+              _showPendingActions();
+            }
+
+            return session.kind == SessionKind.terminal
+                ? TerminalSessionPage(
+                    session: session,
+                    // 跟设置页共用同一个 store 实例：同一条写队列，两个入口改
+                    // 字号不会交错落盘。
+                    prefsStore: _terminalPrefsStore,
+                    onShowPendingActions: showPendingActions,
+                  )
+                : SessionPage(
+                    session: session,
+                    messageDraftStore: _messageDraftStore,
+                    onShowPendingActions: showPendingActions,
+                  );
+          },
         ),
       ).whenComplete(() {
         if (mounted && _activeSessionId == session.id) {
           _activeSessionId = previousActiveSessionId;
+        }
+        // 终端页的 Aa 菜单也能改字号，回来时把设置页的滑杆同步过来。
+        if (session.kind == SessionKind.terminal) {
+          _terminalPrefsStore.load().then((prefs) {
+            if (!mounted) return;
+            setState(() => _terminalPrefs = prefs);
+          });
         }
       }),
     );
@@ -1331,6 +1559,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _pendingActions.dispose();
     _stateSubscription.cancel();
     _sessionsSubscription.cancel();
     _workspaceSubscription.cancel();
@@ -1587,10 +1816,15 @@ class SessionPage extends StatefulWidget {
   final SessionSummary session;
   final MessageDraftStore messageDraftStore;
 
+  /// 点全局待办徽标时调用。由调用方决定「回到待办」意味着什么，页面自己不
+  /// 假设自己是被谁 push 出来的。
+  final VoidCallback? onShowPendingActions;
+
   const SessionPage({
     super.key,
     required this.session,
     required this.messageDraftStore,
+    this.onShowPendingActions,
   });
 
   @override
@@ -1838,6 +2072,8 @@ class _SessionPageState extends State<SessionPage> {
               : widget.session.id,
         ),
         actions: [
+          if (widget.onShowPendingActions case final show?)
+            PendingActionBadge(onPressed: show),
           if (_snapshot != null)
             Padding(
               padding: const EdgeInsets.only(right: 16),
@@ -1845,58 +2081,78 @@ class _SessionPageState extends State<SessionPage> {
             ),
         ],
       ),
-      body: Column(
-        children: [
-          if (_connectionState == WsState.connected &&
-              !gatewayService.snapshotIsCached(widget.session.id))
-            const ConnectionStatusBar()
-          else
-            CachedConnectionBar(
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            buildConnectionBanner(
               state: _connectionState,
+              cached: gatewayService.snapshotIsCached(widget.session.id),
               cachedAt: gatewayService.cachedAt,
+              onRetry: _connectionState == WsState.disconnected
+                  ? gatewayService.retryCurrentConnection
+                  : null,
             ),
-          if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
-          if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
-          if (_snapshot?.pendingPermissions
-              case final List<PendingPermission> permissions
-              when permissions.isNotEmpty)
-            _buildPermissionBanner(permissions.first, permissions.length),
-          if (_snapshot?.pendingElicitation case final elicitation?)
-            _buildElicitationCard(elicitation),
+            if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
+            if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
+            if (_snapshot?.pendingPermissions
+                case final List<PendingPermission> permissions
+                when permissions.isNotEmpty)
+              _buildPermissionBanner(permissions.first, permissions.length),
+            if (_snapshot?.pendingElicitation case final elicitation?)
+              _buildElicitationCard(elicitation),
 
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : Stack(
-                    children: [
-                      Positioned.fill(child: _buildEntryList()),
-                      if (!_isAtBottom)
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 12,
-                          child: Center(
-                            child: FilledButton.tonalIcon(
-                              key: const ValueKey('scroll-to-bottom'),
-                              onPressed: _scrollToBottom,
-                              icon: const Icon(Icons.arrow_downward, size: 18),
-                              label: const Text('滚动到底部'),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : Stack(
+                      children: [
+                        Positioned.fill(child: _buildEntryList()),
+                        if (!_isAtBottom)
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 12,
+                            child: Center(
+                              child: FilledButton.tonalIcon(
+                                key: const ValueKey('scroll-to-bottom'),
+                                onPressed: _scrollToBottom,
+                                icon: const Icon(
+                                  Icons.arrow_downward,
+                                  size: 18,
+                                ),
+                                label: const Text('Jump to latest'),
+                              ),
                             ),
                           ),
-                        ),
-                    ],
-                  ),
-          ),
-          _buildInputBar(),
-        ],
+                      ],
+                    ),
+            ),
+            _buildInputBar(),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildPhaseIndicator() {
     final phase = _snapshot!.phase;
+    // 图标 + 颜色是这里唯一的信息载体，读屏和色盲都拿不到。补一句文字标签。
+    final label = switch (phase) {
+      AcpPhaseIdle() => 'Idle',
+      AcpPhaseStarting() => 'Starting',
+      AcpPhaseRunning() => 'Running',
+      AcpPhaseAwaitingApproval() => 'Waiting for your approval',
+      AcpPhaseAwaitingChoice() => 'Waiting for your choice',
+      AcpPhaseEnded(reason: final r) => 'Ended: $r',
+    };
+    return Semantics(label: label, child: _phaseIcon(phase));
+  }
+
+  Widget _phaseIcon(AcpPhase phase) {
+    final status = context.smeltColors;
     return switch (phase) {
-      AcpPhaseIdle() => const Icon(Icons.pause_circle, color: Colors.grey),
+      AcpPhaseIdle() => Icon(Icons.pause_circle, color: status.idle),
       AcpPhaseStarting() => const SizedBox(
         width: 20,
         height: 20,
@@ -1907,23 +2163,30 @@ class _SessionPageState extends State<SessionPage> {
         height: 20,
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      AcpPhaseAwaitingApproval() => const Icon(
+      // 等审批用红：跟列表「要你」同一色。这里原本是橙色，
+      // 同一个会话在列表里是红、进去以后变成橙。
+      AcpPhaseAwaitingApproval() => Icon(
         Icons.warning_amber,
-        color: Colors.orange,
+        color: status.waitingApproval,
       ),
-      AcpPhaseAwaitingChoice() => const Icon(
+      AcpPhaseAwaitingChoice() => Icon(
         Icons.help_outline,
-        color: Colors.blue,
+        color: status.needsAttention,
       ),
+      // Ended 只在 Fatal / RestoreFailed 时出现——正常结束一轮走的是 Idle
+      // （见 acp_session.rs `finish_turn`）。所以它确实是错误终态，用红。
       AcpPhaseEnded(reason: final r) => Tooltip(
         message: r,
-        child: const Icon(Icons.stop_circle, color: Colors.red),
+        child: Icon(Icons.stop_circle, color: status.danger),
       ),
     };
   }
 
   Widget _buildSessionStatus(AcpSnapshot snapshot) {
     final colors = Theme.of(context).colorScheme;
+    // 运行色用 running token 而不是 primary：指挥台的运行点是蓝的，这里再用蓝紫，
+    // 同一个会话换个页面就换个颜色——跟当初 chip 红、指示器橙那处漂移是一回事。
+    final running = context.smeltColors.running;
     final phase = snapshot.phase;
     if (phase is AcpPhaseIdle ||
         phase is AcpPhaseAwaitingApproval ||
@@ -1934,12 +2197,12 @@ class _SessionPageState extends State<SessionPage> {
       AcpPhaseStarting() => (
         Icons.rocket_launch_outlined,
         snapshot.statusLine ?? 'Starting agent...',
-        colors.primary,
+        running,
       ),
       AcpPhaseRunning() => (
         Icons.auto_awesome,
         snapshot.statusLine ?? 'Agent is working',
-        colors.primary,
+        running,
       ),
       AcpPhaseEnded(reason: final reason) => (
         Icons.error_outline,
@@ -1951,7 +2214,8 @@ class _SessionPageState extends State<SessionPage> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      color: color.withAlpha(18),
+      // 设计稿是 12%；原来的 7% 在深色底上几乎看不出这是一条独立的带子。
+      color: color.withAlpha(31),
       child: Row(
         children: [
           if (phase is AcpPhaseRunning || phase is AcpPhaseStarting)
@@ -2003,13 +2267,16 @@ class _SessionPageState extends State<SessionPage> {
       ),
       children: plan.steps.map((step) {
         final (icon, color) = step.isCompleted
-            ? (Icons.check_circle, Colors.green)
+            ? (Icons.check_circle, context.smeltColors.done)
             : step.isInProgress
             ? (
                 Icons.radio_button_checked,
                 Theme.of(context).colorScheme.primary,
               )
-            : (Icons.radio_button_unchecked, Colors.grey);
+            : (
+                Icons.radio_button_unchecked,
+                Theme.of(context).colorScheme.onSurfaceVariant,
+              );
         return ListTile(
           dense: true,
           visualDensity: VisualDensity.compact,
@@ -2030,239 +2297,46 @@ class _SessionPageState extends State<SessionPage> {
     PendingPermission permission,
     int pendingCount,
   ) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      color: Colors.orange.withAlpha(40),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.gpp_maybe_outlined, size: 19),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  'Permission required',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: ApprovalCard(
+        permission: permission,
+        submitting: _permissionSubmittingToolId == permission.toolCallId,
+        onRespond: (optionId) =>
+            _respondApproval(permission.toolCallId, optionId),
+        header: Row(
+          children: [
+            const Icon(Icons.gpp_maybe_outlined, size: 18),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'Permission required',
+                style: TextStyle(fontWeight: FontWeight.bold),
               ),
-              if (pendingCount > 1)
-                Chip(
-                  visualDensity: VisualDensity.compact,
-                  label: Text('$pendingCount pending'),
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          _buildPermissionDetails(permission),
-          const SizedBox(height: 8),
-          if (_permissionSubmittingToolId == permission.toolCallId)
-            const Row(
-              children: [
-                SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                SizedBox(width: 8),
-                Text('Submitting...'),
-              ],
-            )
-          else
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: permission.options.map((opt) {
-                return opt.isAllow
-                    ? FilledButton(
-                        onPressed: () => _respondApproval(
-                          permission.toolCallId,
-                          opt.optionId,
-                        ),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.green.shade700,
-                        ),
-                        child: Text(opt.name),
-                      )
-                    : OutlinedButton(
-                        onPressed: () => _respondApproval(
-                          permission.toolCallId,
-                          opt.optionId,
-                        ),
-                        style: opt.isReject
-                            ? OutlinedButton.styleFrom(
-                                foregroundColor: Colors.red.shade300,
-                              )
-                            : null,
-                        child: Text(opt.name),
-                      );
-              }).toList(),
             ),
-        ],
+            if (pendingCount > 1)
+              Chip(
+                visualDensity: VisualDensity.compact,
+                label: Text('$pendingCount pending'),
+              ),
+          ],
+        ),
       ),
     );
-  }
-
-  Widget _buildPermissionDetails(PendingPermission permission) {
-    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
-    return switch (permission.details) {
-      ApprovalDetailsCommand(
-        command: final command,
-        cwd: final cwd,
-        reason: final reason,
-      ) =>
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SelectableText(
-              command,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            ),
-            if (reason?.isNotEmpty == true) Text(reason!),
-            if (cwd?.isNotEmpty == true)
-              Text(
-                'Working directory: $cwd',
-                style: TextStyle(color: muted, fontSize: 12),
-              ),
-          ],
-        ),
-      ApprovalDetailsFileChange(reason: final reason, grantRoot: final root) =>
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(reason?.isNotEmpty == true ? reason! : permission.question),
-            if (root?.isNotEmpty == true)
-              Text(
-                'Authorized path: $root',
-                style: TextStyle(color: muted, fontSize: 12),
-              ),
-          ],
-        ),
-      ApprovalDetailsPermissions(summary: final summary) => Text(summary),
-      ApprovalDetailsGeneric() => Text(permission.question),
-    };
   }
 
   Widget _buildElicitationCard(PendingElicitation elicitation) {
-    final ready = elicitation.isReady(localTextValues: _elicitationTextValues);
-    final singleSelect =
-        elicitation.fields.length == 1 &&
-        elicitation.fields.first.kind is ElicitationSelect;
-
-    return Container(
-      width: double.infinity,
-      constraints: const BoxConstraints(maxHeight: 360),
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.amber.withAlpha(20),
-        border: Border.all(color: Colors.amber.shade700),
-        borderRadius: BorderRadius.circular(8),
+    return ElicitationCard(
+      elicitation: elicitation,
+      textValues: _elicitationTextValues,
+      onTextChanged: (index, value) => _elicitationTextValues[index] = value,
+      onChoose: (fieldIndex, optionIndex) => gatewayService.chooseElicitation(
+        widget.session.id,
+        fieldIndex,
+        optionIndex,
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.help_outline, color: Colors.amber, size: 20),
-                const SizedBox(width: 8),
-                const Text(
-                  'Your input is needed',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-            if (elicitation.message.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(elicitation.message),
-            ],
-            const SizedBox(height: 10),
-            ...elicitation.fields.asMap().entries.map(
-              (entry) =>
-                  _buildElicitationField(elicitation, entry.key, entry.value),
-            ),
-            if (!singleSelect)
-              Row(
-                children: [
-                  FilledButton(
-                    onPressed: ready ? _submitElicitation : null,
-                    child: const Text('Submit'),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton(
-                    onPressed: () =>
-                        gatewayService.dismissElicitation(widget.session.id),
-                    child: const Text('Answer in text instead'),
-                  ),
-                ],
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildElicitationField(
-    PendingElicitation elicitation,
-    int fieldIndex,
-    ElicitationField field,
-  ) {
-    final title = Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Text(field.title, style: const TextStyle(fontSize: 13)),
-    );
-    final input = switch (field.kind) {
-      ElicitationSelect(options: final options) ||
-      ElicitationMultiSelect(options: final options) => Wrap(
-        spacing: 8,
-        runSpacing: 6,
-        children: options.asMap().entries.map((entry) {
-          final selected =
-              elicitation.chosen[fieldIndex]?.contains(entry.key) == true;
-          return ChoiceChip(
-            label: Text(entry.value.label),
-            selected: selected,
-            onSelected: (_) => gatewayService.chooseElicitation(
-              widget.session.id,
-              fieldIndex,
-              entry.key,
-            ),
-          );
-        }).toList(),
-      ),
-      ElicitationText(secret: final secret) => TextFormField(
-        initialValue:
-            _elicitationTextValues[fieldIndex] ??
-            elicitation.textValues[fieldIndex] ??
-            '',
-        obscureText: secret,
-        decoration: const InputDecoration(border: OutlineInputBorder()),
-        onChanged: (value) => _elicitationTextValues[fieldIndex] = value,
-      ),
-      ElicitationExternalUrl(url: final url) => Row(
-        children: [
-          Expanded(child: SelectableText(url)),
-          IconButton(
-            tooltip: 'Open link',
-            onPressed: () {
-              final uri = Uri.tryParse(url);
-              if (uri != null) {
-                launchUrl(uri, mode: LaunchMode.externalApplication);
-              }
-            },
-            icon: const Icon(Icons.open_in_new),
-          ),
-        ],
-      ),
-    };
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [title, input],
-      ),
+      onSubmit: _submitElicitation,
+      onDismiss: () => gatewayService.dismissElicitation(widget.session.id),
     );
   }
 
@@ -2427,7 +2501,10 @@ class _SessionPageState extends State<SessionPage> {
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Text(
               label,
-              style: TextStyle(color: Colors.grey[500], fontSize: 12),
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ),
           const Expanded(child: Divider()),
@@ -2452,8 +2529,11 @@ class _SessionPageState extends State<SessionPage> {
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        border: Border(top: BorderSide(color: Colors.grey[800]!)),
+        // 输入区用 bar 面，比消息区(panel)暗一档才分得开。
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        border: Border(
+          top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2745,6 +2825,7 @@ class _SessionPageState extends State<SessionPage> {
 
   void _respondApproval(String toolCallId, String optionKey) {
     if (_permissionSubmittingToolId != null) return;
+    // 触感回执由 ApprovalCard 统一负责，这里再打一次会变成双震。
     setState(() => _permissionSubmittingToolId = toolCallId);
     gatewayService.respondApproval(widget.session.id, toolCallId, optionKey);
   }
