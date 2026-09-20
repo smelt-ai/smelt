@@ -1,5 +1,5 @@
-//! Dock 图标角标：用「需要关注」的会话数当角标数字，跟总览页的状态徽章同一份数据源
-//! （见 main.rs 的 AgentStatus），只是把提醒面挪到 Dock 上——切走 smelt 也能瞥见。
+//! Dock 图标角标：统计统一 AttentionStore 中「未读或仍需行动」的会话数。普通完成
+//! 看过后清除；审批/输入/失败即使看过，也保留到 agent 真正继续。
 
 /// 设置 Dock 图标角标：`count == 0` 清空角标，否则显示数字。
 /// `[[NSApplication sharedApplication] dockTile] setBadgeLabel:]`——跟应用是否在

@@ -1,918 +1,10 @@
-//! 历史会话浏览：列出某个项目下各家 agent CLI 本地保存的历史会话（Claude Code /
-//! Codex / Grok / Copilot 各有自己的存储格式，四份独立实现，共用同一套
-//! `SessionSummary`/`Turn`/`SessionDetail` 展示模型），点开能看完整对话内容；续接
-//! 同时支持 ACP 消息流和 CLI/TUI 两条路径。跟 usage_stats.rs 读的是同一份 Claude
-//! 数据源，但目的不同——那边统计聚合数字，这里还原对话本身。
-//!
-//! 四家格式调研自实测（各 CLI 版本可能变，这些解析都是「尽力而为」，不是协议）：
-//! - Claude: `~/.claude/projects/<项目目录编码>/<session_id>.jsonl`
-//! - Codex: `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`（按日期分区，不按项目）
-//! - Grok: `~/.grok/sessions/<url编码cwd>/<session_id>/`（`summary.json` + `chat_history.jsonl`）
-//! - Copilot: `~/.copilot/session-state/<session_id>/`（`workspace.yaml` + `events.jsonl`）
+//! 历史会话的 GPUI 状态、渲染与 Workspace 集成。各家 agent 的数据模型与
+//! 解析器位于 `smelt_core::session_history`，这里 re-export 保持消费者兼容。
 
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-#[cfg(test)]
-use std::collections::HashSet;
+pub use smelt_core::session_history::*;
+
+use smelt_core::fs::{FileSystem, LocalFs};
 use std::path::{Path, PathBuf};
-
-// 项目目录编码 / transcript 路径 / 记忆目录：唯一权威来源现在是 smelt_core::
-// claude_paths（ACP 连接层挪进 smelt-core 后，续接可行性预检也要用同一份规则，
-// 不能这边一份那边一份）。这里整段 re-export，本文件里原有的裸函数名用法
-// 不用改。
-pub(crate) use smelt_core::claude_paths::memory_dir;
-#[cfg(test)]
-pub(crate) use smelt_core::claude_paths::{project_dir, projects_root};
-
-fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
-}
-
-/// 一份历史会话的概览（列表用）。
-#[derive(Clone)]
-pub struct SessionSummary {
-    pub path: PathBuf,
-    /// 实际展示标题：用户设置过名称时优先，否则使用 agent_title。
-    pub title: String,
-    /// Agent transcript / summary 提供的原始标题，用作搜索和自定义标题下的辅助信息。
-    pub agent_title: String,
-    pub custom_title: Option<String>,
-    /// agent 那头认得的 session id——续接时要发给协议的就是这个，不是 `path`。
-    /// 四家取法不一样：Claude 是文件名去扩展名，Codex 是 `session_meta.id`，
-    /// Grok/Copilot 是会话目录名，`path` 本身的形状（文件 vs 目录）四家也不一样，
-    /// 不能拿 `path` 现算，得在各自的 summarize 里就近取一份存下来。
-    pub resume_id: String,
-    pub started_at: Option<DateTime<Utc>>,
-    pub last_active_at: Option<DateTime<Utc>>,
-    /// user + assistant 消息总数（不含被跳过的 tool_result / 内部记录）。
-    pub message_count: usize,
-    /// 本份会话消耗的 token 总量（input+output+两种 cache 相加，算法跟 usage_stats
-    /// 一致），供总览卡片展示「当前会话」口径的用量——跟用量页的整项目累计口径不同。
-    pub total_tokens: u64,
-}
-
-/// 一轮对话：用户发言 / Claude 回复（含它这轮调用了哪些工具）。
-pub struct Turn {
-    pub is_user: bool,
-    pub timestamp: Option<DateTime<Utc>>,
-    pub text: String,
-    /// 这轮里 assistant 调用的工具名（user 轮恒为空）。
-    pub tools: Vec<String>,
-}
-
-pub struct SessionDetail {
-    pub turns: Vec<Turn>,
-}
-
-/// 列出某个项目目录下的所有历史会话，按最近活跃时间降序。
-/// 只读扫描，可能要几十毫秒（视会话数量），调用方应放后台线程跑。
-///
-/// `override_dir`：多 workspace 场景下手动添加的 profile 显式指定的
-/// `CLAUDE_CONFIG_DIR`（见 `smelt_core::claude_paths::projects_root`），
-/// `None` 就是默认 workspace，行为不变。
-#[cfg(test)]
-pub fn list_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
-    let dir = projects_root(override_dir).join(project_dir(cwd));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<SessionSummary> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-        .filter_map(|path| summarize_session(&path))
-        .collect();
-    out.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
-    out
-}
-
-/// 用户消息的真实文本。`message.content` 有两种形状：老一点的纯字符串，和
-/// 实测目前 Claude Code CLI（含 ACP 模式）在用的块数组
-/// `[{"type":"text","text":"..."}]`——工具结果回填给 user 角色时也是数组
-/// （`[{"type":"tool_result",...}]`），形状一样但不是真人发言，得按块的
-/// `type` 精确区分，不能像之前那样直接把"是不是数组"当判断依据（那样会把
-/// 块数组格式的真实发言也一并当成 tool_result 漏掉，历史页显示的用户消息
-/// 就会全部消失）。
-const CLAUDE_LOCAL_COMMAND_MARKERS: &[(&str, &str)] = &[
-    ("<command-name>", "</command-name>"),
-    ("<command-message>", "</command-message>"),
-    ("<command-args>", "</command-args>"),
-    ("<local-command-stdout>", "</local-command-stdout>"),
-    ("<local-command-stderr>", "</local-command-stderr>"),
-];
-
-/// Match claude-agent-acp's replay filtering: local slash-command bookkeeping
-/// is not a user turn and is deliberately omitted by `session/load`.
-fn strip_claude_local_command_metadata(text: &str) -> Option<String> {
-    let mut text = text.to_string();
-    for (open, close) in CLAUDE_LOCAL_COMMAND_MARKERS {
-        while let Some(start) = text.find(open) {
-            let Some(relative_end) = text[start + open.len()..].find(close) else {
-                break;
-            };
-            let end = start + open.len() + relative_end + close.len();
-            text.replace_range(start..end, "");
-        }
-    }
-    (!text.trim().is_empty()).then_some(text)
-}
-
-fn claude_user_text(content: &Value) -> Option<String> {
-    if let Some(s) = content.as_str() {
-        return strip_claude_local_command_metadata(s);
-    }
-    let blocks = content.as_array()?;
-    let text = blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-        .filter_map(strip_claude_local_command_metadata)
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.trim().is_empty()).then_some(text)
-}
-
-#[cfg(test)]
-fn summarize_session(path: &Path) -> Option<SessionSummary> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let session_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let mut title: Option<String> = None;
-    let mut started_at: Option<DateTime<Utc>> = None;
-    let mut last_active_at: Option<DateTime<Utc>> = None;
-    let mut message_count = 0usize;
-    let mut total_tokens = 0u64;
-    let mut seen_uuids: HashSet<String> = HashSet::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if row.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        let Some(kind) = row.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if kind != "user" && kind != "assistant" {
-            continue;
-        }
-        let ts = row
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc));
-        if let Some(ts) = ts {
-            started_at = Some(started_at.map_or(ts, |s: DateTime<Utc>| s.min(ts)));
-            last_active_at = Some(last_active_at.map_or(ts, |l: DateTime<Utc>| l.max(ts)));
-        }
-
-        if kind == "user" {
-            if let Some(text) = row
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(claude_user_text)
-            {
-                message_count += 1;
-                if title.is_none() {
-                    title = Some(truncate(text.trim(), 80));
-                }
-            }
-        } else {
-            // assistant：content 数组里只要有 text 块就算一条消息；同 uuid 只算一次
-            // （日志重写/追加异常会重复），token 累加算法跟 usage_stats 保持一致。
-            let dup = row
-                .get("uuid")
-                .and_then(|v| v.as_str())
-                .is_some_and(|u| !seen_uuids.insert(u.to_string()));
-            let blocks = row
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array());
-            let has_text = blocks.is_some_and(|blocks| {
-                blocks
-                    .iter()
-                    .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-            });
-            if has_text {
-                message_count += 1;
-            }
-            if !dup {
-                if let Some(usage) = row.get("message").and_then(|m| m.get("usage")) {
-                    let field = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                    total_tokens += field("input_tokens")
-                        + field("output_tokens")
-                        + field("cache_creation_input_tokens")
-                        + field("cache_read_input_tokens");
-                }
-            }
-        }
-    }
-
-    // Claude ACP omits local-command-only transcripts during session/load. Do
-    // not advertise those files as resumable conversations in the first place.
-    let title = title?;
-    Some(SessionSummary {
-        title: title.clone(),
-        agent_title: title,
-        custom_title: None,
-        path: path.to_path_buf(),
-        resume_id: session_id,
-        started_at,
-        last_active_at,
-        message_count,
-        total_tokens,
-    })
-}
-
-/// 读某一份会话 transcript，还原成 Turn 列表供浏览。
-/// 跳过子代理（isSidechain）消息 —— 混进主线对话会话读起来很乱，先不做嵌套展示；
-/// 也跳过纯 tool_result 的 user 消息（那是工具输出回填，不是真实用户发言，assistant
-/// 轮次里的工具名已经能说明调用了什么）。
-pub fn load_session_detail(path: &Path) -> Option<SessionDetail> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut turns = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if row.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        if row.get("isSidechain").and_then(|v| v.as_bool()) == Some(true) {
-            continue;
-        }
-        let Some(kind) = row.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if kind != "user" && kind != "assistant" {
-            continue;
-        }
-        let timestamp = row
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc));
-        let content = row.get("message").and_then(|m| m.get("content"));
-
-        if kind == "user" {
-            let Some(text) = content.and_then(claude_user_text) else {
-                continue;
-            };
-            turns.push(Turn {
-                is_user: true,
-                timestamp,
-                text,
-                tools: Vec::new(),
-            });
-        } else {
-            let blocks = content.and_then(|c| c.as_array());
-            let Some(blocks) = blocks else { continue };
-            let text = blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let tools: Vec<String> = blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(str::to_string))
-                .collect();
-            if text.trim().is_empty() && tools.is_empty() {
-                continue;
-            }
-            turns.push(Turn {
-                is_user: false,
-                timestamp,
-                text,
-                tools,
-            });
-        }
-    }
-
-    Some(SessionDetail { turns })
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max_chars).collect();
-    out.push('…');
-    out
-}
-
-// ===================== Codex =====================
-//
-// `~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl`：不像 Claude 按项目分目录，
-// 只能按日期分区遍历、逐份看第一行 session_meta 里的 cwd 是否匹配——文件多的话
-// 比 Claude 那版慢，调用方本来就放后台线程跑，可以接受。
-
-#[cfg(test)]
-fn codex_sessions_root(override_dir: Option<&str>) -> PathBuf {
-    codex_home(override_dir).join("sessions")
-}
-
-/// `CODEX_HOME` 设了就整段替换默认的 `~/.codex`（同 claude_paths.rs 的
-/// `CLAUDE_CONFIG_DIR` 处理，走同一份 `smelt_core::login_env` 探测）。
-/// `override_dir` 优先于全局探测——多 workspace profile 的显式指定。
-#[cfg(test)]
-fn codex_home(override_dir: Option<&str>) -> PathBuf {
-    if let Some(dir) = override_dir {
-        return PathBuf::from(dir);
-    }
-    if let Some(dir) = smelt_core::login_env::codex_home() {
-        return PathBuf::from(dir);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".codex")
-}
-
-#[cfg(test)]
-pub fn list_codex_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
-    let root = codex_sessions_root(override_dir);
-    let mut out = Vec::new();
-    for year in read_dir_ok(&root) {
-        for month in read_dir_ok(&year) {
-            for day in read_dir_ok(&month) {
-                for path in read_dir_ok(&day) {
-                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    if let Some(s) = summarize_codex_session(&path, cwd) {
-                        out.push(s);
-                    }
-                }
-            }
-        }
-    }
-    out.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
-    out
-}
-
-#[cfg(test)]
-fn read_dir_ok(dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(dir)
-        .map(|it| it.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default()
-}
-
-/// Codex 的 `response_item.payload.type=="message"` 里，`role=="user"` 的第一条
-/// 常常不是人打的字，是 CLI 自己注入的 `<environment_context>…</environment_context>`
-/// ——拿这个当标题会很怪，跟真实问题一样都用尖括号开头这个弱信号过滤掉。
-/// 实测这个弱信号会漏（比如 IDE 插件注入的 `# Context from my IDE setup:` 是
-/// `#` 开头，不是 `<`）——协议没有专门的「这条是合成的」标记，只能靠外观猜，
-/// 猜不准的会在真人对话里多出几条奇怪的「用户消息」，暂时接受。
-fn is_synthetic_codex_text(text: &str) -> bool {
-    let t = text.trim_start();
-    t.starts_with('<') || t.starts_with("# Context from")
-}
-
-#[cfg(test)]
-fn summarize_codex_session(path: &Path, want_cwd: &str) -> Option<SessionSummary> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let first = lines.next()?.trim();
-    let meta: Value = serde_json::from_str(first).ok()?;
-    if meta.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
-        return None;
-    }
-    let payload = meta.get("payload")?;
-    if payload.get("cwd").and_then(|v| v.as_str()) != Some(want_cwd) {
-        return None; // 先过滤 cwd，不匹配就不用往下解析整份文件
-    }
-    let session_id = payload
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let mut title: Option<String> = None;
-    let started_at = meta
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .and_then(parse_rfc3339);
-    let mut last_active_at = started_at;
-    let mut message_count = 0usize;
-
-    for line in lines {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(ts) = row
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339)
-        {
-            last_active_at = Some(last_active_at.map_or(ts, |l: DateTime<Utc>| l.max(ts)));
-        }
-        if row.get("type").and_then(|v| v.as_str()) != Some("response_item") {
-            continue;
-        }
-        let Some(item) = row.get("payload") else {
-            continue;
-        };
-        match item.get("type").and_then(|v| v.as_str()) {
-            Some("message") => {
-                let Some(msg_text) = codex_message_text(item) else {
-                    continue;
-                };
-                // role 不只有 user/assistant——实测还见过 system/developer 这类指令性
-                // 角色（比如 `<permissions instructions>` 说明块）。只认 user/assistant，
-                // 别的一律跳过：归到 assistant 会显示成「AI 说了这段系统指令」，误导人。
-                let is_user = match item.get("role").and_then(|v| v.as_str()) {
-                    Some("user") => true,
-                    Some("assistant") => false,
-                    _ => continue,
-                };
-                // 合成的 <environment_context> 用户消息不计入消息数——跟
-                // load_codex_session_detail 里跳过它是同一条口径，不然列表页显示的
-                // 数字会比点开详情页实际看到的轮次还多，对不上。
-                if is_user && is_synthetic_codex_text(&msg_text) {
-                    continue;
-                }
-                message_count += 1;
-                if is_user && title.is_none() {
-                    title = Some(truncate(msg_text.trim(), 80));
-                }
-            }
-            Some("function_call") => {}
-            _ => {}
-        }
-    }
-
-    let title = title.unwrap_or_else(|| session_id.clone());
-    Some(SessionSummary {
-        path: path.to_path_buf(),
-        title: title.clone(),
-        agent_title: title,
-        custom_title: None,
-        resume_id: session_id,
-        started_at,
-        last_active_at,
-        message_count,
-        // Codex 的 event_msg.token_count 是「速率限制用量占比」，不是这一份会话的
-        // token 总数，跟 Claude 那份口径对不上，宁可不接也不接一个会误导人的数字。
-        total_tokens: 0,
-    })
-}
-
-fn codex_message_text(payload: &Value) -> Option<String> {
-    let blocks = payload.get("content")?.as_array()?;
-    let text = blocks
-        .iter()
-        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.trim().is_empty()).then_some(text)
-}
-
-pub fn load_codex_session_detail(path: &Path) -> Option<SessionDetail> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut turns: Vec<Turn> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if row.get("type").and_then(|v| v.as_str()) != Some("response_item") {
-            continue;
-        }
-        let timestamp = row
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339);
-        let Some(item) = row.get("payload") else {
-            continue;
-        };
-        match item.get("type").and_then(|v| v.as_str()) {
-            Some("message") => {
-                let Some(msg_text) = codex_message_text(item) else {
-                    continue;
-                };
-                let is_user = match item.get("role").and_then(|v| v.as_str()) {
-                    Some("user") => true,
-                    Some("assistant") => false,
-                    _ => continue, // system/developer 等指令角色，不是真实对话轮次
-                };
-                if is_user && is_synthetic_codex_text(&msg_text) {
-                    continue; // CLI 自己注入的 <environment_context>，不是真人发言
-                }
-                turns.push(Turn {
-                    is_user,
-                    timestamp,
-                    text: msg_text,
-                    tools: Vec::new(),
-                });
-            }
-            Some("function_call") => {
-                let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                // 工具调用挂到「上一条 assistant 轮次」上——Codex 的日志比 Claude 更碎，
-                // 一次 assistant 发言常拆成「先一条 message 说要干嘛，再几条 function_call」，
-                // 没有上一条 assistant 轮次就单独开一条只带工具名、没有正文的轮次。
-                match turns.last_mut() {
-                    Some(t) if !t.is_user => t.tools.push(name.to_string()),
-                    _ => turns.push(Turn {
-                        is_user: false,
-                        timestamp,
-                        text: String::new(),
-                        tools: vec![name.to_string()],
-                    }),
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Some(SessionDetail { turns })
-}
-
-// ===================== Grok =====================
-//
-// `~/.grok/sessions/<url编码cwd>/<session_id>/`：`summary.json` 已经现成给了标题/
-// 时间/消息数（不用像 Claude/Codex 那样扫整份 transcript 才能拿到概览，列表这块
-// 反而是四家里最快的），`chat_history.jsonl` 才是完整对话内容。
-
-#[cfg(test)]
-fn grok_sessions_root(override_dir: Option<&str>) -> PathBuf {
-    grok_home(override_dir).join("sessions")
-}
-
-/// `GROK_HOME` 设了就整段替换默认的 `~/.grok`。`override_dir` 同上，优先级最高。
-#[cfg(test)]
-fn grok_home(override_dir: Option<&str>) -> PathBuf {
-    if let Some(dir) = override_dir {
-        return PathBuf::from(dir);
-    }
-    if let Some(dir) = smelt_core::login_env::grok_home() {
-        return PathBuf::from(dir);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".grok")
-}
-
-#[cfg(test)]
-pub fn list_grok_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
-    let root = grok_sessions_root(override_dir);
-    let mut out = Vec::new();
-    for project_dir in read_dir_ok(&root) {
-        if !project_dir.is_dir() {
-            continue; // 跳过同级的 session_search.sqlite
-        }
-        for session_dir in read_dir_ok(&project_dir) {
-            if let Some(s) = summarize_grok_session(&session_dir, cwd) {
-                out.push(s);
-            }
-        }
-    }
-    out.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
-    out
-}
-
-#[cfg(test)]
-fn summarize_grok_session(session_dir: &Path, want_cwd: &str) -> Option<SessionSummary> {
-    let summary_path = session_dir.join("summary.json");
-    let text = std::fs::read_to_string(&summary_path).ok()?;
-    let summary: Value = serde_json::from_str(&text).ok()?;
-    if summary
-        .get("info")
-        .and_then(|i| i.get("cwd"))
-        .and_then(|v| v.as_str())
-        != Some(want_cwd)
-    {
-        return None;
-    }
-    let session_id = session_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let title = summary
-        .get("session_summary")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| truncate(s.trim(), 80))
-        .unwrap_or_else(|| session_id.clone());
-    Some(SessionSummary {
-        path: session_dir.to_path_buf(),
-        title: title.clone(),
-        agent_title: title,
-        custom_title: None,
-        resume_id: session_id,
-        started_at: summary
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339),
-        last_active_at: summary
-            .get("updated_at")
-            .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339),
-        message_count: summary
-            .get("num_chat_messages")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize,
-        // summary.json 没有 token 统计字段（实测），跟 Codex 一样宁可留空。
-        total_tokens: 0,
-    })
-}
-
-/// Grok 把 IDE 环境信息 / 项目说明这类系统注入内容也存成 `type:"user"`。多数带
-/// `synthetic_reason` 字段（如 `"compaction_meta"`/`"project_instructions"`）能直接
-/// 识别；但实测第一轮的 `<user_info>…</user_info>` 环境块不带这个字段（大概是
-/// CLI 认为它是「第一轮正常内容的一部分」而不是「事后注入」），得再兜底一层：
-/// 剥掉 `<user_query>` 包装后文本仍然是尖括号开头，说明这不是真实问题、是别的
-/// 原始上下文块，同样当合成消息跳过。
-fn is_synthetic_grok_row(row: &Value, extracted_text: &str) -> bool {
-    row.get("synthetic_reason").is_some() || extracted_text.trim_start().starts_with('<')
-}
-
-fn grok_text_blocks(content: &Value) -> String {
-    content
-        .as_array()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
-}
-
-/// 真人问题外面常包一层 `<user_query>…</user_query>`（CLI 自己加的），原样显示会
-/// 让消息气泡里露出 XML 标签，剥掉更贴近「这就是用户打的字」。
-fn strip_user_query_wrapper(text: &str) -> &str {
-    let t = text.trim();
-    let Some(rest) = t.strip_prefix("<user_query>") else {
-        return text;
-    };
-    rest.strip_suffix("</user_query>")
-        .map(str::trim)
-        .unwrap_or(text)
-}
-
-pub fn load_grok_session_detail(session_dir: &Path) -> Option<SessionDetail> {
-    let path = session_dir.join("chat_history.jsonl");
-    let text = std::fs::read_to_string(&path).ok()?;
-    let mut turns: Vec<Turn> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        match row.get("type").and_then(|v| v.as_str()) {
-            Some("user") => {
-                let Some(content) = row.get("content") else {
-                    continue;
-                };
-                let raw = grok_text_blocks(content);
-                if raw.trim().is_empty() {
-                    continue;
-                }
-                let text = strip_user_query_wrapper(&raw).to_string();
-                if is_synthetic_grok_row(&row, &text) {
-                    continue;
-                }
-                turns.push(Turn {
-                    is_user: true,
-                    timestamp: None,
-                    text,
-                    tools: Vec::new(),
-                });
-            }
-            Some("assistant") => {
-                let text = row
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let tools: Vec<String> = row
-                    .get("tool_calls")
-                    .and_then(|v| v.as_array())
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if text.trim().is_empty() && tools.is_empty() {
-                    continue;
-                }
-                // Grok 的 chat_history.jsonl 逐行不带时间戳（跟 Claude/Codex 不同），
-                // 只有整份会话的 created_at/updated_at（见 summary.json），没有更细的
-                // 逐轮时间可用，就都留 None，UI 本来就把 None 当「不显示时间」处理。
-                turns.push(Turn {
-                    is_user: false,
-                    timestamp: None,
-                    text,
-                    tools,
-                });
-            }
-            _ => {} // reasoning / system / tool_result：跳过，同 Claude 对 tool_result 的处理
-        }
-    }
-
-    Some(SessionDetail { turns })
-}
-
-// ===================== Copilot =====================
-//
-// `~/.copilot/session-state/<session_id>/`：`workspace.yaml`（10 来行的扁平
-// `key: value`，没有嵌套/列表，手写小解析器就够，不为这一个文件引入 yaml 依赖）
-// 给 cwd/标题/时间，`events.jsonl` 才是完整对话内容。
-
-#[cfg(test)]
-fn copilot_sessions_root(override_dir: Option<&str>) -> PathBuf {
-    copilot_home(override_dir).join("session-state")
-}
-
-/// `COPILOT_HOME` 优先（官方推荐用法，整段替换默认 `~/.copilot`），没设再看
-/// `XDG_CONFIG_HOME`（这种情况下基准目录是 `$XDG_CONFIG_HOME/copilot`），
-/// 都没设才落到默认位置。`override_dir`（多 workspace profile）优先级最高，
-/// 直接就是完整的 Copilot 数据目录（不用再拼 `/copilot` 子目录）。
-#[cfg(test)]
-fn copilot_home(override_dir: Option<&str>) -> PathBuf {
-    if let Some(dir) = override_dir {
-        return PathBuf::from(dir);
-    }
-    if let Some(dir) = smelt_core::login_env::copilot_home() {
-        return PathBuf::from(dir);
-    }
-    if let Some(xdg) = smelt_core::login_env::xdg_config_home() {
-        return PathBuf::from(xdg).join("copilot");
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".copilot")
-}
-
-/// 只认得住扁平 `key: value` 这一种形状——Copilot 目前这个文件就是这样（实测），
-/// 真出现嵌套/列表会直接读不到对应字段，调用方本来就都用 `Option`/回退处理。
-#[cfg(test)]
-fn parse_flat_yaml(text: &str) -> std::collections::HashMap<String, String> {
-    text.lines()
-        .filter_map(|line| line.split_once(": "))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect()
-}
-
-#[cfg(test)]
-pub fn list_copilot_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
-    let root = copilot_sessions_root(override_dir);
-    let mut out = Vec::new();
-    for session_dir in read_dir_ok(&root) {
-        if let Some(s) = summarize_copilot_session(&session_dir, cwd) {
-            out.push(s);
-        }
-    }
-    out.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
-    out
-}
-
-#[cfg(test)]
-fn summarize_copilot_session(session_dir: &Path, want_cwd: &str) -> Option<SessionSummary> {
-    let yaml_text = std::fs::read_to_string(session_dir.join("workspace.yaml")).ok()?;
-    let fields = parse_flat_yaml(&yaml_text);
-    if fields.get("cwd").map(String::as_str) != Some(want_cwd) {
-        return None;
-    }
-    let session_id = session_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let title = fields
-        .get("summary")
-        .or_else(|| fields.get("name"))
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| truncate(s, 80))
-        .unwrap_or_else(|| session_id.clone());
-
-    // workspace.yaml 没存消息数，要拿到它就得扫一遍 events.jsonl。
-    let mut message_count = 0usize;
-    if let Ok(text) = std::fs::read_to_string(session_dir.join("events.jsonl")) {
-        for line in text.lines() {
-            let Ok(row) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            match row.get("type").and_then(|v| v.as_str()) {
-                Some("user.message") | Some("assistant.message") => message_count += 1,
-                _ => {}
-            }
-        }
-    }
-
-    Some(SessionSummary {
-        path: session_dir.to_path_buf(),
-        title: title.clone(),
-        agent_title: title,
-        custom_title: None,
-        resume_id: session_id,
-        started_at: fields.get("created_at").and_then(|v| parse_rfc3339(v)),
-        last_active_at: fields.get("updated_at").and_then(|v| parse_rfc3339(v)),
-        message_count,
-        total_tokens: 0, // events.jsonl 没有可靠的整会话 token 汇总字段（实测）
-    })
-}
-
-pub fn load_copilot_session_detail(session_dir: &Path) -> Option<SessionDetail> {
-    let text = std::fs::read_to_string(session_dir.join("events.jsonl")).ok()?;
-    let mut turns: Vec<Turn> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(data) = row.get("data") else {
-            continue;
-        };
-        match row.get("type").and_then(|v| v.as_str()) {
-            Some("user.message") => {
-                // `content` 是用户原始打字；`transformedContent` 是 CLI 拼进 IDE 选区
-                // 之类上下文之后的版本，混进去展示会很乱，只取干净的那份。
-                let Some(text) = data.get("content").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if text.trim().is_empty() {
-                    continue;
-                }
-                turns.push(Turn {
-                    is_user: true,
-                    timestamp: None,
-                    text: text.to_string(),
-                    tools: Vec::new(),
-                });
-            }
-            Some("assistant.message") => {
-                let text = data
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let tools: Vec<String> = data
-                    .get("toolRequests")
-                    .and_then(|v| v.as_array())
-                    .map(|reqs| {
-                        reqs.iter()
-                            .filter_map(|r| r.get("name").and_then(|n| n.as_str()))
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if text.trim().is_empty() && tools.is_empty() {
-                    continue;
-                }
-                turns.push(Turn {
-                    is_user: false,
-                    timestamp: None,
-                    text,
-                    tools,
-                });
-            }
-            _ => {} // tool.execution_*/hook.*/session.*/system.*：跳过，工具名已从 toolRequests 拿到
-        }
-    }
-
-    Some(SessionDetail { turns })
-}
 
 // ===================== GPUI 面板 =====================
 //
@@ -923,13 +15,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use crate::claude_memory::MemoryEntry;
-use crate::{Workspace, placeholder_view};
+use crate::acp_view;
+use crate::{Workspace, placeholder_view, ui_theme};
 
 pub(crate) fn format_count(n: u64) -> String {
     if n >= 1_000_000 {
@@ -958,45 +51,130 @@ fn session_when(s: &SessionSummary) -> String {
     }
 }
 
-/// 历史会话列表的三种状态：还没扫描完 / 扫描完但没有历史会话 / 拿到数据。
-/// 左侧使用可搜索的双层标题列表（不再用 DataTable——四个数据列挤在一栏很局促）：
+/// 历史会话列表状态：未选项目 / 还没扫描完 / 扫描完但没有历史会话 / 拿到数据。
+/// 右侧使用可搜索的双层标题列表（不再用 DataTable——四个数据列挤在一栏很局促）：
 /// 主行优先显示用户名称，副行保留 Agent 原始标题或时间信息。
 pub enum HistoryListState {
+    NoProject,
     Loading,
     Empty,
     Ready(Rc<Vec<SessionSummary>>),
 }
 
-/// 历史会话页的两个子页，共用「左列表 + 右详情」的骨架：
-/// - `Sessions`：Claude Code 存的历史对话（`*.jsonl`）
-/// - `Memories`：Claude Code 攒的长期记忆（`memory/*.md`，见 claude_memory.rs）
-///
-/// 两者是同一个目录下的邻居数据，都属于「Claude Code 专属层」。
-#[derive(Clone, Copy, PartialEq)]
-pub enum HistoryPane {
-    Sessions,
-    Memories,
+/// 历史会话右键「删除」的确认目标。
+#[derive(Clone)]
+pub struct DeleteHistoryTarget {
+    pub agent: HistorySourceKind,
+    pub profile_id: Option<String>,
+    pub cwd: String,
+    pub resume_id: String,
+    pub path: PathBuf,
+    pub title: String,
 }
 
-/// 历史会话页：左侧列出当前项目下 Claude Code 保存的历史会话，右侧显示选中会话的
-/// 对话内容（只读浏览，支持右键「继续」恢复该对话）。数据来自 session_history 模块，跟「用量」
-/// 页读的是同一份 `~/.claude/projects/**/*.jsonl`，但这里还原对话本身而非统计聚合。
-pub fn history_view(
-    pane: HistoryPane,
-    agent: AcpAgentKind,
-    // 选中的是手动添加的 workspace profile 而不是某个基础 agent 槽位时是
-    // `Some(profile_id)`——决定去哪个目录读数据（见 `ensure_session_list`），
-    // `agent` 这时候是该 profile 底层接的种类（供解析器选用）。
-    profile_id: Option<String>,
-    cwd: Option<String>,
-    list: HistoryListState,
-    detail: &Option<(std::path::PathBuf, Rc<SessionDetail>)>,
-    detail_list_state: gpui::ListState,
-    filter: Option<Entity<gpui_component::input::InputState>>,
-    memories: Option<Rc<Vec<MemoryEntry>>>,
-    memory_selected: Option<usize>,
-    cx: &mut Context<Workspace>,
-) -> Div {
+/// 历史会话页：列出当前项目下各家 agent 保存的历史会话，并显示选中会话的
+/// 对话内容（只读浏览，支持右键「继续」恢复该对话）。
+/// 历史页顶部一个来源 tab：基础 agent 槽或手动 workspace profile。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HistorySourceTab {
+    pub kind: HistorySourceKind,
+    pub profile_id: Option<String>,
+    pub label: String,
+}
+
+/// 历史页该展示哪些来源 tab。智能体上下文只留当前引擎；普通项目列出所有裸种类
+/// 再加上手动 profile。纯数据，不碰 GPUI。
+///
+/// 遍历 [`HistorySourceKind::ALL`] 而不是 `ConversationAgentKind::ALL`：能不能读历史
+/// 取决于本机有没有落盘 transcript，与有没有 ACP 无关。
+pub(crate) fn history_source_tabs(
+    restrict_to_kind: Option<ConversationAgentKind>,
+    profiles: impl IntoIterator<Item = smelt_core::agent_kind::AcpProfile>,
+) -> Vec<HistorySourceTab> {
+    let mut tabs = Vec::new();
+    for kind in HistorySourceKind::ALL {
+        if !kind.is_bare_kind() {
+            continue;
+        }
+        // 智能体上下文只允许当前引擎；引擎总是一个 ACP 种类，所以纯终端
+        // 来源在这种上下文里天然不匹配。
+        if restrict_to_kind.is_none_or(|only| kind.acp() == Some(only)) {
+            tabs.push(HistorySourceTab {
+                kind,
+                profile_id: None,
+                label: kind.short_label().to_string(),
+            });
+        }
+    }
+    if restrict_to_kind.is_none() {
+        for profile in profiles {
+            let Some(kind) = profile.kind() else {
+                continue;
+            };
+            tabs.push(HistorySourceTab {
+                kind: kind.into(),
+                profile_id: Some(profile.id.clone()),
+                label: profile.label,
+            });
+        }
+    }
+    tabs
+}
+
+pub(crate) struct HistoryViewParams<'a> {
+    pub agent: HistorySourceKind,
+    /// 手动添加的 workspace profile；基础 agent 槽位为 `None`。
+    pub profile_id: Option<String>,
+    pub cwd: Option<String>,
+    pub list: HistoryListState,
+    pub detail: &'a Option<(PathBuf, Rc<SessionDetail>)>,
+    pub detail_list_state: ListState,
+    pub filter: Option<Entity<gpui_component::input::InputState>>,
+    /// 智能体上下文里只允许一个引擎。`None` 表示普通项目。
+    pub restrict_to_kind: Option<ConversationAgentKind>,
+    /// 顶部来源 tab，由 [`history_source_tabs`] 在 Workspace 里算好。
+    pub source_tabs: Vec<HistorySourceTab>,
+    /// 当前 tab 若是手动 profile，续接要用它的启动规格。
+    pub launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+    /// 当前 tab 的 profile 显示名；迁移文案用。
+    pub profile_label: Option<String>,
+    /// `resume_id` → 产品智能体定义 id。项目历史里靠它认出「这不是裸引擎会话」。
+    pub history_agent_ids: Rc<HashMap<String, String>>,
+}
+
+/// 智能体 space 里的历史，或项目里绑过智能体定义的那几条，都按智能体续接。
+pub(crate) fn history_row_is_agent_session(
+    agent_context: bool,
+    bound_agent_definition_id: Option<&str>,
+) -> bool {
+    agent_context || bound_agent_definition_id.is_some()
+}
+
+pub(crate) fn history_continue_label(is_agent_session: bool) -> &'static str {
+    if is_agent_session {
+        "继续对话"
+    } else {
+        "ACP 继续"
+    }
+}
+
+pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) -> Div {
+    let HistoryViewParams {
+        agent,
+        profile_id,
+        cwd,
+        list,
+        detail,
+        detail_list_state,
+        filter,
+        restrict_to_kind,
+        source_tabs,
+        launch_override,
+        profile_label,
+        history_agent_ids,
+    } = params;
+    // 智能体上下文：只留「继续对话」这一条按智能体续接的路径。
+    let agent_context = restrict_to_kind.is_some();
     let (muted, fg, c_border, accent, secondary) = {
         let t = cx.theme();
         (
@@ -1008,118 +186,57 @@ pub fn history_view(
         )
     };
 
-    // 「会话 / 记忆」切换：两块数据是同一个项目的两种视角，共用下面的左右布局，
-    // 所以做成页内切换而不是各占一个顶层 tab。「记忆」目前只有 Claude Code 会写
-    // （`~/.claude/.../memory/*.md`），不是四家通用的东西，agent tab 只在「会话」
-    // 子页出现。
-    let switcher = h_flex()
-        .flex_none()
-        .gap_1()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(c_border)
-        .child(pane_button(
-            "会话",
-            HistoryPane::Sessions,
-            pane,
-            accent,
-            fg,
-            muted,
-            cx,
-        ))
-        .child(pane_button(
-            "记忆",
-            HistoryPane::Memories,
-            pane,
-            accent,
-            fg,
-            muted,
-            cx,
-        ));
-
-    if pane == HistoryPane::Memories {
-        return v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(switcher)
-            .child(memory_body(
-                memories,
-                memory_selected,
-                muted,
-                fg,
-                c_border,
-                accent,
-                cx,
-            ));
-    }
-
-    // 会话来源分 tab：四家 agent 各自的本地存储格式完全不同（见文件头注释），
-    // 没法合并成一份列表，只能让用户自己选看哪家。手动添加的 workspace profile
-    // 追加在基础四家后面——同一个 kind 的解析器复用，只是数据目录不同。
     let current_profile = profile_id.clone();
-    let profiles = cx
-        .global::<crate::settings::AgentUiConfig>()
-        .profiles
-        .clone();
+    let tab_colors = HistoryTabColors { accent, fg, muted };
     let agent_switcher = h_flex()
+        .id("history-agent-switcher")
+        .w_full()
+        .h(px(38.))
+        .min_w_0()
         .flex_none()
+        .overflow_x_scrollbar()
         .gap_1()
         .px_3()
         .py_1p5()
         .border_b_1()
         .border_color(c_border)
-        .children(AcpAgentKind::ALL.map(|a| {
+        // 空间足够时把来源 tab 推到右侧；内容超出时占位区收缩为零，保留滚动。
+        .child(div().flex_1().min_w_0())
+        .children(source_tabs.into_iter().map(|tab| {
             agent_tab_button(
-                a,
-                None,
-                a.short_label().into(),
+                tab.kind,
+                tab.profile_id,
+                tab.label.into(),
                 agent,
                 current_profile.clone(),
-                accent,
-                fg,
-                muted,
-                cx,
-            )
-        }))
-        .children(profiles.into_iter().map(|p| {
-            agent_tab_button(
-                p.kind(),
-                Some(p.id.clone()),
-                p.label.clone().into(),
-                agent,
-                current_profile.clone(),
-                accent,
-                fg,
-                muted,
+                tab_colors,
                 cx,
             )
         }));
 
     // 选中会话的路径：list 和 detail 各自渲染都要用它判断"这行是不是当前打开的"，
     // 先从 detail 里取出来，避免下面重复解构。
-    let selected_path = detail.as_ref().map(|(p, _)| p.clone());
     // 只有 Ready 时才有数据可查；detail 头部那行摘要信息（时间/消息数/tokens）
     // 就是从这份列表里按路径找回对应的 SessionSummary，不用另存一份。
     let sessions: Option<Rc<Vec<SessionSummary>>> = match &list {
         HistoryListState::Ready(s) => Some(s.clone()),
         _ => None,
     };
+    let detail = detail.as_ref().filter(|(path, _)| {
+        sessions
+            .as_ref()
+            .is_some_and(|list| list.iter().any(|session| session.path == *path))
+    });
+    let selected_path = detail.map(|(path, _)| path.clone());
     let query = filter
         .as_ref()
         .map(|input| input.read(cx).value().trim().to_lowercase())
         .unwrap_or_default();
 
-    // 当前 tab 若是手动添加的 workspace profile，续接要用它自动拼好的命令
-    // （带 workspace 覆盖前缀），不能用底层 kind 的默认命令——不然续接出来的
-    // 会话又落回默认 workspace，看不到这条历史。
-    let launch_override = profile_id.as_deref().and_then(|id| {
-        cx.global::<crate::settings::AgentUiConfig>()
-            .find_profile(id)
-            .map(|p| current_profile_launch(cx.global::<crate::settings::AgentUiConfig>(), p))
-    });
-
     let list_body: AnyElement = match (&list, &sessions) {
+        (HistoryListState::NoProject, _) => {
+            placeholder_view("当前没有活动项目", muted).into_any_element()
+        }
         (HistoryListState::Loading, _) => placeholder_view("加载中…", muted).into_any_element(),
         (HistoryListState::Empty, _) | (_, None) => {
             placeholder_view("这个项目还没有本地保存的历史会话", muted).into_any_element()
@@ -1139,100 +256,138 @@ pub fn history_view(
             if visible_indices.is_empty() {
                 placeholder_view("没有匹配的历史会话", muted).into_any_element()
             } else {
-                // 右键「继续」的回调是个独立触发的普通闭包，不是 cx.listener——不能直接
-                // 拿闭包外那个 &mut Context<Workspace> 改状态，得先攥一份 Entity handle，
-                // 触发时再 .update() 回去，跟别处「异步回来再 update」是同一个道理。
+                // 虚拟列表的渲染回调发生在 Workspace::render 已经持有实体租约时，
+                // 这个来源能干什么，由它自身能力决定，不是所有来源都一样：
+                // - ACP 续接 / 迁移：需要 ACP 身份，纯终端来源（Antigravity）没有。
+                //   迁移虽然只要读得出 transcript，但 `HistoryMigrationSource` 要拿源
+                //   agent 写进交接头部，而那块目前只认 ACP 种类。
+                // - 删除：存档形态各家不同。Antigravity 的历史同时活在总索引库和
+                //   正文库两处，而且 `agy` 可能正开着它们；只删一半会把别人的索引
+                //   弄成死链，所以不提供删除，而不是提供一个半对的删除。
+                let migrate_agent = agent.acp();
+                let supports_delete = agent.acp().is_some();
+                // 这里只能根据快照构造元素，不能为了拿 Context 再 update Workspace。
+                // 交互回调真正发生在之后，再通过 Entity 更新工作区。
                 let workspace = cx.entity();
                 let list = list.clone();
                 let selected_path_for_list = selected_path.clone();
+                let history_agent_ids = history_agent_ids.clone();
                 let row_count = visible_indices.len();
-                uniform_list("session-list", row_count, move |range, _window, app| {
-                    workspace.update(app, |_, cx| {
-                        range
-                            .map(|row_ix| {
-                                let ix = visible_indices[row_ix];
-                                let s = &list[ix];
-                                let is_sel =
-                                    selected_path_for_list.as_deref() == Some(s.path.as_path());
-                                let path = s.path.clone();
-                                let path_for_copy = path.to_string_lossy().into_owned();
-                                let resume_id = s.resume_id.clone();
-                                let row_cwd = cwd.clone();
-                                let ws_for_resume = workspace.clone();
-                                let row_launch_override = launch_override.clone();
-                                let row_profile_id = profile_id.clone();
-                                let rename_cwd = cwd.clone();
-                                let rename_resume_id = s.resume_id.clone();
-                                let rename_title = s.title.clone();
-                                let has_custom_title = s.custom_title.is_some();
-                                let secondary_title = if s.custom_title.is_some() {
-                                    let when = session_when(s);
-                                    if when.is_empty() {
-                                        s.agent_title.clone()
-                                    } else {
-                                        format!("{} · {when}", s.agent_title)
-                                    }
+                uniform_list("session-list", row_count, move |range, _window, _app| {
+                    range
+                        .map(|row_ix| {
+                            let ix = visible_indices[row_ix];
+                            let s = &list[ix];
+                            let is_sel =
+                                selected_path_for_list.as_deref() == Some(s.path.as_path());
+                            let path = s.path.clone();
+                            let path_for_copy = path.to_string_lossy().into_owned();
+                            let resume_id = s.resume_id.clone();
+                            let row_is_agent = history_row_is_agent_session(
+                                agent_context,
+                                history_agent_ids.get(&s.resume_id).map(String::as_str),
+                            );
+                            let row_cwd = cwd.clone();
+                            let ws_for_resume = workspace.clone();
+                            let row_launch_override = launch_override.clone();
+                            let row_profile_id = profile_id.clone();
+                            let rename_cwd = cwd.clone();
+                            let rename_resume_id = s.resume_id.clone();
+                            let rename_title = s.title.clone();
+                            let delete_target = cwd.clone().filter(|_| supports_delete).map(|cwd| {
+                                DeleteHistoryTarget {
+                                    agent,
+                                    profile_id: profile_id.clone(),
+                                    cwd,
+                                    resume_id: s.resume_id.clone(),
+                                    path: s.path.clone(),
+                                    title: s.title.clone(),
+                                }
+                            });
+                            let migrate_source =
+                                cwd.clone()
+                                    .zip(migrate_agent)
+                                    .map(|(cwd, agent)| HistoryMigrationSource {
+                                        agent,
+                                        profile_label: profile_label.clone(),
+                                        title: s.title.clone(),
+                                        resume_id: s.resume_id.clone(),
+                                        path: s.path.clone(),
+                                        cwd,
+                                    });
+                            let has_custom_title = s.custom_title.is_some();
+                            let secondary_title = if s.custom_title.is_some() {
+                                let when = session_when(s);
+                                if when.is_empty() {
+                                    s.agent_title.clone()
                                 } else {
-                                    session_when(s)
-                                };
-                                div()
-                                    .w_full()
-                                    .px_2()
-                                    .pb_1()
-                                    .child(
-                                        v_flex()
-                                            .id(("session-row", ix))
-                                            .w_full()
-                                            .h(px(54.))
-                                            .justify_center()
-                                            .gap_0p5()
-                                            .px_2()
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .text_color(fg)
-                                            .when(is_sel, |d| d.bg(accent.opacity(0.18)))
-                                            .when(!is_sel, |d| {
-                                                d.hover(|s| s.bg(c_border.opacity(0.5)))
-                                            })
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .text_sm()
-                                                    .truncate()
-                                                    .child(s.title.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .truncate()
-                                                    .child(secondary_title),
-                                            )
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.open_session_detail(
-                                                        agent,
-                                                        path.clone(),
-                                                        cx,
-                                                    );
-                                                }),
-                                            )
-                                            .context_menu(move |mut menu, _window, _cx| {
-                                                let ws = ws_for_resume.clone();
-                                                let resume_id = resume_id.clone();
-                                                let row_cwd = row_cwd.clone();
-                                                let row_launch_override =
-                                                    row_launch_override.clone();
-                                                let row_profile_id = row_profile_id.clone();
-                                                let acp_profile_id = row_profile_id.clone();
-                                                let acp_resume_id = resume_id.clone();
-                                                let acp_row_cwd = row_cwd.clone();
-                                                let acp_launch_override =
-                                                    row_launch_override.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::new("ACP 继续").on_click(
+                                    format!("{} · {when}", s.agent_title)
+                                }
+                            } else {
+                                session_when(s)
+                            };
+                            let ws_for_detail = workspace.clone();
+                            let detail_path = path;
+                            div()
+                                .w_full()
+                                .px_2()
+                                .pb_1()
+                                .child(
+                                    v_flex()
+                                        .id(("session-row", ix))
+                                        .w_full()
+                                        .h(px(54.))
+                                        .justify_center()
+                                        .gap_0p5()
+                                        .px_2()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_color(fg)
+                                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
+                                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .text_sm()
+                                                .truncate()
+                                                .child(s.title.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .truncate()
+                                                .child(secondary_title),
+                                        )
+                                        .on_mouse_down(MouseButton::Left, move |_, _, app| {
+                                            ws_for_detail.update(app, |this, cx| {
+                                                this.open_session_detail(
+                                                    agent,
+                                                    detail_path.clone(),
+                                                    cx,
+                                                );
+                                            });
+                                        })
+                                        .context_menu(move |mut menu, _window, menu_cx| {
+                                            let ws = ws_for_resume.clone();
+                                            let resume_id = resume_id.clone();
+                                            let row_cwd = row_cwd.clone();
+                                            let row_launch_override = row_launch_override.clone();
+                                            let row_profile_id = row_profile_id.clone();
+                                            let acp_profile_id = row_profile_id.clone();
+                                            let acp_resume_id = resume_id.clone();
+                                            let acp_row_cwd = row_cwd.clone();
+                                            let acp_launch_override = row_launch_override.clone();
+                                            let acp_agent = agent.acp();
+                                            // ACP 续接要求对方有 ACP 服务。纯终端来源只能
+                                            // 走下面的 CLI/TUI 续接，这里不能给一个点了没反应的菜单项。
+                                            if let Some(acp_agent) = acp_agent {
+                                                menu =
+                                                    menu.item(PopupMenuItem::new(
+                                                        history_continue_label(row_is_agent),
+                                                    )
+                                                    .on_click(
                                                         move |_ev, window, cx| {
                                                             // 没选中项目时历史页本来就是空的，理论到不了这里，
                                                             // 防御性地什么都不做而不是 panic。
@@ -1246,22 +401,28 @@ pub fn history_view(
                                                             let profile_id = acp_profile_id.clone();
                                                             ws.update(cx, |this, cx| {
                                                                 this.resume_acp_session(
-                                                                    agent,
+                                                                crate::workspace_sessions::AcpResumeRequest {
+                                                                    agent: acp_agent,
                                                                     launch_override,
                                                                     profile_id,
                                                                     cwd,
                                                                     resume_id,
-                                                                    window,
-                                                                    cx,
-                                                                );
+                                                                },
+                                                                window,
+                                                                cx,
+                                                            );
                                                             });
                                                         },
-                                                    ),
-                                                );
-                                                let ws = ws_for_resume.clone();
-                                                let cli_resume_id = resume_id;
-                                                let cli_row_cwd = row_cwd;
-                                                let cli_launch_override = row_launch_override;
+                                                    ));
+                                            }
+                                            let ws = ws_for_resume.clone();
+                                            let cli_resume_id = resume_id;
+                                            let cli_row_cwd = row_cwd;
+                                            let cli_launch_override = row_launch_override;
+                                            // 智能体会话不给裸引擎的入口：CLI/TUI
+                                            // 续接会绕开智能体直接起一个 TUI，插件、
+                                            // 工作方式、绑定上下文全都不会带上。
+                                            if !row_is_agent {
                                                 menu = menu.item(
                                                     PopupMenuItem::new("CLI/TUI 继续").on_click(
                                                         move |_ev, _window, cx| {
@@ -1284,81 +445,106 @@ pub fn history_view(
                                                         },
                                                     ),
                                                 );
-                                                if let Some(rename_cwd) = rename_cwd.clone() {
-                                                    let ws = ws_for_resume.clone();
-                                                    let rename_profile_id = row_profile_id.clone();
-                                                    let rename_resume_id = rename_resume_id.clone();
-                                                    let rename_title = rename_title.clone();
-                                                    let reset_cwd = rename_cwd.clone();
-                                                    let reset_resume_id = rename_resume_id.clone();
-                                                    menu = menu.separator().item(
-                                                        PopupMenuItem::new("重命名").on_click(
-                                                            move |_ev, window, cx| {
-                                                                let profile_id =
-                                                                    rename_profile_id.clone();
-                                                                let cwd = rename_cwd.clone();
-                                                                let resume_id =
-                                                                    rename_resume_id.clone();
-                                                                let current_title =
-                                                                    rename_title.clone();
-                                                                ws.update(cx, |this, cx| {
-                                                                    this.start_rename(
-                                                                        crate::RenameTarget::History {
-                                                                            agent,
-                                                                            profile_id,
-                                                                            cwd,
-                                                                            resume_id,
-                                                                            current_title,
-                                                                        },
-                                                                        window,
-                                                                        cx,
-                                                                    );
-                                                                });
-                                                            },
-                                                        ),
-                                                    );
-                                                    if has_custom_title {
-                                                        let ws = ws_for_resume.clone();
-                                                        let reset_profile_id =
-                                                            row_profile_id.clone();
-                                                        menu = menu.item(
-                                                            PopupMenuItem::new("恢复默认名称")
-                                                                .on_click(
-                                                                    move |_ev, _window, cx| {
-                                                                        ws.update(cx, |this, cx| {
-                                                                            this.set_history_custom_title(
-                                                                                agent,
-                                                                                reset_profile_id.clone(),
-                                                                                reset_cwd.clone(),
-                                                                                reset_resume_id.clone(),
-                                                                                None,
-                                                                                cx,
-                                                                            );
-                                                                        });
+                                            }
+                                            // 「继续」两项是同一家 agent 的续接
+                                            // （靠 session/load 或 --resume）；迁移
+                                            // 是把内容重述给另一家，走的是完全不同
+                                            // 的路径，所以分组分开。
+                                            if let Some(source) =
+                                                migrate_source.clone().filter(|_| !row_is_agent)
+                                            {
+                                                menu = migration_menu(
+                                                    menu,
+                                                    &ws_for_resume,
+                                                    source,
+                                                    row_profile_id.as_deref(),
+                                                    menu_cx,
+                                                );
+                                            }
+                                            if let Some(rename_cwd) = rename_cwd.clone() {
+                                                let ws = ws_for_resume.clone();
+                                                let rename_profile_id = row_profile_id.clone();
+                                                let rename_resume_id = rename_resume_id.clone();
+                                                let rename_title = rename_title.clone();
+                                                let reset_cwd = rename_cwd.clone();
+                                                let reset_resume_id = rename_resume_id.clone();
+                                                menu = menu.separator().item(
+                                                    PopupMenuItem::new("重命名").on_click(
+                                                        move |_ev, window, cx| {
+                                                            let profile_id =
+                                                                rename_profile_id.clone();
+                                                            let cwd = rename_cwd.clone();
+                                                            let resume_id =
+                                                                rename_resume_id.clone();
+                                                            let current_title =
+                                                                rename_title.clone();
+                                                            ws.update(cx, |this, cx| {
+                                                                this.start_rename(
+                                                                    crate::RenameTarget::History {
+                                                                        agent,
+                                                                        profile_id,
+                                                                        cwd,
+                                                                        resume_id,
+                                                                        current_title,
                                                                     },
-                                                                ),
-                                                        );
-                                                    }
-                                                }
-                                                let path = path_for_copy.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::new("复制文件路径").on_click(
-                                                        move |_ev, _window, cx| {
-                                                            cx.write_to_clipboard(
-                                                                ClipboardItem::new_string(
-                                                                    path.clone(),
-                                                                ),
-                                                            );
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            });
                                                         },
                                                     ),
                                                 );
-                                                menu
-                                            }),
-                                    )
-                                    .into_any_element()
-                            })
-                            .collect()
-                    })
+                                                if has_custom_title {
+                                                    let ws = ws_for_resume.clone();
+                                                    let reset_profile_id = row_profile_id;
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new("恢复默认名称")
+                                                            .on_click(move |_ev, _window, cx| {
+                                                                ws.update(cx, |this, cx| {
+                                                                    this.set_history_custom_title(
+                                                                        agent,
+                                                                        reset_profile_id.clone(),
+                                                                        reset_cwd.clone(),
+                                                                        reset_resume_id.clone(),
+                                                                        None,
+                                                                        cx,
+                                                                    );
+                                                                });
+                                                            }),
+                                                    );
+                                                }
+                                            }
+                                            if let Some(target) = delete_target.clone() {
+                                                let ws = ws_for_resume.clone();
+                                                menu = menu.separator().item(
+                                                    PopupMenuItem::new("删除").on_click(
+                                                        move |_ev, _window, cx| {
+                                                            ws.update(cx, |this, cx| {
+                                                                this.start_delete_history(
+                                                                    target.clone(),
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        },
+                                                    ),
+                                                );
+                                            }
+                                            let path = path_for_copy.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new("复制文件路径").on_click(
+                                                    move |_ev, _window, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(path.clone()),
+                                                        );
+                                                    },
+                                                ),
+                                            );
+                                            menu
+                                        }),
+                                )
+                                .into_any_element()
+                        })
+                        .collect()
                 })
                 .flex_1()
                 .min_h_0()
@@ -1428,26 +614,23 @@ pub fn history_view(
         }
         Some((_, d)) => {
             let detail = d.clone();
-            let workspace = cx.entity();
             let agent_label = agent.short_label();
-            gpui::list(detail_list_state, move |i, _window, app| {
-                workspace.update(app, |_, _cx| {
-                    let turn = &detail.turns[i];
-                    div()
-                        .w_full()
-                        .px_3()
-                        .pb_3()
-                        .child(history_turn(
-                            turn,
-                            i,
-                            agent_label,
-                            muted,
-                            fg,
-                            accent,
-                            secondary,
-                        ))
-                        .into_any_element()
-                })
+            gpui::list(detail_list_state, move |i, _window, _app| {
+                let turn = &detail.turns[i];
+                div()
+                    .w_full()
+                    .px_3()
+                    .pb_3()
+                    .child(history_turn(
+                        turn,
+                        i,
+                        agent_label,
+                        muted,
+                        fg,
+                        accent,
+                        secondary,
+                    ))
+                    .into_any_element()
             })
             .w_full()
             .flex_1()
@@ -1460,45 +643,60 @@ pub fn history_view(
 
     let detail_body = v_flex()
         .flex_1()
+        .h_full()
         .min_h_0()
         .min_w_0()
+        .overflow_hidden()
         .children(detail_header)
         .child(turns_body);
 
+    let list_panel = div()
+        .flex()
+        .flex_col()
+        .h_full()
+        .min_h_0()
+        .min_w_0()
+        // 历史和 Files/Git 一样是「列表 + 详情」的左右 Tool Panel；列表宽度稳定，
+        // 详情占用剩余空间，不随停靠/全屏状态改变布局方向。用相对宽度配合上下限，
+        // 避免窄停靠面板被固定宽度吃满，也避免全屏时列表窄得不可用。
+        .w(relative(0.38))
+        .min_w(px(crate::tool_panel::MIN_FILE_TREE_WIDTH))
+        .max_w(px(crate::tool_panel::MAX_FILE_TREE_WIDTH))
+        .flex_none()
+        .border_l_1()
+        .border_color(c_border)
+        .overflow_hidden()
+        .children(filter.as_ref().map(|input| {
+            div()
+                .flex_none()
+                .w_full()
+                .px_2()
+                .pt_2()
+                .child(Input::new(input).small().cleanable(true))
+        }))
+        .child(list_body);
+
+    let content = div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .h_full()
+        .min_h_0()
+        .min_w_0()
+        .items_stretch()
+        .overflow_hidden()
+        .child(detail_body)
+        .child(list_panel);
+
     v_flex()
         .flex_1()
+        .h_full()
         .min_h_0()
-        .child(switcher)
+        .min_w_0()
         .child(agent_switcher)
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .flex()
-                .child(
-                    div()
-                        .w(px(280.))
-                        .flex_none()
-                        .flex()
-                        .flex_col()
-                        .min_h_0()
-                        .border_r_1()
-                        .border_color(c_border)
-                        .children(filter.as_ref().map(|input| {
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .pt_2()
-                                .child(Input::new(input).small().cleanable(true))
-                        }))
-                        .child(list_body),
-                )
-                .child(detail_body),
-        )
+        .child(content)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn history_turn(
     turn: &Turn,
     index: usize,
@@ -1543,7 +741,7 @@ fn history_turn(
         .gap_1()
         .px_3()
         .py_2()
-        .rounded(px(8.))
+        .rounded(ui_theme::card_radius())
         .bg(bubble_bg)
         .when(turn.is_user, |element| element.max_w(px(560.)))
         .child(
@@ -1578,21 +776,26 @@ fn history_turn(
         .into_any_element()
 }
 
-/// 会话来源 tab 上的一个按钮，选中态用 accent 底色标出来（跟 `pane_button` 同款
+/// 会话来源 tab 上的一个按钮，选中态用 accent 底色标出来。
 /// 视觉，但换 agent 时还要顺带清掉右侧详情——不然会显示"上一个 agent 那份会话"
 /// 的残留内容，跟点开新会话前那一瞬间的空白状态不一致）。
-#[allow(clippy::too_many_arguments)]
-fn agent_tab_button(
-    target: AcpAgentKind,
-    target_profile: Option<String>,
-    label: SharedString,
-    current: AcpAgentKind,
-    current_profile: Option<String>,
+#[derive(Clone, Copy)]
+struct HistoryTabColors {
     accent: Hsla,
     fg: Hsla,
     muted: Hsla,
+}
+
+fn agent_tab_button(
+    target: HistorySourceKind,
+    target_profile: Option<String>,
+    label: SharedString,
+    current: HistorySourceKind,
+    current_profile: Option<String>,
+    colors: HistoryTabColors,
     cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
+    let HistoryTabColors { accent, fg, muted } = colors;
     let selected = target == current && target_profile == current_profile;
     let elem_id: SharedString = target_profile
         .as_deref()
@@ -1601,6 +804,7 @@ fn agent_tab_button(
         .into();
     div()
         .id(elem_id)
+        .flex_none()
         .px_3()
         .py_1()
         .rounded_md()
@@ -1616,192 +820,47 @@ fn agent_tab_button(
                 if this.history_agent != target || this.history_profile != target_profile {
                     this.history_agent = target;
                     this.history_profile = target_profile.clone();
+                    this.session_detail_gen = this.session_detail_gen.wrapping_add(1);
                     this.session_detail = None;
+                    this.history_detail_list_state.reset(0);
                     cx.notify();
                 }
             }),
         )
 }
 
-/// 切换条上的一个按钮。选中态用 accent 底色标出来。
-#[allow(clippy::too_many_arguments)]
-fn pane_button(
-    label: &'static str,
-    target: HistoryPane,
-    current: HistoryPane,
-    accent: Hsla,
-    fg: Hsla,
-    muted: Hsla,
-    cx: &mut Context<Workspace>,
-) -> Stateful<Div> {
-    let selected = target == current;
-    div()
-        .id(label)
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(if selected { fg } else { muted })
-        .when(selected, |d| d.bg(accent.opacity(0.18)))
-        .when(!selected, |d| d.hover(|s| s.text_color(fg)))
-        .child(label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, _, cx| {
-                if this.history_pane != target {
-                    this.history_pane = target;
-                    // 换子页时清掉右边的选中项，免得显示上一个子页残留的详情。
-                    this.memory_selected = None;
-                    cx.notify();
-                }
-            }),
-        )
-}
+use crate::settings::{ConversationAgentKind, HistorySourceKind};
 
-/// 记忆子页：左列表（标题 + 一句话描述）+ 右详情（markdown 全文）。
-#[allow(clippy::too_many_arguments)]
-fn memory_body(
-    memories: Option<Rc<Vec<MemoryEntry>>>,
-    selected: Option<usize>,
-    muted: Hsla,
-    fg: Hsla,
-    c_border: Hsla,
-    accent: Hsla,
-    cx: &mut Context<Workspace>,
-) -> Div {
-    let list_body: AnyElement = match &memories {
-        None => placeholder_view("加载中…", muted).into_any_element(),
-        Some(list) if list.is_empty() => placeholder_view(
-            "这个项目还没有记忆。Claude Code 会把值得长期记住的事写进 ~/.claude 下的 memory 目录。",
-            muted,
-        )
-        .into_any_element(),
-        Some(list) => {
-            let mut col = v_flex()
-                .id("memory-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .p_2()
-                .gap_1();
-            for (ix, m) in list.iter().enumerate() {
-                let is_sel = selected == Some(ix);
-                col = col.child(
-                    v_flex()
-                        .id(("memory-row", ix))
-                        .w_full()
-                        .gap_0p5()
-                        .px_2()
-                        .py_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(is_sel, |d| d.bg(accent.opacity(0.18)))
-                        .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))
-                        .child(div().text_sm().text_color(fg).child(m.name.clone()))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(truncate(&m.description, 60)),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.memory_selected = Some(ix);
-                                cx.notify();
-                            }),
-                        ),
-                );
-            }
-            col.into_any_element()
-        }
-    };
-
-    let detail_body: AnyElement = match memories
-        .as_ref()
-        .and_then(|l| selected.and_then(|ix| l.get(ix)))
-    {
-        None => placeholder_view("← 选择一条记忆查看内容", muted).into_any_element(),
-        Some(m) => v_flex()
-            .id("memory-detail")
-            .flex_1()
-            .min_h_0()
-            // min_w_0 不能省：flex item 的默认 min-width 是 auto，即「不收缩到比内容更窄」。
-            // 少了它，这一栏会被记忆正文里最长的那行撑开，超出窗口的部分被直接裁掉，
-            // 文本也永远不会换行（会话那边没踩到，是因为气泡上有 max_w 兜着）。
-            .min_w_0()
-            .overflow_y_scroll()
-            .p_4()
-            .gap_2()
-            .child(div().text_lg().text_color(fg).child(m.name.clone()))
-            .children((!m.description.is_empty()).then(|| {
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(m.description.clone())
-            }))
-            // markdown 得给唯一 id，否则跟别处的 TextView 共享状态互踩（同 turn 气泡的坑）。
-            // 外面这层 w_full + min_w_0 是给正文定死一个「可用宽度」，长行才会在这个宽度
-            // 上折行；不设的话它按内容宽度铺开，撑破整栏被裁掉。
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .child(crate::markdown_mermaid::markdown_view(
-                        "memory-md",
-                        m.body.clone(),
-                    )),
-            )
-            .into_any_element(),
-    };
-
-    div()
-        .flex_1()
-        .min_h_0()
-        .flex()
-        .child(
-            div()
-                .w(px(280.))
-                .flex()
-                .flex_col()
-                .min_h_0()
-                .border_r_1()
-                .border_color(c_border)
-                .child(list_body),
-        )
-        .child(detail_body)
-}
-
-use crate::settings::AcpAgentKind;
-
-/// 历史会话缓存 key：四家 agent 各存各的，同一个 cwd 换个 tab 是完全不同的数据，
-/// 光用 cwd 当 key 会把 Claude 的列表和 Codex 的列表互相顶掉。手动添加的
+/// 历史会话缓存 key：各家 agent 各存各的，同一个 cwd 换个 tab 是完全不同的数据，
+/// 光用 cwd 当 key 会把不同 agent 的列表互相顶掉。手动添加的
 /// workspace profile 跟同 kind 的默认 workspace 也是两份完全不同的数据，
 /// `profile_id` 折进 key 里，同一个 kind 下的不同 profile 才不会互相顶掉
 /// （`profile_id` 本身已经唯一决定了 override 目录，不用再单独编码目录值）。
-pub(crate) fn session_list_key(agent: AcpAgentKind, profile_id: Option<&str>, cwd: &str) -> String {
+pub(crate) fn session_list_key(
+    agent: HistorySourceKind,
+    profile_id: Option<&str>,
+    cwd: &str,
+) -> String {
     format!("{}:{}:{cwd}", agent.id(), profile_id.unwrap_or("default"))
 }
 
 pub(crate) fn normalized_profile_override_dir(
     profile: &smelt_core::agent_kind::AcpProfile,
 ) -> Option<String> {
-    smelt_core::workspace_override::env_override_from_launch(
-        &profile.launch_spec(),
-        profile.env_var(),
-    )
+    let launch = profile.launch_spec().ok()?;
+    let env_var = profile.env_var().ok()?;
+    smelt_core::workspace_override::env_override_from_launch(&launch, env_var)
 }
 
 fn current_profile_launch(
-    config: &crate::settings::AgentUiConfig,
+    config: &crate::settings::AgentHostState,
     profile: &smelt_core::agent_kind::AcpProfile,
-) -> smelt_core::agent_kind::AcpLaunchSpec {
+) -> Result<smelt_core::agent_kind::ConversationLaunchSpec, String> {
     config.profile_launch_spec(profile)
 }
 
 fn list_sessions_for(
-    agent: AcpAgentKind,
+    agent: HistorySourceKind,
     profile_id: Option<&str>,
     override_dir: Option<&str>,
     cwd: &str,
@@ -1824,29 +883,43 @@ fn list_sessions_for(
         .collect()
 }
 
-pub(crate) fn load_session_detail_for(agent: AcpAgentKind, path: &Path) -> Option<SessionDetail> {
-    match agent {
-        AcpAgentKind::Claude => load_session_detail(path),
-        AcpAgentKind::Codex => load_codex_session_detail(path),
-        AcpAgentKind::Grok => load_grok_session_detail(path),
-        AcpAgentKind::Copilot => load_copilot_session_detail(path),
+/// 删除一份已经由历史列表发现的存档。拒绝符号链接和没有文件名的路径，避免右键
+/// 菜单状态过期后误删到更高层目录。
+fn delete_history_path(path: &Path) -> Result<(), String> {
+    if path.file_name().is_none() || path.parent().is_none() {
+        return Err("历史会话路径无效".into());
+    }
+    let metadata = LocalFs
+        .symlink_metadata(path)
+        .ok_or_else(|| "历史会话已不存在".to_string())?;
+    if metadata.is_symlink {
+        return Err("拒绝删除符号链接形式的历史会话".into());
+    }
+    if metadata.is_dir {
+        LocalFs
+            .remove_dir_all(path)
+            .map_err(|error| format!("删除会话目录失败：{error}"))
+    } else {
+        LocalFs
+            .remove_file(path)
+            .map_err(|error| format!("删除会话文件失败：{error}"))
     }
 }
 
 impl Workspace {
     /// 历史会话页：确保当前 agent（+ 可能选中的 workspace profile）+ 项目的会话
     /// 列表缓存新鲜（>10s 或缺失就后台重新扫描）。总览卡片那边固定传
-    /// `(AcpAgentKind::Claude, None)`，跟历史页的 tab 切换共用同一份缓存/同一套
+    /// `(ConversationAgentKind::Claude, None)`，跟历史页的 tab 切换共用同一份缓存/同一套
     /// 读写路径。
     pub fn ensure_session_list(
         &mut self,
-        agent: AcpAgentKind,
+        agent: HistorySourceKind,
         profile_id: Option<String>,
         cwd: String,
         cx: &mut Context<Self>,
     ) {
         let override_dir = profile_id.as_deref().and_then(|id| {
-            cx.global::<crate::settings::AgentUiConfig>()
+            cx.global::<crate::settings::AgentHostState>()
                 .find_profile(id)
                 .and_then(normalized_profile_override_dir)
         });
@@ -1870,7 +943,11 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
                 this.session_list
-                    .insert(key, (Instant::now(), Rc::new(sessions)));
+                    .insert(key.clone(), (Instant::now(), Rc::new(sessions)));
+                if this.session_list_invalidated.remove(&key) {
+                    this.session_list.remove(&key);
+                    this.ensure_session_list(agent, profile_id.clone(), cwd.clone(), cx);
+                }
                 cx.notify();
             });
         })
@@ -1881,7 +958,7 @@ impl Workspace {
     /// Turn 列表。用自增 gen 丢弃过期结果（解析期间又点了别的会话，或切了 tab）。
     pub fn open_session_detail(
         &mut self,
-        agent: AcpAgentKind,
+        agent: HistorySourceKind,
         path: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
@@ -1895,7 +972,7 @@ impl Workspace {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_session_detail_for(agent, &p) })
+                .spawn(async move { load_agent_session_detail(agent, &p) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.session_detail_gen != r#gen {
@@ -1910,6 +987,296 @@ impl Workspace {
         })
         .detach();
     }
+
+    /// 历史会话右键「删除」：先记录目标，等确认弹窗中明确确认后再删盘。
+    pub(crate) fn start_delete_history(
+        &mut self,
+        target: DeleteHistoryTarget,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_history_target = Some(target);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_delete_history(&mut self, cx: &mut Context<Self>) {
+        self.delete_history_target = None;
+        cx.notify();
+    }
+
+    /// 确认删除历史会话。IO 放到后台线程，避免大体积 transcript 删除时卡住窗口；
+    /// 完成后失效对应列表缓存并弹出结果通知。
+    pub(crate) fn confirm_delete_history(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.delete_history_target.take() else {
+            return;
+        };
+        self.session_detail_gen = self.session_detail_gen.wrapping_add(1);
+        if self
+            .session_detail
+            .as_ref()
+            .is_some_and(|(path, _)| path == &target.path)
+        {
+            self.session_detail = None;
+            self.history_detail_list_state.reset(0);
+        }
+        cx.notify();
+
+        let agent = target.agent;
+        let profile_id = target.profile_id.clone();
+        let cwd = target.cwd.clone();
+        let resume_id = target.resume_id.clone();
+        let path = target.path.clone();
+        let title = target.title;
+        let delete_profile_id = profile_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = delete_history_path(&path);
+                    if result.is_ok() {
+                        // 标题仓库独立于 agent 的原始存档，删除存档时同步清理，
+                        // 否则同一个 resume id 被复用时会继承旧标题。
+                        let _ = smelt_core::session_control::rename_history_title(
+                            agent,
+                            delete_profile_id.as_deref(),
+                            &resume_id,
+                            None,
+                            None,
+                        );
+                    }
+                    result
+                })
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                let key = session_list_key(agent, profile_id.as_deref(), &cwd);
+                if result.is_ok() {
+                    this.session_list.remove(&key);
+                    if this.session_list_inflight.contains(&key) {
+                        this.session_list_invalidated.insert(key.clone());
+                    } else {
+                        this.ensure_session_list(agent, profile_id.clone(), cwd.clone(), cx);
+                    }
+                    crate::status_item::notify_success(format!("已删除历史会话「{title}」"));
+                } else if let Err(error) = result {
+                    crate::status_item::notify_error(format!("删除历史会话失败：{error}"));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 历史会话右键「删除」的二次确认弹窗。
+    pub(crate) fn render_delete_history_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let Some(target) = self.delete_history_target.as_ref() else {
+            return div();
+        };
+        let (fg, muted) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let content = v_flex()
+            .child(Self::modal_title(fg, "确定删除这条历史会话吗？"))
+            .child(div().text_sm().text_color(muted).child(format!(
+                "将永久删除 {} 的「{}」及其本地对话记录，此操作不可撤销。",
+                target.agent.short_label(),
+                target.title
+            )))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-delete-history",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_delete_history(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-delete-history",
+                        "确定删除",
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_delete_history(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(420., true, content, cx)
+    }
+
+    /// 历史会话页的「迁移到 →」：读源 agent 落盘的 transcript，压成交接 prompt，
+    /// 交给目标 agent 起一条新会话。
+    ///
+    /// 跟同页的「ACP 继续」是两回事——那个是 `session/load`，只能给同一家 agent
+    /// 用（agent 认自己 session store 里的 id）；这个是把对话内容重述给另一家，
+    /// 目标 agent 从零开始，只是知道前面发生过什么。
+    ///
+    /// transcript 可能有几 MB，解析放后台线程，回到主线程才建会话。
+    pub fn migrate_history_session(
+        &mut self,
+        source: HistoryMigrationSource,
+        target: acp_view::AcpHandoffTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let path = source.path.clone();
+        let source_agent = source.agent;
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let detail = cx
+                .background_executor()
+                .spawn(async move { load_agent_session_detail(source_agent.into(), &p) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(detail) = detail else {
+                    // 存档被删/被换格式：明说读不出来，别让用户对着一条空会话猜。
+                    crate::status_item::notify_error(format!(
+                        "读不出这条历史会话，迁移取消：{}",
+                        path.display()
+                    ));
+                    return;
+                };
+                let request = build_history_handoff_request(&source, &detail, target);
+                this.add_acp_handoff_session(request, window, cx);
+            });
+        })
+        .detach();
+    }
+}
+
+/// 历史会话右键菜单里的「迁移到 →」分组：各家基础 agent + 手动添加的 workspace
+/// profile，跳过源自己（同 provider 继续仍走 `session/load` / CLI resume）。这是唯一
+/// 保留的文本交接入口；活体 ACP 会话不再提供交接菜单。
+fn migration_menu(
+    menu: gpui_component::menu::PopupMenu,
+    ws: &Entity<crate::Workspace>,
+    source: HistoryMigrationSource,
+    source_profile_id: Option<&str>,
+    cx: &App,
+) -> gpui_component::menu::PopupMenu {
+    let config = cx.global::<crate::settings::AgentHostState>().clone();
+    let mut menu = menu.separator().item(PopupMenuItem::label("迁移到"));
+    for target_agent in ConversationAgentKind::ALL
+        .into_iter()
+        .filter(|agent| agent.is_bare_kind())
+    {
+        if target_agent == source.agent && source_profile_id.is_none() {
+            continue;
+        }
+        let target = acp_view::AcpHandoffTarget {
+            agent: target_agent,
+            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command(
+                config.acp_cmd_for(target_agent),
+            ),
+            profile_id: None,
+            profile_label: None,
+        };
+        let ws = ws.clone();
+        let source = source.clone();
+        menu = menu.item(PopupMenuItem::new(target_agent.label()).on_click(
+            move |_ev, _window, cx| {
+                let (source, target) = (source.clone(), target.clone());
+                ws.update(cx, |this, cx| {
+                    this.migrate_history_session(source, target, cx);
+                });
+            },
+        ));
+    }
+    for profile in config.all_profiles() {
+        if source_profile_id == Some(profile.id.as_str()) {
+            continue;
+        }
+        let Some(agent) = profile.kind() else {
+            continue;
+        };
+        let Ok(launch) = current_profile_launch(&config, profile) else {
+            continue;
+        };
+        let target = acp_view::AcpHandoffTarget {
+            agent,
+            launch,
+            profile_id: Some(profile.id.clone()),
+            profile_label: Some(profile.label.clone()),
+        };
+        let ws = ws.clone();
+        let source = source.clone();
+        menu = menu.item(PopupMenuItem::new(profile.label.clone()).on_click(
+            move |_ev, _window, cx| {
+                let (source, target) = (source.clone(), target.clone());
+                ws.update(cx, |this, cx| {
+                    this.migrate_history_session(source, target, cx);
+                });
+            },
+        ));
+    }
+    menu
+}
+
+/// 发起一次历史会话迁移需要知道的源信息（都在历史页那一行上现成拿得到）。
+#[derive(Clone)]
+pub struct HistoryMigrationSource {
+    pub agent: ConversationAgentKind,
+    /// 源 workspace profile 名；默认 workspace 为 `None`。
+    pub profile_label: Option<String>,
+    pub title: String,
+    /// 源 agent 自己认的 session id（历史页那行的 `resume_id`）。只作为溯源信息
+    /// 记进新会话，不发给目标 agent——它不认别家的 id。
+    pub resume_id: String,
+    pub path: std::path::PathBuf,
+    pub cwd: String,
+}
+
+/// 组装历史迁移的交接请求。抽出来是为了能脱离 GPUI 单测：这里决定了目标会话
+/// 拿到的第一句话长什么样。
+fn build_history_handoff_request(
+    source: &HistoryMigrationSource,
+    detail: &SessionDetail,
+    target: acp_view::AcpHandoffTarget,
+) -> acp_view::AcpHandoffRequest {
+    use smelt_core::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
+
+    let context = HandoffContext {
+        turns: handoff_turns_from_history(detail),
+        source_title: &source.title,
+        source: HandoffPeer::new(source.agent, source.profile_label.as_deref()),
+        target: HandoffPeer::new(target.agent, target.profile_label.as_deref()),
+        cwd: Some(source.cwd.as_str()),
+        source_model: detail.model.clone(),
+    };
+    let prompt = build_handoff_prompt(&context);
+
+    acp_view::AcpHandoffRequest {
+        source: Some(acp_view::AcpForkOrigin {
+            session_id: source.resume_id.clone(),
+            title: source.title.clone(),
+            agent: Some(source.agent.id().to_string()),
+            profile_label: source.profile_label.clone(),
+            // 源是磁盘上的历史存档，不是当前开着的某条 Smelt 会话——「返回原会话」
+            // 按 sid 找不到东西，banner 那颗按钮要藏起来。
+            from_history: true,
+        }),
+        cwd: Some(source.cwd.clone()),
+        agent: target.agent,
+        launch: target.launch,
+        // 历史迁移的目标总是从菜单现选的：基础 agent 跟设置页走，profile 用自己的命令。
+        refresh_launch_from_settings: target.profile_id.is_none(),
+        profile_id: target.profile_id,
+        // 模型/配置是各家私有取值，一律不跨会话搬（prompt 尾部已写明）。
+        config_values: Vec::new(),
+        ephemeral_env: Default::default(),
+        prompt,
+        // 历史迁移是文本交接，不搬图片。
+        images: Vec::new(),
+        profile_label: target.profile_label,
+        resume_session_id: None,
+        fork_session_id: None,
+        fork_cut: None,
+        conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
+        agent_session: None,
+    }
 }
 
 #[cfg(test)]
@@ -1918,13 +1285,14 @@ mod tests {
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
     use super::{
-        current_profile_launch, list_codex_sessions, list_copilot_sessions, list_grok_sessions,
-        list_sessions, list_sessions_for, load_codex_session_detail, load_copilot_session_detail,
-        load_grok_session_detail, load_session_detail, normalized_profile_override_dir,
-        project_dir,
+        HistoryMigrationSource, HistorySourceTab, SessionDetail, Turn,
+        build_history_handoff_request, current_profile_launch, handoff_turns_from_history,
+        history_continue_label, history_row_is_agent_session, history_source_tabs,
+        list_sessions_for, normalized_profile_override_dir, project_dir,
     };
-    use crate::settings::AgentUiConfig;
-    use smelt_core::agent_kind::{AcpAgentKind, AcpProfile};
+    use crate::settings::AgentHostState;
+    use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind};
+    use smelt_core::session_handoff::HandoffTurn;
     use std::path::Path;
 
     fn write(dir: &Path, name: &str, lines: &[&str]) {
@@ -1938,14 +1306,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn project_dir_replaces_slashes_and_dots() {
-        assert_eq!(
-            project_dir("/Users/c.chen/dev/smelt"),
-            "-Users-c-chen-dev-smelt"
-        );
     }
 
     #[test]
@@ -1986,7 +1346,12 @@ mod tests {
         );
 
         let override_dir = normalized_profile_override_dir(&profile).unwrap();
-        let sessions = list_sessions_for(AcpAgentKind::Claude, None, Some(&override_dir), "/x/y");
+        let sessions = list_sessions_for(
+            ConversationAgentKind::Claude.into(),
+            None,
+            Some(&override_dir),
+            "/x/y",
+        );
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "with spaces in override path");
@@ -2001,12 +1366,10 @@ mod tests {
             label: "Quant".into(),
             workspace_dir: "~/Claude Workspaces/quant".into(),
         };
-        let config = AgentUiConfig {
-            acp_cmd: "claude --current".into(),
-            ..AgentUiConfig::default()
-        };
+        let config = AgentHostState::default()
+            .with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
 
-        let launch = current_profile_launch(&config, &profile);
+        let launch = current_profile_launch(&config, &profile).expect("有效 profile");
 
         assert_eq!(launch.command, "claude --current");
         assert_eq!(
@@ -2016,226 +1379,152 @@ mod tests {
     }
 
     #[test]
-    fn list_sessions_summarizes_title_and_counts_and_sorts_by_recency() {
-        let tmp = test_sandbox("list");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let config_dir = tmp.join(".claude");
-        let proj_root = config_dir.join("projects").join(project_dir("/x/y"));
-        std::fs::create_dir_all(&proj_root).unwrap();
+    fn unknown_profile_has_no_history_override() {
+        let profile = AcpProfile {
+            id: "future-profile".into(),
+            kind_id: "future-agent".into(),
+            label: "Future Agent".into(),
+            workspace_dir: "~/.future-agent".into(),
+        };
 
-        write(
-            &proj_root,
-            "older.jsonl",
-            &[
-                r#"{"type":"user","timestamp":"2026-07-01T00:00:00Z","message":{"content":"hello there"}}"#,
-                r#"{"type":"assistant","timestamp":"2026-07-01T00:00:05Z","message":{"content":[{"type":"text","text":"hi"}]}}"#,
-            ],
-        );
-        write(
-            &proj_root,
-            "newer.jsonl",
-            &[
-                r#"{"type":"user","timestamp":"2026-07-05T00:00:00Z","message":{"content":"second session"}}"#,
-            ],
-        );
-
-        let sessions = list_sessions("/x/y", config_dir.to_str());
-        std::fs::remove_dir_all(&tmp).unwrap();
-
-        assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].path.file_stem().unwrap(), "newer");
-        assert_eq!(sessions[0].title, "second session");
-        assert_eq!(sessions[1].path.file_stem().unwrap(), "older");
-        assert_eq!(sessions[1].message_count, 2);
+        assert_eq!(normalized_profile_override_dir(&profile), None);
     }
 
     #[test]
-    fn list_sessions_skips_claude_local_command_only_transcripts() {
-        let tmp = test_sandbox("claude-local-command");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let config_dir = tmp.join(".claude");
-        let proj_root = config_dir.join("projects").join(project_dir("/x/y"));
-        std::fs::create_dir_all(&proj_root).unwrap();
-
-        write(
-            &proj_root,
-            "login-only.jsonl",
-            &[
-                r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>internal</local-command-caveat>"}}"#,
-                r#"{"type":"user","message":{"content":"<command-name>/login</command-name><command-message>login</command-message><command-args></command-args>"}}"#,
-                r#"{"type":"user","message":{"content":"<local-command-stdout>Login interrupted</local-command-stdout>"}}"#,
+    fn history_turns_become_handoff_turns_without_agent_only_fields() {
+        let detail = SessionDetail {
+            model: Some("claude-opus-5".into()),
+            turns: vec![
+                Turn {
+                    is_user: true,
+                    timestamp: None,
+                    text: "改一下滚动".into(),
+                    tools: Vec::new(),
+                    tool_paths: Vec::new(),
+                },
+                Turn {
+                    is_user: false,
+                    timestamp: None,
+                    text: "改好了".into(),
+                    tools: vec!["Edit".into(), "Read".into(), "Read".into()],
+                    tool_paths: vec!["src/main.rs".into()],
+                },
+                // 只有工具、没有正文的轮次（Codex 常见）不该产出空的 Assistant
+                Turn {
+                    is_user: false,
+                    timestamp: None,
+                    text: String::new(),
+                    tools: vec!["exec_command".into()],
+                    tool_paths: Vec::new(),
+                },
             ],
-        );
-        write(
-            &proj_root,
-            "real.jsonl",
-            &[
-                r#"{"type":"user","message":{"content":"<command-name>/model</command-name>keep this question"}}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#,
-            ],
-        );
+        };
 
-        let sessions = list_sessions("/x/y", config_dir.to_str());
-        let detail = load_session_detail(&proj_root.join("real.jsonl")).unwrap();
-        std::fs::remove_dir_all(&tmp).unwrap();
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].resume_id, "real");
-        assert_eq!(sessions[0].title, "keep this question");
-        assert_eq!(detail.turns[0].text, "keep this question");
+        let turns = handoff_turns_from_history(&detail);
+        assert_eq!(
+            turns,
+            vec![
+                HandoffTurn::User {
+                    text: "改一下滚动".into(),
+                    images: 0,
+                },
+                HandoffTurn::Assistant("改好了".into()),
+                // 一轮里连着调两次 Read：折成「×2」，不铺开占预算
+                HandoffTurn::Tool {
+                    title: "Edit、Read ×2".into(),
+                    detail: None,
+                    paths: vec!["src/main.rs".into()],
+                },
+                HandoffTurn::Tool {
+                    title: "exec_command".into(),
+                    detail: None,
+                    paths: Vec::new(),
+                },
+            ]
+        );
     }
 
     #[test]
-    fn load_session_detail_skips_tool_result_and_sidechain() {
-        let tmp = std::env::temp_dir().join("smelt-session-history-test-detail.jsonl");
-        write(
-            &tmp.parent().unwrap().to_path_buf(),
-            tmp.file_name().unwrap().to_str().unwrap(),
-            &[
-                r#"{"type":"user","timestamp":"2026-07-01T00:00:00Z","message":{"content":"do the thing"}}"#,
-                r#"{"type":"user","timestamp":"2026-07-01T00:00:01Z","message":{"content":[{"type":"tool_result","content":"raw output"}]}}"#,
-                r#"{"type":"assistant","timestamp":"2026-07-01T00:00:02Z","message":{"content":[{"type":"text","text":"done"},{"type":"tool_use","name":"Bash"}]}}"#,
-                r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-07-01T00:00:03Z","message":{"content":[{"type":"text","text":"subagent chatter"}]}}"#,
-                // 实测目前 Claude Code CLI（含 ACP 模式）把用户发言也存成块数组，
-                // 不是纯字符串——之前的代码只认字符串，会把这种真实发言当成
-                // tool_result 漏掉，历史页里用户消息整个消失就是这么来的。
-                r#"{"type":"user","timestamp":"2026-07-01T00:00:04Z","message":{"content":[{"type":"text","text":"block-array 格式的真实发言"}]}}"#,
-            ],
-        );
+    fn history_migration_request_carries_source_identity_and_no_inherited_config() {
+        let detail = SessionDetail {
+            model: Some("grok-4.5".into()),
+            turns: vec![Turn {
+                is_user: true,
+                timestamp: None,
+                text: "接着干".into(),
+                tools: Vec::new(),
+                tool_paths: Vec::new(),
+            }],
+        };
+        let source = HistoryMigrationSource {
+            agent: ConversationAgentKind::Grok,
+            profile_label: None,
+            title: "老会话".into(),
+            resume_id: "grok-session-1".into(),
+            path: std::path::PathBuf::from("/tmp/does-not-matter"),
+            cwd: "/repo".into(),
+        };
+        let target = crate::acp_view::AcpHandoffTarget {
+            agent: ConversationAgentKind::Claude,
+            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude"),
+            profile_id: None,
+            profile_label: None,
+        };
 
-        let detail = load_session_detail(&tmp).unwrap();
-        std::fs::remove_file(&tmp).unwrap();
-
-        assert_eq!(detail.turns.len(), 3);
-        assert!(detail.turns[0].is_user);
-        assert_eq!(detail.turns[0].text, "do the thing");
-        assert!(!detail.turns[1].is_user);
-        assert_eq!(detail.turns[1].text, "done");
-        assert_eq!(detail.turns[1].tools, vec!["Bash".to_string()]);
-        assert!(detail.turns[2].is_user);
-        assert_eq!(detail.turns[2].text, "block-array 格式的真实发言");
+        let request = build_history_handoff_request(&source, &detail, target);
+        let origin = request.source.expect("迁移来的会话必须记得源");
+        assert_eq!(origin.agent.as_deref(), Some("grok"));
+        assert_eq!(origin.session_id, "grok-session-1");
+        // 源在磁盘上，不是开着的 Smelt 会话——顶栏不该给「返回原会话」
+        assert!(origin.from_history);
+        assert!(request.config_values.is_empty());
+        assert!(request.prompt.contains("原会话由 Grok 进行"));
+        assert!(request.prompt.contains("现在由你（Claude Code）接手"));
+        assert!(request.prompt.contains("原会话使用的模型：grok-4.5"));
+        assert!(request.prompt.contains("接着干"));
     }
 
     #[test]
-    fn codex_reader_filters_by_cwd_skips_synthetic_context_and_groups_tool_calls() {
-        let tmp = test_sandbox("codex");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let config_dir = tmp.join(".codex");
-        let day_dir = config_dir
-            .join("sessions")
-            .join("2026")
-            .join("07")
-            .join("01");
-        std::fs::create_dir_all(&day_dir).unwrap();
-        write(
-            &day_dir,
-            "rollout-test.jsonl",
-            &[
-                r#"{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"cx-1","cwd":"/proj"}}"#,
-                r#"{"timestamp":"2026-07-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd stuff</environment_context>"}]}}"#,
-                r#"{"timestamp":"2026-07-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"实际问题"}]}}"#,
-                r#"{"timestamp":"2026-07-01T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我来看看"}]}}"#,
-                r#"{"timestamp":"2026-07-01T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1"}}"#,
-                r#"{"timestamp":"2026-07-01T00:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}"#,
-            ],
+    fn ordinary_project_lists_bare_kinds_and_skips_profile_bound_agents() {
+        let tabs = history_source_tabs(None, []);
+        assert!(!tabs.is_empty());
+        assert!(tabs.iter().all(|tab| tab.kind.is_bare_kind()));
+        assert!(tabs.iter().all(|tab| tab.profile_id.is_none()));
+        assert!(
+            tabs.iter()
+                .any(|tab| tab.kind == ConversationAgentKind::Pi.into())
         );
-        // 不同 cwd 的会话不该出现在结果里。
-        write(
-            &day_dir,
-            "rollout-other.jsonl",
-            &[
-                r#"{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"cx-2","cwd":"/other"}}"#,
-            ],
+        assert!(
+            !tabs
+                .iter()
+                .any(|tab| tab.kind == ConversationAgentKind::Dsh.into())
         );
-
-        let sessions = list_codex_sessions("/proj", config_dir.to_str());
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title, "实际问题"); // 合成的 environment_context 不该被当标题
-        assert_eq!(sessions[0].message_count, 2);
-
-        let detail = load_codex_session_detail(&sessions[0].path).unwrap();
-        std::fs::remove_dir_all(&tmp).unwrap();
-        assert_eq!(detail.turns.len(), 2); // 合成消息被跳过，剩真实问题 + assistant 轮
-        assert!(detail.turns[0].is_user);
-        assert_eq!(detail.turns[0].text, "实际问题");
-        assert!(!detail.turns[1].is_user);
-        assert_eq!(detail.turns[1].text, "我来看看");
-        assert_eq!(detail.turns[1].tools, vec!["exec_command".to_string()]); // 工具调用挂在上一条 assistant 轮上
+        // 只有 TUI 的 agent 同样要出现在历史 tab 里：能不能读历史与有没有 ACP 无关。
+        assert!(tabs.iter().any(|tab| tab.kind
+            == crate::settings::HistorySourceKind::TerminalOnly(
+                crate::settings::TerminalAgentKind::Antigravity
+            )));
     }
 
     #[test]
-    fn grok_reader_reads_summary_json_and_skips_synthetic_rows() {
-        let tmp = test_sandbox("grok");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let config_dir = tmp.join(".grok");
-        let session_dir = config_dir.join("sessions").join("proj").join("s1");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(
-            session_dir.join("summary.json"),
-            r#"{"info":{"cwd":"/proj"},"session_summary":"聊聊策略","created_at":"2026-07-01T00:00:00Z","updated_at":"2026-07-01T00:05:00Z","num_chat_messages":2}"#,
-        )
-        .unwrap();
-        write(
-            &session_dir,
-            "chat_history.jsonl",
-            &[
-                r#"{"type":"user","synthetic_reason":"project_instructions","content":[{"type":"text","text":"注入的项目说明"}]}"#,
-                // 实测：第一轮的 <user_info> 环境块不带 synthetic_reason 字段，得靠
-                // 「剥完包装仍是尖括号开头」这条兜底规则识别，不是只认这个字段。
-                r#"{"type":"user","content":[{"type":"text","text":"<user_info>\nOS: macos\n</user_info>"}]}"#,
-                r#"{"type":"user","content":[{"type":"text","text":"<user_query>真实问题</user_query>"}]}"#,
-                r#"{"type":"assistant","content":"回答","tool_calls":[{"id":"c1","name":"grep"}]}"#,
-                r#"{"type":"tool_result","tool_call_id":"c1","content":"..."}"#,
-            ],
+    fn agent_context_keeps_only_that_engine() {
+        let tabs = history_source_tabs(Some(ConversationAgentKind::Pi), []);
+        assert_eq!(
+            tabs,
+            vec![HistorySourceTab {
+                kind: ConversationAgentKind::Pi.into(),
+                profile_id: None,
+                label: ConversationAgentKind::Pi.short_label().to_string(),
+            }]
         );
-
-        let sessions = list_grok_sessions("/proj", config_dir.to_str());
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title, "聊聊策略");
-        assert_eq!(sessions[0].message_count, 2);
-
-        let detail = load_grok_session_detail(&sessions[0].path).unwrap();
-        std::fs::remove_dir_all(&tmp).unwrap();
-        assert_eq!(detail.turns.len(), 2); // 两条合成消息（带/不带 synthetic_reason）都被跳过
-        assert!(detail.turns[0].is_user);
-        assert_eq!(detail.turns[0].text, "真实问题"); // <user_query> 包装被剥掉
-        assert!(!detail.turns[1].is_user);
-        assert_eq!(detail.turns[1].tools, vec!["grep".to_string()]);
     }
 
     #[test]
-    fn copilot_reader_reads_workspace_yaml_and_events_jsonl() {
-        let tmp = test_sandbox("copilot");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let config_dir = tmp.join(".copilot");
-        let session_dir = config_dir.join("session-state").join("s1");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(
-            session_dir.join("workspace.yaml"),
-            "id: s1\ncwd: /proj\nsummary: 调试问题\ncreated_at: 2026-07-01T00:00:00.000Z\nupdated_at: 2026-07-01T00:05:00.000Z\n",
-        )
-        .unwrap();
-        write(
-            &session_dir,
-            "events.jsonl",
-            &[
-                r#"{"type":"user.message","data":{"content":"真实问题","transformedContent":"<ide_selection>真实问题</ide_selection>"}}"#,
-                r#"{"type":"assistant.message","data":{"content":"回答","toolRequests":[{"toolCallId":"t1","name":"bash"}]}}"#,
-                r#"{"type":"tool.execution_start","data":{"toolCallId":"t1","toolName":"bash"}}"#,
-            ],
-        );
-
-        let sessions = list_copilot_sessions("/proj", config_dir.to_str());
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title, "调试问题");
-        assert_eq!(sessions[0].message_count, 2);
-
-        let detail = load_copilot_session_detail(&sessions[0].path).unwrap();
-        std::fs::remove_dir_all(&tmp).unwrap();
-        assert_eq!(detail.turns.len(), 2);
-        assert!(detail.turns[0].is_user);
-        // transformedContent（带 IDE 上下文）不该混进来，只取干净的 content。
-        assert_eq!(detail.turns[0].text, "真实问题");
-        assert_eq!(detail.turns[1].tools, vec!["bash".to_string()]);
+    fn project_history_names_bound_agent_sessions_continue_conversation() {
+        assert!(!history_row_is_agent_session(false, None));
+        assert!(history_row_is_agent_session(false, Some("writer")));
+        assert!(history_row_is_agent_session(true, None));
+        assert_eq!(history_continue_label(false), "ACP 继续");
+        assert_eq!(history_continue_label(true), "继续对话");
     }
 }

@@ -46,6 +46,13 @@ impl PanelTransition {
         self.started_at.is_some()
     }
 
+    /// 是否正在执行「打开」动画（目标朝向展开）。开合动画期间面板 body 会
+    /// 逐帧重建，调用方可据此在打开时换轻量骨架、关闭时保留真实内容——
+    /// 关闭时提前换骨架会让内容在面板滑出前就消失。
+    pub(crate) fn is_opening(&self) -> bool {
+        self.started_at.is_some() && self.target > self.from
+    }
+
     pub(crate) fn frame(&mut self) -> Frame {
         let now = Instant::now();
         self.progress = self.value_at(now);

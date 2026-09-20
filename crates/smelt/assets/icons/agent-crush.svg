@@ -1,0 +1,5 @@
+<!-- Monochrome small-size adaptation of Crush's official crush-icon-solo.png. -->
+<svg fill="currentColor" height="1em" shape-rendering="crispEdges" viewBox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg">
+  <title>Crush</title>
+  <path clip-rule="evenodd" d="M5 3H10V4H11V6H13V4H14V3H19V4H21V6H22V13H21V15H20V17H18V19H16V21H14V23H10V21H8V19H6V17H4V15H3V13H2V6H3V4H5V3ZM8 10H9V13H8V10ZM15 10H16V13H15V10ZM11 14H13V15H11V14Z" fill-rule="evenodd"/>
+</svg>

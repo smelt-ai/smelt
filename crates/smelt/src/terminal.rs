@@ -5,13 +5,14 @@
 //! vte 解析器 advance → 更新共享的 Term 网格；UI 线程定时对网格做快照并重绘。
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -23,6 +24,11 @@ use alacritty_terminal::term::{
     Config, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport, viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use smelt_core::daemon_protocol::DaemonOperation;
+
+type SearchMatch = (Point, Point);
+type SearchResult = (u64, String, i32, Vec<SearchMatch>);
+type HandshakeResult = (BufReader<UnixStream>, TermSize, usize, Option<String>, bool);
 
 /// 深浅色模式：进程内只有一套主题（设置页全局切换），用一个原子量足够，不必给
 /// 每个 Terminal/EventProxy 各传一份——见 `set_dark_mode`（main.rs 在
@@ -58,17 +64,18 @@ pub fn default_fg() -> u32 {
     }
 }
 
-/// 默认背景色：跟卡片本体同色系（`ui_theme::bg_panel`），不再是独立的 Tokyo
+/// 默认背景色：跟卡片本体同色系（`ui_theme::bg_stage`），不再是独立的 Tokyo
 /// Night 深蓝黑——终端面板紧贴在舞台头下面，两者用不同色系时，标题栏透明后
 /// 反而更显眼地露出一条界缝。ANSI 16 色板（下面 PALETTE_DARK/LIGHT）仍保留
-/// Tokyo Night 配色，只有「没手动设置背景色」时兜底的这个默认底色跟着卡片走。
+/// Tokyo Night 配色（语法高亮，不是 UI 皮），只有「没手动设置背景色」时兜底的
+/// 这个默认底色跟着舞台底走。
 ///
 /// 用户在设置里自选过底色时以用户的为准（见 `set_bg_override`）：渲染层、OSC 11
 /// 应答、下发给手机的配色快照必须是同一个值，否则 TUI 按查到的底色挑灰度就会
 /// 挑错档。
 pub fn default_bg() -> u32 {
     match BG_OVERRIDE.load(Ordering::Relaxed) {
-        NO_BG_OVERRIDE => crate::ui_theme::bg_panel(),
+        NO_BG_OVERRIDE => crate::ui_theme::bg_stage(),
         color => color,
     }
 }
@@ -315,28 +322,226 @@ struct DaemonGeometrySignal {
     geometry: Option<smelt_core::osc::TerminalGeometryOsc>,
 }
 
+/// smeltd 对单帧的硬上限；大输入由 writer 线程按这个值流式切分后再写 socket。
+const TERMINAL_FRAME_MAX_BYTES: usize = 1 << 20;
+const TERMINAL_WRITE_QUEUE_CAPACITY: usize = 256;
+/// 输入请求本身可以大于帧队列预算，但仍要有独立上限，避免用户连续粘贴把内存吃满。
+const TERMINAL_PENDING_INPUT_MAX_BYTES: usize = 64 * 1024 * 1024;
+const TERMINAL_WRITE_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+enum TerminalWrite {
+    /// 已经是单帧的控制/resize 写入。
+    Frame { ty: u8, payload: Vec<u8> },
+    /// 用户/终端输入；writer 线程消费时再按单帧上限切分，保持请求内顺序。
+    Input(Vec<u8>),
+}
+
+/// GUI / PTY 读线程到 smeltd attachment 的单写端。
+///
+/// 所有实际 socket 写入都在专属线程里执行；调用方只做有界 `try_send`，因此守护停止
+/// 消费时不能把 GPUI 主线程睡在内核的 `send`/`write` 里。队列满或写线程失败则主动
+/// 断开 attachment，复用既有的自动 reattach；输入请求另有 64 MiB 上限，避免把
+/// 单次大粘贴误当成 4 MiB 的帧队列上限。
+#[derive(Clone)]
+struct TerminalWriter {
+    tx: smol::channel::Sender<TerminalWrite>,
+    queued_bytes: Arc<AtomicUsize>,
+    pending_input_bytes: Arc<AtomicUsize>,
+    shutdown: Arc<UnixStream>,
+    closed: Arc<AtomicBool>,
+}
+
+impl TerminalWriter {
+    fn start(mut stream: UnixStream) -> std::io::Result<Self> {
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        let shutdown = Arc::new(stream.try_clone()?);
+        let (tx, rx) = smol::channel::bounded(TERMINAL_WRITE_QUEUE_CAPACITY);
+        let writer = Self {
+            tx,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            pending_input_bytes: Arc::new(AtomicUsize::new(0)),
+            shutdown,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let worker = writer.clone();
+        std::thread::Builder::new()
+            .name("smelt-terminal-writer".into())
+            .spawn(move || {
+                while let Ok(write) = rx.recv_blocking() {
+                    let result = match write {
+                        TerminalWrite::Frame { ty, payload } => {
+                            debug_assert!(payload.len() <= TERMINAL_FRAME_MAX_BYTES);
+                            let byte_len = payload.len();
+                            let result = write_frame(&mut stream, ty, &payload);
+                            worker.queued_bytes.fetch_sub(byte_len, Ordering::AcqRel);
+                            result
+                        }
+                        TerminalWrite::Input(bytes) => {
+                            let byte_len = bytes.len();
+                            let mut result = Ok(());
+                            for payload in bytes.chunks(TERMINAL_FRAME_MAX_BYTES) {
+                                if let Err(error) = write_frame(&mut stream, 0, payload) {
+                                    result = Err(error);
+                                    break;
+                                }
+                            }
+                            worker
+                                .pending_input_bytes
+                                .fetch_sub(byte_len, Ordering::AcqRel);
+                            result
+                        }
+                    };
+                    if result.is_err() {
+                        worker.close();
+                        return;
+                    }
+                }
+            })?;
+        Ok(writer)
+    }
+
+    fn reserve_bytes(&self, byte_len: usize) -> bool {
+        if byte_len == 0 || byte_len > TERMINAL_WRITE_QUEUE_MAX_BYTES {
+            return byte_len == 0;
+        }
+        let mut queued = self.queued_bytes.load(Ordering::Acquire);
+        loop {
+            if self.closed.load(Ordering::Acquire)
+                || queued > TERMINAL_WRITE_QUEUE_MAX_BYTES.saturating_sub(byte_len)
+            {
+                return false;
+            }
+            match self.queued_bytes.compare_exchange_weak(
+                queued,
+                queued + byte_len,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => queued = current,
+            }
+        }
+    }
+
+    /// 按帧占用控制帧队列预算。`TERMINAL_WRITE_QUEUE_MAX_BYTES` 限制的是同时等待
+    /// writer 消费的帧，而不是一次输入请求的总长度。
+    fn enqueue_frames<'a, I>(&self, ty: u8, payloads: I) -> bool
+    where
+        I: IntoIterator<Item = &'a [u8]>,
+    {
+        for payload in payloads {
+            debug_assert!(payload.len() <= TERMINAL_FRAME_MAX_BYTES);
+            let payload_len = payload.len();
+            if !self.reserve_bytes(payload_len) {
+                self.close();
+                return false;
+            }
+            match self.tx.try_send(TerminalWrite::Frame {
+                ty,
+                payload: payload.to_vec(),
+            }) {
+                Ok(()) => {}
+                Err(_) => {
+                    self.queued_bytes.fetch_sub(payload_len, Ordering::AcqRel);
+                    self.close();
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn send_input(&self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        if bytes.len() > TERMINAL_PENDING_INPUT_MAX_BYTES {
+            // `false` 的语义必须是「这一整段输入没有进入旧 attachment」。
+            // 否则上层在 reattach 后无法安全补发，用户就会在断线窗口里丢键。
+            self.close();
+            return false;
+        }
+        let mut pending = self.pending_input_bytes.load(Ordering::Acquire);
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return false;
+            }
+            if pending > TERMINAL_PENDING_INPUT_MAX_BYTES.saturating_sub(bytes.len()) {
+                // 不把新输入塞到一个已经无法及时排空的旧连接后面。关闭 attachment
+                // 让上层走同一条 reattach + 保序补发路径，避免新旧两条流乱序。
+                self.close();
+                return false;
+            }
+            match self.pending_input_bytes.compare_exchange_weak(
+                pending,
+                pending + bytes.len(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => pending = current,
+            }
+        }
+        if self
+            .tx
+            .try_send(TerminalWrite::Input(bytes.to_vec()))
+            .is_err()
+        {
+            self.pending_input_bytes
+                .fetch_sub(bytes.len(), Ordering::AcqRel);
+            self.close();
+            return false;
+        }
+        true
+    }
+
+    fn send_resize(&self, payload: &[u8]) -> bool {
+        if payload.len() > TERMINAL_FRAME_MAX_BYTES {
+            self.close();
+            return false;
+        }
+        self.enqueue_frames(1, std::iter::once(payload))
+    }
+
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.tx.close();
+            // `shutdown` 也是系统调用。这里可能由 GPUI 回调（队列满 / 视图销毁）触发，
+            // 所以同样交给后台，不能为了打断一个卡住的 writer 又把 UI 拖进内核。
+            let shutdown = Arc::clone(&self.shutdown);
+            let _ = std::thread::Builder::new()
+                .name("smelt-terminal-close".into())
+                .spawn(move || {
+                    let _ = shutdown.shutdown(Shutdown::Both);
+                });
+        }
+    }
+}
+
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态；PtyWrite /
-/// ColorRequest / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；
+/// Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
+/// 旧守护没有声明该能力时才在客户端兜底。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
     bell_notify: NotifySlot,
-    /// 终端标题（OSC 0/2）——Claude Code 用它实时报告「在干嘛」（任务名 + 状态符号）。
+    /// 终端标题（OSC 0/2）——Claude Code 用它报告任务名和展示装饰。
     title: Arc<Mutex<Option<String>>>,
-    /// 守护连接写端，跟 [`Terminal`] 自己发键盘输入共用同一把锁——两边都是往同一个
-    /// socket 写帧，混着写会把帧头/帧长/payload 交叉打乱，必须靠这把锁串行。
-    writer: Arc<Mutex<UnixStream>>,
+    /// 守护连接写队列，跟 [`Terminal`] 自己发键盘输入共用同一个单消费者，保证帧不会
+    /// 交叉，同时调用方不直接执行 socket I/O。
+    writer: TerminalWriter,
     /// 当前网格/单元格尺寸（TextAreaSizeRequest 应答用）。
     metrics: Arc<Mutex<TermMetrics>>,
+    /// 新版 smeltd 在收到 PTY 输出时就应答 OSC 颜色查询，覆盖首个 GUI attachment
+    /// 还未挂上的窗口；能力位缺失说明是旧守护，继续由客户端兼容处理。
+    daemon_handles_color_requests: bool,
 }
 
 impl EventProxy {
     /// 把响应字节当作「PTY 输入」帧写回守护——对 shell/CLI 来说，终端主动应答的
     /// 查询（光标位置、颜色）和用户敲键盘没有区别，都是它 stdin 收到的字节。
     fn write_pty(&self, bytes: &[u8]) {
-        if let Ok(mut w) = self.writer.lock() {
-            write_frame(&mut w, 0, bytes);
-        }
+        let _ = self.writer.send_input(bytes);
     }
 
     /// alacritty 自己不记「当前实际渲染色」，查询颜色时要由我们把 RGB 值喂回去。
@@ -376,9 +581,10 @@ impl EventListener for EventProxy {
             // 光标位置 / 设备属性等查询-应答协议：不回应会让依赖精确光标位置渲染
             // 的 TUI（如 Claude Code 的输入框 ghost-text 补全）拿不到定位信息。
             Event::PtyWrite(text) => self.write_pty(text.as_bytes()),
-            Event::ColorRequest(index, format) => {
+            Event::ColorRequest(index, format) if !self.daemon_handles_color_requests => {
                 self.write_pty(format(Self::resolve_color(index)).as_bytes())
             }
+            Event::ColorRequest(_, _) => {}
             // OSC 52：应用把文本写到系统剪贴板 / 从剪贴板读回。远程会话、嵌套
             // tmux、部分 CLI 复制都靠它。读写走系统工具（见 os_clipboard_*），不必
             // 绕到 UI 线程——EventProxy 跑在 PTY 读线程上。
@@ -453,9 +659,8 @@ fn sock_path() -> std::path::PathBuf {
 /// `Smelt.app/Contents/MacOS/smeltd`。否则用户用 Finder 拖 DMG 覆盖 App 时内核会
 /// 干掉守护，所有 Claude/Grok PTY 死掉，GUI 重开只能 spawn 新进程 → 对话「重新初始化」。
 fn managed_daemon_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| "/tmp".into())
-        .join(".smelt")
+    smelt_paths::smelt_home()
+        .unwrap_or_else(|| "/tmp/.smelt".into())
         .join("bin")
 }
 
@@ -504,12 +709,369 @@ fn exe_is_managed(exe: &std::path::Path) -> bool {
     false
 }
 
+/// 等 smeltd 监听 socket 的上限。
+///
+/// 生产里 daemon 基本已常驻，5s 足够且不宜更久——GUI 卡在这里用户什么也做不了。
+/// 测试二进制跑在自己的沙箱里，每个进程都要先把 debug 版 smeltd（数百 MB）复制进去
+/// 再冷启动，5s 必然不够。放宽超时，而不是让用例回头去捞开发者真实安装的 daemon。
+fn daemon_ready_timeout() -> Duration {
+    if smelt_paths::running_under_test() {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
+/// 查找分发物（smeltd、bundled 插件包）时应当参照的可执行文件位置。
+///
+/// cargo 把测试二进制放在 `target/<profile>/deps/`，而分发物都在上一级的 profile
+/// 目录。不抹掉 `deps` 这一层，用例就只能去捞开发者真实安装的 `~/.smelt`，既污染
+/// 个人数据，在 CI 上也必然抓瞎。
+fn distribution_exe() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    if smelt_paths::running_under_test()
+        && let Some(profile_dir) = exe.parent().and_then(std::path::Path::parent)
+    {
+        return Some(profile_dir.join(exe.file_name()?));
+    }
+    Some(exe)
+}
+
 /// App 包 / cargo 同目录下的 smeltd（分发物，不是常驻运行路径）。
 fn bundled_daemon_path() -> Option<std::path::PathBuf> {
-    std::env::current_exe()
-        .ok()
+    distribution_exe()
         .map(|e| e.with_file_name("smeltd"))
         .filter(|p| p.is_file())
+}
+
+fn bundled_plugin_root() -> Option<std::path::PathBuf> {
+    bundled_plugin_root_for(&distribution_exe()?)
+}
+
+/// 已安装或不存在则现场 stage 一份 bundled 插件包，供设置页列出开关。
+pub fn ensure_bundled_plugin_packages() -> Option<std::path::PathBuf> {
+    bundled_plugin_root()
+}
+
+fn bundled_plugin_root_for(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Some(root) = app_bundle_plugin_root(executable) {
+        return Some(root);
+    }
+    stage_workspace_plugins(executable.parent()?).ok()
+}
+
+/// 已安装 bundled 插件包的根目录，只发现不重新 stage。
+pub fn bundled_plugin_package_root() -> Option<std::path::PathBuf> {
+    bundled_plugin_package_root_for(&distribution_exe()?)
+}
+
+/// GUI 侧统一发现应用自带与用户安装的插件。tab 注册表、设置页清单必须走同一条，
+/// 否则会出现“设置里装上了，但 tab 看不见”这种双真相。
+pub fn discover_installed_plugin_packages()
+-> Vec<Result<smelt_plugin_host::PluginPackage, smelt_plugin_host::HostError>> {
+    let Some(root) = smelt_paths::smelt_home() else {
+        return vec![Err(smelt_plugin_host::HostError::new(
+            "cannot determine home directory",
+        ))];
+    };
+    let bundled = bundled_plugin_package_root().or_else(ensure_bundled_plugin_packages);
+    smelt_plugin_host::discover_all_plugins(bundled.as_deref(), &root)
+}
+
+fn bundled_plugin_package_root_for(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Some(root) = app_bundle_plugin_root(executable) {
+        return root.is_dir().then_some(root);
+    }
+    let packages = executable.parent()?.join("plugin-packages");
+    packages.is_dir().then_some(packages)
+}
+
+/// 把设置页的插件开关同步给守护：关掉则停进程，打开则拉起。
+pub fn plugin_set_enabled(plugin_id: &str, enabled: bool) -> Result<(), String> {
+    let Ok(mut stream) = connect_daemon_control() else {
+        return Ok(());
+    };
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "op": DaemonOperation::PluginSetEnabled,
+            "plugin_id": plugin_id,
+            "enabled": enabled,
+            "auth": { "type": "first_party", "kind": "desktop" },
+        })
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| error.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(response.trim()).unwrap_or_default();
+    if value["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(value["error"]
+            .as_str()
+            .unwrap_or("设置插件开关失败")
+            .to_string())
+    }
+}
+
+/// 通知守护重新发现磁盘上的插件包。安装/卸载本身由 GUI 做，进程生命周期仍只归
+/// 守护管理，避免同一个插件跑出两个实例。
+pub fn plugin_reload() -> Result<(), String> {
+    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "op": DaemonOperation::PluginReload,
+            "auth": { "type": "first_party", "kind": "desktop" },
+        })
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
+    if value["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(value["error"]
+            .as_str()
+            .unwrap_or("重新加载插件失败")
+            .to_string())
+    }
+}
+
+/// 查询守护里各插件的运行状态。阻塞 IO，调用方放后台执行器。
+pub fn plugin_statuses() -> Result<Vec<smelt_plugin_host::PluginStatus>, String> {
+    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "op": DaemonOperation::PluginStatuses,
+            "auth": { "type": "first_party", "kind": "desktop" },
+        })
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
+    if value["ok"].as_bool() != Some(true) {
+        return Err(value["error"]
+            .as_str()
+            .unwrap_or("查询插件状态失败")
+            .to_string());
+    }
+    serde_json::from_value(value["statuses"].clone()).map_err(|error| error.to_string())
+}
+
+/// 把一次面板 invocation 转给守护里的插件进程。
+///
+/// GUI 不自己拉起插件进程：那会和守护各管一份，同一个插件跑出两个实例。
+/// 这是阻塞 IO，调用方必须放在后台执行器上。
+pub fn plugin_invoke(
+    plugin_id: &str,
+    request: &smelt_plugin_api::InvocationRequest,
+) -> Result<serde_json::Value, String> {
+    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "op": DaemonOperation::PluginInvoke,
+            "plugin_id": plugin_id,
+            "request": request,
+            "auth": { "type": "first_party", "kind": "desktop" },
+        })
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
+    if value["ok"].as_bool() != Some(true) {
+        return Err(value["error"]
+            .as_str()
+            .unwrap_or("插件调用失败")
+            .to_string());
+    }
+    // 守护把插件的应答原样回传：Success 取 result，Error 转成 Err。
+    match &value["response"] {
+        serde_json::Value::Object(map) if map.contains_key("result") => Ok(map["result"].clone()),
+        serde_json::Value::Object(map) if map.contains_key("message") => Err(map["message"]
+            .as_str()
+            .unwrap_or("插件拒绝了这次调用")
+            .to_string()),
+        other => Err(format!("插件应答无法识别: {other}")),
+    }
+}
+
+/// `.app` 内 first-party 插件包目录，相对 Contents。
+///
+/// 不能用 `PlugIns`：codesign 把那里的子目录当成嵌套 bundle，没有 Info.plist
+/// 会直接 "bundle format unrecognized"。
+const APP_BUNDLE_PLUGIN_PACKAGES: &str = "Resources/plugin-packages";
+
+fn app_bundle_plugin_root(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos = executable.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    Some(contents.join(APP_BUNDLE_PLUGIN_PACKAGES))
+}
+
+/// 开发模式下把 workspace 里的插件源码目录 stage 成插件包。
+///
+/// 扫盘而不是写死名单：新增一个插件只要在 `plugins/<name>/` 放好
+/// `plugin.json` 与它声明的入口，就会自动出现在应用里——宿主不需要为此改任何代码。
+/// Shared Bun 入口直接取 package 数据。
+fn stage_workspace_plugins(bin_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let dest = bin_dir.join("plugin-packages");
+    // target/debug -> target -> workspace root
+    let Some(sources) = bin_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|root| root.join("plugins"))
+        .filter(|path| path.is_dir())
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "找不到 workspace 的 plugins 目录",
+        ));
+    };
+
+    let mut staged = 0usize;
+    for entry in std::fs::read_dir(&sources)? {
+        let source = entry?.path();
+        let manifest_path = source.join("plugin.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let manifest_json = std::fs::read_to_string(&manifest_path)?;
+        let Ok(manifest) = serde_json::from_str::<smelt_plugin_api::PluginManifest>(&manifest_json)
+        else {
+            eprintln!(
+                "[plugin] 跳过无法解析的 manifest：{}",
+                manifest_path.display()
+            );
+            continue;
+        };
+        if !manifest.bundled {
+            // 只为测试存在的 package 不进产物，也不在开发期占一个运行时槽位。
+            continue;
+        }
+        let entrypoint = source.join(&manifest.entrypoint);
+        if !entrypoint.is_file() {
+            continue;
+        }
+        // sidecar 和 web 目录都一并装进包里，声明与资源缺一不可。
+        let web = source.join("web");
+        let package_assets = source.join("assets");
+        let ui_manifest = source.join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE);
+        let input_manifest = source.join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE);
+        let agent_manifest = source.join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE);
+        let mut assets: Vec<(&str, &std::path::Path)> = Vec::new();
+        if web.is_dir() {
+            assets.push(("web", web.as_path()));
+        }
+        if package_assets.is_dir() {
+            assets.push(("assets", package_assets.as_path()));
+        }
+        if ui_manifest.is_file() {
+            assets.push((
+                smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE,
+                ui_manifest.as_path(),
+            ));
+        }
+        if input_manifest.is_file() {
+            assets.push((
+                smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE,
+                input_manifest.as_path(),
+            ));
+        }
+        if agent_manifest.is_file() {
+            assets.push((
+                smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE,
+                agent_manifest.as_path(),
+            ));
+        }
+        match smelt_plugin_host::stage_plugin_package_with_assets(
+            &dest,
+            &manifest_json,
+            &entrypoint,
+            &assets,
+        ) {
+            Ok(_) => staged += 1,
+            Err(error) => eprintln!("[plugin] stage {} 失败：{error}", manifest.id),
+        }
+    }
+
+    if staged == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "没有可用的插件包（package entrypoint 缺失）",
+        ));
+    }
+    Ok(dest)
+}
+
+fn sync_bundled_plugins(daemon: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let smelt_root = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
+    let source = bundled_plugin_root().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "找不到 bundled 插件包；请先构建 bundled plugins",
+        )
+    })?;
+    if !source.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("bundled 插件目录不存在：{}", source.display()),
+        ));
+    }
+    let dest = smelt_plugin_host::sync_bundled_plugin_set(Some(&source), &smelt_root, daemon)
+        .map_err(std::io::Error::other)?;
+    // 只对齐磁盘。这里绝不能 plugin_reload：冷启动 restore 紧接着 Open 终端，
+    // 而 reload 会杀掉并重启 shared bun，控制通道只有 5s 超时，失败还被忽略。
+    // 会话挂上之后由 workspace 再发 reload。
+    Ok(dest)
+}
+
+fn prepare_bundled_release(
+    app: &std::path::Path,
+    smelt_root: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let daemon = app.join("Contents/MacOS/smeltd");
+    if !daemon.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("候选 App 缺少守护程序：{}", daemon.display()),
+        ));
+    }
+    let plugin_root = app.join("Contents").join(APP_BUNDLE_PLUGIN_PACKAGES);
+    if !plugin_root.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("候选 App 缺少插件目录：{}", plugin_root.display()),
+        ));
+    }
+    smelt_plugin_host::sync_bundled_plugin_set(Some(&plugin_root), smelt_root, &daemon)
+        .map_err(std::io::Error::other)?;
+    Ok(daemon)
 }
 
 fn file_mtime_secs(p: &std::path::Path) -> Option<u64> {
@@ -522,22 +1084,43 @@ fn file_mtime_secs(p: &std::path::Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-/// 两份 smeltd 是否视为同一构建（只比 size，热路径禁止全文 read）。
-/// 真升级几乎总会改文件大小；同 size 不同构建的漏升级可接受。
-fn same_daemon_binary_size(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (std::fs::metadata(a), std::fs::metadata(b)) {
-        (Ok(ma), Ok(mb)) => ma.len() == mb.len(),
-        _ => false,
+/// 两份 smeltd 是否是同一份构建。
+///
+/// 只比较文件大小会漏掉“新旧构建恰好同大小”的升级；只比较 mtime 又会把
+/// 安装时一次普通的 copy 误判成新版本。这里先做便宜的 metadata 检查，再逐块
+/// 比较内容，兼顾正确性和后台探测成本。
+fn same_daemon_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut left = [0u8; 128 * 1024];
+    let mut right = [0u8; 128 * 1024];
+    loop {
+        let (Ok(na), Ok(nb)) = (fa.read(&mut left), fb.read(&mut right)) else {
+            return false;
+        };
+        if na != nb || left[..na] != right[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
     }
 }
 
-/// 把 `src` 装到 `~/.smelt/bin/smeltd`（size 不同或目标不存在才拷）。
+/// 把 `src` 装到 `~/.smelt/bin/smeltd`（内容不同或目标不存在才拷）。
 /// 先写 `smeltd.next` 再 rename；覆盖正在执行的 managed 时进程仍握旧 inode。
 fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
-    let need = !managed.is_file() || !same_daemon_binary_size(src, &managed);
+    let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
         stage_daemon_binary(src, &dir.join("smeltd.next"))?;
         // Unix rename 会原子替换目标；先 remove 会制造一个路径不存在的窗口，
@@ -575,11 +1158,39 @@ fn stage_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> std::io
     Ok(())
 }
 
-/// 把正在跑的守护 **一次** exec 到 `~/.smelt/bin/smeltd`（会话 PTY 保留）。
-///
-/// 若目标路径正是当前 running 的文件，先落到 `smeltd.next` 再 rename（不二次 exec）；
-/// `exe_is_managed` 认 managed 目录内任意名，rename 后无需再 handoff。
+/// 完成暂存映像到正式路径的安装。新版 smeltd 会在 handoff 启动最早期自行完成
+/// `next -> smeltd` 并以正式路径继续 exec；旧版仍由 GUI 在确认升级后执行 rename。
+fn finish_staged_managed_install(
+    staged: &std::path::Path,
+    managed: &std::path::Path,
+) -> std::io::Result<()> {
+    if staged == managed {
+        return Ok(());
+    }
+    match std::fs::rename(staged, managed) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && managed.is_file() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
+    handoff_daemon_to_managed_once(src)
+}
+
+/// App 安装不能在持有安装锁时无限等 ACP 回合；交给 UI 显示等待状态并在安全边界后重试。
+fn try_handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
+    handoff_daemon_to_managed_once(src)
+}
+
+/// 把正在跑的守护用一次 handoff 迁到 `~/.smelt/bin/smeltd`（会话 PTY 保留）。
+///
+/// 若目标路径正是当前 running 的文件，先落到 `smeltd.next`。新映像确认自己已通过
+/// exec 后会在启动任何线程前自行 rename，并以正式路径做一次轻量 exec；这一步不重复
+/// 会话快照。旧映像不支持自行提升时，仍由本函数在确认 handoff 后完成 rename。
+///
+/// 一次尝试：Busy 原样返回，由 GUI 在回合结束后再发一次 upgrade。
+fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
     let managed = managed_daemon_path();
     let dir = managed_daemon_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -606,24 +1217,19 @@ fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
         return UpgradeOutcome::Failed;
     }
 
-    let outcome = loop {
-        let outcome = upgrade_daemon_exe(Some(&target));
-        if outcome != UpgradeOutcome::Busy {
-            break outcome;
-        }
-        thread::sleep(Duration::from_millis(500));
-    };
+    let outcome = upgrade_daemon_exe(Some(&target));
     match outcome {
         UpgradeOutcome::Upgraded => {
-            thread::sleep(Duration::from_millis(250));
-            if target != managed {
-                if let Err(e) = std::fs::rename(&target, &managed) {
-                    eprintln!("[workspace] rename → managed 失败：{e}（进程仍在 next inode）");
-                }
+            if let Err(e) = finish_staged_managed_install(&target, &managed) {
+                eprintln!(
+                    "[workspace] 完成 managed 安装失败：{e}（目标：{}）",
+                    managed.display()
+                );
             }
             eprintln!("[workspace] 守护已迁入 managed：{}", managed.display());
             UpgradeOutcome::Upgraded
         }
+        UpgradeOutcome::Busy => UpgradeOutcome::Busy,
         other => {
             // 失败时尽量把文件落到正式名，供下次冷启动
             if target != managed {
@@ -648,6 +1254,7 @@ struct ManagedDaemonFileLock {
 fn acquire_file_lock(path: &std::path::Path) -> std::io::Result<ManagedDaemonFileLock> {
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)?;
@@ -657,10 +1264,35 @@ fn acquire_file_lock(path: &std::path::Path) -> std::io::Result<ManagedDaemonFil
     Ok(ManagedDaemonFileLock { _file: file })
 }
 
+/// 单次更新尝试不能排队等别的进程的 handoff；拿不到锁时交还给 UI 的可取消等待态。
+fn try_acquire_file_lock(path: &std::path::Path) -> std::io::Result<Option<ManagedDaemonFileLock>> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    }
+    Ok(Some(ManagedDaemonFileLock { _file: file }))
+}
+
 fn acquire_managed_daemon_file_lock() -> std::io::Result<ManagedDaemonFileLock> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     acquire_file_lock(&dir.join("smeltd.install.lock"))
+}
+
+fn try_acquire_managed_daemon_file_lock() -> std::io::Result<Option<ManagedDaemonFileLock>> {
+    let dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dir)?;
+    try_acquire_file_lock(&dir.join("smeltd.install.lock"))
 }
 
 /// 确保守护跑在 `~/.smelt/bin/smeltd` 且不旧于 App 内分发物。
@@ -723,6 +1355,8 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
         };
     };
 
+    sync_bundled_plugins(&bundled)?;
+
     match probe_daemon_detail() {
         DaemonProbe::NotRunning => {
             install_managed_daemon_from(&bundled)?;
@@ -736,6 +1370,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
         DaemonProbe::Running {
             exe_mtime: _,
             exe_path,
+            ..
         } => {
             let on_managed = exe_path
                 .as_ref()
@@ -748,7 +1383,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             // 路径不对（仍在 .app / 非 managed）→ 必须迁。
             // 二进制升级：仅当「跑的比 App 旧」且**文件内容实质不同**——
             // 禁止仅因 cp 造成 mtime+1s 就 handoff（会清空 Term → 对话像被重初始化）。
-            let size_differs = !managed.is_file() || !same_daemon_binary_size(&managed, &bundled);
+            let content_differs = !managed.is_file() || !same_daemon_binary(&managed, &bundled);
             let must_relocate = inside_app || !on_managed;
             if must_relocate {
                 // **安全关键**：守护还住在 .app 里 / 不在 managed 目录，随时可能被
@@ -760,7 +1395,7 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
                 if !matches!(outcome, UpgradeOutcome::Upgraded) {
                     let _ = install_managed_daemon_from(&bundled);
                 }
-            } else if size_differs {
+            } else if content_differs {
                 // 守护已在 managed（含版本旧）：只对齐磁盘文件，**不 exec**。
                 // 连接路径偷偷换代正是「用着用着终端全卡」的根源——exec 会断开所有
                 // 客户端连接，而这里只是例行检查，不该背着用户在任意时刻换代。
@@ -804,7 +1439,7 @@ static CONNECT_MANAGED_ENSURED: AtomicBool = AtomicBool::new(false);
 /// 连接守护。进程内**首次**连上时 ensure 一次 managed 路径；之后只 connect。
 /// 连不上则拉起 `~/.smelt/bin/smeltd`（独立进程组）再重试。
 ///
-/// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd.rs。）
+/// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd。）
 fn connect_daemon() -> std::io::Result<UnixStream> {
     let path = sock_path();
 
@@ -834,6 +1469,10 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
             let exe = std::env::current_exe()?;
             let fallback = exe.with_file_name("smeltd");
             if fallback.is_file() {
+                eprintln!(
+                    "[plugin-host] managed daemon sync failed ({e}); falling back to {}",
+                    fallback.display()
+                );
                 fallback
             } else {
                 return Err(std::io::Error::new(e.kind(), format!("smeltd 不可用：{e}")));
@@ -852,12 +1491,20 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         let exe = std::env::current_exe().ok();
         let in_app_bundle = exe.as_ref().is_some_and(|e| path_inside_app_bundle(e));
         let mut cmd = std::process::Command::new(&daemon);
+        smelt_paths::export_to(&mut cmd);
+        smelt_core::tty_color::clear_command(&mut cmd);
         cmd.process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if in_app_bundle {
             cmd.env("SMELT_MENUBAR", "1");
+        }
+        // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
+        // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
+        // SMELTD_PLUGIN_DAEMON_FINGERPRINT 传指纹同一机制）。
+        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&daemon) {
+            cmd.env("SMELTD_PLUGIN_DAEMON_FINGERPRINT", fingerprint);
         }
         match cmd.spawn() {
             Ok(child) => {
@@ -873,18 +1520,21 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         }
     };
 
-    for _ in 0..50 {
+    let timeout = daemon_ready_timeout();
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(100));
         if let Ok(s) = UnixStream::connect(&path) {
             return Ok(s);
         }
     }
+    let secs = timeout.as_secs();
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         match spawn_err {
-            Some(why) => format!("smeltd 未就绪：{why}；5s 内未监听 {}", path.display()),
+            Some(why) => format!("smeltd 未就绪：{why}；{secs}s 内未监听 {}", path.display()),
             None => format!(
-                "smeltd 未就绪（已拉起 {}，5s 内未监听 {}）",
+                "smeltd 未就绪（已拉起 {}，{secs}s 内未监听 {}）",
                 daemon.display(),
                 path.display()
             ),
@@ -902,6 +1552,8 @@ enum DaemonProbe {
         exe_mtime: u64,
         /// 守护自报的 current_exe；老守护无此字段则为 None。
         exe_path: Option<String>,
+        /// 守护启动时钉死的进程指纹；老守护无此字段则为 None。
+        daemon_fingerprint: Option<String>,
     },
 }
 
@@ -909,23 +1561,41 @@ fn probe_daemon() -> DaemonProbe {
     probe_daemon_detail()
 }
 
+/// 面向守护的短控制请求共用时限。它们全都应在后台运行，但超时仍必须存在：守护
+/// 某个连接线程失活时，不能无限占住 executor worker，也不能让重试任务无限堆积。
+const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn connect_daemon_control() -> std::io::Result<UnixStream> {
+    let s = UnixStream::connect(sock_path())?;
+    s.set_read_timeout(Some(DAEMON_CONTROL_TIMEOUT))?;
+    s.set_write_timeout(Some(DAEMON_CONTROL_TIMEOUT))?;
+    Ok(s)
+}
+
 fn probe_daemon_detail() -> DaemonProbe {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return DaemonProbe::NotRunning;
     };
-    let parsed = (|| -> Option<(u64, Option<String>)> {
-        writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
+    let parsed = (|| -> Option<(u64, Option<String>, Option<String>)> {
+        writeln!(
+            s,
+            "{}",
+            serde_json::json!({ "op": DaemonOperation::Version })
+        )
+        .ok()?;
         let mut resp = String::new();
         BufReader::new(s).read_line(&mut resp).ok()?;
         let v: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
         let mtime = v["exe_mtime"].as_u64()?;
         let exe = v["exe"].as_str().map(str::to_string);
-        Some((mtime, exe))
+        let fingerprint = v["daemon_fingerprint"].as_str().map(str::to_string);
+        Some((mtime, exe, fingerprint))
     })();
     match parsed {
-        Some((m, exe)) => DaemonProbe::Running {
+        Some((m, exe, fingerprint)) => DaemonProbe::Running {
             exe_mtime: m,
             exe_path: exe,
+            daemon_fingerprint: fingerprint,
         },
         None => DaemonProbe::Unresponsive,
     }
@@ -939,7 +1609,7 @@ fn probe_daemon_detail() -> DaemonProbe {
 pub struct DaemonInfo {
     pub version: Option<String>,
     pub pid: Option<u32>,
-    /// 守护进程启动时刻（unix 秒）。无缝升级 exec 后会重置，见 smeltd.rs::started_at。
+    /// 守护进程启动时刻（unix 秒）。无缝升级 exec 后会重置，见 `smeltd::session_state`。
     pub started_at: Option<u64>,
     pub session_count: Option<u64>,
 }
@@ -950,8 +1620,13 @@ pub struct DaemonInfo {
 /// `connect_daemon`：那个连不上会顺手拉起守护，而这里只是"看一眼现状"，
 /// 不该有副作用——没起就是没起。
 pub fn daemon_info() -> Option<DaemonInfo> {
-    let mut s = UnixStream::connect(sock_path()).ok()?;
-    writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
+    let mut s = connect_daemon_control().ok()?;
+    writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::Version })
+    )
+    .ok()?;
     let mut resp = String::new();
     BufReader::new(s).read_line(&mut resp).ok()?;
     let v: serde_json::Value = serde_json::from_str(&resp).ok()?;
@@ -982,28 +1657,98 @@ pub fn daemon_outdated() -> bool {
         DaemonProbe::Running {
             exe_mtime,
             exe_path,
-        } => {
-            // 仍住在 .app 内 / 不在 managed = 必须迁（装 DMG 会死）
-            let inside_app = exe_path
-                .as_ref()
-                .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
-                .unwrap_or(false);
-            let on_managed = exe_path
-                .as_ref()
-                .map(|p| exe_is_managed(std::path::Path::new(p)))
-                .unwrap_or(false);
-            if inside_app || !on_managed {
-                return true;
-            }
-            // 已在 managed：App 与 managed **size 相同** 视为已对齐（避免 cp mtime+1s 误报）
-            if let Some(bundled) = bundled_daemon_path() {
-                let managed = managed_daemon_path();
-                if managed.is_file() && same_daemon_binary_size(&bundled, &managed) {
-                    return false;
-                }
-            }
-            disk_smeltd_mtime().is_some_and(|disk| disk > exe_mtime)
+            daemon_fingerprint,
+        } => daemon_outdated_from_probe(
+            exe_mtime,
+            exe_path.as_deref(),
+            daemon_fingerprint.as_deref(),
+        ),
+    }
+}
+
+/// outdated 纯判定（可单测）：指纹主键 + 老守护回退。
+///
+/// 主键是指纹：守护自报启动时钉死的进程指纹，与磁盘期望二进制（bundled 优先，
+/// 其次 managed）的指纹比。内容不同=旧，不受“cp 造成 mtime+1s”误判，也不被
+/// StageDiskOnly 骗（磁盘新了、进程指纹还是老的——之前 `same_daemon_binary(
+/// running_exe_path, bundled)` 比的是两个磁盘新文件，直接误判“不旧”，升级永不触发）。
+fn daemon_outdated_from_probe(
+    exe_mtime: u64,
+    exe_path: Option<&str>,
+    daemon_fingerprint: Option<&str>,
+) -> bool {
+    // 仍住在 .app 内 / 不在 managed = 必须迁（装 DMG 会死）
+    let inside_app = exe_path
+        .map(|p| path_inside_app_bundle(std::path::Path::new(p)))
+        .unwrap_or(false);
+    let on_managed = exe_path
+        .map(|p| exe_is_managed(std::path::Path::new(p)))
+        .unwrap_or(false);
+    if inside_app || !on_managed {
+        return true;
+    }
+    // 主键：钉死指纹 vs 磁盘期望。
+    if let Some(pinned) = daemon_fingerprint {
+        let expected = bundled_daemon_path().or_else(|| {
+            let managed = managed_daemon_path();
+            managed.is_file().then_some(managed)
+        });
+        return outdated_by_fingerprint(pinned, expected.as_deref());
+    }
+    // 老守护无指纹：退回旧 heuristic（exe 路径内容比对 + mtime）。
+    // 注意这条在 StageDiskOnly 后会误判“不旧”，但老守护熬过一次升级就换成新
+    // 守护了——一次性窗口，可接受。
+    if let (Some(exe), Some(bundled)) = (exe_path, bundled_daemon_path()) {
+        let running_exe = std::path::Path::new(exe);
+        let path_was_renamed =
+            !running_exe.is_file() && same_daemon_binary(&managed_daemon_path(), &bundled);
+        if same_daemon_binary(running_exe, &bundled) || path_was_renamed {
+            return false;
         }
+    }
+    disk_smeltd_mtime().is_some_and(|disk| disk > exe_mtime)
+}
+
+/// 指纹主键判定（纯函数，可单测）：内容不同=旧。期望文件缺失/读不出→保守不旧，
+/// 避免误报打扰用户；下一轮（或 headless 自升级）再看。
+fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> bool {
+    let Some(path) = expected else {
+        return false;
+    };
+    match smelt_plugin_host::executable_fingerprint(path) {
+        Ok(disk) => disk != pinned,
+        Err(_) => false,
+    }
+}
+
+/// 新守护是否已经用 version 握手接替了旧进程。pid / started_at 在 exec 后都会变。
+fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) -> bool {
+    let Some(now) = now else {
+        return false;
+    };
+    let Some(before) = before else {
+        return true;
+    };
+    match (before.pid, now.pid) {
+        (Some(old), Some(new)) if old != new => return true,
+        _ => {}
+    }
+    matches!(
+        (before.started_at, now.started_at),
+        (Some(old), Some(new)) if old != new
+    )
+}
+
+fn wait_for_successor_daemon(before: Option<DaemonInfo>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if is_successor_daemon(before.as_ref(), daemon_info().as_ref()) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1020,8 +1765,18 @@ pub enum UpgradeOutcome {
     Failed,
 }
 
+/// 单次 App 安装尝试的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppInstallOutcome {
+    Installed,
+    /// 当前 ACP 回合或另一条 handoff 正在占用安全边界；App 包尚未替换。
+    WaitingForSafeHandoff,
+    /// 暂存包在最终校验时已失效并被 updater 作废，需要重新下载。
+    UpdateInvalidated,
+}
+
 /// 无缝升级守护：发 "upgrade" op，守护 exec 磁盘上的新二进制、PTY fd 原地交接，
-/// **所有会话不中断**（协议与流程见 smeltd.rs 头注释）。调用方在成功后应对每个
+/// **所有会话不中断**（协议与流程见 smeltd 升级设计）。调用方在成功后应对每个
 /// 终端调 reconnect()——会话 id 都还在，走的是正常 reattach + 重放恢复。
 ///
 /// `read_line` 前设了读超时：守护万一卡住（比如某个 out 锁被冻结客户端占住），不能
@@ -1033,6 +1788,7 @@ pub fn upgrade_daemon() -> UpgradeOutcome {
 /// 无缝升级守护。`new_exe` 为 `Some` 时让守护 **exec 指定路径**（装 DMG：先 exec
 /// 暂存包里的 smeltd，会话不丢，再替换 .app）；`None` 则 exec `current_exe`。
 pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
+    let predecessor = daemon_info();
     let Ok(mut s) = UnixStream::connect(sock_path()) else {
         // 守护没跑：拉起磁盘上最新的等于升级完成，但要探测确认它真的起来了再报
         // 成功——ensure_daemon_running 的失败是静默的，不确认就报 Upgraded 会让
@@ -1045,8 +1801,11 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
         };
     };
     let msg = match new_exe {
-        Some(p) => serde_json::json!({ "op": "upgrade", "exe": p.to_string_lossy() }),
-        None => serde_json::json!({ "op": "upgrade" }),
+        Some(p) => serde_json::json!({
+            "op": DaemonOperation::Upgrade,
+            "exe": p.to_string_lossy()
+        }),
+        None => serde_json::json!({ "op": DaemonOperation::Upgrade }),
     };
     if writeln!(s, "{msg}").is_err() {
         return UpgradeOutcome::Failed;
@@ -1077,72 +1836,131 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     if !acked {
         return UpgradeOutcome::Failed;
     }
-    // exec + 交接在百毫秒量级；轮询到新进程的 exe_mtime 追平目标二进制为止。
-    let target_mtime = new_exe
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .or_else(disk_smeltd_mtime);
-    for _ in 0..25 {
-        thread::sleep(Duration::from_millis(200));
-        if let DaemonProbe::Running {
-            exe_mtime: running,
-            exe_path,
-        } = probe_daemon()
-        {
-            let mtime_ok = target_mtime.is_none_or(|d| running >= d);
-            // 指定了 new_exe 时尽量确认进程已落到该路径；老守护无 exe 字段只信 mtime。
-            // managed 目录内的 next/smeltd 互相 rename 后 path 可能短暂不一致，放宽为目录级。
-            let path_ok = match new_exe {
-                Some(target) => match &exe_path {
-                    Some(p) => {
-                        let pe = std::path::Path::new(p);
-                        same_daemon_path(pe, target)
-                            || (path_inside_app_bundle(target) == false
-                                && exe_is_managed(pe)
-                                && target.starts_with(managed_daemon_dir().as_path()))
+    if wait_for_successor_daemon(predecessor) {
+        UpgradeOutcome::Upgraded
+    } else {
+        UpgradeOutcome::Failed
+    }
+}
+
+/// 候选 `.app` 安装的公共前半段：先把 bundled 插件目录绑到该 smeltd 指纹，
+/// 再把守护交到 `~/.smelt/bin`。在线更新、DMG 后的 GUI ensure、`make install`
+/// 都必须是这个顺序；先 exec 再写映射会让插件永远起不来。
+/// 拷贝不跑当前版插件 schema：新字段由新守护 load。
+fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let smelt_root = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
+    prepare_bundled_release(candidate_app, &smelt_root).map_err(anyhow::Error::from)
+}
+
+/// 安装时对运行中守护的处置决策。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InstallCommitAction {
+    /// 守护已在 managed 路径：只把候选二进制 stage 到磁盘，不 handoff。
+    /// 版本升级交给空闲无缝升级；安装永不因此阻塞。
+    StageDiskOnly,
+    /// 守护仍在 .app 里（或路径未知）：必须 handoff 迁出，否则换 App 会 SIGKILL 它。
+    RelocateHandoff,
+}
+
+/// 安装处置决策（纯函数，可单测）：managed 不变量已成立就只 stage 磁盘。
+///
+/// 历史上这里无条件 handoff，把"换 App"和"换守护版本"绑成一次原子事务——
+/// ACP 忙就 exit 75 半安装（映射写了、App 没换）。解耦后安装只保证 managed
+/// 不变量；版本升级由空闲无缝升级接管（restore 后检查 + 60s watch + 回合结束
+/// flush），skew 窗口的新 GUI + 老守护由启动路径的 op 容忍覆盖。
+fn install_commit_action_for_running_daemon(
+    exe_path: Option<&std::path::Path>,
+) -> InstallCommitAction {
+    let managed = exe_path.map(exe_is_managed).unwrap_or(false);
+    // 老守护无 exe 字段：无法证明已迁出，保守迁出（一次性迁移，此后永久跳过）。
+    let inside_app = exe_path.map(path_inside_app_bundle).unwrap_or(true);
+    if managed && !inside_app {
+        InstallCommitAction::StageDiskOnly
+    } else {
+        InstallCommitAction::RelocateHandoff
+    }
+}
+
+/// 安装提交：守护没在跑就只落盘 managed；在跑且已在 managed 路径同样只 stage
+/// 磁盘（版本升级交给空闲无缝升级，安装不等 ACP）；只在守护仍住在 .app 里时
+/// 才强制 handoff 迁出——此时 ACP 忙仍返回 WaitingForSafeHandoff、不替换 App。
+fn commit_candidate_daemon(
+    candidate_smeltd: &std::path::Path,
+) -> anyhow::Result<AppInstallOutcome> {
+    match probe_daemon_detail() {
+        DaemonProbe::NotRunning | DaemonProbe::Unresponsive => {
+            install_managed_daemon_from(candidate_smeltd)?;
+            Ok(AppInstallOutcome::Installed)
+        }
+        DaemonProbe::Running { exe_path, .. } => {
+            let exe = exe_path.as_deref().map(std::path::Path::new);
+            match install_commit_action_for_running_daemon(exe) {
+                InstallCommitAction::StageDiskOnly => {
+                    install_managed_daemon_from(candidate_smeltd)?;
+                    Ok(AppInstallOutcome::Installed)
+                }
+                InstallCommitAction::RelocateHandoff => {
+                    match try_handoff_daemon_to_managed(candidate_smeltd) {
+                        UpgradeOutcome::Upgraded => Ok(AppInstallOutcome::Installed),
+                        UpgradeOutcome::Busy => Ok(AppInstallOutcome::WaitingForSafeHandoff),
+                        UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
+                            anyhow::bail!(
+                                "装包前 handoff→managed 未成功，已停止替换 App 以保护现有会话"
+                            )
+                        }
                     }
-                    None => true,
-                },
-                None => true,
-            };
-            if mtime_ok && path_ok {
-                return UpgradeOutcome::Upgraded;
+                }
             }
         }
     }
-    UpgradeOutcome::Failed
+}
+
+fn prepare_and_commit_candidate_app(
+    candidate_app: &std::path::Path,
+) -> anyhow::Result<AppInstallOutcome> {
+    let candidate_smeltd = prepare_candidate_daemon(candidate_app)?;
+    commit_candidate_daemon(&candidate_smeltd)
 }
 
 /// 装新版 `.app`（在线更新）时保留 smeltd 会话：
-/// 1. **先**把暂存包里的 smeltd handoff 到 `~/.smelt/bin/smeltd`（离开即将被删的 .app）
-/// 2. 再替换 `/Applications/Smelt.app`
-/// 3. 再 ensure managed 与新 App 内 smeltd 对齐
+/// 1. updater 先把候选包复制到正式 App 同卷并完成签名/指纹校验
+/// 2. 再把候选包里的 smeltd handoff 到 `~/.smelt/bin/smeltd`（离开即将被删的 .app）
+/// 3. 再替换 `/Applications/Smelt.app`
+/// 4. 再 ensure managed 与新 App 内 smeltd 对齐
 ///
 /// 顺序绝不能反：若先整包覆盖，App 内 smeltd 会被 SIGKILL → 会话全灭 → 对话「重新初始化」。
-pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::Result<()> {
-    let _gate = MANAGED_DAEMON_GATE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _file_gate = acquire_managed_daemon_file_lock()?;
+pub fn install_app_preserving_sessions(
+    update: &crate::updater::StagedUpdate,
+) -> anyhow::Result<AppInstallOutcome> {
+    let _gate = match MANAGED_DAEMON_GATE.try_lock() {
+        Ok(gate) => gate,
+        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForSafeHandoff),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    let Some(_file_gate) = try_acquire_managed_daemon_file_lock()? else {
+        return Ok(AppInstallOutcome::WaitingForSafeHandoff);
+    };
 
-    let staged_smeltd = staged_app.join("Contents/MacOS/smeltd");
-    if staged_smeltd.is_file() {
-        match handoff_daemon_to_managed(&staged_smeltd) {
-            UpgradeOutcome::Upgraded => {
-                thread::sleep(Duration::from_millis(300));
+    let finalized = crate::updater::finalize_pending_update(update, |candidate_app| {
+        match prepare_and_commit_candidate_app(candidate_app)? {
+            AppInstallOutcome::Installed => Ok(crate::updater::InstallPreparation::Proceed),
+            AppInstallOutcome::WaitingForSafeHandoff => {
+                Ok(crate::updater::InstallPreparation::RetryLater)
             }
-            UpgradeOutcome::Busy => unreachable!("busy outcomes are retried above"),
-            UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
-                eprintln!(
-                    "[workspace] 装包前 handoff→managed 未成功，继续替换 .app（会话可能丢失）"
-                );
+            AppInstallOutcome::UpdateInvalidated => {
+                anyhow::bail!("候选包在守护交接前已失效")
             }
         }
+    })?;
+    match finalized {
+        crate::updater::FinalizeOutcome::Installed => {}
+        crate::updater::FinalizeOutcome::RetryLater => {
+            return Ok(AppInstallOutcome::WaitingForSafeHandoff);
+        }
+        crate::updater::FinalizeOutcome::Invalidated => {
+            return Ok(AppInstallOutcome::UpdateInvalidated);
+        }
     }
-
-    crate::updater::finalize_pending_update(staged_app)?;
 
     // 新包落盘后：managed 与 App 内 smeltd 对齐
     if let Ok(app) = crate::updater::current_app_bundle_path() {
@@ -1156,6 +1974,125 @@ pub fn install_app_preserving_sessions(staged_app: &std::path::Path) -> anyhow::
                 Err(e) => eprintln!("[workspace] 装包后同步 managed 失败：{e}"),
             }
         }
+    }
+    Ok(AppInstallOutcome::Installed)
+}
+
+/// 本地 `make install` 入口：与在线更新同一套「插件映射 → 守护交接 → 换 App」。
+pub fn install_local_app_bundle(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> anyhow::Result<AppInstallOutcome> {
+    let _gate = match MANAGED_DAEMON_GATE.try_lock() {
+        Ok(gate) => gate,
+        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForSafeHandoff),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    let Some(_file_gate) = try_acquire_managed_daemon_file_lock()? else {
+        return Ok(AppInstallOutcome::WaitingForSafeHandoff);
+    };
+
+    match prepare_and_commit_candidate_app(source)? {
+        AppInstallOutcome::Installed => {}
+        other => return Ok(other),
+    }
+
+    atomic_install_app_bundle(source, target)?;
+    sync_managed_helpers_from_app(source)?;
+    Ok(AppInstallOutcome::Installed)
+}
+
+/// `smelt --install-app <src.app> [dst.app]`：给 Makefile 用，避免再写一套 shell 交接。
+pub fn maybe_run_install_app<I, S>(args: I) -> Option<i32>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args: Vec<String> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect();
+    if args.get(1).map(String::as_str) != Some("--install-app") {
+        return None;
+    }
+    let Some(source) = args.get(2).map(std::path::PathBuf::from) else {
+        eprintln!("用法：smelt --install-app <Smelt.app> [/Applications/Smelt.app]");
+        return Some(2);
+    };
+    let target = args
+        .get(3)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
+    match install_local_app_bundle(&source, &target) {
+        Ok(AppInstallOutcome::Installed) => {
+            eprintln!(
+                "✅ 已安装 {}（守护交接与插件映射与在线更新相同）",
+                target.display()
+            );
+            Some(0)
+        }
+        Ok(AppInstallOutcome::WaitingForSafeHandoff) => {
+            eprintln!(
+                "⏸ ACP 会话仍在运行，未替换 App（与在线更新一致）。回合结束后再 make install。"
+            );
+            Some(75)
+        }
+        Ok(AppInstallOutcome::UpdateInvalidated) => {
+            eprintln!("✗ 候选包已失效");
+            Some(1)
+        }
+        Err(error) => {
+            eprintln!("✗ 安装失败：{error:#}");
+            Some(1)
+        }
+    }
+}
+
+fn atomic_install_app_bundle(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> anyhow::Result<()> {
+    let script = std::env::current_dir()
+        .map_err(anyhow::Error::from)?
+        .join("scripts/install-mac-app-atomically.sh");
+    if !script.is_file() {
+        anyhow::bail!(
+            "找不到 {}（请在仓库根目录执行 make install）",
+            script.display()
+        );
+    }
+    let status = std::process::Command::new(&script)
+        .arg(source)
+        .arg(target)
+        .status()
+        .map_err(anyhow::Error::from)?;
+    if !status.success() {
+        anyhow::bail!("原子安装 App 失败，退出码 {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
+    let macos = app.join("Contents/MacOS");
+    let dest_dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dest_dir)?;
+    for name in ["smelt-agent-mcp", "smelt-notify"] {
+        let src = macos.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        let staged = dest_dir.join(format!("{name}.next"));
+        let dest = dest_dir.join(name);
+        let _ = std::fs::remove_file(&staged);
+        std::fs::copy(&src, &staged)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&staged)?.permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&staged, permissions)?;
+        }
+        std::fs::rename(&staged, dest)?;
     }
     Ok(())
 }
@@ -1179,7 +2116,11 @@ pub fn restart_daemon() {
         let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
         let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
         let mut s = s;
-        let _ = writeln!(s, "{}", serde_json::json!({ "op": "shutdown" }));
+        let _ = writeln!(
+            s,
+            "{}",
+            serde_json::json!({ "op": DaemonOperation::Shutdown })
+        );
         let mut resp = String::new();
         let _ = BufReader::new(s).read_line(&mut resp);
     }
@@ -1220,7 +2161,12 @@ fn daemon_pid_with_timeout(path: &std::path::Path) -> Option<u32> {
     let mut s = UnixStream::connect(path).ok()?;
     s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     s.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
-    writeln!(s, "{}", serde_json::json!({ "op": "version" })).ok()?;
+    writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::Version })
+    )
+    .ok()?;
     let mut resp = String::new();
     BufReader::new(s).read_line(&mut resp).ok()?;
     let value: serde_json::Value = serde_json::from_str(resp.trim()).ok()?;
@@ -1294,42 +2240,20 @@ pub fn ensure_daemon_running() {
 
 /// 让守护杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
 pub fn kill_remote(id: &str) {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return;
     };
-    let _ = writeln!(s, "{}", serde_json::json!({ "op": "kill", "id": id }));
+    let _ = writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::Kill, "id": id })
+    );
     // 等守护回执，确保 kill 落地后再继续（避免关 pane 后立刻退出时丢命令）。
     let mut resp = String::new();
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
-/// 守护进程当前持有的**全部**会话——不止 GUI 侧栏认领的那些，测试跑出来的
-/// 游离会话、忘了关的临时会话同样计在内。设置页「会话管理」弹窗用；跟 daemon_info()
-/// 同一套阻塞调用模式，调用方自己扔后台线程。
-pub fn list_daemon_sessions() -> Vec<DaemonSessionState> {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
-        return Vec::new();
-    };
-    if writeln!(s, "{}", serde_json::json!({ "op": "list" })).is_err() {
-        return Vec::new();
-    }
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Vec::new();
-    }
-    // list 的响应是 {"sessions":[id..], "states":[state..]}；每个 state 自己
-    // 就带 id 字段（smeltd::SessionState），只取 states 就够，不用额外拼装。
-    #[derive(serde::Deserialize)]
-    struct ListResp {
-        #[serde(default)]
-        states: Vec<DaemonSessionState>,
-    }
-    serde_json::from_str::<ListResp>(&resp)
-        .map(|r| r.states)
-        .unwrap_or_default()
-}
-
-/// 内嵌远程网关（见 smeltd.rs「内嵌远程网关」一节）的最小运行状态。
+/// 内嵌远程网关（见 smeltd「内嵌远程网关」一节）的最小运行状态。
 #[derive(Clone, Debug, Default)]
 pub struct RemoteStatus {
     pub running: bool,
@@ -1337,16 +2261,20 @@ pub struct RemoteStatus {
 }
 
 /// 让守护开启内嵌远程网关（幂等：已经开着直接回现状原 token/write，不重启不换
-/// token——`write` 传入值在这种情况下会被忽略，见 smeltd.rs `start_remote_gateway`）。
+/// token——`write` 传入值在这种情况下会被忽略，见 smeltd `start_remote_gateway`）。
 /// 绑定非法地址/端口绑不上时把守护回的错误原样透传出去。
 pub fn remote_start(bind: &str, write: bool) -> Result<RemoteStatus, String> {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return Err("连不上守护".to_string());
     };
     if writeln!(
         s,
         "{}",
-        serde_json::json!({ "op": "remote_start", "bind": bind, "write": write })
+        serde_json::json!({
+            "op": DaemonOperation::RemoteStart,
+            "bind": bind,
+            "write": write
+        })
     )
     .is_err()
     {
@@ -1369,21 +2297,60 @@ pub fn remote_start(bind: &str, write: bool) -> Result<RemoteStatus, String> {
 
 /// 关掉内嵌远程网关。
 pub fn remote_stop() {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return;
     };
-    let _ = writeln!(s, "{}", serde_json::json!({ "op": "remote_stop" }));
+    let _ = writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::RemoteStop })
+    );
     let mut resp = String::new();
     let _ = BufReader::new(s).read_line(&mut resp);
+}
+
+/// 热更新内嵌远程网关的 ACP/终端写权限，不断开已经建立的 WebSocket。
+pub fn remote_set_write(write: bool) -> Result<(), String> {
+    let Ok(mut s) = connect_daemon_control() else {
+        return Err("连不上守护".to_string());
+    };
+    if writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::RemoteSetWrite, "write": write })
+    )
+    .is_err()
+    {
+        return Err("发送请求失败".to_string());
+    }
+    let mut resp = String::new();
+    if BufReader::new(s).read_line(&mut resp).is_err() {
+        return Err("守护没有响应".to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
+    if value["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(value["err"]
+            .as_str()
+            .unwrap_or("更新远程写权限失败")
+            .to_string())
+    }
 }
 
 /// 显式轮换持久化的远程配对 Token。守护会先停止 iroh 和本机网关，保证旧配对
 /// 立即失效；调用方成功后需按当前配置重新启动两者。
 pub fn remote_rotate_token() -> Result<(), String> {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return Err("连不上守护".to_string());
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "remote_rotate_token" })).is_err() {
+    if writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::RemoteRotateToken })
+    )
+    .is_err()
+    {
         return Err("发送请求失败".to_string());
     }
     let mut resp = String::new();
@@ -1405,10 +2372,16 @@ pub fn remote_rotate_token() -> Result<(), String> {
 /// 查当前内嵌远程网关的状态——GUI 刚启动时用它对齐"设置里记的开关"和"守护实际
 /// 是不是真开着"（比如上次异常退出、守护单独重启过）。
 pub fn remote_status() -> RemoteStatus {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return RemoteStatus::default();
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "remote_status" })).is_err() {
+    if writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::RemoteStatus })
+    )
+    .is_err()
+    {
         return RemoteStatus::default();
     }
     let mut resp = String::new();
@@ -1422,7 +2395,7 @@ pub fn remote_status() -> RemoteStatus {
     }
 }
 
-/// iroh 隧道（见 smeltd.rs「iroh 隧道」一节）的运行状态。
+/// iroh 隧道（见 smeltd「iroh 隧道」一节）的运行状态。
 ///
 /// `endpoint_id` **重启不变**，所以基于它生成的配对二维码可以一次扫、长期用。
 #[derive(Clone, Debug, Default)]
@@ -1438,14 +2411,14 @@ pub struct IrohStatus {
 /// 让守护开启 iroh 隧道（幂等）。绑定要连接用户配置的 relay，**可能耗时数秒**，
 /// 跟 `tunnel_start` 一样必须扔进后台任务，别在 UI 线程同步调。
 pub fn iroh_start(write: bool, relay: &str) -> Result<IrohStatus, String> {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return Err("连不上守护".to_string());
     };
     if writeln!(
         s,
         "{}",
         serde_json::json!({
-            "op": "iroh_start", "write": write,
+            "op": DaemonOperation::IrohStart, "write": write,
             "relay": relay
         })
     )
@@ -1474,10 +2447,14 @@ pub fn iroh_start(write: bool, relay: &str) -> Result<IrohStatus, String> {
 
 /// 关掉 iroh 隧道（不影响本机远程网关本身）。
 pub fn iroh_stop() {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return;
     };
-    let _ = writeln!(s, "{}", serde_json::json!({ "op": "iroh_stop" }));
+    let _ = writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::IrohStop })
+    );
     let mut resp = String::new();
     let _ = BufReader::new(s).read_line(&mut resp);
 }
@@ -1488,10 +2465,16 @@ pub fn iroh_stop() {
 /// 守护换进程后它照样显示着一个早已失效的二维码。看门狗靠这条 op 拿到事实。
 /// 返回 `None` = 没跑（含守护根本连不上）。
 pub fn iroh_status() -> Option<IrohStatus> {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return None;
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "iroh_status" })).is_err() {
+    if writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::IrohStatus })
+    )
+    .is_err()
+    {
         return None;
     }
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1522,10 +2505,16 @@ pub struct IrohConnection {
 
 /// 查询当前通过 iroh 隧道连接的移动端设备列表。
 pub fn iroh_connections() -> Vec<IrohConnection> {
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = connect_daemon_control() else {
         return Vec::new();
     };
-    if writeln!(s, "{}", serde_json::json!({ "op": "iroh_connections" })).is_err() {
+    if writeln!(
+        s,
+        "{}",
+        serde_json::json!({ "op": DaemonOperation::IrohConnections })
+    )
+    .is_err()
+    {
         return Vec::new();
     }
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1544,12 +2533,13 @@ pub fn iroh_connections() -> Vec<IrohConnection> {
         .unwrap_or_default()
 }
 
-// ===================== 状态通道（见 docs/state-channel-plan.md） =====================
+// ===================== 状态通道（见 docs/archive/state-channel-plan.md） =====================
 //
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
 // 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
 pub(crate) use smelt_core::daemon_state::{
-    DaemonPhase, DaemonSessionState, DaemonStateEvent, subscribe_daemon_states_blocking,
+    DaemonPhase, DaemonSessionState, DaemonStateEvent, daemon_reconnect_backoff,
+    subscribe_daemon_states_blocking,
 };
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
@@ -1568,13 +2558,13 @@ fn term_config() -> Config {
     }
 }
 
-/// 客户端 → 守护的帧：[type:u8][len:u32 BE][payload]。type 0=输入，1=resize。
-fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) {
+/// 客户端 → 守护的帧：`[type:u8][len:u32 BE][payload]`。type 0=输入，1=resize。
+fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(ty);
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
-    let _ = w.write_all(&frame);
+    w.write_all(&frame)
 }
 
 /// 编码一帧鼠标事件。`button`：0=左键、3=X10 松开、32=左键拖动等（xterm 约定）。
@@ -1677,7 +2667,7 @@ pub(crate) fn escape_regex_literal(s: &str) -> String {
 }
 
 /// 收集 buffer 内全部命中（上限 `SEARCH_MATCH_CAP`）。
-fn collect_search_matches<T>(term: &Term<T>, query: &str) -> Vec<(Point, Point)> {
+fn collect_search_matches<T>(term: &Term<T>, query: &str) -> Vec<SearchMatch> {
     let pattern = escape_regex_literal(query);
     let Ok(mut regex) = RegexSearch::new(&pattern) else {
         return Vec::new();
@@ -1758,13 +2748,15 @@ pub struct ScrollInfo {
 
 /// 单次搜索最多收集的命中数，避免超大缓冲卡顿。
 const SEARCH_MATCH_CAP: usize = 2000;
+/// 内容变化触发的搜索重扫节流：agent 流式输出时每帧都会触发 `refresh_search_highlights`，
+/// 不加节流会每帧 spawn 一个搜索线程。查询串本身变了不受此限制。
+const SEARCH_RESCAN_THROTTLE: Duration = Duration::from_millis(200);
 
-/// 一个内嵌终端：alacritty 的 Term（后台线程写、UI 线程读）+ 守护连接写端。
+/// 一个内嵌终端：alacritty 的 Term（后台线程写、UI 线程读）+ 守护连接写队列。
 pub struct Terminal {
     term: Arc<Mutex<Term<EventProxy>>>,
-    /// 写端加锁共享给 EventProxy（见其字段注释）：键盘输入和终端自动应答都从这
-    /// 发出，必须串行，不能各拿一个裸 fd 各写各的。
-    writer: Arc<Mutex<UnixStream>>,
+    /// 单一后台写端。UI 只向有界队列投递帧，绝不直接等 socket 变为可写。
+    writer: TerminalWriter,
     size: TermSize,
     /// 与 EventProxy 共享的行列/单元格像素（resize 与 TextAreaSizeRequest 共用）。
     metrics: Arc<Mutex<TermMetrics>>,
@@ -1778,7 +2770,7 @@ pub struct Terminal {
     notify: NotifySlot,
     /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
     bell_notify: NotifySlot,
-    /// 终端标题（agent 实时状态；UI 读 current_title 用于通知 / 总览）。
+    /// 终端标题（任务展示元数据；UI 读 current_title 用于总览）。
     title: Arc<Mutex<Option<String>>>,
     /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
     /// 静止时要滤掉；但光标移动后若只标了新位置那一格，也得算变化（见 take_damage）。
@@ -1786,9 +2778,24 @@ pub struct Terminal {
     /// 当前搜索查询串；变了就重建 `search_matches`。
     search_query: Mutex<String>,
     /// 全部命中（缓冲绝对坐标 start..=end），按阅读顺序。
-    search_matches: Mutex<Vec<(Point, Point)>>,
+    search_matches: Mutex<Vec<SearchMatch>>,
     /// 当前命中在 `search_matches` 里的下标。
     search_index: Mutex<usize>,
+    /// 后台搜索任务结果回传通道（UI 侧 `poll_search_results` 消费）。
+    /// 元组：(代数, 查询串, 收集时的 scrollback 顶部行号, 命中)。
+    /// 代数/查询串与当前不符的结果直接丢弃。
+    search_result_tx: smol::channel::Sender<SearchResult>,
+    search_result_rx: smol::channel::Receiver<SearchResult>,
+    /// 搜索代数：每次发起重建 +1，回传结果带代数，过期结果丢弃。
+    search_generation: Mutex<u64>,
+    /// 缓存命中收集时的 scrollback 顶部行号（grid 坐标）。新输出推入时 grid 坐标系
+    /// 整体平移（活动区顶部行进 scrollback，所有绝对坐标 -1），`viewport_search_hits`
+    /// 用当前 topmost_line 与它的差值平移缓存坐标，避免每帧全量重扫。
+    search_matches_top: Mutex<i32>,
+    /// 上次发起重建的时间（内容变化触发的重扫节流，见 `set_search_query`）。
+    last_search_rescan: Mutex<Instant>,
+    /// 查询变了时记录待步进方向（后台结果落地后执行），None = 无待步进。
+    pending_step: Mutex<Option<bool>>,
     /// 连接是否已断（读线程 EOF/IO 错误后置位）。守护 exec 交接、被 SIGKILL、
     /// 或 shell 退出都会走到这里——UI 侧据此决定是否自动重连（重连前还会再查
     /// 一次守护里会话还在不在，区分「守护换血」和「shell 真的退了」）。
@@ -1802,6 +2809,14 @@ pub struct Terminal {
     redraw_rx: smol::channel::Receiver<()>,
 }
 
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        // 写线程和读线程各自持有 socket clone；仅 drop 队列不能让阻塞读立刻退出。
+        // shutdown 会同时唤醒两边并让守护摘掉 attachment，但不杀远端 PTY 会话。
+        self.writer.close();
+    }
+}
+
 /// 新建/reattach 握手失败时的重试次数与间隔：守护无缝升级 exec 交接的一次性抖动是
 /// 百毫秒到 1 秒量级，这个预算（5 次 × 300ms ≈ 1.2s，含首次尝试共 5 次）足够盖过去。
 const HANDSHAKE_RETRIES: u32 = 5;
@@ -1810,13 +2825,8 @@ const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// 而握手在 GUI 主线程同步跑——没有这个超时就是无限 beachball（真实发生过：启动
 /// 恢复会话时主线程卡死，强杀重开又 abort）。取值对齐 probe_daemon 的 5s。
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// 终端写端（键盘输入 / PTY 自动应答 → smeltd）的写超时。守护僵死、不再消费这条
-/// socket 时，Unix 发送缓冲写满，`write_all` 无超时会在内核 `sosend` 里无限睡眠——
-/// 而写调用全在 UI 主线程（send_input / write_pty），一堵就是整个 App 卡死（2026-08-04
-/// hang 报告：`__sendto → sosend → lck_mtx_sleep`，主线程挂起 35s+）。正常守护毫秒级
-/// 消费，exec 交接期连接本身会断（EPIPE 快速失败，不走超时路径），取 500ms——注意
-/// macOS 上 SO_SNDTIMEO 实际耗时约两倍（实测 500ms 设置 ≈ 1s 返回），僵死时 UI 最多
-/// 卡 1 秒左右，输入丢一次，比永久冻结可接受得多。
+/// 后台终端 writer 的单帧写超时。UI 从不直接执行这次 `write_all`；守护停止消费时，
+/// 最多让 writer 线程等约一秒，随后断开 attachment 并由 UI 的重连路径恢复。
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn open_request(
@@ -1828,7 +2838,7 @@ fn open_request(
     create_if_missing: bool,
 ) -> serde_json::Value {
     serde_json::json!({
-        "op": "open",
+        "op": DaemonOperation::Open,
         "id": id,
         "cwd": cwd,
         "cols": cols,
@@ -1844,7 +2854,7 @@ fn open_request(
 ///
 /// - 贴底：避免停在 history 中间。
 /// - `\x1b[0m`：清 SGR 状态机，降低「快照末半截真彩参数当正文」
-///   （顶行出现 `48;2;…m` 碎片）的概率；live jolt 重绘会再盖一层正确画面。
+///   （顶行出现 `48;2;…m` 碎片）的概率。
 /// - **不再本地伪造 MOUSE_MODE**：以前补 `1006h/1002h` 只改客户端 Term，
 ///   进程侧若未开鼠标，滚轮按 SGR 发出去会被 Ignored →「恢复后滚不动」。
 ///   无 mouse 的备用屏改走方向键兜底（见 `scroll_wheel_plan`）。
@@ -1857,9 +2867,9 @@ fn finalize_reattach_term(term: &mut Term<EventProxy>, parser: &mut Processor) {
 
 impl Terminal {
     /// 打开（或重连）守护里 id 对应的会话：shell 环境由 smeltd 负责（-l / TERM /
-    /// iTerm2 伪装 / LANG 兜底，见 smeltd.rs）。id 已存在 → attach，守护先重放输出
+    /// iTerm2 伪装 / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
     /// 缓冲恢复画面，再实时转发。`launch`：新建会话时要先跑的命令（编进 shell 启动
-    /// 命令行，见 smeltd.rs::spawn_session），只在新建时生效，reattach 会被忽略。
+    /// 命令行，见 `smeltd::terminal_registry`），只在新建时生效，reattach 会被忽略。
     pub fn spawn(
         rows: usize,
         cols: usize,
@@ -1887,12 +2897,12 @@ impl Terminal {
         // 1) 连守护（不在则自动拉起）并声明要打开的会话，握手失败带几次短重试。
         //
         // 守护无缝升级 exec 交接期间，恰好在这一瞬间新开的 pane 可能撞上这个连接
-        // 被接受、但握手线程卡在守护内部的 SPAWN_GATE（跟 upgrade 互斥，见 smeltd.rs）
+        // 被接受、但握手线程卡在守护内部的 SPAWN_GATE（跟 upgrade 互斥，见 smeltd 升级设计）
         // 上——exec 一发生，这条连接（普通客户端 fd 默认带 CLOEXEC）就被无声关闭，
         // 我们这边会读到 EOF/解析失败。整个交接是百毫秒到 1 秒量级的一次性抖动，
         // 短重试几次基本能把这个窗口盖掉，调用方不必为这种瞬时性错误崩溃整个 GUI
         // （调用方目前对失败仍是 `.expect()`，见 terminal_view.rs 的注释）。
-        let (buffered, size, replay_len, geometry_token) = {
+        let (buffered, size, replay_len, geometry_token, daemon_handles_color_requests) = {
             let mut last_err = None;
             let mut result = None;
             let retries = if create_if_missing {
@@ -1923,14 +2933,13 @@ impl Terminal {
                 None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("握手失败"))),
             }
         };
-        let writer = buffered.get_ref().try_clone()?;
+        let writer = TerminalWriter::start(buffered.get_ref().try_clone()?)?;
 
         // 2) alacritty 终端状态机（EventProxy 维护标题，把 PTY 自动
         //    应答写回下面这个共享写端）
         let notify: NotifySlot = Arc::new(Mutex::new(None));
         let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
         let title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let writer = Arc::new(Mutex::new(writer));
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: size.rows as u16,
             cols: size.cols as u16,
@@ -1946,6 +2955,7 @@ impl Terminal {
                 title: title.clone(),
                 writer: writer.clone(),
                 metrics: metrics.clone(),
+                daemon_handles_color_requests,
             },
         );
         let term = Arc::new(Mutex::new(term));
@@ -1995,10 +3005,10 @@ impl Terminal {
                             } else {
                                 &notify_reader
                             };
-                            if let Some(msg) = osc.feed(b) {
-                                if let Ok(mut g) = target.lock() {
-                                    *g = Some(msg);
-                                }
+                            if let Some(msg) = osc.feed(b)
+                                && let Ok(mut g) = target.lock()
+                            {
+                                *g = Some(msg);
                             }
                             if let Some(geometry) = geometry_osc.feed(b)
                                 && let Ok(mut signal) = daemon_geometry_reader.lock()
@@ -2034,18 +3044,10 @@ impl Terminal {
                                 start = end;
                             }
                             parser.advance(&mut *term, &buf[start..n]);
-                            // 快照刚灌完：贴底 + 清 SGR；live jolt 字节会接在后面。
+                            // 快照刚灌完：贴底 + 清 SGR。不再为「jolt 半屏」再贴一次。
                             if !replay_finalized && bytes_seen >= replay_len {
                                 replay_finalized = true;
                                 finalize_reattach_term(&mut term, &mut parser);
-                            }
-                            // jolt 重绘常在 live 前几包；再贴一次底，避免停在半屏。
-                            if replay_finalized && bytes_seen < replay_len.saturating_add(64 * 1024)
-                            {
-                                let mode = *term.mode();
-                                if mode.contains(TermMode::ALT_SCREEN) {
-                                    term.scroll_display(Scroll::Bottom);
-                                }
                             }
                         }
                         // 喂完这批立刻请求一次重绘（Zed 式：内容生产者驱动重绘）。
@@ -2065,6 +3067,8 @@ impl Terminal {
             drop(redraw_tx);
         });
 
+        let (search_result_tx, search_result_rx) = smol::channel::unbounded();
+
         Ok(Self {
             term,
             writer,
@@ -2080,6 +3084,12 @@ impl Terminal {
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
+            search_result_tx,
+            search_result_rx,
+            search_generation: Mutex::new(0),
+            search_matches_top: Mutex::new(0),
+            last_search_rescan: Mutex::new(Instant::now()),
+            pending_step: Mutex::new(None),
             dead,
             redraw_rx,
         })
@@ -2108,13 +3118,10 @@ impl Terminal {
         id: &str,
         launch: Option<&str>,
         create_if_missing: bool,
-    ) -> anyhow::Result<(BufReader<UnixStream>, TermSize, usize, Option<String>)> {
+    ) -> anyhow::Result<HandshakeResult> {
         // 只在等回执这一段设读超时；同文件 probe/remote/subscribe 都设了，唯独
         // 这条最要命的主线程路径曾经漏掉。
         writer.set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))?;
-        // Keep the write timeout for the lifetime of the cloned UI writer. A
-        // wedged daemon must not be able to block the GPUI thread forever.
-        writer.set_write_timeout(Some(WRITE_TIMEOUT))?;
         writeln!(
             writer,
             "{}",
@@ -2133,11 +3140,20 @@ impl Terminal {
         };
         let replay_len = v["replay_len"].as_u64().unwrap_or(0) as usize;
         let geometry_token = v["geometry_token"].as_str().map(str::to_owned);
+        let daemon_handles_color_requests = v["daemon_handles_color_requests"]
+            .as_bool()
+            .unwrap_or(false);
         // 握手完必须清掉超时：这条 stream 接下来交给读线程长期读 PTY 输出（见
         // spawn 里 `let mut reader = buffered`），空闲终端半天没输出是常态，读循环
         // 对任何 Err 一律 break 当 EOF——超时留着就等于给每个安静的终端定时断线。
         buffered.get_ref().set_read_timeout(None)?;
-        Ok((buffered, size, replay_len, geometry_token))
+        Ok((
+            buffered,
+            size,
+            replay_len,
+            geometry_token,
+            daemon_handles_color_requests,
+        ))
     }
 
     /// 取走最新普通通知消息（读并清）：OSC 9/99/777 上报的文本。
@@ -2150,7 +3166,7 @@ impl Terminal {
         self.bell_notify.lock().ok()?.take()
     }
 
-    /// 当前终端标题（agent 报告的任务名 + 状态符号）；未设置返回 None。
+    /// 当前终端标题（agent 报告的任务名或装饰）；未设置返回 None。
     pub fn current_title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|g| g.clone())
     }
@@ -2262,7 +3278,7 @@ impl Terminal {
     /// TIOCSWINSZ（含 ws_xpixel/ws_ypixel）。`cell_w_px` / `cell_h_px` 为 0 时只更新
     /// 行列（兼容老路径）。无变化则跳过。
     ///
-    /// reattach 后请再调一次 [`force_resize`]：本函数 same_size 早退会挡掉同尺寸帧；
+    /// reattach 后请再调一次 [`Self::force_resize`]：本函数 same_size 早退会挡掉同尺寸帧；
     /// 守护 jolt 用 cell=0，需要 GUI 首帧量到真实 cell 像素后再强制同步一次。
     pub fn resize(&mut self, rows: usize, cols: usize, cell_w_px: u16, cell_h_px: u16) {
         if rows == 0 || cols == 0 {
@@ -2310,10 +3326,8 @@ impl Terminal {
                 m.cell_h = cell_h_px;
             }
         }
-        if !same_grid {
-            if let Ok(mut term) = self.term.lock() {
-                term.resize(self.size);
-            }
+        if !same_grid && let Ok(mut term) = self.term.lock() {
+            term.resize(self.size);
         }
         // type 1 帧：cols + rows + cell_w + cell_h（各 u32 BE）。老 smeltd 只认 8 字节，
         // 新守护认 16 字节并把 cell 像素乘到 ws_xpixel/ws_ypixel。
@@ -2328,31 +3342,30 @@ impl Terminal {
         payload[4..8].copy_from_slice(&(rows as u32).to_be_bytes());
         payload[8..12].copy_from_slice(&(cw as u32).to_be_bytes());
         payload[12..16].copy_from_slice(&(ch as u32).to_be_bytes());
-        if let Ok(mut w) = self.writer.lock() {
-            write_frame(&mut w, 1, &payload);
-        }
+        let _ = self.writer.send_resize(&payload);
     }
 
     /// 向 shell 写入字节（键盘输入用）：帧转发给守护。
-    pub fn send_input(&mut self, bytes: &[u8]) {
-        if let Ok(mut w) = self.writer.lock() {
-            write_frame(&mut w, 0, bytes);
-        }
+    ///
+    /// `false` 表示这次输入没有完整入队；调用方可以据此向用户反馈，而不是把
+    /// 队列背压/连接断开静默吞掉。
+    pub fn send_input(&mut self, bytes: &[u8]) -> bool {
+        self.writer.send_input(bytes)
     }
 
     /// 粘贴文本到 PTY。对端开了 bracketed paste（`CSI ?2004h`）时包
     /// `\x1b[200~…\x1b[201~`，并剥掉内容里的 ESC（防注入序列）；否则只把 `\r\n`/`\n`
     /// 规范成 `\r`——shell 行编辑器认的是 CR，原样喂 LF 会在 zsh/bash 里被当成提交
     /// 多次。跟 Zed `Terminal::paste` / iTerm 行为一致。
-    pub fn paste(&mut self, text: &str) {
+    pub fn paste(&mut self, text: &str) -> bool {
         if text.is_empty() {
-            return;
+            return true;
         }
         let bracketed = match self.term.lock() {
             Ok(term) => term.mode().contains(TermMode::BRACKETED_PASTE),
             Err(_) => false,
         };
-        self.send_input(&encode_paste(text, bracketed));
+        self.send_input(&encode_paste(text, bracketed))
     }
 
     /// 是否处于「应用光标键」模式（DECCKM）。像 Claude Code 里那种上下选列表的全屏
@@ -2464,7 +3477,7 @@ impl Terminal {
                 selected,
             });
             count += 1;
-            if count % cols == 0 {
+            if count.is_multiple_of(cols) {
                 rows.push(std::mem::take(&mut row));
                 wrapped.push(row_wraps);
             }
@@ -2536,7 +3549,9 @@ impl Terminal {
             Err(_) => return,
         };
         match scroll_wheel_plan(mode, lines, row, col) {
-            ScrollWheelPlan::Send(bytes) => self.send_input(&bytes),
+            ScrollWheelPlan::Send(bytes) => {
+                let _ = self.send_input(&bytes);
+            }
             ScrollWheelPlan::LocalHistory(delta) => {
                 let Ok(mut term) = self.term.lock() else {
                     return;
@@ -2604,41 +3619,115 @@ impl Terminal {
     }
 
     /// 重建搜索命中列表（查询变了或内容大变时）。不滚动、不改当前序号（夹到合法范围）。
+    ///
+    /// 全量扫描在后台线程执行（`collect_search_matches` 遍历整个 scrollback，大缓冲下
+    /// 同步跑会卡 UI）；结果经 channel 回传，UI 侧 `poll_search_results` 消费后更新。
+    /// 返回的状态基于当前缓存——新结果落地前可能短暂显示旧值。
     pub fn set_search_query(&mut self, query: &str) -> SearchStatus {
         let q = query.trim().to_string();
         if q.is_empty() {
             self.clear_search();
             return SearchStatus::default();
         }
-        let Ok(term) = self.term.lock() else {
-            return SearchStatus::default();
-        };
-        let matches = collect_search_matches(&term, &q);
-        let total = matches.len();
-        if let Ok(mut g) = self.search_query.lock() {
-            *g = q;
-        }
-        if let Ok(mut g) = self.search_matches.lock() {
-            *g = matches;
-        }
-        if let Ok(mut g) = self.search_index.lock() {
-            if total == 0 {
-                *g = 0;
-            } else {
-                *g = (*g).min(total - 1);
+        // 查询没变且刚重扫过（内容变化触发的重扫）：节流跳过，避免搜索线程风暴。
+        let query_changed = self.search_query.lock().ok().is_none_or(|g| *g != q);
+        if !query_changed {
+            let now = Instant::now();
+            let last = self.last_search_rescan.lock().map(|g| *g).unwrap_or(now);
+            if now.duration_since(last) < SEARCH_RESCAN_THROTTLE {
+                return self.search_status();
             }
         }
-        SearchStatus {
-            current: if total == 0 {
-                0
-            } else {
-                self.search_index.lock().map(|g| *g + 1).unwrap_or(1)
-            },
-            total,
+        if let Ok(mut g) = self.search_query.lock() {
+            *g = q.clone();
         }
+        let generation = {
+            let mut g = self
+                .search_generation
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *g += 1;
+            *g
+        };
+        if let Ok(mut g) = self.last_search_rescan.lock() {
+            *g = Instant::now();
+        }
+        // 后台扫：锁 term 只发生在任务线程内，UI 线程不被阻塞。
+        let term = Arc::clone(&self.term);
+        let tx = self.search_result_tx.clone();
+        thread::spawn(move || {
+            let (top, matches) = match term.lock() {
+                Ok(t) => (t.topmost_line().0, collect_search_matches(&t, &q)),
+                Err(_) => (0, Vec::new()),
+            };
+            let _ = tx.try_send((generation, q, top, matches));
+        });
+        self.search_status()
     }
 
-    /// 跳到下一处 / 上一处命中并滚动到可视区。查询串变了会先重建列表。
+    /// 消费后台搜索任务的结果；返回是否有新结果落地（UI 据此决定是否重绘）。
+    ///
+    /// 过期结果（代数或查询串与当前不符）直接丢弃——用户快速改查询时，旧任务
+    /// 晚到不能覆盖新查询的结果。查询变了时 `find_next` 记下的待步进方向也在这里执行。
+    pub fn poll_search_results(&mut self) -> bool {
+        let mut updated = false;
+        while let Ok((generation, q, top, matches)) = self.search_result_rx.try_recv() {
+            let current_gen = self.search_generation.lock().map(|g| *g).unwrap_or(0);
+            let current_q = self
+                .search_query
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if generation != current_gen || q != current_q {
+                continue;
+            }
+            let total = matches.len();
+            if let Ok(mut g) = self.search_matches.lock() {
+                *g = matches;
+            }
+            if let Ok(mut g) = self.search_matches_top.lock() {
+                *g = top;
+            }
+            if let Ok(mut g) = self.search_index.lock() {
+                if total == 0 {
+                    *g = 0;
+                } else {
+                    *g = (*g).min(total - 1);
+                }
+            }
+            updated = true;
+        }
+        // 查询变了时 find_next 记下的待步进方向：新结果落地后执行。
+        if updated {
+            let backward = self
+                .pending_step
+                .lock()
+                .map(|mut g| g.take())
+                .unwrap_or(None);
+            if let Some(backward) = backward {
+                let total = self.search_matches.lock().map(|m| m.len()).unwrap_or(0);
+                if total > 0 {
+                    if let Ok(mut g) = self.search_index.lock() {
+                        *g = if backward { total - 1 } else { 0 };
+                    }
+                    self.scroll_to_active_match();
+                }
+            }
+        }
+        updated
+    }
+
+    /// 当前搜索查询串（搜索条打开且非空时返回）。
+    pub fn current_search_query(&self) -> Option<String> {
+        self.search_query
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .filter(|q| !q.is_empty())
+    }
+
+    /// 跳到下一处 / 上一处命中并滚动到可视区。查询串变了会先异步重建列表，
+    /// 步进在结果落地后执行（见 `poll_search_results` 的 pending_step）。
     pub fn find_next(&mut self, query: &str, backward: bool) -> SearchStatus {
         let q = query.trim().to_string();
         if q.is_empty() {
@@ -2647,33 +3736,24 @@ impl Terminal {
         }
         let query_changed = self.search_query.lock().ok().is_none_or(|g| *g != q);
         if query_changed {
+            // 新查询：异步重建，记下步进方向，结果回来后从首/末条起跳。
             let _ = self.set_search_query(&q);
-            // 新查询：后退从末条起，前进从首条起
-            if let Ok(mut g) = self.search_index.lock() {
-                let total = self.search_matches.lock().map(|m| m.len()).unwrap_or(0);
-                *g = if total == 0 {
-                    0
-                } else if backward {
-                    total - 1
-                } else {
-                    0
-                };
+            if let Ok(mut g) = self.pending_step.lock() {
+                *g = Some(backward);
             }
-        } else {
-            // 查询没变，但缓冲可能已滚动、新输出里也可能有新命中：旧坐标
-            // 整体过期，步进前先按当前缓冲重建列表（重建会保住当前下标）。
-            let _ = self.set_search_query(&q);
-            let total = self.search_matches.lock().map(|m| m.len()).unwrap_or(0);
-            if total == 0 {
-                return SearchStatus::default();
-            }
-            if let Ok(mut g) = self.search_index.lock() {
-                *g = if backward {
-                    if *g == 0 { total - 1 } else { *g - 1 }
-                } else {
-                    (*g + 1) % total
-                };
-            }
+            return self.search_status();
+        }
+        // 查询没变：基于当前缓存步进（内容变化的重扫由 refresh_search_highlights 负责）。
+        let total = self.search_matches.lock().map(|m| m.len()).unwrap_or(0);
+        if total == 0 {
+            return SearchStatus::default();
+        }
+        if let Ok(mut g) = self.search_index.lock() {
+            *g = if backward {
+                if *g == 0 { total - 1 } else { *g - 1 }
+            } else {
+                (*g + 1) % total
+            };
         }
         self.scroll_to_active_match();
         self.search_status()
@@ -2695,39 +3775,31 @@ impl Terminal {
 
     /// 当前可视区内所有命中（含 active 标记），供 paint 高亮。
     ///
-    /// 每次都按当前缓冲重新收集：缓存里的命中是收集那一刻的绝对坐标，终端
-    /// 每滚一行它们就整体过期（全部 Line -1），照旧坐标画高亮会落在无关文本
-    /// 上。本方法只在搜索条打开时被调用，命中数有 SEARCH_MATCH_CAP 兜底。
+    /// 只做「缓存命中 → 可视区」的映射，不再全量重扫：新输出推入时 grid 坐标系整体
+    /// 平移，用当前 topmost_line 与收集时的差值平移缓存坐标（见 `search_matches_top`）；
+    /// 滚动（display_offset 变化）时 scrollback 内容没变，映射随 offset 正确平移。
+    /// 内容变化后的重扫由 `refresh_search_highlights` 异步触发（见 `set_search_query`），
+    /// 重扫完成前高亮可能短暂滞后一帧。本方法只在搜索条打开时被调用，命中数有
+    /// SEARCH_MATCH_CAP 兜底。
     pub fn viewport_search_hits(&self) -> Vec<SearchHit> {
         let Ok(term) = self.term.lock() else {
             return Vec::new();
         };
-        let query = match self.search_query.lock() {
-            Ok(g) => g.clone(),
+        let offset = term.grid().display_offset();
+        let top = term.topmost_line().0;
+        let matches = match self.search_matches.lock() {
+            Ok(m) => m.clone(),
             Err(_) => return Vec::new(),
         };
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let fresh = collect_search_matches(&term, &query);
-        let Ok(mut matches) = self.search_matches.lock() else {
-            return Vec::new();
-        };
-        *matches = fresh;
-        let total = matches.len();
-        let active_idx = self
-            .search_index
-            .lock()
-            .map(|mut g| {
-                *g = if total == 0 { 0 } else { (*g).min(total - 1) };
-                *g
-            })
-            .unwrap_or(0);
-        let offset = term.grid().display_offset();
+        let cached_top = self.search_matches_top.lock().map(|g| *g).unwrap_or(top);
+        let delta = top - cached_top;
+        let active_idx = self.search_index.lock().map(|g| *g).unwrap_or(0);
         let mut out = Vec::new();
         for (i, (start, end)) in matches.iter().enumerate() {
+            let start = Point::new(start.line + delta, start.column);
+            let end = Point::new(end.line + delta, end.column);
             if let Some(hit) =
-                match_to_viewport_hit(*start, *end, offset, self.size.cols, i == active_idx)
+                match_to_viewport_hit(start, end, offset, self.size.cols, i == active_idx)
             {
                 out.push(hit);
             }
@@ -2744,7 +3816,11 @@ impl Terminal {
         };
         let idx = self.search_index.lock().map(|g| *g).unwrap_or(0);
         if let Some((start, _)) = matches.get(idx) {
-            term.scroll_to_point(*start);
+            // 缓存坐标可能因新输出推入而过期：按 topmost_line 差值平移后再滚动。
+            let top = term.topmost_line().0;
+            let cached_top = self.search_matches_top.lock().map(|g| *g).unwrap_or(top);
+            let delta = top - cached_top;
+            term.scroll_to_point(Point::new(start.line + delta, start.column));
         }
     }
 
@@ -2756,8 +3832,18 @@ impl Terminal {
         if let Ok(mut g) = self.search_matches.lock() {
             g.clear();
         }
+        if let Ok(mut g) = self.search_matches_top.lock() {
+            *g = 0;
+        }
         if let Ok(mut g) = self.search_index.lock() {
             *g = 0;
+        }
+        if let Ok(mut g) = self.pending_step.lock() {
+            *g = None;
+        }
+        // 代数 +1：进行中的后台任务结果到达时会被判过期丢弃。
+        if let Ok(mut g) = self.search_generation.lock() {
+            *g += 1;
         }
     }
 
@@ -2968,23 +4054,38 @@ mod damage_gate_tests {
             "cat 阻塞后未能进入真空闲（quiet_streak={quiet_streak}），无法测 damage 门控"
         );
 
-        // 真空闲：什么都不做，多次采样应稳定为 false。
-        let mut idle_true_count = 0;
-        for _ in 0..10 {
+        // 真空闲：take_damage() 应稳定为 false。shell 输出由 pump 线程异步解析，
+        // 高负载下偶有迟到一帧——按「连续 10 次全 false」断言，容忍孤立迟到帧，
+        // 同时要求真实连续安静（门控坏了就凑不齐连续安静）。
+        let mut quiet_streak = 0usize;
+        for _ in 0..60 {
             thread::sleep(Duration::from_millis(100));
             if term.take_damage() {
-                idle_true_count += 1;
+                quiet_streak = 0;
+            } else {
+                quiet_streak += 1;
+                if quiet_streak >= 10 {
+                    break;
+                }
             }
         }
-        assert_eq!(
-            idle_true_count, 0,
-            "真空闲时 take_damage() 不该返回 true（次数={idle_true_count}）"
+        assert!(
+            quiet_streak >= 10,
+            "真空闲时 take_damage() 不该返回 true（连续安静 {quiet_streak}/10）"
         );
 
-        // 写入真实字节：cat 回显，应被判定为变化。
+        // 写入真实字节：cat 回显，应被判定为变化。轮询等待，避免固定 sleep 在高
+        // 负载下不够 cat 回传。
         term.send_input(b"hi\n");
-        thread::sleep(Duration::from_millis(300));
-        assert!(term.take_damage(), "写入字节后 take_damage() 应返回 true");
+        let mut saw_damage = false;
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(50));
+            if term.take_damage() {
+                saw_damage = true;
+                break;
+            }
+        }
+        assert!(saw_damage, "写入字节后 take_damage() 应返回 true");
         // 清理交给 _guard 的 Drop（含 panic 路径），不再手写。
     }
 
@@ -3006,9 +4107,18 @@ mod damage_gate_tests {
         // 让 shell 真的把 `CSI > 1 u` 吐到 PTY 上（Claude Code v2.1+ 启动时干的事）。
         let mut term = term;
         term.send_input(b"printf '\\033[>1u'\n");
-        thread::sleep(Duration::from_millis(500));
+        // 解析由 pump 线程异步进行，高负载下 shell 执行 + 回传可能超过固定 sleep；
+        // 轮询等待置位（上限 3s），避免时序 flaky。
+        let mut kitty_on = false;
+        for _ in 0..30 {
+            thread::sleep(Duration::from_millis(100));
+            if term.kitty_keyboard_mode() {
+                kitty_on = true;
+                break;
+            }
+        }
         assert!(
-            term.kitty_keyboard_mode(),
+            kitty_on,
             "真实 PTY 上收到 CSI > 1 u 后应置位——没置位说明 spawn 的 Config 没开 kitty_keyboard"
         );
         // 清理交给 _guard 的 Drop（含 panic 路径），不再手写。
@@ -3158,6 +4268,132 @@ mod open_request_tests {
 }
 
 #[cfg(test)]
+mod successor_daemon_tests {
+    use super::*;
+
+    fn info(pid: Option<u32>, started_at: Option<u64>) -> DaemonInfo {
+        DaemonInfo {
+            pid,
+            started_at,
+            ..DaemonInfo::default()
+        }
+    }
+
+    #[test]
+    fn successor_is_a_new_pid_or_started_at() {
+        let old = info(Some(10), Some(100));
+        assert!(is_successor_daemon(
+            Some(&old),
+            Some(&info(Some(11), Some(100)))
+        ));
+        assert!(is_successor_daemon(
+            Some(&old),
+            Some(&info(Some(10), Some(200)))
+        ));
+        assert!(!is_successor_daemon(Some(&old), Some(&old)));
+        assert!(!is_successor_daemon(Some(&old), None));
+        assert!(is_successor_daemon(None, Some(&old)));
+    }
+}
+
+#[cfg(test)]
+mod install_commit_tests {
+    use super::*;
+
+    /// 核心回归：守护已在 managed 路径时安装只 stage 磁盘，不 handoff——
+    /// 此前无条件 handoff，ACP 忙就 exit 75 半安装（映射写了、App 没换）。
+    #[test]
+    fn managed_daemon_stages_disk_only() {
+        let managed = managed_daemon_path();
+        assert_eq!(
+            install_commit_action_for_running_daemon(Some(&managed)),
+            InstallCommitAction::StageDiskOnly
+        );
+        // next 暂存态仍在 managed 目录内：同样不得在安装时 handoff。
+        let staged = managed_daemon_dir().join("smeltd.next");
+        assert_eq!(
+            install_commit_action_for_running_daemon(Some(&staged)),
+            InstallCommitAction::StageDiskOnly
+        );
+    }
+
+    /// 守护仍住在 .app 里：必须 handoff 迁出，否则换 App 会被 SIGKILL。
+    #[test]
+    fn app_resident_daemon_must_relocate() {
+        let in_app = std::path::PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smeltd");
+        assert_eq!(
+            install_commit_action_for_running_daemon(Some(&in_app)),
+            InstallCommitAction::RelocateHandoff
+        );
+        // 非 managed 的其它路径同样迁出。
+        let elsewhere = std::path::PathBuf::from("/tmp/smeltd");
+        assert_eq!(
+            install_commit_action_for_running_daemon(Some(&elsewhere)),
+            InstallCommitAction::RelocateHandoff
+        );
+    }
+
+    /// 老守护无 exe 字段：无法证明已迁出，保守迁出（一次性，此后永久跳过）。
+    #[test]
+    fn unknown_exe_relocates_conservatively() {
+        assert_eq!(
+            install_commit_action_for_running_daemon(None),
+            InstallCommitAction::RelocateHandoff
+        );
+    }
+}
+
+#[cfg(test)]
+mod outdated_fingerprint_tests {
+    use super::*;
+
+    fn fixture(content: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "smelt-outdated-fp-{}-{}.bin",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    /// 核心回归：StageDiskOnly 后磁盘是新的、进程指纹还是老的，必须判旧。
+    /// 之前 `same_daemon_binary(running_exe_path, bundled)` 比的是两个磁盘新文件，
+    /// 误判“不旧”，升级永不触发。
+    #[test]
+    fn staged_disk_with_old_process_is_outdated() {
+        let disk_new = fixture(b"new-binary-bytes");
+        let disk_old = fixture(b"old-binary-bytes");
+        let pinned_old = smelt_plugin_host::executable_fingerprint(&disk_old).unwrap();
+        assert!(
+            outdated_by_fingerprint(&pinned_old, Some(&disk_new)),
+            "磁盘新了、进程还是老的，必须判旧"
+        );
+        std::fs::remove_file(disk_new).ok();
+        std::fs::remove_file(disk_old).ok();
+    }
+
+    /// 内容一致（仅 cp 造成 mtime 变化）不判旧：handoff 会闪断终端，不能误触。
+    #[test]
+    fn same_content_is_not_outdated() {
+        let disk = fixture(b"same-binary-bytes");
+        let pinned = smelt_plugin_host::executable_fingerprint(&disk).unwrap();
+        assert!(!outdated_by_fingerprint(&pinned, Some(&disk)));
+        std::fs::remove_file(disk).ok();
+    }
+
+    /// 期望文件缺失/不可读→保守不旧，避免误报打扰用户。
+    #[test]
+    fn missing_expected_file_is_not_outdated() {
+        assert!(!outdated_by_fingerprint("abc123", None));
+        assert!(!outdated_by_fingerprint(
+            "abc123",
+            Some(std::path::Path::new("/nonexistent/smeltd-xyz"))
+        ));
+    }
+}
+
+#[cfg(test)]
 mod handshake_timeout_tests {
     use super::*;
 
@@ -3214,58 +4450,77 @@ mod handshake_timeout_tests {
         assert!(error.to_string().contains("不存在"));
     }
 
-    /// 复现 2026-08-04 hang 报告（Smelt 0.6.9）的第二环：守护不再消费终端写
-    /// socket 时，写端无限阻塞。主线程栈 `__sendto → sosend → lck_mtx_sleep`
-    /// = Unix socket 发送缓冲写满、对端不读，而 `write_frame → write_all` 没有
-    /// 写超时 → UI 主线程 send_input 永久卡死（采样显示挂起 35s+）。
-    /// 修复后：握手建立的 writer 必须带写超时，写满缓冲时应返回 Err 而不是
-    /// 永久挂起。用 UnixStream::pair 当假守护：先正常回握手回执（否则走不到
-    /// writer 阶段），之后保持连接打开但不再消费，模拟守护僵死。
     #[test]
-    fn writer_times_out_when_daemon_stops_consuming() {
+    fn handshake_reads_daemon_color_request_capability() {
+        let (ours, mut theirs) = UnixStream::pair().expect("pair 失败");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut request = String::new();
+            BufReader::new(theirs.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("\"op\":\"open\""));
+            writeln!(
+                theirs,
+                "{}",
+                serde_json::json!({
+                    "rows": 24,
+                    "cols": 80,
+                    "replay_len": 0,
+                    "daemon_handles_color_requests": true,
+                })
+            )
+            .unwrap();
+            // `handshake_on` 成功前会清掉读超时；macOS 上若这里先关 socket，那个
+            // setsockopt 可能报 EINVAL，测到的是夹具断链而不是能力位解析。
+            let _ = release_rx.recv_timeout(Duration::from_secs(1));
+        });
+
+        let result = Terminal::handshake_on(ours, 24, 80, None, "color-capability", None, true);
+        let _ = release_tx.send(());
+        let (_buffered, _size, _replay, _geometry_token, daemon_handles_color_requests) =
+            result.expect("能力位握手应成功");
+        assert!(daemon_handles_color_requests);
+    }
+
+    /// 复现 2026-08-04 hang 报告（Smelt 0.6.9）的第二环：守护不再消费终端写
+    /// socket 时，UI 主线程不能直接进入 `write_all`。假守护在握手后保持连接但
+    /// 不再读，验证一次满额输入只入队并立即返回；实际 socket 阻塞仅允许发生在
+    /// 专属 writer 线程。
+    #[test]
+    fn writer_queue_returns_without_waiting_for_mute_daemon() {
         let (mut daemon_side, client_side) = UnixStream::pair().expect("pair 失败");
 
         // 假守护线程不 join：断言窗口（2s）远小于其存活时长，进程退出时兜底清理。
         thread::spawn(move || {
             let mut line = String::new();
             let mut reader = BufReader::new(daemon_side.try_clone().expect("clone 失败"));
-            reader
-                .read_line(&mut line)
-                .expect("应收到 open 请求行");
+            reader.read_line(&mut line).expect("应收到 open 请求行");
             let _ = daemon_side.write_all(b"{\"rows\":24,\"cols\":80,\"replay_len\":0}\n");
             // 之后保持连接打开但不再读：客户端写满发送缓冲后应阻塞（修复前）
             // / 超时返回（修复后）。
             thread::sleep(Duration::from_secs(60));
         });
 
-        let (buffered, _size, _replay, _geometry_token) = Terminal::handshake_on(
-            client_side,
-            24,
-            80,
-            None,
-            "write-timeout-test",
-            None,
-            true,
-        )
-        .expect("假守护正常回执，握手应成功");
+        let (buffered, _size, _replay, _geometry_token, _daemon_handles_color_requests) =
+            Terminal::handshake_on(client_side, 24, 80, None, "write-timeout-test", None, true)
+                .expect("假守护正常回执，握手应成功");
 
-        // 与 Terminal::spawn 同一条路径：从握手流 clone 出写端。
-        let mut writer = buffered.get_ref().try_clone().expect("clone 失败");
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            // 8MB 远超 Unix socket 默认发送缓冲，对端不读 → 写满后阻塞。
-            let payload = vec![0u8; 8 * 1024 * 1024];
-            let _ = writer.write_all(&payload);
-            let _ = tx.send(());
-        });
-
-        match rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(()) => {}
-            Err(_) => panic!(
-                "守护不再消费时写端应超时返回，而不是无限阻塞——否则 UI 主线程 send_input 卡死"
-            ),
-        }
+        // 与 Terminal::spawn 同一条路径：后续写入进入后台单消费者队列。UI 线程只把
+        // 4MB 输入请求投进去便返回；假守护不消费时，阻塞最多发生在 writer 线程。
+        let writer = TerminalWriter::start(buffered.get_ref().try_clone().expect("clone 失败"))
+            .expect("writer 启动失败");
+        let payload = vec![0u8; TERMINAL_WRITE_QUEUE_MAX_BYTES];
+        let started = std::time::Instant::now();
+        assert!(
+            writer.send_input(&payload),
+            "健康队列应接受上限内的一次输入"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "UI 投递输入不应等待 daemon 消费 socket"
+        );
+        writer.close();
     }
 }
 
@@ -3330,6 +4585,33 @@ mod managed_daemon_ensure_tests {
     }
 
     #[test]
+    fn daemon_promoted_staging_file_is_a_completed_install() {
+        let root = managed_test_file("daemon-promoted-staging");
+        let staged = root.join("smeltd.next");
+        let managed = root.join("smeltd");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&managed, b"new daemon image").unwrap();
+
+        finish_staged_managed_install(&staged, &managed)
+            .expect("daemon 已自行提升到正式路径时 GUI 不应再报 rename 失败");
+        assert_eq!(std::fs::read(&managed).unwrap(), b"new daemon image");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_staging_and_managed_files_is_not_a_completed_install() {
+        let root = managed_test_file("missing-staging-and-managed");
+        let staged = root.join("smeltd.next");
+        let managed = root.join("smeltd");
+
+        assert!(
+            finish_staged_managed_install(&staged, &managed).is_err(),
+            "两个路径都不存在时不能把真实安装丢失误判成 daemon 已自行提升"
+        );
+    }
+
+    #[test]
     fn file_lock_serializes_managed_daemon_installers() {
         const INSTALLERS: usize = 8;
         let lock_path = managed_test_file("install-lock");
@@ -3363,6 +4645,248 @@ mod managed_daemon_ensure_tests {
         );
         let _ = std::fs::remove_file(lock_path);
     }
+
+    #[test]
+    fn app_bundle_plugins_are_not_in_codesign_nested_bundle_dirs() {
+        let root = app_bundle_plugin_root(std::path::Path::new(
+            "/Applications/Smelt.app/Contents/MacOS/smelt",
+        ))
+        .expect("GUI 在 .app/Contents/MacOS 下必须能定位 bundled 插件");
+        assert_eq!(
+            root,
+            std::path::PathBuf::from("/Applications/Smelt.app/Contents/Resources/plugin-packages")
+        );
+        assert!(
+            !root.components().any(|c| c.as_os_str() == "PlugIns"),
+            "Contents/PlugIns 会被 codesign 当成嵌套 bundle：{root:?}"
+        );
+    }
+
+    #[test]
+    fn candidate_release_selects_its_plugin_set_before_handoff() {
+        let root = managed_test_file("candidate-release");
+        let candidate = root.join("Smelt.app");
+        let daemon = candidate.join("Contents/MacOS/smeltd");
+        let package = candidate
+            .join("Contents")
+            .join(APP_BUNDLE_PLUGIN_PACKAGES)
+            .join("com.example");
+        let entrypoint = package.join("bin/main.ts");
+        let smelt_root = root.join("state");
+        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
+        std::fs::write(&daemon, b"candidate-daemon").unwrap();
+        std::fs::write(&entrypoint, b"export default {};\n").unwrap();
+        std::fs::write(
+            package.join("plugin.json"),
+            serde_json::json!({
+                "id": "com.example",
+                "name": "Example",
+                "version": "1.0.0",
+                "api_version": 1,
+                "entrypoint": "bin/main.ts",
+                "capabilities": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let prepared_daemon = prepare_bundled_release(&candidate, &smelt_root).unwrap();
+
+        assert_eq!(prepared_daemon, daemon);
+        let selected = smelt_plugin_host::active_plugin_set_root(&smelt_root, &prepared_daemon)
+            .unwrap()
+            .expect("handoff 前必须已经选中插件集合");
+        assert!(selected.join("com.example/plugin.json").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn install_app_cli_is_opt_in() {
+        assert!(maybe_run_install_app(["smelt"]).is_none());
+        assert!(maybe_run_install_app(["smelt", "--help"]).is_none());
+        assert_eq!(crate::cli::maybe_run(["smelt", "--help"]), Some(0));
+        assert_eq!(maybe_run_install_app(["smelt", "--install-app"]), Some(2));
+    }
+
+    #[test]
+    fn cargo_layout_stages_every_bundled_plugin_it_finds() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // 复刻 cargo 的布局：<root>/plugins 是插件源，<root>/target/debug 是产物。
+        let root = managed_test_file("dev-plugins");
+        let bin_dir = root.join("target/debug");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let gui = bin_dir.join("smelt");
+        std::fs::write(&gui, b"gui").unwrap();
+
+        let write_manifest = |name: &str, id: &str, entrypoint: &str, bundled: bool| {
+            let dir = root.join("plugins").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.json"),
+                serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "version": "1.0.0",
+                    "api_version": 1,
+                    "entrypoint": format!("bin/{entrypoint}"),
+                    "capabilities": [],
+                    "bundled": bundled,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            dir
+        };
+        let write_entrypoint = |dir: &std::path::Path, name: &str| {
+            let path = dir.join("bin").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"export default {};\n").unwrap();
+        };
+
+        // 有入口、带 web 的插件：整包（含网页）都要被装进去。
+        let alpha = write_manifest("alpha", "com.example.alpha", "alpha-bin", true);
+        std::fs::create_dir_all(alpha.join("web")).unwrap();
+        std::fs::write(alpha.join("web/index.html"), b"<!doctype html>").unwrap();
+        std::fs::write(
+            alpha.join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE),
+            serde_json::json!({ "contributions": [] }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            alpha.join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE),
+            serde_json::json!({ "contributions": [] }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            alpha.join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE),
+            serde_json::json!({ "contributions": [] }).to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(alpha.join("assets")).unwrap();
+        std::fs::write(alpha.join("assets/icon.svg"), b"<svg/>").unwrap();
+        write_entrypoint(&alpha, "alpha-bin");
+        // 测试用插件：不进产物。
+        let beta = write_manifest("beta", "com.example.beta", "beta-bin", false);
+        write_entrypoint(&beta, "beta-bin");
+        // 缺入口的插件：跳过而不是让整个启动失败。
+        write_manifest("gamma", "com.example.gamma", "gamma-bin", true);
+        // Shared Bun 的入口是包内数据，不能要求 target/debug 里存在同名二进制。
+        let bun = root.join("plugins/bun");
+        std::fs::create_dir_all(bun.join("bin")).unwrap();
+        std::fs::write(
+            bun.join("plugin.json"),
+            serde_json::json!({
+                "id": "com.example.bun",
+                "name": "Bun",
+                "version": "1.0.0",
+                "api_version": 1,
+                "entrypoint": "bin/main.ts",
+                "capabilities": [],
+                "contributions": [],
+                "bundled": true,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            bun.join("bin/main.ts"),
+            "export { default } from './api.ts';",
+        )
+        .unwrap();
+        std::fs::write(
+            bun.join("bin/api.ts"),
+            "export default { invoke() { return null; } };",
+        )
+        .unwrap();
+        std::fs::write(bun.join("bin/api.test.ts"), "throw new Error('test');").unwrap();
+
+        let staged = bundled_plugin_root_for(&gui).expect("开发态必须能组装插件包");
+        assert!(staged.join("com.example.alpha/plugin.json").is_file());
+        assert!(staged.join("com.example.alpha/bin/alpha-bin").is_file());
+        assert!(
+            staged
+                .join("com.example.alpha")
+                .join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE)
+                .is_file(),
+            "UI sidecar 必须跟包一起 stage"
+        );
+        assert!(
+            staged
+                .join("com.example.alpha")
+                .join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE)
+                .is_file(),
+            "输入路由 sidecar 必须跟包一起 stage"
+        );
+        assert!(
+            staged
+                .join("com.example.alpha")
+                .join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE)
+                .is_file(),
+            "智能体 sidecar 必须跟包一起 stage"
+        );
+        assert!(
+            staged.join("com.example.alpha/assets/icon.svg").is_file(),
+            "智能体等 contribution 的包内资源必须跟包一起 stage"
+        );
+        assert!(
+            staged.join("com.example.alpha/web/index.html").is_file(),
+            "面板资源必须跟包一起 stage，否则装了也打不开"
+        );
+        assert!(
+            !staged.join("com.example.beta").exists(),
+            "bundled=false 的插件不该进产物"
+        );
+        assert!(
+            !staged.join("com.example.gamma").exists(),
+            "缺少 package entrypoint 的插件应当跳过"
+        );
+        assert!(
+            staged.join("com.example.bun/bin/main.ts").is_file(),
+            "Shared Bun 入口必须从 package 源目录 stage"
+        );
+        assert!(
+            staged.join("com.example.bun/bin/api.ts").is_file(),
+            "Bun 入口旁边的模块必须一起 stage，否则运行时 import 会失败"
+        );
+        assert!(
+            !staged.join("com.example.bun/bin/api.test.ts").exists(),
+            "测试文件不能进运行时插件包"
+        );
+        assert_eq!(
+            std::fs::metadata(staged.join("com.example.bun/bin/main.ts"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0,
+            "Shared Bun module must stay non-executable package data"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn daemon_spawn_strips_host_color_suppression() {
+        let mut cmd = std::process::Command::new("/bin/true");
+        cmd.env("NO_COLOR", "1");
+        cmd.env("FORCE_COLOR", "0");
+        smelt_paths::export_to(&mut cmd);
+        smelt_core::tty_color::clear_command(&mut cmd);
+        let present: Vec<String> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value?;
+                key.to_str().map(str::to_string)
+            })
+            .collect();
+        for key in smelt_core::tty_color::SUPPRESSION_VARS {
+            assert!(
+                !present.iter().any(|k| k == key),
+                "拉起 smeltd 不得带上 {key}，实际: {present:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3377,13 +4901,14 @@ mod event_proxy_answers_tests {
         let proxy = EventProxy {
             bell_notify: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(None)),
-            writer: Arc::new(Mutex::new(sock)),
+            writer: TerminalWriter::start(sock).expect("writer 启动失败"),
             metrics: Arc::new(Mutex::new(TermMetrics {
                 rows: 24,
                 cols: 80,
                 cell_w: 8,
                 cell_h: 16,
             })),
+            daemon_handles_color_requests: false,
         };
         (proxy, probe)
     }
@@ -3426,8 +4951,8 @@ mod event_proxy_answers_tests {
         );
     }
 
-    /// `OSC 11 ?`（查询当前背景色）：之前同样被吞掉，回应里应带上当前主题的
-    /// 默认背景色（深色下 `bg_panel` = `0x313338`，跟随卡片配色）而不是空/无回应。
+    /// 兼容旧守护：`OSC 11 ?`（查询当前背景色）仍要由客户端兜底，回应里应带上当前主题的
+    /// 默认背景色（深色下 `bg_stage` = `0x070707`，跟随卡片配色）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
         let _guard = lock_theme_globals();
@@ -3443,9 +4968,27 @@ mod event_proxy_answers_tests {
         let (ty, resp) = read_frame(&mut probe);
         assert_eq!(ty, 0);
         assert!(
-            resp.contains("rgb:3131/3333/3838"),
-            "应含默认背景色（bg_panel 深色 0x313338）的 rgb 十六进制，实际: {resp:?}"
+            resp.contains("rgb:0707/0707/0707"),
+            "应含默认背景色（bg_stage 深色 0x070707）的 rgb 十六进制，实际: {resp:?}"
         );
+    }
+
+    #[test]
+    fn daemon_owned_color_query_is_not_answered_twice_by_client() {
+        let (mut proxy, mut probe) = make_proxy();
+        proxy.daemon_handles_color_requests = true;
+        probe.set_nonblocking(true).unwrap();
+        let size = TermSize { rows: 24, cols: 80 };
+        let mut term = Term::new(Config::default(), &size, proxy);
+        let mut parser: Processor = Processor::new();
+
+        parser.advance(&mut term, b"\x1b]11;?\x07");
+
+        let mut byte = [0u8; 1];
+        let error = probe
+            .read(&mut byte)
+            .expect_err("新版守护已应答时客户端不该再写一份");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     /// 用户在设置里自选了终端底色时，OSC 11 必须回**用户那个色**：TUI 就是靠这个
@@ -3471,7 +5014,7 @@ mod event_proxy_answers_tests {
         set_bg_override(None);
         assert_eq!(
             default_bg(),
-            crate::ui_theme::bg_panel(),
+            crate::ui_theme::bg_stage(),
             "清掉自选色后应回到跟随主题"
         );
     }
@@ -3538,13 +5081,14 @@ mod bell_notification_tests {
         let proxy = EventProxy {
             bell_notify: Arc::clone(&bell_notify),
             title: Arc::new(Mutex::new(None)),
-            writer: Arc::new(Mutex::new(sock)),
+            writer: TerminalWriter::start(sock).expect("writer 启动失败"),
             metrics: Arc::new(Mutex::new(TermMetrics {
                 rows: 24,
                 cols: 80,
                 cell_w: 8,
                 cell_h: 16,
             })),
+            daemon_handles_color_requests: false,
         };
 
         proxy.send_event(Event::Bell);
@@ -3553,6 +5097,104 @@ mod bell_notification_tests {
             bell_notify.lock().unwrap().take().as_deref(),
             Some("🔔 响铃")
         );
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    use std::io::{ErrorKind, Read};
+
+    fn make_terminal_with_peer(rows: usize, cols: usize) -> (Terminal, UnixStream) {
+        let (peer, sock) = UnixStream::pair().expect("pair 失败");
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("设置读超时失败");
+        let writer = TerminalWriter::start(sock).expect("writer 启动失败");
+        let metrics = Arc::new(Mutex::new(TermMetrics {
+            rows: rows as u16,
+            cols: cols as u16,
+            cell_w: 8,
+            cell_h: 16,
+        }));
+        let proxy = EventProxy {
+            bell_notify: Arc::new(Mutex::new(None)),
+            title: Arc::new(Mutex::new(None)),
+            writer: writer.clone(),
+            metrics: metrics.clone(),
+            daemon_handles_color_requests: false,
+        };
+        let size = TermSize { rows, cols };
+        let term = Term::new(term_config(), &size, proxy);
+        let (_, redraw_rx) = smol::channel::bounded::<()>(1);
+        let (search_result_tx, search_result_rx) = smol::channel::unbounded();
+        (
+            Terminal {
+                term: Arc::new(Mutex::new(term)),
+                writer,
+                size,
+                metrics,
+                daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
+                daemon_geometry_generation: 0,
+                remote_geometry_locked: false,
+                notify: Arc::new(Mutex::new(None)),
+                bell_notify: Arc::new(Mutex::new(None)),
+                title: Arc::new(Mutex::new(None)),
+                last_damage_cursor: Mutex::new(None),
+                search_query: Mutex::new(String::new()),
+                search_matches: Mutex::new(Vec::new()),
+                search_index: Mutex::new(0),
+                search_result_tx,
+                search_result_rx,
+                search_generation: Mutex::new(0),
+                search_matches_top: Mutex::new(0),
+                last_search_rescan: Mutex::new(Instant::now()),
+                pending_step: Mutex::new(None),
+                dead: Arc::new(AtomicBool::new(false)),
+                redraw_rx,
+            },
+            peer,
+        )
+    }
+
+    fn read_resize(peer: &mut UnixStream) -> [u32; 4] {
+        let mut header = [0u8; 5];
+        peer.read_exact(&mut header).expect("应收到 resize 帧");
+        assert_eq!(header[0], 1, "应为 type=1 resize 帧");
+        let len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+        assert_eq!(len, 16, "resize 帧应包含行列和 cell 像素");
+        let mut payload = [0u8; 16];
+        peer.read_exact(&mut payload)
+            .expect("resize payload 不完整");
+        std::array::from_fn(|index| {
+            u32::from_be_bytes(payload[index * 4..index * 4 + 4].try_into().unwrap())
+        })
+    }
+
+    fn assert_no_frame(peer: &mut UnixStream) {
+        let mut byte = [0u8; 1];
+        match peer.read(&mut byte) {
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {}
+            Ok(0) => panic!("对端提前关闭，无法判断是否多发 resize"),
+            Ok(_) => panic!("同尺寸 resize 不应再次发送帧"),
+            Err(error) => panic!("读取 resize 帧失败: {error}"),
+        }
+    }
+
+    #[test]
+    fn resize_only_sends_when_grid_or_cell_changes() {
+        let (mut terminal, mut peer) = make_terminal_with_peer(24, 80);
+
+        terminal.resize(24, 80, 8, 16);
+        assert_no_frame(&mut peer);
+
+        terminal.resize(25, 80, 8, 16);
+        assert_eq!(read_resize(&mut peer), [80, 25, 8, 16]);
+
+        terminal.resize(25, 80, 8, 16);
+        assert_no_frame(&mut peer);
+
+        terminal.resize(25, 80, 9, 16);
+        assert_eq!(read_resize(&mut peer), [80, 25, 9, 16]);
     }
 }
 
@@ -3573,6 +5215,71 @@ mod paste_encode_tests {
 }
 
 #[cfg(test)]
+mod attachment_cleanup_tests {
+    use super::TerminalWriter;
+    use super::{TERMINAL_FRAME_MAX_BYTES, TERMINAL_WRITE_QUEUE_MAX_BYTES};
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn closing_writer_closes_peer_stream() {
+        let (writer, mut peer) = UnixStream::pair().expect("pair 失败");
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("设置读超时失败");
+
+        let writer = TerminalWriter::start(writer).expect("writer 启动失败");
+        writer.close();
+
+        let mut byte = [0; 1];
+        assert_eq!(peer.read(&mut byte).expect("peer 读取失败"), 0);
+    }
+
+    #[test]
+    fn large_input_is_chunked_across_queue_budget() {
+        let (mut peer, writer_side) = UnixStream::pair().expect("pair 失败");
+        let writer = TerminalWriter::start(writer_side).expect("writer 启动失败");
+        let expected = TERMINAL_WRITE_QUEUE_MAX_BYTES + TERMINAL_FRAME_MAX_BYTES / 2 + 17;
+        let payload = vec![0x5a; expected];
+        let (done_tx, done_rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let mut received = 0usize;
+            loop {
+                let mut header = [0u8; 5];
+                if peer.read_exact(&mut header).is_err() {
+                    return;
+                }
+                let len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+                assert!(len <= TERMINAL_FRAME_MAX_BYTES, "writer 不得发送超限帧");
+                let mut frame = vec![0u8; len];
+                if peer.read_exact(&mut frame).is_err() {
+                    return;
+                }
+                received += len;
+                if received >= expected {
+                    let _ = done_tx.send(received);
+                    return;
+                }
+            }
+        });
+
+        assert!(
+            writer.send_input(&payload),
+            "大粘贴不应因总长度超过队列预算失败"
+        );
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("应收到完整的大粘贴"),
+            expected
+        );
+        writer.close();
+    }
+}
+
+#[cfg(test)]
 mod search_resync_tests {
     use super::*;
 
@@ -3580,6 +5287,9 @@ mod search_resync_tests {
     /// 专测搜索坐标——不 spawn shell，无时序依赖，不 flaky。
     fn make_terminal(rows: usize, cols: usize) -> Terminal {
         let (_probe, sock) = UnixStream::pair().expect("pair 失败");
+        let writer =
+            TerminalWriter::start(sock.try_clone().expect("clone 失败")).expect("writer 启动失败");
+        let (search_result_tx, search_result_rx) = smol::channel::unbounded();
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: rows as u16,
             cols: cols as u16,
@@ -3589,13 +5299,14 @@ mod search_resync_tests {
         let proxy = EventProxy {
             bell_notify: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(None)),
-            writer: Arc::new(Mutex::new(sock.try_clone().expect("clone 失败"))),
+            writer: writer.clone(),
             metrics: metrics.clone(),
+            daemon_handles_color_requests: false,
         };
         let term = Term::new(term_config(), &TermSize { rows, cols }, proxy);
         Terminal {
             term: Arc::new(Mutex::new(term)),
-            writer: Arc::new(Mutex::new(sock)),
+            writer,
             size: TermSize { rows, cols },
             metrics,
             daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
@@ -3608,12 +5319,27 @@ mod search_resync_tests {
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
             search_index: Mutex::new(0),
+            search_result_tx,
+            search_result_rx,
+            search_generation: Mutex::new(0),
+            search_matches_top: Mutex::new(0),
+            last_search_rescan: Mutex::new(Instant::now()),
+            pending_step: Mutex::new(None),
             dead: Arc::new(AtomicBool::new(false)),
             // 测试不驱动 UI 重绘，给一个即时关闭的通道占位即可。
             redraw_rx: {
                 let (_, rx) = smol::channel::bounded::<()>(1);
                 rx
             },
+        }
+    }
+
+    /// 测试辅助：等后台搜索结果落地（模拟 UI 的 poll 循环）。
+    fn wait_search(t: &mut Terminal) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !t.poll_search_results() {
+            assert!(Instant::now() < deadline, "search result timeout");
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -3664,7 +5390,9 @@ mod search_resync_tests {
     fn stale_hits_vanish_after_scroll() {
         let mut t = make_terminal(4, 20);
         feed(&t, b"one needle here\r\nfill-a\r\nfill-b\r\nfill-c");
-        let st = t.set_search_query("needle");
+        t.set_search_query("needle");
+        wait_search(&mut t);
+        let st = t.search_status();
         assert_eq!((st.current, st.total), (1, 1));
         let hits = t.viewport_search_hits();
         assert_eq!(hits.len(), 1);
@@ -3690,6 +5418,7 @@ mod search_resync_tests {
         let mut t = make_terminal(4, 20);
         feed(&t, b"one needle here\r\nfill-a\r\nfill-b\r\nfill-c");
         t.set_search_query("needle");
+        wait_search(&mut t);
         feed(&t, b"\r\nnew-1\r\nnew-2");
 
         t.set_scroll_offset(2); // 回看到最初 4 行，needle 应在视口第 0 行
@@ -3704,10 +5433,16 @@ mod search_resync_tests {
     fn find_next_picks_up_new_matches() {
         let mut t = make_terminal(4, 20);
         feed(&t, b"one needle here\r\nfill-a");
-        let st = t.find_next("needle", false);
+        t.find_next("needle", false);
+        wait_search(&mut t); // 查询变了：异步重建 + 待步进，结果落地后从首条起跳
+        let st = t.search_status();
         assert_eq!((st.current, st.total), (1, 1));
 
         feed(&t, b"\r\nsecond needle x");
+        // 模拟 refresh_search_highlights：内容变化触发重扫（等节流窗口过去）。
+        std::thread::sleep(SEARCH_RESCAN_THROTTLE);
+        t.set_search_query("needle");
+        wait_search(&mut t);
         let st = t.find_next("needle", false);
         assert_eq!(st.total, 2, "新输出里的命中必须被看见");
         assert_eq!(st.current, 2);

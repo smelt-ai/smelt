@@ -4,7 +4,7 @@
 //! 块处理（纯文本 + 语法高亮壳，mermaid 语法本身没有 tree-sitter 语法，等于纯文
 //! 本）。这里接上它的 `markdown_block_parser`/`markdown_block_renderer` 钩子，识
 //! 别出 mermaid 代码块，用 `rusty-mermaid`（纯 Rust，无浏览器/Node 依赖）离线渲成
-//! SVG，缓存到 `~/.smelt/mermaid_cache/`，再用 GPUI 的 `img()` 全彩显示——注意不
+//! SVG，再用 GPUI 的 `img()` 全彩显示——注意不
 //! 是 `svg()`：那个元素只做单色 alpha mask 渲染（图标那条路），画不出多彩图，
 //! `img()` 对 `.svg` 走的才是全彩栅格化管线。
 //!
@@ -16,34 +16,27 @@
 //! 全仓库新增/已有的 `TextView::markdown` 调用点都应该改走这里的 `markdown_view`，
 //! 不要直接调 `TextView::markdown`，否则等于每处都得重新接一遍这两个钩子。
 //!
-//! 两级缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用
+//! 内存缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用
 //! （对照 gpui-component `node.rs` 里 `CODE_BLOCK_HIGHLIGHTERS` 那个 thread_local
-//! 先例），所以除了磁盘缓存（跨会话持久）还要有一层内存缓存（`thread_local`），
-//! 否则滚动一屏 mermaid 图会变成每帧都读盘+算哈希。
+//! 先例），同一张图只渲一次，否则滚动会变成每帧重算。不落盘——这是派生图，不是状态。
 //!
 //! mermaid 渲染库默认输出不透明白底、不会跟随亮暗主题，缓存 key 必须把主题模式
 //! 并进去，否则暗色模式下会看到刺眼的白底图。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, ObjectFit, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, px, relative,
+    AnyElement, App, ElementId, HighlightStyle, InteractiveElement, IntoElement, ObjectFit,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img,
+    px, relative, rgb,
 };
 use gpui_component::ActiveTheme;
 use gpui_component::text::{
-    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, markdown_ast,
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewStyle, markdown_ast,
 };
 use sha2::{Digest, Sha256};
-
-/// `~/.smelt/mermaid_cache/`——照抄 `tasks_dir()`/`worktrees_root()` 的模式：
-/// `Option<PathBuf>` + 用时自己 `create_dir_all`，不在这里建目录。
-fn mermaid_cache_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".smelt").join("mermaid_cache"))
-}
 
 /// rusty-mermaid（crates.io `=0.2.0`）默认字体栈——见其
 /// `rusty_mermaid_core::font_fallback::SVG_FONT_FAMILY` 常量。整份字体栈都是西文
@@ -69,10 +62,7 @@ const MERMAID_LEGACY_FONT_FAMILY: &str = "'Intel One Mono', 'SF Mono', 'Cascadia
 const MERMAID_FONT_FAMILY: &str =
     "Hiragino Sans GB, Heiti SC, PingFang SC, Helvetica Neue, Arial, sans-serif";
 
-/// 缓存格式版本：改了渲染库/字体栈这类会改变渲染产物的逻辑，得跟着升一位，否则
-/// 旧版本渲染坏的缓存文件会一直被当「已缓存」直接读出来，新逻辑永远生效不了。
-/// v2 = mermaid-rs-renderer；v3 = 换成 rusty-mermaid；v4 = 字体栈换成 Hiragino
-/// Sans GB 优先（PingFang SC 查不到，见 MERMAID_FONT_FAMILY 上的注释）。
+/// 内存缓存 key 版本：改了渲染库/字体栈得跟着升，避免同进程里旧产物被复用。
 const CACHE_FORMAT_VERSION: &str = "v4";
 
 /// parser 阶段存进 `MarkdownNode` 的原始数据。parser 不能碰 Window/App，真正的
@@ -149,13 +139,15 @@ fn source_digest(source: &str, is_dark: bool) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// SVG 根元素的 `viewBox="x y w h"` 里取后两个数当自然像素尺寸。rusty-mermaid
-/// 出的 SVG 一定带 viewBox，不需要引入完整 XML 解析库来干这一件事。
+/// SVG 根元素的 `viewBox="x y w h"`（兼容单双引号及多余空白）里取后两个数当自然像素尺寸。
 fn parse_viewbox_size(svg: &str) -> Option<(f32, f32)> {
-    let key = "viewBox=\"";
-    let start = svg.find(key)? + key.len();
-    let end = start + svg[start..].find('"')?;
-    let mut parts = svg[start..end].split_whitespace();
+    let idx = svg.find("viewBox")?;
+    let rest = &svg[idx + "viewBox".len()..];
+    let quote_start = rest.find(['"', '\''])?;
+    let quote_char = rest.as_bytes()[quote_start];
+    let content = &rest[quote_start + 1..];
+    let quote_end = content.find(quote_char as char)?;
+    let mut parts = content[..quote_end].split_whitespace();
     let _x = parts.next()?;
     let _y = parts.next()?;
     let w: f32 = parts.next()?.parse().ok()?;
@@ -163,39 +155,34 @@ fn parse_viewbox_size(svg: &str) -> Option<(f32, f32)> {
     (w > 0.0 && h > 0.0).then_some((w, h))
 }
 
-/// 磁盘缓存查找 + 未命中时调 rusty-mermaid 渲染 + 落盘。跟 `mermaid_cache_dir`
-/// 分开、显式接受 `cache_dir` 是为了让测试能喂临时目录（参照 claude_memory.rs 里
-/// `list_memories`/`list_memories_in` 拆分绕开 `~/.smelt` 硬编码路径的写法）。
-///
-/// 落盘失败（磁盘满/权限问题）不影响这次渲染结果——SVG 已经在内存里了，只是没
-/// 法持久化到下次启动，打一行日志就够，不 panic、不把整次调用判成 Err。
-fn render_or_load(source: &str, is_dark: bool, cache_dir: &Path) -> Result<MermaidImage, String> {
-    let digest = source_digest(source, is_dark);
-    let mode = if is_dark { "dark" } else { "light" };
-    let cache_path = cache_dir.join(format!("{digest}-{mode}.svg"));
+fn inject_cjk_font_style(svg: &str) -> String {
+    let replaced = svg.replace(MERMAID_LEGACY_FONT_FAMILY, MERMAID_FONT_FAMILY);
+    const CJK_STYLE: &str = r#"<style>text, tspan { font-family: Hiragino Sans GB, Heiti SC, PingFang SC, Helvetica Neue, Arial, sans-serif !important; }</style>"#;
+    if let Some(pos) = replaced.find("<svg")
+        && let Some(tag_end) = replaced[pos..].find('>')
+    {
+        let insert_at = pos + tag_end + 1;
+        let mut out = String::with_capacity(replaced.len() + CJK_STYLE.len());
+        out.push_str(&replaced[..insert_at]);
+        out.push_str(CJK_STYLE);
+        out.push_str(&replaced[insert_at..]);
+        return out;
+    }
+    replaced
+}
 
-    let svg = match std::fs::read_to_string(&cache_path) {
-        Ok(existing) => existing,
-        Err(_) => {
-            let theme = if is_dark {
-                rusty_mermaid::Theme::dark()
-            } else {
-                rusty_mermaid::Theme::light()
-            };
-            let svg = rusty_mermaid::to_svg(source, &theme).map_err(|e| e.to_string())?;
-            // Theme/SvgConfig 都没有字体覆盖的公开口子，只能事后替换渲染产物里的
-            // 字面字符串，见 MERMAID_LEGACY_FONT_FAMILY 上的注释。
-            let svg = svg.replace(MERMAID_LEGACY_FONT_FAMILY, MERMAID_FONT_FAMILY);
-
-            if let Err(e) =
-                std::fs::create_dir_all(cache_dir).and_then(|_| std::fs::write(&cache_path, &svg))
-            {
-                eprintln!("[mermaid] 缓存写盘失败（不影响本次显示）：{e}");
-            }
-            svg
-        }
+fn render_svg(source: &str, is_dark: bool) -> Result<String, String> {
+    let theme = if is_dark {
+        rusty_mermaid::Theme::dark()
+    } else {
+        rusty_mermaid::Theme::light()
     };
+    let svg = rusty_mermaid::to_svg(source, &theme).map_err(|e| e.to_string())?;
+    Ok(inject_cjk_font_style(&svg))
+}
 
+fn render_or_load(source: &str, is_dark: bool) -> Result<MermaidImage, String> {
+    let svg = render_svg(source, is_dark)?;
     let (width, height) = parse_viewbox_size(&svg).unwrap_or((400.0, 300.0));
     let image = gpui::Image::from_bytes(gpui::ImageFormat::Svg, svg.into_bytes());
     Ok(MermaidImage {
@@ -226,21 +213,17 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
             .into_any_element();
     }
 
-    // 首次见：读盘/渲染挪后台线程，render 不碰文件系统（ES 慢 open() 会卡 UI）。
-    // 完成后写内存缓存 + 刷新窗口，下一帧直接命中缓存。
+    // 首次见：渲染挪后台线程，完成后只写内存缓存，下一帧直接命中。
     MERMAID_RENDER_INFLIGHT.with(|c| c.borrow_mut().insert(digest.clone()));
     let source = data.source.clone();
     let digest_for_task = digest.clone();
     cx.spawn(async move |cx| {
-        let outcome = match mermaid_cache_dir() {
-            Some(dir) => cx
-                .background_executor()
-                .spawn(async move { render_or_load(&source, is_dark, &dir) })
-                .await
-                .map(|img| MermaidRender::Ok(Arc::new(img)))
-                .unwrap_or_else(|e| MermaidRender::Err(e.into())),
-            None => MermaidRender::Err("找不到 ~/.smelt 目录".into()),
-        };
+        let outcome = cx
+            .background_executor()
+            .spawn(async move { render_or_load(&source, is_dark) })
+            .await
+            .map(|img| MermaidRender::Ok(Arc::new(img)))
+            .unwrap_or_else(|e| MermaidRender::Err(e.into()));
         MERMAID_RENDER_INFLIGHT.with(|c| c.borrow_mut().remove(&digest_for_task));
         MERMAID_RENDER_CACHE.with(|c| c.borrow_mut().insert(digest_for_task, outcome));
         cx.update(|cx| cx.refresh_windows());
@@ -252,7 +235,12 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
         .into_any_element()
 }
 
-fn mermaid_result_element(result: MermaidRender, digest: &str, source: &str, cx: &App) -> AnyElement {
+fn mermaid_result_element(
+    result: MermaidRender,
+    digest: &str,
+    source: &str,
+    cx: &App,
+) -> AnyElement {
     match result {
         MermaidRender::Ok(m) => div()
             .id(SharedString::from(format!("mermaid-{digest}")))
@@ -303,6 +291,18 @@ pub fn markdown_view_clickable(
     markdown_view_with_selection(id, text, true)
 }
 
+fn markdown_text_view_style() -> TextViewStyle {
+    // 围栏代码块走 `cx.theme().highlight_theme` / `tokens.muted`（= bg_card）。
+    // 行内 code 面积小，同样用卡片底会糊进正文，改用选中表面拉开对比。
+    let inline_code = HighlightStyle {
+        background_color: Some(rgb(crate::ui_theme::bg_selected()).into()),
+        ..Default::default()
+    };
+    let mut style = TextViewStyle::default().inline_code(inline_code);
+    style.is_dark = !crate::ui_theme::is_light();
+    style
+}
+
 fn markdown_view_with_selection(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
@@ -310,6 +310,7 @@ fn markdown_view_with_selection(
 ) -> TextView {
     TextView::markdown(id, text)
         .selectable(selectable)
+        .style(markdown_text_view_style())
         .markdown_extensions(shared_markdown_extensions().clone())
 }
 
@@ -338,24 +339,12 @@ mod tests {
         ));
     }
 
-    fn temp_cache_dir(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("smelt-mermaid-{}-{tag}", std::process::id()))
-    }
-
     #[test]
-    fn valid_source_renders_and_caches_svg_file() {
-        let dir = temp_cache_dir("valid");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let img = render_or_load("flowchart TD\nA-->B", false, &dir).expect("应能渲染");
+    fn valid_source_renders_without_writing_disk() {
+        let img = render_or_load("flowchart TD\nA-->B", false).expect("应能渲染");
         assert!(img.width > 0.0 && img.height > 0.0);
-
-        let digest = source_digest("flowchart TD\nA-->B", false);
-        let cached_path = dir.join(format!("{digest}-light.svg"));
-        let written = std::fs::read_to_string(&cached_path).expect("应已落盘缓存");
-        assert!(written.trim_start().starts_with("<svg"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let svg = render_svg("flowchart TD\nA-->B", false).expect("应能渲出 SVG");
+        assert!(svg.trim_start().starts_with("<svg"));
     }
 
     /// 回归守卫：rusty-mermaid 内置字体栈在 GPUI 的 usvg 字体解析里一个都对不上
@@ -365,75 +354,27 @@ mod tests {
     /// 里那行字符串替换删掉。
     #[test]
     fn rendered_svg_overrides_font_family_to_a_resolvable_one() {
-        let dir = temp_cache_dir("font-family");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let img = render_or_load("flowchart TD\nA[开始]-->B[结束]", false, &dir).expect("应能渲染");
-        let digest = source_digest("flowchart TD\nA[开始]-->B[结束]", false);
-        let svg = std::fs::read_to_string(dir.join(format!("{digest}-light.svg"))).unwrap();
+        let img = render_or_load("flowchart TD\nA[开始]-->B[结束]", false).expect("应能渲染");
+        let svg = render_svg("flowchart TD\nA[开始]-->B[结束]", false).unwrap();
         assert!(
             svg.contains("Hiragino Sans GB"),
             "渲染产物应该用覆盖后的字体栈，而不是渲染库默认的那套解析不出来的西文字体名"
         );
         assert!(img.width > 0.0 && img.height > 0.0);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn invalid_source_errs_without_panicking_or_leaving_a_file() {
-        let dir = temp_cache_dir("invalid");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let result = render_or_load("this is not mermaid at all {{{", false, &dir);
-        assert!(result.is_err());
-
-        let digest = source_digest("this is not mermaid at all {{{", false);
-        let cached_path = dir.join(format!("{digest}-light.svg"));
-        assert!(!cached_path.exists(), "渲染失败不该在缓存目录留下文件");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn second_render_hits_disk_cache_without_recomputing() {
-        let dir = temp_cache_dir("cache-hit");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        render_or_load("graph LR\nA-->B", true, &dir).expect("首次应能渲染");
-        let digest = source_digest("graph LR\nA-->B", true);
-        let cached_path = dir.join(format!("{digest}-dark.svg"));
-
-        // 篡改缓存文件内容（换一个仍然合法的 SVG 头），如果第二次调用真的绕开了
-        // 重新渲染直接读盘，拿到的应该是这份篡改后的内容而不是重新渲染的产物；
-        // 且不应该再写一次盘——篡改后的 mtime 得原封不动。
-        std::fs::write(&cached_path, "<svg viewBox=\"0 0 12345 6789\"></svg>").unwrap();
-        let tampered_write = std::fs::metadata(&cached_path).unwrap().modified().unwrap();
-
-        let second = render_or_load("graph LR\nA-->B", true, &dir).expect("第二次应命中缓存");
-        assert_eq!(second.width, 12345.0);
-        assert_eq!(second.height, 6789.0);
-        let second_write = std::fs::metadata(&cached_path).unwrap().modified().unwrap();
-        assert_eq!(tampered_write, second_write, "命中缓存不该重新写盘");
-
-        let _ = std::fs::remove_dir_all(&dir);
+    fn invalid_source_errs_without_panicking() {
+        assert!(render_or_load("this is not mermaid at all {{{", false).is_err());
     }
 
     #[test]
     fn theme_mode_changes_cache_key() {
-        let dir = temp_cache_dir("theme-split");
-        let _ = std::fs::remove_dir_all(&dir);
-
-        render_or_load("graph TD\nA-->B", false, &dir).expect("亮色应能渲染");
-        render_or_load("graph TD\nA-->B", true, &dir).expect("暗色应能渲染");
-
-        let light_digest = source_digest("graph TD\nA-->B", false);
-        let dark_digest = source_digest("graph TD\nA-->B", true);
-        assert_ne!(light_digest, dark_digest);
-        assert!(dir.join(format!("{light_digest}-light.svg")).exists());
-        assert!(dir.join(format!("{dark_digest}-dark.svg")).exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let light = source_digest("graph TD\nA-->B", false);
+        let dark = source_digest("graph TD\nA-->B", true);
+        assert_ne!(light, dark);
+        render_or_load("graph TD\nA-->B", false).expect("亮色应能渲染");
+        render_or_load("graph TD\nA-->B", true).expect("暗色应能渲染");
     }
 
     #[test]
@@ -458,5 +399,29 @@ mod tests {
             Some("graph TD\nA-->B")
         );
         assert!(mermaid_source(&rust_node).is_none());
+    }
+
+    #[test]
+    fn parse_viewbox_size_handles_single_quotes_and_whitespace() {
+        assert_eq!(
+            super::parse_viewbox_size("<svg viewBox='0 0 500 300'></svg>"),
+            Some((500.0, 300.0))
+        );
+        assert_eq!(
+            super::parse_viewbox_size("<svg viewBox=\" 0  0   800.5  600.25 \"></svg>"),
+            Some((800.5, 600.25))
+        );
+        assert_eq!(
+            super::parse_viewbox_size("<svg viewBox=\"0 0 -10 20\"></svg>"),
+            None
+        );
+    }
+
+    #[test]
+    fn inject_cjk_font_style_inserts_css_rule() {
+        let raw = "<svg width=\"100\" height=\"100\"><g></g></svg>";
+        let injected = super::inject_cjk_font_style(raw);
+        assert!(injected.contains("<style>text, tspan { font-family:"));
+        assert!(injected.starts_with("<svg width=\"100\" height=\"100\"><style>"));
     }
 }
