@@ -1,0 +1,11 @@
+[package]
+name = "smelt-pairing"
+version.workspace = true
+edition.workspace = true
+description = "Smelt desktop/mobile pairing URI format and parser"
+
+[lints]
+workspace = true
+
+[dependencies]
+url = "2"

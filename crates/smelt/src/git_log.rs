@@ -207,9 +207,10 @@ pub fn layout_graph(commits: &[CommitNode]) -> Vec<GraphRow> {
 ///
 /// 默认是 [`LogScope::Head`]——**当前分支**，跟 JetBrains 一致。一进来就 `--all`
 /// 会把所有分支的提交混在一起按时间排，跟「我这条线上都干了啥」完全是两回事。
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub enum LogScope {
     /// 当前检出的分支（`git log` 不带 ref，默认就是 HEAD）。
+    #[default]
     Head,
     /// 所有分支（`--all`），看完整拓扑用。
     All,
@@ -217,19 +218,14 @@ pub enum LogScope {
     Branch(String),
 }
 
-impl Default for LogScope {
-    fn default() -> Self {
-        Self::Head
-    }
-}
-
 /// 「日志」页的全部状态。
 #[derive(Default)]
 pub struct GitLogState {
-    /// 当前载入的提交（已按 git log 给的顺序）。
-    pub commits: Vec<CommitNode>,
-    /// 与 `commits` 一一对应的分支图布局。
-    pub graph: Vec<GraphRow>,
+    /// 当前载入的提交（已按 git log 给的顺序）。Rc：渲染时每帧要 move 进
+    /// uniform_list 的回调，Vec 会整表深拷贝，Rc 只是一次引用计数。
+    pub commits: std::rc::Rc<Vec<CommitNode>>,
+    /// 与 `commits` 一一对应的分支图布局。Rc 理由同上。
+    pub graph: std::rc::Rc<Vec<GraphRow>>,
     /// 正在拉取提交列表。
     pub loading: bool,
     /// 选中的提交 sha。
@@ -248,7 +244,8 @@ pub struct GitLogState {
     pub detail_scroll: gpui::ScrollHandle,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
     pub loaded_root: Option<String>,
-    pub scroll: gpui::ScrollHandle,
+    /// 提交列表（uniform_list）的滚动句柄；分支图 canvas 也用它同步滚动。
+    pub scroll: gpui::UniformListScrollHandle,
 }
 
 /// 一次拉多少条。历史动辄上万条，全量拉既慢又没人翻得到底；先给够用的量，
@@ -282,7 +279,7 @@ pub fn parse_name_status(text: &str) -> Vec<(String, String)> {
                 return None;
             }
             // 重命名/复制有两个路径，取最后一个（新路径）。
-            let path = f.last()?.trim();
+            let path = f.next_back()?.trim();
             if path.is_empty() {
                 return None;
             }
@@ -299,7 +296,7 @@ use crate::git_panel::run_git;
 use gpui::Context;
 
 impl Workspace {
-    /// 进「日志」页时确保数据在（换了仓库也重拉）。render 顶部调用，必须便宜：
+    /// 进「日志」页时确保数据在（换了仓库也重拉）。`prepare_frame` 调用，必须便宜：
     /// 已经是这个 root 就直接返回，真正的 git 调用都在后台。
     pub fn ensure_git_log(&mut self, root: String, cx: &mut Context<Self>) {
         if self.git_log.loading || self.git_log.loaded_root.as_deref() == Some(root.as_str()) {
@@ -322,7 +319,7 @@ impl Workspace {
                     let args = log_args(&scope, LOG_LIMIT);
                     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
                     let out = run_git(&r, &argv).ok()?;
-                    if !out.status.success() {
+                    if !out.success() {
                         return None;
                     }
                     Some(parse_log(&String::from_utf8_lossy(&out.stdout)))
@@ -330,8 +327,8 @@ impl Workspace {
                 .await
                 .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
-                this.git_log.graph = layout_graph(&commits);
-                this.git_log.commits = commits;
+                this.git_log.graph = std::rc::Rc::new(layout_graph(&commits));
+                this.git_log.commits = std::rc::Rc::new(commits);
                 this.git_log.loading = false;
                 // 列表换了，旧的选中项多半已经不在里面。
                 this.git_log.selected = None;

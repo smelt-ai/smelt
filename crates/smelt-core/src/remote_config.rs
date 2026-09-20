@@ -1,6 +1,6 @@
-//! 远程访问的持久化配置（`~/.smelt/collab.json`）。
+//! 远程访问的持久化配置（主库 `collab` 作用域；残留 JSON 只导入一次）。
 //!
-//! 放在 smelt-core 而不是 GUI 的 settings.rs：守护也要读它。守护每次启动
+//! 放在 smelt-core 而不是 GUI 的 settings 模块：守护也要读它。守护每次启动
 //! （冷启动、`shutdown` 后被拉起、无缝升级 exec 后的新进程）内存里的网关与
 //! 隧道状态都是空的，若没有这份落盘配置，远程就只能等 GUI 冷启动那一次去
 //! `remote_start`/`iroh_start`——守护单独重启后手机就再也连不上，必须去设置页
@@ -9,9 +9,7 @@
 //! 只存开关和 relay 地址。设备配对 token 由守护单独存在 owner-only 文件里，
 //! 不进这里。
 
-use std::path::PathBuf;
-
-use crate::json_store;
+use crate::sqlite_state;
 
 /// 远程访问开关。字段语义与 GUI 设置页一一对应。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -28,19 +26,40 @@ pub struct RemoteConfig {
     pub write_enabled: bool,
 }
 
-pub fn config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".smelt").join("collab.json"))
-}
-
-/// 读取配置；文件缺失/损坏回退默认（关闭）。
+/// 读取配置；文档缺失/损坏回退默认（关闭）。
 pub fn load() -> RemoteConfig {
-    json_store::load_json(config_path())
+    let Ok(store) = sqlite_state::default_sqlite_store() else {
+        return RemoteConfig::default();
+    };
+    match store.get_remote_config_snapshot() {
+        Ok(Some(snapshot)) => config_from_snapshot(snapshot),
+        Ok(None) | Err(_) => RemoteConfig::default(),
+    }
 }
 
-/// 写回配置。走 private 权限：虽然当前字段都不算机密，但这个文件的语义是
-/// 「谁能连我的机器」，没有理由让同机其他用户读到。
+/// 写回配置。主库本身已是 `0600`。
 pub fn save(config: &RemoteConfig) {
-    json_store::save_json_private(config_path(), config);
+    if let Ok(store) = sqlite_state::default_sqlite_store()
+        && let Err(error) = store.put_remote_config_snapshot(&snapshot_from_config(config))
+    {
+        eprintln!("[storage] 保存远程配置失败: {error}");
+    }
+}
+
+fn snapshot_from_config(config: &RemoteConfig) -> smelt_store::RemoteConfigSnapshot {
+    smelt_store::RemoteConfigSnapshot {
+        enabled: config.enabled,
+        iroh_relay: config.iroh_relay.clone(),
+        write_enabled: config.write_enabled,
+    }
+}
+
+fn config_from_snapshot(snapshot: smelt_store::RemoteConfigSnapshot) -> RemoteConfig {
+    RemoteConfig {
+        enabled: snapshot.enabled,
+        iroh_relay: snapshot.iroh_relay,
+        write_enabled: snapshot.write_enabled,
+    }
 }
 
 #[cfg(test)]
@@ -49,7 +68,8 @@ mod tests {
 
     #[test]
     fn old_config_without_new_fields_still_parses() {
-        let c: RemoteConfig = serde_json::from_str(r#"{"enabled":true}"#).expect("旧配置必须能解析");
+        let c: RemoteConfig =
+            serde_json::from_str(r#"{"enabled":true}"#).expect("旧配置必须能解析");
         assert!(c.enabled);
         // 缺省必须是只读：升级不能把老用户的只读链接变成可写。
         assert!(!c.write_enabled);

@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
 /// 启动到指定 EndpointId 的 iroh 隧道，返回手机本地入口端口。
 ///
@@ -26,46 +26,8 @@ Future<int> irohTunnelStart({
 Future<void> irohTunnelStop() =>
     RustLib.instance.api.crateApiIrohIrohTunnelStop();
 
-/// 当前隧道的本地端口，没有则返回 `None`。
-Future<int?> irohTunnelPort() =>
-    RustLib.instance.api.crateApiIrohIrohTunnelPort();
-
 Future<IrohPathStatus?> irohTunnelPathStatus() =>
     RustLib.instance.api.crateApiIrohIrohTunnelPathStatus();
-
-/// 解析 `smelt+iroh://` 配对码。
-///
-/// Dart 侧自己也有一份解析（`pairing_config.dart`，扫码即时校验用，不能等
-/// FFI 起来）。这个函数留给需要在 Rust 侧核对同一个码的场景，两边都以
-/// `smelt-core::pairing` 为准。
-Future<IrohPairing> parseIrohPairingUri({required String uri}) =>
-    RustLib.instance.api.crateApiIrohParseIrohPairingUri(uri: uri);
-
-/// `smelt+iroh://` 配对码的两半。缺一不可：EndpointId 决定连得上谁，
-/// token 决定连上之后能不能操作。
-class IrohPairing {
-  final String endpointId;
-  final String token;
-  final String relayUrl;
-
-  const IrohPairing({
-    required this.endpointId,
-    required this.token,
-    required this.relayUrl,
-  });
-
-  @override
-  int get hashCode => endpointId.hashCode ^ token.hashCode ^ relayUrl.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is IrohPairing &&
-          runtimeType == other.runtimeType &&
-          endpointId == other.endpointId &&
-          token == other.token &&
-          relayUrl == other.relayUrl;
-}
 
 /// iroh 当前选中的实际传输路径和 QUIC RTT。
 class IrohPathStatus {

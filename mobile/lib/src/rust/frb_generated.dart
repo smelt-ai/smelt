@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 1394003773;
+  int get rustContentHash => 597317792;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -82,16 +82,12 @@ abstract class RustLibApi extends BaseApi {
 
   Future<IrohPathStatus?> crateApiIrohIrohTunnelPathStatus();
 
-  Future<int?> crateApiIrohIrohTunnelPort();
-
   Future<int> crateApiIrohIrohTunnelStart({
     required String endpointId,
     required String relayUrl,
   });
 
   Future<void> crateApiIrohIrohTunnelStop();
-
-  Future<IrohPairing> crateApiIrohParseIrohPairingUri({required String uri});
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -143,27 +139,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiIrohIrohTunnelPathStatusConstMeta =>
       const TaskConstMeta(debugName: "iroh_tunnel_path_status", argNames: []);
-
-  @override
-  Future<int?> crateApiIrohIrohTunnelPort() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          return wire.wire__crate__api_iroh__iroh_tunnel_port(port_);
-        },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_opt_box_autoadd_u_32,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiIrohIrohTunnelPortConstMeta,
-        argValues: [],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiIrohIrohTunnelPortConstMeta =>
-      const TaskConstMeta(debugName: "iroh_tunnel_port", argNames: []);
 
   @override
   Future<int> crateApiIrohIrohTunnelStart({
@@ -219,34 +194,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiIrohIrohTunnelStopConstMeta =>
       const TaskConstMeta(debugName: "iroh_tunnel_stop", argNames: []);
 
-  @override
-  Future<IrohPairing> crateApiIrohParseIrohPairingUri({required String uri}) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          var arg0 = cst_encode_String(uri);
-          return wire.wire__crate__api_iroh__parse_iroh_pairing_uri(
-            port_,
-            arg0,
-          );
-        },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_iroh_pairing,
-          decodeErrorData: dco_decode_String,
-        ),
-        constMeta: kCrateApiIrohParseIrohPairingUriConstMeta,
-        argValues: [uri],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiIrohParseIrohPairingUriConstMeta =>
-      const TaskConstMeta(
-        debugName: "parse_iroh_pairing_uri",
-        argNames: ["uri"],
-      );
-
   @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -257,25 +204,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_iroh_path_status(raw);
-  }
-
-  @protected
-  int dco_decode_box_autoadd_u_32(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw as int;
-  }
-
-  @protected
-  IrohPairing dco_decode_iroh_pairing(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
-    return IrohPairing(
-      endpointId: dco_decode_String(arr[0]),
-      token: dco_decode_String(arr[1]),
-      relayUrl: dco_decode_String(arr[2]),
-    );
   }
 
   @protected
@@ -300,12 +228,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_iroh_path_status(raw);
-  }
-
-  @protected
-  int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
   }
 
   @protected
@@ -342,25 +264,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_u_32(deserializer));
-  }
-
-  @protected
-  IrohPairing sse_decode_iroh_pairing(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_endpointId = sse_decode_String(deserializer);
-    var var_token = sse_decode_String(deserializer);
-    var var_relayUrl = sse_decode_String(deserializer);
-    return IrohPairing(
-      endpointId: var_endpointId,
-      token: var_token,
-      relayUrl: var_relayUrl,
-    );
-  }
-
-  @protected
   IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_kind = sse_decode_String(deserializer);
@@ -383,17 +286,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_iroh_path_status(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_u_32(deserializer));
     } else {
       return null;
     }
@@ -462,20 +354,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_u_32(self, serializer);
-  }
-
-  @protected
-  void sse_encode_iroh_pairing(IrohPairing self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.endpointId, serializer);
-    sse_encode_String(self.token, serializer);
-    sse_encode_String(self.relayUrl, serializer);
-  }
-
-  @protected
   void sse_encode_iroh_path_status(
     IrohPathStatus self,
     SseSerializer serializer,
@@ -505,16 +383,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_iroh_path_status(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_u_32(self, serializer);
     }
   }
 

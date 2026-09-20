@@ -25,12 +25,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw);
 
   @protected
-  int dco_decode_box_autoadd_u_32(dynamic raw);
-
-  @protected
-  IrohPairing dco_decode_iroh_pairing(dynamic raw);
-
-  @protected
   IrohPathStatus dco_decode_iroh_path_status(dynamic raw);
 
   @protected
@@ -38,9 +32,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw);
-
-  @protected
-  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -60,12 +51,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
-
-  @protected
-  IrohPairing sse_decode_iroh_pairing(SseDeserializer deserializer);
-
-  @protected
   IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer);
 
   @protected
@@ -75,9 +60,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IrohPathStatus? sse_decode_opt_box_autoadd_iroh_path_status(
     SseDeserializer deserializer,
   );
-
-  @protected
-  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -110,12 +92,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<ffi.Uint32> cst_encode_box_autoadd_u_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return wire.cst_new_box_autoadd_u_32(cst_encode_u_32(raw));
-  }
-
-  @protected
   ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_list_prim_u_8_strict(
     Uint8List raw,
   ) {
@@ -135,27 +111,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  ffi.Pointer<ffi.Uint32> cst_encode_opt_box_autoadd_u_32(int? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? ffi.nullptr : cst_encode_box_autoadd_u_32(raw);
-  }
-
-  @protected
   void cst_api_fill_to_wire_box_autoadd_iroh_path_status(
     IrohPathStatus apiObj,
     ffi.Pointer<wire_cst_iroh_path_status> wireObj,
   ) {
     cst_api_fill_to_wire_iroh_path_status(apiObj, wireObj.ref);
-  }
-
-  @protected
-  void cst_api_fill_to_wire_iroh_pairing(
-    IrohPairing apiObj,
-    wire_cst_iroh_pairing wireObj,
-  ) {
-    wireObj.endpoint_id = cst_encode_String(apiObj.endpointId);
-    wireObj.token = cst_encode_String(apiObj.token);
-    wireObj.relay_url = cst_encode_String(apiObj.relayUrl);
   }
 
   @protected
@@ -186,12 +146,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_iroh_pairing(IrohPairing self, SseSerializer serializer);
-
-  @protected
   void sse_encode_iroh_path_status(
     IrohPathStatus self,
     SseSerializer serializer,
@@ -208,9 +162,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     IrohPathStatus? self,
     SseSerializer serializer,
   );
-
-  @protected
-  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
@@ -288,18 +239,6 @@ class RustLibWire implements BaseWire {
       _wire__crate__api_iroh__iroh_tunnel_path_statusPtr
           .asFunction<void Function(int)>();
 
-  void wire__crate__api_iroh__iroh_tunnel_port(int port_) {
-    return _wire__crate__api_iroh__iroh_tunnel_port(port_);
-  }
-
-  late final _wire__crate__api_iroh__iroh_tunnel_portPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
-        'frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_port',
-      );
-  late final _wire__crate__api_iroh__iroh_tunnel_port =
-      _wire__crate__api_iroh__iroh_tunnel_portPtr
-          .asFunction<void Function(int)>();
-
   void wire__crate__api_iroh__iroh_tunnel_start(
     int port_,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> endpoint_id,
@@ -344,28 +283,6 @@ class RustLibWire implements BaseWire {
       _wire__crate__api_iroh__iroh_tunnel_stopPtr
           .asFunction<void Function(int)>();
 
-  void wire__crate__api_iroh__parse_iroh_pairing_uri(
-    int port_,
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> uri,
-  ) {
-    return _wire__crate__api_iroh__parse_iroh_pairing_uri(port_, uri);
-  }
-
-  late final _wire__crate__api_iroh__parse_iroh_pairing_uriPtr =
-      _lookup<
-        ffi.NativeFunction<
-          ffi.Void Function(
-            ffi.Int64,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )
-        >
-      >('frbgen_smelt_mobile_wire__crate__api_iroh__parse_iroh_pairing_uri');
-  late final _wire__crate__api_iroh__parse_iroh_pairing_uri =
-      _wire__crate__api_iroh__parse_iroh_pairing_uriPtr
-          .asFunction<
-            void Function(int, ffi.Pointer<wire_cst_list_prim_u_8_strict>)
-          >();
-
   ffi.Pointer<wire_cst_iroh_path_status>
   cst_new_box_autoadd_iroh_path_status() {
     return _cst_new_box_autoadd_iroh_path_status();
@@ -378,17 +295,6 @@ class RustLibWire implements BaseWire {
   late final _cst_new_box_autoadd_iroh_path_status =
       _cst_new_box_autoadd_iroh_path_statusPtr
           .asFunction<ffi.Pointer<wire_cst_iroh_path_status> Function()>();
-
-  ffi.Pointer<ffi.Uint32> cst_new_box_autoadd_u_32(int value) {
-    return _cst_new_box_autoadd_u_32(value);
-  }
-
-  late final _cst_new_box_autoadd_u_32Ptr =
-      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Uint32> Function(ffi.Uint32)>>(
-        'frbgen_smelt_mobile_cst_new_box_autoadd_u_32',
-      );
-  late final _cst_new_box_autoadd_u_32 = _cst_new_box_autoadd_u_32Ptr
-      .asFunction<ffi.Pointer<ffi.Uint32> Function(int)>();
 
   ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_new_list_prim_u_8_strict(
     int len,
@@ -438,12 +344,4 @@ final class wire_cst_iroh_path_status extends ffi.Struct {
 
   @ffi.Uint32()
   external int rtt_ms;
-}
-
-final class wire_cst_iroh_pairing extends ffi.Struct {
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> endpoint_id;
-
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> token;
-
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_url;
 }

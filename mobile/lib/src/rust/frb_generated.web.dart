@@ -27,12 +27,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw);
 
   @protected
-  int dco_decode_box_autoadd_u_32(dynamic raw);
-
-  @protected
-  IrohPairing dco_decode_iroh_pairing(dynamic raw);
-
-  @protected
   IrohPathStatus dco_decode_iroh_path_status(dynamic raw);
 
   @protected
@@ -40,9 +34,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw);
-
-  @protected
-  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -62,12 +53,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
-
-  @protected
-  IrohPairing sse_decode_iroh_pairing(SseDeserializer deserializer);
-
-  @protected
   IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer);
 
   @protected
@@ -77,9 +62,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IrohPathStatus? sse_decode_opt_box_autoadd_iroh_path_status(
     SseDeserializer deserializer,
   );
-
-  @protected
-  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -109,22 +91,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
-  int cst_encode_box_autoadd_u_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_u_32(raw);
-  }
-
-  @protected
-  JSAny cst_encode_iroh_pairing(IrohPairing raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [
-      cst_encode_String(raw.endpointId),
-      cst_encode_String(raw.token),
-      cst_encode_String(raw.relayUrl),
-    ].jsify()!;
-  }
-
-  @protected
   JSAny cst_encode_iroh_path_status(IrohPathStatus raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return [cst_encode_String(raw.kind), cst_encode_u_32(raw.rttMs)].jsify()!;
@@ -140,12 +106,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   JSAny? cst_encode_opt_box_autoadd_iroh_path_status(IrohPathStatus? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? null : cst_encode_box_autoadd_iroh_path_status(raw);
-  }
-
-  @protected
-  int? cst_encode_opt_box_autoadd_u_32(int? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_u_32(raw);
   }
 
   @protected
@@ -167,12 +127,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_iroh_pairing(IrohPairing self, SseSerializer serializer);
-
-  @protected
   void sse_encode_iroh_path_status(
     IrohPathStatus self,
     SseSerializer serializer,
@@ -189,9 +143,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     IrohPathStatus? self,
     SseSerializer serializer,
   );
-
-  @protected
-  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
@@ -220,9 +171,6 @@ class RustLibWire implements BaseWire {
   void wire__crate__api_iroh__iroh_tunnel_path_status(NativePortType port_) =>
       wasmModule.wire__crate__api_iroh__iroh_tunnel_path_status(port_);
 
-  void wire__crate__api_iroh__iroh_tunnel_port(NativePortType port_) =>
-      wasmModule.wire__crate__api_iroh__iroh_tunnel_port(port_);
-
   void wire__crate__api_iroh__iroh_tunnel_start(
     NativePortType port_,
     String endpoint_id,
@@ -235,11 +183,6 @@ class RustLibWire implements BaseWire {
 
   void wire__crate__api_iroh__iroh_tunnel_stop(NativePortType port_) =>
       wasmModule.wire__crate__api_iroh__iroh_tunnel_stop(port_);
-
-  void wire__crate__api_iroh__parse_iroh_pairing_uri(
-    NativePortType port_,
-    String uri,
-  ) => wasmModule.wire__crate__api_iroh__parse_iroh_pairing_uri(port_, uri);
 }
 
 @JS('wasm_bindgen')
@@ -254,8 +197,6 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
     NativePortType port_,
   );
 
-  external void wire__crate__api_iroh__iroh_tunnel_port(NativePortType port_);
-
   external void wire__crate__api_iroh__iroh_tunnel_start(
     NativePortType port_,
     String endpoint_id,
@@ -263,9 +204,4 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
   );
 
   external void wire__crate__api_iroh__iroh_tunnel_stop(NativePortType port_);
-
-  external void wire__crate__api_iroh__parse_iroh_pairing_uri(
-    NativePortType port_,
-    String uri,
-  );
 }

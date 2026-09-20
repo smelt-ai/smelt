@@ -2,6 +2,26 @@
 
 Flutter client for Smelt remote ACP conversations and live terminal sessions.
 
+## Flutter SDK version
+
+Use the version pinned as `REQUIRED_FLUTTER` in `ci/lib/common.sh`. It is the
+single source of truth, shared by the iOS and Android CI setup scripts.
+
+Matching it locally is not optional. Every `flutter` invocation silently
+migrates the platform projects to the shape its own SDK expects — the iOS
+deployment target, the engine checksum in `ios/Podfile.lock`, the exclusion
+list in `analysis_options.yaml`. Running a different version rewrites those
+files, and the pinned version rewrites them back, so they show up as unrelated
+diffs in every commit. Check with:
+
+```sh
+flutter --version
+bash ci/ios/env-setup.sh --check    # or ci/android/env-setup.sh --check
+```
+
+When you deliberately upgrade, bump `REQUIRED_FLUTTER` and commit whatever the
+new SDK migrates in the same change, so the two never drift.
+
 ## iOS development signing
 
 Debug and Profile builds load a local signing override. Create it once per

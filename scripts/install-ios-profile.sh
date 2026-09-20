@@ -62,6 +62,44 @@ report_expiry() {
   fi
 }
 
+# 自动签名要求 Xcode 里登录着 Apple ID，否则 flutter build 会跑满一轮再抛
+# "No Accounts: Add a new account in Accounts settings."。Keychain 里有证书也不
+# 够——免费账号的 profile 七天一过就被清掉，重新申请必须走账号。提前拦一下，
+# 省掉那次白等的构建。
+#
+# 这个 key 属于 Xcode 内部实现，换版本可能改名；读不到就当检查不适用直接放行，
+# 不能因为探测手段失效而挡住本来能跑的构建。
+preflight_xcode_account() {
+  local json
+  json=$(defaults export com.apple.dt.Xcode - 2>/dev/null \
+    | plutil -extract DVTDeveloperAccountManagerAppleIDLists json -o - - 2>/dev/null) || return 0
+  [[ -n "$json" ]] || return 0
+
+  # 结构是 {"IDE.Identifiers.Prod": ["someone@example.com", ...]}，登录过才有条目。
+  # 解析不出来（换版本改了结构）就放行，不拿探测失败去挡构建。
+  local state
+  state=$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("unknown"); raise SystemExit
+if not isinstance(data, dict):
+    print("unknown"); raise SystemExit
+print("empty" if not any(data.values()) else "ok")
+' 2>/dev/null) || return 0
+  [[ "$state" == "empty" ]] || return 0
+
+  echo "Xcode 里没有登录 Apple ID，自动签名无法申请 provisioning profile。" >&2
+  echo >&2
+  echo "  打开 Xcode → Settings → Accounts → 左下角 + → Apple ID → 登录，" >&2
+  echo "  然后重跑本脚本。" >&2
+  echo >&2
+  echo "（免费账号的 profile 只有 7 天，过期后要靠登录着的账号重新申请；" >&2
+  echo "  Keychain 里留着证书并不够。）" >&2
+  exit 1
+}
+
 APP_PATH="$MOBILE_DIR/build/ios/iphoneos/Runner.app"
 
 if [[ "$CHECK_ONLY" == true ]]; then
@@ -69,6 +107,8 @@ if [[ "$CHECK_ONLY" == true ]]; then
   report_expiry "$APP_PATH"
   exit 0
 fi
+
+preflight_xcode_account
 
 # 没显式指定就自己找：真机 iOS 设备（排掉模拟器/macOS/Chrome）。恰好一台才自动选，
 # 多台时要求指定——装错设备比报错更烦人。
@@ -117,7 +157,7 @@ echo
 if xcrun devicectl device info apps --device "$DEVICE_ID" 2>/dev/null | grep -q "$BUNDLE_ID"; then
   echo "✓ 已安装到设备：$BUNDLE_ID"
 else
-  echo "⚠️  设备上没查到 $BUNDLE_ID，安装可能没成功。" >&2
+  echo "⚠️  设备上没查到 ${BUNDLE_ID}，安装可能没成功。" >&2
   echo "    手机解锁着的话可以重跑一次；若提示不受信任的开发者，去" >&2
   echo "    设置 → 通用 → VPN与设备管理 里信任该开发者证书。" >&2
   exit 1

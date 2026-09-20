@@ -1,0 +1,18 @@
+[package]
+name = "smelt-remote-gateway"
+version.workspace = true
+edition.workspace = true
+description = "Smelt mobile remote ACP and terminal gateway"
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-paths = { path = "../smelt-paths" }
+smelt-core = { path = "../smelt-core" }
+axum = { version = "0.8.9", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "net", "sync", "time"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }

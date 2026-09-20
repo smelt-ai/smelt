@@ -114,4 +114,65 @@ void main() {
     expect(history.lastActiveAt?.toUtc().hour, 12);
     expect(history.messageCount, 8);
   });
+
+  group('LaunchAction', () {
+    Map<String, dynamic> row(String key, String section, String target) => {
+      'key': key,
+      'label': key,
+      'section': section,
+      'target': target,
+      'kind': target == 'conversation' ? 'conversation' : 'terminal',
+      'pinned': section == 'common',
+    };
+
+    test('分组和 target 原样来自电脑端，手机不重新归类', () {
+      final actions = [
+        row('terminal:blank', 'common', 'blankTerminal'),
+        row('terminal:claude:claude', 'terminal', 'terminal'),
+        row('conversation:codex', 'conversation', 'conversation'),
+      ].map(LaunchAction.fromJson).nonNulls.toList();
+
+      final catalog = WorkspaceCatalog(
+        projects: const [],
+        agents: const [],
+        launchActions: actions,
+      );
+
+      expect(
+        catalog.actionsIn(LaunchSection.common).single.target,
+        LaunchTarget.blankTerminal,
+      );
+      expect(
+        catalog.actionsIn(LaunchSection.terminal).single.key,
+        'terminal:claude:claude',
+      );
+      final conversation = catalog.actionsIn(LaunchSection.conversation).single;
+      expect(conversation.isConversation, isTrue);
+      expect(conversation.kindLabel, 'Conversation');
+    });
+
+    test('认不出的分组或 target 直接丢掉，不猜', () {
+      expect(LaunchAction.fromJson(row('x', 'favourites', 'terminal')), isNull);
+      expect(LaunchAction.fromJson(row('x', 'common', 'wormhole')), isNull);
+      expect(LaunchAction.fromJson(row('', 'common', 'terminal')), isNull);
+    });
+
+    test('画图标用的 agent 认 agentKind，也认终端的 provider', () {
+      final conversation = LaunchAction.fromJson({
+        ...row('conversation:codex', 'conversation', 'conversation'),
+        'agentKind': 'codex',
+      })!;
+      final terminal = LaunchAction.fromJson({
+        ...row('terminal:claude:claude', 'terminal', 'terminal'),
+        'provider': 'claude',
+      })!;
+      expect(conversation.agent, 'codex');
+      expect(terminal.agent, 'claude');
+      expect(
+        LaunchAction.fromJson(row('terminal:blank', 'common', 'blankTerminal'))!
+            .agent,
+        isEmpty,
+      );
+    });
+  });
 }

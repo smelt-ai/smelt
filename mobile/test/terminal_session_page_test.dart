@@ -36,6 +36,19 @@ class _FakeTerminalStream implements TerminalStreamClient {
   @override
   bool get writeEnabled => true;
 
+  bool historyAvailable = false;
+  int loadMoreCalls = 0;
+
+  @override
+  bool get canLoadMoreScrollback => historyAvailable;
+
+  @override
+  bool loadMoreScrollback() {
+    if (!historyAvailable) return false;
+    loadMoreCalls++;
+    return true;
+  }
+
   @override
   void resume() {}
 
@@ -82,6 +95,45 @@ void main() {
     expect(terminalView.focusNode?.hasFocus, isFalse);
     expect(find.byIcon(Icons.keyboard_outlined), findsOneWidget);
     expect(find.byType(TerminalShortcutBar), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('shortcut bar is usable in browse mode without the keyboard', (
+    tester,
+  ) async {
+    final stream = _FakeTerminalStream();
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+    );
+    stream.connect();
+    stream.emit(
+      const TerminalReadyEvent(
+        cols: 40,
+        rows: 20,
+        replayBytes: 0,
+        writeEnabled: true,
+      ),
+    );
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pump();
+    await tester.pump();
+
+    // 软键盘没开（图标仍是「显示键盘」），打断键照样可按。
+    expect(find.byIcon(Icons.keyboard_outlined), findsOneWidget);
+    expect(find.byType(TerminalShortcutBar), findsOneWidget);
+
+    await tester.tap(find.text('^C'));
+    await tester.pump();
+    expect(stream.sentInput, contains('\u0003'));
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -190,9 +242,14 @@ void main() {
         ),
       );
       expect(stream.geometries, isNotEmpty);
-      final mobileGeometry = stream.geometries.last;
 
       stream.connect();
+      // 通道接通、attach 未发：快捷键栏先上屏，行数在 attach 之前就落定。
+      stream.emit(const TerminalConnectedEvent(writeEnabled: true));
+      await tester.pump();
+      final mobileGeometry = stream.geometries.last;
+      final geometryUpdatesAtAttach = stream.geometries.length;
+
       final replay = Uint8List.fromList(
         utf8.encode(
           '\x1b[?1049l\x1b[H\x1b[2J\x1b[3J\x1b[?7l'
@@ -225,9 +282,15 @@ void main() {
 
       view = tester.widget<TerminalView>(find.byType(TerminalView));
       expect(view.autoResize, isTrue);
+      // 行列在 attach 之前就落定了，回放结束不能再改一次。改一次就是一次 PTY
+      // resize：不切备用屏的 CLI 收到 SIGWINCH 会把整段对话重印一遍，实测一次
+      // 就是 560KB / 8 秒的流，手机上就是「每次进来对话又滚很久」。
+      expect(view.terminal.viewWidth, mobileGeometry.cols);
+      expect(view.terminal.viewHeight, mobileGeometry.rows);
       expect(
-        (view.terminal.viewWidth, view.terminal.viewHeight),
-        (mobileGeometry.cols, mobileGeometry.rows),
+        stream.geometries.skip(geometryUpdatesAtAttach),
+        everyElement(mobileGeometry),
+        reason: 'attach 之后量到的几何必须和 attach 时一致（相同值会被 service 丢掉）',
       );
       expect(view.terminal.buffer.getText(), contains('LATEST'));
       expect(view.scrollController!.position.maxScrollExtent, greaterThan(0));
@@ -346,7 +409,8 @@ void main() {
       );
       expect(viewAfter.autoResize, isTrue);
       expect(stateAfter, isNot(same(stateBefore)));
-      expect(find.byType(TerminalShortcutBar), findsNothing);
+      // 关掉软键盘不收起快捷键栏：^C / Esc 这类打断键在浏览态同样要能按。
+      expect(find.byType(TerminalShortcutBar), findsOneWidget);
       expect(
         stream.geometries.every(
           (geometry) =>
@@ -384,6 +448,71 @@ void main() {
       await tester.drag(find.byType(TerminalView), const Offset(0, 120));
       await tester.pumpAndSettle();
       expect(scrollController.offset, lessThan(latestOffset));
+    },
+  );
+
+  testWidgets(
+    '快捷键栏出现后，全屏 TUI 仍然正好铺满视口',
+    (tester) async {
+      final stream = _FakeTerminalStream();
+      const session = SessionSummary(
+        id: 'terminal-1',
+        kind: SessionKind.terminal,
+        title: 'Shell',
+        phase: 'running',
+        agent: 'terminal',
+      );
+      await tester.pumpWidget(
+        MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+      );
+
+      // 首次测量发生在浏览模式：那时还不知道能不能写，快捷键栏没上屏。
+      final attached = stream.geometries.last;
+
+      stream.connect();
+      final replay = Uint8List.fromList(
+        utf8.encode(
+          // 全屏 TUI（alt buffer）：没有回滚，行数恒等于视口行数。
+          '\x1b[?1049h\x1b[H\x1b[2J'
+          '${List.generate(attached.rows, (i) => 'tui-$i\r\n').join()}',
+        ),
+      );
+      stream.emit(
+        TerminalReadyEvent(
+          cols: attached.cols,
+          rows: attached.rows,
+          replayBytes: replay.length,
+          // 可写 => 快捷键栏上屏 => 终端视口当场变矮。
+          writeEnabled: true,
+        ),
+      );
+      stream.emit(TerminalDataEvent(replay));
+      // 回放期间要先过一帧：这一帧里快捷键栏已经上屏，终端却还锁着尺寸。
+      await tester.pump();
+      expect(find.byType(TerminalShortcutBar), findsOneWidget);
+
+      stream.emit(const TerminalReplayCompleteEvent());
+      await tester.pump();
+      await tester.pump();
+
+      final view = tester.widget<TerminalView>(find.byType(TerminalView));
+      expect(view.autoResize, isTrue);
+      // alt buffer 高过视口就会长出滚动量，手势被外层 Scrollable 吃掉，
+      // TUI 内部再也滚不动。
+      expect(view.scrollController!.position.maxScrollExtent, 0);
+      expect(view.terminal.viewHeight, lessThan(attached.rows));
+      expect(stream.geometries.last.rows, view.terminal.viewHeight);
+
+      // 视口没有滚动量，拖拽才会落到外层的 InfiniteScrollView，被翻译成方向键
+      // 交给 TUI——这就是「在 TUI 内部滚动」。
+      stream.sentInput.clear();
+      await tester.drag(find.byType(TerminalView), const Offset(0, -120));
+      await tester.pumpAndSettle();
+      expect(stream.sentInput, isNotEmpty);
+      expect(stream.sentInput.every((data) => data == '\x1b[B'), isTrue);
+
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
   );
 
@@ -621,4 +750,126 @@ testWidgets(
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  /// 首屏只带最新的一段；滚到顶就该去补更老的，并且不能把用户弹回底部。
+  testWidgets('滚到顶触发补加载历史，补完后停在原来的内容上', (tester) async {
+    final stream = _FakeTerminalStream()..historyAvailable = true;
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+    );
+    stream.connect();
+    stream.emit(
+      const TerminalReadyEvent(
+        cols: 40,
+        rows: 20,
+        replayBytes: 0,
+        writeEnabled: true,
+        scrollbackLines: 120,
+        historyLines: 4000,
+      ),
+    );
+    await tester.pump();
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(
+          utf8.encode(
+            '${List.generate(200, (i) => 'line-\$i').join('\r\n')}\r\n',
+          ),
+        ),
+      ),
+    );
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pumpAndSettle();
+
+    final controller = tester
+        .widget<TerminalView>(find.byType(TerminalView))
+        .scrollController!;
+    final extentBefore = controller.position.maxScrollExtent;
+    expect(extentBefore, greaterThan(0));
+    expect(stream.loadMoreCalls, 0, reason: '停在底部时不该去拉历史');
+
+    // 程序性地把偏移送到顶部不算数：新建的 ScrollPosition、视口变化后的夹取都
+    // 会这么走一遭，那不是用户要看更老的内容。
+    controller.jumpTo(0);
+    await tester.pump();
+    expect(
+      stream.loadMoreCalls,
+      0,
+      reason: '没人碰屏幕的时候把偏移送到顶部，不该触发整帧重取',
+    );
+
+    controller.jumpTo(controller.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    for (var i = 0; i < 60 && stream.loadMoreCalls == 0; i++) {
+      await tester.drag(find.byType(TerminalView), const Offset(0, 600));
+      // 进度条是无限动画，触发补加载之后 pumpAndSettle 不会停。
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(stream.loadMoreCalls, 1);
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+
+    // 补加载回来的是一份更长的快照：历史往上长，底部不动。
+    stream.emit(
+      const TerminalReadyEvent(
+        cols: 40,
+        rows: 20,
+        replayBytes: 0,
+        writeEnabled: true,
+        scrollbackLines: kMaxTerminalScrollbackLines,
+        historyLines: 4000,
+      ),
+    );
+    await tester.pump();
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(
+          utf8.encode(
+            '${List.generate(600, (i) => 'line-\$i').join('\r\n')}\r\n',
+          ),
+        ),
+      ),
+    );
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pumpAndSettle();
+
+    final restored = tester
+        .widget<TerminalView>(find.byType(TerminalView))
+        .scrollController!;
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(
+      restored.position.pixels,
+      greaterThan(0),
+      reason: '补完历史必须停在用户原来看的内容上，不能弹到底',
+    );
+    expect(
+      restored.position.maxScrollExtent,
+      greaterThan(extentBefore),
+      reason: '补回来的历史要变成新的可滚动量',
+    );
+    expect(
+      restored.position.maxScrollExtent - restored.position.pixels,
+      closeTo(extentBefore, 1),
+      reason: '离底距离要跟触发时一致（触发时 pixels=0，距底就是当时的 maxScrollExtent）',
+    );
+
+    // 停在几千行之外时，回最新输出不能只剩「一路手动拖」这一条路。
+    expect(find.byIcon(Icons.arrow_downward), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.arrow_downward));
+    await tester.pumpAndSettle();
+    expect(
+      restored.position.pixels,
+      closeTo(restored.position.maxScrollExtent, 0.5),
+    );
+    expect(find.byIcon(Icons.arrow_downward), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

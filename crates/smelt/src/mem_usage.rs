@@ -4,7 +4,7 @@
 pub fn current_rss_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
-        return macos_rss();
+        macos_rss()
     }
     #[cfg(target_os = "linux")]
     {
@@ -52,7 +52,7 @@ fn macos_rss() -> Option<u64> {
         return None;
     }
     let info = unsafe { info.assume_init() };
-    Some(info.resident_size as u64)
+    Some(info.resident_size)
 }
 
 #[cfg(target_os = "linux")]

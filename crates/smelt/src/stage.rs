@@ -1,382 +1,551 @@
-//! 会话舞台的头部（34px：会话名 + 状态胶囊 + 次要信息）
-//! 终端与 ACP 会话共用这一层，避免在终端底部重复展示状态和快捷键。
-//! 头栏里只有状态胶囊保留卡片底+边框，是唯一该抢视线的颜色；模型/token/
-//! cwd/git 统一降级成 "·" 分隔的纯文字，避免所有信息一样重导致扫不出重点。
+//! 舞台和右栏共用的 34px 顶栏：窗口开关 + 可见舞台身份。
+//! 用其他应用打开在项目右键；文件/变更/技能/历史在右抽屉里。
 //!
-//! 跟 file_tree.rs 同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
+//! 标题槽只填当前舞台没有自己页头的那一面（项目会话、智能体对话、插件面）。
+//! 智能体/自动化目录和钻取已有页头，铬不重复写，也不回落到上一会话。
+//!
+//! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
-use crate::inspector::InspectorTab;
-use crate::{
-    AgentStatus, MainView, SessionKind, Workspace, session_history, ui_theme, workspace_frame,
-};
+use crate::{StageCover, Workspace, WorkspaceRoute, ui_theme, workspace_frame};
 
-/// 状态胶囊文案（与会话列表副标题同一套口径）。
-fn phase_text(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::WaitingApproval => "等你批准",
-        AgentStatus::NeedsAttention => "需要处理",
-        AgentStatus::Running => "运行中",
-        AgentStatus::Done => "已完成",
-        AgentStatus::Idle => "空闲",
+/// 共用顶栏标题槽。目录/编辑器/自动化钻取都有页头，那些面必须是 `Hidden`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChromeTitle {
+    Hidden,
+    Visible {
+        title: String,
+        model: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChromeSessionTitle {
+    pub title: String,
+    pub model: Option<String>,
+}
+
+impl ChromeTitle {
+    fn from_session(session: Option<ChromeSessionTitle>) -> Self {
+        match session {
+            Some(session) if !session.title.trim().is_empty() => Self::Visible {
+                title: session.title,
+                model: session.model,
+            },
+            _ => Self::Hidden,
+        }
     }
 }
 
+/// 铬标题跟可见面走，不读裸的 `active_session`。
+///
+/// `project_session` 是项目舞台上那条会话；切到智能体目录后它往往还在，
+/// 但不能再显示——那就是「顶栏还停在上一场 Grok」这条 bug。
+pub(crate) fn chrome_title_for_stage(
+    route: &WorkspaceRoute,
+    agent_conversation: Option<ChromeSessionTitle>,
+    project_session: Option<ChromeSessionTitle>,
+    plugin_title: Option<String>,
+) -> ChromeTitle {
+    match route {
+        WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
+        WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
+        WorkspaceRoute::Automations => ChromeTitle::Hidden,
+        WorkspaceRoute::Plugin { .. } => match plugin_title {
+            Some(title) if !title.trim().is_empty() => ChromeTitle::Visible { title, model: None },
+            _ => ChromeTitle::Hidden,
+        },
+    }
+}
+
+/// 首次 IDE 扫描完成后需要更新的菜单。菜单可能已经被用户关闭，因此只持有弱引用。
+pub(crate) struct IdePopupWaiter {
+    popup: WeakEntity<PopupMenu>,
+    root: String,
+}
+
 impl Workspace {
-    /// 钻取页顶部的返回条（32px）。任务 route 不经过这里；Files/Git/Skills
-    /// 展开态也使用自己的收回操作，目前只有 History 需要返回会话。
-    pub(crate) fn render_stage_back_bar(
-        &self,
-        v: MainView,
-        left_guard: Pixels,
-        right_reserve: Pixels,
+    /// 构建「使用其他应用打开」菜单。Finder 始终立即可用；IDE 首次发现留在后台，
+    /// `PopupMenu::rebuild` 会在结果回来后把其余应用原地补进菜单。
+    pub(crate) fn build_ide_popup_menu(
+        &mut self,
+        menu: PopupMenu,
+        root: String,
+        popup: Entity<PopupMenu>,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
-        // match 保持穷尽，非 History 变体若误走到这里应尽早暴露调用错误。
-        let (label, back) = match v {
-            MainView::History => ("历史会话", "‹ 返回会话"),
-            MainView::Tasks | MainView::Files | MainView::Git | MainView::Skills => {
-                unreachable!("一级页面或展开面板不应渲染返回条")
+    ) -> PopupMenu {
+        let snapshot = self.ide_catalog.snapshot();
+        if snapshot.installed.is_none() {
+            self.ide_popup_waiters.push(IdePopupWaiter {
+                popup: popup.downgrade(),
+                root: root.clone(),
+            });
+            if !snapshot.scanning {
+                self.refresh_ide_catalog(window, cx);
             }
-        };
-        let this = cx.entity();
-        workspace_frame::top_bar()
-            .h(px(32.))
-            // 同 render_stage_header：不写 w_full() 这行只会缩到内容宽度，
-            // 标题后面一大截舞台宽度就晾着。
-            .w_full()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_2p5()
-            // sidebar 收起时这条横条会变成贴着窗口左边缘那一块，真交通灯浮在
-            // 它头上——跟 render_stage_header 同一个处理：不额外拿一整行 34px
-            // 去撑高度，就地在左边多让出交通灯的宽度，留在同一行里。
-            // left_guard 由调用方按全屏状态算好（见 main.rs 的注释）：非全屏
-            // 128px 不是随手拍的——main.rs 顶部拖拽层里的「切换左侧栏」图标固定
-            // 绝对定位在 left(92px)、size_6（24px），92+24=116 再加一点间距，
-            // 之前给 92px 只避开了交通灯，没避开这颗常驻图标，标题文字被它糊住；
-            // 全屏时红绿灯隐藏、按钮移到 left(18px)，让位宽度缩小到 48px。
-            .when(left_guard > px(0.), |d| d.pl(left_guard))
-            // 右边同理：这条横条贴着窗口右边缘时，右上角浮着全屏/终端抽屉/
-            // 侧边面板 3 颗 size_6 图标（main.rs 那个 h_flex：3*24 + 2*4 gap +
-            // 10 右边距 ≈ 90px），不留够空间标题/内容会被糊住。跟 render_stage_header
-            // 一样用连续插值，别在 inspector 开合瞬间一刀切。
-            .pr(right_reserve)
-            .when(left_guard == px(0.), |d| d.pl_3())
-            .child(
-                div()
-                    .id("stage-back")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py(px(2.))
-                    .rounded(px(6.))
-                    .text_sm()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .cursor_pointer()
-                    .hover(|d| {
-                        d.bg(rgb(ui_theme::bg_hover()))
-                            .text_color(rgb(ui_theme::text_bright()))
-                    })
-                    .child(back)
-                    .on_click(move |_ev, window, cx| {
-                        this.update(cx, |ws, cx| ws.set_stage_override(None, window, cx));
-                    }),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child(label),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_xs()
-                    .font_family("monospace")
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child("Esc"),
-            )
+        }
+        Self::ide_popup_items(menu, root, snapshot, cx.entity())
     }
 
-    /// 44px 舞台头。没有会话时返回 None（空态自带引导）。
-    ///
-    /// `left_guard`：sidebar 收起时这块舞台会变成贴着窗口左边缘的那一块，
-    /// 真交通灯浮在它上面——这时不额外拿一整条 34px 出来把头栏往下挤（那样
-    /// 平白多出一整行空白，看着像布局错位），而是让头栏自己在左边多留出
-    /// 交通灯的宽度，标题跟交通灯挤在同一行里，参考 Arc / VS Code 的处理。
-    /// 宽度由调用方按全屏状态算好（全屏时红绿灯隐藏、切换按钮移到最左，
-    /// 让位从 128px 缩到 48px）；传 0 表示不需要让位。
-    pub(crate) fn render_stage_header(
-        &mut self,
-        left_guard: Pixels,
-        right_reserve: Pixels,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let ix = self.active_session;
-        let sess = self.sessions.get(ix)?;
-        let title = sess.title(cx);
-        // 状态胶囊：ACP 直接问视图要相位（它有自己的相位机，经五态映射会把
-        // 「启动中 / 已结束」都塌成「空闲」）；终端仍走 AgentStatus 那套。
-        let (phase_label, phase_color) = match &sess.kind {
-            SessionKind::Acp(view) => {
-                let (label, color) = view.read(cx).phase_label();
-                (label, rgb(color))
-            }
-            SessionKind::Term { .. } => {
-                let st = sess.status(cx);
-                (phase_text(st), ui_theme::session_dot_color(st))
-            }
-        };
-        // ACP 会话把当前模型也摆到舞台头上——「这轮对话用的哪个模型」是随时
-        // 要能确认的事实，不该只藏在输入栏胶囊里。ACP 顺带把当前上下文用量
-        // （精确 token 数，跟输入栏「上下文 %」胶囊同一个数据源）也取出来。
-        let (model, acp_tokens) = match &sess.kind {
-            SessionKind::Acp(view) => {
-                let v = view.read(cx);
-                (v.model_name(), v.context_tokens_used())
-            }
-            SessionKind::Term { .. } => (None, None),
-        };
-        let cwd = sess.cwd(cx);
-        let cwd_tail = cwd
-            .as_ref()
-            .map(|c| crate::project_name_for_cwd(&c))
-            .unwrap_or_default();
-        let git_summary = cwd
-            .as_ref()
-            .and_then(|cwd| self.git_status.get(cwd))
-            .and_then(|(_, status)| {
-                let branch = status.branch_name();
-                (!branch.is_empty()).then(|| {
-                    (
-                        branch.to_string(),
-                        status.files.len(),
-                        status.ahead_behind(),
-                        status.insertions_deletions(),
-                    )
-                })
-            });
-        // 只有 ACP 会话有实时用量上报，直接用它；终端会话没有精确来源
-        // （历史缓存只是近似值，容易跟"当前上下文"这个语义对不上，索性
-        // 不显示，不瞎猜）。
-        let token_count = acp_tokens;
-        let this = cx.entity();
+    /// 后台刷新本机 IDE 目录。首次扫描结束后会原地补齐所有仍打开的应用菜单。
+    fn refresh_ide_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ide_catalog.begin_refresh() {
+            return;
+        }
+        cx.notify();
 
-        // 次要信息（模型 / token / 项目目录）统一降级成纯文字，用 "·" 分隔，
-        // 不再各自套跟状态胶囊一样的卡片边框——状态才是这条头栏唯一该抢视线的颜色，
-        // 其余是「随时能查」但不需要抢戏的辅助信息。
-        let mut info_segments: Vec<AnyElement> = Vec::new();
-        if let Some(m) = model {
-            info_segments.push(
-                div()
-                    .text_xs()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .child(m)
-                    .into_any_element(),
-            );
+        cx.spawn_in(window, async move |this, cx| {
+            let installed = cx
+                .background_executor()
+                .spawn(async move { crate::ide::detect_installed() })
+                .await;
+
+            let _ = this.update_in(cx, |workspace, window, cx| {
+                workspace.ide_catalog.finish_refresh(installed);
+                let snapshot = workspace.ide_catalog.snapshot();
+                let waiters = std::mem::take(&mut workspace.ide_popup_waiters);
+                let workspace_entity = cx.entity();
+
+                for waiter in waiters {
+                    let snapshot = snapshot.clone();
+                    let workspace_entity = workspace_entity.clone();
+                    let _ = waiter.popup.update(cx, |popup_menu, popup_cx| {
+                        popup_menu.rebuild(window, popup_cx, |menu, _, _| {
+                            Self::ide_popup_items(menu, waiter.root, snapshot, workspace_entity)
+                        });
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Finder 是确定存在的系统应用，单独在后台预取它的图标。这个请求不会枚举 IDE，
+    /// 也不在 UI 线程调用 AppKit，因此左侧主操作会尽早显示 Finder 的真实图标。
+    pub(crate) fn preload_file_manager_icon(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.ide_catalog.begin_file_manager_icon_load() {
+            return;
         }
-        if let Some(n) = token_count {
-            info_segments.push(
-                div()
-                    .id("stage-token-count")
-                    .text_xs()
-                    .font_family("monospace")
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .child(format!("{} tok", session_history::format_count(n)))
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(
-                            "Claude 用量：ACP 会话为当前上下文占用，终端会话为最近一次 Claude Code 活动的累计用量（近似值）",
-                        )
-                        .build(window, cx)
+
+        cx.spawn_in(window, async move |this, cx| {
+            let icon = cx
+                .background_executor()
+                .spawn(async move { crate::ide::detect_file_manager_icon() })
+                .await;
+
+            let _ = this.update_in(cx, |workspace, _window, cx| {
+                workspace.ide_catalog.finish_file_manager_icon_load(icon);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 等首屏稳定后再预热一次应用目录。macOS 查询的是 Launch Services 已维护的注册
+    /// 表，仍放在后台；用户若先点开菜单，`begin_refresh` 的去重闸门会立刻接管。
+    pub(crate) fn prewarm_ide_catalog_after_idle(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.ide_catalog.schedule_idle_prewarm() {
+            return;
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(750))
+                .await;
+            let _ = this.update_in(cx, |workspace, window, cx| {
+                workspace.refresh_ide_catalog(window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 把某个缓存快照转成菜单项。这个函数只操作已在内存里的数据，因此既可由首次
+    /// 点击构建，也可由异步结果通过 `PopupMenu::rebuild` 复用。
+    fn ide_popup_items(
+        mut menu: PopupMenu,
+        root: String,
+        snapshot: crate::ide::IdeCatalogSnapshot,
+        workspace: Entity<Self>,
+    ) -> PopupMenu {
+        let crate::ide::IdeCatalogSnapshot {
+            installed,
+            file_manager_icon,
+            ..
+        } = snapshot;
+
+        let Some(installed) = installed else {
+            return menu.item(Self::file_manager_menu_item(
+                root,
+                file_manager_icon,
+                workspace,
+            ));
+        };
+
+        if installed.is_empty() {
+            menu = menu.item(Self::file_manager_menu_item(
+                root,
+                file_manager_icon,
+                workspace,
+            ));
+        } else {
+            for installed_ide in installed {
+                let workspace = workspace.clone();
+                let root = root.clone();
+                let icon = installed_ide.icon.clone();
+                let label = installed_ide.label.to_string();
+                menu = menu.item(
+                    // ElementItem 不经过 PopupMenu 的 Icon/SVG 通道，直接把
+                    // NSWorkspace 返回的彩色 Image 作为菜单行的一部分。
+                    PopupMenuItem::element(move |_window, _cx| {
+                        let mut row = h_flex().flex_1().items_center().gap_x_2();
+                        row = if let Some(icon) = icon.clone() {
+                            row.child(img(icon).size(px(17.)).object_fit(ObjectFit::Contain))
+                        } else {
+                            row.child(Icon::new(IconName::SquareTerminal).size(px(16.)))
+                        };
+                        row.child(label.clone())
                     })
-                    .into_any_element(),
-            );
-        }
-        if !cwd_tail.is_empty() {
-            info_segments.push(
-                div()
-                    .text_xs()
-                    .font_family("monospace")
-                    .text_color(rgb(ui_theme::text_faint()))
-                    .child(cwd_tail)
-                    .into_any_element(),
-            );
-        }
-        let mut info_cluster = div()
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .min_w(px(0.))
-            .flex_shrink(1.)
-            .overflow_hidden();
-        for (i, seg) in info_segments.into_iter().enumerate() {
-            if i > 0 {
-                info_cluster = info_cluster.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .child("·"),
+                    .on_click(move |_ev, _window, cx| {
+                        let result =
+                            crate::ide::open_in(&installed_ide, std::path::Path::new(&root));
+                        workspace.update(cx, |ws, workspace_cx| {
+                            if let Err(error) = result {
+                                ws.background_error = Some(error);
+                                workspace_cx.notify();
+                            }
+                        });
+                    }),
                 );
             }
-            info_cluster = info_cluster.child(seg);
+            menu = menu.item(Self::file_manager_menu_item(
+                root,
+                file_manager_icon,
+                workspace,
+            ));
         }
+        menu
+    }
 
-        let e_git = this.clone();
-        Some(
+    /// 文件管理器是稳定的系统能力，跟按需发现的 IDE 共用同一菜单，但不依赖扫描
+    /// 结果；图标尚未从后台缓存回来时，使用线性文件夹图标作无阻塞回退。
+    fn file_manager_menu_item(
+        root: String,
+        icon: Option<std::sync::Arc<gpui::Image>>,
+        workspace: Entity<Self>,
+    ) -> PopupMenuItem {
+        let label = crate::ide::file_manager_label();
+        PopupMenuItem::element(move |_window, _cx| {
+            let mut row = h_flex().flex_1().items_center().gap_x_2();
+            row = if let Some(icon) = icon.clone() {
+                row.child(img(icon).size(px(17.)).object_fit(ObjectFit::Contain))
+            } else {
+                row.child(Icon::new(IconName::FolderOpen).size(px(16.)))
+            };
+            row.child(label)
+        })
+        .on_click(move |_ev, _window, cx| {
+            workspace.update(cx, |ws, workspace_cx| {
+                ws.open_project_in_file_manager(&root, workspace_cx);
+            });
+        })
+    }
+
+    pub(crate) fn open_project_in_file_manager(&mut self, root: &str, cx: &mut Context<Self>) {
+        if let Err(error) = crate::ide::open_in_file_manager(std::path::Path::new(root)) {
+            self.background_error = Some(error);
+            cx.notify();
+        }
+    }
+
+    fn chrome_title(&self, cx: &App) -> ChromeTitle {
+        let agent_conversation =
+            self.selected_agent_conversation_view(cx)
+                .map(|(ix, view)| ChromeSessionTitle {
+                    title: self.sessions[ix].title(cx),
+                    model: view.read(cx).model_name(),
+                });
+        let project_session = self.sessions.get(self.active_session).and_then(|session| {
+            if session.is_product_conversation(cx) {
+                return None;
+            }
+            Some(ChromeSessionTitle {
+                title: session.title(cx),
+                model: session
+                    .active_acp()
+                    .and_then(|view| view.read(cx).model_name()),
+            })
+        });
+        let plugin_title = match self.active_tab() {
+            WorkspaceRoute::Plugin { key } => Some(self.workspace_surface_display_title(key)),
+            _ => None,
+        };
+        chrome_title_for_stage(
+            self.active_tab(),
+            agent_conversation,
+            project_session,
+            plugin_title,
+        )
+    }
+
+    /// 舞台和右栏共用的 34px 顶栏：可见舞台身份 + 窗口开关。
+    /// 用其他应用打开在项目右键；文件/变更/技能/历史在抽屉里。
+    pub(crate) fn render_shared_right_chrome(
+        &mut self,
+        left_guard: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (title, model) = match self.chrome_title(cx) {
+            ChromeTitle::Visible { title, model } => (Some(title), model),
+            ChromeTitle::Hidden => (None, None),
+        };
+        workspace_frame::with_window_drag(
             workspace_frame::top_bar()
-                // 统一 34px：跟侧栏顶部导航行、拖拽悬浮层、inspector rail 同一个
-                // 基准，不管侧栏开合都是这个高度——开合时舞台头只变宽不变高，
-                // 侧栏收起时又正好跟红绿灯（`TitleBar::title_bar_options()` 里
-                // 固定的 traffic_light_position）对上同一条水平线。
-                .h(px(34.))
-                // 显式撑满：这层是 flex_col 舞台的第一个子项，不写 w_full() 的话
-                // 只会缩到内容本身的宽度（标题一截断就跟着变窄），右边一大截
-                // 舞台宽度就晾在那——标题的 flex_1 只在“行本身够宽”时才有意义。
                 .w_full()
-                .flex_shrink_0()
+                .h(workspace_frame::TOP_BAR_HEIGHT)
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap_2p5()
+                .bg(rgb(ui_theme::bg_stage()))
+                .border_b_1()
+                .border_color(ui_theme::hairline())
                 .when(left_guard > px(0.), |d| d.pl(left_guard))
                 .when(left_guard == px(0.), |d| d.pl_4())
-                // 右边贴窗口边缘时（inspector 没停靠在旁边）要避开右上角浮着的
-                // 全屏/终端抽屉/侧边面板 3 颗图标，见 render_stage_back_bar 同款
-                // 注释；inspector 停靠时它在旁边接管右边缘，这里就不用多留。
-                // right_reserve 跟 inspector 挂载/收起的动画进度同步插值
-                // （16px↔100px），不是开合瞬间一刀切——不然图标条会先猛地
-                // 甩到最右边、再被面板展开挤回来，跟内容宽度的动画对不上。
-                .pr(right_reserve)
-                .child(
+                .pr(px(18.))
+                .children(title.map(|title| {
+                    let tip = title.clone();
                     div()
                         .id("stage-title")
-                        // 收窄到极限也至少留够几个字——之前是 0，pane 一变窄就先塌成
-                        // 纯省略号「…」，标题（这行最该保住的信息）反而完全看不见。
-                        // 该让步的是下面 info_cluster 那串「随时能查」的次要信息。
                         .min_w(px(56.))
-                        // 标题吃掉头栏真正剩余的宽度；末尾不再放另一个 flex_1
-                        // 空白跟它平分空间，否则明明右侧空着，标题仍会先缩成省略号。
-                        .flex_1()
                         .flex_shrink(1.)
                         .overflow_hidden()
                         .text_sm()
                         .font_semibold()
                         .text_color(rgb(ui_theme::text_bright()))
                         .truncate()
-                        .child(title.clone())
-                        // 标题本身可能是完整路径（比如终端会话直接拿 cwd 当标题），
-                        // 窄屏下省略号截得只剩前缀，鼠标搁上去至少能看到全文，
-                        // 不用手动拉宽窗口/侧栏。
+                        .child(title)
                         .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
-                        }),
-                )
-                .child(
-                    // 状态胶囊：头栏里唯一保留卡片底+边框的元素，用颜色/边框把
-                    // 「这个会话现在什么状态」跟其余辅助信息拉开一档视觉权重。
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        })
+                }))
+                .children(model.map(|m| {
                     div()
-                        .flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py(px(2.))
-                        .rounded(px(6.))
-                        .bg(rgb(ui_theme::bg_card()))
-                        .border_1()
-                        .border_color(rgb(ui_theme::border_mid()))
                         .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
-                        .child(div().size(px(6.)).rounded_full().bg(phase_color))
-                        .child(phase_label),
-                )
-                .child(info_cluster)
-                .children(git_summary.map(
-                    |(branch, changes, (ahead, behind), (insertions, deletions))| {
-                        div()
-                            .id("stage-git-status")
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .py(px(2.))
-                            .rounded(px(6.))
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(rgb(ui_theme::text_mid()))
-                            .cursor_pointer()
-                            .hover(|d| {
-                                d.bg(rgb(ui_theme::bg_hover()))
-                                    .text_color(rgb(ui_theme::text_bright()))
-                            })
-                            .child(
-                                Icon::empty()
-                                    .path("smelt-icons/git-branch.svg")
-                                    .size(px(12.)),
-                            )
-                            .child(branch)
-                            .when(ahead > 0, |d| d.child(format!("↑{ahead}")))
-                            .when(behind > 0, |d| d.child(format!("↓{behind}")))
-                            .when(insertions > 0, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(rgb(ui_theme::diff_add_fg()))
-                                        .child(format!("+{insertions}")),
-                                )
-                            })
-                            .when(deletions > 0, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(rgb(ui_theme::diff_del_fg()))
-                                        .child(format!("-{deletions}")),
-                                )
-                            })
-                            .when(changes > 0, |d| {
-                                d.child(
-                                    div()
-                                        .min_w(px(16.))
-                                        .h(px(16.))
-                                        .px(px(4.))
-                                        .rounded(px(8.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .bg(rgb(ui_theme::accent()))
-                                        .text_color(rgb(ui_theme::on_accent()))
-                                        .text_size(px(9.))
-                                        .font_semibold()
-                                        .child(changes.to_string()),
-                                )
-                            })
-                            .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new("打开 Git 面板")
-                                    .build(window, cx)
-                            })
-                            .on_click(move |_ev, window, cx| {
-                                e_git.update(cx, |ws, cx| {
-                                    if ws.inspector_panel_promoted() {
-                                        ws.set_stage_override(None, window, cx);
-                                    }
-                                    if crate::inspector::should_reset_git_diff_on_dock_selection(
-                                        ws.inspector_tab,
-                                        ws.stage_override,
-                                    ) {
-                                        ws.reset_git_diff_view();
-                                    }
-                                    ws.inspector_tab = InspectorTab::Git;
-                                    ws.set_inspector_open(true);
-                                    cx.notify();
-                                });
-                            })
-                    },
-                )),
+                        .text_color(rgb(ui_theme::text_mid()))
+                        .child(m)
+                }))
+                .child(div().flex_1().min_w_0())
+                .child(self.render_window_trailing_toggles(cx)),
         )
+    }
+
+    /// 窗口级开关：全屏 / 右侧抽屉。挂在共用顶栏右侧，不进浮层。
+    pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Div {
+        let promoted = self.tool_panel_promoted();
+        let panel_visible = self.tool_panel_open || promoted;
+        h_flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .children((promoted || self.tool_panel_open).then(|| {
+                div()
+                    .id("tool-panel-fullscreen-toggle")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_6()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_color(rgb(ui_theme::text_mid()))
+                    .when(promoted, |s| s.bg(ui_theme::overlay(0x18)))
+                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
+                    .child(
+                        Icon::new(if promoted {
+                            IconName::Minimize
+                        } else {
+                            IconName::Maximize
+                        })
+                        .size_4(),
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(if promoted {
+                            "收回右侧面板"
+                        } else {
+                            "全屏显示右侧面板"
+                        })
+                        .build(window, cx)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if promoted {
+                                this.set_stage_cover(None, window, cx);
+                                this.set_tool_panel_open(true);
+                            } else {
+                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
+                            }
+                            this.save_state(cx);
+                            cx.notify();
+                        }),
+                    )
+            }))
+            .child(
+                div()
+                    .id("tool-panel-toggle")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_6()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_color(rgb(ui_theme::text_mid()))
+                    .when(panel_visible, |s| s.bg(ui_theme::overlay(0x18)))
+                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
+                    .child(
+                        if panel_visible {
+                            Icon::empty().path("smelt-icons/panel-right-filled.svg")
+                        } else {
+                            Icon::new(IconName::PanelRight)
+                        }
+                        .size_4(),
+                    )
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("切换右侧面板  ⌥⌘B").build(window, cx)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_tool_panel(window, cx);
+                        }),
+                    ),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChromeSessionTitle, ChromeTitle, chrome_title_for_stage};
+    use crate::WorkspaceRoute;
+
+    fn grok() -> ChromeSessionTitle {
+        ChromeSessionTitle {
+            title: ".: - Waiting for response... - PI-Desktop 插件架构与 UI 扩展边界 - grok".into(),
+            model: None,
+        }
+    }
+
+    fn agent_chat() -> ChromeSessionTitle {
+        ChromeSessionTitle {
+            title: "查登录".into(),
+            model: Some("grok-4".into()),
+        }
+    }
+
+    #[test]
+    fn leaving_a_session_for_the_agent_catalog_clears_the_chrome_title() {
+        assert_eq!(
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None),
+            ChromeTitle::Hidden,
+        );
+    }
+
+    #[test]
+    fn automations_do_not_keep_the_previous_session() {
+        assert_eq!(
+            chrome_title_for_stage(&WorkspaceRoute::Automations, None, Some(grok()), None),
+            ChromeTitle::Hidden,
+        );
+    }
+
+    #[test]
+    fn agent_conversation_uses_that_thread_not_the_project_session() {
+        assert_eq!(
+            chrome_title_for_stage(
+                &WorkspaceRoute::Agents,
+                Some(agent_chat()),
+                Some(grok()),
+                None,
+            ),
+            ChromeTitle::Visible {
+                title: "查登录".into(),
+                model: Some("grok-4".into()),
+            },
+        );
+    }
+
+    #[test]
+    fn project_stage_still_shows_the_session_title() {
+        assert_eq!(
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None),
+            ChromeTitle::Visible {
+                title: grok().title,
+                model: None,
+            },
+        );
+        assert_eq!(
+            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None, None),
+            ChromeTitle::Hidden,
+        );
+    }
+
+    #[test]
+    fn plugin_surface_does_not_fall_back_to_the_previous_session() {
+        assert_eq!(
+            chrome_title_for_stage(
+                &WorkspaceRoute::Plugin {
+                    key: "com.example/board".into(),
+                },
+                None,
+                Some(grok()),
+                Some("看板".into()),
+            ),
+            ChromeTitle::Visible {
+                title: "看板".into(),
+                model: None,
+            },
+        );
+        assert_eq!(
+            chrome_title_for_stage(
+                &WorkspaceRoute::Plugin {
+                    key: "com.example/board".into(),
+                },
+                None,
+                Some(grok()),
+                None,
+            ),
+            ChromeTitle::Hidden,
+        );
+    }
+
+    #[test]
+    fn blank_titles_do_not_occupy_the_chrome() {
+        assert_eq!(
+            chrome_title_for_stage(
+                &WorkspaceRoute::Session,
+                None,
+                Some(ChromeSessionTitle {
+                    title: "   ".into(),
+                    model: None,
+                }),
+                None,
+            ),
+            ChromeTitle::Hidden,
+        );
     }
 }

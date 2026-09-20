@@ -11,7 +11,13 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+smelt-paths = { path = "../smelt-paths" }
 smelt-core = { path = "../smelt-core" }
+smelt-plugin-api = { path = "../smelt-plugin-api" }
+smelt-plugin-host = { path = "../smelt-plugin-host" }
+smelt-event-bus = { path = "../smelt-event-bus" }
+smelt-store = { path = "../smelt-store" }
+smelt-remote-gateway = { path = "../smelt-remote-gateway" }
 # iroh P2P 隧道（iroh_start/iroh_stop op）。放这儿而不是 smelt-core：
 # smelt-core 是 GUI 与守护共用的地基，不该被只有守护用得上的重依赖拖慢。
 smelt-iroh = { path = "../smelt-iroh" }
@@ -19,7 +25,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-dirs = "5"
+clap.workspace = true
 uuid = { version = "1", features = ["v4"] }
 portable-pty = "0.9"
 # smeltd 无缝升级：PTY master 裸 fd 的 dup/CLOEXEC/ioctl(TIOCSWINSZ)/kill/waitpid。
@@ -27,9 +33,16 @@ libc = "0.2"
 alacritty_terminal = { version = "0.26", default-features = false }
 axum = { version = "0.8.9", features = ["ws"] }
 # ACP 会话托管：直接复用 smelt-core::acp_conn 的连接驱动，不重写一遍。
-agent-client-protocol = { version = "=1.3.0", features = ["unstable_elicitation"] }
+agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
 smol = "2"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
 core-foundation = "0.10"
+core-foundation-sys = "0.8"
+security-framework-sys = "2.17"

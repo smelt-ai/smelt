@@ -69,9 +69,9 @@ void main() {
   // 查到的底色跟手机上渲染的对不上，就是对比度问题。
   test('fallback matches the desktop default dark snapshot', () {
     const TerminalTheme fallback = SmeltTerminalTheme.fallbackDark;
-    expect(fallback.background, const Color(0xff313338));
+    expect(fallback.background, const Color(0xff070707));
     expect(fallback.foreground, const Color(0xffd8d8d8));
-    expect(fallback.selection, const Color(0xff334a6a));
+    expect(fallback.selection, const Color(0xff0c3d7a));
     expect(fallback.black, const Color(0xff15161e));
     expect(fallback.brightWhite, const Color(0xffffffff));
     expect(fallback.searchHitBackground, const Color(0xff7a5c20));

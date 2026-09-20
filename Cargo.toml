@@ -1,12 +1,25 @@
 # 虚拟 workspace：所有代码住 crates/ 下，根不再有 package。
+# - crates/smelt-store  —— 桌面 SQLite/KV 与 legacy 导入事务原语（移动端不编 native SQLite）
+# - crates/smelt-pairing —— 桌面/移动端共用的配对码格式
+# - crates/smelt-remote-gateway —— 移动端远程 ACP/终端网关（不含 GPUI）
 # - crates/smelt-core   —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）
+# - crates/smelt-git    —— Git 领域层（仓库发现/状态/diff/写操作，不含 UI）
 # - crates/smeltd       —— 守护侧三个二进制（smeltd / gateway / smelt-notify）
 # - crates/smelt        —— GUI 主程序（bin 名 smelt，与产品名统一）
 [workspace]
 members = [
+    "crates/smelt-paths",
+    "crates/smelt-plugin-api",
+    "crates/smelt-plugin-host",
+    "crates/smelt-event-bus",
+    "crates/smelt-store",
+    "crates/smelt-pairing",
+    "crates/smelt-remote-gateway",
     "crates/smelt-core",
+    "crates/smelt-git",
     "crates/smeltd",
     "crates/smelt-ui",
+    "crates/smelt-webview",
     "crates/smelt-acp-view",
     "crates/smelt",
     "crates/smelt-iroh",
@@ -17,10 +30,31 @@ resolver = "3"
 # 版本号唯一真源：发版只改这里（scripts/package-mac.sh 与 release CI 都
 # grep 本文件的 '^version' 行做校验），各成员 version.workspace = true 继承。
 [workspace.package]
-version = "0.6.14"
+version = "0.9.0"
 edition = "2024"
+# 与 rust-toolchain.toml 一致。成员 crate 未一律 inherit，钉编译器靠 toolchain 文件。
+rust-version = "1.97.0"
 
-# 老版 objc 0.2 的 msg_send!/class! 宏展开带 cfg(feature="cargo-clippy")，新 Rust 的
-# check-cfg 会刷 unexpected_cfgs 警告；宏来自依赖无法改，这里整体放行。
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+
+# GPUI's macOS dependency chain still uses block 0.1.6, whose opaque Objective-C
+# class symbol is declared as an uninhabited enum. Keep the API/version unchanged
+# and patch only that FFI declaration until GPUI migrates to block2/objc2.
+[patch.crates-io]
+block = { path = "vendor/block-0.1.6" }
+
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }
+
+[workspace.lints.clippy]
+needless_borrow = "warn"
+unnecessary_to_owned = "warn"
+unnecessary_sort_by = "warn"
+collapsible_if = "warn"
+cloned_ref_to_slice_refs = "warn"
+redundant_clone = "warn"
+# 正确性闸门：空 dbg/todo 不应进主线。存量 style 警告不在这里 deny，避免一次清不完。
+dbg_macro = "deny"
+todo = "deny"

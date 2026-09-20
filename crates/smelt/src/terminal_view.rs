@@ -2,6 +2,7 @@
 //! 多个 TerminalView 由 Workspace 以标签形式管理。
 
 use std::cell::Cell as StdCell;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -9,12 +10,9 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
-use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionItem, AttentionKind};
 use smol::Timer;
 
-use crate::NewTask;
-use crate::tasks::NewTaskPrefill;
 use crate::terminal::{self, Terminal};
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
@@ -24,9 +22,9 @@ use crate::terminal::{self, Terminal};
 /// （见 `settings::publish_terminal_theme`）。
 pub(crate) fn sel_bg() -> u32 {
     if terminal::is_dark() {
-        0x0033_4a6a
+        0x000c_3d7a
     } else {
-        0x00ad_d6ff
+        0x00d6_eaff
     }
 }
 
@@ -43,9 +41,9 @@ pub(crate) fn search_hit_bg(active: bool) -> u32 {
 /// 悬停链接的高亮前景色：同上，浅色主题换成对比度够的蓝。
 fn link_fg() -> u32 {
     if terminal::is_dark() {
-        0x007d_cfff
+        0x0045_9ffe
     } else {
-        0x0009_69da
+        0x000c_64c1
     }
 }
 
@@ -185,28 +183,15 @@ pub struct TerminalView {
     hover_url: Option<Vec<(usize, usize, usize)>>,
     /// 最近一帧的光标位置 (行, 列)，供 IME 定位候选窗（bounds_for_range）。
     cursor: Option<(usize, usize)>,
-    /// 上一帧该终端是否在「运行中」（标题以 braille spinner 开头）；用于检测完成边沿。
-    was_running: bool,
     /// 结构化状态上一帧是否已经是 Succeeded；hook 激活后完成边沿以此为准，
-    /// 不能再让标题 spinner 的短暂消失误判任务完成。
+    /// 防止同一完成快照重复产生关注事件。
     was_structured_succeeded: bool,
-    /// 结构化状态上一帧是否已经是 Failed；用于检测失败边沿（触发任务失败处理）。
-    was_structured_failed: bool,
-    /// 非结构化路径下 spinner 从运行变为空闲的时刻。标题停转可能是「完成」也可能
-    /// 是「等人」（问问题/请求权限），所以要静默稳定一段时间才判完成。
-    fallback_idle_since: Option<Instant>,
-    /// 使已经过期的 fallback settle timer 失效，避免旧 timer 误判新一轮运行。
-    fallback_settle_generation: u64,
-    /// 守护里的会话 id（持久化到 workspace.json；重开 GUI 按它 reattach）。
+    /// 守护里的会话 id（持久化到工作区快照；重开 GUI 按它 reattach）。
     session_id: String,
-    /// 刚收到但尚未展示的 BEL。仅用于没有结构化状态通道的普通终端/agent fallback；
-    /// hook 一旦激活，BEL 永久让位给明确的 phase，不再展示泛化“响铃”。
+    /// 刚收到但尚未展示的 BEL。已有结构化状态后抑制它，避免重复通知。
     pending_bell_at: Option<Instant>,
-    /// 使已经被结构化状态或 Codex Stop 覆盖的 BEL grace timer 失效。
+    /// 使已经过期的 BEL grace timer 失效。
     bell_timer_generation: u64,
-    /// 绑定任务刚被标 Done 时写入「完成项目 cwd」；Workspace::render 取走后
-    /// 触发同项目自动续跑下一条待办。None = 本帧无需续跑。
-    pending_task_continue_cwd: Option<String>,
     /// 触控板滚轮的像素余数：触控板每帧只送几像素的增量，若逐事件独立按
     /// LINE_PX 取整会把大部分小增量截断成 0（滚了但没反应），造成"很不跟手"
     /// 的卡顿感。改为跨事件累加像素，攒够一整行再吐出、余数留到下次。
@@ -219,101 +204,110 @@ pub struct TerminalView {
     /// 快捷启动实际命令行。仅用于标识这个 pane 最初的启动方式；daemon 中会话
     /// 丢失后不会重跑该命令。
     launch_cmd: Option<String>,
-    /// 首帧布局后强制发一次 PTY resize（含真实 cell 像素）。reattach 后守护 jolt
-    /// 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺像素」的 TUI 排版。
+    /// 首帧布局或 reattach 后强制发一次 PTY resize（含真实 cell 像素）。reattach
+    /// 后守护 jolt 用 cell=0；普通 `resize` 同尺寸早退——两者都盖不住「同网格但缺
+    /// 像素」的 TUI 排版。
     pty_kick_pending: bool,
     /// 断线自动重连是否已在跑（防并发：多个触发点同时 schedule 时只起一个后台任务）。
     reconnecting: bool,
+    /// attachment 已断开但尚未重连时的用户输入。这里只收「明确没有进入旧写队列」
+    /// 的输入，重连后按原顺序补发，不能把用户键入当成一次可丢的 UI 事件。
+    recovery_input: VecDeque<RecoveryInput>,
+    recovery_input_bytes: usize,
+    /// 无法恢复时（例如会话已实际退出，或恢复队列超限）的单次提示。
+    write_error: Option<String>,
+    /// 当前 epoch 已确认没有 runtime。之后不再重连、不再把按键放进恢复队列，
+    /// 避免 make install / 守护换代后连弹「未发送的输入已取消」。
+    session_runtime_gone: bool,
+}
+
+/// 断线窗口内尚未进入旧 attachment 的用户输入。粘贴保留原文本，重连后按新终端
+/// 当前的 bracketed-paste 模式编码；普通按键保留已经确定的终端字节序列。
+enum RecoveryInput {
+    Bytes(Vec<u8>),
+    Paste(String),
+}
+
+impl RecoveryInput {
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Paste(text) => text.len(),
+        }
+    }
 }
 
 /// 同一终端同文本的系统通知最小间隔。
 /// BEL 常和 agent 的完成信号出现在同一批输出中。稍等一帧窗口，让更准确的
 /// Succeeded/Failed/Waiting 通知优先，避免通知中心同时出现“响铃”和“已完成”。
 const BELL_NOTIFICATION_GRACE: Duration = Duration::from_millis(250);
+/// 与底层 writer 的待写输入上限一致。超过这个量时继续保存只会放大内存占用，且用户
+/// 已经无法确认整段内容是否应在旧会话结束后补发。
+const TERMINAL_RECOVERY_INPUT_MAX_BYTES: usize = 64 * 1024 * 1024;
+const TERMINAL_RECOVERY_OVERFLOW_MESSAGE: &str = "终端重连期间待发送的输入过多，未发送部分已取消";
+const TERMINAL_SESSION_ENDED_MESSAGE: &str = "终端会话已结束，未发送的输入已取消";
 
 fn bell_notification_due(pending_at: Option<Instant>, now: Instant) -> bool {
     pending_at.is_some_and(|at| now.duration_since(at) >= BELL_NOTIFICATION_GRACE)
 }
 
+/// PTY 批次只有在网格内容或守护几何状态变化时才需要重画终端。
+/// 后者不能只靠 alacritty damage：远端接管/释放尺寸租约时，行列可能完全没变。
+fn terminal_event_needs_redraw(grid_damaged: bool, daemon_geometry_changed: bool) -> bool {
+    grid_damaged || daemon_geometry_changed
+}
+
 fn fallback_attention(
     bell_due: bool,
     osc: Option<String>,
-    codex_osc_stop: bool,
 ) -> Option<(AttentionKind, &'static str, String)> {
     if bell_due {
         return Some((AttentionKind::Bell, "响铃", "🔔 响铃".to_string()));
     }
-    osc.map(|message| {
-        if codex_osc_stop {
-            (AttentionKind::Success, "已完成", message)
-        } else {
-            (AttentionKind::Notice, "终端通知", message)
-        }
-    })
-}
-
-/// 标题是否以 braille spinner（U+2801–U+28FF）开头 —— 与 Session::status 的 Running 判定一致。
-fn title_is_running(title: Option<String>) -> bool {
-    title.is_some_and(|t| crate::osc::title_starts_with_spinner(&t))
+    osc.map(|message| (AttentionKind::Notice, "终端通知", message))
 }
 
 fn daemon_agent_state(
     session_id: &str,
     cx: &App,
 ) -> Option<smelt_core::daemon_state::DaemonSessionState> {
-    cx.try_global::<smelt_ui::daemon_states_global::DaemonStates>()
-        .and_then(|states| states.0.lock().ok()?.get(session_id).cloned())
+    smelt_ui::daemon_states_global::DaemonStates::get(session_id, cx)
 }
 
 fn terminal_bell_notifications_enabled(cx: &App) -> bool {
-    cx.try_global::<smelt_ui::agent_ui_config::AgentUiConfig>()
+    cx.try_global::<smelt_ui::agent_host_state::AgentHostState>()
         .map(|config| config.notify_terminal_bell)
         .unwrap_or(true)
 }
 
-/// 非结构化完成「静默稳定」阈值：spinner 落下后连续 3s 无新输出才判完成
-/// （标题停转也可能是「等人」，无法可靠区分，取保守值）。
-const NONSTRUCTURED_SETTLE: Duration = Duration::from_secs(3);
-
-/// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里各项的图标对齐
-/// （新建终端/Claude Code/Codex/Copilot/Grok 一一对应），一眼认出这一行是哪种会话。
+/// 建终端时用的启动方式，决定侧栏行图标——跟「+」下拉菜单里注册的终端 agent
+/// 一一对应，一眼认出这一行是哪种会话。
 /// 建好之后不变：daemon 重启触发的 `reconnect()` 只换底层连接，不重置这个。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchKind {
     Terminal,
-    Claude,
-    Codex,
-    Copilot,
-    Grok,
+    Agent(crate::settings::TerminalAgentKind),
 }
 
 impl LaunchKind {
-    /// 反过来映射回 `AcpAgentKind`（`Terminal` 没有对应种类）。侧栏行图标
-    /// （main.rs 的 `row_icon`）拿这个接到 `settings::icon_for_agent_kind`，
-    /// 不用再维护一份 Claude→Asterisk 这种 match。
-    pub fn agent_kind(self) -> Option<crate::settings::AcpAgentKind> {
+    /// 反过来映射回 `TerminalAgentKind`（`Terminal` 没有对应种类）。可直接接到
+    /// `settings::icon_for_agent_kind` 等工具函数，不用再维护一份 Claude→Asterisk 这种 match。
+    pub fn agent_kind(self) -> Option<crate::settings::TerminalAgentKind> {
         match self {
             Self::Terminal => None,
-            Self::Claude => Some(crate::settings::AcpAgentKind::Claude),
-            Self::Codex => Some(crate::settings::AcpAgentKind::Codex),
-            Self::Copilot => Some(crate::settings::AcpAgentKind::Copilot),
-            Self::Grok => Some(crate::settings::AcpAgentKind::Grok),
+            Self::Agent(agent) => Some(agent),
         }
     }
 }
 
-/// 从 `launch` 命令行猜启动方式（见各「+」菜单项的 on_click：'claude'/'claude
-/// --dangerously-skip-permissions'/'codex'/'copilot'/'grok'），前缀匹配的判断本体
-/// 是 `AcpAgentKind::from_command_prefix`——跟「+」菜单图标（`icon_for_launch_command`）
-/// 共用同一份逻辑，以后加参数不失配、加新 agent 也不用两处一起改。
+/// 从 `launch` 命令行猜启动方式。前缀匹配的判断本体是
+/// `TerminalAgentKind::from_command_prefix`——跟「+」菜单图标
+/// (`icon_for_launch_command`) 共用同一份逻辑，以后加参数或 agent 不会失配。
 fn classify_launch(launch: Option<&str>) -> LaunchKind {
-    match launch.and_then(crate::settings::AcpAgentKind::from_command_prefix) {
-        Some(crate::settings::AcpAgentKind::Claude) => LaunchKind::Claude,
-        Some(crate::settings::AcpAgentKind::Codex) => LaunchKind::Codex,
-        Some(crate::settings::AcpAgentKind::Copilot) => LaunchKind::Copilot,
-        Some(crate::settings::AcpAgentKind::Grok) => LaunchKind::Grok,
-        None => LaunchKind::Terminal,
-    }
+    launch
+        .and_then(crate::settings::TerminalAgentKind::from_command_prefix)
+        .map(LaunchKind::Agent)
+        .unwrap_or(LaunchKind::Terminal)
 }
 
 impl TerminalView {
@@ -377,21 +371,20 @@ impl TerminalView {
             grid_size: Rc::new(StdCell::new((0.0, 0.0))),
             hover_url: None,
             cursor: None,
-            was_running: false,
             was_structured_succeeded: false,
-            was_structured_failed: false,
-            fallback_idle_since: None,
-            fallback_settle_generation: 0,
             session_id,
             pending_bell_at: None,
             bell_timer_generation: 0,
-            pending_task_continue_cwd: None,
             scroll_accum: 0.0,
             launch_kind,
             launch_label,
             launch_cmd,
             pty_kick_pending: true,
             reconnecting: false,
+            recovery_input: VecDeque::new(),
+            recovery_input_bytes: 0,
+            write_error: None,
+            session_runtime_gone: false,
         };
         if let Some(state) = daemon_agent_state(&view.session_id, cx) {
             view.handle_daemon_state(&state, cx);
@@ -412,18 +405,6 @@ impl TerminalView {
     /// 快捷启动实际命令行；裸终端为 None。
     pub fn launch_cmd(&self) -> Option<&str> {
         self.launch_cmd.as_deref()
-    }
-
-    /// 是否「任务完成未读」（Running→Idle 后用户还没回应过）。
-    pub fn completed_unread(&self, cx: &App) -> bool {
-        cx.try_global::<AttentionGlobal>().is_some_and(|store| {
-            store
-                .0
-                .lock()
-                .unwrap()
-                .unread(&self.session_id)
-                .is_some_and(|item| item.kind == AttentionKind::Success)
-        })
     }
 
     /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
@@ -454,8 +435,7 @@ impl TerminalView {
         .detach();
     }
 
-    /// PTY 读线程每批输出只唤醒一次。终端内容、BEL/OSC fallback 和标题 fallback
-    /// 都在这里消费，因此空闲终端没有任何定时器。
+    /// PTY 读线程每批输出只唤醒一次。终端内容与信息性 OSC/BEL 通知都在这里消费。
     fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
         let daemon_state = daemon_agent_state(&self.session_id, cx);
         let structured_events = daemon_state
@@ -463,8 +443,6 @@ impl TerminalView {
             .is_some_and(|state| state.structured_events);
         let bell_received = self.terminal.take_bell_notification().is_some();
         let osc = self.terminal.take_notification();
-        let codex_osc_stop =
-            osc.is_some() && !structured_events && self.launch_kind == LaunchKind::Codex;
         let now = Instant::now();
         let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
 
@@ -476,37 +454,29 @@ impl TerminalView {
             self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
             self.schedule_bell_timer(cx);
         }
-        if codex_osc_stop {
-            self.invalidate_bell_timer();
-        }
         let bell_due = !structured_events
             && bell_notifications_enabled
             && bell_notification_due(self.pending_bell_at, now);
-        if let Some((kind, title, message)) = fallback_attention(
-            bell_due,
-            (!structured_events).then_some(osc).flatten(),
-            codex_osc_stop,
-        ) {
+        if let Some((kind, title, message)) =
+            fallback_attention(bell_due, (!structured_events).then_some(osc).flatten())
+        {
             if kind == AttentionKind::Bell {
                 self.invalidate_bell_timer();
             }
             self.publish_attention(kind, title, message, cx);
         }
 
-        if structured_events {
-            self.cancel_fallback_settle();
-            self.was_running = false;
-            self.handle_structured_state(daemon_state.as_ref(), cx);
-        } else {
-            self.handle_fallback_state(codex_osc_stop, cx);
-        }
+        self.handle_structured_state(daemon_state.as_ref(), cx);
 
-        if self.terminal.take_damage() {
-            // 滚动/输出变了：搜索高亮要按新的 display_offset 重算可视区命中。
+        let daemon_geometry_changed = self.terminal.sync_daemon_geometry();
+        let grid_damaged = self.terminal.take_damage();
+        if terminal_event_needs_redraw(grid_damaged, daemon_geometry_changed) {
+            // 滚动/输出/网格尺寸变了：搜索高亮要按新的可视区重算命中。
             self.refresh_search_highlights();
+            cx.notify();
         }
-        // 读线程只在有输入时到这里，OSC/BEL/title 变化也需要刷新侧栏和画布。
-        cx.notify();
+        // 纯 OSC 标题 / BEL 没有终端网格 damage：标题由 daemon 状态
+        // 订阅合并刷新侧栏，提醒由 AttentionGlobal 投递，都不应重画画布。
     }
 
     fn invalidate_bell_timer(&mut self) {
@@ -547,86 +517,19 @@ impl TerminalView {
         }
     }
 
-    fn handle_fallback_state(&mut self, codex_osc_stop: bool, cx: &mut Context<Self>) {
-        if codex_osc_stop {
-            self.cancel_fallback_settle();
-            self.was_running = false;
-            self.finish_session(true, false, cx);
-            return;
-        }
-
-        let running = !self.completed_unread(cx) && title_is_running(self.terminal.current_title());
-        if running {
-            self.was_running = true;
-            self.fallback_idle_since = None;
-            self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
-        } else if self.was_running {
-            self.was_running = false;
-            self.fallback_idle_since = Some(Instant::now());
-            self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
-            self.schedule_fallback_settle(cx);
-        }
-    }
-
-    fn schedule_fallback_settle(&mut self, cx: &mut Context<Self>) {
-        let generation = self.fallback_settle_generation;
-        cx.spawn(async move |this, cx| {
-            Timer::after(NONSTRUCTURED_SETTLE).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.fallback_settle_generation != generation
-                    || this.fallback_idle_since.is_none()
-                {
-                    return;
-                }
-                let structured = daemon_agent_state(&this.session_id, cx)
-                    .as_ref()
-                    .is_some_and(|state| state.structured_events);
-                if structured
-                    || this.completed_unread(cx)
-                    || title_is_running(this.terminal.current_title())
-                {
-                    return;
-                }
-                this.fallback_idle_since = None;
-                this.finish_session(false, false, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn cancel_fallback_settle(&mut self) {
-        self.fallback_idle_since = None;
-        self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
-    }
-
     fn handle_structured_state(
         &mut self,
         daemon_state: Option<&smelt_core::daemon_state::DaemonSessionState>,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = daemon_state.filter(|state| state.structured_events) else {
+        let Some(state) = daemon_state.filter(|state| state.phase_is_authoritative()) else {
             return;
         };
         let succeeded = state.phase == crate::terminal::DaemonPhase::Succeeded;
-        let failed = state.phase == crate::terminal::DaemonPhase::Failed;
         if succeeded && !self.was_structured_succeeded {
-            self.finish_session(false, true, cx);
-        }
-        if failed && !self.was_structured_failed {
-            let sid = self.session_id.clone();
-            let err = state
-                .pending_question
-                .clone()
-                .unwrap_or_else(|| "agent 回合失败".to_string());
-            if let Some(cwd) = crate::tasks::TaskStore::mark_session_failed(&sid, &err) {
-                // 失败按重试策略回待办（冷却）或落 Failed 列；挂旗让 Workspace
-                // 继续 claim——同 cwd 下一条或重试该任务。
-                self.pending_task_continue_cwd = Some(cwd);
-            }
+            self.finish_structured_session(cx);
         }
         self.was_structured_succeeded = succeeded;
-        self.was_structured_failed = failed;
     }
 
     /// 由 daemon 状态订阅直接分发，独立于该 pane 当前是否正在渲染。
@@ -635,26 +538,16 @@ impl TerminalView {
         state: &smelt_core::daemon_state::DaemonSessionState,
         cx: &mut Context<Self>,
     ) {
-        if state.id != self.session_id || !state.structured_events {
+        if state.id != self.session_id {
             return;
         }
-        self.cancel_fallback_settle();
-        self.was_running = false;
         self.handle_structured_state(Some(state), cx);
-        cx.notify();
+        // phase / 标题由 Workspace 的 daemon 订阅统一刷新侧栏。这个 view
+        // 只处理结构化完成边沿，不要因此重画终端网格。
     }
 
-    fn finish_session(&mut self, codex_osc_stop: bool, structured: bool, cx: &mut Context<Self>) {
-        if !structured && !codex_osc_stop {
-            self.publish_attention(AttentionKind::Success, "已完成", "已完成".to_string(), cx);
-        }
-        let sid = self.session_id.clone();
-        if let Some(cwd) = crate::tasks::TaskStore::mark_session_done(&sid) {
-            // 只有结构化完成和 Codex Stop 是明确终点，才自动续跑下一条任务。
-            if structured || codex_osc_stop {
-                self.pending_task_continue_cwd = Some(cwd);
-            }
-        }
+    fn finish_structured_session(&mut self, cx: &mut Context<Self>) {
+        self.publish_attention(AttentionKind::Success, "已完成", "已完成".to_string(), cx);
     }
 
     /// 断线自动重连（后台，带退避）。守护 exec 交接 / 被强杀 / 重启时，会话本身
@@ -667,7 +560,7 @@ impl TerminalView {
     /// 永久冻结、只能重启 GUI。这里跟状态订阅通道的 2s 重连循环同一个思路，
     /// 让终端自己长出一条命来，不依赖调用方。
     fn schedule_auto_reconnect(&mut self, generation: u64, cx: &mut Context<Self>) {
-        if self.reconnecting {
+        if self.reconnecting || self.session_runtime_gone {
             return;
         }
         self.reconnecting = true;
@@ -678,7 +571,9 @@ impl TerminalView {
             let mut delay = Duration::from_millis(500);
             loop {
                 let still_current = this
-                    .update(cx, |this, _| this.terminal_generation == generation)
+                    .update(cx, |this, _| {
+                        this.terminal_generation == generation && !this.session_runtime_gone
+                    })
                     .unwrap_or(false);
                 if !still_current {
                     return;
@@ -689,25 +584,32 @@ impl TerminalView {
                     .background_executor()
                     .spawn(async { terminal::daemon_info().is_some() })
                     .await;
-                if !daemon_up {
-                    cx.background_executor().timer(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(10));
-                    continue;
-                }
-                // 2) 会话还在守护里吗？不在 = shell 真的退了/被杀，不复活它。
                 let sid2 = sid.clone();
-                let alive = cx
-                    .background_executor()
-                    .spawn(async move {
-                        terminal::list_daemon_sessions()
-                            .iter()
-                            .any(|s| s.id == sid2)
+                let alive = this
+                    .update(cx, |_, cx| {
+                        smelt_ui::daemon_states_global::DaemonStates::runtime_alive(&sid2, cx)
                     })
-                    .await;
-                if !alive {
-                    break;
+                    .ok()
+                    .flatten();
+                match smelt_core::daemon_state::terminal_reconnect_action(daemon_up, alive) {
+                    smelt_core::daemon_state::TerminalReconnectAction::Wait => {
+                        cx.background_executor().timer(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(10));
+                        continue;
+                    }
+                    smelt_core::daemon_state::TerminalReconnectAction::GiveUp => {
+                        let _ = this.update(cx, |this, cx| {
+                            if this.terminal_generation == generation {
+                                this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
+                                cx.notify();
+                            }
+                        });
+                        break;
+                    }
+                    smelt_core::daemon_state::TerminalReconnectAction::Reattach => {}
                 }
                 // 3) 重连（reattach：守护按 id 重放历史画面，输出不丢）。
+                // 镜像未知时也立刻 attach：tmux 式，attach 本人才是还活着的权威答案。
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
                 let term = cx
@@ -746,22 +648,6 @@ impl TerminalView {
         .detach();
     }
 
-    /// 守护整个重启后（旧会话随守护进程一起死掉，见 `terminal::restart_daemon`），
-    /// 换一个全新会话顶替冻结的旧连接——同 id 在全新守护里查无此会话，走 `handle_open`
-    /// 的新建分支，等效于重开一个终端。旧网格尺寸不丢：grid_size 仍是上次量到的值，
-    /// 下一帧 render() 会照常把新终端 resize 到位，用户侧只是内容被清空重开。
-    /// 连不上守护就原地不动（仍是冻结的旧终端），不 panic。
-    ///
-    /// **注意**：`Terminal::spawn` 内部会 sleep 重试，禁止在 UI 线程对多 pane 连环调用；
-    /// 硬重启请走 [`Self::adopt_terminal`]（后台建好再塞进来）。
-    pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        let Ok(terminal) = Terminal::spawn(24, 80, self.cwd.as_deref(), &self.session_id, None)
-        else {
-            return;
-        };
-        self.adopt_terminal(terminal, cx);
-    }
-
     /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
     pub fn adopt_terminal(&mut self, terminal: Terminal, cx: &mut Context<Self>) {
         self.terminal_generation = self.terminal_generation.wrapping_add(1);
@@ -770,11 +656,7 @@ impl TerminalView {
         // 自行退出；这里给新连接挂一个新的重绘任务。
         Self::drive_redraws(self.terminal.redraw_channel(), self.terminal_generation, cx);
         self.clear_attention(cx);
-        self.was_running = false;
         self.was_structured_succeeded = false;
-        self.was_structured_failed = false;
-        self.fallback_idle_since = None;
-        self.fallback_settle_generation = self.fallback_settle_generation.wrapping_add(1);
         self.invalidate_bell_timer();
         // 新 Terminal 自带空选区，只需重置本视图的拖选 / 应用鼠标交互态。
         self.selecting = false;
@@ -783,6 +665,8 @@ impl TerminalView {
         self.cursor = None;
         // 重连后必须再 force 一次带 cell 像素的 resize（见 pty_kick_pending）。
         self.pty_kick_pending = true;
+        self.session_runtime_gone = false;
+        self.flush_recovery_input(cx);
         if let Some(state) = daemon_agent_state(&self.session_id, cx) {
             self.handle_daemon_state(&state, cx);
         }
@@ -790,8 +674,8 @@ impl TerminalView {
     }
 
     fn publish_attention(&self, kind: AttentionKind, title: &str, message: String, cx: &mut App) {
-        if let Some(store) = cx.try_global::<AttentionGlobal>() {
-            store.0.lock().unwrap().publish(
+        if cx.try_global::<AttentionGlobal>().is_some() {
+            AttentionGlobal::publish_terminal_notification(
                 AttentionItem {
                     session_id: self.session_id.clone(),
                     title: title.to_string(),
@@ -799,23 +683,19 @@ impl TerminalView {
                     kind,
                 },
                 Instant::now(),
+                cx,
             );
         }
     }
 
     fn clear_attention(&self, cx: &mut App) {
-        if let Some(store) = cx.try_global::<AttentionGlobal>() {
-            store.0.lock().unwrap().mark_read(&self.session_id);
+        if cx.try_global::<AttentionGlobal>().is_some() {
+            AttentionGlobal::mark_read(&self.session_id, cx);
         }
     }
 
     pub fn mark_read(&mut self, cx: &mut Context<Self>) {
         self.clear_attention(cx);
-    }
-
-    /// 取走「任务完成 → 自动续跑」挂旗（完成项目 cwd）；Workspace::render 每帧调用。
-    pub fn take_pending_task_continue(&mut self) -> Option<String> {
-        self.pending_task_continue_cwd.take()
     }
 
     /// agent 报告的终端标题（含任务名 + 状态符号）；供侧栏 / 总览显示。
@@ -845,34 +725,94 @@ impl TerminalView {
     /// 走 [`Terminal::paste`]：bracketed paste + 换行规范化，跟 Cmd+V 同一条路。
     ///
     /// **不会提交**：Claude 等开了 bracketed paste 时，粘贴内容里的 `\n` 只是多行文本。
-    /// 需要回车执行时用 [`Self::send_text_and_submit`]。
+    /// 若需回车执行，调用方应在文本末尾附带回车符（`\r`）。
     pub fn send_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.terminal.paste(text);
-        self.clear_attention(cx);
-        cx.notify();
-    }
-
-    /// 把正文当作**键盘输入**写入 PTY（不走 bracketed paste）。
-    pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let body = text.trim_end_matches(['\n', '\r']);
-        if !body.is_empty() {
-            self.terminal.send_input(body.as_bytes());
+        if !self.terminal.paste(text) {
+            self.defer_input(RecoveryInput::Paste(text.to_string()));
+            self.recover_input_transport(cx);
         }
         self.clear_attention(cx);
         cx.notify();
     }
 
-    /// 发送一次 Enter（裸 `\r`）。
-    pub fn send_enter(&mut self, cx: &mut Context<Self>) {
-        self.terminal.send_input(b"\r");
+    fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.terminal.paste(text) {
+            self.defer_input(RecoveryInput::Paste(text.to_string()));
+            self.recover_input_transport(cx);
+        }
         self.clear_attention(cx);
         cx.notify();
     }
 
-    /// 键入正文并回车（已有终端上执行任务用）。
-    pub fn send_text_and_submit(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.type_text(text, cx);
-        self.send_enter(cx);
+    fn send_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> bool {
+        let accepted = self.terminal.send_input(bytes);
+        if !accepted {
+            self.defer_input(RecoveryInput::Bytes(bytes.to_vec()));
+            self.recover_input_transport(cx);
+            cx.notify();
+        }
+        accepted
+    }
+
+    /// 只会在底层 writer 明确拒绝整段输入后调用（见 `TerminalWriter::send_input`）。
+    /// 因而不需要猜测这段输入是否已经抵达 PTY：它可以安全地放入恢复队列。
+    fn defer_input(&mut self, input: RecoveryInput) {
+        if self.session_runtime_gone {
+            return;
+        }
+        let byte_len = input.byte_len();
+        if byte_len == 0 {
+            return;
+        }
+        if self.recovery_input_bytes.saturating_add(byte_len) > TERMINAL_RECOVERY_INPUT_MAX_BYTES {
+            self.write_error = Some(TERMINAL_RECOVERY_OVERFLOW_MESSAGE.to_string());
+            return;
+        }
+        self.recovery_input_bytes += byte_len;
+        self.recovery_input.push_back(input);
+    }
+
+    /// 读通道 EOF 会触发同一条重连路径；写通道先失效时不能等 EOF 的调度时机，
+    /// 否则用户已经键入的内容会停在一个没有消费者的窗口里。
+    fn recover_input_transport(&mut self, cx: &mut Context<Self>) {
+        if self.session_runtime_gone {
+            return;
+        }
+        self.schedule_auto_reconnect(self.terminal_generation, cx);
+    }
+
+    /// 新 attachment 已就绪后补发断线期间未进入旧写队列的输入。若新连接又立即
+    /// 失效，把当前项放回队首，下一轮重连继续保持原始顺序。
+    fn flush_recovery_input(&mut self, cx: &mut Context<Self>) {
+        while let Some(input) = self.recovery_input.pop_front() {
+            let byte_len = input.byte_len();
+            self.recovery_input_bytes = self.recovery_input_bytes.saturating_sub(byte_len);
+            let accepted = match &input {
+                RecoveryInput::Bytes(bytes) => self.terminal.send_input(bytes),
+                RecoveryInput::Paste(text) => self.terminal.paste(text),
+            };
+            if accepted {
+                continue;
+            }
+            self.recovery_input_bytes += byte_len;
+            self.recovery_input.push_front(input);
+            self.recover_input_transport(cx);
+            return;
+        }
+    }
+
+    fn mark_session_runtime_gone(&mut self, message: &str) {
+        self.session_runtime_gone = true;
+        self.discard_recovery_input_if_any(message);
+    }
+
+    fn discard_recovery_input_if_any(&mut self, message: &str) {
+        if self.recovery_input.is_empty() {
+            return;
+        }
+        self.recovery_input.clear();
+        self.recovery_input_bytes = 0;
+        self.write_error = Some(message.to_string());
     }
 
     /// 打开终端内搜索条（Cmd+F）。输入框获焦；Enter 下一个，Shift+Enter 上一个，Esc 关闭。
@@ -933,6 +873,10 @@ impl TerminalView {
 
     fn refresh_search_highlights(&mut self) {
         if self.search_open {
+            // 内容变了：触发异步重扫（内部有节流），高亮先用当前缓存映射。
+            if let Some(q) = self.terminal.current_search_query() {
+                self.terminal.set_search_query(&q);
+            }
             self.search_hits = self.terminal.viewport_search_hits();
             self.search_status = self.terminal.search_status();
         }
@@ -1058,7 +1002,10 @@ fn wrapped_line_range(frame: &terminal::Frame, r: usize) -> (usize, usize) {
 /// 扫描前先把 `r` 所在的软换行逻辑行（[`wrapped_line_range`]）拼成一条缓冲区再整体找
 /// 链接，最后把命中的缓冲区下标切回各物理行的列区间——否则打印的长链接卡在换行处就
 /// 会被从中间切断，点出来的是被截断的错误地址（#21）。
-fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<(Vec<(usize, usize, usize)>, String)> {
+type LinkRowRange = (usize, usize, usize);
+type TerminalLink = (Vec<LinkRowRange>, String);
+
+fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<TerminalLink> {
     let (first, last) = wrapped_line_range(frame, r);
     let mut buf: Vec<terminal::Cell> = Vec::new();
     let mut starts: Vec<usize> = Vec::with_capacity(last - first + 2);
@@ -1180,7 +1127,7 @@ impl EntityInputHandler for TerminalView {
     ) {
         self.marked_text = None;
         if !text.is_empty() {
-            self.terminal.send_input(text.as_bytes());
+            self.send_input(text.as_bytes(), cx);
             self.clear_attention(cx);
         }
         cx.notify();
@@ -1234,16 +1181,24 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(message) = self.write_error.take() {
+            crate::status_item::notify_error(message);
+        }
         // 首帧把焦点抢到终端上。
         if !self.did_focus {
             self.did_focus = true;
             window.focus(&self.focus_handle, cx);
         }
 
-        // smeltd may hand geometry ownership to a mobile renderer. Apply that
-        // canonical grid first and do not echo the change back as a resize.
+        // 正常由 PTY 事件处理先同步；这里兜底首帧/重连竞态。守护可能把尺寸所有权
+        // 交给移动端，应用其 canonical grid 时不能把 resize 再回写给守护。
         self.terminal.sync_daemon_geometry();
         let remote_geometry_locked = self.terminal.remote_geometry_locked();
+        // 远程（手机）拿走尺寸后，桌面不再一看见就抢回来：这一抢就是一次 SIGWINCH，
+        // 不切备用屏的 CLI 会把整段对话重排重印一遍，而手机下次进来又要抢回去。改成
+        // 用户真的点进这个终端（获得焦点）才发一次 claim，守护那边的宽限租约当场作废。
+        let focus_claim =
+            remote_geometry_locked && self.focus_handle.is_focused(window) && !self.was_focused;
 
         // 依据「本终端自身尺寸」重算行列（网格 Hub 里每个终端只占一格）。
         {
@@ -1273,15 +1228,16 @@ impl Render for TerminalView {
             self.cell_w = cell_w; // 供鼠标坐标换算
             // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
             // 等 canvas 量到真实尺寸再调（避免 w=0 把终端缩成最小 4 列）。
-            if w > 1.0 && h > 1.0 && !remote_geometry_locked {
+            if w > 1.0 && h > 1.0 && (!remote_geometry_locked || focus_claim) {
                 // 可用网格区 = 自身尺寸减去左右 / 上下各一份内边距。
                 let cols = (((w - 2.0 * PAD_X) / cell_w).floor() as usize).clamp(4, 1000);
                 let grid_rows = (((h - 2.0 * PAD_Y) / line_px()).floor() as usize).clamp(2, 1000);
                 let cell_w_px = cell_w.round().clamp(1.0, 64.0) as u16;
                 let cell_h_px = line_px().round().clamp(1.0, 128.0) as u16;
-                if self.pty_kick_pending {
+                if self.pty_kick_pending || focus_claim {
                     // 首帧 / reattach：无条件发 resize（含真实 cell 像素）。
                     // 守护 jolt 用 cell=0；普通 resize 同尺寸会早退——两处都补不到像素。
+                    // focus claim 同理：本地 VT 已经跟着远程网格走了，不强发就拿不回来。
                     self.terminal
                         .force_resize(grid_rows, cols, cell_w_px, cell_h_px);
                     self.pty_kick_pending = false;
@@ -1312,16 +1268,19 @@ impl Render for TerminalView {
         if focused != self.was_focused {
             self.was_focused = focused;
             self.terminal.report_focus(focused);
-            // 获得焦点时强制重发 resize。若移动端当前持有尺寸租约，标记会保留到
-            // 租约释放，届时下一帧才走 force_resize，避免两端形成 resize 循环。
-            if focused {
-                self.pty_kick_pending = true;
-            }
+            // 焦点变化只上报给应用。尺寸由上面的 grid_size 测量和 Terminal::resize
+            // 判定；这里不能 force_resize，否则每次切回窗口都会额外触发 TIOCSWINSZ/SIGWINCH。
+            // 唯一的例外是「远程留下的尺寸租约」：见下方 focus claim。
         }
         let hover_url = self.hover_url.clone();
         let has_hover = hover_url.is_some();
         // 滚动会改 display_offset：每帧按当前 offset 把绝对命中映到可视区。
         if self.search_open {
+            // 后台搜索任务的结果落地后，本帧数据已更新；但结果到达本身可能没有
+            // 其他事件触发 render，这里请求下一帧把新高亮画出来。
+            if self.terminal.poll_search_results() {
+                cx.notify();
+            }
             self.search_hits = self.terminal.viewport_search_hits();
             self.search_status = self.terminal.search_status();
         }
@@ -1352,23 +1311,18 @@ impl Render for TerminalView {
         // 配色快照也都取它，四处同源。
         let ap = cx.global::<crate::Appearance>().clone();
         let bg_color = terminal::default_bg();
+        // 终端是最高频的绘制区域。整窗透明度已由 NSWindow 统一处理，这里保持实底，
+        // 避免每次终端输出都触发整块窗口的额外 alpha 混合。
         let mut bg_layer = div().absolute().inset_0().bg(rgb(bg_color));
         if let Some(path) = &ap.bg_image {
-            bg_layer = bg_layer.child(
-                img(std::path::PathBuf::from(path))
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(ObjectFit::Cover),
-            );
+            bg_layer = bg_layer.child(crate::workspace_frame::background_image_layer(
+                path,
+                ap.bg_image_opacity,
+            ));
         }
-        // 液态玻璃模式下终端也必须给窗口 vibrancy 留出通道。否则终端这块最大的
-        // 实色矩形会把外层玻璃全部盖住，视觉上只剩几条圆角边线。
-        let surface_opacity = ap.opacity.min(0.68);
-        let bg_layer = bg_layer.opacity(surface_opacity);
+        // 整扇窗口的透明度由原生 NSWindow 统一处理，不能在这里重复叠加，
+        // 否则终端背景会比侧栏/舞台额外变淡一次。
 
-        let menu_sid = self.session_id.clone();
-        let menu_cwd = self.cwd.clone();
         div()
             .relative()
             .track_focus(&self.focus_handle)
@@ -1384,13 +1338,13 @@ impl Render for TerminalView {
             .text_color(rgb(terminal::default_fg()))
             .font_family(font_family())
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
-                this.terminal.send_input(b"\t");
+                this.send_input(b"\t", cx);
                 this.terminal.scroll_to_bottom();
                 this.clear_attention(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TerminalBackTab, _window, cx| {
-                this.terminal.send_input(b"\x1b[Z"); // xterm 反向 Tab（back-tab）序列
+                this.send_input(b"\x1b[Z", cx); // xterm 反向 Tab（back-tab）序列
                 this.terminal.scroll_to_bottom();
                 this.clear_attention(cx);
                 cx.notify();
@@ -1421,17 +1375,21 @@ impl Render for TerminalView {
                     if ks.key == "escape" {
                         this.close_search(window, cx);
                     }
+                    // 搜索框属于终端；不能再让按键冒泡给工作区的文件树 / Git 快捷键。
+                    cx.stop_propagation();
                     return;
                 }
                 // IME 合成中：这些键归输入法（backspace 删拼音、enter/space/数字选词），
                 // 不能再往 PTY 发一份，否则终端会当成真实按键吃掉。上屏的文字走
                 // replace_text_in_range 进来。
                 if this.marked_text.is_some() && !m.platform {
+                    cx.stop_propagation();
                     return;
                 }
                 // Cmd+F 打开搜索（action 也会绑，这里兜底）。
                 if m.platform && ks.key == "f" {
                     this.open_search(window, cx);
+                    cx.stop_propagation();
                     return;
                 }
                 // Cmd+C 复制选区（alacritty 按缓冲区绝对行取文本，跨屏选区也完整）
@@ -1439,15 +1397,15 @@ impl Render for TerminalView {
                     if let Some(text) = this.terminal.selection_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
+                    cx.stop_propagation();
                     return;
                 }
                 // Cmd+V 粘贴：读剪贴板写入 PTY（bracketed paste / 换行规范化见 Terminal::paste）
                 if m.platform && ks.key == "v" {
                     if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
-                        this.terminal.paste(&text);
-                        this.clear_attention(cx);
-                        cx.notify();
+                        this.paste_text(&text, cx);
                     }
+                    cx.stop_propagation();
                     return;
                 }
                 // Shift+PageUp/Down 滚动历史缓冲
@@ -1459,6 +1417,7 @@ impl Render for TerminalView {
                     };
                     this.terminal.scroll(delta);
                     cx.notify();
+                    cx.stop_propagation();
                     return;
                 }
                 if let Some(bytes) = keystroke_to_bytes(
@@ -1466,10 +1425,11 @@ impl Render for TerminalView {
                     this.terminal.app_cursor_mode(),
                     this.terminal.kitty_keyboard_mode(),
                 ) {
-                    this.terminal.send_input(&bytes);
+                    this.send_input(&bytes, cx);
                     this.terminal.scroll_to_bottom(); // 敲键盘即回到最新输出，跟真实终端一致
                     this.clear_attention(cx);
                     cx.notify();
+                    cx.stop_propagation();
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
@@ -1498,20 +1458,19 @@ impl Render for TerminalView {
                     window.focus(&this.focus_handle, cx);
                     let cell = this.pos_to_cell(ev.position, window);
                     // Cmd+点击打开链接
-                    if ev.modifiers.platform {
-                        if let Some(url) = this.url_at(cell) {
+                    if ev.modifiers.platform
+                        && let Some(url) = this.url_at(cell) {
                             cx.open_url(&open_target(&url));
                             return;
                         }
-                    }
                     // Option+点击：模拟 iTerm2/Terminal.app 的「点击移动光标」——只在
                     // 点击的正是光标所在那一行时才生效（shell 当前输入行），发对应数量
                     // 的左右方向键让 shell 的行编辑器（readline/zsh line editor）把光标
                     // 挪过去。终端本身没法直接把光标「传送」到任意格：光标位置由 shell
                     // 端的行编辑器状态决定，我们只能模拟按键让它自己移动。
                     if ev.modifiers.alt {
-                        if let Some((cursor_row, cursor_col)) = this.cursor {
-                            if cell.0 == cursor_row && cell.1 != cursor_col {
+                        if let Some((cursor_row, cursor_col)) = this.cursor
+                            && cell.0 == cursor_row && cell.1 != cursor_col {
                                 let app_cursor = this.terminal.app_cursor_mode();
                                 let step: &[u8] = if cell.1 > cursor_col {
                                     if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
@@ -1525,9 +1484,8 @@ impl Render for TerminalView {
                                 for _ in 0..count {
                                     bytes.extend_from_slice(step);
                                 }
-                                this.terminal.send_input(&bytes);
+                                this.send_input(&bytes, cx);
                             }
-                        }
                         return;
                     }
                     // 应用开了鼠标上报且没按 Shift → 把 press 转发给 TUI（vim/less/
@@ -1629,9 +1587,7 @@ impl Render for TerminalView {
                         return;
                     }
                     if let Some(text) = cx.read_from_clipboard().and_then(|it| it.text()) {
-                        this.terminal.paste(&text);
-                        this.clear_attention(cx);
-                        cx.notify();
+                        this.paste_text(&text, cx);
                     }
                 }),
             )
@@ -1739,8 +1695,19 @@ impl Render for TerminalView {
                             };
                             let origin = point(ox, oy + px(r as f32 * line_px()));
                             paint_row(
-                                row, origin, cur, focused, &base_font, hl, &row_hits, cell_w,
-                                ime_here, window, cx,
+                                row,
+                                PaintRowParams {
+                                    origin,
+                                    cursor: cur,
+                                    focused,
+                                    base_font: &base_font,
+                                    hover_link: hl,
+                                    search_hits: &row_hits,
+                                    cell_w,
+                                    ime: ime_here,
+                                },
+                                window,
+                                cx,
                             );
                         }
                     },
@@ -1754,12 +1721,9 @@ impl Render for TerminalView {
                     // prepaint：建一个覆盖终端区的 hitbox（供设置鼠标样式用），并在
                     // 首次拿到真实布局尺寸后请求下一帧。尺寸是在这一阶段才可用的；
                     // 若首帧终端输出已经触发过重绘，下一次 render 可能永远不来，
-                    // PTY 就会一直停在默认网格，直到用户开合抽屉等操作碰巧触发它。
+                    // PTY 就会一直停在默认网格，直到后续重绘操作碰巧触发它。
                     move |bounds, window, _cx| {
-                        let size = (
-                            f32::from(bounds.size.width),
-                            f32::from(bounds.size.height),
-                        );
+                        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
                         if size_cell_prepaint.get() != size {
                             size_cell_prepaint.set(size);
                             window.request_animation_frame();
@@ -1840,21 +1804,6 @@ impl Render for TerminalView {
             .when(scroll_info.max_offset > 0, |root| {
                 root.child(self.render_scrollbar(scroll_info, cx))
             })
-            // TUI 未开鼠标模式时右键出菜单；开了则右键转给应用（见 on_mouse_down）。
-            .context_menu(move |menu, _window, _cx| {
-                let sid = menu_sid.clone();
-                let cwd = menu_cwd.clone();
-                menu.item(
-                    PopupMenuItem::new("新建任务").on_click(move |_ev, window, cx| {
-                        *cx.default_global::<NewTaskPrefill>() = NewTaskPrefill {
-                            session_id: Some(sid.clone()),
-                            cwd: cwd.clone(),
-                            body: None,
-                        };
-                        window.dispatch_action(Box::new(NewTask), cx);
-                    }),
-                )
-            })
     }
 }
 
@@ -1896,7 +1845,8 @@ impl TerminalView {
         let track_h = (h - 2.0 * PAD_Y).max(1.0);
         let (thumb_h, thumb_y) =
             scrollbar_thumb(track_h, info.viewport_rows, info.max_offset, info.offset);
-        let thumb_color = rgb(crate::ui_theme::border_focus());
+        // 中性灰，不要焦点蓝。终端底比侧栏更深，border_loud 会融进去，用 text_faint 才能看见。
+        let thumb_color = rgb(crate::ui_theme::text_faint());
         let max_off = info.max_offset;
         let viewport = info.viewport_rows;
 
@@ -1909,7 +1859,7 @@ impl TerminalView {
             .h(px(track_h))
             .rounded_full()
             .bg(if terminal::is_dark() {
-                rgba(0x00_2c_3149_55)
+                rgba(0x0000_2c31_4955)
             } else {
                 rgba(0x00_d0_d7_de_66)
             })
@@ -1930,13 +1880,12 @@ impl TerminalView {
                 }),
             )
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _window, cx| {
-                if let Some(grab) = this.scrollbar_drag {
-                    if ev.pressed_button == Some(MouseButton::Left) {
-                        let (_, oy) = this.grid_origin.get();
-                        let y =
-                            (f32::from(ev.position.y) - oy - grab).clamp(0.0, track_h - thumb_h);
-                        this.jump_scrollbar_to(y + thumb_h * 0.5, track_h, thumb_h, max_off, cx);
-                    }
+                if let Some(grab) = this.scrollbar_drag
+                    && ev.pressed_button == Some(MouseButton::Left)
+                {
+                    let (_, oy) = this.grid_origin.get();
+                    let y = (f32::from(ev.position.y) - oy - grab).clamp(0.0, track_h - thumb_h);
+                    this.jump_scrollbar_to(y + thumb_h * 0.5, track_h, thumb_h, max_off, cx);
                 }
             }))
             .on_mouse_up(
@@ -2002,21 +1951,35 @@ impl TerminalView {
 ///
 /// `ime`（预编辑串, 起始列）不为空时在行内叠一层：垫终端底色遮住底下的内容、下划线标示
 /// 「合成中」，光标跟在拼音末尾（合成中网格里的光标块不画，见 render 里 cursor 的取值）。
-#[allow(clippy::too_many_arguments)]
+struct PaintRowParams<'a> {
+    origin: Point<Pixels>,
+    cursor: Option<(usize, terminal::CursorKind)>,
+    focused: bool,
+    base_font: &'a Font,
+    hover_link: Option<(usize, usize)>,
+    /// 本行搜索命中：(起列, 止列含, 是否当前 active)。
+    search_hits: &'a [(usize, usize, bool)],
+    cell_w: f32,
+    /// 预编辑串与起始列（来自 cursor_pos，含被 TUI 隐藏的光标）。
+    ime: Option<(&'a str, usize)>,
+}
+
 fn paint_row(
     row: &[terminal::Cell],
-    origin: Point<Pixels>,
-    cursor: Option<(usize, terminal::CursorKind)>, // (列, 形状)
-    focused: bool,
-    base_font: &Font,
-    hover_link: Option<(usize, usize)>,
-    // 本行搜索命中：(起列, 止列含, 是否当前 active)
-    search_hits: &[(usize, usize, bool)],
-    cell_w: f32,
-    ime: Option<(&str, usize)>, // (预编辑串, 起始列 —— 来自 cursor_pos，含被 TUI 隐藏的光标)
+    params: PaintRowParams<'_>,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let PaintRowParams {
+        origin,
+        cursor,
+        focused,
+        base_font,
+        hover_link,
+        search_hits,
+        cell_w,
+        ime,
+    } = params;
     // 失焦时一律画成空心框（跟 iTerm2 / Zed 一致，terminal_element.rs:1250）——驾驶舱里
     // 多个终端并排，每个都亮着一模一样的实心块的话，根本看不出焦点在谁身上。
     let cursor = cursor.map(|(col, kind)| {
@@ -2041,7 +2004,7 @@ fn paint_row(
         None => false,
     };
 
-    let is_link = |i: usize| hover_link.map_or(false, |(a, b)| i >= a && i <= b);
+    let is_link = |i: usize| hover_link.is_some_and(|(a, b)| i >= a && i <= b);
     // 返回 (是否命中, 是否 active)。active 画得更亮。
     let search_at = |i: usize| -> Option<bool> {
         search_hits
@@ -2476,8 +2439,7 @@ fn find_paths(row: &[terminal::Cell]) -> Vec<(usize, usize, String)> {
 /// 上的零宽字符（变体选择器等）。列范围本身仍含占位格，悬停高亮才能盖满两格。
 fn cells_to_token(row: &[terminal::Cell], start: usize, end: usize) -> String {
     let mut s = String::new();
-    for k in start..end.min(row.len()) {
-        let c = &row[k];
+    for c in row.iter().take(end.min(row.len())).skip(start) {
         if c.ch == '\0' {
             continue;
         }
@@ -2549,7 +2511,10 @@ fn is_url_char(c: char) -> bool {
 fn keystroke_to_bytes(ks: &Keystroke, app_cursor: bool, kitty_keys: bool) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
 
-    if m.platform {
+    // Cmd+字母/数字/标点留给应用（复制、搜索、面板、分屏、切 pane）。
+    // Backspace / Delete / 方向键 / Enter 等命名键跟 Ctrl/Alt 走同一条编码，
+    // 不按 TUI 品牌或修饰键种类开白名单。
+    if m.platform && is_super_app_chord(ks.key.as_str()) {
         return None;
     }
 
@@ -2574,12 +2539,51 @@ fn keystroke_to_bytes(ks: &Keystroke, app_cursor: bool, kitty_keys: bool) -> Opt
         return Some(b"\r".to_vec());
     }
 
-    // 有任意修饰键时，优先发 xterm 修饰序列（方向 / F / 导航键）。
-    // 必须在「裸键」表之前：否则 Shift+Up 会掉进裸 `\x1b[A`，readline 词跳等全废。
-    if m.shift || m.alt || m.control {
-        if let Some(seq) = modified_special_key(ks.key.as_str(), m) {
+    // cmux/Ghostty 对 Cmd/Ctrl+Backspace、Cmd/Ctrl+Delete 直接发 readline 行删除
+    // C0（^U / ^K）。Grok 认的是 Ctrl+U / Ctrl+K（删到行首/行尾），不是 CSI u 的
+    // Ctrl+Delete（那是删词）。开着 kitty 也必须走 C0，否则对不上 cmux。
+    if (m.platform || m.control)
+        && !m.alt
+        && let Some(bytes) = line_kill_c0(ks.key.as_str())
+    {
+        return Some(bytes);
+    }
+
+    // kitty keyboard protocol（对端发过 `CSI > 1 u`）：只把 **没有传统 CSI ~ / CSI
+    // A-D 编码** 的键走 CSI u（Backspace / Tab / Escape；Enter 已单独处理）。
+    // Delete / Insert / Page / 方向 / F 键 kitty 规定仍是 `CSI 3;5~` 这种
+    // legacy functional 形式——cmux/Ghostty 也这么发。旧实现把 Delete 编成
+    // `ESC[16;5u`，crossterm 当成 Char(0x10)，Grok 里 Ctrl+Delete 就没反应。
+    if kitty_keys && modifiers_any(m) {
+        if let Some(seq) = kitty_csi_u_key(ks.key.as_str(), m) {
             return Some(seq);
         }
+        // Ctrl+Shift / Ctrl+Alt 的字符键：C0 控制码表达不了 shift/alt，硬发 C0 会
+        // 丢修饰（程序把 Ctrl+Shift+P 当成 Ctrl+P）。kitty 模式按 CSI u 上报码点 +
+        // 修饰；纯 Ctrl+字母保持 C0（readline 历史等依赖 0x10 语义，不能动）。
+        if m.control
+            && (m.shift || m.alt)
+            && let Some(c) = ks.key.chars().next()
+            && c.is_ascii()
+        {
+            return Some(format!("\x1b[{};{}u", u32::from(c), csi_u_modifiers(m)).into_bytes());
+        }
+    }
+
+    // 没开 kitty 时，Cmd 不能编进 xterm 修饰位（只有 shift/alt/ctrl）。对齐
+    // Ghostty/cmux 的 macOS natural editing：发成对应的 C0 控制符。
+    // kitty 开着时 Super 位可以编进 CSI，交给下面的 modified_special_key。
+    if m.platform && !kitty_keys {
+        return super_natural_edit(ks.key.as_str());
+    }
+
+    // 有任意修饰键时，优先发 xterm 修饰序列（方向 / F / 导航键）。
+    // 必须在「裸键」表之前：否则 Shift+Up 会掉进裸 `\x1b[A`，readline 词跳等全废。
+    // Super（Cmd）也算：kitty 开着时 Cmd+Delete 是 `CSI 3;9~`，不能塌成裸 `CSI 3~`。
+    if modifiers_any(m)
+        && let Some(seq) = modified_special_key(ks.key.as_str(), m)
+    {
+        return Some(seq);
     }
 
     // 裸特殊键 + 部分固定修饰（Shift+Tab / Ctrl+Backspace 等）
@@ -2619,17 +2623,31 @@ fn keystroke_to_bytes(ks: &Keystroke, app_cursor: bool, kitty_keys: bool) -> Opt
     }
 
     // Ctrl+字母 / 若干标点 → C0 控制符
-    if m.control && !m.alt {
-        if let Some(b) = ctrl_byte(ks.key.as_str()) {
-            return Some(vec![b]);
-        }
+    if m.control
+        && !m.alt
+        && let Some(b) = ctrl_byte(ks.key.as_str())
+    {
+        return Some(vec![b]);
     }
 
     None
 }
 
+/// kitty CSI u：仅用于没有 legacy CSI ~ / CSI A–D 编码的键。
+/// Delete 是 `CSI 3 ~`，必须走 [`modified_special_key`]，不能发 `CSI 16 u`。
+/// Enter 已单独处理。键码见 kitty keyboard protocol Functional key definitions。
+fn kitty_csi_u_key(key: &str, m: &Modifiers) -> Option<Vec<u8>> {
+    let code = match key {
+        "tab" => 9,
+        "escape" => 27,
+        "backspace" => 127,
+        _ => return None,
+    };
+    Some(format!("\x1b[{code};{}u", csi_u_modifiers(m)).into_bytes())
+}
+
 /// xterm 修饰特殊键。mod 编码：1+ shift|alt<<1|ctrl<<2 → 2..=8。
-/// 见 https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
+/// 见 <https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys>
 fn modified_special_key(key: &str, m: &Modifiers) -> Option<Vec<u8>> {
     let mod_code = csi_u_modifiers(m);
     if mod_code <= 1 {
@@ -2683,10 +2701,41 @@ fn ctrl_byte(key: &str) -> Option<u8> {
     }
 }
 
-/// CSI u / xterm 修饰键参数：基数 1，再按位叠加 shift(1) / alt(2) / ctrl(4)。
-/// 例：Shift+Enter → 2，于是 `ESC[13;2u`；Ctrl+Left → 5，于是 `ESC[1;5D`。
+/// CSI u / xterm 修饰键参数：基数 1，再按位叠加 shift(1) / alt(2) / ctrl(4) / super(8)。
+/// 例：Shift+Enter → 2，于是 `ESC[13;2u`；Ctrl+Left → 5，于是 `ESC[1;5D`；
+/// Cmd+Backspace → 9，于是 `ESC[127;9u`。
 fn csi_u_modifiers(m: &Modifiers) -> u8 {
-    1 + u8::from(m.shift) + (u8::from(m.alt) << 1) + (u8::from(m.control) << 2)
+    1 + u8::from(m.shift)
+        + (u8::from(m.alt) << 1)
+        + (u8::from(m.control) << 2)
+        + (u8::from(m.platform) << 3)
+}
+
+fn modifiers_any(m: &Modifiers) -> bool {
+    m.shift || m.alt || m.control || m.platform
+}
+
+/// Cmd+单码点（字母/数字/标点）是应用快捷键，不进 PTY。
+fn is_super_app_chord(key: &str) -> bool {
+    key.chars().count() == 1
+}
+
+/// Cmd/Ctrl+Backspace → ^U（删到行首）；Cmd/Ctrl+Delete → ^K（删到行尾）。
+fn line_kill_c0(key: &str) -> Option<Vec<u8>> {
+    Some(match key {
+        "backspace" => b"\x15".to_vec(),
+        "delete" => b"\x0b".to_vec(),
+        _ => return None,
+    })
+}
+
+/// 无 kitty 时 Cmd 编不进 xterm 修饰位，发成 readline/Ghostty 那套 C0。
+fn super_natural_edit(key: &str) -> Option<Vec<u8>> {
+    Some(match key {
+        "left" | "home" => b"\x01".to_vec(), // Ctrl+A：行首
+        "right" | "end" => b"\x05".to_vec(), // Ctrl+E：行尾
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -2695,7 +2744,7 @@ mod tests {
     use super::{
         BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
         bg_spans, cells_to_token, classify_launch, fallback_attention, keystroke_to_bytes, link_at,
-        scrollbar_thumb, text_batches, visible_end,
+        scrollbar_thumb, terminal_event_needs_redraw, text_batches, visible_end,
     };
     use crate::terminal;
     use crate::terminal::Cell;
@@ -2716,14 +2765,26 @@ mod tests {
     };
 
     #[test]
+    fn daemon_geometry_change_redraws_even_without_grid_damage() {
+        assert!(terminal_event_needs_redraw(false, true));
+        assert!(terminal_event_needs_redraw(true, false));
+        assert!(!terminal_event_needs_redraw(false, false));
+    }
+
+    #[test]
     fn classifies_all_builtin_terminal_agents() {
-        assert_eq!(classify_launch(Some("claude --help")), LaunchKind::Claude);
-        assert_eq!(classify_launch(Some("codex")), LaunchKind::Codex);
+        for agent in crate::settings::TerminalAgentKind::ALL {
+            assert_eq!(
+                classify_launch(Some(agent.quick_terminal_cmd())),
+                LaunchKind::Agent(agent),
+                "{} 的快捷命令应由统一注册表分类",
+                agent.id()
+            );
+        }
         assert_eq!(
-            classify_launch(Some("copilot --allow-all")),
-            LaunchKind::Copilot
+            classify_launch(Some("grok --minimal")),
+            LaunchKind::Agent(crate::settings::TerminalAgentKind::Grok)
         );
-        assert_eq!(classify_launch(Some("grok --minimal")), LaunchKind::Grok);
         assert_eq!(classify_launch(Some("zsh")), LaunchKind::Terminal);
     }
 
@@ -2743,18 +2804,14 @@ mod tests {
     }
 
     #[test]
-    fn fallback_events_map_to_typed_attention() {
-        let bell = fallback_attention(true, Some("ignored".into()), false).unwrap();
+    fn terminal_notifications_are_informational() {
+        let bell = fallback_attention(true, Some("ignored".into())).unwrap();
         assert_eq!(bell.0, AttentionKind::Bell);
         assert_eq!(bell.2, "🔔 响铃");
 
-        let done = fallback_attention(false, Some("turn complete".into()), true).unwrap();
-        assert_eq!(done.0, AttentionKind::Success);
-        assert_eq!(done.1, "已完成");
-
-        let notice = fallback_attention(false, Some("needs input".into()), false).unwrap();
+        let notice = fallback_attention(false, Some("turn complete".into())).unwrap();
         assert_eq!(notice.0, AttentionKind::Notice);
-        assert!(fallback_attention(false, None, false).is_none());
+        assert!(fallback_attention(false, None).is_none());
     }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。
@@ -2905,7 +2962,7 @@ mod tests {
         let mut cells = row("ab cd");
         // 「cd」两格挂着 OSC 8 链接
         cells[3].link = Some(uri.clone());
-        cells[4].link = Some(uri.clone());
+        cells[4].link = Some(uri);
         let frame = single_row_frame(cells);
 
         assert_eq!(
@@ -3130,6 +3187,17 @@ mod tests {
         }
     }
 
+    fn ks_cmd(key: &str) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            key: key.into(),
+            key_char: None,
+        }
+    }
+
     /// readline / zsh 词跳靠 Ctrl+Left/Right 的 xterm 修饰序列；发裸方向键等于没按。
     #[test]
     fn ctrl_arrow_sends_xterm_modifier_sequence() {
@@ -3137,6 +3205,168 @@ mod tests {
         assert_eq!(left, b"\x1b[1;5D");
         let up = keystroke_to_bytes(&ks("up", true, false, false), false, false).unwrap();
         assert_eq!(up, b"\x1b[1;2A");
+    }
+
+    /// 对端开了 kitty keyboard protocol（grok / Claude Code 启动发 `CSI > 1 u`）：
+    /// Backspace/Tab/Esc 走 CSI u；Delete 按 kitty 规定仍是 `CSI 3;mods~`（cmux 同款）。
+    #[test]
+    fn kitty_mode_sends_csi_u_for_modified_function_keys() {
+        // cmux 行删除：Ctrl+Delete → ^K，Ctrl+Backspace → ^U（开 kitty 也一样）
+        assert_eq!(
+            keystroke_to_bytes(&ks("delete", false, false, true), false, true).unwrap(),
+            b"\x0b"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks("backspace", false, false, true), false, true).unwrap(),
+            b"\x15"
+        );
+        // Shift+Tab 也走 CSI u（比遗留 `ESC[Z` 更标准）
+        assert_eq!(
+            keystroke_to_bytes(&ks("tab", true, false, false), false, true).unwrap(),
+            b"\x1b[9;2u"
+        );
+        // 裸功能键无修饰时 kitty 模式仍保持传统编码（协议兼容）
+        assert_eq!(
+            keystroke_to_bytes(&ks("delete", false, false, false), false, true).unwrap(),
+            b"\x1b[3~"
+        );
+        // Ctrl+Shift 字母走 CSI u（C0 表达不了 shift），纯 Ctrl 保持 C0（readline 依赖）
+        assert_eq!(
+            keystroke_to_bytes(&ks("P", true, false, true), false, true).unwrap(),
+            b"\x1b[80;6u"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks("p", false, false, true), false, true).unwrap(),
+            vec![0x10]
+        );
+        // Ctrl+Alt 字母走 CSI u；Ctrl+Esc 也带修饰上报
+        assert_eq!(
+            keystroke_to_bytes(&ks("a", false, true, true), false, true).unwrap(),
+            b"\x1b[97;7u"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks("escape", false, false, true), false, true).unwrap(),
+            b"\x1b[27;5u"
+        );
+    }
+
+    /// 没开 kitty 时 Cmd 编不进 xterm 修饰位；对齐 Ghostty/cmux 发 C0。
+    /// 任意 TUI / shell（不只 grok）都认 Ctrl+U/K/A/E。
+    #[test]
+    fn cmd_editing_keys_fall_back_to_c0_without_kitty() {
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("backspace"), false, false).unwrap(),
+            b"\x15"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("delete"), false, false).unwrap(),
+            b"\x0b"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("left"), false, false).unwrap(),
+            b"\x01"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("right"), false, false).unwrap(),
+            b"\x05"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("home"), false, false).unwrap(),
+            b"\x01"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("end"), false, false).unwrap(),
+            b"\x05"
+        );
+    }
+
+    /// kitty 开着时 Cmd/Ctrl+Backspace/Delete 仍发行删除 C0（对齐 cmux 覆盖 kitty）。
+    #[test]
+    fn cmd_named_keys_report_super_in_kitty_mode() {
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("backspace"), false, true).unwrap(),
+            b"\x15"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("delete"), false, true).unwrap(),
+            b"\x0b"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("left"), false, true).unwrap(),
+            b"\x1b[1;9D"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("right"), false, true).unwrap(),
+            b"\x1b[1;9C"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("home"), false, true).unwrap(),
+            b"\x1b[1;9H"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("end"), false, true).unwrap(),
+            b"\x1b[1;9F"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("tab"), false, true).unwrap(),
+            b"\x1b[9;9u"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks_cmd("enter"), false, true).unwrap(),
+            b"\x1b[13;9u"
+        );
+    }
+
+    /// Cmd+字母仍是应用快捷键（复制/搜索/面板/分屏），不能灌进 PTY。
+    #[test]
+    fn cmd_letter_stays_with_the_app() {
+        assert_eq!(keystroke_to_bytes(&ks_cmd("c"), false, false), None);
+        assert_eq!(keystroke_to_bytes(&ks_cmd("c"), false, true), None);
+        assert_eq!(keystroke_to_bytes(&ks_cmd("k"), false, true), None);
+        assert_eq!(keystroke_to_bytes(&ks_cmd("a"), false, true), None);
+        assert_eq!(keystroke_to_bytes(&ks_cmd("["), false, true), None);
+        assert_eq!(keystroke_to_bytes(&ks_cmd("1"), false, false), None);
+    }
+
+    /// Ctrl+字母走 C0：Ctrl+U/K/W 是行编辑，任意 shell / TUI 都认，不依赖 kitty。
+    #[test]
+    fn ctrl_letter_sends_c0() {
+        assert_eq!(
+            keystroke_to_bytes(&ks("u", false, false, true), false, false).unwrap(),
+            vec![0x15]
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks("k", false, false, true), false, false).unwrap(),
+            vec![0x0b]
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks("w", false, false, true), false, false).unwrap(),
+            vec![0x17]
+        );
+        // kitty 模式下纯 Ctrl+字母仍保持 C0，readline 语义不能改成 CSI u。
+        assert_eq!(
+            keystroke_to_bytes(&ks("u", false, false, true), false, true).unwrap(),
+            vec![0x15]
+        );
+        // Ctrl+Delete / Ctrl+Backspace 对齐 cmux：删行，不是 CSI 词删除。
+        assert_eq!(
+            keystroke_to_bytes(&ks("delete", false, false, true), false, false).unwrap(),
+            b"\x0b"
+        );
+        assert_eq!(
+            keystroke_to_bytes(&ks("backspace", false, false, true), false, false).unwrap(),
+            b"\x15"
+        );
+    }
+
+    /// 未开 kitty 时 Ctrl+Shift+P 仍退化 C0——shell/readline 场景不受影响。
+    /// Ctrl+Delete/Backspace 走行删除 C0，见 `ctrl_letter_sends_c0`。
+    #[test]
+    fn non_kitty_mode_keeps_xterm_encodings() {
+        assert_eq!(
+            keystroke_to_bytes(&ks("P", true, false, true), false, false).unwrap(),
+            vec![0x10]
+        );
     }
 
     #[test]

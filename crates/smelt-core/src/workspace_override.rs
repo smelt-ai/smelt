@@ -5,7 +5,7 @@
 //!   浏览都要从同一条启动命令里读出「这个会话实际用的是哪个 workspace 目录」，
 //!   不能只看进程当前的全局环境变量——那只反映"默认"那一个。
 
-use crate::agent_kind::AcpLaunchSpec;
+use crate::agent_kind::ConversationLaunchSpec;
 
 /// 判断 token 是不是 shell 风格的 `VAR=value` 赋值——规则跟
 /// `agent_client_protocol` 自己的 `parse_env_var` 保持一致（变量名以字母/下划线
@@ -35,12 +35,11 @@ pub fn split_env_assignment(token: &str) -> Option<(&str, &str)> {
 /// `export` 出来的效果一样，所以这里替用户展开一次，不能指望每家 agent 自己
 /// 都做了防御性展开。
 pub fn expand_tilde(value: &str) -> String {
-    if let Some(rest) = value.strip_prefix('~') {
-        if rest.is_empty() || rest.starts_with('/') {
-            if let Some(home) = dirs::home_dir() {
-                return format!("{}{}", home.display(), rest);
-            }
-        }
+    if let Some(rest) = value.strip_prefix('~')
+        && (rest.is_empty() || rest.starts_with('/'))
+        && let Some(home) = dirs::home_dir()
+    {
+        return format!("{}{}", home.display(), rest);
     }
     value.to_string()
 }
@@ -62,7 +61,7 @@ pub fn env_override_from_cmd(cmd: &str, var_name: &str) -> Option<String> {
 
 /// 从结构化启动规格里取某个环境变量的覆盖值。优先看 `launch.env`（支持包含空格
 /// 的值），没有再回退到 legacy `VAR=value cmd` 前缀，方便旧配置继续工作。
-pub fn env_override_from_launch(launch: &AcpLaunchSpec, var_name: &str) -> Option<String> {
+pub fn env_override_from_launch(launch: &ConversationLaunchSpec, var_name: &str) -> Option<String> {
     launch
         .env
         .get(var_name)
@@ -70,7 +69,7 @@ pub fn env_override_from_launch(launch: &AcpLaunchSpec, var_name: &str) -> Optio
         .or_else(|| env_override_from_cmd(&launch.command, var_name))
 }
 
-/// 各家 agent 自定义 workspace 目录用的环境变量名（`AcpAgentKind::id()` →
+/// 各家 agent 自定义 workspace 目录用的环境变量名（`ConversationAgentKind::id()` →
 /// 变量名），跟 `login_env.rs` 头部注释是同一份调研结论。Copilot 有
 /// `COPILOT_HOME`/`XDG_CONFIG_HOME` 两种，这里给手动添加 workspace 用的是
 /// 官方推荐、整段替换的 `COPILOT_HOME`。
@@ -80,6 +79,8 @@ pub fn config_dir_env_var(kind_id: &str) -> Option<&'static str> {
         "codex" => Some("CODEX_HOME"),
         "grok" => Some("GROK_HOME"),
         "copilot" => Some("COPILOT_HOME"),
+        "opencode" => Some("OPENCODE_CONFIG_DIR"),
+        "pi" => Some("PI_CODING_AGENT_DIR"),
         _ => None,
     }
 }
@@ -148,7 +149,7 @@ mod tests {
 
     #[test]
     fn structured_override_wins_and_expands_tilde() {
-        let launch = crate::agent_kind::AcpLaunchSpec::from_command(
+        let launch = crate::agent_kind::ConversationLaunchSpec::from_command(
             "CLAUDE_CONFIG_DIR=/legacy/path claude --flag",
         )
         .with_env("CLAUDE_CONFIG_DIR", "~/.claude-quant");
@@ -162,8 +163,9 @@ mod tests {
 
     #[test]
     fn launch_override_falls_back_to_legacy_prefixes() {
-        let launch =
-            crate::agent_kind::AcpLaunchSpec::from_command("CODEX_HOME=~/.codex-alt codex --help");
+        let launch = crate::agent_kind::ConversationLaunchSpec::from_command(
+            "CODEX_HOME=~/.codex-alt codex --help",
+        );
         let home = dirs::home_dir().unwrap();
         assert_eq!(
             env_override_from_launch(&launch, "CODEX_HOME"),

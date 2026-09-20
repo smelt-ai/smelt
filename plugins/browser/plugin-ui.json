@@ -1,0 +1,10 @@
+{
+  "contributions": [
+    {
+      "type": "tool_panel",
+      "id": "browser",
+      "title": "浏览器",
+      "entry": "web/index.html"
+    }
+  ]
+}

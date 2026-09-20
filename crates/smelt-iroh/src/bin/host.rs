@@ -12,37 +12,27 @@
 //! 「链接本身就是授权」的既有立场一致。
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use tracing::warn;
+use anyhow::Result;
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-fn parse_args() -> Result<(SocketAddr, Option<String>, String)> {
-    let mut gateway: Option<String> = None;
-    let mut secret: Option<String> = None;
-    let mut relay: Option<String> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--gateway" => gateway = args.next(),
-            "--secret" => secret = args.next(),
-            "--relay" => relay = args.next(),
-            "--help" | "-h" => {
-                println!(
-                    "smelt-iroh-host --gateway <host:port> --relay <domain|url> \
-                     [--secret <path>]"
-                );
-                std::process::exit(0);
-            }
-            other => warn!("忽略未知参数 {other}"),
-        }
-    }
-    let gateway = gateway.context("必须指定 --gateway <host:port>")?;
-    let addr = gateway
-        .parse()
-        .with_context(|| format!("--gateway 不是合法的 host:port：{gateway}"))?;
-    let relay = relay.context("必须指定 --relay <domain|url>")?;
-    Ok((addr, secret, relay))
+/// Mac 侧 iroh 隧道宿主：把进来的流转发到本机网关。
+#[derive(Debug, Parser)]
+#[command(name = "smelt-iroh-host", version, about)]
+struct Cli {
+    /// 本机网关地址，形如 `127.0.0.1:9877`。
+    #[arg(long, value_name = "HOST:PORT")]
+    gateway: SocketAddr,
+
+    /// 中继，域名或完整 URL。
+    #[arg(long, value_name = "DOMAIN|URL")]
+    relay: String,
+
+    /// 私钥路径。省略则用 `~/.smelt/iroh-secret`。
+    #[arg(long, value_name = "PATH")]
+    secret: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -51,24 +41,78 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let (gateway, secret_path, relay_address) = parse_args()?;
-    let secret_path = match secret_path {
-        Some(p) => std::path::PathBuf::from(p),
+    let cli = Cli::parse();
+    let secret_path = match cli.secret {
+        Some(p) => p,
         None => smelt_iroh::default_secret_path()?,
     };
     let secret = smelt_iroh::load_or_create_secret(&secret_path)?;
-    let relay = smelt_iroh::RelaySettings::parse(&relay_address)?;
+    let relay = smelt_iroh::RelaySettings::parse(&cli.relay)?;
     let endpoint =
         smelt_iroh::bind_endpoint(secret, vec![smelt_iroh::ALPN.to_vec()], &relay).await?;
 
     println!("smelt iroh 宿主已就绪");
     println!("EndpointId（配对码，重启不变）：{}", endpoint.id());
-    println!("转发到本机网关：{gateway}");
+    println!("转发到本机网关：{}", cli.gateway);
 
     // Ctrl-C 收摊：让 endpoint 有机会跟对端道别，而不是被硬杀。
-    smelt_iroh::serve_tunnel(endpoint, gateway, async {
+    smelt_iroh::serve_tunnel(endpoint, cli.gateway, async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn parses_gateway_and_relay() {
+        let cli = Cli::try_parse_from([
+            "smelt-iroh-host",
+            "--gateway",
+            "127.0.0.1:9877",
+            "--relay",
+            "relay.example.com",
+        ])
+        .expect("合法参数应解析成功");
+        assert_eq!(cli.gateway, "127.0.0.1:9877".parse::<SocketAddr>().unwrap());
+        assert_eq!(cli.relay, "relay.example.com");
+        assert!(cli.secret.is_none());
+    }
+
+    #[test]
+    fn rejects_missing_required() {
+        let err = Cli::try_parse_from(["smelt-iroh-host", "--gateway", "127.0.0.1:9"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn rejects_unknown_args() {
+        let err = Cli::try_parse_from([
+            "smelt-iroh-host",
+            "--gateway",
+            "127.0.0.1:9",
+            "--relay",
+            "relay.example.com",
+            "--nope",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn rejects_invalid_gateway() {
+        let err = Cli::try_parse_from([
+            "smelt-iroh-host",
+            "--gateway",
+            "not-a-socket",
+            "--relay",
+            "relay.example.com",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
 }

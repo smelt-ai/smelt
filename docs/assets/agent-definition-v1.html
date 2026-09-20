@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>智能体 / 自动化 · 目录到编辑器</title>
+<style>
+  :root {
+    --rail: #070707;
+    --stage: #070707;
+    --column: #111111;
+    --card: #181818;
+    --hover: #262626;
+    --border: #181818;
+    --border-mid: #262626;
+    --t-bright: #fcfcfc;
+    --t: #f3f3f3;
+    --t-mid: #b7b7b7;
+    --t-muted: #959595;
+    --t-faint: #777777;
+    --accent: #1084fe;
+    --green: #22c55e;
+    --purple: #a78bfa;
+    --blue: #1084fe;
+    --on: #070707;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0b0b0b;
+    color: var(--t);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    padding: 36px 28px 72px;
+  }
+  h1 {
+    font-size: 20px;
+    color: var(--t-bright);
+    font-weight: 650;
+    letter-spacing: -.02em;
+  }
+  .sub {
+    color: var(--t-muted);
+    margin: 8px 0 22px;
+    max-width: 780px;
+  }
+  .tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 18px;
+  }
+  .tab {
+    border: 1px solid var(--border-mid);
+    background: transparent;
+    color: var(--t-muted);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font: 12px/1 inherit;
+    cursor: pointer;
+  }
+  .tab.on {
+    color: var(--t-bright);
+    border-color: var(--accent);
+    background: #1084fe1a;
+  }
+  .window {
+    width: min(1120px, 100%);
+    height: 720px;
+    background: var(--stage);
+    border: 1px solid #1a1a1a;
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 24px 80px #0008;
+  }
+  .titlebar {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    background: var(--column);
+    border-bottom: 1px solid var(--border);
+    color: var(--t-faint);
+    font-size: 12px;
+  }
+  .dots { display: flex; gap: 6px; margin-right: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.r { background: #ff5f57; }
+  .dot.y { background: #febc2e; }
+  .dot.g { background: #28c840; }
+  .shell { flex: 1; min-height: 0; display: flex; }
+  .sidebar {
+    width: 232px;
+    background: var(--column);
+    border-right: 1px solid var(--border);
+    padding: 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .group {
+    font-size: 11px;
+    color: var(--t-faint);
+    padding: 6px 8px 4px;
+    font-weight: 500;
+  }
+  .nav, .conv {
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px;
+    border-radius: 8px;
+    color: var(--t-mid);
+    font-size: 13px;
+    border: 0;
+    background: transparent;
+    width: 100%;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .nav b { flex: 1; font-weight: 500; text-align: left; }
+  .nav .n { font-size: 11px; color: var(--t-faint); }
+  .nav.on { background: var(--hover); color: var(--t-bright); }
+  .nav.on .ico { color: var(--accent); }
+  .nav .ico, .conv .ico { width: 16px; color: var(--t-muted); text-align: center; }
+  .stage {
+    flex: 1;
+    min-width: 0;
+    background: var(--stage);
+    display: flex;
+    flex-direction: column;
+  }
+  .page-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .head-left { min-width: 0; display: flex; align-items: flex-start; gap: 10px; }
+  .back {
+    width: 28px;
+    height: 28px;
+    margin-top: 1px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--t-muted);
+    font: 16px/1 inherit;
+    cursor: pointer;
+  }
+  .back:hover { background: var(--hover); color: var(--t-bright); }
+  .page-head h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--t-bright);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .page-head h2 span { font-size: 12px; color: var(--t-muted); font-weight: 400; }
+  .page-head p { font-size: 12px; color: var(--t-muted); margin-top: 4px; }
+  .btn {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 8px;
+    border: 0;
+    font: 12px/1 inherit;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn.primary { background: var(--t-bright); color: var(--on); font-weight: 600; }
+  .btn.ghost { background: transparent; color: var(--t-muted); }
+  .col {
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 20px 32px 32px;
+  }
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .stack.gap-16 { gap: 16px; }
+  .body { flex: 1; min-height: 0; overflow: auto; }
+  .row {
+    width: 100%;
+    text-align: left;
+    background: var(--card);
+    border: 1px solid var(--border-mid);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 14px;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .row:hover { background: #1c1c1c; border-color: #2e2e2e; }
+  .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .row-actions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 10px;
+  }
+  .row-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .row-title strong {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--t-bright);
+    letter-spacing: -.01em;
+  }
+  .row-desc {
+    font-size: 12px;
+    color: var(--t-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 650;
+    flex: none;
+  }
+  .avatar.lg { width: 56px; height: 56px; font-size: 16px; }
+  .avatar.xl { width: 64px; height: 64px; font-size: 18px; }
+  .av-purple { background: #a78bfa29; color: var(--purple); border: 1px solid #a78bfa66; }
+  .av-blue { background: #1084fe29; color: var(--blue); border: 1px solid #1084fe66; }
+  .av-empty { background: #1084fe29; color: var(--accent); border: 1px solid #1084fe66; }
+  .av-shell { background: #1084fe1f; color: var(--accent); border: 1px solid #1084fe4d; font-size: 15px; }
+  .engine {
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: var(--hover);
+    color: var(--t-muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    flex: none;
+  }
+  .pi {
+    width: 12px;
+    height: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+  }
+  .pi i { background: currentColor; display: block; }
+  .pi i:nth-child(2) { background: transparent; }
+  .usage { font-size: 11px; color: var(--t-faint); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border-mid);
+    border-radius: 16px;
+  }
+  .identity {
+    padding: 16px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+  }
+  .who { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 8px; }
+  .name {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--t-bright);
+    letter-spacing: -.02em;
+  }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
+  .more {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    color: var(--t-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    letter-spacing: 1px;
+  }
+  .write { display: flex; flex-direction: column; }
+  .write-h { padding: 16px 20px 8px; }
+  .write-h strong { display: block; font-size: 13px; font-weight: 500; color: var(--t-bright); }
+  .write-h span { display: block; margin-top: 4px; font-size: 12px; color: var(--t-muted); }
+  .write-b {
+    min-height: 120px;
+    padding: 8px 20px 12px;
+    color: var(--t);
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
+  .write-b.short { min-height: 72px; }
+  .write-f { padding: 4px 20px 12px; font-size: 11px; color: var(--t-faint); }
+  .empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+  }
+  .empty .card {
+    width: 420px;
+    padding: 40px 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    text-align: center;
+  }
+  .empty h3 { font-size: 16px; color: var(--t-bright); }
+  .empty p { font-size: 13px; color: var(--t-muted); }
+  .note {
+    margin-top: 16px;
+    max-width: 780px;
+    font-size: 12px;
+    color: var(--t-faint);
+    line-height: 1.7;
+  }
+  .hidden { display: none !important; }
+  .toast {
+    position: absolute;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    background: var(--card);
+    border: 1px solid var(--border-mid);
+    color: var(--t);
+    font-size: 12px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s;
+  }
+  .toast.on { opacity: 1; }
+  .stage-wrap { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .switch {
+    width: 36px;
+    height: 20px;
+    border-radius: 999px;
+    background: #3d3d3d;
+    position: relative;
+    flex: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .switch.on { background: var(--green); }
+  .switch i {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    transition: left .15s;
+  }
+  .switch.on i { left: 18px; }
+  .seg {
+    display: inline-flex;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--column);
+    border: 1px solid var(--border-mid);
+    gap: 2px;
+  }
+  .seg span {
+    min-width: 88px;
+    height: 26px;
+    padding: 0 12px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: var(--t-muted);
+  }
+  .seg span.on { background: var(--hover); color: var(--t-bright); font-weight: 500; }
+  .field {
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .field + .field { border-top: 1px solid var(--border); }
+  .choice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    padding: 0 12px;
+    border-radius: 10px;
+    background: var(--hover);
+    color: var(--t);
+    font-size: 13px;
+  }
+  .hist {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .hist:first-child { border-top: 0; }
+  .ok { color: var(--green); }
+  .muted { color: var(--t-faint); }
+</style>
+</head>
+<body>
+<h1>智能体 / 自动化</h1>
+<p class="sub">两边都是目录到编辑器。自动化行只保留开关和「测试执行」，点行进入编辑；状态只讲运行，不讲「尚未配置完成」。智能体的报错不会出现在这个面上。</p>
+
+<div class="tabs">
+  <button class="tab on" data-view="catalog">智能体 · 目录</button>
+  <button class="tab" data-view="quant">智能体 · 编辑</button>
+  <button class="tab" data-view="auto-catalog">自动化 · 目录</button>
+  <button class="tab" data-view="auto-edit">自动化 · 编辑</button>
+  <button class="tab" data-view="auto-history">自动化 · 记录</button>
+  <button class="tab" data-view="auto-empty">自动化 · 空</button>
+</div>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="dots"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+    Pi
+  </div>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="group">工作台</div>
+      <button class="nav on" id="nav-agents" data-view="catalog"><span class="ico">◎</span><b>智能体</b><span class="n">2</span></button>
+      <button class="nav" id="nav-autos" data-view="auto-catalog"><span class="ico">⬡</span><b>自动化</b><span class="n">2</span></button>
+      <div class="group">对话</div>
+      <div class="conv"><span class="ico">▢</span>还没有对话</div>
+    </aside>
+    <div class="stage-wrap">
+      <main class="stage">
+        <div class="page-head">
+          <div class="head-left">
+            <button class="back hidden" id="back" aria-label="返回">←</button>
+            <div>
+              <h2 id="head-title">智能体 <span>2 个</span></h2>
+              <p id="head-sub">定义它是谁、怎么做事。对话和自动化都会引用这里。</p>
+            </div>
+          </div>
+          <button class="btn primary" id="head-action">＋ 新建</button>
+        </div>
+
+        <div class="body" id="catalog">
+          <div class="col stack">
+            <button class="row" data-open="quant">
+              <div class="avatar av-purple">量化</div>
+              <div class="row-main">
+                <div class="row-title">
+                  <strong>量化交易</strong>
+                  <span class="engine"><span class="pi"><i></i><i></i><i></i><i></i></span>Pi</span>
+                  <span class="usage">2 段对话 · 1 条自动化</span>
+                </div>
+                <div class="row-desc">先验证行情时间，再给出结论。价格行为优先，不把盘口噪声写成信号。</div>
+              </div>
+              <span class="btn primary" data-talk="量化交易">新对话</span>
+            </button>
+            <button class="row" data-open="pi">
+              <div class="avatar av-blue">Pi</div>
+              <div class="row-main">
+                <div class="row-title">
+                  <strong>Pi 智能体</strong>
+                  <span class="engine"><span class="pi"><i></i><i></i><i></i><i></i></span>Pi</span>
+                  <span class="usage">1 段对话</span>
+                </div>
+                <div class="row-desc">它负责日常问答和代码协作，拿不准时先停下来问我。</div>
+              </div>
+              <span class="btn primary" data-talk="Pi 智能体">新对话</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="body hidden" id="editor">
+          <div class="col stack gap-16">
+            <div class="card identity">
+              <div class="avatar lg" id="hero-av">量化</div>
+              <div class="who">
+                <div class="name" id="hero-name">量化交易</div>
+                <div class="meta">
+                  <span class="engine"><span class="pi"><i></i><i></i><i></i><i></i></span>Pi</span>
+                  <span class="usage" id="usage">2 段对话 · 1 条自动化</span>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="btn primary" id="talk-btn">新对话</button>
+                <div class="more">···</div>
+              </div>
+            </div>
+            <div class="card write">
+              <div class="write-h">
+                <strong>工作方式</strong>
+                <span>长期规则。对话和自动化都会带上，不会当成第一条消息。</span>
+              </div>
+              <div class="write-b" id="write-body">先验证行情时间，再给出结论。价格行为优先，不把盘口噪声写成信号。拿不准时先停下来问我。</div>
+              <div class="write-f" id="write-foot">48 字 · 会作为系统提示词带进每次对话和自动化</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="empty hidden" id="empty">
+          <div class="card">
+            <div class="avatar xl av-empty">智</div>
+            <h3>还没有智能体</h3>
+            <p>创建一个可复用的智能体。之后对话和自动化都会引用它。</p>
+            <button class="btn primary">＋ 新建智能体</button>
+          </div>
+        </div>
+
+        <div class="body hidden" id="auto-catalog">
+          <div class="col stack">
+            <div class="row" data-open="auto-edit">
+              <div class="avatar av-purple">量化</div>
+              <div class="row-main">
+                <div class="row-title">
+                  <strong>输出你好</strong>
+                  <span class="engine">每隔 1 分钟 → 量化交易</span>
+                </div>
+                <div class="row-desc">下次 09-05 18:00 · 已跑 50 次</div>
+              </div>
+              <div class="row-actions">
+                <span class="switch on" data-toggle role="switch" aria-checked="true"><i></i></span>
+                <span class="btn primary" data-run="输出你好">测试执行</span>
+              </div>
+            </div>
+            <div class="row" data-open="auto-edit">
+              <div class="avatar av-shell">⌘</div>
+              <div class="row-main">
+                <div class="row-title">
+                  <strong>健康检查</strong>
+                  <span class="engine">每天 09:00 → Shell</span>
+                </div>
+                <div class="row-desc">已暂停 · 上次 09-04 09:00 完成</div>
+              </div>
+              <div class="row-actions">
+                <span class="switch" data-toggle role="switch" aria-checked="false"><i></i></span>
+                <span class="btn primary" data-run="健康检查">测试执行</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="body hidden" id="auto-edit">
+          <div class="col stack gap-16">
+            <div class="card identity">
+              <div class="avatar lg av-purple">量化</div>
+              <div class="who">
+                <div class="name">输出你好</div>
+                <div class="meta">
+                  <span class="engine">每隔 1 分钟</span>
+                  <span class="engine"><span class="pi"><i></i><i></i><i></i><i></i></span>量化交易</span>
+                  <span class="usage">下次 09-05 18:00 · 50 次</span>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="switch on" data-toggle aria-label="启用"><i></i></button>
+                <button class="btn primary" data-run="输出你好">测试执行</button>
+                <div class="more">···</div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="field">
+                <strong style="font-size:13px;font-weight:500;color:var(--t-bright)">动作</strong>
+                <div class="seg"><span class="on">智能体</span><span>命令</span></div>
+                <div class="choice"><span class="avatar av-purple" style="width:22px;height:22px;font-size:9px">量化</span>量化交易 · 逐次审批</div>
+              </div>
+              <div class="field">
+                <strong style="font-size:13px;font-weight:500;color:var(--t-bright)">时机</strong>
+                <div class="choice">每隔 1 分钟 · 本机时区 UTC+08:00</div>
+              </div>
+              <div class="write">
+                <div class="write-h">
+                  <strong>每次输入</strong>
+                  <span>可选。会作为这次 Run 的用户消息；智能体的工作方式仍会带上。</span>
+                </div>
+                <div class="write-b short">你好</div>
+              </div>
+            </div>
+            <button class="row" data-open="auto-history" style="justify-content:space-between">
+              <span>运行记录</span>
+              <span class="usage">50 次 · 最近 09-05 17:48 完成</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="body hidden" id="auto-history">
+          <div class="col">
+            <div class="card" style="padding:8px 20px 12px">
+              <div class="hist"><span>09-05 17:48 · 手动</span><span class="ok">已完成</span></div>
+              <div class="hist"><span>09-05 17:47 · 定时</span><span class="ok">已完成</span></div>
+              <div class="hist"><span>09-05 17:46 · 定时</span><span class="muted">已跳过</span></div>
+              <div class="hist"><span>09-05 17:45 · 定时</span><span class="ok">已完成</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="empty hidden" id="auto-empty">
+          <div class="card">
+            <div class="avatar xl av-empty">⬡</div>
+            <h3>还没有自动化</h3>
+            <p>先选触发时间和动作。动作可以是智能体，也可以是一条命令。</p>
+            <button class="btn primary">＋ 新建自动化</button>
+          </div>
+        </div>
+      </main>
+      <div class="toast" id="toast">已用「量化交易」开一段新对话</div>
+    </div>
+  </div>
+</div>
+
+<p class="note">
+  现在这页的问题：智能体报错串到自动化；行上写「尚未配置完成」；编辑嵌在列表里，动作太多。
+  示意图改成：行上只有开关和测试执行，点行进编辑器，运行记录单独一页。没有草稿/就绪。
+</p>
+
+<script>
+  const agents = {
+    quant: {
+      name: "量化交易",
+      avatar: "量化",
+      avatarClass: "avatar lg av-purple",
+      usage: "2 段对话 · 1 条自动化",
+      body: "先验证行情时间，再给出结论。价格行为优先，不把盘口噪声写成信号。拿不准时先停下来问我。",
+      foot: "48 字 · 会作为系统提示词带进每次对话和自动化",
+    },
+    pi: {
+      name: "Pi 智能体",
+      avatar: "Pi",
+      avatarClass: "avatar lg av-blue",
+      usage: "1 段对话",
+      body: "它负责日常问答和代码协作。先把目标问清楚，再动手改文件。拿不准时先停下来问我。",
+      foot: "42 字 · 会作为系统提示词带进每次对话和自动化",
+    },
+  };
+
+  const panes = ["catalog", "editor", "empty", "auto-catalog", "auto-edit", "auto-history", "auto-empty"];
+  const back = document.getElementById("back");
+  const headAction = document.getElementById("head-action");
+  const toast = document.getElementById("toast");
+  let toastTimer = 0;
+
+  function showToast(text) {
+    toast.textContent = text;
+    toast.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove("on"), 1600);
+  }
+
+  function setView(view) {
+    document.querySelectorAll(".tab").forEach((el) => {
+      el.classList.toggle("on", el.dataset.view === view);
+    });
+    const isAgent = view === "catalog" || view === "quant" || view === "pi" || view === "empty";
+    const isEditor = view === "quant" || view === "pi" || view === "auto-edit" || view === "auto-history";
+    const pane = view === "quant" || view === "pi" ? "editor" : view;
+
+    panes.forEach((id) => {
+      document.getElementById(id).classList.toggle("hidden", id !== pane);
+    });
+    document.getElementById("nav-agents").classList.toggle("on", isAgent);
+    document.getElementById("nav-autos").classList.toggle("on", !isAgent);
+    back.classList.toggle("hidden", !isEditor);
+
+    if (view === "catalog" || view === "empty") {
+      const count = view === "empty" ? "0 个" : "2 个";
+      document.getElementById("head-title").innerHTML = "智能体 <span>" + count + "</span>";
+      document.getElementById("head-sub").textContent = "定义它是谁、怎么做事。对话和自动化都会引用这里。";
+      headAction.classList.remove("hidden");
+      headAction.textContent = "＋ 新建";
+      return;
+    }
+    if (view === "auto-catalog" || view === "auto-empty") {
+      const count = view === "auto-empty" ? "0 条" : "2 条";
+      document.getElementById("head-title").innerHTML = "自动化 <span>" + count + "</span>";
+      document.getElementById("head-sub").textContent = "按时间执行智能体或命令。失败会留在运行记录里。";
+      headAction.classList.remove("hidden");
+      headAction.textContent = "＋ 新建";
+      return;
+    }
+    if (view === "auto-edit") {
+      document.getElementById("head-title").textContent = "输出你好";
+      document.getElementById("head-sub").textContent = "改时机、动作和每次输入。测试执行不推进定时游标。";
+      headAction.classList.add("hidden");
+      return;
+    }
+    if (view === "auto-history") {
+      document.getElementById("head-title").textContent = "输出你好";
+      document.getElementById("head-sub").textContent = "最近 50 次运行。点一条看输入和结果。";
+      headAction.classList.add("hidden");
+      return;
+    }
+
+    const data = agents[view];
+    document.getElementById("head-title").textContent = data.name;
+    document.getElementById("head-sub").textContent = "长期规则会带进对话和自动化，不会当成第一条消息。";
+    headAction.classList.add("hidden");
+    document.getElementById("hero-name").textContent = data.name;
+    const av = document.getElementById("hero-av");
+    av.textContent = data.avatar;
+    av.className = data.avatarClass;
+    document.getElementById("usage").textContent = data.usage;
+    document.getElementById("write-body").textContent = data.body;
+    document.getElementById("write-foot").textContent = data.foot;
+  }
+
+  document.querySelectorAll(".tab, #nav-agents, #nav-autos").forEach((el) => {
+    el.addEventListener("click", () => setView(el.dataset.view));
+  });
+  document.querySelectorAll("[data-open]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      if (event.target.closest("[data-talk], [data-run], [data-toggle]")) return;
+      setView(el.dataset.open);
+    });
+  });
+  document.querySelectorAll("[data-talk]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showToast("已用「" + el.dataset.talk + "」开一段新对话");
+    });
+  });
+  document.querySelectorAll("[data-run]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showToast("已开始测试执行「" + el.dataset.run + "」");
+    });
+  });
+  document.querySelectorAll("[data-toggle]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.stopPropagation();
+      el.classList.toggle("on");
+    });
+  });
+  document.getElementById("talk-btn").addEventListener("click", () => {
+    showToast("已用「" + document.getElementById("hero-name").textContent + "」开一段新对话");
+  });
+  back.addEventListener("click", () => {
+    const auto = document.getElementById("nav-autos").classList.contains("on");
+    const history = !document.getElementById("auto-history").classList.contains("hidden");
+    if (history) setView("auto-edit");
+    else setView(auto ? "auto-catalog" : "catalog");
+  });
+</script>
+</body>
+</html>

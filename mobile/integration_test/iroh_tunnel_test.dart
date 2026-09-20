@@ -31,7 +31,7 @@ void main() {
   test('Rust 库真的加载起来了', () async {
     // 只要能调进去不崩，就说明原生库被正确打包并链接了 —— 这一步挂掉
     // 说明 podspec/cargokit 的接线有问题，与 iroh 无关。
-    expect(await irohTunnelPort(), isNull);
+    expect(await irohTunnelPathStatus(), isNull);
   });
 
   test('打错的 EndpointId 会报错而不是挂起', () async {
@@ -51,7 +51,7 @@ void main() {
       expect(port, greaterThan(0));
       // 幂等：同一个 peer 不该换端口，否则上层重连会打到旧端口。
       expect(await irohTunnelStart(endpointId: _peer, relayUrl: _relay), port);
-      expect(await irohTunnelPort(), port);
+      expect(await irohTunnelPathStatus(), isNotNull);
 
       final client = HttpClient();
       final request = await client.getUrl(Uri.parse('http://127.0.0.1:$port/'));
@@ -61,7 +61,7 @@ void main() {
       client.close();
 
       await irohTunnelStop();
-      expect(await irohTunnelPort(), isNull);
+      expect(await irohTunnelPathStatus(), isNull);
     },
     skip: _peer.isEmpty || _relay.isEmpty
         ? '需要 SMELT_IROH_TEST_PEER 和 SMELT_IROH_TEST_RELAY'

@@ -49,6 +49,242 @@ class LifecycleAttention {
 
 enum SessionKind { acp, terminal }
 
+/// 这条会话不是用户开的，而是某条自动化的一次运行现场。
+///
+/// 桌面上 Run 挂在自动化页的运行历史下面，会话在 daemon 目录里是 hidden 的；
+/// 手机把它们提到指挥台，因为「自动化半夜停下来等审批」这一刻只有手机在场。
+/// 用户此时没有任何上下文，光有一句「Pi 想执行 git push」不足以判断该不该放行，
+/// 所以来源、触发方式和这次运行固化的输入必须跟着卡片一起到。
+class AutomationSource {
+  final String automationId;
+  final String automationName;
+  final String runId;
+
+  /// 与桌面 `AgentRunStatus` 同名：starting / queued / dispatching / running /
+  /// awaiting_approval / waiting_for_user / completed / failed / cancelled / skipped。
+  final String runStatus;
+
+  /// manual / scheduled / webhook / event。
+  final String runSource;
+
+  /// 这次运行**固化**的输入，不是自动化当前的定义值——定义改过之后回看旧 Run，
+  /// 显示当前值会直接把排查带偏。
+  final String? prompt;
+  final int? startedAt;
+
+  const AutomationSource({
+    required this.automationId,
+    required this.automationName,
+    required this.runId,
+    required this.runStatus,
+    required this.runSource,
+    this.prompt,
+    this.startedAt,
+  });
+
+  factory AutomationSource.fromJson(Map<String, dynamic> json) =>
+      AutomationSource(
+        automationId: json['automation_id'] as String? ?? '',
+        automationName: json['automation_name'] as String? ?? '',
+        runId: json['run_id'] as String? ?? '',
+        runStatus: json['run_status'] as String? ?? 'running',
+        runSource: json['run_source'] as String? ?? 'manual',
+        prompt: json['prompt'] as String?,
+        startedAt: json['started_at'] as int?,
+      );
+
+  Map<String, dynamic> toJson() => {
+    'automation_id': automationId,
+    'automation_name': automationName,
+    'run_id': runId,
+    'run_status': runStatus,
+    'run_source': runSource,
+    if (prompt != null) 'prompt': prompt,
+    if (startedAt != null) 'started_at': startedAt,
+  };
+}
+
+/// 自动化的一条调度规则。字段与桌面 `AgentSchedule` 同构，文案在移动端拼。
+class AutomationSchedule {
+  /// daily / every_minutes / every_hours / weekly。
+  final String type;
+  final int hour;
+  final int minute;
+  final int minutes;
+  final int hours;
+
+  /// 周几的位掩码，bit0 = 周一。仅 weekly 有意义。
+  final int days;
+
+  const AutomationSchedule({
+    required this.type,
+    this.hour = 0,
+    this.minute = 0,
+    this.minutes = 0,
+    this.hours = 0,
+    this.days = 0,
+  });
+
+  factory AutomationSchedule.fromJson(Map<String, dynamic> json) =>
+      AutomationSchedule(
+        type: json['type'] as String? ?? 'daily',
+        hour: json['hour'] as int? ?? 0,
+        minute: json['minute'] as int? ?? 0,
+        minutes: json['minutes'] as int? ?? 0,
+        hours: json['hours'] as int? ?? 0,
+        days: json['days'] as int? ?? 0,
+      );
+}
+
+/// 自动化目录里的「上次结果」。
+class AutomationRunSummary {
+  final String runId;
+  final String status;
+  final String source;
+  final int? startedAt;
+  final int? finishedAt;
+
+  /// 那次运行的会话，有值就能从目录直接跳进执行现场。
+  final String? sessionId;
+  final String? error;
+
+  const AutomationRunSummary({
+    required this.runId,
+    required this.status,
+    required this.source,
+    this.startedAt,
+    this.finishedAt,
+    this.sessionId,
+    this.error,
+  });
+
+  factory AutomationRunSummary.fromJson(Map<String, dynamic> json) =>
+      AutomationRunSummary(
+        runId: json['run_id'] as String? ?? '',
+        status: json['status'] as String? ?? 'running',
+        source: json['source'] as String? ?? 'manual',
+        startedAt: json['started_at'] as int?,
+        finishedAt: json['finished_at'] as int?,
+        sessionId: json['session_id'] as String?,
+        error: json['error'] as String?,
+      );
+}
+
+/// 自动化目录的一行：它叫什么、什么时候由谁做、上次结果如何。
+///
+/// 网关做过脱敏，webhook 的 endpoint 和 secret 不会到这里——手机上没有任何
+/// 需要它们的操作，多带一份凭据只是白白扩大泄露面。
+class AutomationSummary {
+  final String id;
+  final String name;
+  final bool enabled;
+
+  /// 三种时机可以混排在同一条自动化上，所以这里是三份并列的时机，不是一个单选
+  /// 的类型：只显示其中一种，会让「既定时又能被外部打」的自动化在手机上少掉
+  /// 一半，而用户上手机就是来核对「它到底什么时候跑」的。
+  final List<AutomationSchedule> schedules;
+  final List<String> eventTopics;
+  final bool webhook;
+
+  /// agent / shell。
+  final String actionKind;
+
+  /// 执行者展示名。null 表示这条自动化绑的智能体定义已经不在了——那本身就是
+  /// 用户要看见的排查线索。
+  final String? agentName;
+  final int? nextRunAt;
+  final AutomationRunSummary? lastRun;
+
+  const AutomationSummary({
+    required this.id,
+    required this.name,
+    required this.enabled,
+    this.schedules = const [],
+    this.eventTopics = const [],
+    this.webhook = false,
+    required this.actionKind,
+    this.agentName,
+    this.nextRunAt,
+    this.lastRun,
+  });
+
+  factory AutomationSummary.fromJson(Map<String, dynamic> json) =>
+      AutomationSummary(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        enabled: json['enabled'] as bool? ?? false,
+        schedules: (json['schedules'] as List<dynamic>? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(AutomationSchedule.fromJson)
+            .toList(),
+        eventTopics: (json['event_topics'] as List<dynamic>? ?? const [])
+            .whereType<String>()
+            .toList(),
+        webhook: json['webhook'] as bool? ?? false,
+        actionKind: json['action_kind'] as String? ?? 'agent',
+        agentName: json['agent_name'] as String?,
+        nextRunAt: json['next_run_at'] as int?,
+        lastRun: json['last_run'] is Map<String, dynamic>
+            ? AutomationRunSummary.fromJson(
+                json['last_run'] as Map<String, dynamic>,
+              )
+            : null,
+      );
+}
+
+/// 智能体定义的只读投影。手机不提供编辑入口，这里只回答「它为什么这么干」。
+class AgentDefinitionSummary {
+  final String id;
+  final String name;
+  final String description;
+
+  /// 执行引擎机器码（当前只有 pi 能被自动化调用）。
+  final String agentId;
+
+  /// 长期工作方式，会写进引擎 system prompt。
+  final String prompt;
+  final List<String> plugins;
+  final List<String> contextFolders;
+  final List<String> contextLinks;
+
+  const AgentDefinitionSummary({
+    required this.id,
+    required this.name,
+    this.description = '',
+    required this.agentId,
+    this.prompt = '',
+    this.plugins = const [],
+    this.contextFolders = const [],
+    this.contextLinks = const [],
+  });
+
+  static List<String> _strings(dynamic value) =>
+      (value as List<dynamic>? ?? const []).whereType<String>().toList();
+
+  factory AgentDefinitionSummary.fromJson(Map<String, dynamic> json) =>
+      AgentDefinitionSummary(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        description: json['description'] as String? ?? '',
+        agentId: json['agent_id'] as String? ?? '',
+        prompt: json['prompt'] as String? ?? '',
+        plugins: _strings(json['plugins']),
+        contextFolders: _strings(json['context_folders']),
+        contextLinks: _strings(json['context_links']),
+      );
+}
+
+/// 「智能体」这一栏的整份数据。自动化和定义一起下发，目录行才能显示执行者名字。
+class AutomationCatalog {
+  final List<AutomationSummary> automations;
+  final List<AgentDefinitionSummary> agents;
+
+  const AutomationCatalog({
+    this.automations = const [],
+    this.agents = const [],
+  });
+}
+
 /// 会话摘要（列表用）
 class SessionSummary {
   static const unknownOrder = 0xffffffff;
@@ -70,6 +306,21 @@ class SessionSummary {
   final bool unread;
   final LifecycleAttention? attention;
 
+  /// 只有自动化 Run 的会话才有。null = 用户自己开的对话/终端。
+  final AutomationSource? automation;
+
+  /// 这是一条智能体对话时，它属于哪个智能体定义。
+  ///
+  /// 网关从 cwd 反推（智能体 space 的目录名就是定义 id），所以只有 id 没有名字
+  /// ——名字要读存档，而会话摘要是每次事件都重算的热路径。展示名由
+  /// [AutomationCatalog] 配。
+  final String? agentDefinitionId;
+
+  /// 有归属就是智能体对话。自动化 Run 不算：它有自己的来源标注，两者在界面上
+  /// 是不同的东西（一个是我和智能体聊，一个是它自己半夜跑）。
+  bool get isAgentConversation =>
+      automation == null && agentDefinitionId != null;
+
   const SessionSummary({
     required this.id,
     this.kind = SessionKind.acp,
@@ -87,6 +338,8 @@ class SessionSummary {
     this.detail,
     this.unread = false,
     this.attention,
+    this.automation,
+    this.agentDefinitionId,
   });
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) {
@@ -114,6 +367,12 @@ class SessionSummary {
               json['attention'] as Map<String, dynamic>,
             )
           : null,
+      automation: json['automation'] is Map<String, dynamic>
+          ? AutomationSource.fromJson(
+              json['automation'] as Map<String, dynamic>,
+            )
+          : null,
+      agentDefinitionId: json['agent_definition_id'] as String?,
     );
   }
 
@@ -134,6 +393,8 @@ class SessionSummary {
     if (detail != null) 'detail': detail,
     'unread': unread,
     if (attention != null) 'attention': attention!.toJson(),
+    if (automation != null) 'automation': automation!.toJson(),
+    if (agentDefinitionId != null) 'agent_definition_id': agentDefinitionId,
   };
 }
 
@@ -162,26 +423,109 @@ class AcpAgentOption {
   final String label;
   final bool profile;
 
+  /// Set when this option is a product agent rather than a bare engine or a
+  /// workspace profile. Such a conversation can start without a project: the
+  /// gateway puts it in the agent's own space, same as the desktop.
+  final String? agentDefinitionId;
+
   const AcpAgentOption({
     required this.id,
     required this.kind,
     required this.label,
     required this.profile,
+    this.agentDefinitionId,
   });
+
+  bool get isAgentDefinition => agentDefinitionId != null;
 
   factory AcpAgentOption.fromJson(Map<String, dynamic> json) => AcpAgentOption(
     id: json['id'] as String? ?? '',
     kind: json['kind'] as String? ?? '',
     label: json['label'] as String? ?? '',
     profile: json['profile'] as bool? ?? false,
+    agentDefinitionId: json['agentDefinitionId'] as String?,
   );
+}
+
+/// 新建会话选择器里的一行，跟桌面「+」弹层是同一份目录（`smelt_core::new_session`）。
+///
+/// 「常用 / 终端 / 对话」的分组、顺序、Pin 全在电脑那边算好；手机只负责画，并把
+/// [key] 原样回传。命令行永远不在手机上拼——配对设备不该决定电脑上跑什么进程。
+enum LaunchSection { common, terminal, conversation }
+
+enum LaunchTarget { conversation, terminal, blankTerminal }
+
+class LaunchAction {
+  final String key;
+  final String label;
+  final LaunchSection section;
+  final LaunchTarget target;
+
+  /// 动作是「对话」还是「终端」。跟 [section] 无关：常用组里两种都有。
+  final bool isConversation;
+
+  /// 画图标用的 agent 标识；认不出就是空串。
+  final String agent;
+
+  const LaunchAction({
+    required this.key,
+    required this.label,
+    required this.section,
+    required this.target,
+    required this.isConversation,
+    required this.agent,
+  });
+
+  /// 列表里显示成「名称 · 对话/终端」，跟桌面同一种写法。
+  String get kindLabel => isConversation ? 'Conversation' : 'Terminal';
+
+  static LaunchAction? fromJson(Map<String, dynamic> json) {
+    final key = json['key'] as String? ?? '';
+    if (key.isEmpty) return null;
+    final target = switch (json['target'] as String?) {
+      'conversation' => LaunchTarget.conversation,
+      'terminal' => LaunchTarget.terminal,
+      'blankTerminal' => LaunchTarget.blankTerminal,
+      _ => null,
+    };
+    if (target == null) return null;
+    final section = switch (json['section'] as String?) {
+      'common' => LaunchSection.common,
+      'terminal' => LaunchSection.terminal,
+      'conversation' => LaunchSection.conversation,
+      _ => null,
+    };
+    if (section == null) return null;
+    return LaunchAction(
+      key: key,
+      label: json['label'] as String? ?? key,
+      section: section,
+      target: target,
+      isConversation: (json['kind'] as String?) == 'conversation',
+      agent:
+          (json['agentKind'] as String?) ??
+          (json['provider'] as String?) ??
+          '',
+    );
+  }
 }
 
 class WorkspaceCatalog {
   final List<WorkspaceProject> projects;
   final List<AcpAgentOption> agents;
 
-  const WorkspaceCatalog({required this.projects, required this.agents});
+  /// 新建会话的启动动作，已按「常用 / 终端 / 对话」排好序。旧网关不下发这个字段，
+  /// 那时是空列表——选择器会直接让用户去升级电脑端，而不是拼一个半残的目录。
+  final List<LaunchAction> launchActions;
+
+  const WorkspaceCatalog({
+    required this.projects,
+    required this.agents,
+    this.launchActions = const [],
+  });
+
+  List<LaunchAction> actionsIn(LaunchSection section) =>
+      launchActions.where((action) => action.section == section).toList();
 }
 
 class HistorySessionSummary {
@@ -389,6 +733,13 @@ class GatewayService {
   static const int _maxCachedSessions = 5;
   static const int _maxCacheBytes = 32 * 1024 * 1024;
   static const int _initialTailLimit = 100;
+
+  /// 指挥台按需取详情时的窗口。卡片只用 pending_permissions，配几条最近 entry
+  /// 作上下文即可，不必把整段历史拉到手机上。
+  static const int _pendingActionsTailLimit = 8;
+
+  /// "从末尾取"的哨兵下标：smeltd 侧会 clamp 到实际长度。
+  static const int _tailProbeOffset = 0x7fffffff;
   final LinkedHashMap<String, AcpSnapshot> _snapshotCache = LinkedHashMap();
   final Set<String> _historyLoads = {};
   final Set<String> _cachedSnapshotIds = {};
@@ -396,6 +747,7 @@ class GatewayService {
   String? _cacheNamespace;
   int _cacheLoadGeneration = 0;
   List<SessionSummary> _lastSessions = const [];
+  AutomationCatalog? _lastAutomationCatalog;
   DateTime? _cachedAt;
   bool _sessionsAreCached = false;
 
@@ -403,6 +755,8 @@ class GatewayService {
   final _sessionsController =
       StreamController<List<SessionSummary>>.broadcast();
   final _workspaceController = StreamController<WorkspaceCatalog>.broadcast();
+  final _automationCatalogController =
+      StreamController<AutomationCatalog>.broadcast();
   final _sessionHistoryController =
       StreamController<SessionHistoryResult>.broadcast();
   final _sessionHistoryRenameController =
@@ -410,6 +764,7 @@ class GatewayService {
   final _sessionCreatedController = StreamController<String>.broadcast();
   final _sessionDeletedController = StreamController<String>.broadcast();
   final _snapshotController = StreamController<AcpSnapshot>.broadcast();
+  final _snapshotCacheController = StreamController<String>.broadcast();
   final _attentionController = StreamController<LifecycleAttention>.broadcast();
   final _attentionResolvedController = StreamController<String>.broadcast();
   final _errorController = StreamController<String>.broadcast();
@@ -429,6 +784,11 @@ class GatewayService {
 
   Stream<WorkspaceCatalog> get workspaceStream => _workspaceController.stream;
 
+  /// 「智能体」栏的数据流。写命令的结果也从这里回来——daemon 是自动化的所有者，
+  /// 它回一份权威快照，手机就不会出现「开关拨过去了、实际没生效」。
+  Stream<AutomationCatalog> get automationCatalogStream =>
+      _automationCatalogController.stream;
+
   Stream<SessionHistoryResult> get sessionHistoryStream =>
       _sessionHistoryController.stream;
 
@@ -441,6 +801,13 @@ class GatewayService {
 
   /// 当前订阅会话的快照流
   Stream<AcpSnapshot> get snapshotStream => _snapshotController.stream;
+
+  /// 任一会话的缓存快照被刷新时发出它的 id——包括当前没在看的那些。
+  ///
+  /// `snapshotStream` 只发当前订阅的会话，因为会话页只关心自己。指挥台要同时盯住
+  /// 一批会话，需要的是"谁的详情变了"这个更底层的信号，据此再去 `cachedSnapshot`
+  /// 取内容。把它单独暴露出来，指挥台就不必为了拿详情去抢订阅槽。
+  Stream<String> get snapshotCacheStream => _snapshotCacheController.stream;
 
   /// smeltd 统一生命周期产生的关注事件。
   Stream<LifecycleAttention> get attentionStream => _attentionController.stream;
@@ -466,6 +833,21 @@ class GatewayService {
   bool get writeEnabled => _writeEnabled;
 
   List<SessionSummary> get lastSessions => _lastSessions;
+
+  /// 最近一次的自动化目录。会话列表要拿它把 `agent_definition_id` 配成展示名，
+  /// 为一个副标题再开一条订阅不值得。null = 还没拉到。
+  AutomationCatalog? get lastAutomationCatalog => _lastAutomationCatalog;
+
+  /// 智能体展示名。配不上就返回 null，让调用方退回通用标签而不是印一个 uuid。
+  String? agentDefinitionName(String? definitionId) {
+    if (definitionId == null) return null;
+    for (final agent in _lastAutomationCatalog?.agents ?? const []) {
+      if (agent.id == definitionId) {
+        return agent.name.trim().isEmpty ? null : agent.name.trim();
+      }
+    }
+    return null;
+  }
 
   DateTime? get cachedAt => _cachedAt;
 
@@ -741,6 +1123,25 @@ class GatewayService {
     _send({'method': 'listWorkspace'});
   }
 
+  void listAutomations() {
+    _send({'method': 'listAutomations'});
+  }
+
+  /// 幂等设值而不是 toggle：桌面可能刚改过同一条，toggle 会翻反。
+  void setAutomationEnabled(String automationId, bool enabled) {
+    _send({
+      'method': 'setAutomationEnabled',
+      'params': {'automationId': automationId, 'enabled': enabled},
+    });
+  }
+
+  void runAutomationOnce(String automationId) {
+    _send({
+      'method': 'runAutomationOnce',
+      'params': {'automationId': automationId},
+    });
+  }
+
   void listSessionHistory(String projectRoot, String agentOptionId) {
     _send({
       'method': 'listSessionHistory',
@@ -768,6 +1169,8 @@ class GatewayService {
     });
   }
 
+  /// 开一场 ACP 对话。[projectRoot] 传空串表示「不绑项目」——只有产品智能体
+  /// 能这么开，网关会把它落在智能体自己的 space。
   void createSession(
     String projectRoot,
     String? agentOptionId, {
@@ -783,12 +1186,12 @@ class GatewayService {
     });
   }
 
-  /// 新建一个终端会话（PTY），跟 [createSession] 走同一个 `createSession`
-  /// 请求，只是 `kind: 'terminal'` 且不需要 agent。
-  void createTerminalSession(String projectRoot) {
+  /// 按新建选择器里的一行开会话：对话还是终端、终端先跑什么命令，全由网关按
+  /// [launchKey] 解析。手机不传命令，也不需要知道 `kind`。
+  void createSessionFromLaunch(String projectRoot, String launchKey) {
     _send({
       'method': 'createSession',
-      'params': {'projectRoot': projectRoot, 'kind': 'terminal'},
+      'params': {'projectRoot': projectRoot, 'launchKey': launchKey},
     });
   }
 
@@ -835,6 +1238,31 @@ class GatewayService {
         'sessionId': sessionId,
         'beforeOffset': cached.entriesOffset,
         'limit': _initialTailLimit,
+      },
+    });
+    return true;
+  }
+
+  /// 取某个会话的待批详情，不占用订阅槽。
+  ///
+  /// 指挥台要在"不进会话"的前提下渲染审批卡，需要 pending permission 的选项和
+  /// tool call id——这些只在快照里有。但这**不需要订阅**：网关的 `loadHistory`
+  /// 落到 smeltd 的 `acp_snapshot`，那边自己开一条连接读取，跟订阅互不干扰；
+  /// 而 `respondApproval` 本来就带显式 sessionId。所以"看得见 + 批得掉"两件事
+  /// 都不依赖当前订阅的是谁。
+  ///
+  /// 只取尾部一小段：快照无论请求哪个区间都会带上完整的 pending_permissions /
+  /// pending_elicitation（见 smelt-core `to_snapshot_range`），卡片要的就是这个，
+  /// 没必要把整段历史拉到手机上。
+  bool fetchPendingActions(String sessionId) {
+    if (_state != WsState.connected || sessionId.isEmpty) return false;
+    _send({
+      'method': 'loadHistory',
+      'params': {
+        'sessionId': sessionId,
+        // smeltd 会 `before.min(entries.len())`，给一个不可能达到的下标即"从末尾取"。
+        'beforeOffset': _tailProbeOffset,
+        'limit': _pendingActionsTailLimit,
       },
     });
     return true;
@@ -1109,6 +1537,9 @@ class GatewayService {
           _setState(WsState.connected);
           listSessions();
           listWorkspace();
+          // 会话行要拿目录里的定义把 `agent_definition_id` 配成智能体名，所以
+          // 这一份跟工作区一起在连上时就拉，不等用户切到「智能体」栏。
+          listAutomations();
           final sessionId = _subscribedSessionId;
           if (sessionId != null) subscribe(sessionId);
 
@@ -1153,9 +1584,32 @@ class GatewayService {
               .whereType<Map<String, dynamic>>()
               .map(AcpAgentOption.fromJson)
               .toList();
+          final launchActions =
+              (json['launchActions'] as List<dynamic>? ?? const [])
+                  .whereType<Map<String, dynamic>>()
+                  .map(LaunchAction.fromJson)
+                  .nonNulls
+                  .toList();
           _workspaceController.add(
-            WorkspaceCatalog(projects: projects, agents: agents),
+            WorkspaceCatalog(
+              projects: projects,
+              agents: agents,
+              launchActions: launchActions,
+            ),
           );
+
+        case 'automations':
+          _lastAutomationCatalog = AutomationCatalog(
+            automations: (json['automations'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(AutomationSummary.fromJson)
+                .toList(),
+            agents: (json['agents'] as List<dynamic>? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(AgentDefinitionSummary.fromJson)
+                .toList(),
+          );
+          _automationCatalogController.add(_lastAutomationCatalog!);
 
         case 'sessionHistory':
           _sessionHistoryController.add(
@@ -1317,6 +1771,8 @@ class GatewayService {
     if (_subscribedSessionId == sessionId) {
       _snapshotController.add(merged);
     }
+    // 后台会话的详情也要通知出去，指挥台靠这个刷新审批卡。
+    _snapshotCacheController.add(sessionId);
   }
 
   void _scheduleSnapshotPersistence(String sessionId, AcpSnapshot snapshot) {
@@ -1410,6 +1866,7 @@ class GatewayService {
     _stateController.close();
     _sessionsController.close();
     _workspaceController.close();
+    _automationCatalogController.close();
     _sessionHistoryController.close();
     _sessionHistoryRenameController.close();
     _sessionCreatedController.close();
@@ -1417,6 +1874,7 @@ class GatewayService {
     _snapshotController.close();
     _attentionController.close();
     _attentionResolvedController.close();
+    _snapshotCacheController.close();
     _errorController.close();
     _metricsController.close();
     _messageSendController.close();

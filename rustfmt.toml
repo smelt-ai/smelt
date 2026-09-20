@@ -1,0 +1,7 @@
+# Smelt 项目统一代码格式化规范
+edition = "2024"
+max_width = 100
+use_small_heuristics = "Default"
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

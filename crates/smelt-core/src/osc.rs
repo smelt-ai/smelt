@@ -1,8 +1,6 @@
-//! OSC 通知扫描——主要给 GUI（`workspace/terminal.rs`）用。
+//! OSC 通知扫描——主要给 GUI（`crates/smelt/src/terminal.rs`）用。
 //!
 //! - `OscScan`：OSC 9 / 99 / 777 通知（alacritty 不解析，逐字节自己扫，跟 cmux 同协议）
-//! - `title_starts_with_spinner`：从 `title_spinner.rs` 再导出，smeltd 只用那一个
-//!   函数，直接走 `smelt_core::title_spinner` 即可，不必经过本模块
 
 /// OSC 9 / 99 / 777 通知扫描：提取 `ESC ] … (BEL|ST)`，跨 `feed` 调用保持状态
 /// （字节可能跨 PTY read 边界断开）。
@@ -131,8 +129,7 @@ fn parse_terminal_geometry_osc(value: &str, expected_token: &str) -> Option<Term
     Some(geometry)
 }
 
-/// OSC 通知协议种类。状态归约必须保留这个区别：Codex 的兼容完成信号仅是
-/// OSC 9，Kitty OSC 99 和结构化 OSC 777 不能被当成同一语义。
+/// OSC 通知协议种类。消费者可保留协议细节，但不能由此推断 agent 状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OscNotificationKind {
     Osc9,
@@ -154,8 +151,7 @@ impl OscScan {
             .map(|notification| notification.text)
     }
 
-    /// 与 [`Self::feed`] 相同，但保留 OSC 协议种类，供状态归约器区分兼容完成
-    /// 信号和普通桌面通知。
+    /// 与 [`Self::feed`] 相同，但保留 OSC 协议种类供通知消费者展示。
     pub fn feed_notification(&mut self, b: u8) -> Option<OscNotification> {
         if self.in_osc {
             if b == 0x07 {
@@ -252,10 +248,11 @@ fn parse_osc99_payload(pt: &str) -> Option<String> {
     let mut b64 = false;
     if let Some(m) = meta {
         for kv in m.split(':') {
-            if let Some((k, v)) = kv.split_once('=') {
-                if k == "e" && v == "1" {
-                    b64 = true;
-                }
+            if let Some((k, v)) = kv.split_once('=')
+                && k == "e"
+                && v == "1"
+            {
+                b64 = true;
             }
         }
     }
@@ -274,46 +271,21 @@ fn parse_osc99_payload(pt: &str) -> Option<String> {
     }
 }
 
-/// 标准 base64（可含 `=` 填充、忽略空白）→ UTF-8 字符串。无外部 crate。
+/// 标准 base64（支持标准 `=` 填充、未填充及空白过滤）→ UTF-8 字符串。
 fn decode_base64_utf8(s: &str) -> Option<String> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if bytes.is_empty() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+    let clean: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if clean.is_empty() {
         return None;
     }
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        let a = bytes[i];
-        let b = bytes[i + 1];
-        let c = bytes[i + 2];
-        let d = bytes[i + 3];
-        i += 4;
-        let va = val(a)?;
-        let vb = val(b)?;
-        out.push((va << 2) | (vb >> 4));
-        if c != b'=' {
-            let vc = val(c)?;
-            out.push((vb << 4) | (vc >> 2));
-            if d != b'=' {
-                let vd = val(d)?;
-                out.push((vc << 6) | vd);
-            }
-        }
-    }
-    String::from_utf8(out).ok()
+    let bytes = STANDARD
+        .decode(clean.as_bytes())
+        .or_else(|_| STANDARD_NO_PAD.decode(clean.as_bytes()))
+        .ok()?;
+    String::from_utf8(bytes).ok()
 }
-
-pub use crate::title_spinner::title_starts_with_spinner;
 
 #[cfg(test)]
 mod tests {

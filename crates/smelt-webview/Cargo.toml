@@ -1,0 +1,22 @@
+# 插件 WebView 宿主（spike）。
+#
+# smelt 自身 UI 是 GPUI 自绘的，插件不可能往里注入元素；但插件"自留地"式的
+# 面板可以整块交给 WebView。面板和通用 Overlay 都通过 AppKit 独立 child
+# window 挂载：WebView 保持输入法隔离，Overlay 在 NSWindow 层级位于其上。
+[package]
+name = "smelt-webview"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5" }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wry = { version = "0.56", default-features = false, features = ["os-webview"] }
+objc = "0.2"

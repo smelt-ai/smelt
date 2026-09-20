@@ -22,9 +22,9 @@ class SmeltTerminalTheme {
   /// `TerminalThemeSnapshot::default()`）。
   static const TerminalTheme fallbackDark = TerminalTheme(
     cursor: Color(0xffd8d8d8),
-    selection: Color(0xff334a6a),
+    selection: Color(0xff0c3d7a),
     foreground: Color(0xffd8d8d8),
-    background: Color(0xff313338),
+    background: Color(0xff070707),
     black: Color(0xff15161e),
     red: Color(0xfff7768e),
     green: Color(0xff9ece6a),

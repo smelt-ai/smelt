@@ -1,24 +1,22 @@
 //! 语义色板（深色 / 浅色两套）——全局 UI 颜色的唯一出处。
 //!
-//! 色值取自 **Discord**：深色 `#313338`（主区）/ `#2b2d31`（侧栏）/ `#1e1f22`
-//! （rail）那一套灰蓝，强调色是它的 blurple `#5865f2`；浅色对应 Discord light。
-//! 两套语义位一一对应，调用方不需要关心当前是哪套。
+//! 视觉语言整体跟本机 **Grok Bot**（`/Applications/Grok Bot.app`）的 `sand`：
+//! 色值、实色表面、近白/近黑主按钮、胶囊 composer。窗口底和舞台底 `#070707` /
+//! 会话列表 `#111111` / 卡片 `#181818`，交互强调是它的链接蓝 `#1084fe`；
+//! 主操作（发送钮）走近白/近黑实心，不走强调蓝。浅色对应 `sand` light
+//! （舞台底 `#fcfcfc`）。
 //!
-//! 上一版色值来自 claude.ai/design「桌面开发者客户端设计」定稿（冷调近黑 +
-//! 橙强调）。换成 Discord 是整体换语言，不是调参：**表面层级的方向都反过来了**
-//! （见 DARK 的注释），两套混用会四不像。
+//! 上一版色值来自 Discord，材质一度走过 Telegram 毛玻璃。换成 Grok Bot
+//! 是整体换语言，不是调参：**深色表面层级的方向反过来了**（见 DARK 的注释），
+//! 内容区用实底，不要再给卡片叠半透明。
 //!
-//! 布局各层（项目 rail / 会话列表 / 会话舞台 / inspector / 状态栏 / toast / diff）
+//! 布局各层（项目栏 / 会话栏 / 舞台 / 工具栏 / 底栏 / 状态栏 / diff）
 //! 统一从这里取色，别再在各处写裸 `rgb(0x...)`——写死的深色在浅色模式下会花。
 //!
 //! 用法：全是**函数**不是常量（`ui_theme::bg_rail()`），因为色值要跟着
-//! `set_light()` 在运行时切换。切换点见 settings.rs 的「主题模式」开关和 main() 初始化，
+//! `set_light()` 在运行时切换。切换点见 settings 模块的「外观」设置开关和 main() 初始化，
 //! 切完必须 `cx.refresh_windows()` 才会重绘。
 
-// 改版分阶段落地，常量与 helper 会陆续被各阶段启用；收尾阶段拿掉这行。
-#![allow(dead_code)]
-
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{Anchor, Pixels, Rgba, px, rgb, rgba, transparent_black};
@@ -28,17 +26,17 @@ use smelt_core::agent_status::AgentStatus;
 /// 一套完整语义色板。字段即语义位，深浅两套必须一一对应填满。
 pub struct Palette {
     // ---- 底色（表面层级） ----
-    /// 项目 rail / inspector 图标条（深色下最深，浅色下最灰）。
+    /// 项目 rail / Tool Panel 图标条（深色下最深，浅色下最灰）。
     pub bg_rail: u32,
-    /// 会话舞台底。
-    pub bg_panel: u32,
-    /// 会话列表 / inspector 面板底。
-    pub bg_elev: u32,
+    /// 舞台底：中间会话区（终端 / ACP 对话）。
+    pub bg_stage: u32,
+    /// 左右栏底：会话栏和工具栏共用的次表面。
+    pub bg_column: u32,
     /// 标题栏底。
     pub bg_bar: u32,
     /// 卡片 / 胶囊底。
     pub bg_card: u32,
-    /// hover / toast / 输入胶囊底。
+    /// hover / 输入胶囊底。
     pub bg_hover: u32,
     /// **列表行**专用 hover 底：必须明显弱于 `bg_selected`，否则「鼠标划过的行」
     /// 和「当前选中的行」同时是两块灰，一眼分不出哪个才是当前。
@@ -60,9 +58,6 @@ pub struct Palette {
     pub border_loud: u32,
     /// hover / 焦点描边。
     pub border_focus: u32,
-    /// 选中行描边。
-    pub border_selected: u32,
-
     // ---- 文字（由强到弱） ----
     /// 标题 / 强调正文。
     pub text_bright: u32,
@@ -76,17 +71,17 @@ pub struct Palette {
     pub text_faint: u32,
 
     // ---- 语义色 ----
-    /// 主强调橙（品牌色：进行中、主按钮、激活态）。
+    /// 交互强调（选中描边 / 焦点 / 链接）。Grok Bot 的 `fill/accent`，不是主按钮填色。
     pub accent: u32,
     /// 绿：运行正常 / 通过 / diff 新增侧。
     pub green: u32,
-    /// 黄：阻塞 / 等审批。
+    /// 黄：警告 / 额度将满，不是 agent 状态。
     pub yellow: u32,
     /// 蓝：链接 / 读类工具 / queued。
     pub blue: u32,
     /// 紫：agent 会话标识 / 模型胶囊。
     pub purple: u32,
-    /// 红：删除侧 / 拒绝 / 等审批（最高优先级状态）。
+    /// 红：要你 / 拒绝 / diff 删除侧。
     pub red: u32,
     /// diff 新增行的文字色（深色下比 green 亮一档用于深绿底；浅色下反之压深）。
     pub diff_add_text: u32,
@@ -106,9 +101,8 @@ pub struct Palette {
     pub diff_del_hl: u32,
     /// 上下文行前景。
     pub diff_ctx_fg: u32,
-    /// hunk 头前景 / 底 / 激活 hunk 的描边。
+    /// hunk 头前景。
     pub diff_hunk_fg: u32,
-    pub diff_hunk_bg: u32,
     /// diff 元信息行（文件头等）前景。
     pub diff_meta_fg: u32,
     /// 并排视图里「此侧无对应行」的空白底。
@@ -117,126 +111,118 @@ pub struct Palette {
     pub diff_gutter: u32,
 }
 
-/// 深色（Discord 风格）。
+/// 深色（Grok Bot `sand-dark`）。
 ///
-/// **表面层级的方向跟大多数深色 UI 相反，别顺手「修正」**：Discord 是
-/// 「主区最亮、越往边缘越暗」（舞台 > 会话列表 > rail），靠边缘压暗把注意力
-/// 推向中间的内容区；常见做法（也是本项目上一版）是反过来让侧栏浮在舞台之上。
-/// 两种都自洽，但混用就会既不像 Discord 也不像原来那套。
+/// **表面层级跟 Discord 那版相反，别顺手改回去**：Grok Bot 是窗口底和舞台同色近黑，
+/// 会话列表和卡片往上抬。上一版 Discord 靠「舞台最亮、边缘压暗」把注意力推向中间；
+/// 两种都自洽，混用就既不像 Grok 也不像 Discord。
 pub const DARK: Palette = Palette {
-    bg_rail: 0x191a1d,
-    bg_panel: 0x313338,
-    bg_elev: 0x232428,
-    bg_bar: 0x2b2d31,
-    bg_card: 0x3a3c42,
-    bg_hover: 0x35373c,
-    // 只比 bg_elev(0x232428) 高一档：划过是「浮起一点」，选中才是「亮起来」。
-    bg_row_hover: 0x2b2d31,
-    bg_selected: 0x45474f,
-    bg_status: 0x191a1d,
+    bg_rail: 0x070707,
+    bg_stage: 0x070707,
+    bg_column: 0x111111,
+    bg_bar: 0x111111,
+    bg_card: 0x181818,
+    bg_hover: 0x262626,
+    // 只比 bg_column(#111) 抬一档：划过是「浮起一点」，选中才明显亮起来。
+    bg_row_hover: 0x151515,
+    bg_selected: 0x262626,
+    bg_status: 0x070707,
 
-    border_dim: 0x202226,
-    border: 0x2b2d31,
-    border_mid: 0x43454b,
-    border_loud: 0x54575e,
-    border_focus: 0x6d7079,
-    // 选中描边直接用 blurple：Discord 的选中态从来不是「灰上加灰」。
-    border_selected: 0x5865f2,
+    border_dim: 0x151515,
+    border: 0x181818,
+    border_mid: 0x262626,
+    border_loud: 0x3d3d3d,
+    // Grok Bot `border/focus` 深色：#1c8bfe。
+    border_focus: 0x1c8bfe,
+    // 选中描边走强调蓝，不用「灰上加灰」。
+    text_bright: 0xfcfcfc,
+    text: 0xf3f3f3,
+    text_mid: 0xb7b7b7,
+    text_muted: 0x959595,
+    text_faint: 0x777777,
 
-    text_bright: 0xf2f3f5,
-    text: 0xdbdee1,
-    text_mid: 0xb5bac1,
-    text_muted: 0x949ba4,
-    text_faint: 0x80848e,
+    // 强调蓝是 Grok Bot 的 `fill/accent`（sand blue/9）。主按钮不走它，
+    // 见 `action_fill`：深色近白、浅色近黑。
+    accent: 0x1084fe,
+    // 完成绿要偏黄、少蓝。sand success `#00c972` 的 B=114，是薄荷绿，
+    // 小图标上看着跟运行青是同一个色。
+    green: 0x22c55e,
+    yellow: 0xff9800,
+    // 运行必须是「蓝通道压过绿」的蓝。`#459ffe` 的 G=159，15px 空心图标会收成青，
+    // 和完成绿撞车。`#3b82f6` 仍跟强调蓝 `#1084fe` 同族，但绿通道更低。
+    blue: 0x3b82f6,
+    purple: 0x9159fe,
+    red: 0xff263c,
+    diff_add_text: 0x78e2b4,
+    on_accent: 0xfcfcfc,
 
-    // accent 从原来的橙换成 Discord 的 blurple——它是这套设计的灵魂色，
-    // 主按钮 / 激活态 / 进行中全用它。随之 on_accent 必须翻成白：blurple
-    // 底上压深色文字读不出来。
-    accent: 0x5865f2,
-    green: 0x23a55a,
-    yellow: 0xf0b232,
-    // 链接蓝走 Discord 的青蓝，跟 blurple 拉开——两个都偏蓝紫会分不清。
-    blue: 0x00a8fc,
-    // agent 标识紫同理往粉里偏，避免和 blurple 撞。
-    purple: 0xc78ef7,
-    red: 0xf23f43,
-    diff_add_text: 0x8fd6ac,
-    on_accent: 0xffffff,
-
-    diff_add_fg: 0xb5e08a,
-    diff_add_bg: 0x16261a,
-    diff_add_bar: 0x4ba14b,
-    diff_add_hl: 0x2f6b34,
-    diff_del_fg: 0xf7a3ae,
-    diff_del_bg: 0x2a1620,
-    diff_del_bar: 0xc75c6a,
-    diff_del_hl: 0x7a2836,
-    diff_ctx_fg: 0xc0caf5,
-    diff_hunk_fg: 0x7dcfff,
-    diff_hunk_bg: 0x16202e,
-    diff_meta_fg: 0x565f89,
-    diff_empty_bg: 0x101218,
-    diff_gutter: 0x2a2e3d,
+    diff_add_fg: 0x78e2b4,
+    diff_add_bg: 0x001c10,
+    diff_add_bar: 0x00c972,
+    diff_add_hl: 0x004024,
+    diff_del_fg: 0xff8c98,
+    diff_del_bg: 0x240508,
+    diff_del_bar: 0xff263c,
+    diff_del_hl: 0x520c13,
+    diff_ctx_fg: 0xb7b7b7,
+    diff_hunk_fg: 0x459ffe,
+    diff_meta_fg: 0x5a5a5a,
+    diff_empty_bg: 0x070707,
+    diff_gutter: 0x181818,
 };
 
-/// 浅色（Discord light）。
+/// 浅色（Grok Bot `sand` light）。
 ///
 /// 两条别顺手改平：
-/// - 层级方向与深色一致：**舞台是纯白（最亮），侧栏和卡片反而更暗**。所以
-///   卡片不能再取纯白——那样就跟舞台糊成一片，浮不起来了（上一版靠纯白浮起，
-///   因为那时舞台不是纯白）。
-/// - 同深色一样，层级明度拉得比 Discord light 更开：它的侧栏/标题栏/卡片
-///   原样都是 `#f2f3f5` 同一个值，在这里会糊成一片。
-/// - blurple 深浅两套用同一个值：它是品牌色，跟着模式变色就不是那个牌子了；
-///   其余语义色（绿/黄/红/蓝/紫）照例压深一档，否则近白底上对比不足。
+/// - 浅色舞台底是近白 `#fcfcfc`（最亮），会话列表和卡片略压暗才能浮起来。
+/// - 强调蓝深浅两套用同一个值 `#1084fe`：它是品牌交互色，跟着模式变色就不是
+///   那个牌子了；其余语义色（绿/黄/红/青/紫）照例压深一档，否则近白底上对比不足。
 pub const LIGHT: Palette = Palette {
-    bg_rail: 0xdcdfe4,
-    bg_panel: 0xffffff,
-    bg_elev: 0xeff1f4,
-    bg_bar: 0xf6f7f9,
-    bg_card: 0xf2f3f5,
-    bg_hover: 0xe6e9ee,
-    // 浅色下同理：划过只比 bg_elev(0xeff1f4) 压深一点，选中才明显。
-    bg_row_hover: 0xe8eaee,
-    bg_selected: 0xd3d8e1,
-    bg_status: 0xdcdfe4,
+    bg_rail: 0xeeeeee,
+    bg_stage: 0xfcfcfc,
+    bg_column: 0xf7f7f7,
+    bg_bar: 0xf7f7f7,
+    bg_card: 0xf3f3f3,
+    bg_hover: 0xe8e8e8,
+    // 浅色下同理：划过只比 bg_column 压深一点，选中才明显。
+    bg_row_hover: 0xeeeeee,
+    bg_selected: 0xe8e8e8,
+    bg_status: 0xeeeeee,
 
-    border_dim: 0xe0e3e8,
-    border: 0xd4d8df,
-    border_mid: 0xc9ced6,
-    border_loud: 0xb4bac4,
-    border_focus: 0x8e9297,
-    border_selected: 0x5865f2,
+    border_dim: 0xe8e8e8,
+    border: 0xe8e8e8,
+    border_mid: 0xd5d5d5,
+    border_loud: 0xb7b7b7,
+    border_focus: 0x0c64c1,
 
-    text_bright: 0x060607,
-    text: 0x2e3338,
-    text_mid: 0x4e5058,
-    text_muted: 0x5c5e66,
-    text_faint: 0x6f7680,
+    text_bright: 0x141414,
+    text: 0x141414,
+    text_mid: 0x3d3d3d,
+    text_muted: 0x5a5a5a,
+    text_faint: 0x777777,
 
-    accent: 0x5865f2,
-    green: 0x248046,
-    yellow: 0xb8850b,
-    blue: 0x006ce7,
-    purple: 0x9b59d0,
-    red: 0xd83a3e,
-    diff_add_text: 0x1c7a4a,
-    on_accent: 0xffffff,
+    accent: 0x1084fe,
+    green: 0x16a34a,
+    yellow: 0xc27400,
+    blue: 0x2563eb,
+    purple: 0x6e44c1,
+    red: 0xc21d2e,
+    diff_add_text: 0x00673a,
+    on_accent: 0xfcfcfc,
 
-    diff_add_fg: 0x1c6b3c,
-    diff_add_bg: 0xe4f6ea,
-    diff_add_bar: 0x3f9a4a,
-    diff_add_hl: 0xb4e3c4,
-    diff_del_fg: 0x9c2b2b,
-    diff_del_bg: 0xfdebee,
-    diff_del_bar: 0xc75c6a,
-    diff_del_hl: 0xf6c2ca,
-    diff_ctx_fg: 0x3b4252,
-    diff_hunk_fg: 0x1a6485,
-    diff_hunk_bg: 0xe3f0f8,
-    diff_meta_fg: 0x8a93a8,
-    diff_empty_bg: 0xeceef2,
-    diff_gutter: 0xd1d6de,
+    diff_add_fg: 0x00673a,
+    diff_add_bg: 0xe8faf2,
+    diff_add_bar: 0x00c972,
+    diff_add_hl: 0xb0eed3,
+    diff_del_fg: 0xc21d2e,
+    diff_del_bg: 0xffebed,
+    diff_del_bar: 0xff263c,
+    diff_del_hl: 0xffbcc3,
+    diff_ctx_fg: 0x3d3d3d,
+    diff_hunk_fg: 0x0c64c1,
+    diff_meta_fg: 0x959595,
+    diff_empty_bg: 0xf7f7f7,
+    diff_gutter: 0xe8e8e8,
 };
 
 /// 当前是不是浅色。进程级全局态：色板要在任意渲染函数里同步读到，
@@ -272,9 +258,11 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     let is_dark = cx.theme().mode.is_dark();
     let c = &mut cx.global_mut::<Theme>().colors;
 
-    c.background = rgb(p.bg_panel).into();
+    c.background = rgb(p.bg_stage).into();
     c.foreground = rgb(p.text).into();
-    c.border = transparent_black().into();
+    // Markdown 表格/分割线、ACP 卡片描边都读 `theme.border`。写成透明后这些
+    // 声明全部失效，表格会糊成两列飘字。跟 `border_mid()` 对齐。
+    c.border = rgb(p.border_mid).into();
     c.muted = rgb(p.bg_card).into();
     c.muted_foreground = rgb(p.text_muted).into();
     c.popover = rgb(p.bg_card).into();
@@ -284,23 +272,37 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     c.selection = rgba((p.accent << 8) | 0x55).into();
     c.drop_target = rgba((p.accent << 8) | 0x33).into();
 
-    // 主按钮 = blurple，次按钮 = 卡片底。深浅两套的前景色跟着 on_accent 走。
-    c.primary = rgb(p.accent).into();
-    c.primary_hover = rgb(shade(p.accent, if is_dark { 1.12 } else { 0.92 })).into();
-    c.primary_active = rgb(shade(p.accent, if is_dark { 0.9 } else { 0.84 })).into();
-    c.primary_foreground = rgb(p.on_accent).into();
+    // 主按钮走 Grok Bot：深色近白底 + 深字，浅色近黑底 + 浅字。强调蓝只留给
+    // 选中/链接，不再当实心 CTA，否则和对话里的白圆钮打架。
+    c.primary = rgb(p.text_bright).into();
+    c.primary_hover = rgb(shade(p.text_bright, if is_dark { 0.9 } else { 1.18 })).into();
+    c.primary_active = rgb(shade(p.text_bright, if is_dark { 0.82 } else { 0.7 })).into();
+    c.primary_foreground = rgb(p.bg_stage).into();
+    // Slider：tokens 派生时 slider_bar/slider_thumb 没配置会 fallback 到
+    // primary——拖动 active 时整条轨道铺成主色，全屏下非常刺眼。
+    // 收敛成中性选中表面色 + 亮手柄，跟拖拽调整布局那条 drag_border 一个思路：
+    // 拖拽反馈用主题色，不用组件默认的亮强调色。
+    c.slider_bar = rgb(p.bg_selected).into();
+    c.slider_thumb = rgb(p.text_bright).into();
     c.secondary = rgb(p.bg_card).into();
     c.secondary_hover = rgb(p.bg_hover).into();
     c.secondary_active = rgb(p.bg_selected).into();
     c.secondary_foreground = rgb(p.text).into();
-    // gpui-component 的 Markdown 行内代码直接拿 `accent` 当背景色。完整的
-    // bg_selected 在长回复中太抢眼，bg_hover 又与正文底色太接近；使用约 2/3
-    // 不透明度的选中表面取得中间对比度，深浅主题都能看清但不像实心按钮。
+    // 行内 code 的底色改在 markdown_view 里用 bg_selected 实色设，不再借 accent。
+    // accent 仍给菜单/列表 hover：半透明选中表面，避免整块发灰。
     c.accent = rgba((p.bg_selected << 8) | 0xaa).into();
     c.accent_foreground = rgb(p.text_bright).into();
     c.danger = rgb(p.red).into();
     c.danger_foreground = rgb(p.on_accent).into();
-    // Tab（inspector.rs 的 FILES/GIT/SKILL 用的 gpui_component::tab::TabBar）：
+    // Markdown 链接读 `theme.link*`，不覆写的话深色默认是近白，和正文分不开。
+    c.link = rgb(p.blue).into();
+    c.link_hover = rgb(shade(p.blue, if is_dark { 1.14 } else { 0.88 })).into();
+    c.link_active = rgb(shade(p.blue, if is_dark { 0.88 } else { 0.78 })).into();
+    c.warning = rgb(p.yellow).into();
+    c.warning_foreground = rgb(p.yellow).into();
+    c.info = rgb(p.blue).into();
+    c.info_foreground = rgb(p.blue).into();
+    // Tab（tool_panel.rs 的 Files / Git / History 与插件 tab 用的 gpui_component::tab::TabBar）：
     // 库自带的 tab_foreground/tab_active_foreground 是内置深色主题的固定值，
     // 不跟着上面这些 palette 覆写走，跟其余全用 ui_theme 色板的界面挨在一起
     // 会有点"格格不入"（灰阶、字重都对不上）。这里收敛成跟舞台头标题同一套
@@ -308,17 +310,29 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     c.tab_foreground = rgb(p.text_muted).into();
     c.tab_active_foreground = rgb(p.text_bright).into();
     c.tab_bar = c.background;
-    c.tab = transparent_black().into();
-    c.tab_active = transparent_black().into();
+    c.tab = transparent_black();
+    c.tab_active = transparent_black();
 
     // 列表 / 侧栏：会话列表与文件树都在这一层，必须跟自绘的行底同色。
-    c.list = rgb(p.bg_elev).into();
+    c.list = rgb(p.bg_column).into();
     c.list_hover = rgb(p.bg_hover).into();
     c.list_active = rgb(p.bg_selected).into();
     c.list_active_border = rgb(p.accent).into();
-    c.list_even = rgb(p.bg_elev).into();
+    c.list_even = rgb(p.bg_column).into();
     c.list_head = rgb(p.bg_bar).into();
-    c.sidebar = rgb(p.bg_elev).into();
+    c.sidebar = rgb(p.bg_column).into();
+    // 设置页侧栏的 active 行读的是 sidebar_accent（不是 list_active）。
+    // 如果只覆写 sidebar，默认深色主题的 #262626 会和 bg_column 几乎融在一起，
+    // 看起来就像当前页没有选中。
+    c.sidebar_accent = rgb(p.bg_selected).into();
+    c.sidebar_accent_foreground = rgb(p.text_bright).into();
+    c.sidebar_border = rgb(p.border_dim).into();
+    c.sidebar_foreground = rgb(p.text).into();
+    // 滚动条：组件库缺省 thumb 会落到 accent（Grok 强调蓝 `#1084fe`），
+    // 侧栏/历史这种长列表里整条亮蓝非常扎眼。轨道保持透明，thumb 用中性描边灰。
+    c.scrollbar = transparent_black();
+    c.scrollbar_thumb = rgb(p.border_loud).into();
+    c.scrollbar_thumb_hover = rgb(p.text_faint).into();
 
     // colors 改完必须同步重算 tokens：组件内部有些位读的是 `tokens.*` 而不是
     // `colors.*`（如 checkbox 勾选态的方块填充用 tokens.primary）。不同步的话
@@ -329,6 +343,39 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
     // 应用内通知固定在右下角，避开左侧高频操作的会话列表；主题切换会重置通知配置，
     // 所以必须在每次 Theme::change 之后和色板一起重新覆盖。
     theme.notification.placement = Anchor::BottomRight;
+    let radius = theme.radius;
+
+    // 分栏拖拽条读的是 gpui-base 的 `resizable.handle`，不是 `Theme.colors.border`。
+    // Theme::change 会把手柄设成当时的 `theme.border`；我们随后覆写 colors.border
+    // 却不同步这一位的话，手柄就停在组件库默认——Default 是透明，1px 缝里露出
+    // 壳底 `#070707`，看起来像一条黑槽。发丝画在手柄上，不要靠缝透底。
+    // 滚动条同理：Theme::change 已经把旧 thumb 色烤进 gpui-base，只改 colors
+    // 不够，必须把中性灰重新投影上去。
+    if cx.has_global::<gpui_base::Theme>() {
+        let hairline: gpui::Hsla = overlay(0x22).into();
+        let active: gpui::Hsla = rgb(p.border_focus).into();
+        let track: gpui::Hsla = transparent_black();
+        let thumb: gpui::Hsla = rgb(p.border_loud).into();
+        let thumb_hover: gpui::Hsla = rgb(p.text_faint).into();
+        let border: gpui::Hsla = rgb(p.border_mid).into();
+        let base = cx.global_mut::<gpui_base::Theme>();
+        base.resizable.handle = hairline;
+        base.resizable.active_handle = active;
+        let mode = base.scrollbar.mode();
+        let motion = base.scrollbar.motion();
+        base.scrollbar = gpui_base::ScrollbarTheme::new()
+            .with_mode(mode)
+            .with_motion(motion)
+            .with_styles(
+                gpui_base::ScrollbarStyles::default()
+                    .track(|style| style.bg(track))
+                    .track_hover(|style| style.bg(track))
+                    .track_active(|style| style.bg(track).border_color(border))
+                    .thumb(|style| style.bg(thumb).radius(radius))
+                    .thumb_hover(|style| style.bg(thumb_hover).radius(radius))
+                    .thumb_active(|style| style.bg(thumb_hover).radius(radius)),
+            );
+    }
 }
 
 /// 把一个 RGB 按比例调亮（factor > 1）或压暗（< 1），逐通道饱和截断。
@@ -360,8 +407,8 @@ macro_rules! slots {
 
 slots!(
     bg_rail,
-    bg_panel,
-    bg_elev,
+    bg_stage,
+    bg_column,
     bg_bar,
     bg_card,
     bg_hover,
@@ -373,7 +420,6 @@ slots!(
     border_mid,
     border_loud,
     border_focus,
-    border_selected,
     text_bright,
     text,
     text_mid,
@@ -397,47 +443,97 @@ slots!(
     diff_del_hl,
     diff_ctx_fg,
     diff_hunk_fg,
-    diff_hunk_bg,
     diff_meta_fg,
     diff_empty_bg,
     diff_gutter,
 );
 
 /// 给纯色叠低透明度，用于角标底、激活态背景等衍生色。
-/// `alpha` 0–255；`tint(accent(), 0x22)` ≈ 设计稿的 rgba(217,138,79,.13)。
+/// `alpha` 0–255；`tint(accent(), 0x22)` 给强调蓝叠一层淡底。
 pub fn tint(color: u32, alpha: u8) -> Rgba {
     rgba((color << 8) | alpha as u32)
 }
 
-/// 液态玻璃的浮层材质。
+/// 浮层材质：菜单、补全、对话框。Grok Bot 是实色抬起，不是磨砂。
+/// 函数名 `glass_*` 是历史残留，实现必须不透明。
 pub fn glass_floating() -> Rgba {
-    tint(bg_card(), 0xdc)
+    rgb(bg_card())
 }
 
-/// 内容卡片材质：比浮层更通透，适合工具调用、消息附件等重复表面。
+/// 内容卡片材质：工具调用、附件、任务卡。实色 `bg_card`，比舞台抬一档。
 pub fn glass_card() -> Rgba {
-    tint(bg_card(), 0xb8)
+    rgb(bg_card())
 }
 
-/// 卡片圆角统一出处（任务卡 / skill 卡 / 通知卡等重复出现的小卡片）。
-/// 之前各处各写各的（7px/8px/9px），一眼看不出是不是同一层级。
+/// 内容卡片圆角（工具卡、弹层、对话附件）。窗口分栏本身不圆角。
 pub fn card_radius() -> Pixels {
-    px(9.)
+    px(12.)
 }
 
 /// 卡片内边距统一出处，配合 `card_radius` 一起用，让重复出现的卡片手感一致。
 pub fn card_padding() -> Pixels {
-    px(10.)
+    px(12.)
 }
 
-/// 输入区域材质：透明度介于浮层和内容卡片之间，保证编辑文字对比度。
+/// 列表行 / 页签 / 侧栏按钮的圆角。比卡片小一档，避免行和外壳撞成同一半径。
+pub fn row_radius() -> Pixels {
+    px(8.)
+}
+
+/// 栏与栏之间的输入安全槽。
+///
+/// GPUI 的拖拽手柄以边界为中心、左右各约 4px；插件 WebView 却住在更高层级的
+/// 原生 child window 中。栏缝为 0 时，用户沿着可见发丝按下会先命中 WebView，
+/// GPUI 根本收不到 drag start。6px 让 WebView 从手柄之后开始，同时仍保持紧凑。
+pub fn chrome_gap() -> Pixels {
+    px(6.)
+}
+
+/// 窗口最外圈内边距。Grok Bot 栏贴边，所以是 0；分栏矩形直接顶到窗口。
+pub fn shell_padding() -> Pixels {
+    px(0.)
+}
+
+/// 对话列最大宽度。Grok 那种居中阅读栏，不是 IDE 拉满的 1040。
+pub fn conversation_max_width() -> Pixels {
+    px(768.)
+}
+
+/// 输入条圆角。Grok 的 composer 是胶囊，不是 12px 卡片。
+pub fn composer_radius() -> Pixels {
+    px(24.)
+}
+
+/// 主操作填充：深色近白、浅色近黑。Grok 发送钮同一套，不用品牌紫。
+pub fn action_fill() -> u32 {
+    text_bright()
+}
+
+/// 主操作上的字/图标，压在 `action_fill` 上。
+pub fn action_on() -> u32 {
+    bg_stage()
+}
+
+/// 弱分隔：半透明 overlay，不是实色 `border_dim`。
+/// 用来切开区块，又不会把界面画成一堆 1px 表格线。
+pub fn hairline() -> Rgba {
+    overlay(0x14)
+}
+
+/// 卡片轮廓：半透明 overlay，Grok Bot 的 `sand-border-default` 同思路，不走硬灰边。
+pub fn card_stroke() -> Rgba {
+    overlay(0x22)
+}
+
+/// composer 输入区：实色抬起，压在舞台底上。
 pub fn glass_input() -> Rgba {
-    tint(bg_panel(), 0xcc)
+    rgb(bg_card())
 }
 
-/// 浮层背后的压暗层。低风险弹层只轻压，高风险确认仍保持明确打断。
+/// 浮层背后的压暗层。Grok Bot 弹层背后还能认出来，不要压成一块黑。
+/// `heavy` 只比轻遮罩深一档，仍透得出舞台。
 pub fn glass_scrim(heavy: bool) -> Rgba {
-    rgba(if heavy { 0x00000088 } else { 0x00000020 })
+    rgba(if heavy { 0x0000004d } else { 0x00000020 })
 }
 
 /// 「在底色上压一层薄纱」——深色下是白纱，浅色下是黑纱。
@@ -447,18 +543,15 @@ pub fn overlay(alpha: u8) -> Rgba {
     rgba((base << 8) | alpha as u32)
 }
 
-/// Agent 五态状态色（等审批红 > 需处理黄 > 运行蓝 > 完成绿 > 空闲灰）。
-/// 收敛自旧版散落的 0xef4444/0xf59e0b/0x4a9eff/0x22c55e 硬编码。
+/// Agent 三态色：要你红 > 运行蓝 > 空闲灰。
 pub fn agent_status_color(status: AgentStatus) -> Rgba {
     rgb(agent_status_u32(status))
 }
 
 fn agent_status_u32(status: AgentStatus) -> u32 {
     match status {
-        AgentStatus::WaitingApproval => red(),
-        AgentStatus::NeedsAttention => yellow(),
+        AgentStatus::NeedsYou => red(),
         AgentStatus::Running => blue(),
-        AgentStatus::Done => green(),
         AgentStatus::Idle => text_faint(),
     }
 }
@@ -469,16 +562,184 @@ pub fn agent_status_rgb8(status: AgentStatus) -> (u8, u8, u8) {
     ((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
-/// 左侧会话 / pane 圆点使用完整五态颜色，避免仅靠圆点时无法区分运行与完成、
-/// 审批与一般待处理。
+/// 左侧会话 / pane 状态色。空闲是灰，不另画点。
 pub fn session_dot_color(status: AgentStatus) -> Rgba {
     agent_status_color(status)
 }
 
-/// 项目名 → 稳定颜色：hash 到 6 色环，跟会话顺序无关。
-pub fn project_color(name: &str) -> Rgba {
-    let ring = [accent(), green(), blue(), purple(), yellow(), red()];
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut h);
-    rgb(ring[(h.finish() % ring.len() as u64) as usize])
+const RUNNING_GLOW_DARK_LIGHTNESS_GAIN: f32 = 0.08;
+const RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN: f32 = 0.05;
+
+/// 运行中 agent 图标进入状态时的一次性提亮色。
+///
+/// 桌面侧栏会话行用 `session_dot_color` 给 agent 图标上色：Running 是静态蓝。进入
+/// 状态时的短暂提亮只改变 HSL 亮度，不按比例放大 RGB，避免蓝通道先饱和后把图标
+/// 推成青色。主题判断也收在这里，调用方不再传容易反转的 light/dark 布尔值。
+///
+/// `phase` 是 0.0..=1.0 的过渡进度；起点和终点都是基准蓝，中点最亮。浅色底的
+/// 增幅更小，避免在近白背景上失去对比度。终点回到静态蓝后不再预约动画帧。
+pub fn running_glow_color(phase: f32) -> Rgba {
+    let lightness_gain = if is_light() {
+        RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN
+    } else {
+        RUNNING_GLOW_DARK_LIGHTNESS_GAIN
+    };
+    running_glow_color_for(blue(), phase, lightness_gain)
+}
+
+fn running_glow_color_for(base: u32, phase: f32, lightness_gain: f32) -> Rgba {
+    // 半个正弦周期保证起点/终点都回到基准色，不给稳态留下动画依赖。
+    let wave = (phase.clamp(0.0, 1.0) * std::f32::consts::PI)
+        .sin()
+        .clamp(0.0, 1.0);
+    let mut color: gpui::Hsla = rgb(base).into();
+    color.l = (color.l + wave * lightness_gain).clamp(0.0, 1.0);
+    color.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrome_tokens_keep_a_visible_hierarchy() {
+        assert!(card_radius() > row_radius());
+        assert_eq!(card_radius(), px(12.));
+        assert_eq!(row_radius(), px(8.));
+        assert_eq!(
+            chrome_gap(),
+            px(6.),
+            "栏间要给原生 WebView 留出 GPUI 拖拽手柄的输入安全槽"
+        );
+        assert!(
+            chrome_gap() >= px(4.),
+            "输入安全槽不能小于 8px 拖拽命中区落在 WebView 一侧的半宽"
+        );
+        assert_eq!(
+            shell_padding(),
+            px(0.),
+            "Grok Bot 栏贴边，窗口不要再留浮卡内边距"
+        );
+        assert_eq!(card_padding(), px(12.));
+        assert!(composer_radius() > card_radius());
+        assert_eq!(conversation_max_width(), px(768.));
+        assert_eq!(action_fill(), text_bright());
+        assert_eq!(action_on(), bg_stage());
+        assert_ne!(
+            action_fill(),
+            accent(),
+            "主操作不能走强调蓝，否则和 Grok Bot 发送钮两套语言"
+        );
+        assert_eq!(DARK.accent, 0x1084fe, "强调色必须是 Grok Bot fill/accent");
+        assert_ne!(
+            DARK.border_loud, DARK.accent,
+            "滚动条 thumb 用 border_loud，不能跟强调蓝撞成一条亮蓝"
+        );
+        assert_eq!(LIGHT.accent, 0x1084fe);
+        assert_ne!(DARK.accent, 0x5865f2, "Discord blurple 必须从色板里清掉");
+        const {
+            // 深色：舞台最暗，会话列表/卡片往上抬。
+            assert!(DARK.bg_stage <= DARK.bg_column);
+            assert!(DARK.bg_column <= DARK.bg_card);
+            assert!(DARK.bg_card < DARK.bg_selected);
+            // 浅色：舞台最亮，会话列表/卡片略压暗。
+            assert!(LIGHT.bg_stage > LIGHT.bg_column);
+            assert!(LIGHT.bg_column >= LIGHT.bg_card);
+            assert!(LIGHT.bg_card > LIGHT.bg_selected);
+        }
+    }
+
+    #[test]
+    fn card_stroke_and_hairline_are_translucent() {
+        assert!(
+            card_stroke().a < 1.0,
+            "卡片描边必须半透明，不能再走实色硬边"
+        );
+        assert!(hairline().a < card_stroke().a);
+        assert!(hairline().a > 0.0);
+    }
+
+    #[test]
+    fn content_surfaces_are_opaque() {
+        assert_eq!(
+            glass_card().a,
+            1.0,
+            "内容卡必须是 Grok Bot 实底，不能半透明"
+        );
+        assert_eq!(glass_floating().a, 1.0, "浮层必须是实底");
+        assert_eq!(glass_input().a, 1.0, "composer 必须是实底");
+    }
+
+    fn channel(c: u32, shift: u32) -> i32 {
+        ((c >> shift) & 0xff) as i32
+    }
+
+    /// 15px 空心图标在深色底上，RGB 欧氏距离会骗人：天蓝 `#459ffe`（G=159）
+    /// 和薄荷绿 `#00c972`（B=114）数值差得开，看起来仍是两颗青绿。
+    /// 运行必须蓝通道压过绿，完成必须绿通道压过蓝。
+    fn assert_running_is_blue_and_done_is_green(
+        blue: u32,
+        green: u32,
+        min_blue_lead: i32,
+        min_green_lead: i32,
+        label: &str,
+    ) {
+        let run_b = channel(blue, 0);
+        let run_g = channel(blue, 8);
+        let done_g = channel(green, 8);
+        let done_b = channel(green, 0);
+        assert!(
+            run_b - run_g > min_blue_lead,
+            "{label} 运行态不够蓝：B-G={} blue={blue:#08x}（15px 图标会收成青）",
+            run_b - run_g
+        );
+        assert!(
+            done_g - done_b > min_green_lead,
+            "{label} 完成态不够绿：G-B={} green={green:#08x}（薄荷绿会跟青撞）",
+            done_g - done_b
+        );
+    }
+
+    #[test]
+    fn agent_status_uses_three_colors() {
+        assert_eq!(agent_status_u32(AgentStatus::NeedsYou), DARK.red);
+        assert_eq!(agent_status_u32(AgentStatus::Running), DARK.blue);
+        assert_eq!(agent_status_u32(AgentStatus::Idle), DARK.text_faint);
+        assert_ne!(DARK.red, DARK.blue);
+        assert_ne!(DARK.blue, DARK.text_faint);
+    }
+
+    #[test]
+    fn running_is_visibly_blue() {
+        // 运行中仍用蓝，避免再和别的状态挤在青绿里。
+        assert_running_is_blue_and_done_is_green(DARK.blue, DARK.green, 110, 100, "深色");
+        assert_running_is_blue_and_done_is_green(LIGHT.blue, LIGHT.green, 110, 85, "浅色");
+    }
+
+    #[test]
+    fn running_glow_preserves_hue_and_limits_the_light_theme_peak() {
+        let dark_base: gpui::Hsla = rgb(DARK.blue).into();
+        let dark_start: gpui::Hsla =
+            running_glow_color_for(DARK.blue, 0.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_peak: gpui::Hsla =
+            running_glow_color_for(DARK.blue, 0.5, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_end: gpui::Hsla =
+            running_glow_color_for(DARK.blue, 1.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+        let light_base: gpui::Hsla = rgb(LIGHT.blue).into();
+        let light_peak: gpui::Hsla =
+            running_glow_color_for(LIGHT.blue, 0.5, RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN).into();
+
+        let dark_hue_shift = (dark_peak.h - dark_base.h).abs();
+        let light_hue_shift = (light_peak.h - light_base.h).abs();
+        let dark_lightness_gain = dark_peak.l - dark_base.l;
+        let light_lightness_gain = light_peak.l - light_base.l;
+        assert_eq!(dark_start, dark_base, "进入动画必须从静态运行色开始");
+        assert_eq!(dark_end, dark_base, "进入动画必须回到静态运行色结束");
+        assert!(
+            dark_hue_shift < 0.001
+                && light_hue_shift < 0.001
+                && dark_lightness_gain > light_lightness_gain,
+            "状态提亮必须保持蓝色色相，且浅色主题更克制：dark hue={dark_hue_shift}, light hue={light_hue_shift}, dark gain={dark_lightness_gain}, light gain={light_lightness_gain}",
+        );
+    }
 }

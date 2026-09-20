@@ -1,12 +1,21 @@
 # smelt 产品路线图 · 待做
 
-**优先支持的 4 家 agent：** Claude Code · Codex · Copilot · Grok  
-（PTY 快捷启动 + ACP 对接均以这四家为一等公民；其它 CLI 可走 custom，不保证体验。）
+**优先支持的 4 家 agent：** Claude Code · Codex · Copilot · Grok
+（原生能力已扩展到 Cursor / OpenCode / Kiro；Pi 由 Smelt 直接驱动官方
+JSONL RPC，不经 ACP。其它 CLI 可走 custom，不保证体验。）
 
-对标 Codex Desktop：**多 provider ACP · App 工作面 · Review · 任务编排 · 手机远程 · 体验增强**  
-约束：PTY/ACP 二选一 · 权限门不关 · 引擎在本机 · 远程只指挥不搬服务器
+对标 Codex Desktop：**多 provider 结构化对话 · App 工作面 · Review · 手机远程 · 体验增强**
+约束：PTY/结构化对话二选一 · 权限门不关 · 引擎在本机 · 远程只指挥不搬服务器
 
 杂项点子 → [`roadmap.md`](roadmap.md) · 远程细节 → [`remote-ops-roadmap.md`](remote-ops-roadmap.md)
+
+---
+
+## 产品级智能体基线
+
+产品模型固定为 `AgentDefinition → Conversation / Automation → AgentRun → Engine`：智能体是长期存在的产品对象，不是进程或对话；同一定义可以创建多段 Conversation，自动化也能在没有 Conversation 时创建 Run。定义只保存名称、长期指令和引擎；普通 Conversation 的工作目录来自会话上下文，Automation 则由 daemon 在 `~/.smelt/workspaces/automations` 下分配稳定工作区，账号/profile、模型与输入仍属于每次 Conversation/Run。Pi 是第一阶段唯一注册的执行引擎。左侧「智能体」负责定义管理，「自动化」独立管理触发条件、每次输入与运行状态；对话仍是普通 Session，并只引用智能体 ID。
+
+股票数据、飞书 `chat watch` 和通知目标都属于 Smelt capability/plugin 与 source/trigger/sink 层。Pi 只负责理解目标、规划和调用宿主授予的能力，不直接拥有这些业务插件。定时是首个内置触发方式：由 `smeltd` 持续 claim 到期项并创建独立 Run，不要求先有对话或保持 GUI 打开。手动「运行一次」复用同一 Run 生命周期，但不推进定时游标。飞书监听应作为 daemon 托管的连接器/事件源，由自动化订阅其事件，而不是硬编码进智能体定义或 Pi 引擎。
 
 ---
 
@@ -30,18 +39,26 @@ flowchart TB
 ## 1 · Agent 协议对接
 
 **不是四家都「CLI 本体原生讲 ACP」。** smelt 对 Claude、Copilot、Grok 做 ACP
-客户端；Codex 则直接连接 CLI 内置的 app-server，再归一化到同一套会话事件。
+客户端；Codex 出厂默认走 `@agentclientprotocol/codex-acp` 标准 ACP 通道（`default_acp_codex_cmd()`），
+旧的 `codex app-server` 仅兼容手填旧存档。各家再归一化到同一套会话事件。
 
 | Provider | 协议形态 | smelt 怎么交付 | 启动（出厂默认） |
 |----------|----------|----------------|------------------|
-| **Claude** | **适配器**（`claude-agent-acp`） | **受管 bun 自动拉包** | `bunx @agentclientprotocol/claude-agent-acp@<锁版本>` |
-| **Codex** | **原生**（CLI 内置 app-server） | 用户本机已装 `codex`；smelt 不代装 CLI | `codex app-server` |
+| **Claude** | **适配器**（`claude-agent-acp`） | **受管 bun 自动拉包** | `bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0` |
+| **Codex** | **标准 ACP 通道** | 经 `bunx` 拉官方 `codex-acp`（出厂默认） | `bunx --bun @agentclientprotocol/codex-acp@1.12.0` |
 | **Copilot** | **原生**（CLI 内置 ACP server） | 用户本机已装 `copilot`；smelt 不代装 CLI | `copilot --acp --stdio` |
 | **Grok** | **原生**（Grok Build 官方 ACP） | 用户本机已装 / 官方入口；smelt 不代装 CLI | 以官方 `agent stdio` 为准 |
+| **Pi** | **官方 JSONL RPC** | Smelt 原生驱动 + 锁定 Pi 依赖，由受管 Bun 运行；复用 Pi 配置/凭据 | `smelt-pi-agent` |
+
+受管适配器升级时，Smelt 只把自己曾发布过的逐字默认命令迁到当前 pin；带环境
+前缀、额外参数或替换过运行器的用户命令保持不动。新会话和断线/手动重启后的
+会话使用新版本，正在执行的进程不热切换。受管 Bun 同步会定向删除历史适配器包
+的实体目录与版本别名，保留当前版本、未作为 Smelt 默认值发布的版本和共享依赖。
 
 ```text
 原生   = agent 进程自己实现 ACP
 适配器 = 另起进程，把 Claude 私有协议翻译成 ACP
+原生 RPC = smelt 直接消费 provider 公开的进程协议，不先翻译成 ACP
 app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 ```
 
@@ -53,18 +70,20 @@ app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 2. `bunx <adapter>@<锁版本>` 由受管 bun 解析/缓存，**用户不必自己装 node/npx/适配器**  
 3. 出厂命令**一律 `bunx …@版本`**，不用 `npx`（避免依赖用户系统 Node）  
 4. 版本锁定在出厂默认里；设置可「升级到 latest」并写回  
-5. 进度文案走 `AcpEvent::Status`（下载中 / 拉包中），失败可读、可重试  
+5. 进度文案走 `ConversationEvent::Status`（下载中 / 拉包中），失败可读、可重试  
 
 **仍须用户自备的（smelt 不代装）：**  
 - Claude 适配器背后的 **Claude Code / 登录**  
 - Codex 的 **Codex CLI / 登录**
 - Copilot / Grok 的 **本机 CLI + 鉴权**（原生，无适配器可代下）
+- Pi 的模型凭据或已有 `~/.pi/agent` 配置（对话模式不要求安装 Pi CLI）
 
 能力与权限语义（尤其 `request_permission`）**逐家实测**，不假设「接了 ACP = 会弹权限门」。
 
-- [ ] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂四家 + 用户可增 custom，每项含名称/启动命令
-- [ ] Claude 适配器锁定版本并由 `ensure_bun` 拉取；Codex 直接启动本机 app-server
-- [ ] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」
+- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家裸 agent + profile-only DSH，用户可增 custom，每项含名称/启动命令（静态注册表 `CONVERSATION_AGENTS` + `ConversationCommands`，按 agent id 存储）
+- [x] Claude 适配器锁定版本并由 `ensure_bun` 拉取；Codex 走标准 `codex-acp` 通道
+- [x] Pi 原生 RPC 驱动：受管 Bun、锁定依赖、流式/工具/权限/取消/恢复、模型与推理配置
+- [x] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」
 - [ ] 逐家实测矩阵：`session/load` · `request_permission` · elicitation
 - [ ] 启动命令支持引号；下载/拉包错误可读；adapter 版本可锁可升
 - [ ] 连接层下沉 smelt-core（为 smeltd 托管 ACP 做准备；见 §6）
@@ -77,7 +96,7 @@ flowchart LR
     Bun --> CL
   end
   subgraph native["原生 · 用户本机 CLI"]
-    CD["codex app-server"]
+    CD["bunx codex-acp"]
     CP["copilot --acp"]
     GK["grok agent stdio"]
   end
@@ -100,7 +119,7 @@ flowchart LR
 
 ### 待做
 
-- [ ] **P0 消息流工作面**（对标 Codex/Claude 桌面）：tool 卡片折叠 · 行内/附件 diff · turn 中 prompt 排队
+- [x] **P0 消息流工作面**（对标 Codex/Claude 桌面）：tool 卡片折叠 · 行内/附件 diff · turn 中 prompt 排队（`acp-view` 的 render / conversation / composer / cards 已落地）
 - [ ] **P1 多会话指挥**：同项目多线程 · 一键再开/换 provider · Remix 带上下文 · 文件/diff content block
 - [ ] **P2** 会话内搜索 · `terminal/*` 代跑真 PTY + 会话内终端面板
 
@@ -159,56 +178,10 @@ flowchart LR
 
 ---
 
-## 4 · 任务增强
+## 4 · 任务
 
-**目标体验：** 指挥单位是**任务**，会话只是执行现场。人给起点就能走开——队列自动续跑、agent 可自己塞下一条；需要时再点进会话接管。  
-（本地骨架与定时/续跑已有，见 [`local-tasks.md`](local-tasks.md)；本节只列增强。）
-
-**给谁用：** 一次丢多件活、想串行/并行盯进度，而不是守着终端一条条喂 prompt 的人。
-
-### 会话 ↔ 任务一体
-
-- [ ] 会话「钉成任务」（标题 / cwd / launch 预填）
-- [ ] 任务卡片显示绑定会话相位（PTY 推断 / ACP 协议事实）
-- [ ] 右键：改 column、删任务、取消绑定、聚焦会话
-- [ ] 总览与侧栏：待办 / 执行中 / 完成筛选；失败态可区分（非一律 Done）
-
-### 开跑与通道
-
-- [ ] `channel = term | acp` + `provider_id`（四家优先）
-- [ ] 开跑：PTY 仍用 launch 首包；ACP 则建消息流会话 + 首包 `Prompt`
-- [ ] 完成边沿：ACP `TurnEnded` 与 PTY Idle 对称 → 同 cwd claim 下一条
-- [ ] auto_run 队列默认倾向 ACP；可强制 PTY；同 cwd 串行策略可配置
-- [ ] 失败 / 取消：不误标完成、可重试、可换 provider Remix 再跑
-
-### Agent 自循环
-
-- [ ] `smelt-task add|done|list|…` CLI（或扩展 `smelt-notify` 同源协议）
-- [ ] agent 干完可自塞下一条；读 spec / 清单后拆一批任务进同一队列
-- [ ] 落盘语义与 UI TaskStore 一致，人与 agent 看到的是同一份列表
-
-### 编排（克制）
-
-- [ ] 轻量依赖：B 等 A done 再 claim（仅本地 FIFO 扩展，不做甘特）
-- [ ] 并行：不同 cwd / worktree 可同时跑；同 cwd 默认串行
-- [ ] 频率任务体验：到点失败提示、跳过周期说明与手动立即执行
-- [ ] 认领池（后置）：等人审批 / 失败任务 / 待 review 与任务列表同一入口
-
-```mermaid
-flowchart TB
-  Human["人下起点"] --> Store["TaskStore"]
-  Spec["agent 读 spec"] --> CLI["smelt-task add"]
-  CLI --> Store
-  Store --> Run["run_task"]
-  Run --> Term["PTY 会话"]
-  Run --> Acp["ACP 会话"]
-  Term --> Edge["完成边沿"]
-  Acp --> Edge
-  Edge --> Claim["claim 同 cwd 下一条"]
-  Claim --> Run
-  Term -->|自塞新活| CLI
-  Acp -->|自塞新活| CLI
-```
+本地任务看板、`TaskRun` 调度、任务总览页和 `task.create` 插件契约已经下线。
+执行现场就是会话（ACP / 终端）和自动化 Run；不再恢复独立任务产品面。
 
 ---
 
@@ -221,7 +194,6 @@ flowchart TB
 | **终端** | 光标闪烁 · 选区/滚动/粘贴边角 · 重绘与帧感 · 链接/IME 边角 · 空闲与刷屏手感 |
 | **侧栏 / 会话** | 标题与相位可读 · 通知不过噪 · 总览卡片信息密度 · 分屏/焦点/快捷键一致 |
 | **Git / 文件** | diff 可读与操作反馈 · 大仓性能 · 保存/冲突提示 · 空态与错误文案 |
-| **任务** | 卡片状态一眼懂 · 开跑/失败反馈 · 列表筛选与排序手感 |
 | **ACP 消息流** | 流式阅读 · 权限卡片布局 · 长 tool 折叠默认策略 · 错误/重连文案 |
 | **手机远程** | 小屏信息密度 · 通知与深链 · 弱网/断线重连文案 |
 | **设置 / 新手** | 首次引导 · 缺 CLI/未登录可读提示 · 设置项分组与搜索 |
@@ -319,10 +291,10 @@ flowchart TB
 | | 3.2 | 提交 · 回看 log/commit diff · 评论挂 sha | 改→审→交→回看不离 smelt |
 | | 3.3 | 跳文件 · 分支/stash · worktree 提示 | 日常 Git 少切客户端 |
 | | 3.4 | 联机 review（后置） | 同事评论进同一管道 |
-| **任务** | 4.1 | 钉会话 · 相位 · 失败态 | 会话与任务不割裂 |
-| | 4.2 | `smelt-task` · agent 自循环 | 人给起点能续队列 |
-| | 4.3 | `channel=acp` · 完成边沿 | 队列可走四家 ACP |
-| | 4.4 | 依赖 · 并行 · 定时 · 认领池（后置） | 多任务可预期 |
+| **任务** | 4.1 | 执行记录 · 相位 · 失败态 | 会话与任务不割裂 |
+| | 4.2 | Issue Worktree · branch 绑定 | 多 Issue 隔离执行 |
+| | 4.3 | `channel=acp` · 完成边沿 | 任务可走多家 ACP |
+| | 4.4 | Runtime 执行 · Worktree 保留 · 显式交付入口 | 执行完成后由用户决定代码交付 |
 | **体验** | 5.* | §5 表（含手机小屏） | 高频路径变顺；与各线穿插 |
 | **远程** | 6.1 | 网关 action/state 稳 · 手机操作台 + 会话列表 | 手机能批一条权限回本机 |
 | | 6.2 | 推送 · 深链 · token · 弱网重连 | 通知一点进会话 |

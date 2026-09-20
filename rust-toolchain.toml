@@ -1,0 +1,6 @@
+# 本地 cargo/rustup 与 CI 共用这一份钉死的工具链。
+# 改 channel 时同步 ci/mac/env-setup.sh、ci/android/env-setup.sh 的 REQUIRED_RUST。
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

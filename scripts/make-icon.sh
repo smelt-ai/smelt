@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 从 assets/icon.svg 渲染前景 + 深石墨渐变圆角方块底，合成 macOS app 图标。
 # 产出 assets/icon-1024.png（母图）和 assets/AppIcon.icns（打包用）。
+# 另把 crates/smelt/assets/icons/agent-*.svg 渲染成 assets/agent-*.png
+# （macOS 菜单栏下拉里各 agent 会话的 logo，见 status_item.rs 的 AGENT_LOGO_PNG）。
 # 依赖：rsvg-convert（brew install librsvg）、python3 + Pillow、系统 sips / iconutil。
 set -euo pipefail
 
@@ -64,4 +66,14 @@ cp "$SRC" "$ICONSET/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET" -o "$ASSETS/AppIcon.icns"
 rm -rf "$ICONSET"
 
+# 菜单栏 agent logo：单色 svg（fill="currentColor"）直接渲染成黑色模板图，
+# AppKit 侧 setTemplate: 按 alpha 通道着色，自动适配深浅色菜单栏。
+echo "▶ 渲染 agent 菜单栏 logo …"
+AGENT_ICON_DIR="$ROOT/crates/smelt/assets/icons"
+for a in claude copilot codex grok antigravity cursor opencode kiro pi crush dsh; do
+  rsvg-convert -w 32 -h 32 "$AGENT_ICON_DIR/agent-$a.svg" -o "$ASSETS/agent-$a.png"
+  echo "   saved $ASSETS/agent-$a.png"
+done
+
 echo "✅ 图标已生成：$ASSETS/AppIcon.icns（重新 make dist 即会打进包）"
+echo "✅ agent logo 已生成：$ASSETS/agent-*.png"

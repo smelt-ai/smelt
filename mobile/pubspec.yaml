@@ -61,6 +61,8 @@ dependencies:
   # 负责把 smelt-mobile 编成各平台原生库并塞进 App，由 codegen 生成。
   rust_lib_smelt_mobile:
     path: rust_builder
+  flutter_svg: ^2.3.0
+  flutter_slidable: ^4.0.3
   
 dev_dependencies:
   flutter_test:
@@ -88,6 +90,12 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # 各家 agent 的身份图标。**这几个 SVG 是从 `crates/smelt/assets/icons/` 复制来的**
+  # ——Flutter 的 asset 声明不能指到 package 目录外，所以只能带一份副本。桌面端换图
+  # 标时这里要跟着换（THIRD_PARTY_NOTICES.md 一并复制，LobeHub Icons / MIT）。
+  assets:
+    - assets/agent-icons/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

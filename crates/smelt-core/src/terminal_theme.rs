@@ -1,9 +1,10 @@
-//! 终端配色快照：PC 端当前**真正生效**的终端颜色，落一份到 `~/.smelt/terminal-theme.json`，
-//! 给守护/网关（进程外，读不到 GUI 的全局态）转发给移动端。
+//! 终端配色快照：PC 端当前**真正生效**的终端颜色，落到主库 `terminal_theme`
+//! 作用域，给守护/网关（进程外，读不到 GUI 的全局态）转发给移动端。
 //!
 //! 为什么要有这层：TUI（Claude Code、bat、delta…）会用 OSC 11 查终端背景色来决定
-//! 自己用哪档灰。这个查询由 PC 端的终端应答（`smelt::terminal::EventProxy::resolve_color`），
-//! 回的是 PC 当前主题色。移动端渲染的是同一份 PTY 字节流，若用自己写死的底色，
+//! 自己用哪档灰。这个查询由守护进程在收到 PTY 输出时立即应答，回的是 PC 当前主题色；
+//! 新版 GUI 从握手能力位得知后不再重复应答，旧守护仍由 GUI 兼容兜底。移动端渲染的是
+//! 同一份 PTY 字节流，若用自己写死的底色，
 //! TUI 以为的底色和实际底色就对不上——直接是对比度问题。
 //!
 //! 所以颜色真源只有一个：PC 端主题（深浅色模式 + 用户在设置里自选的终端底色）。
@@ -14,7 +15,6 @@
 //! 不能有任何全局写死的色板。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// 线协议版本：字段只增不改，移动端按缺字段回退即可，这里主要用于排查。
 pub const TERMINAL_THEME_VERSION: u32 = 1;
@@ -46,10 +46,10 @@ impl Default for TerminalThemeSnapshot {
         Self {
             version: TERMINAL_THEME_VERSION,
             dark: true,
-            background: 0x313338,
+            background: 0x070707,
             foreground: 0xd8d8d8,
             cursor: 0xd8d8d8,
-            selection: 0x334a6a,
+            selection: 0x0c3d7a,
             palette: vec![
                 0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc7c7c7,
                 0x2c3149, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xffffff,
@@ -89,18 +89,50 @@ impl TerminalThemeSnapshot {
     }
 }
 
-fn theme_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".smelt").join("terminal-theme.json"))
-}
-
-/// 读当前快照；文件缺失/损坏回退 PC 默认深色。
+/// 读当前快照；文档缺失/损坏回退 PC 默认深色。
 pub fn load() -> TerminalThemeSnapshot {
-    crate::json_store::load_json::<TerminalThemeSnapshot>(theme_path()).normalized()
+    let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
+        return TerminalThemeSnapshot::default();
+    };
+    match store.get_terminal_theme_snapshot() {
+        Ok(Some(snapshot)) => theme_from_store(snapshot).normalized(),
+        Ok(None) | Err(_) => TerminalThemeSnapshot::default(),
+    }
 }
 
 /// PC 端在主题模式 / 外观设置变化时调用，把当前生效配色落盘。
 pub fn publish(snapshot: &TerminalThemeSnapshot) {
-    crate::json_store::save_json(theme_path(), snapshot);
+    if let Ok(store) = crate::sqlite_state::default_sqlite_store() {
+        let _ = store.put_terminal_theme_snapshot(&theme_to_store(snapshot));
+    }
+}
+
+fn theme_to_store(snapshot: &TerminalThemeSnapshot) -> smelt_store::TerminalThemeSnapshot {
+    smelt_store::TerminalThemeSnapshot {
+        version: snapshot.version,
+        dark: snapshot.dark,
+        background: snapshot.background,
+        foreground: snapshot.foreground,
+        cursor: snapshot.cursor,
+        selection: snapshot.selection,
+        palette: snapshot.palette.clone(),
+        search_hit: snapshot.search_hit,
+        search_hit_current: snapshot.search_hit_current,
+    }
+}
+
+fn theme_from_store(snapshot: smelt_store::TerminalThemeSnapshot) -> TerminalThemeSnapshot {
+    TerminalThemeSnapshot {
+        version: snapshot.version,
+        dark: snapshot.dark,
+        background: snapshot.background,
+        foreground: snapshot.foreground,
+        cursor: snapshot.cursor,
+        selection: snapshot.selection,
+        palette: snapshot.palette,
+        search_hit: snapshot.search_hit,
+        search_hit_current: snapshot.search_hit_current,
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +142,7 @@ mod tests {
     #[test]
     fn wire_uses_hex_strings_and_full_palette() {
         let wire = TerminalThemeSnapshot::default().to_wire();
-        assert_eq!(wire["background"], "#313338");
+        assert_eq!(wire["background"], "#070707");
         assert_eq!(wire["foreground"], "#d8d8d8");
         assert_eq!(wire["palette"].as_array().unwrap().len(), 16);
         assert_eq!(wire["palette"][0], "#15161e");

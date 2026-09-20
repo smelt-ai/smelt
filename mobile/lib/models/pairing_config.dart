@@ -7,7 +7,7 @@ class PairingConfig {
   final String endpoint;
   final String token;
 
-  /// iroh 配对码的 scheme。权威定义在 `crates/smelt-core/src/pairing.rs`，
+  /// iroh 配对码的 scheme。权威定义在 `crates/smelt-pairing/src/lib.rs`，
   /// 改这里必须同步改那边，否则桌面出的码手机认不出来。
   static const irohScheme = 'smelt+iroh';
 

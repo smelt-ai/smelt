@@ -27,16 +27,9 @@
 ## 会话监控
 
 - fs watcher 驱动（不轮询）解析 `~/.claude/projects/*.jsonl`
-- 五态：`Thinking / Executing Tool / Awaiting Approval / Waiting for User / Idle`
+- ✅ 守护相位 `DaemonPhase` 已落地（connecting / thinking / executing_tool / awaiting_approval / waiting_for_user / succeeded / failed / idle / dead）。这是守护事实，不是侧栏 UI 态。ACP 对话页读同一套相位，不再另养 `AcpPhase`。
 
 > worktree · Remix · 交互式 diff 已归入 [`product-roadmap.md`](product-roadmap.md)
-
----
-
-## 宠物
-
-- 近距凑近 / 划过身体害羞挤压
-- Stage 3：多轮对话（输入框 + 历史）
 
 ---
 

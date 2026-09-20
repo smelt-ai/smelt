@@ -84,10 +84,12 @@ pub struct PathStatus {
 pub type PathObserver = Arc<dyn Fn(PathStatus) + Send + Sync + 'static>;
 
 /// 连接事件：移动端设备的连接与断开。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionEvent {
     /// 新设备连接。
     Connected {
+        /// 当前进程内唯一标识这条 QUIC 连接；同一设备快速重连时不会复用。
+        connection_id: usize,
         /// iroh 节点 ID（公钥的十六进制表示）。
         remote_id: String,
         /// 连接建立的时间戳（Unix 秒）。
@@ -95,6 +97,7 @@ pub enum ConnectionEvent {
     },
     /// 设备断开连接。
     Disconnected {
+        connection_id: usize,
         remote_id: String,
     },
 }
@@ -107,8 +110,8 @@ pub type ConnectionObserver = Arc<dyn Fn(ConnectionEvent) + Send + Sync + 'stati
 /// 每次重启换密钥的话，二维码就会像 Cloudflare Quick Tunnel 的 URL 一样失效，
 /// 而「配对码永久有效」正是我们选 iroh 的主要理由之一。
 pub fn default_secret_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("找不到 $HOME")?;
-    Ok(PathBuf::from(home).join(".smelt").join("iroh-secret"))
+    let root = smelt_paths::smelt_home().context("找不到 $HOME")?;
+    Ok(root.join("iroh-secret"))
 }
 
 /// 读取密钥；不存在就生成并落盘（0600）。
@@ -189,17 +192,7 @@ pub async fn serve_tunnel(
     serve_tunnel_inner(endpoint, gateway, shutdown, None, None).await;
 }
 
-/// 与 [`serve_tunnel`] 相同，但在 iroh 选中或切换传输路径时通知观察者。
-pub async fn serve_tunnel_with_observer(
-    endpoint: Endpoint,
-    gateway: SocketAddr,
-    shutdown: impl std::future::Future<Output = ()> + Send,
-    observer: PathObserver,
-) {
-    serve_tunnel_inner(endpoint, gateway, shutdown, Some(observer), None).await;
-}
-
-/// 与 [`serve_tunnel_with_observer`] 相同，但同时监听连接事件（设备连接/断开）。
+/// 与 [`serve_tunnel`] 相同，但同时监听传输路径和连接事件（设备连接/断开）。
 pub async fn serve_tunnel_with_observers(
     endpoint: Endpoint,
     gateway: SocketAddr,
@@ -207,7 +200,14 @@ pub async fn serve_tunnel_with_observers(
     path_observer: PathObserver,
     conn_observer: ConnectionObserver,
 ) {
-    serve_tunnel_inner(endpoint, gateway, shutdown, Some(path_observer), Some(conn_observer)).await;
+    serve_tunnel_inner(
+        endpoint,
+        gateway,
+        shutdown,
+        Some(path_observer),
+        Some(conn_observer),
+    )
+    .await;
 }
 
 async fn serve_tunnel_inner(
@@ -245,6 +245,7 @@ async fn serve_conn(
     conn_observer: Option<ConnectionObserver>,
 ) -> Result<()> {
     let conn = incoming.await.context("握手失败")?;
+    let connection_id = conn.stable_id();
     let remote = conn.remote_id();
     let remote_id = remote.to_string();
     info!(%remote, "iroh 已接受连接");
@@ -256,6 +257,7 @@ async fn serve_conn(
             .map(|d| d.as_secs())
             .unwrap_or(0);
         obs(ConnectionEvent::Connected {
+            connection_id,
             remote_id: remote_id.clone(),
             connected_at,
         });
@@ -282,7 +284,10 @@ async fn serve_conn(
 
     // 通知断开事件
     if let Some(obs) = conn_observer {
-        obs(ConnectionEvent::Disconnected { remote_id });
+        obs(ConnectionEvent::Disconnected {
+            connection_id,
+            remote_id,
+        });
     }
 
     result
