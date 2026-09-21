@@ -943,7 +943,6 @@ impl Workspace {
                 narrow_rows.push(NarrowGitRow::CommitBox {
                     root: repo_root.clone(),
                     input: input.clone(),
-                    branch: repo_status.map(|d| d.branch.clone()).unwrap_or_default(),
                     has_text: !input.read(cx).value().trim().is_empty(),
                     has_staged: !staged.is_empty(),
                     pushing: self.pushing,
