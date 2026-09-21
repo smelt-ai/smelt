@@ -2673,6 +2673,68 @@ pub(crate) fn handle_acp_snapshot(
     let _ = writeln!(conn, "{}", serde_json::json!({ "snapshot": snapshot }));
 }
 
+/// 按需列出这场对话实际加载的技能。
+///
+/// 故意不塞进会话快照：快照每次状态变化都要推给所有观察者，而技能得扫一遍
+/// 磁盘；两者的频率和代价对不上。手机打开对话时问一次即可，和桌面每次渲染
+/// 输入栏重算是同一份来源（`loaded_skills_for_launch`）。
+pub(crate) fn handle_acp_skills(
+    mut conn: UnixStream,
+    v: &serde_json::Value,
+    acp_sessions: &AcpSessions,
+) {
+    let id = v["id"].as_str().unwrap_or_default();
+    let launch = acp_sessions.get(id).and_then(|slot| {
+        acp_sessions.with_current(id, &slot, |session| {
+            (
+                session.launch_spec.lock().unwrap().clone(),
+                session.cwd.clone(),
+            )
+        })
+    });
+    let Some((Some(launch), cwd)) = launch else {
+        // 会话没在运行（已结束 / 仅历史）就没有「这场对话加载了什么」可言。这不是错误，
+        // 回 supported=false 让客户端收起入口，而不是弹一个用户无法处理的报错。
+        let _ = writeln!(
+            conn,
+            "{}",
+            serde_json::json!({ "ok": true, "supported": false, "skills": [] })
+        );
+        return;
+    };
+    // 技能是 Pi 的概念。别家 agent 如实回 `supported: false`，让客户端不画这个入口，
+    // 而不是画一个永远空的列表。
+    let agent = smelt_core::agent_kind::ConversationAgentKind::from_command_loose(&launch.command);
+    let supported = agent == Some(smelt_core::agent_kind::ConversationAgentKind::Pi);
+    let skills = if supported {
+        smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
+            &launch,
+            cwd.as_deref().map(std::path::Path::new),
+        )
+    } else {
+        Vec::new()
+    };
+    let skills: Vec<_> = skills
+        .into_iter()
+        .map(|skill| {
+            serde_json::json!({
+                "name": skill.name,
+                "description": skill.description,
+            })
+        })
+        .collect();
+    let _ = writeln!(
+        conn,
+        "{}",
+        serde_json::json!({
+            "ok": true,
+            "agent": agent.map(|kind| kind.id()),
+            "supported": supported,
+            "skills": skills,
+        })
+    );
+}
+
 /// 杀会话：先在 lifecycle 锁内 retire（waitpid），再从表里摘掉。这是 Recreate：
 /// 拆卸完成前 sid 仍在表里，并发 open 堵在同一把锁上，不会先 reserve 一个
 /// 替换 slot 再用 sleep 去等。证不了退出就留在表里，让后续 open/restart 失败。

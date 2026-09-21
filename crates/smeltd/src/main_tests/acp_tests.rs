@@ -1341,6 +1341,90 @@ fn one_shot_action_rejects_invalid_prompt_shape() {
 }
 
 #[test]
+fn skills_on_a_session_that_is_not_running_are_reported_as_unsupported() {
+    let acp_sessions = new_test_acp_sessions();
+    let (server, client) = UnixStream::pair().unwrap();
+
+    handle_acp_skills(
+        server,
+        &serde_json::json!({"id": "acp-nope"}),
+        &acp_sessions,
+    );
+
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    // 不是错误：没在跑的会话就没有「加载了什么」可言，手机据此收起入口。
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["supported"], false);
+    assert_eq!(response["skills"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn skills_are_only_a_pi_concept() {
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-claude", || {
+        let session = make_acp_session_value("acp-claude", AcpSessionState::default());
+        *session.launch_spec.lock().unwrap() =
+            Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
+        session
+    });
+    let (server, client) = UnixStream::pair().unwrap();
+
+    handle_acp_skills(
+        server,
+        &serde_json::json!({"id": "acp-claude"}),
+        &acp_sessions,
+    );
+
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["agent"], "claude");
+    assert_eq!(response["supported"], false);
+}
+
+#[test]
+fn pi_skills_come_from_the_launch_spec_plugin_args() {
+    let temp = std::env::temp_dir().join(format!("smelt-daemon-skills-{}", uuid::Uuid::new_v4()));
+    let skill_dir = temp.join("deploy");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: deploy\ndescription: 把构建推上去\n---\n",
+    )
+    .unwrap();
+
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-pi", || {
+        let session = make_acp_session_value("acp-pi", AcpSessionState::default());
+        *session.launch_spec.lock().unwrap() = Some(
+            smelt_core::agent_kind::ConversationLaunchSpec::from_command("pi acp").with_env(
+                smelt_core::agent_kind::SMELT_AGENT_PLUGIN_ARGS_ENV,
+                serde_json::json!(["--no-skills", "--skill", skill_dir.to_str().unwrap()])
+                    .to_string(),
+            ),
+        );
+        session
+    });
+    let (server, client) = UnixStream::pair().unwrap();
+
+    handle_acp_skills(server, &serde_json::json!({"id": "acp-pi"}), &acp_sessions);
+
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["supported"], true);
+    let skills = response["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0]["name"], "deploy");
+    assert_eq!(skills[0]["description"], "把构建推上去");
+
+    std::fs::remove_dir_all(&temp).ok();
+}
+
+#[test]
 fn watch_on_unknown_session_just_disconnects() {
     let acp_sessions = new_test_acp_sessions();
     let (server, client) = UnixStream::pair().unwrap();

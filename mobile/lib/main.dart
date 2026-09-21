@@ -1849,8 +1849,13 @@ class _SessionPageState extends State<SessionPage> {
   String? _permissionSubmittingToolId;
   final List<AcpImageData> _pendingImages = [];
   final Map<int, String> _elicitationTextValues = {};
+
+  /// 这场对话已加载的技能。null = 还没问到（或电脑端不支持），界面就不画入口——
+  /// 与桌面一致：技能是 Pi 的概念，别家 agent 上画一个永远空的列表没有意义。
+  List<SessionSkill>? _skills;
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
+  late final StreamSubscription<SessionSkills> _sessionSkillsSubscription;
   late final StreamSubscription<MessageSendResult> _messageSendSubscription;
   late final StreamSubscription<WsState> _connectionStateSubscription;
   Timer? _draftSaveTimer;
@@ -1876,8 +1881,25 @@ class _SessionPageState extends State<SessionPage> {
     _connectionStateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
+      // 技能表在电脑那边算，重连后得重新问：断线期间发出的请求会被丢掉，
+      // 而对方也可能已经换了一台机器。
+      if (state == WsState.connected) {
+        gatewayService.listSessionSkills(widget.session.id);
+      }
     });
     _subscribeSession();
+    _sessionSkillsSubscription = gatewayService.sessionSkillsStream.listen((
+      result,
+    ) {
+      if (!mounted) return;
+      // 空 sessionId = 网关/桌面回了「没这个能力」的兜底应答，对任何会话都成立。
+      if (result.sessionId.isNotEmpty &&
+          result.sessionId != widget.session.id) {
+        return;
+      }
+      setState(() => _skills = result.supported ? result.skills : null);
+    });
+    gatewayService.listSessionSkills(widget.session.id);
     unawaited(_restoreDraft());
   }
 
@@ -2649,16 +2671,49 @@ class _SessionPageState extends State<SessionPage> {
       items.add(Chip(label: Text('Context $percent%')));
     }
     if (snapshot.model case final model? when model.currentName.isNotEmpty) {
+      // 协议按 provider 分组时，先切 provider、再在该组内选模型（桌面输入栏同一套）。
+      // 平铺协议没有分组，仍然只出一个模型入口。
+      final provider = model.currentProvider;
+      if (provider != null) {
+        items.add(
+          PopupMenuButton<String>(
+            tooltip: 'Switch provider',
+            enabled:
+                model.providerGroups.length > 1 && gatewayService.writeEnabled,
+            onSelected: (value) => gatewayService.setConfigOption(
+              widget.session.id,
+              model.configId,
+              value,
+            ),
+            itemBuilder: (context) => [
+              for (final group in model.providerGroups)
+                CheckedPopupMenuItem(
+                  // 协议只接受模型值，没有「只换 provider」的写法；给不出目标模型
+                  // 的空组只列出来，不假装能点。
+                  value: model.switchValueFor(group),
+                  enabled: model.switchValueFor(group) != null,
+                  checked: group.id == provider.id,
+                  child: Text(group.name.isEmpty ? group.id : group.name),
+                ),
+            ],
+            child: Chip(
+              avatar: const Icon(Icons.hub_outlined, size: 16),
+              label: Text(provider.name.isEmpty ? provider.id : provider.name),
+            ),
+          ),
+        );
+      }
+      final modelOptions = provider?.options ?? model.options;
       items.add(
         PopupMenuButton<String>(
           tooltip: 'Switch model',
-          enabled: model.options.length > 1 && gatewayService.writeEnabled,
+          enabled: modelOptions.length > 1 && gatewayService.writeEnabled,
           onSelected: (value) => gatewayService.setConfigOption(
             widget.session.id,
             model.configId,
             value,
           ),
-          itemBuilder: (context) => model.options
+          itemBuilder: (context) => modelOptions
               .map(
                 (option) => CheckedPopupMenuItem(
                   value: option.first,
@@ -2695,6 +2750,43 @@ class _SessionPageState extends State<SessionPage> {
               )
               .toList(),
           child: Chip(label: Text(config.currentName)),
+        ),
+      );
+    }
+    // 「技能 N」：只读，和桌面一样回答「这场对话到底装了什么」。手机不改技能，
+    // 那是改磁盘上的文件，归电脑端。
+    if (_skills case final skills?) {
+      items.add(
+        PopupMenuButton<void>(
+          tooltip: 'Loaded skills',
+          itemBuilder: (context) => skills.isEmpty
+              ? [
+                  const PopupMenuItem<void>(
+                    enabled: false,
+                    child: Text('这场对话没有加载技能'),
+                  ),
+                ]
+              : [
+                  for (final skill in skills)
+                    PopupMenuItem<void>(
+                      enabled: false,
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(skill.name),
+                        subtitle: skill.description.isEmpty
+                            ? null
+                            : Text(
+                                skill.description,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                      ),
+                    ),
+                ],
+          child: Chip(
+            avatar: const Icon(Icons.auto_awesome_outlined, size: 16),
+            label: Text('技能 ${skills.length}'),
+          ),
         ),
       );
     }
@@ -2836,6 +2928,7 @@ class _SessionPageState extends State<SessionPage> {
     if (!_sendingMessage) _messageSendSubscription.cancel();
     _connectionStateSubscription.cancel();
     _snapshotSubscription.cancel();
+    _sessionSkillsSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {
       gatewayService.unsubscribe();

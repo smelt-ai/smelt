@@ -1638,6 +1638,9 @@ enum AcpWsRequest {
     Subscribe { params: SubscribeParams },
     #[serde(rename = "loadHistory")]
     LoadHistory { params: LoadHistoryParams },
+    /// 输入栏的「技能」入口：按需问一次，不跟着快照推。
+    #[serde(rename = "listSessionSkills")]
+    ListSessionSkills { params: SessionActionParams },
     #[serde(rename = "unsubscribe")]
     Unsubscribe,
     #[serde(rename = "sendMessage")]
@@ -2444,6 +2447,20 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         });
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
                     }
+                    AcpWsRequest::ListSessionSkills { params } => {
+                        let session_id = params.session_id.clone();
+                        let resp = match read_session_skills(&session_id).await {
+                            Ok(value) => serde_json::json!({
+                                "type": "sessionSkills",
+                                "sessionId": session_id,
+                                "agent": value.get("agent").cloned().unwrap_or(serde_json::Value::Null),
+                                "supported": value.get("supported").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                                "skills": value.get("skills").cloned().unwrap_or_else(|| serde_json::json!([])),
+                            }),
+                            Err(error) => serde_json::json!({"type": "error", "error": error}),
+                        };
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(resp.to_string().into())).await;
+                    }
                     AcpWsRequest::LoadHistory { params } => {
                         let result = read_acp_history(
                             &params.session_id,
@@ -2731,6 +2748,46 @@ async fn acp_watch_loop(
                 }
             }
         }
+    }
+}
+
+/// 问一次 daemon：这场对话现在加载了哪些技能。技能要读本机文件系统，只有 daemon
+/// 手上有这个会话完整的 launch spec（含 `--skill` 参数）和 cwd，网关不自己猜。
+async fn read_session_skills(session_id: &str) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let stream = tokio::net::UnixStream::connect(sock_path())
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+    let (reader, mut writer) = stream.into_split();
+    let request = serde_json::json!({
+        "op": DaemonOperation::AcpSkills,
+        "id": session_id,
+    });
+    let req_line = format!("{request}\n");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        writer.write_all(req_line.as_bytes()),
+    )
+    .await
+    .map_err(|_| "write timeout".to_string())?
+    .map_err(|e| format!("write failed: {e}"))?;
+
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut response))
+        .await
+        .map_err(|_| "read timeout".to_string())?
+        .map_err(|e| format!("read failed: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(response.trim())
+        .map_err(|e| format!("invalid skills response: {e}"))?;
+    if value["ok"].as_bool() == Some(true) {
+        Ok(value)
+    } else {
+        Err(value["error"]
+            .as_str()
+            .unwrap_or("failed to read session skills")
+            .to_string())
     }
 }
 
@@ -3211,6 +3268,18 @@ mod tests {
                 assert_eq!(params.agent_option_id, "profile:quant");
             }
             _ => panic!("expected listSessionHistory"),
+        }
+
+        let skills: AcpWsRequest = serde_json::from_value(serde_json::json!({
+            "method": "listSessionSkills",
+            "params": {"sessionId": "session-1"}
+        }))
+        .unwrap();
+        match skills {
+            AcpWsRequest::ListSessionSkills { params } => {
+                assert_eq!(params.session_id, "session-1");
+            }
+            _ => panic!("expected listSessionSkills"),
         }
 
         let rename: AcpWsRequest = serde_json::from_value(serde_json::json!({
