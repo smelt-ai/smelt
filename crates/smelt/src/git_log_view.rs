@@ -301,6 +301,13 @@ pub fn git_log_view(
         .w_full()
         .min_w_0()
         .overflow_hidden()
+        // flex + flex_col 不能省：默认的 row 方向下，`uniform_list` 拿不到纵向的
+        // 尺寸约束，算出来的可见行数是 0，一行都不会构造；而分支图 canvas 是
+        // `absolute inset_0`，照样铺满照样画点——表现就是「只剩一列圆点，提交
+        // 信息全没了」。行内的 `w_full` / `flex_1` 也靠它才有参照，否则作者、
+        // 时间列不再各自成列。
+        .flex()
+        .flex_col()
         .relative()
         .child(graph)
         .child(list);
