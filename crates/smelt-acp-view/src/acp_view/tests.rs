@@ -3,9 +3,9 @@
 use super::{
     CachedDiff, ComposerMenuSection, RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text,
     apply_pending_config_selection, build_conversation_layout,
-    build_conversation_layout_with_timings, build_markdown_cache, cached_diff_stats,
-    can_dispatch_prompt_immediately, can_load_older_history, classify_attached_paths,
-    compact_token_count, compact_tool_headline, compact_tool_run_label,
+    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
+    cached_diff_stats, can_dispatch_prompt_immediately, can_load_older_history,
+    classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
     composer_config_section_label, composer_menu_sections, composer_model_label,
     composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
     composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
@@ -26,8 +26,8 @@ use super::{
     session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_replace_session_title,
     should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
-    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    usage_percent, usage_warn_color,
+    tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
+    tool_uses_compact_process_row, trajectory_counts, usage_percent, usage_warn_color,
 };
 use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -2181,6 +2181,27 @@ fn empty_tool_output_does_not_offer_expandable_content() {
         old_text: None,
         new_text: "fn main() {}".into(),
     }]));
+}
+
+#[test]
+fn tool_image_output_is_expandable_and_decodes_once() {
+    // 1x1 PNG
+    let image = smelt_core::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
+    };
+    let output = vec![
+        ToolOutputPart::Text("Read image file [image/png]".into()),
+        ToolOutputPart::Image(image),
+    ];
+
+    assert!(tool_output_has_content(&output));
+    let decoded = build_tool_image_parts(&output);
+    assert!(decoded[0].is_none());
+    assert!(decoded[1].is_some());
+    assert!(tool_image_cache_matches_output(&decoded, &output));
+    // 形状变了（少一段输出）就必须重建，不能拿旧下标去索引新 output。
+    assert!(!tool_image_cache_matches_output(&decoded, &output[..1]));
 }
 
 #[test]

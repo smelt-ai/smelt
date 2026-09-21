@@ -3840,6 +3840,14 @@ pub fn tool_content_parts(
         .iter()
         .filter_map(|c| match c {
             ToolCallContent::Content(inner) => {
+                if let agent_client_protocol::schema::v1::ContentBlock::Image(image) =
+                    &inner.content
+                {
+                    return Some(ToolOutputPart::Image(crate::acp_chat::AcpImage {
+                        mime: image.mime_type.clone(),
+                        data_b64: image.data.clone(),
+                    }));
+                }
                 let text = content_text(&inner.content);
                 (!text.trim().is_empty()).then_some(ToolOutputPart::Text(text))
             }

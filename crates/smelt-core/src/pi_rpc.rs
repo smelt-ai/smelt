@@ -2489,6 +2489,28 @@ fn content_text(content: Option<&serde_json::Value>) -> String {
         .join("\n")
 }
 
+/// 工具结果里的图片块。pi 的 `read` 读图时会同时给一段文本提示和
+/// `{type:"image", data, mimeType}`，两者都要保留。
+fn content_images(content: Option<&serde_json::Value>) -> Vec<crate::acp_chat::AcpImage> {
+    content
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        .filter_map(|block| {
+            let data = block.get("data").and_then(serde_json::Value::as_str)?;
+            let mime = block
+                .get("mimeType")
+                .or_else(|| block.get("mime_type"))
+                .and_then(serde_json::Value::as_str)?;
+            (!data.is_empty()).then(|| crate::acp_chat::AcpImage {
+                mime: mime.to_string(),
+                data_b64: data.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn tool_output_parts(
     result: &serde_json::Value,
     name: &str,
@@ -2553,6 +2575,11 @@ fn tool_output_parts(
     if !text.is_empty() && !(has_diff && text_looks_like_diff(&text)) {
         output.insert(0, ToolOutputPart::Text(text));
     }
+    output.extend(
+        content_images(result.get("content"))
+            .into_iter()
+            .map(ToolOutputPart::Image),
+    );
     output
 }
 
@@ -3521,6 +3548,26 @@ mod tests {
             tool_title("subagent", Some(&serde_json::json!({"task": "find auth"}))),
             "find auth"
         );
+    }
+
+    #[test]
+    fn tool_result_images_survive_as_image_parts() {
+        let output = tool_output_parts(
+            &serde_json::json!({
+                "content": [
+                    {"type": "text", "text": "Read image file [image/png]"},
+                    {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+                ]
+            }),
+            "read",
+            Some(&serde_json::json!({"path": "shot.png"})),
+        );
+        assert!(matches!(&output[0], ToolOutputPart::Text(text) if text.contains("Read image")));
+        assert!(matches!(
+            &output[1],
+            ToolOutputPart::Image(image)
+                if image.mime == "image/png" && image.data_b64 == "iVBORw0KGgo="
+        ));
     }
 
     #[test]

@@ -495,7 +495,8 @@ dynamic _toolOutputToJson(ToolOutputPart output) => switch (output) {
       'Diff': {'path': path, 'old_text': oldText, 'new_text': newText},
     },
   ToolOutputImage(base64: final base64, mimeType: final mimeType) => {
-    'Image': {'base64': base64, 'mime_type': mimeType},
+    // 线格式由 Rust 的 `AcpImage` 决定（mime / data_b64），别再自造一套键名。
+    'Image': {'mime': mimeType, 'data_b64': base64},
   },
 };
 
@@ -584,11 +585,10 @@ sealed class ToolOutputPart {
       );
     }
     if (json.containsKey('Image')) {
-      final img = json['Image'] as Map<String, dynamic>;
-      return ToolOutputImage(
-        base64: img['base64'] as String? ?? '',
-        mimeType: img['mime_type'] as String? ?? 'image/png',
+      final image = AcpImageData.fromJson(
+        json['Image'] as Map<String, dynamic>,
       );
+      return ToolOutputImage(base64: image.base64, mimeType: image.mimeType);
     }
 
     return ToolOutputText(text: json.toString());

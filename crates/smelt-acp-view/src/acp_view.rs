@@ -1276,6 +1276,10 @@ pub struct AcpView {
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
     rendered_diffs: std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+    /// 工具输出里图片块的解码缓存，与 `rendered_diffs` 同构（按 tool id，下标对齐
+    /// `output`）。流式重绘每帧都会重建元素，不能每帧重跑一次 base64 解码。
+    rendered_tool_images:
+        std::collections::HashMap<String, Vec<Option<std::sync::Arc<gpui::Image>>>>,
     /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
     /// entry 变化时执行，静态重绘直接复用 `SharedString`。
     rendered_markdown: Vec<Option<gpui::SharedString>>,
@@ -1670,6 +1674,7 @@ impl AcpView {
             immediate_cancel_pending: false,
             rendered_images,
             rendered_diffs,
+            rendered_tool_images: std::collections::HashMap::new(),
             rendered_markdown,
             loaded_entries_offset: 0,
             entries_total: initial_entry_count,
@@ -3379,6 +3384,7 @@ impl AcpView {
                 })
             {
                 self.rendered_diffs.remove(id);
+                self.rendered_tool_images.remove(id);
             }
         }
         let new_entries_len = self.entries.len();
@@ -3631,6 +3637,29 @@ impl AcpView {
         }
         let parts = build_diff_parts(output);
         self.rendered_diffs.insert(id, parts);
+    }
+
+    /// 工具输出图片的解码缓存。图片块是最终结果（不会就地变更），形状变了就整条重建。
+    fn ensure_tool_image_cache_for_entry(&mut self, entry_ix: usize) {
+        let Some(AcpEntry::ToolCall { id, output, .. }) = self.entries.get(entry_ix) else {
+            return;
+        };
+        if !output
+            .iter()
+            .any(|part| matches!(part, ToolOutputPart::Image(_)))
+        {
+            return;
+        }
+        let id = id.clone();
+        if self
+            .rendered_tool_images
+            .get(&id)
+            .is_some_and(|parts| tool_image_cache_matches_output(parts, output))
+        {
+            return;
+        }
+        let parts = build_tool_image_parts(output);
+        self.rendered_tool_images.insert(id, parts);
     }
 
     fn tool_card_is_expanded(
@@ -4339,6 +4368,7 @@ fn build_diff_parts(output: &[ToolOutputPart]) -> Vec<Option<CachedDiff>> {
                 })
             }
             ToolOutputPart::Text(_) => None,
+            ToolOutputPart::Image(_) => None,
             ToolOutputPart::Terminal { .. } => None,
         })
         .collect()
@@ -4349,8 +4379,33 @@ fn diff_cache_matches_output(cached: &[Option<CachedDiff>], output: &[ToolOutput
         && cached.iter().zip(output).all(|(cached, part)| {
             matches!(
                 (part, cached),
-                (ToolOutputPart::Diff { .. }, Some(_)) | (ToolOutputPart::Text(_), None)
+                (ToolOutputPart::Diff { .. }, Some(_))
+                    | (ToolOutputPart::Text(_), None)
+                    | (ToolOutputPart::Image(_), None)
+                    | (ToolOutputPart::Terminal { .. }, None)
             )
+        })
+}
+
+/// 工具输出 → 与 `output` 下标对齐的解码图片（非图片块为 None）。
+fn build_tool_image_parts(output: &[ToolOutputPart]) -> Vec<Option<std::sync::Arc<gpui::Image>>> {
+    output
+        .iter()
+        .map(|part| match part {
+            ToolOutputPart::Image(image) => decode_acp_image(image),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_image_cache_matches_output(
+    cached: &[Option<std::sync::Arc<gpui::Image>>],
+    output: &[ToolOutputPart],
+) -> bool {
+    cached.len() == output.len()
+        && cached.iter().zip(output).all(|(cached, part)| {
+            // 解码失败的图片块缓存为 None，所以只校验「非图片块一定是 None」。
+            matches!(part, ToolOutputPart::Image(_)) || cached.is_none()
         })
 }
 
@@ -4787,6 +4842,7 @@ fn tool_output_has_content(output: &[ToolOutputPart]) -> bool {
     output.iter().any(|part| match part {
         ToolOutputPart::Text(text) => !strip_code_fence(text).trim().is_empty(),
         ToolOutputPart::Diff { .. } => true,
+        ToolOutputPart::Image(_) => true,
         ToolOutputPart::Terminal { .. } => true,
     })
 }
@@ -4809,6 +4865,7 @@ fn tool_result_summary(
         .filter_map(|part| match part {
             ToolOutputPart::Text(text) => Some(strip_code_fence(text)),
             ToolOutputPart::Diff { .. } => None,
+            ToolOutputPart::Image(_) => None,
             ToolOutputPart::Terminal { output, .. } => Some(output.as_str()),
         })
         .flat_map(str::lines)
