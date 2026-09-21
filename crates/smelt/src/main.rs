@@ -61,7 +61,7 @@ pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::{
     WorkspaceLoad, WorkspaceSnapshotWriteQueue, load_ws_state, normalize_saved_sessions,
-    unproject_acp_when_remote_catalog_drops,
+    pending_restore_session_ids, unproject_acp_when_remote_catalog_drops,
 };
 #[cfg(test)]
 pub(crate) use workspace_persist::{WsState, merge_restore_pending, persisted_active_position};
@@ -2089,7 +2089,7 @@ fn restored_active_position(restored_indices: &[usize], saved_active: usize) -> 
         .unwrap_or_else(|position| position.min(restored_indices.len() - 1))
 }
 
-fn pane_state_leaf_ids(pane: &PaneState) -> Vec<String> {
+pub(crate) fn pane_state_leaf_ids(pane: &PaneState) -> Vec<String> {
     match pane {
         PaneState::Leaf { id, .. } => id
             .as_deref()
@@ -3348,9 +3348,12 @@ impl Workspace {
                 SessionKind::Term { .. } => None,
             })
             .collect::<HashSet<_>>();
+        // 正在恢复的存档会话已经拿了这些 id，只是还没插进 `sessions`。不计进来就会
+        // 把同一场对话再投影一份，两个视图抢同一个 smeltd 会话。
+        let pending = crate::pending_restore_session_ids(&self.restore_pending);
         let mut changed = false;
         for (record, agent) in records {
-            if existing.contains(&record.id) {
+            if existing.contains(&record.id) || pending.contains(&record.id) {
                 continue;
             }
             if !record.is_visible()
@@ -3496,8 +3499,10 @@ impl Workspace {
                 SessionKind::Conversation(_) => None,
             })
             .collect::<HashSet<_>>();
+        // 和 ACP 那边同理：存档里还在排队恢复的终端也已经报了这些 id。
+        let pending_restore = crate::pending_restore_session_ids(&self.restore_pending);
         for record in records {
-            if existing.contains(&record.id) {
+            if existing.contains(&record.id) || pending_restore.contains(&record.id) {
                 continue;
             }
             if record.lifecycle != smelt_core::session_control::RemoteSessionLifecycle::Active {

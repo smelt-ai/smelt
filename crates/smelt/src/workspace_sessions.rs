@@ -421,6 +421,10 @@ impl Workspace {
                     })
                     .detach();
                 }
+                // 恢复落定后再对一次远程目录：恢复期间我们故意跳过了还在排队的 id，
+                // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
+                // 不能干等下一次目录推送。
+                this.reconcile_remote_catalog_projection(window, cx);
                 cx.notify();
             });
         })

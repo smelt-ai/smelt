@@ -123,6 +123,29 @@ pub(crate) fn unproject_acp_when_remote_catalog_drops(
     remote_owned && auto_projected_background
 }
 
+/// 还没落地的恢复会话占着哪些 smeltd 会话 id。
+///
+/// 启动时远程目录先到、存档恢复后到（恢复要等 managed daemon 就绪）。只看已经建
+/// 好的 `sessions` 会把“正在恢复的那一个”当成缺失，把同一场对话再投影一份；两个
+/// 视图随后互抢同一个 ACP 会话的 client，表现就是侧栏里两条一模一样的会话、切过去
+/// 反复断开重连。
+pub(crate) fn pending_restore_session_ids(
+    pending: &[(usize, SessionState)],
+) -> std::collections::HashSet<String> {
+    pending
+        .iter()
+        .flat_map(|(_, state)| {
+            state
+                .acp
+                .as_ref()
+                .and_then(|acp| acp.sid.clone())
+                .into_iter()
+                .chain(crate::pane_state_leaf_ids(&state.layout))
+        })
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 pub(crate) fn merge_restore_pending(
     mut sessions: Vec<SessionState>,
     pending: &[(usize, SessionState)],
@@ -189,7 +212,7 @@ fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
 /// 把存档里的会话列表规范成 `Vec<SessionState>`（兼容旧 layout / tabs 字段）。
 pub(crate) fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
     let legacy_route = legacy_route_from_workspace(s);
-    let (mut sessions, active_session) = if !s.sessions.is_empty() {
+    let (mut sessions, mut active_session) = if !s.sessions.is_empty() {
         let mut sessions = s.sessions.clone();
         for session in &mut sessions {
             // 旧版 route 尚未按会话持久化时，顶层字段只作为迁移来源使用一次。
@@ -267,7 +290,47 @@ pub(crate) fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize
         });
     }
 
-    (sessions, active_session)
+    (
+        dedupe_saved_sessions(sessions, &mut active_session),
+        active_session,
+    )
+}
+
+/// 同一个 smeltd 会话 id 在存档里只能有一条。
+///
+/// 历史上的启动竞态（远程目录先到、存档恢复后到）会把同一场对话写成两条。它们
+/// 会各自去 attach 同一个 ACP 会话、互相顶掉对方的 client，用户看到的就是侧栏里两
+/// 条一模一样的会话、切过去反复断开重连。产生竞态的路径已经堵住，这里负责把已经
+/// 写脏的存档在读取时收敛回来。
+fn dedupe_saved_sessions(
+    sessions: Vec<SessionState>,
+    active_session: &mut usize,
+) -> Vec<SessionState> {
+    let saved_active = *active_session;
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut kept: Vec<SessionState> = Vec::with_capacity(sessions.len());
+    for (old_ix, session) in sessions.into_iter().enumerate() {
+        let sid = session
+            .acp
+            .as_ref()
+            .and_then(|acp| acp.sid.clone())
+            .filter(|sid| !sid.is_empty());
+        if let Some(sid) = sid {
+            if let Some(&kept_ix) = seen.get(&sid) {
+                // 被丢掉的那条和保留的那条是同一场会话：当时停在它上面就改停在双胞胎上，
+                // 而不是随便滑到邻居。
+                if old_ix == saved_active {
+                    *active_session = kept_ix;
+                } else if old_ix < saved_active {
+                    *active_session = active_session.saturating_sub(1);
+                }
+                continue;
+            }
+            seen.insert(sid, kept.len());
+        }
+        kept.push(session);
+    }
+    kept
 }
 
 /// 把旧 workspace.json 的工作区级右侧栏状态投影为单个会话的 route。
