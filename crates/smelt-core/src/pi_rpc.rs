@@ -769,7 +769,12 @@ where
         )
         .await?;
         if let Some(messages) = response_data(&response)?["messages"].as_array() {
-            replay_messages(messages, event_tx, state);
+            crate::app_log::info(
+                "pi-rpc",
+                &format!("会话 {} 开始重放 {} 条历史消息", launch.sid, messages.len()),
+            );
+            replay_history(messages, event_tx, state);
+            crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
         }
     }
 
@@ -794,6 +799,13 @@ where
         },
         supports_image: true,
     });
+    crate::app_log::info(
+        "pi-rpc",
+        &format!(
+            "会话 {} 握手完成，已发出 Ready（resumed={resumed}）",
+            launch.sid
+        ),
+    );
     Ok(())
 }
 
@@ -815,6 +827,11 @@ where
 {
     command["id"] = serde_json::Value::String(id.to_string());
     write_rpc(writer, &command).await?;
+    let started = std::time::Instant::now();
+    // 握手每一步都留痕。超时由外层的 `PI_RPC_HANDSHAKE_TIMEOUT` 统一看着，这里不再
+    // 叠一层；但得能从日志里看出「哪一步、多久、其间收了多少事件」，否则一旦
+    // 会话停在 Connecting，现场除了「卡着」之外没有任何可观测信息。
+    let mut events = 0usize;
     loop {
         enum Wait {
             Line(Option<std::io::Result<String>>),
@@ -832,9 +849,18 @@ where
                 if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
                     if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
                         ensure_response_success(&value)?;
+                        crate::app_log::info(
+                            "pi-rpc",
+                            &format!(
+                                "会话 {} 握手 {id} 用时 {:?}（其间 {events} 条事件）",
+                                launch.sid,
+                                started.elapsed()
+                            ),
+                        );
                         return Ok(value);
                     }
                 } else {
+                    events += 1;
                     handle_event(value, event_tx, outbound_tx, state, launch);
                 }
             }
@@ -2590,6 +2616,17 @@ fn text_looks_like_diff(text: &str) -> bool {
             .any(|line| line.starts_with("+++ ") || line.starts_with("--- "))
 }
 
+/// 全量重放 + 显式收尾。pi 是先把 `get_messages` 重放完再握手，边界在这里就确定了；
+/// 不发结束信号的话，恢复后只要用户不再发消息，`replaying_history` 就一直挂着。
+fn replay_history(
+    messages: &[serde_json::Value],
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+) {
+    replay_messages(messages, event_tx, state);
+    let _ = event_tx.try_send(ConversationEvent::HistoryReplayFinished);
+}
+
 fn replay_messages(
     messages: &[serde_json::Value],
     event_tx: &smol::channel::Sender<ConversationEvent>,
@@ -3323,6 +3360,30 @@ mod tests {
         assert_eq!(request["images"][0]["mimeType"], "image/png");
         assert_eq!(request["images"][0]["data"], "aGVsbG8=");
         assert!(state.active_turn);
+    }
+
+    /// 重放必须以显式的结束信号收尾。没有它时，`replaying_history` 只能等「下一条
+    /// prompt」才复位，恢复后就闲置的会话会永远挂在「重放中」。
+    #[test]
+    fn history_replay_ends_with_an_explicit_finished_event() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+
+        replay_history(
+            &[serde_json::json!({"role": "user", "content": "旧问题"})],
+            &event_tx,
+            &mut state,
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::UserChunk(text)) if text == "旧问题"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::HistoryReplayFinished)
+        ));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

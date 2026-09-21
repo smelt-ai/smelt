@@ -123,6 +123,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::HistoryReplayStarted => {
             apply_history_replay_started(state, &mut outcome)
         }
+        ConversationEvent::HistoryReplayFinished => state.replaying_history = false,
         ConversationEvent::RestoreFailed(failure) => apply_restore_failed(state, failure),
         ConversationEvent::UserChunk(text) => apply_user_chunk(state, &mut outcome, text),
         ConversationEvent::UserImage(image) => apply_user_image(state, &mut outcome, image),

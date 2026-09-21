@@ -2016,6 +2016,7 @@ fn main() {
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘——StageDiskOnly
     // 后磁盘是新的、进程还是老的，重哈希会拿错插件集（与 -67034 同一类耦合）。
     let daemon_fingerprint = pinned_daemon_fingerprint(handoff_plugin_daemon_fingerprint);
+    let _ = PINNED_DAEMON_FINGERPRINT.set(daemon_fingerprint.clone());
     if let Some(sock_fd) = import_sock {
         import_main(sock_fd, daemon_fingerprint);
         return;
@@ -2358,6 +2359,31 @@ fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
         return SelfUpgradeOutcome::Failed(format!("读回包失败：{error}"));
     }
     classify_self_upgrade_reply(&reply)
+}
+
+/// 本进程运行映像的指纹。启动时钉死一次，`spawn` session host 前要拿它跟磁盘
+/// 上的二进制比对——两者不一致时 spawn 出来的 host 会是另一个版本，双方的快照
+/// schema 未必兼容（`acp_runtime_host` 的镜像 reader 会因此断开）。
+static PINNED_DAEMON_FINGERPRINT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// 磁盘上的守护二进制是否已经跟本进程运行的映像不是同一份。
+///
+/// `make install` / 在线更新会先把新二进制 stage 到磁盘、等守护空闲再 handoff；
+/// 这个窗口里新 spawn 的 session host 用的是磁盘上的新版，而主 daemon 还是旧版。
+pub(crate) fn daemon_image_is_stale() -> Option<std::path::PathBuf> {
+    let pinned = PINNED_DAEMON_FINGERPRINT.get()?.as_deref()?;
+    let target = daemon_executable_path().ok()?;
+    let disk = smelt_plugin_host::executable_fingerprint(&target).ok()?;
+    (disk != pinned).then_some(target)
+}
+
+/// 对自己发一次 upgrade（供 `acp_host` 在开新会话前消除版本错配用）。
+pub(crate) fn upgrade_self_for_stale_image(target: &std::path::Path) -> String {
+    match request_self_upgrade(target) {
+        SelfUpgradeOutcome::Upgraded => "已升级".to_string(),
+        SelfUpgradeOutcome::Busy(reason) => format!("busy：{reason}"),
+        SelfUpgradeOutcome::Failed(reason) => format!("失败：{reason}"),
+    }
 }
 
 /// 服务主循环：远端自愈→bun→插件→accept（+macOS 菜单栏主线程编排）。

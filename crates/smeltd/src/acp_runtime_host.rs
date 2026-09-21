@@ -200,8 +200,21 @@ fn start_snapshot_reader(
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
-                let Ok(parsed) = serde_json::from_str::<HostedSnapshotLine>(line.trim()) else {
-                    continue;
+                let parsed = match serde_json::from_str::<HostedSnapshotLine>(line.trim()) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        // 快照解析失败几乎只有一个原因：host 与主 daemon 不同版本，快照 schema
+                        // 对不上（比如 host 发了新增的 enum 变体）。这不是瞬时错误，不会自愈；
+                        // 旧实现在这里 `continue`，结果是主 daemon（进而 GUI）的镜像永久冻在
+                        // 最后一份可解析的快照上，且没有任何日志——会话看起来「只恢复了一半」
+                        // 并永远停在「正在建立连接」。宁可断开镜像让上层落成可重连的终态，
+                        // 也不能静默冻结。
+                        crate::dlog(&format!(
+                            "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
+                            line.len()
+                        ));
+                        break;
+                    }
                 };
                 let live_provider_pid = parsed.provider_pid.filter(|pid| *pid > 1);
                 // None 也是事实：provider 已被宿主收尸后必须清掉旧 pid，避免该
@@ -327,5 +340,42 @@ pub(crate) fn run_session_host() {
     for (_, slot) in acp_sessions.snapshot() {
         let _lifecycle = slot.lifecycle.lock().unwrap();
         let _ = retire_acp_runtime(&slot.value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// 回归：host 与主 daemon 版本不一致时，快照 JSON 会解析失败。旧实现在这里
+    /// 静默 `continue`，主 daemon 的镜像就永久冻结在最后一份可解析的快照上——
+    /// 会话表现为「只恢复了一部分、永远停在正在建立连接」，且没有任何日志。
+    /// 现在必须断开镜像，让上层落成可重连的终态。
+    #[test]
+    fn unparsable_snapshot_line_disconnects_the_mirror() {
+        let (host_side, daemon_side) = UnixStream::pair().unwrap();
+        let rx = start_snapshot_reader(daemon_side, Arc::new(AtomicI32::new(0))).unwrap();
+
+        let mut host_side = host_side;
+        // schema 对不上的一行（新版 host 发了旧版 daemon 不认识的变体）。
+        host_side
+            .write_all(b"{\"snapshot\":{\"entries\":[{\"ToolCall\":{\"output\":[{\"NewVariant\":{}}]}}]}}\n")
+            .unwrap();
+        host_side.flush().unwrap();
+
+        assert!(
+            smol::block_on(smol::future::race(
+                async { rx.recv().await.map(|_| ()) },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                    // 旧实现静默 `continue`，channel 永远不关，这里会走到超时分支；
+                    // 用 Ok(()) 让断言失败，而不是把测试挂死。
+                    Ok(())
+                },
+            ))
+            .is_err(),
+            "解析不了的快照必须断开镜像，不能静默丢弃"
+        );
     }
 }

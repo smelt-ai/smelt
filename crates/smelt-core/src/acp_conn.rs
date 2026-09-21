@@ -295,6 +295,12 @@ pub enum ConversationEvent {
     /// 冷恢复即将由 agent 重放完整历史。必须先清空 daemon 中的旧投影；Ready
     /// 到达时历史可能已经同步回放完，不能再在那里清空。
     HistoryReplayStarted,
+    /// 重放确实结束。只有能判定边界的 provider 才发（pi 是先把
+    /// `get_messages` 全量重放完再握手）；ACP 的 `session/load` 在 Ready 之后仍可能
+    /// 继续推历史，那条路径继续由「下一条 prompt」兜底。没有这个信号时，
+    /// 用户恢复后只要不发消息，`replaying_history` 就会一直挂着 true，
+    /// 把「是否有活跃回合」、「是否在执行工具」和 GUI 的列表高度提示全部拖成失真。
+    HistoryReplayFinished,
     /// `session/load` 失败。smeltd 的恢复 supervisor 根据失败类型和本地投影
     /// 决定是否重试、报错或降级为 `session/new`。
     RestoreFailed(ConversationRestoreFailure),

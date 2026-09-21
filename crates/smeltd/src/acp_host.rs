@@ -503,6 +503,13 @@ pub(crate) fn push_acp_snapshot_since(
         if client.enqueue(&payload) {
             out.client = Some(client);
         } else {
+            // 邮箱超限或已关闭。对 session host 来说，这条 client 就是主 daemon 的镜像
+            // 通道，摘掉它等于主 daemon（进而 GUI）的状态永久冻结，必须留痕。
+            crate::dlog(&format!(
+                "acp 快照入队失败，摘掉 client fd={} payload={} 字节",
+                client.fd,
+                payload.len()
+            ));
             client.close();
         }
     }
@@ -511,6 +518,7 @@ pub(crate) fn push_acp_snapshot_since(
         if watcher.enqueue(&payload) {
             live_watchers.push(watcher);
         } else {
+            crate::dlog(&format!("acp 快照入队失败，摘掉 watcher fd={}", watcher.fd));
             watcher.close();
         }
     }
@@ -676,6 +684,22 @@ pub(crate) fn settle_acp_turn_locked(
     }
 }
 
+/// drain 日志用的事件名。只取判别式名字，不带负载——日志不该把整段历史或图片
+/// base64 打进去。
+fn acp_event_name(event: &smelt_core::acp_conn::ConversationEvent) -> &'static str {
+    use smelt_core::acp_conn::ConversationEvent as E;
+    match event {
+        E::Ready { .. } => "Ready",
+        E::Status(_) => "Status",
+        E::HistoryReplayStarted => "HistoryReplayStarted",
+        E::HistoryReplayFinished => "HistoryReplayFinished",
+        E::RestoreFailed(_) => "RestoreFailed",
+        E::Fatal(_) => "Fatal",
+        E::TurnEnded(_) => "TurnEnded",
+        _ => "其它",
+    }
+}
+
 /// 事件 drain：整个会话生命周期只有这一条线程在改 `reduced`（`apply_acp_user_action`
 /// 里权限/选择题相关的写也在这条线程外发生，但两边改的是不相交的字段/走
 /// 互斥锁，不会踩踏）。通道关闭（连接线程收尾）就退出；如果退出时相位还不是
@@ -698,6 +722,15 @@ pub(crate) fn start_acp_event_drain(
             while let Ok(ev) = event_rx.recv().await {
                 let _turn_completion = sess.turn_completion.lock().unwrap();
                 if sess.connection_generation.load(Ordering::SeqCst) != generation {
+                    // 这条连接已被换掉，剩下的事件不能再改新连接的状态。但被丢掉的
+                    // 若是 Ready，会话就会一直停在 Connecting——必须留痕，否则现场
+                    // 只看得到「卡着」。
+                    crate::dlog(&format!(
+                        "acp drain 代数失配退出 id={session_id} gen={generation} \
+                         current={} 丢弃事件={}",
+                        sess.connection_generation.load(Ordering::SeqCst),
+                        acp_event_name(&ev),
+                    ));
                     break;
                 }
                 let turn_ended = ev.ends_turn();
@@ -723,6 +756,9 @@ pub(crate) fn start_acp_event_drain(
                         ..
                     }
                 ) {
+                    crate::dlog(&format!(
+                        "acp drain 收到恢复 Ready id={session_id} gen={generation}"
+                    ));
                     let history_id = sess.reduced.lock().unwrap().history_session_id.clone();
                     sess.restore_state
                         .lock()
@@ -829,6 +865,10 @@ pub(crate) fn start_hosted_snapshot_drain(
         smol::block_on(async {
             while let Ok(envelope) = snapshot_rx.recv().await {
                 if sess.connection_generation.load(Ordering::SeqCst) != generation {
+                    crate::dlog(&format!(
+                        "acp 镜像 drain 代数失配退出 id={session_id} gen={generation} current={}",
+                        sess.connection_generation.load(Ordering::SeqCst)
+                    ));
                     break;
                 }
                 let _provider_pid = envelope.provider_pid;
@@ -836,6 +876,9 @@ pub(crate) fn start_hosted_snapshot_drain(
                 let revision = snapshot.snapshot_revision;
                 let seen = sess.host_snapshot_revision.load(Ordering::SeqCst);
                 if revision != 0 && revision <= seen {
+                    crate::dlog(&format!(
+                        "acp 镜像丢弃旧快照 id={session_id} rev={revision} seen={seen}"
+                    ));
                     continue;
                 }
 
@@ -844,6 +887,13 @@ pub(crate) fn start_hosted_snapshot_drain(
                     && revision != 0
                     && revision > seen.saturating_add(1);
                 if (awaiting_full_snapshot || incremental_gap) && snapshot.entries_offset != 0 {
+                    // 进入等全量状态后，只有 offset=0 的快照能再把镜像推动。全量那份若
+                    // 没如约到达，镜像就永久冻在这里，而 host 内部一切正常——必须留痕。
+                    crate::dlog(&format!(
+                        "acp 镜像等全量快照 id={session_id} rev={revision} seen={seen} \
+                         offset={} gap={incremental_gap} awaiting={awaiting_full_snapshot}",
+                        snapshot.entries_offset,
+                    ));
                     if !awaiting_full_snapshot {
                         awaiting_full_snapshot = true;
                         let request_ok = sess
@@ -853,6 +903,9 @@ pub(crate) fn start_hosted_snapshot_drain(
                             .as_ref()
                             .is_some_and(|host| host.request_full_snapshot().is_ok());
                         if !request_ok {
+                            crate::dlog(&format!(
+                                "acp 镜像请求全量快照失败，drain 退出 id={session_id}"
+                            ));
                             break;
                         }
                     }
@@ -964,6 +1017,9 @@ pub(crate) fn acp_relaunch(
         // 每次换连接都推进代数。旧 drain 即使随后才看到 event_rx 关闭，也不能
         // 把新连接的 handle/Starting 状态清掉。
         let generation = sess.connection_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        crate::dlog(&format!(
+            "acp relaunch id={id} gen={generation} resume={resume_id:?} fork={fork_id:?}"
+        ));
         let restore_policy = {
             let mut reduced = sess.reduced.lock().unwrap();
             let previous_history_session_id = reduced.history_session_id.clone();
@@ -1021,6 +1077,16 @@ pub(crate) fn acp_relaunch(
     if acp_sessions.spawn_policy() == acp_registry::AcpSpawnPolicy::HostedProcess
         && !acp_runtime_host::is_session_host_process()
     {
+        // 磁盘二进制已经是新版、主 daemon 还是旧映像时，直接 spawn 会得到一个跟自己
+        // 不同版本的 host，双方的快照 schema 未必兼容（真出过：host 发新增的 enum
+        // 变体，主 daemon 解析不了，镜像永久冻结）。开新会话正是打断代价最小的升级
+        // 时机，这里不再等 headless 自升级的「GUI 空闲」条件。
+        if let Some(target) = crate::daemon_image_is_stale() {
+            let outcome = crate::upgrade_self_for_stale_image(&target);
+            crate::dlog(&format!(
+                "acp 开会话前发现守护映像落后，先自升级：{outcome}（id={id}）"
+            ));
+        }
         let seed_snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
         let initial_open = serde_json::json!({
             "op": "acp_open",
