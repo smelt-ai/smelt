@@ -22,7 +22,6 @@ pub enum SettingsSection {
     AgentWorkspace,
     AgentNotify,
     AgentHooks,
-    Worktree,
     CollaborationRemote,
     /// `id` 为空表示插件清单还没就绪或尚未安装任何插件。
     Plugin {
@@ -56,7 +55,6 @@ impl SettingsSection {
             Self::AgentWorkspace => "agent-workspace".into(),
             Self::AgentNotify => "agent-notify".into(),
             Self::AgentHooks => "agent-hooks".into(),
-            Self::Worktree => "worktree".into(),
             Self::CollaborationRemote => "collaboration-remote".into(),
             Self::Plugin { id } => format!("plugin:{id}").into(),
             Self::MaintenanceUpdate => "maintenance-update".into(),
@@ -409,48 +407,28 @@ pub fn settings_nav(plugins: &[InstalledPlugin]) -> Vec<SettingsNavCategory> {
             title: "工作区与远程",
             keywords: &["项目"],
             default_open: true,
-            children: vec![
-                leaf(
-                    "Worktree 文件继承",
-                    IconName::FolderOpen,
-                    SettingsSection::Worktree,
-                    &[
-                        "worktree",
-                        "工作区",
-                        "文件继承",
-                        "继承主仓库未跟踪文件",
-                        "继承",
-                        "未跟踪",
-                        "gitignore",
-                        ".env",
-                        "软链",
-                        "跳过",
-                        "排除",
-                    ],
-                ),
-                leaf(
-                    "手机远程",
-                    IconName::Globe,
-                    SettingsSection::CollaborationRemote,
-                    &[
-                        "远程访问",
-                        "开启远程",
-                        "Relay 地址",
-                        "允许远程写入",
-                        "远程",
-                        "手机",
-                        "移动端",
-                        "配对",
-                        "二维码",
-                        "token",
-                        "iroh",
-                        "relay",
-                        "分享",
-                        "只读",
-                        "写入",
-                    ],
-                ),
-            ],
+            children: vec![leaf(
+                "手机远程",
+                IconName::Globe,
+                SettingsSection::CollaborationRemote,
+                &[
+                    "远程访问",
+                    "开启远程",
+                    "Relay 地址",
+                    "允许远程写入",
+                    "远程",
+                    "手机",
+                    "移动端",
+                    "配对",
+                    "二维码",
+                    "token",
+                    "iroh",
+                    "relay",
+                    "分享",
+                    "只读",
+                    "写入",
+                ],
+            )],
         },
         plugin_category(plugins),
         SettingsNavCategory {
@@ -708,7 +686,7 @@ mod tests {
         );
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::Workspace),
-            ["Worktree 文件继承", "手机远程"]
+            ["手机远程"]
         );
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::System),
@@ -878,7 +856,6 @@ mod tests {
 
         for (query, expected) in [
             ("任务完成通知", SettingsSection::AgentNotify),
-            ("继承主仓库未跟踪文件", SettingsSection::Worktree),
             ("Relay 地址", SettingsSection::CollaborationRemote),
             ("自动下载安装", SettingsSection::MaintenanceUpdate),
         ] {
@@ -922,10 +899,9 @@ mod tests {
             .map(|child| child.section.clone())
             .collect::<Vec<_>>();
 
-        assert_eq!(visible_destinations.len(), 16);
+        assert_eq!(visible_destinations.len(), 15);
         assert!(visible_destinations.contains(&SettingsSection::DshModel));
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
-        assert!(visible_destinations.contains(&SettingsSection::Worktree));
     }
 
     #[test]

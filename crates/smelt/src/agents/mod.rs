@@ -247,6 +247,11 @@ fn ensure_agent_conversation_cwd(agent_definition_id: &str) -> Option<String> {
     Some(dir.to_string_lossy().into_owned())
 }
 
+fn ensure_workbench_conversation_cwd() -> Option<String> {
+    let dir = smelt_core::agent_definition_store::ensure_workbench_conversation_workspace()?;
+    Some(dir.to_string_lossy().into_owned())
+}
+
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。
 ///
 /// 空闲选中如果再走 accent 蓝，就会和运行中撞色——选中那条永远看不出在不在跑。

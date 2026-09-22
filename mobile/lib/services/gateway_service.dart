@@ -510,6 +510,34 @@ class LaunchAction {
   }
 }
 
+/// 一条已加载的技能。名字 + 一句话描述，和桌面输入栏的技能弹层同一份数据。
+class SessionSkill {
+  final String name;
+  final String description;
+
+  const SessionSkill({required this.name, this.description = ''});
+
+  factory SessionSkill.fromJson(Map<String, dynamic> json) => SessionSkill(
+    name: json['name'] as String? ?? '',
+    description: json['description'] as String? ?? '',
+  );
+}
+
+/// `listSessionSkills` 的应答。[supported] = 这场对话的引擎根本有「技能」这个概念
+/// （目前只有 Pi），或者电脑端版本太旧。不支持时界面不画入口，而不是画一个永远
+/// 空的列表。
+class SessionSkills {
+  final String sessionId;
+  final bool supported;
+  final List<SessionSkill> skills;
+
+  const SessionSkills({
+    required this.sessionId,
+    required this.supported,
+    this.skills = const [],
+  });
+}
+
 class WorkspaceCatalog {
   final List<WorkspaceProject> projects;
   final List<AcpAgentOption> agents;
@@ -728,6 +756,11 @@ class GatewayService {
   bool _pingSupported = true;
   bool _hasPongLatency = false;
   int? _pendingPingSentAt;
+
+  /// 旧桌面不认识 `listSessionSkills`，只会回一句 `invalid request`。碰一次就不再问，
+  /// 也不把它当作会话错误弹给用户——该升级的是电脑端，不是这场对话出了问题。
+  bool _sessionSkillsSupported = true;
+  int _pendingSkillsRequests = 0;
   Future<void> _messageQueue = Future.value();
 
   static const int _maxCachedSessions = 5;
@@ -759,6 +792,7 @@ class GatewayService {
       StreamController<AutomationCatalog>.broadcast();
   final _sessionHistoryController =
       StreamController<SessionHistoryResult>.broadcast();
+  final _sessionSkillsController = StreamController<SessionSkills>.broadcast();
   final _sessionHistoryRenameController =
       StreamController<SessionHistoryRenameResult>.broadcast();
   final _sessionCreatedController = StreamController<String>.broadcast();
@@ -791,6 +825,10 @@ class GatewayService {
 
   Stream<SessionHistoryResult> get sessionHistoryStream =>
       _sessionHistoryController.stream;
+
+  /// 会话已加载技能的应答。按需发问，不跟快照推：算它要在电脑那边扫磁盘。
+  Stream<SessionSkills> get sessionSkillsStream =>
+      _sessionSkillsController.stream;
 
   Stream<SessionHistoryRenameResult> get sessionHistoryRenameStream =>
       _sessionHistoryRenameController.stream;
@@ -1347,6 +1385,25 @@ class GatewayService {
     });
   }
 
+  /// 问一次这场对话加载了哪些技能。旧桌面不支持时直接当作「没有这个能力」，
+  /// 由调用方决定不画入口。
+  void listSessionSkills(String sessionId) {
+    if (!_sessionSkillsSupported) {
+      _sessionSkillsController.add(
+        SessionSkills(sessionId: sessionId, supported: false),
+      );
+      return;
+    }
+    // 没连上就不计数：`_send` 会默默丢掉这条请求，留下的 pending 会把后续别人的
+    // `invalid request` 误当成「技能不支持」。重连后由会话页再问一次。
+    if (_state != WsState.connected) return;
+    _pendingSkillsRequests += 1;
+    _send({
+      'method': 'listSessionSkills',
+      'params': {'sessionId': sessionId},
+    });
+  }
+
   /// 响应权限请求
   void respondApproval(
     String sessionId,
@@ -1436,6 +1493,9 @@ class GatewayService {
     _pingSupported = true;
     _hasPongLatency = false;
     _pendingPingSentAt = null;
+    // 重连可能接到另一台（或已升级的）电脑，能力判定跟着连接重算。
+    _sessionSkillsSupported = true;
+    _pendingSkillsRequests = 0;
     _sampleMetrics();
     _metricsTimer = Timer.periodic(metricsInterval, (_) => _sampleMetrics());
   }
@@ -1611,6 +1671,19 @@ class GatewayService {
           );
           _automationCatalogController.add(_lastAutomationCatalog!);
 
+        case 'sessionSkills':
+          if (_pendingSkillsRequests > 0) _pendingSkillsRequests -= 1;
+          _sessionSkillsController.add(
+            SessionSkills(
+              sessionId: json['sessionId'] as String? ?? '',
+              supported: json['supported'] as bool? ?? false,
+              skills: (json['skills'] as List<dynamic>? ?? const [])
+                  .whereType<Map<String, dynamic>>()
+                  .map(SessionSkill.fromJson)
+                  .toList(),
+            ),
+          );
+
         case 'sessionHistory':
           _sessionHistoryController.add(
             SessionHistoryResult(
@@ -1717,6 +1790,16 @@ class GatewayService {
             _pingSupported = false;
             _pendingPingSentAt = null;
             _hasPongLatency = false;
+            break;
+          }
+          if (error == 'invalid request' && _pendingSkillsRequests > 0) {
+            // 同理：旧桌面还没有 `listSessionSkills`。告诉界面「没这能力」，它会把
+            // 技能入口收起来，而不是报一个用户无法处理的错误。
+            _sessionSkillsSupported = false;
+            _pendingSkillsRequests = 0;
+            _sessionSkillsController.add(
+              const SessionSkills(sessionId: '', supported: false),
+            );
             break;
           }
           final sessionId = _subscribedSessionId;
@@ -1868,6 +1951,7 @@ class GatewayService {
     _workspaceController.close();
     _automationCatalogController.close();
     _sessionHistoryController.close();
+    _sessionSkillsController.close();
     _sessionHistoryRenameController.close();
     _sessionCreatedController.close();
     _sessionDeletedController.close();

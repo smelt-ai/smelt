@@ -345,6 +345,50 @@ impl AcpView {
                     .child(model_label)
                     .into_any_element()
             };
+            let skills_control = (self.agent == ConversationAgentKind::Pi).then(|| {
+                let skills = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
+                    &self.launch,
+                    self.cwd.as_deref().map(std::path::Path::new),
+                );
+                let count = skills.len();
+                Button::new("acp-skills-pill")
+                    .ghost()
+                    .small()
+                    .rounded(ButtonRounded::Size(px(16.)))
+                    .dropdown_caret(true)
+                    .label(format!("技能 {count}"))
+                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .hover(|d| d.bg(ui_theme::overlay(0x28)))
+                    .dropdown_menu_with_anchor(
+                        gpui::Anchor::BottomLeft,
+                        move |mut menu, _window, _cx| {
+                            if skills.is_empty() {
+                                return menu.item(PopupMenuItem::label("这场对话没有加载技能"));
+                            }
+                            menu = menu.item(PopupMenuItem::label("已加载的技能"));
+                            for skill in &skills {
+                                let label = if skill.description.is_empty() {
+                                    skill.name.clone()
+                                } else {
+                                    let desc = skill
+                                        .description
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    let desc = if desc.chars().count() > 36 {
+                                        format!("{}…", desc.chars().take(36).collect::<String>())
+                                    } else {
+                                        desc
+                                    };
+                                    format!("{} · {desc}", skill.name)
+                                };
+                                menu = menu.item(PopupMenuItem::new(label).disabled(true));
+                            }
+                            menu
+                        },
+                    )
+                    .into_any_element()
+            });
             let composer_border = if focused {
                 ui_theme::tint(ui_theme::accent(), 0x66)
             } else {
@@ -360,10 +404,22 @@ impl AcpView {
                 .shadow_sm()
                 .child(
                     div()
+                        .id("acp-composer-input")
                         .px_4()
                         .pt_3()
                         .pb_1()
                         .min_h(px(52.))
+                        .when(
+                            self.supports_native_queue && self.is_visibly_running(),
+                            |box_| {
+                                box_.tooltip(|window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(
+                                        composer_native_queue_shortcut_hint(),
+                                    )
+                                    .build(window, cx)
+                                })
+                            },
+                        )
                         .child(Textarea::new(input).appearance(false)),
                 )
                 .when(
@@ -682,6 +738,7 @@ impl AcpView {
                                 .gap_2()
                                 .items_center()
                                 .child(model_control)
+                                .children(skills_control)
                                 .children(next_turn_notice.as_ref().map(|label| {
                                     div()
                                         .flex_shrink_0()
@@ -689,17 +746,30 @@ impl AcpView {
                                         .text_color(gpui::rgb(ui_theme::yellow()))
                                         .child(label.clone())
                                 }))
-                                .when(
-                                    self.supports_native_queue && self.is_visibly_running(),
-                                    |row| {
-                                        row.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .text_color(gpui::rgb(ui_theme::text_faint()))
-                                                .child(composer_native_queue_shortcut_hint()),
+                                .child(
+                                    div()
+                                        .id("acp-trajectory")
+                                        .flex_shrink_0()
+                                        .size(px(18.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.))
+                                        .cursor_pointer()
+                                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                                        .hover(|d| d.bg(ui_theme::overlay(0x22)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("轨迹")
+                                                .build(window, cx)
+                                        })
+                                        .child(
+                                            Icon::empty()
+                                                .path("smelt-icons/git-commit.svg")
+                                                .size(px(16.)),
                                         )
-                                    },
+                                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                                            this.open_trajectory_window(cx);
+                                        })),
                                 )
                                 .when(self.compacting || self.usage.is_some(), |row| {
                                     let ring_color: gpui::Hsla = gpui::rgb(usage_color).into();

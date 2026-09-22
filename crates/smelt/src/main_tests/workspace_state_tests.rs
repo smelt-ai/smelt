@@ -268,6 +268,69 @@ mod restore_order_tests {
         assert!(should_auto_resume_active_acp(true));
     }
 
+    /// 存档里出现两条指向同一个 smeltd 会话的记录时，读档就要收敛掉：它们会
+    /// 各自 attach 同一个 ACP 会话、互相顶掉对方，表现为反复断开重连。
+    #[test]
+    fn duplicate_saved_sessions_for_one_daemon_session_collapse_on_load() {
+        let twin = state("acp-1", true);
+        let saved = crate::WsState {
+            sessions: vec![twin.clone(), state("acp-2", true), twin],
+            active_session: 2,
+            ..Default::default()
+        };
+
+        let (sessions, active) = crate::normalize_saved_sessions(&saved);
+
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session_state_persist_id(session).unwrap())
+                .collect::<Vec<_>>(),
+            vec!["sid-acp-1", "sid-acp-2"]
+        );
+        // 当时停在被丢掉的那条上，就改停在它的双胞胎上，而不是滑到邻居。
+        assert_eq!(active, 0);
+    }
+
+    #[test]
+    fn dedupe_keeps_the_active_session_when_an_earlier_twin_is_dropped() {
+        let twin = state("acp-1", true);
+        let saved = crate::WsState {
+            sessions: vec![twin.clone(), twin, state("acp-2", true)],
+            active_session: 2,
+            ..Default::default()
+        };
+
+        let (sessions, active) = crate::normalize_saved_sessions(&saved);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            session_state_persist_id(&sessions[active]).unwrap(),
+            "sid-acp-2"
+        );
+    }
+
+    /// 启动时远程目录比存档恢复先到。排队中的会话必须算作「已占用这个 id」，
+    /// 否则手机建的会话会被投影一份、恢复再装一份。
+    #[test]
+    fn pending_restores_reserve_their_daemon_session_ids() {
+        let mut terminal = state("term-0", false);
+        terminal.layout = PaneState::Leaf {
+            cwd: Some("/term-0".into()),
+            id: Some("term-sid".into()),
+            custom_title: None,
+            launch_label: None,
+            launch_cmd: None,
+        };
+        let pending = vec![(0, terminal), (1, state("acp-1", true))];
+
+        let ids = crate::pending_restore_session_ids(&pending);
+
+        assert!(ids.contains("term-sid"));
+        assert!(ids.contains("sid-acp-1"));
+        assert_eq!(ids.len(), 2);
+    }
+
     #[test]
     fn user_session_mutation_disables_saved_index_insertion() {
         assert_eq!(planned_restore_insert_position(&[1, 3], 2, 2), Some(1));

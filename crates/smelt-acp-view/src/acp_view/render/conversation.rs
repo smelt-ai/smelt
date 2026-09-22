@@ -91,6 +91,7 @@ impl AcpView {
                 if should_cache_tool_diff {
                     this.ensure_diff_cache_for_entry(i);
                 }
+                this.ensure_tool_image_cache_for_entry(i);
                 let tool_run = process_expanded
                     .then_some(process_group)
                     .flatten()
@@ -222,62 +223,12 @@ impl AcpView {
                         let mut image_strip = h_flex().gap_2().flex_wrap();
                         for image_ix in 0..images.len() {
                             if let Some(image) = this.rendered_images.get(&(i, image_ix)).cloned() {
-                                let preview_image = image.clone();
-                                // 缩略图统一走 smelt_ui::image：降采样 + 内容寻址缓存
-                                // + canvas contain 绘制。历史上大图/长截图在这里反复出
-                                // bug（撑破屏幕、只露顶部、撞 sprite atlas 上限），四次
-                                // 修复都在调用点打补丁，这里收敛成唯一路径。
-                                let render = smelt_ui::image::cached(&image);
-                                if render.is_none() && image.format != gpui::ImageFormat::Svg {
-                                    let fetch_image = image.clone();
-                                    cx.spawn(async move |this, cx| {
-                                        smelt_ui::image::fetch_async(
-                                            fetch_image,
-                                            cx.background_executor(),
-                                        )
-                                        .await;
-                                        let _ = this.update(cx, |_, cx| cx.notify());
-                                    })
-                                    .detach();
-                                }
-                                let thumb: gpui::AnyElement = if let Some(render) = render {
-                                    smelt_ui::image::contain_canvas_at_height(
-                                        render,
-                                        px(160.),
-                                        px(280.),
-                                        8.0,
-                                    )
-                                    .into_any_element()
-                                } else {
-                                    // SVG 或解码未完成：回退原 `img` 渲染（svg 走 gpui
-                                    // 全彩栅格化管线；解码完成后切到 contain 路径）。
-                                    gpui::img(image)
-                                        .h(px(160.))
-                                        .max_w(px(280.))
-                                        .into_any_element()
-                                };
-                                image_strip = image_strip.child(
-                                    div()
-                                        .id(("acp-sent-image", i * 1024 + image_ix))
-                                        .overflow_hidden()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(t.border)
-                                        .cursor_pointer()
-                                        .hover(|image| {
-                                            image.border_color(ui_theme::tint(
-                                                ui_theme::accent(),
-                                                0x72,
-                                            ))
-                                        })
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            let _ = this;
-                                            cx.emit(AcpViewEvent::PreviewImage(
-                                                preview_image.clone(),
-                                            ));
-                                        }))
-                                        .child(thumb),
-                                );
+                                image_strip = image_strip.child(render_clickable_image_thumb(
+                                    image,
+                                    ("acp-sent-image", i * 1024 + image_ix),
+                                    t.border,
+                                    cx,
+                                ));
                             }
                         }
                         h_flex()
@@ -858,6 +809,27 @@ impl AcpView {
                                                 )
                                                 }),
                                         )
+                                    }
+                                    ToolOutputPart::Image(_) => {
+                                        let decoded = this
+                                            .rendered_tool_images
+                                            .get(id)
+                                            .and_then(|parts| parts.get(part_ix))
+                                            .and_then(Option::as_ref)
+                                            .cloned();
+                                        match decoded {
+                                            Some(image) => card.child(
+                                                div().pl_5().pt_1().pb_1().child(
+                                                    render_clickable_image_thumb(
+                                                        image,
+                                                        ("acp-tool-image", i * 100 + part_ix),
+                                                        t.border,
+                                                        cx,
+                                                    ),
+                                                ),
+                                            ),
+                                            None => card,
+                                        }
                                     }
                                     ToolOutputPart::Text(_) => card,
                                     ToolOutputPart::Terminal { output, .. }
@@ -1516,7 +1488,7 @@ impl AcpView {
     }
 
     fn tool_output_popover(&self, entry_ix: usize, muted: gpui::Hsla, trigger: Button) -> Popover {
-        let (kind, output, children, diffs) = match self.entries.get(entry_ix) {
+        let (kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
             Some(AcpEntry::ToolCall {
                 id,
                 kind,
@@ -1528,6 +1500,7 @@ impl AcpView {
                 output.clone(),
                 children.clone(),
                 self.rendered_diffs.get(id).cloned(),
+                self.rendered_tool_images.get(id).cloned(),
             ),
             _ => {
                 return Popover::new(("acp-tool-output-pop", entry_ix))
@@ -1544,15 +1517,16 @@ impl AcpView {
             .p_0()
             .trigger(trigger)
             .content(move |_, _, _| {
-                render_tool_output_popover_body(
+                render_tool_output_popover_body(ToolOutputPopoverBody {
                     entry_ix,
                     kind,
-                    &output,
-                    diffs.as_deref(),
-                    &children,
+                    output: &output,
+                    diffs: diffs.as_deref(),
+                    images: images.as_deref(),
+                    children: &children,
                     muted,
                     border,
-                )
+                })
             })
     }
 
@@ -1695,15 +1669,30 @@ impl AcpView {
     }
 }
 
-fn render_tool_output_popover_body(
+/// hover 预览的渲染入参。工具输出的展示要素（原始 parts + 两份渲染缓存 + 配色）
+/// 一起传，散成八个位置参数既超 clippy 阈值也容易调错顺序。
+struct ToolOutputPopoverBody<'a> {
     entry_ix: usize,
     kind: ToolKind,
-    output: &[ToolOutputPart],
-    diffs: Option<&[Option<super::super::CachedDiff>]>,
-    children: &[AcpEntry],
+    output: &'a [ToolOutputPart],
+    diffs: Option<&'a [Option<super::super::CachedDiff>]>,
+    images: Option<&'a [Option<std::sync::Arc<gpui::Image>>]>,
+    children: &'a [AcpEntry],
     muted: gpui::Hsla,
     border: gpui::Hsla,
-) -> gpui::AnyElement {
+}
+
+fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::AnyElement {
+    let ToolOutputPopoverBody {
+        entry_ix,
+        kind,
+        output,
+        diffs,
+        images,
+        children,
+        muted,
+        border,
+    } = body;
     let mut col = v_flex()
         .id(("acp-tool-output-pop-body", entry_ix))
         .min_w(px(280.))
@@ -1756,6 +1745,17 @@ fn render_tool_output_popover_body(
                         .into_any_element()
                 };
                 col.child(body_el)
+            }
+            ToolOutputPart::Image(_) => {
+                match images
+                    .and_then(|parts| parts.get(part_ix))
+                    .and_then(Option::as_ref)
+                {
+                    // hover 预览没有 `Context<AcpView>`，只出缩略图，不接点击大图；
+                    // 解码交给展开卡片路径触发（缓存是内容寻址的，全局共享）。
+                    Some(image) => col.child(image_thumb_element(image)),
+                    None => col,
+                }
             }
             ToolOutputPart::Text(_) => col,
             ToolOutputPart::Terminal { output, .. } if !output.trim().is_empty() => col.child(
@@ -2010,5 +2010,59 @@ fn hover_swap_lead(
                 .group_hover(EXPAND_ICON_GROUP, |s| s.opacity(1.))
                 .child(Icon::new(hover_icon).size(px(13.)).text_color(color)),
         )
+        .into_any_element()
+}
+
+/// 缩略图元素：降采样 + 内容寻址缓存 + canvas contain 绘制。历史上大图/长截图
+/// 在调用点反复出 bug（撑破屏幕、只露顶部、撞 sprite atlas 上限），已发消息、
+/// 工具输出图片统一收敛到这一条路径，不再各写一份。
+fn image_thumb_element(image: &std::sync::Arc<gpui::Image>) -> gpui::AnyElement {
+    match smelt_ui::image::cached(image) {
+        Some(render) => smelt_ui::image::contain_canvas_at_height(render, px(160.), px(280.), 8.0)
+            .into_any_element(),
+        // SVG 或解码未完成：回退原 `img` 渲染（svg 走 gpui 全彩栅格化管线；
+        // 解码完成后切到 contain 路径）。
+        None => gpui::img(image.clone())
+            .h(px(160.))
+            .max_w(px(280.))
+            .into_any_element(),
+    }
+}
+
+/// 后台解码到 `smelt_ui::image` 缓存；解码完成后通知重绘切到 contain 路径。
+fn ensure_image_decoded(image: &std::sync::Arc<gpui::Image>, cx: &Context<AcpView>) {
+    if smelt_ui::image::cached(image).is_some() || image.format == gpui::ImageFormat::Svg {
+        return;
+    }
+    let fetch_image = image.clone();
+    cx.spawn(async move |this, cx| {
+        smelt_ui::image::fetch_async(fetch_image, cx.background_executor()).await;
+        let _ = this.update(cx, |_, cx| cx.notify());
+    })
+    .detach();
+}
+
+/// 可点开大图的缩略图卡片（已发消息里的图、工具返回的图共用）。
+fn render_clickable_image_thumb(
+    image: std::sync::Arc<gpui::Image>,
+    id: impl Into<gpui::ElementId>,
+    border: gpui::Hsla,
+    cx: &Context<AcpView>,
+) -> gpui::AnyElement {
+    ensure_image_decoded(&image, cx);
+    let thumb = image_thumb_element(&image);
+    let preview_image = image;
+    div()
+        .id(id)
+        .overflow_hidden()
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .cursor_pointer()
+        .hover(|image| image.border_color(ui_theme::tint(ui_theme::accent(), 0x72)))
+        .on_click(cx.listener(move |_this, _ev, _window, cx| {
+            cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));
+        }))
+        .child(thumb)
         .into_any_element()
 }

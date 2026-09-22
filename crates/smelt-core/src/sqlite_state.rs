@@ -32,6 +32,12 @@ pub fn enable_sqlite_state() {
     SQLITE_STATE_ENABLED.store(true, Ordering::Release);
 }
 
+/// 当前进程是否已打开 SQLite 主库路由。未启用时智能体/自动化读配置应视为空，
+/// 而不是把「测试进程默认不碰家目录」误报成业务错误。
+pub fn is_sqlite_state_enabled() -> bool {
+    SQLITE_STATE_ENABLED.load(Ordering::Acquire)
+}
+
 /// 直接读写 SQLite 的作用域 blob，不经过 JSON 文档路由。
 ///
 /// 这组接口给只存在于新版应用里的偏好使用：不会读取同名 `.json` 文件，也不会

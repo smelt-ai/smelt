@@ -76,9 +76,21 @@ fn archive_entry(entry: &AcpEntry) -> AcpEntry {
             title: title.clone(),
             kind: *kind,
             status: *status,
-            output: output.clone(),
+            output: output.iter().map(archive_tool_output).collect(),
             children: children.iter().map(archive_entry).collect(),
         },
+        other => other.clone(),
+    }
+}
+
+/// 图片字节不进存档（与用户消息里的图片同一约定）：存档是给人读的文本记录，
+/// base64 会把 SQLite 撑大，长期历史以 agent 自己的 transcript 为准。
+fn archive_tool_output(part: &ToolOutputPart) -> ToolOutputPart {
+    match part {
+        ToolOutputPart::Image(image) => ToolOutputPart::Image(AcpImage {
+            mime: image.mime.clone(),
+            data_b64: String::new(),
+        }),
         other => other.clone(),
     }
 }
@@ -162,6 +174,10 @@ fn render_tool_output(parts: &[ToolOutputPart]) -> String {
         }
         match part {
             ToolOutputPart::Text(text) => body.push_str(text.trim()),
+            // transcript 是纯文本载体，图片只留类型标记。
+            ToolOutputPart::Image(image) => {
+                body.push_str(&format!("[图片 {}]", image.mime));
+            }
             ToolOutputPart::Diff {
                 path,
                 old_text,
@@ -302,7 +318,6 @@ mod tests {
                 thought: false,
             },
         ];
-
         save_run_transcript_on(&store, "run-1", &entries).unwrap();
         let loaded = load_run_transcript_on(&store, "run-1").unwrap();
         let AcpEntry::UserWithImages { images, .. } = &loaded[1] else {
@@ -313,6 +328,37 @@ mod tests {
         assert!(markdown.contains("看盘"));
         assert!(markdown.contains("结论"));
         assert!(markdown.contains("1 张图片"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tool_output_images_are_stripped_from_archive() {
+        let (dir, store) = temp_store("tool-image");
+        seed_runs(&store, &["run-img"]);
+        let entries = vec![AcpEntry::tool_call(
+            "t1",
+            "read shot.png",
+            crate::acp_chat::ToolKind::Read,
+            ToolCallStatus::Completed,
+            vec![
+                ToolOutputPart::Text("Read image file [image/png]".into()),
+                ToolOutputPart::Image(AcpImage {
+                    mime: "image/png".into(),
+                    data_b64: "iVBORw0KGgo=".into(),
+                }),
+            ],
+        )];
+
+        save_run_transcript_on(&store, "run-img", &entries).unwrap();
+        let loaded = load_run_transcript_on(&store, "run-img").unwrap();
+        let AcpEntry::ToolCall { output, .. } = &loaded[0] else {
+            panic!("应保留工具调用");
+        };
+        assert!(matches!(
+            &output[1],
+            ToolOutputPart::Image(image) if image.mime == "image/png" && image.data_b64.is_empty()
+        ));
+        assert!(render_run_transcript(&loaded).contains("[图片 image/png]"));
         let _ = fs::remove_dir_all(&dir);
     }
 

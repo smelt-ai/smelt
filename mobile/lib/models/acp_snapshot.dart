@@ -495,7 +495,8 @@ dynamic _toolOutputToJson(ToolOutputPart output) => switch (output) {
       'Diff': {'path': path, 'old_text': oldText, 'new_text': newText},
     },
   ToolOutputImage(base64: final base64, mimeType: final mimeType) => {
-    'Image': {'base64': base64, 'mime_type': mimeType},
+    // 线格式由 Rust 的 `AcpImage` 决定（mime / data_b64），别再自造一套键名。
+    'Image': {'mime': mimeType, 'data_b64': base64},
   },
 };
 
@@ -584,11 +585,10 @@ sealed class ToolOutputPart {
       );
     }
     if (json.containsKey('Image')) {
-      final img = json['Image'] as Map<String, dynamic>;
-      return ToolOutputImage(
-        base64: img['base64'] as String? ?? '',
-        mimeType: img['mime_type'] as String? ?? 'image/png',
+      final image = AcpImageData.fromJson(
+        json['Image'] as Map<String, dynamic>,
       );
+      return ToolOutputImage(base64: image.base64, mimeType: image.mimeType);
     }
 
     return ToolOutputText(text: json.toString());
@@ -999,20 +999,91 @@ class AcpPlanStep {
 }
 
 /// 模型信息
+/// ACP 按 provider 分组下发的模型候选。旧 agent 只给平铺列表，这里就是空的，
+/// 界面回退成「只有模型」的单层菜单——和桌面输入栏同一套回退。
+class AcpModelProviderGroup {
+  final String id;
+  final String name;
+  final List<List<String>> options;
+
+  const AcpModelProviderGroup({
+    required this.id,
+    required this.name,
+    this.options = const [],
+  });
+
+  factory AcpModelProviderGroup.fromJson(Map<String, dynamic> json) =>
+      AcpModelProviderGroup(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        options:
+            (json['options'] as List<dynamic>?)
+                ?.map(
+                  (o) => (o as List<dynamic>).map((e) => e.toString()).toList(),
+                )
+                .toList() ??
+            [],
+      );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'options': options,
+  };
+}
+
 class AcpModel {
   final String configId;
+
+  /// 当前模型的协议值。部分 agent 把 provider 编进值里（`provider/model`），
+  /// 只看 [currentName] 分不出同名模型属于哪个 provider。
+  final String currentValue;
   final String currentName;
   final List<List<String>> options;
+  final List<AcpModelProviderGroup> providerGroups;
 
   const AcpModel({
     required this.configId,
+    this.currentValue = '',
     required this.currentName,
     this.options = const [],
+    this.providerGroups = const [],
   });
+
+  /// 当前模型所属的 provider。先按值匹配，再按名字兜底；都对不上就取第一组——
+  /// 与桌面 `selected_provider_group` 同一套判定，两端不能给出不同答案。
+  AcpModelProviderGroup? get currentProvider {
+    if (providerGroups.isEmpty) return null;
+    for (final group in providerGroups) {
+      if (group.options.any(
+        (option) => option.isNotEmpty && option.first == currentValue,
+      )) {
+        return group;
+      }
+    }
+    for (final group in providerGroups) {
+      if (group.options.any(
+        (option) => option.length > 1 && option[1] == currentName,
+      )) {
+        return group;
+      }
+    }
+    return providerGroups.first;
+  }
+
+  /// 切到某个 provider 时要写回的模型值：同名模型优先，否则该组第一个。
+  /// 协议只认模型值，没有「只切 provider」这种写法。
+  String? switchValueFor(AcpModelProviderGroup group) {
+    for (final option in group.options) {
+      if (option.length > 1 && option[1] == currentName) return option.first;
+    }
+    return group.options.isEmpty ? null : group.options.first.first;
+  }
 
   factory AcpModel.fromJson(Map<String, dynamic> json) {
     return AcpModel(
       configId: json['config_id'] as String? ?? '',
+      currentValue: json['current_value'] as String? ?? '',
       currentName: json['current_name'] as String? ?? '',
       options:
           (json['options'] as List<dynamic>?)
@@ -1021,13 +1092,21 @@ class AcpModel {
               )
               .toList() ??
           [],
+      providerGroups:
+          (json['provider_groups'] as List<dynamic>?)
+              ?.whereType<Map<String, dynamic>>()
+              .map(AcpModelProviderGroup.fromJson)
+              .toList() ??
+          [],
     );
   }
 
   Map<String, dynamic> toJson() => {
     'config_id': configId,
+    'current_value': currentValue,
     'current_name': currentName,
     'options': options,
+    'provider_groups': providerGroups.map((g) => g.toJson()).toList(),
   };
 }
 

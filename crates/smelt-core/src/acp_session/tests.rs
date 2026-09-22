@@ -309,6 +309,32 @@ fn load_replay_rebuilds_legacy_projection_without_duplicates() {
     ));
 }
 
+/// 恢复后用户不再发消息时，`replaying_history` 必须靠显式的结束信号收尾。
+/// 之前只有「下一条 prompt」会复位它，于是一条恢复后就闲置的会话会永远
+/// 挂着「重放中」，把是否有活跃回合、是否在执行工具和 GUI 的列表高度提示
+/// 一起拖成失真。
+#[test]
+fn replay_finished_clears_replaying_without_a_new_prompt() {
+    let mut s = fresh_state();
+    apply_event(&mut s, ConversationEvent::HistoryReplayStarted);
+    assert!(s.replaying_history);
+
+    apply_event(&mut s, ConversationEvent::HistoryReplayFinished);
+    assert!(!s.replaying_history);
+
+    // Ready 仍然不负责收尾：ACP 的 session/load 在 Ready 之后还会继续推历史。
+    apply_event(&mut s, ConversationEvent::HistoryReplayStarted);
+    apply_event(
+        &mut s,
+        ConversationEvent::Ready {
+            session_id: agent_client_protocol::schema::v1::SessionId::new("sid-1"),
+            kind: ReadyKind::ResumedWithReplay,
+            supports_image: true,
+        },
+    );
+    assert!(s.replaying_history);
+}
+
 #[test]
 fn ready_resumed_keep_history_preserves_local_entries() {
     let mut s = fresh_state();

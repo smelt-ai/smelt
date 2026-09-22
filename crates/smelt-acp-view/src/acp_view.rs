@@ -12,8 +12,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Render, ScrollHandle, StatefulInteractiveElement, Styled, Window,
-    canvas, div, list as virtual_list, point, px,
+    ParentElement, PathBuilder, Render, ScrollHandle, StatefulInteractiveElement, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
+    list as virtual_list, point, px, size,
 };
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -59,6 +60,7 @@ pub use smelt_core::acp_chat::{
 mod render;
 #[cfg(test)]
 mod tests;
+mod trajectory;
 
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
 const AUTO_RECONNECT_ATTEMPTS: u32 = 6;
@@ -431,16 +433,16 @@ fn composer_next_turn_notice(names: &[String], turn_active: bool) -> Option<Stri
     }
 }
 
-/// 运行中原生队列的快捷键说明：回车插当前回合，⌥↩ 等本轮结束再发。
+/// 运行中输入框的快捷键说明：回车插当前回合，⌥Enter 等本轮结束再发。
 fn composer_native_queue_shortcut_hint() -> &'static str {
-    "↩ 插入当前回合 · ⌥↩ 回合后发送"
+    "Enter 插入当前回合 · ⌥Enter 回合后发送"
 }
 
 fn native_queue_item_kind_label(is_follow_up: bool) -> &'static str {
     if is_follow_up {
-        "回合后发送"
+        "下一回合"
     } else {
-        "插入当前回合"
+        "当前回合"
     }
 }
 
@@ -1274,6 +1276,10 @@ pub struct AcpView {
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
     rendered_diffs: std::collections::HashMap<String, Vec<Option<CachedDiff>>>,
+    /// 工具输出里图片块的解码缓存，与 `rendered_diffs` 同构（按 tool id，下标对齐
+    /// `output`）。流式重绘每帧都会重建元素，不能每帧重跑一次 base64 解码。
+    rendered_tool_images:
+        std::collections::HashMap<String, Vec<Option<std::sync::Arc<gpui::Image>>>>,
     /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
     /// entry 变化时执行，静态重绘直接复用 `SharedString`。
     rendered_markdown: Vec<Option<gpui::SharedString>>,
@@ -1315,6 +1321,8 @@ pub struct AcpView {
     usage_breakdown: Option<smelt_core::acp_conn::ContextUsageBreakdown>,
     /// 底栏用量圆环点开的 Context Usage 面板。只属于本地浏览状态。
     usage_popover_open: bool,
+    /// 独立 Trajectory 窗口。已打开则前置，不重复开。
+    trajectory_window: Option<WindowHandle<trajectory::TrajectoryWindow>>,
     supports_compaction: bool,
     supports_native_queue: bool,
     /// 驱动是否支持回退到历史消息重发（Pi 的 fork）。用户气泡上的
@@ -1666,6 +1674,7 @@ impl AcpView {
             immediate_cancel_pending: false,
             rendered_images,
             rendered_diffs,
+            rendered_tool_images: std::collections::HashMap::new(),
             rendered_markdown,
             loaded_entries_offset: 0,
             entries_total: initial_entry_count,
@@ -1685,6 +1694,7 @@ impl AcpView {
             usage_cost: None,
             usage_breakdown: None,
             usage_popover_open: false,
+            trajectory_window: None,
             supports_compaction: false,
             supports_native_queue: false,
             supports_rewind: false,
@@ -3374,6 +3384,7 @@ impl AcpView {
                 })
             {
                 self.rendered_diffs.remove(id);
+                self.rendered_tool_images.remove(id);
             }
         }
         let new_entries_len = self.entries.len();
@@ -3626,6 +3637,29 @@ impl AcpView {
         }
         let parts = build_diff_parts(output);
         self.rendered_diffs.insert(id, parts);
+    }
+
+    /// 工具输出图片的解码缓存。图片块是最终结果（不会就地变更），形状变了就整条重建。
+    fn ensure_tool_image_cache_for_entry(&mut self, entry_ix: usize) {
+        let Some(AcpEntry::ToolCall { id, output, .. }) = self.entries.get(entry_ix) else {
+            return;
+        };
+        if !output
+            .iter()
+            .any(|part| matches!(part, ToolOutputPart::Image(_)))
+        {
+            return;
+        }
+        let id = id.clone();
+        if self
+            .rendered_tool_images
+            .get(&id)
+            .is_some_and(|parts| tool_image_cache_matches_output(parts, output))
+        {
+            return;
+        }
+        let parts = build_tool_image_parts(output);
+        self.rendered_tool_images.insert(id, parts);
     }
 
     fn tool_card_is_expanded(
@@ -4334,6 +4368,7 @@ fn build_diff_parts(output: &[ToolOutputPart]) -> Vec<Option<CachedDiff>> {
                 })
             }
             ToolOutputPart::Text(_) => None,
+            ToolOutputPart::Image(_) => None,
             ToolOutputPart::Terminal { .. } => None,
         })
         .collect()
@@ -4344,8 +4379,33 @@ fn diff_cache_matches_output(cached: &[Option<CachedDiff>], output: &[ToolOutput
         && cached.iter().zip(output).all(|(cached, part)| {
             matches!(
                 (part, cached),
-                (ToolOutputPart::Diff { .. }, Some(_)) | (ToolOutputPart::Text(_), None)
+                (ToolOutputPart::Diff { .. }, Some(_))
+                    | (ToolOutputPart::Text(_), None)
+                    | (ToolOutputPart::Image(_), None)
+                    | (ToolOutputPart::Terminal { .. }, None)
             )
+        })
+}
+
+/// 工具输出 → 与 `output` 下标对齐的解码图片（非图片块为 None）。
+fn build_tool_image_parts(output: &[ToolOutputPart]) -> Vec<Option<std::sync::Arc<gpui::Image>>> {
+    output
+        .iter()
+        .map(|part| match part {
+            ToolOutputPart::Image(image) => decode_acp_image(image),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_image_cache_matches_output(
+    cached: &[Option<std::sync::Arc<gpui::Image>>],
+    output: &[ToolOutputPart],
+) -> bool {
+    cached.len() == output.len()
+        && cached.iter().zip(output).all(|(cached, part)| {
+            // 解码失败的图片块缓存为 None，所以只校验「非图片块一定是 None」。
+            matches!(part, ToolOutputPart::Image(_)) || cached.is_none()
         })
 }
 
@@ -4619,6 +4679,129 @@ fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrajectoryLane {
+    User,
+    Assistant,
+    Tool,
+    Context,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectoryEvent {
+    seq: usize,
+    lane: TrajectoryLane,
+    /// 1-based 回合；0 表示第一轮用户消息之前（CONTEXT）。
+    turn: usize,
+    text: String,
+}
+
+/// 整场会话的轨迹事件，给轨迹窗口用。参考 DSH Trajectory 的 USER / CONTEXT / ASSISTANT / TOOL。
+fn session_trajectory_events(
+    entries: &[AcpEntry],
+    context_note: Option<String>,
+) -> Vec<TrajectoryEvent> {
+    let mut events = Vec::new();
+    let mut turn = 0usize;
+    if let Some(note) = context_note.filter(|note| !note.is_empty()) {
+        events.push(TrajectoryEvent {
+            seq: events.len(),
+            lane: TrajectoryLane::Context,
+            turn: 0,
+            text: note,
+        });
+    }
+    for entry in entries {
+        match entry {
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => {
+                turn += 1;
+                events.push(TrajectoryEvent {
+                    seq: events.len(),
+                    lane: TrajectoryLane::User,
+                    turn,
+                    text: text.clone(),
+                });
+            }
+            AcpEntry::Assistant { text, thought } if !thought && !text.trim().is_empty() => {
+                events.push(TrajectoryEvent {
+                    seq: events.len(),
+                    lane: TrajectoryLane::Assistant,
+                    turn: turn.max(1),
+                    text: text.clone(),
+                });
+            }
+            AcpEntry::ToolCall { kind, title, .. } if !is_task_completion_tool_title(title) => {
+                events.push(TrajectoryEvent {
+                    seq: events.len(),
+                    lane: TrajectoryLane::Tool,
+                    turn: turn.max(1),
+                    text: compact_tool_headline(*kind, title),
+                });
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
+fn filter_trajectory_events<'a>(
+    events: &'a [TrajectoryEvent],
+    query: &str,
+) -> Vec<&'a TrajectoryEvent> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return events.iter().collect();
+    }
+    events
+        .iter()
+        .filter(|event| {
+            let haystack = format!(
+                "{} {} {}",
+                trajectory_lane_label(event.lane),
+                event.text,
+                if event.turn == 0 {
+                    String::new()
+                } else {
+                    format!("turn {}", event.turn)
+                }
+            )
+            .to_lowercase();
+            terms.iter().all(|term| haystack.contains(term))
+        })
+        .collect()
+}
+
+fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
+    match lane {
+        TrajectoryLane::User => "USER",
+        TrajectoryLane::Assistant => "ASSISTANT",
+        TrajectoryLane::Tool => "TOOL",
+        TrajectoryLane::Context => "CONTEXT",
+    }
+}
+
+fn trajectory_lane_color(lane: TrajectoryLane) -> u32 {
+    match lane {
+        TrajectoryLane::User => ui_theme::blue(),
+        TrajectoryLane::Assistant => ui_theme::purple(),
+        TrajectoryLane::Tool => ui_theme::green(),
+        TrajectoryLane::Context => ui_theme::text_muted(),
+    }
+}
+
+fn trajectory_counts(entries: &[AcpEntry]) -> (usize, usize) {
+    let turns = entries.iter().filter(|entry| is_user_entry(entry)).count();
+    let calls = entries
+        .iter()
+        .filter(|entry| matches!(entry, AcpEntry::ToolCall { title, .. } if !is_task_completion_tool_title(title)))
+        .count();
+    (turns, calls)
+}
+
 fn compact_fetch_target(title: &str) -> String {
     let stripped = title
         .strip_prefix("https://")
@@ -4659,6 +4842,7 @@ fn tool_output_has_content(output: &[ToolOutputPart]) -> bool {
     output.iter().any(|part| match part {
         ToolOutputPart::Text(text) => !strip_code_fence(text).trim().is_empty(),
         ToolOutputPart::Diff { .. } => true,
+        ToolOutputPart::Image(_) => true,
         ToolOutputPart::Terminal { .. } => true,
     })
 }
@@ -4681,6 +4865,7 @@ fn tool_result_summary(
         .filter_map(|part| match part {
             ToolOutputPart::Text(text) => Some(strip_code_fence(text)),
             ToolOutputPart::Diff { .. } => None,
+            ToolOutputPart::Image(_) => None,
             ToolOutputPart::Terminal { output, .. } => Some(output.as_str()),
         })
         .flat_map(str::lines)

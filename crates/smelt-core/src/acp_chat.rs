@@ -68,6 +68,9 @@ pub enum ToolOutputPart {
         old_text: Option<String>,
         new_text: String,
     },
+    /// 工具返回的图片（`read` 读图、截图类工具）。渲染层直接出缩略图，
+    /// 不再降级成 `[图片]` 文本——图片本来就是结果本身。
+    Image(AcpImage),
     /// `terminal/create` 之后嵌进 tool_call 的 live 输出。旧快照没有这个变体。
     Terminal {
         id: String,
@@ -609,7 +612,9 @@ pub fn completion_summary_text(output: &[ToolOutputPart]) -> String {
                 let text = strip_code_fence(text).trim();
                 (!text.is_empty()).then(|| text.to_string())
             }
-            ToolOutputPart::Diff { .. } | ToolOutputPart::Terminal { .. } => None,
+            ToolOutputPart::Diff { .. }
+            | ToolOutputPart::Image(_)
+            | ToolOutputPart::Terminal { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")

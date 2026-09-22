@@ -220,7 +220,6 @@ fn section_page(
         SettingsSection::AgentWorkspace => agent::workspace_page(entity, snapshot, cx),
         SettingsSection::AgentNotify => agent::notify_page(entity, snapshot, cx),
         SettingsSection::AgentHooks => agent::hooks_page(entity, snapshot, cx),
-        SettingsSection::Worktree => collaboration::worktree_page(),
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
         SettingsSection::Plugin { id } => plugins::plugin_page(entity, snapshot, id, plugins, cx),
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),

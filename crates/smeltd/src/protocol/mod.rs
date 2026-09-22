@@ -119,6 +119,7 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         ),
         DaemonOperation::AcpWatch => handle_acp_watch(conn, reader, &v, acp_sessions),
         DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions),
+        DaemonOperation::AcpSkills => handle_acp_skills(conn, &v, &acp_sessions),
         DaemonOperation::AcpSubmitInput => {
             handle_acp_submit_input(conn, &v, &acp_sessions, &event_hub)
         }

@@ -389,5 +389,56 @@ void main() {
         isTrue,
       );
     });
+
+    test('model keeps provider groups and resolves the current provider', () {
+      final model = AcpModel.fromJson({
+        'config_id': 'model',
+        'current_value': 'anthropic/sonnet-4.5',
+        'current_name': 'Sonnet 4.5',
+        'options': [
+          ['anthropic/sonnet-4.5', 'Sonnet 4.5'],
+          ['bedrock/sonnet-4.5', 'Sonnet 4.5'],
+          ['bedrock/haiku', 'Haiku'],
+        ],
+        'provider_groups': [
+          {
+            'id': 'anthropic',
+            'name': 'Anthropic',
+            'options': [
+              ['anthropic/sonnet-4.5', 'Sonnet 4.5'],
+            ],
+          },
+          {
+            'id': 'bedrock',
+            'name': 'Bedrock',
+            'options': [
+              ['bedrock/sonnet-4.5', 'Sonnet 4.5'],
+              ['bedrock/haiku', 'Haiku'],
+            ],
+          },
+        ],
+      });
+
+      expect(model.currentProvider?.id, 'anthropic');
+      // 换 provider 时优先留在同名模型上，而不是把用户扔到该组第一个模型。
+      expect(
+        model.switchValueFor(model.providerGroups[1]),
+        'bedrock/sonnet-4.5',
+      );
+    });
+
+    test('model without provider groups falls back to the flat list', () {
+      final model = AcpModel.fromJson({
+        'config_id': 'model',
+        'current_name': 'gpt-5',
+        'options': [
+          ['gpt-5', 'gpt-5'],
+        ],
+      });
+
+      expect(model.providerGroups, isEmpty);
+      expect(model.currentProvider, isNull);
+      expect(model.options.length, 1);
+    });
   });
 }

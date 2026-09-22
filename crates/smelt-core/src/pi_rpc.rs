@@ -769,7 +769,12 @@ where
         )
         .await?;
         if let Some(messages) = response_data(&response)?["messages"].as_array() {
-            replay_messages(messages, event_tx, state);
+            crate::app_log::info(
+                "pi-rpc",
+                &format!("会话 {} 开始重放 {} 条历史消息", launch.sid, messages.len()),
+            );
+            replay_history(messages, event_tx, state);
+            crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
         }
     }
 
@@ -794,6 +799,13 @@ where
         },
         supports_image: true,
     });
+    crate::app_log::info(
+        "pi-rpc",
+        &format!(
+            "会话 {} 握手完成，已发出 Ready（resumed={resumed}）",
+            launch.sid
+        ),
+    );
     Ok(())
 }
 
@@ -815,6 +827,11 @@ where
 {
     command["id"] = serde_json::Value::String(id.to_string());
     write_rpc(writer, &command).await?;
+    let started = std::time::Instant::now();
+    // 握手每一步都留痕。超时由外层的 `PI_RPC_HANDSHAKE_TIMEOUT` 统一看着，这里不再
+    // 叠一层；但得能从日志里看出「哪一步、多久、其间收了多少事件」，否则一旦
+    // 会话停在 Connecting，现场除了「卡着」之外没有任何可观测信息。
+    let mut events = 0usize;
     loop {
         enum Wait {
             Line(Option<std::io::Result<String>>),
@@ -832,9 +849,18 @@ where
                 if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
                     if value.get("id").and_then(serde_json::Value::as_str) == Some(id) {
                         ensure_response_success(&value)?;
+                        crate::app_log::info(
+                            "pi-rpc",
+                            &format!(
+                                "会话 {} 握手 {id} 用时 {:?}（其间 {events} 条事件）",
+                                launch.sid,
+                                started.elapsed()
+                            ),
+                        );
                         return Ok(value);
                     }
                 } else {
+                    events += 1;
                     handle_event(value, event_tx, outbound_tx, state, launch);
                 }
             }
@@ -2489,6 +2515,28 @@ fn content_text(content: Option<&serde_json::Value>) -> String {
         .join("\n")
 }
 
+/// 工具结果里的图片块。pi 的 `read` 读图时会同时给一段文本提示和
+/// `{type:"image", data, mimeType}`，两者都要保留。
+fn content_images(content: Option<&serde_json::Value>) -> Vec<crate::acp_chat::AcpImage> {
+    content
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        .filter_map(|block| {
+            let data = block.get("data").and_then(serde_json::Value::as_str)?;
+            let mime = block
+                .get("mimeType")
+                .or_else(|| block.get("mime_type"))
+                .and_then(serde_json::Value::as_str)?;
+            (!data.is_empty()).then(|| crate::acp_chat::AcpImage {
+                mime: mime.to_string(),
+                data_b64: data.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn tool_output_parts(
     result: &serde_json::Value,
     name: &str,
@@ -2553,6 +2601,11 @@ fn tool_output_parts(
     if !text.is_empty() && !(has_diff && text_looks_like_diff(&text)) {
         output.insert(0, ToolOutputPart::Text(text));
     }
+    output.extend(
+        content_images(result.get("content"))
+            .into_iter()
+            .map(ToolOutputPart::Image),
+    );
     output
 }
 
@@ -2561,6 +2614,17 @@ fn text_looks_like_diff(text: &str) -> bool {
         || text
             .lines()
             .any(|line| line.starts_with("+++ ") || line.starts_with("--- "))
+}
+
+/// 全量重放 + 显式收尾。pi 是先把 `get_messages` 重放完再握手，边界在这里就确定了；
+/// 不发结束信号的话，恢复后只要用户不再发消息，`replaying_history` 就一直挂着。
+fn replay_history(
+    messages: &[serde_json::Value],
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+) {
+    replay_messages(messages, event_tx, state);
+    let _ = event_tx.try_send(ConversationEvent::HistoryReplayFinished);
 }
 
 fn replay_messages(
@@ -3298,6 +3362,30 @@ mod tests {
         assert!(state.active_turn);
     }
 
+    /// 重放必须以显式的结束信号收尾。没有它时，`replaying_history` 只能等「下一条
+    /// prompt」才复位，恢复后就闲置的会话会永远挂在「重放中」。
+    #[test]
+    fn history_replay_ends_with_an_explicit_finished_event() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+
+        replay_history(
+            &[serde_json::json!({"role": "user", "content": "旧问题"})],
+            &event_tx,
+            &mut state,
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::UserChunk(text)) if text == "旧问题"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::HistoryReplayFinished)
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
     #[test]
     fn native_event_sequence_maps_stream_tool_and_turn_lifecycle() {
         let launch = test_launch(SMELT_PI_AGENT_COMMAND);
@@ -3521,6 +3609,26 @@ mod tests {
             tool_title("subagent", Some(&serde_json::json!({"task": "find auth"}))),
             "find auth"
         );
+    }
+
+    #[test]
+    fn tool_result_images_survive_as_image_parts() {
+        let output = tool_output_parts(
+            &serde_json::json!({
+                "content": [
+                    {"type": "text", "text": "Read image file [image/png]"},
+                    {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+                ]
+            }),
+            "read",
+            Some(&serde_json::json!({"path": "shot.png"})),
+        );
+        assert!(matches!(&output[0], ToolOutputPart::Text(text) if text.contains("Read image")));
+        assert!(matches!(
+            &output[1],
+            ToolOutputPart::Image(image)
+                if image.mime == "image/png" && image.data_b64 == "iVBORw0KGgo="
+        ));
     }
 
     #[test]

@@ -231,7 +231,6 @@ enum NarrowGitRow {
     CommitBox {
         root: Rc<str>,
         input: Entity<gpui_component::input::TextareaState>,
-        branch: String,
         has_text: bool,
         /// 这个仓库有没有已暂存的改动。
         ///
@@ -613,12 +612,20 @@ fn render_narrow_git_row(
                 )
                 .child(
                     div()
+                        .id(("narrow-git-repo-branch", list_index))
                         .flex_shrink_0()
                         .max_w(px(96.))
                         .truncate()
                         .text_size(px(10.))
                         .text_color(rgb(ui_theme::text_faint()))
-                        .child(branch.clone()),
+                        .child(branch.clone())
+                        .tooltip({
+                            let b = branch.clone();
+                            move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(b.clone())
+                                    .build(window, cx)
+                            }
+                        }),
                 )
                 // 仓库自己的操作入口：获取/拉取/暂存/丢弃都作用于这一个仓库，
                 // 而不是“当前项目”——多仓工作区里后者根本不是一个明确的对象。
@@ -657,7 +664,6 @@ fn render_narrow_git_row(
         NarrowGitRow::CommitBox {
             root,
             input,
-            branch,
             has_text,
             has_staged,
             pushing,
@@ -674,11 +680,9 @@ fn render_narrow_git_row(
             let ws_push = ws.clone();
             let root_push = root.to_string();
             let commit_label = if pushing {
-                "推送中…".to_string()
-            } else if branch.is_empty() {
-                "提交并推送".to_string()
+                "推送中…"
             } else {
-                format!("提交并推送 · {branch}")
+                "提交并推送"
             };
             v_flex()
                 .gap_1p5()
