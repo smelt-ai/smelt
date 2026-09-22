@@ -35,7 +35,7 @@ use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, ConversationSnapshot,
     ElicitFieldKindView, PendingElicitation, PendingPermission, PermissionOptionKindView,
-    PlanEntryStatusView, PlanView,
+    PlanEntryStatusView, PlanView, RuntimeDebug, ToolCallDebug,
 };
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
@@ -1218,6 +1218,8 @@ pub struct AcpView {
     elicitation: Option<PendingElicitation>,
     /// 自由文本 elicitation 的本地编辑器；协议状态只保存字符串，不持有 GPUI 实体。
     elicitation_inputs: std::collections::HashMap<usize, Entity<InputState>>,
+    /// 输入变化负责刷新提交按钮，Enter 负责提交；订阅必须和动态字段同生命周期。
+    elicitation_input_subscriptions: std::collections::HashMap<usize, gpui::Subscription>,
     phase: DaemonPhase,
     /// `phase == Dead` 时的展示文案。
     end_reason: String,
@@ -1288,6 +1290,10 @@ pub struct AcpView {
     /// 显式换算，不能再假设本地 Vec 从全局 0 开始。
     loaded_entries_offset: usize,
     entries_total: usize,
+    /// Provider 明确暴露的工具原始名称/参数；与聊天条目按 tool call id 关联。
+    tool_debug: std::collections::BTreeMap<String, ToolCallDebug>,
+    /// 受管运行时在本轮开始时明确上报的 system prompt 与可用工具定义。
+    runtime_debug: RuntimeDebug,
     history_loading: bool,
     /// 分页尾页可能不含首条用户消息，标题由快照单独携带。
     session_title: Option<String>,
@@ -1649,6 +1655,7 @@ impl AcpView {
             permission_submitting: None,
             elicitation: None,
             elicitation_inputs: Default::default(),
+            elicitation_input_subscriptions: Default::default(),
             status_line: None,
             phase: DaemonPhase::Dead,
             end_reason: reason,
@@ -1678,6 +1685,8 @@ impl AcpView {
             rendered_markdown,
             loaded_entries_offset: 0,
             entries_total: initial_entry_count,
+            tool_debug: Default::default(),
+            runtime_debug: Default::default(),
             history_loading: false,
             session_title: None,
             supports_image: true,
@@ -1791,6 +1800,7 @@ impl AcpView {
         self.permission_submitting = None;
         self.elicitation = None;
         self.elicitation_inputs.clear();
+        self.elicitation_input_subscriptions.clear();
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
@@ -2015,9 +2025,11 @@ impl AcpView {
                 .collect();
             self.elicitation_inputs
                 .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
+            self.elicitation_input_subscriptions
+                .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
             for (ix, secret, title, value) in text_fields {
-                self.elicitation_inputs.entry(ix).or_insert_with(|| {
-                    cx.new(|cx| {
+                if !self.elicitation_inputs.contains_key(&ix) {
+                    let input = cx.new(|cx| {
                         let mut state = InputState::new(window, cx)
                             .placeholder(&title)
                             .default_value(value);
@@ -2025,8 +2037,25 @@ impl AcpView {
                             state = state.masked(true);
                         }
                         state
-                    })
-                });
+                    });
+                    self.elicitation_inputs.insert(ix, input);
+                }
+                if !self.elicitation_input_subscriptions.contains_key(&ix) {
+                    let input = self.elicitation_inputs[&ix].clone();
+                    let subscription = cx.subscribe_in(
+                        &input,
+                        window,
+                        |this, _, event: &InputEvent, _window, cx| match event {
+                            InputEvent::PressEnter { .. } if this.elicit_ready(cx) => {
+                                this.submit_elicitation(cx);
+                            }
+                            InputEvent::Change => cx.notify(),
+                            _ => {}
+                        },
+                    );
+                    self.elicitation_input_subscriptions
+                        .insert(ix, subscription);
+                }
             }
         }
     }
@@ -2147,6 +2176,12 @@ impl AcpView {
         self.entries_total = self.entries_total.max(snapshot.entries_total);
         if snapshot.session_title.is_some() {
             self.session_title = snapshot.session_title;
+        }
+        if let Some(tool_debug) = snapshot.tool_debug {
+            self.tool_debug = tool_debug;
+        }
+        if let Some(runtime_debug) = snapshot.runtime_debug {
+            self.runtime_debug = runtime_debug;
         }
 
         self.rendered_images = self
@@ -3329,6 +3364,12 @@ impl AcpView {
         }
 
         let mut should_persist = snap.should_persist;
+        if let Some(tool_debug) = snap.tool_debug.take() {
+            self.tool_debug = tool_debug;
+        }
+        if let Some(runtime_debug) = snap.runtime_debug.take() {
+            self.runtime_debug = runtime_debug;
+        }
         if let Some(conversation_state) = snap.conversation_state.take() {
             let pending_changed =
                 self.pending_agent_preset != conversation_state.pending_agent_preset;
@@ -3437,6 +3478,7 @@ impl AcpView {
         self.elicitation = snap.pending_elicitation;
         if self.elicitation.is_none() {
             self.elicitation_inputs.clear();
+            self.elicitation_input_subscriptions.clear();
         }
         let previous_status_line = self.status_line.clone();
         self.status_line = snap.status_line;
@@ -4683,63 +4725,194 @@ fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
 enum TrajectoryLane {
     User,
     Assistant,
+    Thinking,
     Tool,
-    Context,
+    /// Pi 在 provider 请求 hook 中捕获的真实调用 payload。
+    ModelCall,
+    /// Pi 在回合开始时明确上报的 system prompt / tool schemas 组装配置。
+    Request,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectoryContext {
+    lane: TrajectoryLane,
+    label: String,
+    preview: String,
+    source: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryEvent {
     seq: usize,
     lane: TrajectoryLane,
-    /// 1-based 回合；0 表示第一轮用户消息之前（CONTEXT）。
+    /// 1-based 回合；0 表示不属于聊天回合的请求捕获或辅助诊断。
     turn: usize,
+    /// 0 是主会话，正数表示嵌套在子代理工具结果中的层级。
+    depth: usize,
+    /// 嵌套事件所属的直接父工具；主会话事件为 None。
+    parent_tool_id: Option<String>,
+    /// 列表中的一行摘要，同时参与搜索。
     text: String,
+    /// Inspector 的可读完整内容，不截断工具参数或结果。
+    preview: String,
+    /// Inspector Source 页的实际快照投影。
+    source: String,
 }
 
-/// 整场会话的轨迹事件，给轨迹窗口用。参考 DSH Trajectory 的 USER / CONTEXT / ASSISTANT / TOOL。
+fn pretty_json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn tool_debug_preview(
+    id: &str,
+    title: &str,
+    kind: ToolKind,
+    status: ToolCallStatus,
+    output: &[ToolOutputPart],
+    debug: Option<&ToolCallDebug>,
+) -> String {
+    let mut fields = Vec::new();
+    if let Some(name) = debug.and_then(|debug| debug.name.as_deref()) {
+        fields.push(format!("工具名称: {name}"));
+    }
+    fields.extend([
+        format!("调用 ID: {id}"),
+        format!("展示标题: {title}"),
+        format!("类型: {kind:?}"),
+        format!("状态: {status:?}"),
+    ]);
+    if let Some(input) = debug.and_then(|debug| debug.raw_input.as_ref()) {
+        fields.push(format!("参数\n{}", pretty_json(input)));
+    }
+    let output = pretty_json(&serde_json::to_value(output).unwrap_or(serde_json::Value::Null));
+    fields.push(format!("完整结果\n{output}"));
+    fields.join("\n\n")
+}
+
+fn append_trajectory_entry(
+    events: &mut Vec<TrajectoryEvent>,
+    entry: &AcpEntry,
+    tool_debug: &std::collections::BTreeMap<String, ToolCallDebug>,
+    turn: &mut usize,
+    depth: usize,
+    parent_tool_id: Option<&str>,
+) {
+    let event_turn = if depth == 0 {
+        if matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }) {
+            *turn += 1;
+        }
+        (*turn).max(1)
+    } else {
+        (*turn).max(1)
+    };
+    let relation = serde_json::json!({
+        "depth": depth,
+        "parent_tool_id": parent_tool_id,
+    });
+    let projected = match entry {
+        AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => Some((
+            TrajectoryLane::User,
+            text.clone(),
+            text.clone(),
+            pretty_json(&serde_json::json!({
+                "role": if depth == 0 { "user" } else { "subagent_user" },
+                "turn": event_turn,
+                "relation": relation,
+                "entry": entry,
+            })),
+        )),
+        AcpEntry::Assistant { text, thought } if !text.trim().is_empty() => {
+            let lane = if *thought {
+                TrajectoryLane::Thinking
+            } else {
+                TrajectoryLane::Assistant
+            };
+            Some((
+                lane,
+                text.clone(),
+                text.clone(),
+                pretty_json(&serde_json::json!({
+                    "role": if *thought { "assistant_thinking" } else { "assistant" },
+                    "turn": event_turn,
+                    "relation": relation,
+                    "entry": entry,
+                })),
+            ))
+        }
+        AcpEntry::ToolCall {
+            id,
+            title,
+            kind,
+            status,
+            output,
+            ..
+        } if !is_task_completion_tool_title(title) => {
+            let debug = tool_debug.get(id);
+            let mut source = serde_json::json!({
+                "kind": "tool_call",
+                "turn": event_turn,
+                "relation": relation,
+                "entry": entry,
+            });
+            if let Some(provider_debug) = debug
+                .and_then(|debug| serde_json::to_value(debug).ok())
+                .filter(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
+            {
+                source
+                    .as_object_mut()
+                    .expect("tool source is an object")
+                    .insert("provider_debug".to_string(), provider_debug);
+            }
+            Some((
+                TrajectoryLane::Tool,
+                compact_tool_headline(*kind, title),
+                tool_debug_preview(id, title, *kind, *status, output, debug),
+                pretty_json(&source),
+            ))
+        }
+        _ => None,
+    };
+    if let Some((lane, text, preview, source)) = projected {
+        events.push(TrajectoryEvent {
+            seq: events.len(),
+            lane,
+            turn: event_turn,
+            depth,
+            parent_tool_id: parent_tool_id.map(str::to_string),
+            text,
+            preview,
+            source,
+        });
+    }
+    if let AcpEntry::ToolCall { id, children, .. } = entry {
+        for child in children {
+            append_trajectory_entry(events, child, tool_debug, turn, depth + 1, Some(id));
+        }
+    }
+}
+
+/// 整场会话的可审计轨迹。只展示条目和 sidecar 实际提供的数据；缺失字段不会从标题反推或用占位补齐。
 fn session_trajectory_events(
     entries: &[AcpEntry],
-    context_note: Option<String>,
+    contexts: Vec<TrajectoryContext>,
+    tool_debug: &std::collections::BTreeMap<String, ToolCallDebug>,
 ) -> Vec<TrajectoryEvent> {
     let mut events = Vec::new();
     let mut turn = 0usize;
-    if let Some(note) = context_note.filter(|note| !note.is_empty()) {
+    for context in contexts {
         events.push(TrajectoryEvent {
             seq: events.len(),
-            lane: TrajectoryLane::Context,
+            lane: context.lane,
             turn: 0,
-            text: note,
+            depth: 0,
+            parent_tool_id: None,
+            text: context.label,
+            preview: context.preview,
+            source: pretty_json(&context.source),
         });
     }
     for entry in entries {
-        match entry {
-            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => {
-                turn += 1;
-                events.push(TrajectoryEvent {
-                    seq: events.len(),
-                    lane: TrajectoryLane::User,
-                    turn,
-                    text: text.clone(),
-                });
-            }
-            AcpEntry::Assistant { text, thought } if !thought && !text.trim().is_empty() => {
-                events.push(TrajectoryEvent {
-                    seq: events.len(),
-                    lane: TrajectoryLane::Assistant,
-                    turn: turn.max(1),
-                    text: text.clone(),
-                });
-            }
-            AcpEntry::ToolCall { kind, title, .. } if !is_task_completion_tool_title(title) => {
-                events.push(TrajectoryEvent {
-                    seq: events.len(),
-                    lane: TrajectoryLane::Tool,
-                    turn: turn.max(1),
-                    text: compact_tool_headline(*kind, title),
-                });
-            }
-            _ => {}
-        }
+        append_trajectory_entry(&mut events, entry, tool_debug, &mut turn, 0, None);
     }
     events
 }
@@ -4760,9 +4933,11 @@ fn filter_trajectory_events<'a>(
         .iter()
         .filter(|event| {
             let haystack = format!(
-                "{} {} {}",
+                "{} {} {} {} {}",
                 trajectory_lane_label(event.lane),
                 event.text,
+                event.preview,
+                event.source,
                 if event.turn == 0 {
                     String::new()
                 } else {
@@ -4779,8 +4954,10 @@ fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
     match lane {
         TrajectoryLane::User => "USER",
         TrajectoryLane::Assistant => "ASSISTANT",
+        TrajectoryLane::Thinking => "THINKING",
         TrajectoryLane::Tool => "TOOL",
-        TrajectoryLane::Context => "CONTEXT",
+        TrajectoryLane::ModelCall => "MODEL CALL",
+        TrajectoryLane::Request => "REQUEST CONFIG",
     }
 }
 
@@ -4788,18 +4965,28 @@ fn trajectory_lane_color(lane: TrajectoryLane) -> u32 {
     match lane {
         TrajectoryLane::User => ui_theme::blue(),
         TrajectoryLane::Assistant => ui_theme::purple(),
+        TrajectoryLane::Thinking => ui_theme::yellow(),
         TrajectoryLane::Tool => ui_theme::green(),
-        TrajectoryLane::Context => ui_theme::text_muted(),
+        TrajectoryLane::ModelCall => ui_theme::purple(),
+        TrajectoryLane::Request => ui_theme::blue(),
     }
+}
+
+fn nested_tool_count(entries: &[AcpEntry]) -> usize {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            AcpEntry::ToolCall {
+                title, children, ..
+            } => usize::from(!is_task_completion_tool_title(title)) + nested_tool_count(children),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn trajectory_counts(entries: &[AcpEntry]) -> (usize, usize) {
     let turns = entries.iter().filter(|entry| is_user_entry(entry)).count();
-    let calls = entries
-        .iter()
-        .filter(|entry| matches!(entry, AcpEntry::ToolCall { title, .. } if !is_task_completion_tool_title(title)))
-        .count();
-    (turns, calls)
+    (turns, nested_tool_count(entries))
 }
 
 fn compact_fetch_target(title: &str) -> String {

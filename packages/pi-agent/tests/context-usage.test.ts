@@ -3,6 +3,8 @@ import type { Skill } from "@earendil-works/pi-coding-agent";
 import { formatSkillsForPrompt } from "@earendil-works/pi-coding-agent";
 import {
 	buildContextUsageBuckets,
+	buildRuntimeDebugPayload,
+	captureProviderRequest,
 	estimateTokens,
 	formatProjectContext,
 } from "../src/context-usage.ts";
@@ -75,6 +77,64 @@ describe("context usage buckets", () => {
 		expect(buckets.systemPrompt + buckets.rules + buckets.skills).toBe(
 			estimateTokens(systemPrompt),
 		);
+	});
+
+	test("runtime debug keeps the exact request config and provider payload", () => {
+		const systemPrompt =
+			"system line 1\n<project_context>真实上下文</project_context>";
+		const tools = [
+			{
+				name: "bash",
+				description: "Run a shell command",
+				parameters: {
+					type: "object",
+					required: ["command"],
+					properties: { command: { type: "string" } },
+				},
+				source: "builtin",
+			},
+		];
+		const modelCall = captureProviderRequest(
+			1,
+			{
+				model: "gpt-test",
+				max_tokens: 4096,
+				messages: [{ role: "user", content: "hello" }],
+				api_key: "must-not-leak",
+				headers: { authorization: "Bearer must-not-leak" },
+			},
+			{
+				provider: "openai",
+				id: "gpt-test",
+				api: "responses",
+				thinkingLevel: "high",
+			},
+		);
+
+		expect(buildRuntimeDebugPayload(systemPrompt, tools, modelCall)).toEqual({
+			version: 2,
+			source: "pi_runtime_debug",
+			systemPrompt,
+			tools,
+			modelCall: {
+				sequence: 1,
+				source: "pi_before_provider_request",
+				model: {
+					provider: "openai",
+					id: "gpt-test",
+					api: "responses",
+					thinkingLevel: "high",
+				},
+				payload: {
+					model: "gpt-test",
+					max_tokens: 4096,
+					messages: [{ role: "user", content: "hello" }],
+					api_key: "[REDACTED]",
+					headers: "[REDACTED]",
+				},
+				redactedPaths: ["$.api_key", "$.headers"],
+			},
+		});
 	});
 
 	test("empty parts stay at zero", () => {

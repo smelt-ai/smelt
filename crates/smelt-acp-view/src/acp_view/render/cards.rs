@@ -261,12 +261,12 @@ impl AcpView {
                 .fields
                 .iter()
                 .any(|field| matches!(field.kind, ElicitFieldKindView::MultiSelect(_)));
-            let multi_field = card.fields.len() > 1
-                || card
-                    .fields
-                    .first()
-                    .is_some_and(|f| !matches!(f.kind, ElicitFieldKindView::Select(_)));
-            let show_footer = multi_field
+            let requires_explicit_submit = card.fields.len() > 1
+                || card.fields.iter().any(|field| {
+                    !matches!(field.kind, ElicitFieldKindView::Select(_))
+                        || field.allow_custom_input
+                });
+            let show_footer = requires_explicit_submit
                 && !matches!(
                     card.fields.as_slice(),
                     [smelt_core::acp_session::ElicitFieldView {

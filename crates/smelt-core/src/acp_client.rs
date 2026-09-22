@@ -158,6 +158,8 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         session_title: None,
         replaying_history: false,
         entries: Vec::new(),
+        tool_debug: Default::default(),
+        runtime_debug: Default::default(),
         phase: DaemonPhase::Dead,
         end_reason: reason.to_string(),
         end_kind: AcpEndKind::TransportDisconnected,

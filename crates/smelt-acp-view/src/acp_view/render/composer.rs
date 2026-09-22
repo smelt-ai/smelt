@@ -759,14 +759,10 @@ impl AcpView {
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .hover(|d| d.bg(ui_theme::overlay(0x22)))
                                         .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("轨迹")
+                                            gpui_component::tooltip::Tooltip::new("会话追踪")
                                                 .build(window, cx)
                                         })
-                                        .child(
-                                            Icon::empty()
-                                                .path("smelt-icons/git-commit.svg")
-                                                .size(px(16.)),
-                                        )
+                                        .child(Icon::new(IconName::Inspector).size(px(16.)))
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.open_trajectory_window(cx);
                                         })),

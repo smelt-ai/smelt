@@ -57,7 +57,7 @@ impl AcpView {
         cx.defer(move |cx| {
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Trajectory".into()),
+                    title: Some("会话追踪".into()),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),
@@ -75,28 +75,44 @@ impl AcpView {
     }
 }
 
+pub(super) fn runtime_debug_contexts(debug: &RuntimeDebug) -> Vec<TrajectoryContext> {
+    let mut contexts = Vec::new();
+    if let Some(call) = &debug.model_call {
+        let source = serde_json::to_value(call).unwrap_or(serde_json::Value::Null);
+        contexts.push(TrajectoryContext {
+            lane: TrajectoryLane::ModelCall,
+            label: format!("MODEL CALL #{}", call.sequence),
+            preview: pretty_json(&source),
+            source,
+        });
+    }
+
+    if let Some(system_prompt) = debug.system_prompt.as_deref() {
+        let source = serde_json::json!({
+            "version": debug.version,
+            "source": debug.source,
+            "systemPrompt": system_prompt,
+            "tools": debug.tools,
+        });
+        contexts.push(TrajectoryContext {
+            lane: TrajectoryLane::Request,
+            label: "Pi REQUEST CONFIG".to_string(),
+            preview: pretty_json(&source),
+            source,
+        });
+    }
+    contexts
+}
+
+fn trajectory_contexts(session: &AcpView) -> Vec<TrajectoryContext> {
+    runtime_debug_contexts(&session.runtime_debug)
+}
+
 impl Render for TrajectoryWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session.read(cx);
-        let context_note = (session.agent == ConversationAgentKind::Pi).then(|| {
-            let skills = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-                &session.launch,
-                session.cwd.as_deref().map(std::path::Path::new),
-            );
-            if skills.is_empty() {
-                "Available skills: none".to_string()
-            } else {
-                format!(
-                    "Available skills: {}",
-                    skills
-                        .iter()
-                        .map(|skill| skill.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        });
-        let events = session_trajectory_events(&session.entries, context_note);
+        let contexts = trajectory_contexts(session);
+        let events = session_trajectory_events(&session.entries, contexts, &session.tool_debug);
         let query = self.search.read(cx).value().to_string();
         let visible = filter_trajectory_events(&events, &query);
         let (turns, calls) = trajectory_counts(&session.entries);
@@ -124,7 +140,20 @@ impl Render for TrajectoryWindow {
             ));
         } else {
             let mut last_turn = usize::MAX;
+            let mut showed_debug_header = false;
             for event in visible.iter() {
+                if event.turn == 0 && !showed_debug_header {
+                    showed_debug_header = true;
+                    list = list.child(
+                        h_flex().w_full().px_5().pt_3().pb_1().child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(muted)
+                                .child("Runtime captures · 非时间线"),
+                        ),
+                    );
+                }
                 if event.turn != last_turn && event.turn > 0 {
                     last_turn = event.turn;
                     list = list.child(
@@ -151,6 +180,7 @@ impl Render for TrajectoryWindow {
                 let badge_bg = trajectory_lane_color(event.lane);
                 let seq = event.seq;
                 let selected = self.selected == Some(seq);
+                let indent = event.depth as f32 * 16.;
                 list = list.child(
                     h_flex()
                         .id(("trajectory-event", seq))
@@ -166,6 +196,9 @@ impl Render for TrajectoryWindow {
                             this.selected = Some(seq);
                             cx.notify();
                         }))
+                        .when(event.depth > 0, |row| {
+                            row.child(div().flex_shrink_0().w(px(indent)))
+                        })
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -277,9 +310,11 @@ fn render_inspector(
 ) -> gpui::Div {
     let preview = tab == InspectorTab::Preview;
     let kind_zh = match event.lane {
-        TrajectoryLane::Context => "上下文",
+        TrajectoryLane::ModelCall => "模型调用（provider payload）",
+        TrajectoryLane::Request => "Pi 请求组装配置",
         TrajectoryLane::User => "消息",
-        TrajectoryLane::Assistant => "回复",
+        TrajectoryLane::Assistant => "模型消息",
+        TrajectoryLane::Thinking => "模型思考",
         TrajectoryLane::Tool => "工具",
     };
     let subtitle = if event.turn == 0 {
@@ -287,13 +322,11 @@ fn render_inspector(
     } else {
         format!("第 {} 轮 · {kind_zh}", event.turn)
     };
-    let source = format!(
-        "kind: {}\nturn: {}\ntext: {}",
-        trajectory_lane_label(event.lane),
-        event.turn,
-        event.text
-    );
-    let body = if preview { event.text.clone() } else { source };
+    let body = if preview {
+        event.preview.clone()
+    } else {
+        event.source.clone()
+    };
     v_flex()
         .w(px(380.))
         .h_full()
@@ -415,19 +448,29 @@ fn inspector_tab_label(
 }
 
 fn render_sequence_overview(events: &[TrajectoryEvent]) -> gpui::AnyElement {
+    // 请求配置和本地诊断目前都只是最新快照，没有可靠的 turn 关联；即使内容真实，
+    // 也不能在时间概览里占一个“执行步骤”。
+    let events = events
+        .iter()
+        .filter(|event| event.turn > 0)
+        .cloned()
+        .collect::<Vec<_>>();
     v_flex()
         .w_full()
         .gap_1()
         .child(overview_lane(
             "Input",
             ui_theme::text_muted(),
-            events,
-            |lane| matches!(lane, TrajectoryLane::User | TrajectoryLane::Context),
+            &events,
+            |lane| lane == TrajectoryLane::User,
         ))
-        .child(overview_lane("Model", ui_theme::purple(), events, |lane| {
-            lane == TrajectoryLane::Assistant
-        }))
-        .child(overview_lane("Tools", ui_theme::green(), events, |lane| {
+        .child(overview_lane(
+            "Model",
+            ui_theme::purple(),
+            &events,
+            |lane| matches!(lane, TrajectoryLane::Assistant | TrajectoryLane::Thinking),
+        ))
+        .child(overview_lane("Tools", ui_theme::green(), &events, |lane| {
             lane == TrajectoryLane::Tool
         }))
         .into_any_element()

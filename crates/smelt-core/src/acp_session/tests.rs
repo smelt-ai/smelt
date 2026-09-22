@@ -137,6 +137,24 @@ fn usage_keeps_tokens_when_only_cost_arrives() {
 }
 
 #[test]
+fn unknown_context_usage_does_not_invent_an_empty_context() {
+    let mut s = fresh_state();
+    apply_event(
+        &mut s,
+        ConversationEvent::Usage {
+            used: 0,
+            size: 128_000,
+            cached_read: Some(31_000_000),
+            cost: Some(1.25),
+            breakdown: None,
+        },
+    );
+    assert_eq!(s.usage, None);
+    assert_eq!(s.usage_cached_read, Some(31_000_000));
+    assert_eq!(s.usage_cost, Some(1.25));
+}
+
+#[test]
 fn usage_breakdown_is_kept_when_totals_arrive_separately() {
     let mut s = fresh_state();
     let breakdown = crate::acp_conn::ContextUsageBreakdown {
@@ -643,6 +661,7 @@ fn tool_children_replace_the_nested_transcript() {
                 text: "looking".into(),
                 thought: true,
             }],
+            debug: Default::default(),
         },
     );
     let AcpEntry::ToolCall { children, .. } = &s.entries[0] else {
@@ -655,6 +674,101 @@ fn tool_children_replace_the_nested_transcript() {
             text
         }] if text == "looking"
     ));
+}
+
+#[test]
+fn tool_children_atomically_replace_nested_debug_metadata() {
+    let mut s = fresh_state();
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolStarted {
+            id: "sa-1".into(),
+            title: "scout".into(),
+            kind: ToolKind::Collaborate,
+        },
+    );
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolChildren {
+            id: "sa-1".into(),
+            children: vec![AcpEntry::tool_call(
+                "sa-1-child-1",
+                "README.md",
+                ToolKind::Read,
+                ToolCallStatus::InProgress,
+                Vec::new(),
+            )],
+            debug: BTreeMap::from([
+                (
+                    "sa-1-child-1".into(),
+                    ToolCallDebug {
+                        name: Some("read".into()),
+                        raw_input: Some(serde_json::json!({"path": "README.md"})),
+                    },
+                ),
+                (
+                    "orphan".into(),
+                    ToolCallDebug {
+                        name: Some("bash".into()),
+                        raw_input: None,
+                    },
+                ),
+            ]),
+        },
+    );
+    assert!(s.tool_debug.contains_key("sa-1-child-1"));
+    assert!(!s.tool_debug.contains_key("orphan"));
+
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolChildren {
+            id: "sa-1".into(),
+            children: vec![AcpEntry::tool_call(
+                "sa-1-child-2",
+                "src/lib.rs",
+                ToolKind::Read,
+                ToolCallStatus::Completed,
+                Vec::new(),
+            )],
+            debug: BTreeMap::from([(
+                "sa-1-child-2".into(),
+                ToolCallDebug {
+                    name: Some("read".into()),
+                    raw_input: Some(serde_json::json!({"path": "src/lib.rs"})),
+                },
+            )]),
+        },
+    );
+    assert!(!s.tool_debug.contains_key("sa-1-child-1"));
+    assert_eq!(
+        s.tool_debug["sa-1-child-2"].raw_input,
+        Some(serde_json::json!({"path": "src/lib.rs"}))
+    );
+
+    let entries_before = serde_json::to_value(&s.entries).unwrap();
+    let debug_before = s.tool_debug.clone();
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolChildren {
+            id: "missing-parent".into(),
+            children: vec![AcpEntry::tool_call(
+                "missing-parent-child-1",
+                "secret.rs",
+                ToolKind::Read,
+                ToolCallStatus::Completed,
+                Vec::new(),
+            )],
+            debug: BTreeMap::from([(
+                "missing-parent-child-1".into(),
+                ToolCallDebug {
+                    name: Some("read".into()),
+                    raw_input: Some(serde_json::json!({"path": "secret.rs"})),
+                },
+            )]),
+        },
+    );
+    assert_eq!(serde_json::to_value(&s.entries).unwrap(), entries_before);
+    assert_eq!(s.tool_debug, debug_before);
 }
 
 #[test]
@@ -782,6 +896,8 @@ fn snapshot_wire_keeps_legacy_phase_names() {
     .unwrap();
     assert_eq!(parsed.phase, DaemonPhase::Dead);
     assert_eq!(parsed.end_reason, "超时");
+    assert_eq!(parsed.tool_debug, None);
+    assert_eq!(parsed.runtime_debug, None);
 
     let choice: ConversationSnapshot = serde_json::from_value(serde_json::json!({
         "entries": [],
@@ -795,6 +911,79 @@ fn snapshot_wire_keeps_legacy_phase_names() {
     }))
     .unwrap();
     assert_eq!(choice.phase, DaemonPhase::WaitingForUser);
+}
+
+#[test]
+fn runtime_debug_event_round_trips_through_authoritative_snapshots() {
+    let mut state = fresh_state();
+    let debug = RuntimeDebug {
+        version: 2,
+        source: "pi_runtime_debug".into(),
+        system_prompt: Some("exact system prompt".into()),
+        tools: vec![RuntimeDebugTool {
+            name: "bash".into(),
+            description: "Run a shell command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["command"]
+            }),
+            source: Some("builtin".into()),
+        }],
+        model_call: Some(RuntimeDebugModelCall {
+            sequence: 4,
+            source: "pi_before_provider_request".into(),
+            model: RuntimeDebugModel {
+                provider: Some("openai".into()),
+                id: Some("gpt-test".into()),
+                api: Some("responses".into()),
+                thinking_level: Some("high".into()),
+            },
+            payload: serde_json::json!({
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "api_key": "[REDACTED]"
+            }),
+            redacted_paths: vec!["$.api_key".into()],
+        }),
+    };
+
+    let outcome = apply_event(&mut state, ConversationEvent::RuntimeDebug(debug.clone()));
+    assert!(
+        !outcome.should_persist,
+        "大体积审计事件不应单独触发流式落盘"
+    );
+    assert!(
+        outcome.runtime_debug_changed,
+        "实时快照必须知道本帧需要携带更新后的 sidecar"
+    );
+    assert_eq!(state.runtime_debug, debug);
+
+    let snapshot = state.to_snapshot(false);
+    assert_eq!(snapshot.runtime_debug.as_ref(), Some(&debug));
+    let restored = AcpSessionState::from_snapshot(snapshot);
+    assert_eq!(restored.runtime_debug, debug);
+}
+
+#[test]
+fn old_snapshot_does_not_clear_known_runtime_debug_during_hosted_merge() {
+    let mut state = fresh_state();
+    state.runtime_debug = RuntimeDebug {
+        version: 1,
+        source: "pi_before_agent_start".into(),
+        system_prompt: Some("known prompt".into()),
+        tools: Vec::new(),
+        model_call: None,
+    };
+    let mut old_snapshot = state.to_snapshot(false);
+    old_snapshot.runtime_debug = None;
+    old_snapshot.entries_total = old_snapshot.entries.len();
+
+    state.merge_hosted_snapshot(old_snapshot).unwrap();
+    assert_eq!(
+        state.runtime_debug.system_prompt.as_deref(),
+        Some("known prompt")
+    );
+    assert_eq!(state.runtime_debug.version, 1);
 }
 
 #[test]

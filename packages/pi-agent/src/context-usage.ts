@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 export const SMELT_CONTEXT_USAGE_WIDGET = "smelt-context-usage";
+export const SMELT_RUNTIME_DEBUG_WIDGET = "smelt-runtime-debug";
 
 export type ContextUsageBuckets = {
 	systemPrompt: number;
@@ -155,20 +156,151 @@ function publish(ctx: ExtensionContext, buckets: ContextUsageBuckets): void {
 	}
 }
 
+export type RuntimeDebugModelCall = {
+	sequence: number;
+	source: "pi_before_provider_request";
+	model: {
+		provider?: string;
+		id?: string;
+		api?: string;
+		thinkingLevel?: string;
+	};
+	payload: unknown;
+	redactedPaths: string[];
+};
+
+export type RuntimeDebugPayload = {
+	version: 2;
+	source: "pi_runtime_debug";
+	systemPrompt: string;
+	tools: ContextUsageTool[];
+	modelCall?: RuntimeDebugModelCall;
+};
+
+const SENSITIVE_PAYLOAD_KEYS = new Set([
+	"authorization",
+	"proxyauthorization",
+	"headers",
+	"apikey",
+	"accesstoken",
+	"refreshtoken",
+	"token",
+	"clientsecret",
+	"secret",
+	"password",
+	"passwd",
+	"cookie",
+	"setcookie",
+	"credential",
+	"credentials",
+]);
+
+function normalizedPayloadKey(key: string): string {
+	return key.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+}
+
+function redactProviderPayload(
+	value: unknown,
+	path: string,
+	redactedPaths: string[],
+	seen: WeakSet<object>,
+): unknown {
+	if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
+		return value;
+	}
+	if (typeof value === "bigint") {
+		return value.toString();
+	}
+	if (typeof value !== "object") {
+		return `[UNSERIALIZABLE:${typeof value}]`;
+	}
+	if (seen.has(value)) {
+		return "[UNSERIALIZABLE:CIRCULAR]";
+	}
+	seen.add(value);
+	if (Array.isArray(value)) {
+		return value.map((item, index) =>
+			redactProviderPayload(item, `${path}[${index}]`, redactedPaths, seen),
+		);
+	}
+	const result: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value)) {
+		const childPath = `${path}.${key}`;
+		if (SENSITIVE_PAYLOAD_KEYS.has(normalizedPayloadKey(key))) {
+			result[key] = "[REDACTED]";
+			redactedPaths.push(childPath);
+			continue;
+		}
+		result[key] = redactProviderPayload(child, childPath, redactedPaths, seen);
+	}
+	return result;
+}
+
+export function captureProviderRequest(
+	sequence: number,
+	payload: unknown,
+	model: RuntimeDebugModelCall["model"],
+): RuntimeDebugModelCall {
+	const redactedPaths: string[] = [];
+	return {
+		sequence,
+		source: "pi_before_provider_request",
+		model,
+		payload: redactProviderPayload(payload, "$", redactedPaths, new WeakSet()),
+		redactedPaths,
+	};
+}
+
+export function buildRuntimeDebugPayload(
+	systemPrompt: string,
+	tools: ContextUsageTool[],
+	modelCall?: RuntimeDebugModelCall,
+): RuntimeDebugPayload {
+	return {
+		version: 2,
+		source: "pi_runtime_debug",
+		systemPrompt,
+		tools,
+		...(modelCall ? { modelCall } : {}),
+	};
+}
+
+function publishRuntimeDebug(
+	ctx: ExtensionContext,
+	systemPrompt: string,
+	tools: ContextUsageTool[],
+	modelCall?: RuntimeDebugModelCall,
+): void {
+	try {
+		ctx.ui.setWidget(SMELT_RUNTIME_DEBUG_WIDGET, [
+			JSON.stringify(buildRuntimeDebugPayload(systemPrompt, tools, modelCall)),
+		]);
+	} catch {
+		// 审计数据不能影响正常对话。
+	}
+}
+
 export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 	return (pi) => {
 		let lastOptions: {
 			contextFiles: Array<{ path: string; content: string }>;
 			skills: Skill[];
 		} = { contextFiles: [], skills: [] };
+		let lastSystemPrompt = "";
+		let lastTools: ContextUsageTool[] = [];
+		let modelCallSequence = 0;
 
-		const publishFrom = (ctx: ExtensionContext, systemPrompt: string) => {
+		const publishFrom = (
+			ctx: ExtensionContext,
+			systemPrompt: string,
+			includeRuntimeDebug: boolean,
+		) => {
 			let tools: ContextUsageTool[] = [];
 			try {
 				const active = new Set(pi.getActiveTools());
 				tools = pi
 					.getAllTools()
-					.filter((tool) => active.size === 0 || active.has(tool.name))
+					.filter((tool) => active.has(tool.name))
 					.map((tool) => ({
 						name: tool.name,
 						description: tool.description,
@@ -178,6 +310,8 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 			} catch {
 				tools = [];
 			}
+			lastSystemPrompt = systemPrompt;
+			lastTools = tools;
 			publish(
 				ctx,
 				buildContextUsageBuckets({
@@ -188,6 +322,9 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					messages: messagesFromSession(ctx),
 				}),
 			);
+			if (includeRuntimeDebug) {
+				publishRuntimeDebug(ctx, systemPrompt, tools);
+			}
 		};
 
 		pi.on("before_agent_start", (event, ctx) => {
@@ -195,10 +332,20 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 				contextFiles: event.systemPromptOptions.contextFiles ?? [],
 				skills: event.systemPromptOptions.skills ?? [],
 			};
-			publishFrom(ctx, event.systemPrompt);
+			publishFrom(ctx, event.systemPrompt, true);
 		});
 		pi.on("context", (_event, ctx) => {
-			publishFrom(ctx, ctx.getSystemPrompt());
+			publishFrom(ctx, ctx.getSystemPrompt(), false);
+		});
+		pi.on("before_provider_request", (event, ctx) => {
+			modelCallSequence += 1;
+			const modelCall = captureProviderRequest(modelCallSequence, event.payload, {
+				provider: ctx.model?.provider,
+				id: ctx.model?.id,
+				api: ctx.model?.api,
+				thinkingLevel: ctx.thinkingLevel,
+			});
+			publishRuntimeDebug(ctx, lastSystemPrompt, lastTools, modelCall);
 		});
 	};
 }

@@ -329,6 +329,14 @@ pub enum ConversationEvent {
     },
     ToolCall(ToolCall),
     ToolCallUpdate(ToolCallUpdate),
+    /// Provider 明确暴露的工具原始元数据。与展示生命周期分开，避免从 title 反推。
+    ToolDebug {
+        id: String,
+        name: Option<String>,
+        raw_input: Option<serde_json::Value>,
+    },
+    /// 受管运行时明确上报的本轮 system prompt 与可用工具定义。
+    RuntimeDebug(crate::acp_session::RuntimeDebug),
     /// Provider-neutral tool lifecycle used by native drivers such as Codex app-server.
     ToolStarted {
         id: String,
@@ -348,6 +356,7 @@ pub enum ConversationEvent {
     ToolChildren {
         id: String,
         children: Vec<crate::acp_chat::AcpEntry>,
+        debug: BTreeMap<String, crate::acp_session::ToolCallDebug>,
     },
     /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
     /// UI 渲染成消息流上方的可折叠 PLAN 条。

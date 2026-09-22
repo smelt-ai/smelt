@@ -44,9 +44,10 @@ use super::*;
 // 这层要解决的问题（GUI 退出不该带走 ACP 对话）。真要杀走 acp_kill。
 //
 // 「无缝升级」交接 session host 控制 socket + 镜像水位。SDK future、outstanding
-// callback、审批 responder 和 prompt 队列始终留在宿主进程，所以 Running/审批中也
-// 能升级；新 daemon 接管后发 Refresh 全量追平 exec 窗口。旧版 direct-fd handoff
-// 仍保留兼容，只对那类遗留会话要求一次协议静默边界，接管后立即迁入独立宿主。
+// callback、审批 responder 和 prompt 队列始终留在宿主进程，因此底层 handoff 具备
+// 恢复活跃回合的能力；但正常升级仍在主 daemon 统一等待回合 idle，避免主动打断
+// 用户对话。新 daemon 接管后发 Refresh 全量追平 exec 窗口。旧版 direct-fd handoff
+// 仍保留兼容，接管后立即迁入独立宿主。
 
 pub(crate) struct AcpOut {
     /// ACP 快照也复用有界 attachment 邮箱；归约线程只入队，不直接写 socket。
@@ -476,11 +477,23 @@ pub(crate) fn push_acp_snapshot_since(
     should_persist: bool,
     entries_offset: Option<usize>,
 ) {
+    push_acp_snapshot_since_with_runtime_debug(sess, should_persist, entries_offset, false);
+}
+
+fn push_acp_snapshot_since_with_runtime_debug(
+    sess: &AcpSession,
+    should_persist: bool,
+    entries_offset: Option<usize>,
+    include_runtime_debug: bool,
+) {
     let _output_gate = sess.output_gate.lock().unwrap();
     let mut snap = {
         let reduced = sess.reduced.lock().unwrap();
         let offset = entries_offset.unwrap_or(reduced.entries.len());
         let mut snapshot = reduced.to_snapshot_since(should_persist, offset);
+        if !include_runtime_debug {
+            snapshot.runtime_debug = None;
+        }
         snapshot.snapshot_revision = sess.snapshot_revision.fetch_add(1, Ordering::SeqCst) + 1;
         snapshot
     };
@@ -523,6 +536,11 @@ pub(crate) fn push_acp_snapshot_since(
         }
     }
     out.watchers = live_watchers;
+}
+
+#[cfg(test)]
+pub(crate) fn push_acp_snapshot_with_runtime_debug_for_test(sess: &AcpSession) {
+    push_acp_snapshot_since_with_runtime_debug(sess, false, None, true);
 }
 
 pub(crate) fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
@@ -783,7 +801,12 @@ pub(crate) fn start_acp_event_drain(
                     update_acp_daemon_state(sess, &subscribers);
                     break;
                 }
-                push_acp_snapshot_since(sess, outcome.should_persist, outcome.entries_offset);
+                push_acp_snapshot_since_with_runtime_debug(
+                    sess,
+                    outcome.should_persist,
+                    outcome.entries_offset,
+                    outcome.runtime_debug_changed,
+                );
                 update_acp_daemon_state(sess, &subscribers);
                 // TurnEnded / Ready 之后只要相位已 Idle 就放闸。迟到工具终态
                 // 按 tool id 归到旧条目，不会把新回合重新打开。
@@ -912,6 +935,7 @@ pub(crate) fn start_hosted_snapshot_drain(
                     continue;
                 }
 
+                let runtime_debug_changed = snapshot.runtime_debug.is_some();
                 let should_persist = snapshot.should_persist;
                 let requested_offset = snapshot.entries_offset;
                 let owner_ids = {
@@ -967,7 +991,12 @@ pub(crate) fn start_hosted_snapshot_drain(
                         )
                 };
                 sess.prompt_in_flight.store(gate_held, Ordering::SeqCst);
-                push_acp_snapshot_since(sess, should_persist, Some(requested_offset));
+                push_acp_snapshot_since_with_runtime_debug(
+                    sess,
+                    should_persist,
+                    Some(requested_offset),
+                    runtime_debug_changed,
+                );
                 update_acp_daemon_state(sess, &subscribers);
             }
         });
@@ -1597,7 +1626,7 @@ fn apply_acp_user_action_inner(
     }
     match action {
         AcpUserAction::Refresh => {
-            push_acp_snapshot_since(sess, false, Some(0));
+            push_acp_snapshot_since_with_runtime_debug(sess, false, Some(0), true);
             Ok(())
         }
         AcpUserAction::RestartRuntime => Err("runtime restart must be handled by the session host"),
@@ -3065,11 +3094,8 @@ pub(crate) fn acp_upgrade_blockers(acp_sessions: &AcpSessions) -> Vec<String> {
         .snapshot()
         .into_iter()
         .filter_map(|(id, slot)| {
-            // 独立 session host 持有 SDK future/responder/prompt queue，本 daemon
-            // 只交接控制 socket；即使正处于 Running/审批中也没有内存状态要迁移。
-            if slot.value.hosted_handle.lock().unwrap().is_some() {
-                return None;
-            }
+            // hosted 与 direct 共用同一回合门槛。独立宿主让 mid-turn handoff 可恢复，
+            // 但恢复能力不能成为正常升级主动打断活跃回合的理由。
             let (phase_blocks, has_unfinished_tool) = {
                 let reduced = slot.value.reduced.lock().unwrap();
                 // `phase` alone is not a reliable liveness signal.  A late event or an

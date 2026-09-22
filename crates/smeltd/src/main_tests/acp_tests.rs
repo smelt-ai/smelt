@@ -1636,6 +1636,52 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
 }
 
 #[test]
+fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
+    let mut reduced = AcpSessionState::default();
+    reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
+        version: 2,
+        source: "pi_runtime_debug".into(),
+        system_prompt: Some("exact prompt".into()),
+        tools: Vec::new(),
+        model_call: Some(smelt_core::acp_session::RuntimeDebugModelCall {
+            sequence: 1,
+            source: "pi_before_provider_request".into(),
+            model: smelt_core::acp_session::RuntimeDebugModel {
+                provider: Some("openai".into()),
+                id: Some("gpt-test".into()),
+                ..Default::default()
+            },
+            payload: serde_json::json!({
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            redacted_paths: Vec::new(),
+        }),
+    };
+    let sess = make_acp_session("acp-runtime-debug-wire", reduced);
+    let (server, client) = UnixStream::pair().unwrap();
+    sess.out.lock().unwrap().client = Some(test_acp_attachment(server, "acp-runtime-debug-wire"));
+    let mut reader = BufReader::new(client);
+
+    push_acp_snapshot_since(&sess, false, None);
+    let mut incremental = String::new();
+    reader.read_line(&mut incremental).unwrap();
+    let incremental: serde_json::Value = serde_json::from_str(&incremental).unwrap();
+    assert!(
+        incremental["snapshot"].get("runtime_debug").is_none(),
+        "普通流式帧不应重复携带完整 provider payload"
+    );
+
+    push_acp_snapshot_with_runtime_debug_for_test(&sess);
+    let mut changed = String::new();
+    reader.read_line(&mut changed).unwrap();
+    let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
+    assert_eq!(
+        changed["snapshot"]["runtime_debug"]["modelCall"]["payload"]["messages"][0]["content"],
+        "hello"
+    );
+}
+
+#[test]
 fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
     let mut reduced = AcpSessionState::default();
     for id in ["tool-a", "tool-b"] {
@@ -2103,7 +2149,7 @@ fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
 }
 
 #[test]
-fn hosted_runtime_never_blocks_upgrade_during_an_active_turn() {
+fn hosted_runtime_blocks_upgrade_until_the_active_turn_is_idle() {
     let acp_sessions = new_test_acp_sessions();
     let mut running = AcpSessionState::default();
     running.phase = DaemonPhase::AwaitingApproval;
@@ -2115,10 +2161,19 @@ fn hosted_runtime_never_blocks_upgrade_during_an_active_turn() {
     let (hosted, peer) = acp_runtime_host::HostedConversationHandle::test_stub();
     *slot.value.hosted_handle.lock().unwrap() = Some(hosted);
 
-    assert!(
-        acp_upgrade_blockers(&acp_sessions).is_empty(),
-        "SDK future 和 responder 留在 session host 后，活跃回合不能再阻塞 daemon exec"
+    assert_eq!(
+        acp_upgrade_blockers(&acp_sessions),
+        vec!["acp-hosted"],
+        "session host 能恢复回合不等于应主动打断回合；升级必须等到 idle"
     );
+
+    {
+        let mut reduced = slot.value.reduced.lock().unwrap();
+        reduced.phase = DaemonPhase::Idle;
+        reduced.turn_started_at_ms = None;
+    }
+    slot.value.prompt_in_flight.store(false, Ordering::SeqCst);
+    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
     drop(peer);
 }
 

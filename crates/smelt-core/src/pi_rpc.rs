@@ -22,12 +22,15 @@ use crate::acp_conn::{
     ElicitField, ElicitFieldKind, ElicitOption, ElicitationResponder, ModelProviderGroup,
     ModelState, PermissionResponder, ReadyKind, SessionConfigState,
 };
-use crate::acp_session::{ApprovalDetailsView, PermissionOptionKindView, PermissionOptionView};
+use crate::acp_session::{
+    ApprovalDetailsView, PermissionOptionKindView, PermissionOptionView, RuntimeDebug,
+};
 use crate::agent_kind::{ConversationLaunchSpec, SMELT_PI_AGENT_COMMAND};
 
 const PI_RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
+const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 
 #[derive(Clone, Debug)]
 struct PiModel {
@@ -74,7 +77,9 @@ struct PiState {
     /// 已解析的工具参数，结束时用来出 diff / 标题。
     tool_args: HashMap<String, serde_json::Value>,
     tool_names: HashMap<String, String>,
-    stats_request_ids: HashSet<String>,
+    /// 只接受最后一次 `get_session_stats` 的回包。Pi 会并发处理 stdin 命令，
+    /// 旧请求可能晚于压缩后的新请求返回，不能让旧上下文覆盖新估算。
+    latest_stats_request_id: Option<String>,
     /// 进行中的回退：先等 `get_fork_messages` 回执定位 entryId，再等 `fork` 回执。
     /// 两段用同一份 pending 而不是两个 id 集，因为它们的语义是连续的，
     /// 中途任何一段失败都要把整次回退作废。
@@ -1524,7 +1529,8 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         }
         return Ok(());
     }
-    if state.stats_request_ids.remove(&id) {
+    if state.latest_stats_request_id.as_deref() == Some(&id) {
+        state.latest_stats_request_id = None;
         if ensure_response_success(&response).is_ok() {
             publish_session_stats(
                 response.get("data").unwrap_or(&serde_json::Value::Null),
@@ -1930,14 +1936,15 @@ fn handle_event(
             let Some(id) = event.get("toolCallId").and_then(serde_json::Value::as_str) else {
                 return;
             };
-            if let Some(children) = event
+            if let Some((children, debug)) = event
                 .get("partialResult")
                 .and_then(|value| value.get("details"))
-                .and_then(subagent_children_from_details)
+                .and_then(|details| subagent_children_from_details(id, details))
             {
                 let _ = event_tx.try_send(ConversationEvent::ToolChildren {
                     id: id.to_string(),
                     children,
+                    debug,
                 });
                 let text = content_text(
                     event
@@ -1983,14 +1990,15 @@ fn handle_event(
                 .cloned()
                 .or_else(|| state.tool_args.remove(id));
             state.partial_tool_args.remove(id);
-            if let Some(children) = event
+            if let Some((children, debug)) = event
                 .get("result")
                 .and_then(|value| value.get("details"))
-                .and_then(subagent_children_from_details)
+                .and_then(|details| subagent_children_from_details(id, details))
             {
                 let _ = event_tx.try_send(ConversationEvent::ToolChildren {
                     id: id.to_string(),
                     children,
+                    debug,
                 });
             }
             let output = event
@@ -2112,22 +2120,11 @@ fn publish_usage(
     let Some(usage) = message.get("usage") else {
         return;
     };
-    let used = usage
-        .get("totalTokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| {
-            usage
-                .get("input")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                + usage
-                    .get("output")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
-        });
     let cached_read = usage.get("cacheRead").and_then(serde_json::Value::as_u64);
     let _ = event_tx.try_send(ConversationEvent::Usage {
-        used,
+        // Provider usage is billing data. In particular, totalTokens may include
+        // cache/lifetime totals and is not Pi's active context size.
+        used: 0,
         size,
         cached_read,
         cost: None,
@@ -2140,8 +2137,12 @@ fn request_session_stats(
     outbound_tx: &smol::channel::Sender<serde_json::Value>,
 ) {
     let id = state.request_id("stats");
-    state.stats_request_ids.insert(id.clone());
-    let _ = outbound_tx.try_send(serde_json::json!({"id": id, "type": "get_session_stats"}));
+    if outbound_tx
+        .try_send(serde_json::json!({"id": id, "type": "get_session_stats"}))
+        .is_ok()
+    {
+        state.latest_stats_request_id = Some(id);
+    }
 }
 
 fn publish_session_stats(
@@ -2151,14 +2152,12 @@ fn publish_session_stats(
 ) {
     let tokens = data.get("tokens");
     let context = data.get("contextUsage");
+    // Pi deliberately returns contextUsage.tokens = null immediately after
+    // compaction until a later model response makes the active size reliable.
+    // Session tokens.total is lifetime billing usage, never a context fallback.
     let used = context
         .and_then(|value| value.get("tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .or_else(|| {
-            tokens
-                .and_then(|value| value.get("total"))
-                .and_then(serde_json::Value::as_u64)
-        });
+        .and_then(serde_json::Value::as_u64);
     let size = context
         .and_then(|value| value.get("contextWindow"))
         .and_then(serde_json::Value::as_u64)
@@ -2192,10 +2191,16 @@ fn emit_tool_started(
     name: &str,
     args: Option<&serde_json::Value>,
 ) {
+    // 保持既有生命周期顺序：先让卡片出现，再补仅供审计的原始元数据。
     let _ = event_tx.try_send(ConversationEvent::ToolStarted {
         id: id.to_string(),
         title: tool_title(name, args),
         kind: tool_kind(name),
+    });
+    let _ = event_tx.try_send(ConversationEvent::ToolDebug {
+        id: id.to_string(),
+        name: Some(name.to_string()),
+        raw_input: args.cloned(),
     });
 }
 
@@ -2355,48 +2360,53 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-fn subagent_children_from_details(details: &serde_json::Value) -> Option<Vec<AcpEntry>> {
+fn subagent_children_from_details(
+    parent_id: &str,
+    details: &serde_json::Value,
+) -> Option<(
+    Vec<AcpEntry>,
+    BTreeMap<String, crate::acp_session::ToolCallDebug>,
+)> {
     let results = details.get("results")?.as_array()?;
     if results.len() <= 1 {
         let result = results.first()?;
         return Some(entries_from_subagent_messages(
             result.get("messages").and_then(serde_json::Value::as_array),
-            "sa",
+            &format!("{parent_id}-child"),
             subagent_result_running(result),
         ));
     }
-    Some(
-        results
-            .iter()
-            .enumerate()
-            .map(|(index, result)| {
-                let agent = result
-                    .get("agent")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("agent");
-                let running = subagent_result_running(result);
-                let failed = subagent_result_failed(result);
-                AcpEntry::ToolCall {
-                    id: format!("sa-result-{index}"),
-                    title: agent.to_string(),
-                    kind: ToolKind::Collaborate,
-                    status: if running {
-                        ToolCallStatus::InProgress
-                    } else if failed {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    },
-                    output: Vec::new(),
-                    children: entries_from_subagent_messages(
-                        result.get("messages").and_then(serde_json::Value::as_array),
-                        &format!("sa-{index}"),
-                        running,
-                    ),
-                }
-            })
-            .collect(),
-    )
+    let mut entries = Vec::with_capacity(results.len());
+    let mut debug = BTreeMap::new();
+    for (index, result) in results.iter().enumerate() {
+        let agent = result
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("agent");
+        let running = subagent_result_running(result);
+        let failed = subagent_result_failed(result);
+        let (children, child_debug) = entries_from_subagent_messages(
+            result.get("messages").and_then(serde_json::Value::as_array),
+            &format!("{parent_id}-result-{index}-child"),
+            running,
+        );
+        debug.extend(child_debug);
+        entries.push(AcpEntry::ToolCall {
+            id: format!("{parent_id}-result-{index}"),
+            title: agent.to_string(),
+            kind: ToolKind::Collaborate,
+            status: if running {
+                ToolCallStatus::InProgress
+            } else if failed {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
+            },
+            output: Vec::new(),
+            children,
+        });
+    }
+    Some((entries, debug))
 }
 
 fn subagent_result_running(result: &serde_json::Value) -> bool {
@@ -2425,11 +2435,15 @@ fn entries_from_subagent_messages(
     messages: Option<&Vec<serde_json::Value>>,
     id_prefix: &str,
     running: bool,
-) -> Vec<AcpEntry> {
+) -> (
+    Vec<AcpEntry>,
+    BTreeMap<String, crate::acp_session::ToolCallDebug>,
+) {
     let Some(messages) = messages else {
-        return Vec::new();
+        return (Vec::new(), BTreeMap::new());
     };
     let mut entries = Vec::new();
+    let mut debug = BTreeMap::new();
     let mut tool_index = 0_usize;
     for message in messages {
         if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
@@ -2472,8 +2486,16 @@ fn entries_from_subagent_messages(
                         .unwrap_or("tool");
                     let args = part.get("arguments").or_else(|| part.get("args"));
                     tool_index += 1;
+                    let id = format!("{id_prefix}-{tool_index}");
+                    debug.insert(
+                        id.clone(),
+                        crate::acp_session::ToolCallDebug {
+                            name: Some(name.to_string()),
+                            raw_input: args.cloned(),
+                        },
+                    );
                     entries.push(AcpEntry::tool_call(
-                        format!("{id_prefix}-{tool_index}"),
+                        id,
                         tool_title(name, args),
                         tool_kind(name),
                         ToolCallStatus::Completed,
@@ -2492,7 +2514,7 @@ fn entries_from_subagent_messages(
             }
         }
     }
-    entries
+    (entries, debug)
 }
 
 fn content_text(content: Option<&serde_json::Value>) -> String {
@@ -2753,14 +2775,84 @@ fn replay_assistant_content(
     }
 }
 
-fn publish_context_usage_widget(
+fn normalized_sensitive_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_sensitive_payload_key(key: &str) -> bool {
+    matches!(
+        normalized_sensitive_key(key).as_str(),
+        "authorization"
+            | "proxyauthorization"
+            | "headers"
+            | "apikey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "token"
+            | "clientsecret"
+            | "secret"
+            | "password"
+            | "passwd"
+            | "cookie"
+            | "setcookie"
+            | "credential"
+            | "credentials"
+    )
+}
+
+fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                redact_runtime_payload(item, &format!("{path}[{index}]"), paths);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, child) in fields {
+                let child_path = format!("{path}.{key}");
+                if is_sensitive_payload_key(key) {
+                    *child = serde_json::Value::String("[REDACTED]".to_string());
+                    if !paths.contains(&child_path) {
+                        paths.push(child_path);
+                    }
+                } else {
+                    redact_runtime_payload(child, &child_path, paths);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_runtime_debug(debug: &mut RuntimeDebug) -> bool {
+    if debug.system_prompt.as_deref().is_none_or(str::is_empty) {
+        return false;
+    }
+    match (debug.version, debug.source.as_str()) {
+        (1, "pi_before_agent_start") => debug.model_call.is_none(),
+        (2, "pi_runtime_debug") => {
+            if let Some(call) = &mut debug.model_call {
+                if call.sequence == 0 || call.source != "pi_before_provider_request" {
+                    return false;
+                }
+                redact_runtime_payload(&mut call.payload, "$", &mut call.redacted_paths);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn publish_extension_widget(
     request: &serde_json::Value,
     event_tx: &smol::channel::Sender<ConversationEvent>,
 ) {
-    let key = request.get("widgetKey").and_then(serde_json::Value::as_str);
-    if key != Some(SMELT_CONTEXT_USAGE_WIDGET) {
+    let Some(key) = request.get("widgetKey").and_then(serde_json::Value::as_str) else {
         return;
-    }
+    };
     let Some(line) = request
         .get("widgetLines")
         .and_then(serde_json::Value::as_array)
@@ -2769,16 +2861,30 @@ fn publish_context_usage_widget(
     else {
         return;
     };
-    let Ok(breakdown) = serde_json::from_str::<ContextUsageBreakdown>(line) else {
-        return;
-    };
-    let _ = event_tx.try_send(ConversationEvent::Usage {
-        used: 0,
-        size: 0,
-        cached_read: None,
-        cost: None,
-        breakdown: Some(breakdown),
-    });
+    match key {
+        SMELT_CONTEXT_USAGE_WIDGET => {
+            let Ok(breakdown) = serde_json::from_str::<ContextUsageBreakdown>(line) else {
+                return;
+            };
+            let _ = event_tx.try_send(ConversationEvent::Usage {
+                used: 0,
+                size: 0,
+                cached_read: None,
+                cost: None,
+                breakdown: Some(breakdown),
+            });
+        }
+        SMELT_RUNTIME_DEBUG_WIDGET => {
+            let Ok(mut debug) = serde_json::from_str::<RuntimeDebug>(line) else {
+                return;
+            };
+            if !validate_runtime_debug(&mut debug) {
+                return;
+            }
+            let _ = event_tx.try_send(ConversationEvent::RuntimeDebug(debug));
+        }
+        _ => {}
+    }
 }
 
 fn handle_extension_ui(
@@ -2817,7 +2923,7 @@ fn handle_extension_ui(
                 let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
             }
         }
-        "setWidget" => publish_context_usage_widget(request, event_tx),
+        "setWidget" => publish_extension_widget(request, event_tx),
         "setTitle" => {
             if let Some(title) = request.get("title").and_then(serde_json::Value::as_str) {
                 let _ = event_tx.try_send(ConversationEvent::SessionTitle(Some(title.to_string())));
@@ -3458,6 +3564,14 @@ mod tests {
         ));
         assert!(matches!(
             event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: Some(args),
+            }) if id == "tool-1" && name == "bash" && args["command"] == "pwd"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
             Ok(ConversationEvent::ToolOutputDelta { id, delta }) if id == "tool-1" && delta == "/work"
         ));
         assert!(matches!(
@@ -3559,11 +3673,29 @@ mod tests {
                 kind: ToolKind::Collaborate
             }) if id == "sa-1" && title == "find auth"
         ));
-        let ConversationEvent::ToolChildren { id, children } = event_rx.try_recv().unwrap() else {
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: Some(args),
+            }) if id == "sa-1" && name == "subagent" && args["task"] == "find auth"
+        ));
+        let ConversationEvent::ToolChildren {
+            id,
+            children,
+            debug,
+        } = event_rx.try_recv().unwrap()
+        else {
             panic!("expected nested subagent children");
         };
         assert_eq!(id, "sa-1");
         assert_eq!(children.len(), 2);
+        assert_eq!(debug["sa-1-child-1"].name.as_deref(), Some("read"));
+        assert_eq!(
+            debug["sa-1-child-1"].raw_input,
+            Some(serde_json::json!({"path": "README.md"}))
+        );
         assert!(matches!(
             &children[0],
             AcpEntry::Assistant { thought: true, text } if text == "looking"
@@ -3693,8 +3825,45 @@ mod tests {
         ));
         assert!(matches!(
             event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: None,
+            }) if id == "call-1" && name == "bash"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
             Ok(ConversationEvent::ToolStarted { id, title, kind: ToolKind::Execute })
                 if id == "call-1" && title == "ls -la"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: Some(args),
+            }) if id == "call-1" && name == "bash" && args["command"] == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn message_usage_only_publishes_cache_without_clobbering_context() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_usage(
+            &serde_json::json!({
+                "usage": {"totalTokens": 35_400_000, "cacheRead": 31_000_000}
+            }),
+            Some(128_000),
+            &event_tx,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Usage {
+                used: 0,
+                size: 128_000,
+                cached_read: Some(31_000_000),
+                ..
+            })
         ));
     }
 
@@ -3723,9 +3892,109 @@ mod tests {
     }
 
     #[test]
+    fn stale_session_stats_response_cannot_overwrite_the_latest_context() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.model = Some(PiModel {
+            provider: "anthropic".into(),
+            id: "opus".into(),
+            name: "Opus".into(),
+            context_window: Some(200_000),
+        });
+
+        request_session_stats(&mut state, &outbound_tx);
+        let stale_id = outbound_rx.try_recv().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        request_session_stats(&mut state, &outbound_tx);
+        let latest_id = outbound_rx.try_recv().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let in_flight = AtomicUsize::new(0);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": latest_id,
+                "type": "response",
+                "command": "get_session_stats",
+                "success": true,
+                "data": {
+                    "tokens": {"cacheRead": 20_000},
+                    "cost": 0.5,
+                    "contextUsage": {"tokens": 32_000, "contextWindow": 200_000}
+                }
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Usage {
+                used: 32_000,
+                size: 200_000,
+                ..
+            })
+        ));
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": stale_id,
+                "type": "response",
+                "command": "get_session_stats",
+                "success": true,
+                "data": {
+                    "tokens": {"cacheRead": 100_000},
+                    "cost": 1.0,
+                    "contextUsage": {"tokens": 150_000, "contextWindow": 200_000}
+                }
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(
+            event_rx.try_recv().is_err(),
+            "迟到的旧统计不能覆盖较新的活动上下文"
+        );
+    }
+
+    #[test]
+    fn session_stats_do_not_replace_unknown_context_with_lifetime_tokens() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_session_stats(
+            &serde_json::json!({
+                "tokens": {"cacheRead": 31_000_000, "total": 35_400_000},
+                "cost": 1.25,
+                "contextUsage": {"tokens": null, "contextWindow": 128_000, "percent": null}
+            }),
+            Some(128_000),
+            &event_tx,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Usage {
+                used: 0,
+                size: 128_000,
+                cached_read: Some(31_000_000),
+                cost: Some(cost),
+                ..
+            }) if (cost - 1.25).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
     fn context_usage_widget_publishes_breakdown_without_clobbering_totals() {
         let (event_tx, event_rx) = smol::channel::unbounded();
-        publish_context_usage_widget(
+        publish_extension_widget(
             &serde_json::json!({
                 "widgetKey": "smelt-context-usage",
                 "widgetLines": ["{\"systemPrompt\":2000,\"toolsDefinition\":5600,\"rules\":1100,\"skills\":1700,\"mcpDynamic\":0,\"subagent\":0,\"summarized\":0,\"conversation\":1600}"]
@@ -3746,6 +4015,109 @@ mod tests {
         assert_eq!(breakdown.system_prompt, 2_000);
         assert_eq!(breakdown.tools_definition, 5_600);
         assert_eq!(breakdown.occupied(), 12_000);
+    }
+
+    #[test]
+    fn runtime_debug_widget_publishes_exact_prompt_tools_and_redacted_model_call() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 2,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "system line 1\n<project_context>真实上下文</project_context>",
+                    "tools": [{
+                        "name": "bash",
+                        "description": "Run a shell command",
+                        "parameters": {
+                            "type": "object",
+                            "required": ["command"],
+                            "properties": {"command": {"type": "string"}}
+                        },
+                        "source": "builtin"
+                    }],
+                    "modelCall": {
+                        "sequence": 3,
+                        "source": "pi_before_provider_request",
+                        "model": {
+                            "provider": "openai",
+                            "id": "gpt-test",
+                            "api": "responses",
+                            "thinkingLevel": "high"
+                        },
+                        "payload": {
+                            "model": "gpt-test",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "api_key": "malicious-widget-secret",
+                            "nested": {"Authorization": "Bearer secret"}
+                        },
+                        "redactedPaths": []
+                    }
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("expected runtime debug event");
+        };
+        assert_eq!(debug.version, 2);
+        assert_eq!(debug.source, "pi_runtime_debug");
+        assert_eq!(
+            debug.system_prompt.as_deref(),
+            Some("system line 1\n<project_context>真实上下文</project_context>")
+        );
+        assert_eq!(debug.tools.len(), 1);
+        assert_eq!(debug.tools[0].name, "bash");
+        assert_eq!(debug.tools[0].parameters["required"][0], "command");
+        let call = debug.model_call.expect("model call");
+        assert_eq!(call.sequence, 3);
+        assert_eq!(call.model.provider.as_deref(), Some("openai"));
+        assert_eq!(call.payload["max_tokens"], 4096);
+        assert_eq!(call.payload["api_key"], "[REDACTED]");
+        assert_eq!(call.payload["nested"]["Authorization"], "[REDACTED]");
+        assert_eq!(
+            call.redacted_paths,
+            vec![
+                "$.api_key".to_string(),
+                "$.nested.Authorization".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_debug_widget_rejects_unknown_versions_and_empty_prompts() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        for payload in [
+            serde_json::json!({
+                "version": 3,
+                "source": "pi_runtime_debug",
+                "systemPrompt": "future",
+                "tools": []
+            }),
+            serde_json::json!({
+                "version": 1,
+                "source": "pi_before_agent_start",
+                "systemPrompt": "",
+                "tools": []
+            }),
+            serde_json::json!({
+                "version": 1,
+                "source": "another_extension",
+                "systemPrompt": "spoofed",
+                "tools": []
+            }),
+        ] {
+            publish_extension_widget(
+                &serde_json::json!({
+                    "widgetKey": "smelt-runtime-debug",
+                    "widgetLines": [payload.to_string()]
+                }),
+                &event_tx,
+            );
+        }
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
