@@ -29,6 +29,9 @@ struct AgentUiProjection {
 }
 
 fn load_agent_ui_projection() -> Result<Option<AgentUiProjection>, String> {
+    if !sqlite_state::is_sqlite_state_enabled() {
+        return Ok(None);
+    }
     let store = sqlite_state::default_sqlite_store()?;
     let Some(snapshot) = store.get_agent_ui_snapshot()? else {
         return Ok(None);

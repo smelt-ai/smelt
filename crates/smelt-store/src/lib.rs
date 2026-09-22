@@ -933,23 +933,45 @@ mod imp {
     }
 
     fn open_backend(path: &Path, mode: OpenMode) -> Result<Backend, StoreError> {
+        if matches!(mode, OpenMode::OpenOrCreate) {
+            return open_or_create_backend(path);
+        }
         let presence = super::inspect_database_presence(path);
         match (mode, presence) {
-            (OpenMode::Existing, super::DatabasePresence::Ready)
-            | (OpenMode::OpenOrCreate, super::DatabasePresence::Ready) => {
-                open_existing_backend(path)
-            }
+            (OpenMode::Existing, super::DatabasePresence::Ready) => open_existing_backend(path),
             (OpenMode::Existing, super::DatabasePresence::Absent) => {
                 Err(super::missing_database_error(path))
             }
-            (OpenMode::CreateNew, super::DatabasePresence::Absent)
-            | (OpenMode::OpenOrCreate, super::DatabasePresence::Absent) => create_new_backend(path),
+            (OpenMode::CreateNew, super::DatabasePresence::Absent) => create_new_backend(path),
             (OpenMode::CreateNew, super::DatabasePresence::Ready) => {
                 Err(StoreError::AlreadyExists {
                     path: path.to_path_buf(),
                 })
             }
             (_, super::DatabasePresence::OrphanSidecars) => Err(super::orphan_sidecar_error(path)),
+            (OpenMode::OpenOrCreate, _) => unreachable!("open_or_create 走独立路径"),
+        }
+    }
+
+    /// 并发首次建库：A 刚创建空文件、schema 还没写完时，B 会把路径看成 Ready，
+    /// 按已有库打开又拒绝 bootstrap，于是拿到 `UninitializedDatabase`。
+    /// open_or_create 在这个窗口里重试，等初始化方提交 schema。
+    fn open_or_create_backend(path: &Path) -> Result<Backend, StoreError> {
+        let deadline = Instant::now() + BUSY_TIMEOUT;
+        loop {
+            let result = match super::inspect_database_presence(path) {
+                super::DatabasePresence::Ready => open_existing_backend(path),
+                super::DatabasePresence::Absent => create_new_backend(path),
+                super::DatabasePresence::OrphanSidecars => {
+                    return Err(super::orphan_sidecar_error(path));
+                }
+            };
+            match result {
+                Err(StoreError::UninitializedDatabase) if Instant::now() < deadline => {
+                    std::thread::sleep(BUSY_RETRY_DELAY);
+                }
+                other => return other,
+            }
         }
     }
 
