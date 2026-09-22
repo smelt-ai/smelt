@@ -17,6 +17,12 @@ fn renamed_staging_executable_falls_back_to_stable_smeltd_path() {
         stable,
         "macOS rename 后 current_exe 仍可能指向已不存在的 smeltd.next"
     );
+    let leftover_pin = root.join(".smeltd.image.11309");
+    assert_eq!(
+        daemon_executable_from_current(leftover_pin).unwrap(),
+        stable,
+        "历史硬链被删后必须回退到正式 smeltd，不能 ENOENT 把宿主 spawn 打挂"
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -87,6 +93,33 @@ fn ordinary_staging_launch_does_not_install_itself() {
     );
     assert!(staged.is_file());
     assert_eq!(std::fs::read(&stable).unwrap(), b"stable daemon image");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn staged_successor_is_the_sibling_next_file() {
+    let root = std::env::temp_dir().join(format!(
+        "smeltd-staged-successor-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let live = root.join("smeltd");
+    let next = root.join("smeltd.next");
+    std::fs::write(&live, b"running").unwrap();
+    assert_eq!(staged_successor_executable(&live), None);
+
+    std::fs::write(&next, b"pending").unwrap();
+    assert_eq!(
+        staged_successor_executable(&live).as_deref(),
+        Some(next.as_path())
+    );
+    assert_eq!(
+        staged_successor_executable(&next),
+        None,
+        "已经在跑 .next 时不能把自身再当成待升级候选"
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }

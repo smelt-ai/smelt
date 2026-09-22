@@ -569,26 +569,32 @@ pub(super) fn authenticate_event_connection(
     authenticate_event_client_for_platform(value, &peer, daemon_pid, daemon_executable)
 }
 
-/// 最近一次 viewer 活跃时刻（unix 秒）：desktop 鉴权成功，或终端 open/watch。
-/// headless 自升级用它判断“有没有人在看”：有人就把升级时机让给 GUI（它有空闲
-/// 门控，agent 忙不闪终端）；5 分钟没人看才自己升。
-static LAST_VIEWER_SEEN_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 正在看画面的活连接数。headless 自升级只在这是 0 时才动手——GUI 自己有空闲
+/// 门控（agent 忙不闪终端），有人连着就把升级时机让出去。
+///
+/// 必须是租约而不是「最近 N 分钟活跃过」：desktop 鉴权 / 终端 open 都是稀疏事件，
+/// ACP 对话可以连着看很久却不再触发它们。用过期时间当「GUI 不在」，会把正在跑的
+/// 回合当成没人看，自升级把 host 换掉，toolUse 就停在半截。
+static LIVE_VIEWERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-pub(super) fn record_viewer_seen() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    LAST_VIEWER_SEEN_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+/// 一条会挡住 headless 自升级的观看连接。Drop 时归还。
+pub(crate) struct ViewerLease;
+
+impl ViewerLease {
+    pub(crate) fn acquire() -> Self {
+        LIVE_VIEWERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
 }
 
-pub(crate) fn viewer_seen_within(window: std::time::Duration) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let last = LAST_VIEWER_SEEN_SECS.load(std::sync::atomic::Ordering::Relaxed);
-    last != 0 && now.saturating_sub(last) <= window.as_secs()
+impl Drop for ViewerLease {
+    fn drop(&mut self) {
+        LIVE_VIEWERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn viewer_is_present() -> bool {
+    LIVE_VIEWERS.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
 pub(super) fn authenticate_desktop_connection(
@@ -604,9 +610,7 @@ pub(super) fn authenticate_desktop_connection(
         std::process::id(),
         &executable,
     )?;
-    let identity = require_desktop_identity(identity)?;
-    record_viewer_seen();
-    Ok(identity)
+    require_desktop_identity(identity)
 }
 
 pub(super) fn require_desktop_identity(

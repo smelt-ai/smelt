@@ -1077,16 +1077,6 @@ pub(crate) fn acp_relaunch(
     if acp_sessions.spawn_policy() == acp_registry::AcpSpawnPolicy::HostedProcess
         && !acp_runtime_host::is_session_host_process()
     {
-        // 磁盘二进制已经是新版、主 daemon 还是旧映像时，直接 spawn 会得到一个跟自己
-        // 不同版本的 host，双方的快照 schema 未必兼容（真出过：host 发新增的 enum
-        // 变体，主 daemon 解析不了，镜像永久冻结）。开新会话正是打断代价最小的升级
-        // 时机，这里不再等 headless 自升级的「GUI 空闲」条件。
-        if let Some(target) = crate::daemon_image_is_stale() {
-            let outcome = crate::upgrade_self_for_stale_image(&target);
-            crate::dlog(&format!(
-                "acp 开会话前发现守护映像落后，先自升级：{outcome}（id={id}）"
-            ));
-        }
         let seed_snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
         let initial_open = serde_json::json!({
             "op": "acp_open",
@@ -2279,6 +2269,9 @@ pub(crate) fn handle_acp_open(
         break attached_fd;
     };
     let sess = &slot.value;
+    // ACP 控制连接活着：headless 自升级让路。对话可以连着看很久却不再走
+    // desktop 鉴权 / 终端 open，不能靠过期时间戳判断「没人看」。
+    let _viewer = crate::protocol::ViewerLease::acquire();
 
     // 动作循环：一行一个 AcpUserAction 的 JSON，直到客户端断开。
     let mut line = String::new();
@@ -2627,6 +2620,7 @@ pub(crate) fn handle_acp_watch(
         fd
     };
     drop(lifecycle);
+    let _viewer = crate::protocol::ViewerLease::acquire();
     let mut scratch = [0u8; 64];
     let _ = reader.read(&mut scratch);
     let _output_gate = sess.output_gate.lock().unwrap();

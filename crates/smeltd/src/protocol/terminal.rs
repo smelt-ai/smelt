@@ -311,8 +311,6 @@ pub(crate) fn handle_open(
     event_hub: EventHubHandle,
     remote_sessions: RemoteSessions,
 ) {
-    // 有 viewer 在看：headless 自升级 5 分钟内让路（GUI 有空闲门控）。
-    super::auth::record_viewer_seen();
     let id = v["id"].as_str().unwrap_or_default().to_string();
     if id.is_empty() {
         return;
@@ -603,6 +601,8 @@ pub(crate) fn handle_open(
         fd
     };
     drop(lifecycle);
+    // 终端控制连接活着：headless 自升级让路，交给 GUI 空闲门控。
+    let _viewer = super::auth::ViewerLease::acquire();
 
     // reattach jolt：只挂旗，不定时补枪。
     // 客户端首帧 type-1 resize（含真实 cell 像素）进 `resize_session` 即消费 jolt；
@@ -718,8 +718,6 @@ pub(crate) fn handle_watch(
     v: &serde_json::Value,
     sessions: Sessions,
 ) {
-    // 有 viewer 在看：headless 自升级 5 分钟内让路（GUI 有空闲门控）。
-    super::auth::record_viewer_seen();
     let id = v["id"].as_str().unwrap_or_default().to_string();
     if id.is_empty() {
         return;
@@ -793,6 +791,8 @@ pub(crate) fn handle_watch(
         id: id.clone(),
         slot: Arc::clone(&slot),
     });
+    // 旁观连接活着：headless 自升级让路。
+    let _viewer = super::auth::ViewerLease::acquire();
 
     // 几何变化的那一次 SIGWINCH 已在 `begin_remote_viewport` 内打过（仅变才打，
     // 同尺寸续租一次不抖）。watcher 挂载后不再补抖：快照即准确画面，重绘画

@@ -3,13 +3,13 @@
 use super::super::session_catalog::published_session_states;
 use super::super::*;
 use super::{
-    AuthenticatedEventClient, SystemPeerIdentityProvider, authenticate_event_connection,
-    require_desktop_identity,
+    AuthenticatedEventClient, SystemPeerIdentityProvider, ViewerLease,
+    authenticate_event_connection, require_desktop_identity,
 };
 use smelt_event_bus::Delivery;
 use smelt_plugin_api::{
-    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, InvocationRequest, SubscribeControlMessage,
-    SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
+    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, InvocationRequest,
+    SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
 };
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -240,6 +240,10 @@ pub(crate) fn handle_event_subscribe(
             return;
         }
     };
+    // 桌面 subscribe 是 GUI 活着的长连接。headless 自升级必须让路，不能靠
+    // 「最近鉴权过」这种会过期的时间戳。
+    let _desktop_viewer =
+        (identity.plugin_id.as_str() == FIRST_PARTY_DESKTOP_PLUGIN_ID).then(ViewerLease::acquire);
 
     if conn.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT)).is_err() {
         let _ = event_hub

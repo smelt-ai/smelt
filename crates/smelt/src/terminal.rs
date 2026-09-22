@@ -668,6 +668,10 @@ pub fn managed_daemon_path() -> std::path::PathBuf {
     managed_daemon_dir().join("smeltd")
 }
 
+fn staged_daemon_path() -> std::path::PathBuf {
+    managed_daemon_dir().join("smeltd.next")
+}
+
 /// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
 fn path_inside_app_bundle(p: &std::path::Path) -> bool {
     p.components()
@@ -1114,18 +1118,19 @@ fn same_daemon_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-/// 把 `src` 装到 `~/.smelt/bin/smeltd`（内容不同或目标不存在才拷）。
-/// 先写 `smeltd.next` 再 rename；覆盖正在执行的 managed 时进程仍握旧 inode。
+/// 守护没在跑时把 `src` 装到正式路径 `~/.smelt/bin/smeltd`。
+/// 先写 `smeltd.next` 再 rename，避免半截文件。
 fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
-        stage_daemon_binary(src, &dir.join("smeltd.next"))?;
+        let staged = staged_daemon_path();
+        stage_daemon_binary(src, &staged)?;
         // Unix rename 会原子替换目标；先 remove 会制造一个路径不存在的窗口，
         // 此时若硬重启恰好发生，新守护将无文件可执行。
-        std::fs::rename(dir.join("smeltd.next"), &managed)?;
+        std::fs::rename(&staged, &managed)?;
         eprintln!(
             "[workspace] 已同步守护 {} → {}",
             src.display(),
@@ -1140,6 +1145,29 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
             format!("无法安装 smeltd 到 {}", managed.display()),
         ))
     }
+}
+
+/// 守护在跑时只把新映像写到 `smeltd.next`，绝不覆盖正在 exec 的 `smeltd`。
+/// ACP host 从 `current_exe()` 派生，那条路径必须始终是运行中的映像。
+fn stage_managed_daemon_update(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = managed_daemon_dir();
+    std::fs::create_dir_all(&dir)?;
+    let staged = staged_daemon_path();
+    stage_daemon_binary(src, &staged)?;
+    eprintln!(
+        "[workspace] 已暂存守护更新 {} → {}",
+        src.display(),
+        staged.display()
+    );
+    Ok(staged)
+}
+
+fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
+    let staged = staged_daemon_path();
+    if staged.is_file() {
+        return Some(staged);
+    }
+    bundled_daemon_path()
 }
 
 fn stage_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
@@ -1231,13 +1259,11 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         }
         UpgradeOutcome::Busy => UpgradeOutcome::Busy,
         other => {
-            // 失败时尽量把文件落到正式名，供下次冷启动
-            if target != managed {
-                let _ = std::fs::rename(&target, &managed);
-            }
+            // 失败时把候选留在 smeltd.next。不能扶正到正在跑的 smeltd：
+            // ACP host 从那条路径派生，覆盖它就是混版本。
             eprintln!(
-                "[workspace] handoff 到 managed 失败（{other:?}），文件：{}",
-                managed.display()
+                "[workspace] handoff 到 managed 失败（{other:?}），候选：{}",
+                target.display()
             );
             other
         }
@@ -1363,8 +1389,8 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             Ok(managed_daemon_path())
         }
         DaemonProbe::Unresponsive => {
-            // 连得上但无 version：只更新磁盘，不强杀（可能丢会话）
-            let _ = install_managed_daemon_from(&bundled);
+            // 连得上但无 version：进程可能还活着，只 stage 下一份，不覆盖正在跑的文件。
+            let _ = stage_managed_daemon_update(&bundled);
             Ok(managed_daemon_path())
         }
         DaemonProbe::Running {
@@ -1393,15 +1419,13 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
                 );
                 let outcome = handoff_daemon_to_managed(&bundled);
                 if !matches!(outcome, UpgradeOutcome::Upgraded) {
-                    let _ = install_managed_daemon_from(&bundled);
+                    let _ = stage_managed_daemon_update(&bundled);
                 }
             } else if content_differs {
-                // 守护已在 managed（含版本旧）：只对齐磁盘文件，**不 exec**。
-                // 连接路径偷偷换代正是「用着用着终端全卡」的根源——exec 会断开所有
-                // 客户端连接，而这里只是例行检查，不该背着用户在任意时刻换代。
-                // 真正的换代交给 GUI 的空闲升级（main.rs::check_daemon_outdated
-                // 有空闲门控），或用户手动点升级。
-                let _ = install_managed_daemon_from(&bundled);
+                // 守护已在 managed（含版本旧）：只把新映像写到 smeltd.next，**不
+                // 覆盖正在跑的 smeltd，也不 exec**。连接路径偷偷换代正是「用着用着
+                // 终端全卡」的根源。真正的换代交给 GUI 空闲升级或用户手动点升级。
+                let _ = stage_managed_daemon_update(&bundled);
             }
             Ok(managed_daemon_path())
         }
@@ -1782,7 +1806,7 @@ pub enum AppInstallOutcome {
 /// `read_line` 前设了读超时：守护万一卡住（比如某个 out 锁被冻结客户端占住），不能
 /// 让这次调用永久挂起——上层 `daemon_upgrading` 标志会跟着卡死，整个功能失效。
 pub fn upgrade_daemon() -> UpgradeOutcome {
-    upgrade_daemon_exe(None)
+    upgrade_daemon_exe(pending_upgrade_exe().as_deref())
 }
 
 /// 无缝升级守护。`new_exe` 为 `Some` 时让守护 **exec 指定路径**（装 DMG：先 exec
@@ -1855,8 +1879,8 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
 /// 安装时对运行中守护的处置决策。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InstallCommitAction {
-    /// 守护已在 managed 路径：只把候选二进制 stage 到磁盘，不 handoff。
-    /// 版本升级交给空闲无缝升级；安装永不因此阻塞。
+    /// 守护已在 managed 路径：只把候选二进制写到 `smeltd.next`，不覆盖正在跑的
+    /// `smeltd`，不 handoff。版本升级交给空闲无缝升级；安装永不因此阻塞。
     StageDiskOnly,
     /// 守护仍在 .app 里（或路径未知）：必须 handoff 迁出，否则换 App 会 SIGKILL 它。
     RelocateHandoff,
@@ -1896,7 +1920,7 @@ fn commit_candidate_daemon(
             let exe = exe_path.as_deref().map(std::path::Path::new);
             match install_commit_action_for_running_daemon(exe) {
                 InstallCommitAction::StageDiskOnly => {
-                    install_managed_daemon_from(candidate_smeltd)?;
+                    stage_managed_daemon_update(candidate_smeltd)?;
                     Ok(AppInstallOutcome::Installed)
                 }
                 InstallCommitAction::RelocateHandoff => {
@@ -4300,7 +4324,7 @@ mod successor_daemon_tests {
 mod install_commit_tests {
     use super::*;
 
-    /// 核心回归：守护已在 managed 路径时安装只 stage 磁盘，不 handoff——
+    /// 核心回归：守护已在 managed 路径时安装只写 smeltd.next，不 handoff——
     /// 此前无条件 handoff，ACP 忙就 exit 75 半安装（映射写了、App 没换）。
     #[test]
     fn managed_daemon_stages_disk_only() {
@@ -4340,6 +4364,35 @@ mod install_commit_tests {
             install_commit_action_for_running_daemon(None),
             InstallCommitAction::RelocateHandoff
         );
+    }
+
+    #[test]
+    fn staging_an_update_does_not_replace_the_live_managed_binary() {
+        let dir = managed_daemon_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = managed_daemon_path();
+        let staged = staged_daemon_path();
+        std::fs::write(&live, b"running-image").unwrap();
+        let src = std::env::temp_dir().join(format!(
+            "smelt-stage-src-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&src, b"pending-image").unwrap();
+
+        let dest = stage_managed_daemon_update(&src).unwrap();
+        assert_eq!(dest, staged);
+        assert_eq!(std::fs::read(&live).unwrap(), b"running-image");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"pending-image");
+        assert_eq!(
+            pending_upgrade_exe().as_deref(),
+            Some(staged.as_path()),
+            "空闲升级必须 exec smeltd.next，不能再 exec 正在跑的旧文件"
+        );
+
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&staged);
+        let _ = std::fs::remove_file(&live);
     }
 }
 
