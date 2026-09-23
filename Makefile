@@ -48,9 +48,11 @@ sdk-check: ## 检查 TS 插件 SDK（类型 + 单测）
 	@./scripts/sdk-consumer-check.sh
 
 pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
-	@bun="$$(./scripts/bun.sh)" || { \
-		echo "✗ 找不到 bun。跑一次 GUI 会自动装受管 bun，或自行安装到 PATH"; exit 1; }; \
-	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent && "$$bun" run check
+	@bun="$$(./scripts/bun.sh --managed-only)" || { \
+		echo "✗ 找不到源码锁定版本的受管 Bun。请先运行一次 Smelt 完成 runtime 准备"; exit 1; }; \
+	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
+		&& "$$bun" run check \
+		&& "$$bun" run production-smoke
 
 check-all: fmt-check lint lint-sh test sdk-check pi-agent-check ## 完整检查 (格式 + Clippy + shell + Rust/TS 测试)
 
@@ -87,7 +89,7 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 		&& [ -f target/release/smelt-notify ] && [ -f target/release/smelt-agent-mcp ] \
 		&& [ -f target/release/smelt-installer ] || { \
 		echo "✗ 缺少 release 产物，先 make build"; exit 1; }
-	if [ -d dist/Smelt.app/Contents/Resources/plugin-packages ]; then \
+	@if [ -d dist/Smelt.app/Contents/Resources/plugin-packages ]; then \
 		if ! plugin_sources_changed="$$(./scripts/bundled-plugins.sh newer-than dist/Smelt.app/Contents/Resources/plugin-packages)"; then \
 			echo "✗ bundled plugin package 状态无效，拒绝安装旧 dist"; exit 1; \
 		fi; \

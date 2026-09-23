@@ -67,6 +67,9 @@ struct PiState {
     steer_request_ids: HashSet<String>,
     follow_up_request_ids: HashSet<String>,
     compact_request_ids: HashSet<String>,
+    reload_request_ids: HashSet<String>,
+    /// `reload` 成功后补发的 `get_commands`。技能和提示词可能刚变过。
+    commands_refresh_id: Option<String>,
     /// `clear_queue` 回执后是否要把 in_flight 还回去（ClearQueue 动作才要）。
     pending_clear: Option<(String, bool)>,
     composer_restore_seq: u64,
@@ -298,16 +301,9 @@ async fn run_connection(
     let resume_id = launch.resume_session_id.as_ref().map(|id| id.to_string());
     let fork_id = launch.fork_session_id.as_ref().map(|id| id.to_string());
     apply_pi_session_cli_args(&mut trailing, resume_id.as_deref(), fork_id.as_deref());
+    // `runtime` 在同步完成、全局锁释放前已经取得 shared generation lease；将它持有
+    // 到本连接结束，消除 prepare 与 spawn 之间被升级 GC 删除目录的窗口。
     let process_args = runtime.process_args(trailing);
-    // 钉住本次会话用的运行时目录，直到本连接结束。升级 GC 必须先拿到排他锁
-    // 才能删目录；不钉住的话，OAuth 刷新会按启动路径再 import 已卸载的文件。
-    let _runtime_lease = match crate::acp_conn::pin_managed_pi_runtime(&runtime.root) {
-        Ok(lease) => Some(lease),
-        Err(error) => {
-            crate::app_log::warn("pi-rpc", &format!("无法钉住 Pi 运行时目录：{error}"));
-            None
-        }
-    };
     let (child_stdin, child_stdout, child_stderr, child) = {
         let _spawn_permit = spawn_gate.as_ref().map(|gate| gate.read().unwrap());
         let mut stdio = stdio_out.lock().unwrap();
@@ -322,72 +318,78 @@ async fn run_connection(
         });
         spawned
     };
-    let pid = child.id() as i32;
-    let _child_keep_alive = child;
-    let _guard = KillPiProcessGroupOnDrop(pid);
+    let mut process = PiProcessGuard::new(child);
     *stderr_drain.lock().unwrap() = Some(spawn_stderr_drain(child_stderr, stderr_tail));
 
-    let mut writer = child_stdin;
-    let mut lines = futures::io::BufReader::new(child_stdout).lines();
-    let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
-    let mut state = PiState::new();
-    let initialize = initialize_session(
-        &mut lines,
-        &mut writer,
-        &outbound_tx,
-        &outbound_rx,
-        &event_tx,
-        &mut state,
-        launch,
-    );
-    smol::future::race(initialize, async {
-        smol::Timer::after(PI_RPC_HANDSHAKE_TIMEOUT).await;
-        Err(format!(
-            "Pi RPC 启动握手超时（{} 秒）",
-            PI_RPC_HANDSHAKE_TIMEOUT.as_secs()
-        ))
-    })
-    .await?;
-    ready.store(true, Ordering::Release);
+    let result = async {
+        let mut writer = child_stdin;
+        let mut lines = futures::io::BufReader::new(child_stdout).lines();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let initialize = initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            launch,
+        );
+        smol::future::race(initialize, async {
+            smol::Timer::after(PI_RPC_HANDSHAKE_TIMEOUT).await;
+            Err(format!(
+                "Pi RPC 启动握手超时（{} 秒）",
+                PI_RPC_HANDSHAKE_TIMEOUT.as_secs()
+            ))
+        })
+        .await?;
+        ready.store(true, Ordering::Release);
 
-    enum Next {
-        Command(Result<ConversationCommand, smol::channel::RecvError>),
-        Outbound(Result<serde_json::Value, smol::channel::RecvError>),
-        Line(Option<std::io::Result<String>>),
-    }
+        enum Next {
+            Command(Result<ConversationCommand, smol::channel::RecvError>),
+            Outbound(Result<serde_json::Value, smol::channel::RecvError>),
+            Line(Option<std::io::Result<String>>),
+        }
 
-    loop {
-        let next = smol::future::race(
-            async { Next::Command(cmd_rx.recv().await) },
-            smol::future::race(async { Next::Outbound(outbound_rx.recv().await) }, async {
-                Next::Line(lines.next().await)
-            }),
-        )
-        .await;
-        match next {
-            Next::Command(Ok(ConversationCommand::Shutdown)) | Next::Command(Err(_)) => {
-                return Ok(());
-            }
-            Next::Command(Ok(command)) => {
-                handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc).await?;
-            }
-            Next::Outbound(Ok(message)) => write_rpc(&mut writer, &message).await?,
-            Next::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
-            Next::Line(Some(Ok(line))) => {
-                let value = parse_rpc_line(&line)?;
-                if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
-                    handle_response(value, &mut writer, &event_tx, &mut state, &in_flight_rpc)
-                        .await?;
-                } else {
-                    handle_event(value, &event_tx, &outbound_tx, &mut state, launch);
+        loop {
+            let next = smol::future::race(
+                async { Next::Command(cmd_rx.recv().await) },
+                smol::future::race(async { Next::Outbound(outbound_rx.recv().await) }, async {
+                    Next::Line(lines.next().await)
+                }),
+            )
+            .await;
+            match next {
+                Next::Command(Ok(ConversationCommand::Shutdown)) | Next::Command(Err(_)) => {
+                    return Ok(());
                 }
+                Next::Command(Ok(command)) => {
+                    handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc)
+                        .await?;
+                }
+                Next::Outbound(Ok(message)) => write_rpc(&mut writer, &message).await?,
+                Next::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
+                Next::Line(Some(Ok(line))) => {
+                    let value = parse_rpc_line(&line)?;
+                    if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+                        handle_response(value, &mut writer, &event_tx, &mut state, &in_flight_rpc)
+                            .await?;
+                    } else {
+                        handle_event(value, &event_tx, &outbound_tx, &mut state, launch);
+                    }
+                }
+                Next::Line(Some(Err(error))) => {
+                    return Err(format!("读取 Pi RPC 输出失败：{error}"));
+                }
+                Next::Line(None) => return Err("Pi RPC 进程已关闭 stdout".to_string()),
             }
-            Next::Line(Some(Err(error))) => {
-                return Err(format!("读取 Pi RPC 输出失败：{error}"));
-            }
-            Next::Line(None) => return Err("Pi RPC 进程已关闭 stdout".to_string()),
         }
     }
+    .await;
+    // 必须先确认直属子进程已退出，再让 `runtime` 的 generation lease 析构。
+    // 仅发送 SIGKILL 不等于进程已经消失，期间原地修复会与旧进程并发读模块树。
+    process.kill_and_reap().await;
+    result
 }
 
 type SpawnedPi = (
@@ -527,12 +529,59 @@ fn spawn_stderr_drain(
     })
 }
 
-struct KillPiProcessGroupOnDrop(i32);
+struct PiProcessGuard {
+    pid: i32,
+    child: async_process::Child,
+    reaped: bool,
+}
 
-impl Drop for KillPiProcessGroupOnDrop {
-    fn drop(&mut self) {
+impl PiProcessGuard {
+    fn new(child: async_process::Child) -> Self {
+        Self {
+            pid: child.id() as i32,
+            child,
+            reaped: false,
+        }
+    }
+
+    fn kill_process_tree(&mut self) {
         unsafe {
-            libc::kill(-self.0, libc::SIGKILL);
+            libc::kill(-self.pid, libc::SIGKILL);
+        }
+        // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死，
+        // 否则下面的 status/try_status 会永久等住，generation lease 也永不释放。
+        let _ = self.child.kill();
+    }
+
+    async fn kill_and_reap(&mut self) {
+        self.kill_process_tree();
+        if self.child.status().await.is_ok() {
+            self.reaped = true;
+        }
+    }
+}
+
+impl Drop for PiProcessGuard {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        // 正常路径由 `kill_and_reap` 异步回收。这里只覆盖 panic/未来提前返回，
+        // 仍须在 generation lease 释放前同步确认主子进程已经退出。
+        self.kill_process_tree();
+        loop {
+            match self.child.try_status() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    self.kill_process_tree();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break,
+                Err(_) => {
+                    self.kill_process_tree();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 }
@@ -739,24 +788,7 @@ where
         serde_json::json!({"type": "get_commands"}),
     )
     .await?;
-    state.available_commands = response_data(&response)?["commands"]
-        .as_array()
-        .map(|commands| {
-            commands
-                .iter()
-                .filter_map(|command| {
-                    Some((
-                        command.get("name")?.as_str()?.to_string(),
-                        command
-                            .get("description")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    state.available_commands = parse_pi_commands(response_data(&response)?);
 
     let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
     if resumed {
@@ -1109,6 +1141,32 @@ fn thinking_name(level: &str) -> &str {
     }
 }
 
+fn parse_pi_commands(data: &serde_json::Value) -> Vec<(String, String)> {
+    data.get("commands")
+        .and_then(serde_json::Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some((
+                        command.get("name")?.as_str()?.to_string(),
+                        command
+                            .get("description")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/reload`。后面再跟字就不是这条指令，避免吞掉用户本来想发给模型的话。
+pub(crate) fn parse_reload_slash(text: &str) -> bool {
+    text.trim() == "/reload"
+}
+
 /// `/compact` 或 `/compact 自定义说明`。其它以 `/compact` 为前缀的词不算。
 pub(crate) fn parse_compact_slash(text: &str) -> Option<Option<String>> {
     let trimmed = text.trim();
@@ -1162,6 +1220,16 @@ async fn handle_command<W: AsyncWrite + Unpin>(
 ) -> Result<(), String> {
     match command {
         ConversationCommand::Prompt { text, images } => {
+            if parse_reload_slash(&text) {
+                if state.active_turn {
+                    finish_in_flight(in_flight_rpc);
+                    let _ = event_tx.try_send(ConversationEvent::Status(
+                        "回合进行中，结束后再 /reload".to_string(),
+                    ));
+                    return Ok(());
+                }
+                return send_reload(writer, state).await;
+            }
             if let Some(instructions) = parse_compact_slash(&text) {
                 return send_compact(instructions, writer, state).await;
             }
@@ -1318,6 +1386,15 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         | ConversationCommand::Shutdown => {}
     }
     Ok(())
+}
+
+async fn send_reload<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+) -> Result<(), String> {
+    let id = state.request_id("reload");
+    state.reload_request_ids.insert(id.clone());
+    write_rpc(writer, &serde_json::json!({"id": id, "type": "reload"})).await
 }
 
 async fn send_compact<W: AsyncWrite + Unpin>(
@@ -1501,6 +1578,38 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             )));
         }
         finish_in_flight(in_flight_rpc);
+        return Ok(());
+    }
+    if state.reload_request_ids.remove(&id) {
+        match ensure_response_success(&response) {
+            Ok(()) => {
+                let _ = event_tx.try_send(ConversationEvent::Status(
+                    "已重新加载技能、扩展、提示词和上下文".to_string(),
+                ));
+                let refresh_id = state.request_id("commands");
+                state.commands_refresh_id = Some(refresh_id.clone());
+                write_rpc(
+                    writer,
+                    &serde_json::json!({"id": refresh_id, "type": "get_commands"}),
+                )
+                .await?;
+            }
+            Err(error) => {
+                let _ =
+                    event_tx.try_send(ConversationEvent::Status(format!("重新加载失败：{error}")));
+            }
+        }
+        finish_in_flight(in_flight_rpc);
+        return Ok(());
+    }
+    if state.commands_refresh_id.as_deref() == Some(&id) {
+        state.commands_refresh_id = None;
+        if let Ok(data) = response_data(&response) {
+            state.available_commands = parse_pi_commands(data);
+            let _ = event_tx.try_send(ConversationEvent::AvailableCommands(
+                state.available_commands.clone(),
+            ));
+        }
         return Ok(());
     }
     if state
@@ -3252,6 +3361,33 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pi_process_guard_reaps_the_direct_child_before_returning() {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let child = async_process::Command::from(command)
+            .spawn()
+            .expect("spawn guarded process");
+        let pid = child.id() as i32;
+        let mut guard = PiProcessGuard::new(child);
+        smol::block_on(guard.kill_and_reap());
+
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "guard 返回前必须已回收直属子进程"
+        );
+    }
+
     #[test]
     fn only_exact_logical_command_selects_native_pi_rpc() {
         assert!(is_smelt_pi_launch(&ConversationLaunchSpec::from_command(
@@ -4460,6 +4596,134 @@ mod tests {
         assert!(state.active_turn);
         assert_eq!(in_flight.load(Ordering::SeqCst), 2);
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reload_slash_is_only_the_exact_command() {
+        assert!(parse_reload_slash("  /reload  "));
+        assert!(!parse_reload_slash("/reload 现在"));
+        assert!(!parse_reload_slash("/reloader"));
+        assert!(!parse_reload_slash("reload"));
+    }
+
+    #[test]
+    fn slash_reload_sends_native_reload_instead_of_a_prompt() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "/reload".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let request: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
+        assert_eq!(request["type"], "reload");
+        assert_eq!(state.reload_request_ids.len(), 1);
+        assert!(event_rx.try_recv().is_err());
+        assert!(state.active_turn == false);
+
+        let id = request["id"].as_str().unwrap().to_string();
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": id,
+                "type": "response",
+                "command": "reload",
+                "success": true
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("已重新加载")
+        ));
+        let refresh: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
+        assert_eq!(refresh["type"], "get_commands");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+
+        let refresh_id = refresh["id"].as_str().unwrap();
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": refresh_id,
+                "type": "response",
+                "command": "get_commands",
+                "success": true,
+                "data": {
+                    "commands": [
+                        {"name": "reload", "description": "Reload skills"},
+                        {"name": "skill:new", "description": "刚加载的技能"}
+                    ]
+                }
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.available_commands,
+            vec![
+                ("reload".to_string(), "Reload skills".to_string()),
+                ("skill:new".to_string(), "刚加载的技能".to_string()),
+            ]
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::AvailableCommands(commands))
+                if commands.iter().any(|(name, _)| name == "skill:new")
+        ));
+    }
+
+    #[test]
+    fn slash_reload_during_a_turn_is_not_sent_to_the_model() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "/reload".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(
+            String::from_utf8(writer.into_inner())
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+        assert!(state.active_turn);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
+        ));
     }
 
     #[test]

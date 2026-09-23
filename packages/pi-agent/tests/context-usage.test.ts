@@ -24,8 +24,11 @@ function skill(name: string, description: string): Skill {
 
 describe("context usage buckets", () => {
 	test("host ships the context-usage extension before permission", () => {
-		expect(SMELT_EXTENSION_FACTORIES).toContain(smeltContextUsageExtension);
-		expect(SMELT_EXTENSION_FACTORIES.at(-1)).not.toBe(smeltContextUsageExtension);
+		const contextUsageIndex = SMELT_EXTENSION_FACTORIES.findIndex(
+			(extension) => typeof extension !== "function" && extension.factory === smeltContextUsageExtension,
+		);
+		expect(contextUsageIndex).toBeGreaterThanOrEqual(0);
+		expect(contextUsageIndex).toBeLessThan(SMELT_EXTENSION_FACTORIES.length - 1);
 	});
 
 	test("maps Pi parts onto Cursor-style buckets", () => {

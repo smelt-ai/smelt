@@ -189,8 +189,11 @@ pub fn parse_login_event(line: &str) -> Option<PiLoginEvent> {
     }
 }
 
-fn spawn_auth_process(args: &[&str], status: &dyn Fn(&str)) -> Result<std::process::Child, String> {
-    let (bun, script) = crate::acp_conn::sync_managed_pi_tool(AUTH_SCRIPT, status)?;
+fn spawn_auth_process(
+    args: &[&str],
+    status: &dyn Fn(&str),
+) -> Result<(std::process::Child, crate::acp_conn::PiRuntimeLease), String> {
+    let (bun, script, runtime_lease) = crate::acp_conn::sync_managed_pi_tool(AUTH_SCRIPT, status)?;
     let mut command = std::process::Command::new(&bun);
     command
         .arg(&script)
@@ -204,9 +207,10 @@ fn spawn_auth_process(args: &[&str], status: &dyn Fn(&str)) -> Result<std::proce
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    command
+    let child = command
         .spawn()
-        .map_err(|error| format!("启动 Pi 凭据助手失败：{error}"))
+        .map_err(|error| format!("启动 Pi 凭据助手失败：{error}"))?;
+    Ok((child, runtime_lease))
 }
 
 /// 收尾一个已经结束/要结束的子进程，把 stderr 拼成人能看的错误。
@@ -233,7 +237,7 @@ fn run_once<T>(
     status: &dyn Fn(&str),
     pick: impl Fn(PiLoginEvent) -> Option<T>,
 ) -> Result<T, String> {
-    let mut child = spawn_auth_process(args, status)?;
+    let (mut child, _runtime_lease) = spawn_auth_process(args, status)?;
     let stdout = child.stdout.take().ok_or("Pi 凭据助手没有 stdout")?;
     // 看门狗单独一条线程：超时判断不能挂在「收到一行输出」上——真正会卡死的
     // 情形恰恰是子进程一声不吭（装运行时时网络吊住、等一个永远不来的回调），
@@ -329,6 +333,7 @@ pub fn logout(provider_id: &str, status: &dyn Fn(&str)) -> Result<(), String> {
 pub struct PiLoginSession {
     child: Arc<Mutex<std::process::Child>>,
     stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+    _runtime_lease: crate::acp_conn::PiRuntimeLease,
     /// 用户主动取消过。之后子进程报的 abort 错误不该再当失败展示。
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -378,7 +383,7 @@ impl PiLoginSession {
         if ask_all {
             args.push("--ask-all");
         }
-        let mut child = spawn_auth_process(&args, status)?;
+        let (mut child, runtime_lease) = spawn_auth_process(&args, status)?;
         let stdout = child.stdout.take().ok_or("Pi 凭据助手没有 stdout")?;
         let stdin = child.stdin.take();
         let (sender, receiver) = futures::channel::mpsc::unbounded();
@@ -386,6 +391,7 @@ impl PiLoginSession {
         let session = Self {
             child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
+            _runtime_lease: runtime_lease,
             cancelled: cancelled.clone(),
         };
         let child_handle = session.child.clone();

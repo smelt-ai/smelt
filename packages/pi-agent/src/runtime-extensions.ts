@@ -1,13 +1,15 @@
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import smeltContextUsageExtension from "./context-usage.ts";
-import smeltElicitationExtension from "./elicitation.ts";
+import {
+	SMELT_ELICITATION_EXTENSION_NAME,
+	smeltElicitationExtension,
+} from "./elicitation.ts";
 import smeltPermissionExtension from "./smelt-permission.ts";
 
-// Pi appends inline factories after discovered user/project extensions. Permission stays last so
-// host approval sees the final tool arguments. Elicitation is a host conversation primitive, not a
-// user plugin: models get a choice card without the user writing an extension.
+// Pi appends inline factories after discovered user/project extensions. Stable names make their
+// sourceInfo auditable. Permission stays last so host approval sees the final tool arguments.
 export const SMELT_EXTENSION_FACTORIES = [
-	smeltElicitationExtension,
-	smeltContextUsageExtension,
-	smeltPermissionExtension,
-] satisfies ExtensionFactory[];
+	{ name: SMELT_ELICITATION_EXTENSION_NAME, factory: smeltElicitationExtension, hidden: true },
+	{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
+	{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
+] satisfies InlineExtension[];

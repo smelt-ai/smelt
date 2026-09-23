@@ -3913,8 +3913,14 @@ const BUN_DOWNLOAD: (&str, &str) = (
 );
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const BUN_EXECUTABLE_SHA256: &str =
+    "539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-x64";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const BUN_EXECUTABLE_SHA256: &str =
+    "ca8a18d0116d7b6b19f53bb0d8c48e487c0757cab4dc3f4f8cc5e43a44cd75d8";
 
 fn managed_runtime_dir() -> Option<std::path::PathBuf> {
     Some(dirs::home_dir()?.join(".smelt/runtime"))
@@ -3940,10 +3946,9 @@ fn pi_agent_dependency_fingerprint() -> String {
     use sha2::{Digest, Sha256};
 
     let mut digest = Sha256::new();
-    for (name, content) in [
-        ("package.json", PI_AGENT_PACKAGE_JSON),
-        ("bun.lock", PI_AGENT_BUN_LOCK),
-    ] {
+    for (name, content) in PI_AGENT_RUNTIME_FILES.iter().copied().filter(|(name, _)| {
+        *name == "package.json" || *name == "bun.lock" || name.starts_with("patches/")
+    }) {
         digest.update(name.as_bytes());
         digest.update([0]);
         digest.update(content.as_bytes());
@@ -3978,6 +3983,12 @@ fn sync_embedded_runtime_file(
     Ok(())
 }
 
+fn managed_pi_agent_files_ready(root: &std::path::Path) -> bool {
+    PI_AGENT_RUNTIME_FILES.iter().all(|(relative, content)| {
+        std::fs::read(root.join(relative)).is_ok_and(|existing| existing == content.as_bytes())
+    })
+}
+
 fn materialize_managed_pi_agent_files_at(root: &std::path::Path) -> Result<(), String> {
     for (relative, content) in PI_AGENT_RUNTIME_FILES {
         sync_embedded_runtime_file(root, relative, content)?;
@@ -3994,8 +4005,29 @@ fn managed_pi_agent_dependencies_ready(root: &std::path::Path) -> bool {
 }
 
 fn managed_pi_agent_dependencies_installed(root: &std::path::Path) -> bool {
-    root.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/rpc-entry.js")
-        .is_file()
+    let rpc_entry =
+        root.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/rpc-entry.js");
+    let rpc_mode =
+        root.join("node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js");
+    rpc_entry.is_file()
+        && std::fs::read_to_string(rpc_mode)
+            .is_ok_and(|source| pi_rpc_duplicate_rebind_patch_is_applied(&source))
+}
+
+fn pi_rpc_duplicate_rebind_patch_is_applied(source: &str) -> bool {
+    ["new_session", "switch_session", "fork", "clone"]
+        .into_iter()
+        .all(|command| {
+            let marker = format!("case \"{command}\": {{");
+            let Some(start) = source.find(&marker) else {
+                return false;
+            };
+            let after_marker = &source[start + marker.len()..];
+            let end = after_marker
+                .find("\n            case \"")
+                .unwrap_or(after_marker.len());
+            !after_marker[..end].contains("await rebindSession()")
+        })
 }
 
 fn run_managed_pi_agent_install(
@@ -4079,14 +4111,35 @@ fn open_pi_runtime_lease_file(root: &std::path::Path) -> std::io::Result<std::fs
         .open(root.join(PI_RUNTIME_LEASE_FILE))
 }
 
-/// 拿不到排他锁就视为仍被占用，不能删。
-fn try_exclusive_pi_runtime_lease(root: &std::path::Path) -> Option<PiRuntimeLease> {
-    let file = open_pi_runtime_lease_file(root).ok()?;
+fn acquire_exclusive_pi_runtime_lease(root: &std::path::Path) -> Result<PiRuntimeLease, String> {
+    let file = open_pi_runtime_lease_file(root)
+        .map_err(|error| format!("打开 Pi 运行时写入锁失败：{error}"))?;
+    // SAFETY: `file` 在返回的 lease 生命周期内有效；非阻塞失败时不修改运行时。
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
-        return None;
+        return Err(format!(
+            "Pi 运行时需要修复，但仍有会话正在使用该 generation：{}",
+            std::io::Error::last_os_error()
+        ));
     }
-    Some(PiRuntimeLease { _file: file })
+    Ok(PiRuntimeLease { _file: file })
+}
+
+fn downgrade_pi_runtime_lease(lease: PiRuntimeLease) -> Result<PiRuntimeLease, String> {
+    // SAFETY: 在同一个 fd 上把 LOCK_EX 原子转换成 LOCK_SH；不会出现先解锁再重锁的窗口。
+    let rc = unsafe { libc::flock(lease._file.as_raw_fd(), libc::LOCK_SH) };
+    if rc != 0 {
+        return Err(format!(
+            "将 Pi 运行时写入锁降级为占用锁失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(lease)
+}
+
+/// 拿不到排他锁就视为仍被占用，不能删。
+fn try_exclusive_pi_runtime_lease(root: &std::path::Path) -> Option<PiRuntimeLease> {
+    acquire_exclusive_pi_runtime_lease(root).ok()
 }
 
 fn cleanup_stale_managed_pi_agents(runtime_dir: &std::path::Path, current_version: &str) {
@@ -4352,29 +4405,36 @@ pub fn spawn_managed_bun_sync() {
     }
 }
 
-/// 已就位的受管 bun；**不触发下载**。插件运行时解析走这里：首次启动还没下完时
-/// 返回 `None`，调用方据此把脚本插件当作"暂不可用"降级，而不是在 UI 线程上等下载。
+/// 本进程已完整验证过、且文件身份至今未变的受管 Bun；**不触发下载或哈希**。
+///
+/// GUI 首帧会走这里，不能同步哈希 60MB 制品再起 `--version`。首次后台
+/// `sync_managed_bun` 完成前返回 `None`；完整验证会记录不可变文件身份，后续查询只做
+/// 元数据比较。内容替换、原地写入、chmod 或软链切换都会撤销 attestation，真实启动
+/// 路径随后在 runtime 锁内重新做 hash + version 验证。
 pub fn managed_bun_if_ready() -> Option<std::path::PathBuf> {
-    managed_bun_path().filter(|path| path.is_file())
+    let path = managed_bun_path()?;
+    #[cfg(target_os = "macos")]
+    {
+        attested_bun_identity(&path).map(|_| path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// 确保锁定版本的受管 bun 就位并清掉旧 `bun-v*` 目录。
 pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
     let bun = ensure_bun(status);
-    // 非 macOS 上 ensure_bun 会报错并回退系统 Bun，缓存仍应按同一套版本表回收。
+    // 非 macOS 上 ensure_bun 会报错；内置 Pi 直接 fail closed，显式 bun/bunx ACP
+    // 命令仍可由其解析层决定是否使用用户 PATH。缓存继续按同一版本表回收。
     cleanup_stale_managed_adapters(status);
     bun
 }
 
 fn bun_for_managed_pi_agent(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
-    match sync_managed_bun(status) {
-        Ok(bun) => Ok(bun),
-        Err(managed_error) => resolve_in_path("bun", &extended_search_path())
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                format!("无法准备 Smelt Pi 运行时：{managed_error}；系统 PATH 中也没有 Bun")
-            }),
-    }
+    sync_managed_bun(status).map_err(|error| format!("无法准备 Smelt Pi 运行时：{error}"))
 }
 
 /// 已准备好的 Pi 原生 RPC 运行时。路径保持结构化，不能先拼成命令字符串：用户名或
@@ -4383,6 +4443,7 @@ pub(crate) struct ManagedPiRuntime {
     pub bun: std::path::PathBuf,
     pub root: std::path::PathBuf,
     pub entry: std::path::PathBuf,
+    _lease: PiRuntimeLease,
 }
 
 impl ManagedPiRuntime {
@@ -4401,19 +4462,36 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
     let bun = bun_for_managed_pi_agent(status)?;
     let root = managed_pi_agent_dir().ok_or("找不到 home 目录")?;
     let _lock = lock_managed_runtime()?;
-    materialize_managed_pi_agent_files_at(&root)?;
-    if !managed_pi_agent_dependencies_ready(&root) {
-        status("正在准备 Pi 智能体运行时（仅首次）…");
-        run_managed_pi_agent_install(&bun, &root)?;
-        if !managed_pi_agent_dependencies_installed(&root) {
-            return Err("Pi 运行时依赖安装完成，但必要的 RPC 入口不完整".to_string());
+    let files_ready = managed_pi_agent_files_ready(&root);
+    let dependencies_ready = files_ready && managed_pi_agent_dependencies_ready(&root);
+    let runtime_lease = if !files_ready || !dependencies_ready {
+        std::fs::create_dir_all(&root)
+            .map_err(|error| format!("创建 Pi 运行时目录 {} 失败：{error}", root.display()))?;
+        let write_lease = acquire_exclusive_pi_runtime_lease(&root)?;
+        materialize_managed_pi_agent_files_at(&root)?;
+        if !managed_pi_agent_dependencies_ready(&root) {
+            status("正在准备 Pi 智能体运行时（仅首次或完整性修复）…");
+            let _ = std::fs::remove_file(root.join(".dependencies.sha256"));
+            let package = root.join("node_modules/@earendil-works/pi-coding-agent");
+            if package.exists() {
+                std::fs::remove_dir_all(&package).map_err(|error| {
+                    format!("移除不完整 Pi 依赖 {} 失败：{error}", package.display())
+                })?;
+            }
+            run_managed_pi_agent_install(&bun, &root)?;
+            if !managed_pi_agent_dependencies_installed(&root) {
+                return Err("Pi 运行时依赖安装完成，但必要的 RPC 补丁或入口不完整".to_string());
+            }
+            sync_embedded_runtime_file(
+                &root,
+                ".dependencies.sha256",
+                &format!("{}\n", pi_agent_dependency_fingerprint()),
+            )?;
         }
-        sync_embedded_runtime_file(
-            &root,
-            ".dependencies.sha256",
-            &format!("{}\n", pi_agent_dependency_fingerprint()),
-        )?;
-    }
+        downgrade_pi_runtime_lease(write_lease)?
+    } else {
+        pin_managed_pi_runtime(&root).map_err(|error| format!("无法安全使用 Pi 运行时：{error}"))?
+    };
     if let Some(runtime_dir) = managed_runtime_dir() {
         cleanup_stale_managed_pi_agents(&runtime_dir, PI_AGENT_RUNTIME_VERSION);
     }
@@ -4421,6 +4499,7 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
         bun,
         entry: managed_pi_agent_entry_path().ok_or("找不到 Pi RPC 入口")?,
         root,
+        _lease: runtime_lease,
     })
 }
 
@@ -4432,18 +4511,16 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
 /// 那个 Pi。
 ///
 /// 首次调用可能触发下载与安装，必须在后台线程里跑。
-pub fn sync_managed_pi_tool(
+pub(crate) fn sync_managed_pi_tool(
     relative: &str,
     status: &dyn Fn(&str),
-) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+) -> Result<(std::path::PathBuf, std::path::PathBuf, PiRuntimeLease), String> {
     let runtime = sync_managed_pi_agent(status)?;
-    let script = managed_pi_agent_dir()
-        .ok_or("找不到 home 目录")?
-        .join(relative);
+    let script = runtime.root.join(relative);
     if !script.is_file() {
         return Err(format!("Pi 运行时里没有 {relative}"));
     }
-    Ok((runtime.bun, script))
+    Ok((runtime.bun, script, runtime._lease))
 }
 
 /// 一个 CLI 或运行时可执行文件的本机诊断结果。
@@ -4515,10 +4592,7 @@ pub fn inspect_acp_runtime() -> AcpRuntimeDiagnostics {
     for agent in TerminalAgentKind::ALL {
         diagnostics.record_terminal(agent, inspect(agent));
     }
-    diagnostics.record_agent(
-        ConversationAgentKind::Pi,
-        inspect_smelt_pi_runtime(&search_path),
-    );
+    diagnostics.record_agent(ConversationAgentKind::Pi, inspect_smelt_pi_runtime());
     diagnostics.record_agent(
         ConversationAgentKind::Dsh,
         inspect_dsh_runtime(&search_path),
@@ -4526,7 +4600,7 @@ pub fn inspect_acp_runtime() -> AcpRuntimeDiagnostics {
     diagnostics
 }
 
-fn inspect_smelt_pi_runtime(search_path: &str) -> RuntimeExecutable {
+fn inspect_smelt_pi_runtime() -> RuntimeExecutable {
     let Some(entry) = managed_pi_agent_entry_path() else {
         return RuntimeExecutable {
             program: SMELT_PI_AGENT_COMMAND.to_string(),
@@ -4537,9 +4611,9 @@ fn inspect_smelt_pi_runtime(search_path: &str) -> RuntimeExecutable {
     let ready = managed_pi_agent_dir()
         .as_deref()
         .is_some_and(managed_pi_agent_dependencies_ready);
-    let can_provision = cfg!(target_os = "macos")
-        || managed_bun_if_ready().is_some()
-        || resolve_in_path("bun", search_path).is_some();
+    // Smelt 内置 Pi 只使用校验过的受管 Bun。PATH 中的任意 Bun 不参与生产能力判断，
+    // 否则诊断会显示可用，真正启动时却执行了未经锁定版本验证的运行时。
+    let can_provision = cfg!(target_os = "macos");
     RuntimeExecutable {
         program: SMELT_PI_AGENT_COMMAND.to_string(),
         path: can_provision.then(|| entry.to_string_lossy().into_owned()),
@@ -4550,8 +4624,7 @@ fn inspect_smelt_pi_runtime(search_path: &str) -> RuntimeExecutable {
                 format!("Smelt Pi Runtime {PI_AGENT_RUNTIME_VERSION} · 首次使用自动准备")
             }
         }),
-        error: (!can_provision)
-            .then(|| "此平台没有 Smelt 受管 Bun，系统 PATH 中也未找到 Bun".to_string()),
+        error: (!can_provision).then(|| "此平台没有 Smelt 受管 Bun".to_string()),
     }
 }
 
@@ -4842,10 +4915,141 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
     }
 }
 
-/// 确保受管 bun 就位（不在则下载 + sha256 校验 + 冒烟），返回可执行路径。
+#[cfg(target_os = "macos")]
+fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BunFileIdentity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mode: u32,
+    modified_secs: i64,
+    modified_nanos: i64,
+    changed_secs: i64,
+    changed_nanos: i64,
+}
+
+#[cfg(target_os = "macos")]
+fn bun_attestation() -> &'static std::sync::Mutex<Option<BunFileIdentity>> {
+    static ATTESTED: std::sync::OnceLock<std::sync::Mutex<Option<BunFileIdentity>>> =
+        std::sync::OnceLock::new();
+    ATTESTED.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(target_os = "macos")]
+fn matching_bun_attestation(
+    attested: &mut Option<BunFileIdentity>,
+    current: Result<BunFileIdentity, String>,
+) -> Option<BunFileIdentity> {
+    match current {
+        Ok(current) if attested.as_ref() == Some(&current) => Some(current),
+        _ => {
+            *attested = None;
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn attested_bun_identity(bun: &std::path::Path) -> Option<BunFileIdentity> {
+    // 只读取一次文件身份，并在持有 attestation 锁时匹配、返回这一份身份。
+    // 匹配后不能再次 stat 再把第二份身份当作已验证，否则替换窗口会认证新文件。
+    let current = bun_file_identity(bun);
+    let mut attested = bun_attestation().lock().ok()?;
+    matching_bun_attestation(&mut attested, current)
+}
+
+#[cfg(target_os = "macos")]
+fn bun_file_identity(bun: &std::path::Path) -> Result<BunFileIdentity, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::symlink_metadata(bun)
+        .map_err(|error| format!("读取受管 Bun 元数据失败：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("受管 Bun 不是普通文件".to_string());
+    }
+    if metadata.mode() & 0o111 == 0 {
+        return Err("受管 Bun 没有可执行权限".to_string());
+    }
+    Ok(BunFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        size: metadata.size(),
+        mode: metadata.mode(),
+        modified_secs: metadata.mtime(),
+        modified_nanos: metadata.mtime_nsec(),
+        changed_secs: metadata.ctime(),
+        changed_nanos: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn validate_managed_bun(bun: &std::path::Path) -> Result<BunFileIdentity, String> {
+    let identity_before = bun_file_identity(bun)?;
+    let actual_sha = sha256_file(bun)?;
+    if actual_sha != BUN_EXECUTABLE_SHA256 {
+        return Err(format!(
+            "受管 Bun 制品校验失败（期望 {BUN_EXECUTABLE_SHA256}，实际 {actual_sha}）"
+        ));
+    }
+    let output = std::process::Command::new(bun)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("受管 Bun 无法执行：{error}"))?;
+    if !output.status.success() {
+        return Err(format!("受管 Bun 版本检查失败（{}）", output.status));
+    }
+    let actual_version = String::from_utf8_lossy(&output.stdout);
+    if actual_version.trim() != BUN_VERSION {
+        return Err(format!(
+            "受管 Bun 版本错误（期望 {BUN_VERSION}，实际 {}）",
+            actual_version.trim()
+        ));
+    }
+    let identity_after = bun_file_identity(bun)?;
+    if identity_after != identity_before {
+        return Err("受管 Bun 在完整性验证期间发生变化".to_string());
+    }
+    Ok(identity_after)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_invalid_managed_bun(bun: &std::path::Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(bun) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            std::fs::remove_file(bun)
+                .map_err(|error| format!("移除无效受管 Bun {} 失败：{error}", bun.display()))
+        }
+        Ok(_) => Err(format!("无效受管 Bun 路径不是文件：{}", bun.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("检查无效受管 Bun {} 失败：{error}", bun.display())),
+    }
+}
+
+/// 确保受管 bun 就位（不在或完整性失效则下载 + sha256 校验 + 冒烟），返回可执行路径。
 ///
 /// 只在 macOS 上有实现：受管运行时锁的是 darwin 版压缩包，别的平台没有对应产物。
-/// 非 macOS 上直接报错，由调用方回退到 PATH 上用户自己装的 bun。
+/// 非 macOS 上直接报错；Smelt 内置 Pi 不回退 PATH，其他显式 ACP 命令自行决定策略。
 #[cfg(not(target_os = "macos"))]
 fn ensure_bun(_status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
     Err("受管 Bun 运行时只在 macOS 上提供".to_string())
@@ -4855,7 +5059,29 @@ fn ensure_bun(_status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
 fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
     let bun = managed_bun_path().ok_or("找不到 home 目录")?;
     let _lock = lock_managed_runtime()?;
-    if !bun.is_file() {
+    // 同进程重复启动 Pi/插件只做廉价文件身份比较；首次使用或身份变化才重新哈希。
+    let mut verified_identity = attested_bun_identity(&bun);
+    let existing_is_valid = if verified_identity.is_some() {
+        true
+    } else {
+        match validate_managed_bun(&bun) {
+            Ok(identity) => {
+                verified_identity = Some(identity);
+                true
+            }
+            Err(error) => {
+                if std::fs::symlink_metadata(&bun).is_ok() {
+                    status(&format!("受管 Bun 完整性失效，正在重新准备：{error}"));
+                }
+                if let Ok(mut attested) = bun_attestation().lock() {
+                    *attested = None;
+                }
+                remove_invalid_managed_bun(&bun)?;
+                false
+            }
+        }
+    };
+    if !existing_is_valid {
         let dir = bun.parent().unwrap();
         std::fs::create_dir_all(dir).map_err(|e| format!("建目录 {} 失败：{e}", dir.display()))?;
         let (url, want_sha) = BUN_DOWNLOAD;
@@ -4869,7 +5095,7 @@ fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
             .map_err(|e| format!("无法执行 curl：{e}"))?;
         if !out.status.success() {
             return Err(format!(
-                "下载 Bun 失败（可离线安装：brew install bun 后把命令改成系统 bunx）：{}",
+                "下载 Bun 失败：{}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
@@ -4904,18 +5130,18 @@ fn ensure_bun(status: &dyn Fn(&str)) -> Result<std::path::PathBuf, String> {
         std::fs::rename(dir.join(BUN_ZIP_DIR).join("bun"), &bun)
             .map_err(|e| format!("安放 bun 失败：{e}"))?;
         let _ = std::fs::remove_dir_all(dir.join(BUN_ZIP_DIR));
-        // 冒烟：能报版本才算装好（顺带触发 macOS 首次执行检查）。
-        let ver = std::process::Command::new(&bun)
-            .arg("--version")
-            .output()
-            .map_err(|e| format!("bun 无法执行：{e}"))?;
-        if !ver.status.success() {
-            return Err("bun 下载后无法运行".to_string());
-        }
+        verified_identity = Some(
+            validate_managed_bun(&bun)
+                .map_err(|error| format!("Bun 下载后完整性验证失败：{error}"))?,
+        );
     }
     if let Some(dir) = managed_runtime_dir() {
         cleanup_stale_managed_bun(&dir, BUN_VERSION);
     }
+    let identity = verified_identity.ok_or("受管 Bun 验证完成但缺少文件身份")?;
+    *bun_attestation()
+        .lock()
+        .map_err(|_| "受管 Bun 完整性状态锁已损坏".to_string())? = Some(identity);
     Ok(bun)
 }
 
@@ -5242,7 +5468,90 @@ mod runtime_tests {
             url.ends_with(&format!("{BUN_ZIP_DIR}.zip")),
             "下载 URL 应与解压目录名对应：{url} / {BUN_ZIP_DIR}"
         );
-        assert_eq!(sha.len(), 64, "sha256 应为 64 位 hex");
+        assert_eq!(sha.len(), 64, "ZIP sha256 应为 64 位 hex");
+        assert_eq!(
+            BUN_EXECUTABLE_SHA256.len(),
+            64,
+            "解压后 Bun sha256 应为 64 位 hex"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_bun_validation_rejects_non_regular_or_wrong_content() {
+        let root =
+            std::env::temp_dir().join(format!("smelt-bun-validation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bogus = root.join("bun");
+        std::fs::write(&bogus, b"not the pinned bun").unwrap();
+        let error = validate_managed_bun(&bogus).expect_err("错误制品必须被拒绝");
+        assert!(error.contains("校验失败") || error.contains("可执行权限"));
+        let link = root.join("bun-link");
+        std::os::unix::fs::symlink(&bogus, &link).unwrap();
+        assert!(
+            validate_managed_bun(&link)
+                .unwrap_err()
+                .contains("普通文件")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_bun_file_identity_invalidates_on_drift() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root =
+            std::env::temp_dir().join(format!("smelt-bun-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bun = root.join("bun");
+        std::fs::write(&bun, b"first").unwrap();
+        std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original = bun_file_identity(&bun).unwrap();
+        let mut attested = Some(original.clone());
+        assert_eq!(
+            matching_bun_attestation(&mut attested, bun_file_identity(&bun)),
+            Some(original.clone()),
+            "同一文件身份必须复用并返回已完整验证的那份身份"
+        );
+        assert_eq!(attested, Some(original.clone()));
+
+        std::fs::write(&bun, b"second-content").unwrap();
+        let changed = bun_file_identity(&bun).unwrap();
+        assert_ne!(changed, original, "原地改写必须撤销已验证身份");
+        assert_eq!(
+            matching_bun_attestation(&mut attested, Ok(changed.clone())),
+            None
+        );
+        assert_eq!(attested, None, "身份漂移后必须清空认证状态");
+
+        attested = Some(changed);
+        std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let permission_error = bun_file_identity(&bun);
+        assert!(
+            permission_error
+                .as_ref()
+                .unwrap_err()
+                .contains("可执行权限"),
+            "chmod 撤销执行位后必须 fail closed"
+        );
+        assert_eq!(
+            matching_bun_attestation(&mut attested, permission_error),
+            None
+        );
+        assert_eq!(attested, None, "元数据读取失败也必须清空认证状态");
+
+        let link = root.join("bun-link");
+        std::os::unix::fs::symlink(&bun, &link).unwrap();
+        attested = Some(original);
+        let link_error = bun_file_identity(&link);
+        assert!(
+            link_error.as_ref().unwrap_err().contains("普通文件"),
+            "软链不能继承已验证身份"
+        );
+        assert_eq!(matching_bun_attestation(&mut attested, link_error), None);
+        assert_eq!(attested, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -5285,7 +5594,12 @@ mod runtime_tests {
         assert!(root.join("src/agent-instructions.ts").is_file());
         assert!(root.join("src/smelt-permission.ts").is_file());
         assert!(root.join("src/runtime-extensions.ts").is_file());
-        assert_every_pi_src_file_was_materialized(&root);
+        assert!(
+            root.join("patches/@earendil-works%2Fpi-coding-agent@0.87.1.patch")
+                .is_file(),
+            "Bun patchedDependencies 引用的补丁必须随受管运行时物化"
+        );
+        assert_every_pi_runtime_file_was_materialized(&root);
 
         std::fs::write(root.join("src/main.ts"), "tampered").unwrap();
         materialize_managed_pi_agent_files_at(&root).expect("再次同步应修复漂移");
@@ -5296,23 +5610,68 @@ mod runtime_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 回归：`runtime-extensions.ts` 会 import 同目录新文件。嵌入表必须覆盖源码树，
-    /// 否则受管目录会同步到 import 却落不下被引用文件，Pi 握手前直接退出。
-    fn assert_every_pi_src_file_was_materialized(root: &std::path::Path) {
-        let src_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/pi-agent/src");
-        for entry in std::fs::read_dir(&src_dir).unwrap() {
-            let name = entry.unwrap().file_name();
-            let name = name.to_string_lossy();
-            if !name.ends_with(".ts") || name.ends_with(".d.ts") {
-                continue;
+    /// 回归：源码和 patchedDependencies 都可能出现子目录。嵌入表必须递归覆盖，
+    /// 否则源码态 production smoke 通过，发布二进制物化后才缺文件。
+    fn assert_every_pi_runtime_file_was_materialized(root: &std::path::Path) {
+        fn collect(dir: &std::path::Path, package: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(&path, package, out);
+                } else {
+                    let relative = path.strip_prefix(package).unwrap();
+                    let relative = relative.to_string_lossy().replace('\\', "/");
+                    let is_runtime = (relative.starts_with("src/")
+                        && relative.ends_with(".ts")
+                        && !relative.ends_with(".d.ts"))
+                        || relative.starts_with("patches/");
+                    if is_runtime {
+                        out.push(relative);
+                    }
+                }
             }
-            let relative = format!("src/{name}");
+        }
+
+        let package =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/pi-agent");
+        let mut expected = vec!["bun.lock".to_string(), "package.json".to_string()];
+        collect(&package.join("src"), &package, &mut expected);
+        collect(&package.join("patches"), &package, &mut expected);
+        expected.sort();
+        let mut embedded = PI_AGENT_RUNTIME_FILES
+            .iter()
+            .map(|(relative, _)| (*relative).to_string())
+            .collect::<Vec<_>>();
+        embedded.sort();
+        assert_eq!(embedded, expected, "源码树与 Rust 嵌入表必须严格一致");
+        for relative in expected {
+            assert!(root.join(&relative).is_file(), "物化结果缺少 {relative}");
+        }
+    }
+
+    #[test]
+    fn pi_rpc_patch_postcondition_checks_every_session_replacement_handler() {
+        let clean = ["new_session", "switch_session", "fork", "clone"]
+            .into_iter()
+            .map(|name| format!("case \"{name}\": {{\n return success();\n }}\n"))
+            .collect::<String>();
+        assert!(pi_rpc_duplicate_rebind_patch_is_applied(&clean));
+        for name in ["new_session", "switch_session", "fork", "clone"] {
+            let drifted = clean.replacen(
+                &format!("case \"{name}\": {{"),
+                &format!("case \"{name}\": {{\n await rebindSession();"),
+                1,
+            );
             assert!(
-                root.join(&relative).is_file(),
-                "物化结果缺少 {relative}：build.rs 必须把 packages/pi-agent/src 的运行时源文件全部嵌入"
+                !pi_rpc_duplicate_rebind_patch_is_applied(&drifted),
+                "{name} 重引入重复 rebind 时必须判定依赖不完整"
             );
         }
+        assert!(!pi_rpc_duplicate_rebind_patch_is_applied(&clean.replacen(
+            "case \"clone\": {",
+            "case \"removed\": {",
+            1
+        )));
     }
 
     #[test]
@@ -5323,10 +5682,14 @@ mod runtime_tests {
 
     #[test]
     fn embedded_pi_runtime_keeps_paths_as_structured_arguments() {
+        let root =
+            std::env::temp_dir().join(format!("smelt-pi-structured-args-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
         let runtime = ManagedPiRuntime {
             bun: "/Users/Name With Spaces/.smelt/runtime/bun".into(),
             root: "/Users/Name With Spaces/.smelt/runtime/pi".into(),
             entry: "/Users/Name With Spaces/.smelt/runtime/pi/src/main.ts".into(),
+            _lease: pin_managed_pi_runtime(&root).unwrap(),
         };
         let args = runtime.process_args(["--future-flag".to_string()]);
         assert_eq!(
