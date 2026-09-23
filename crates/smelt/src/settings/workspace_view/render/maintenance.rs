@@ -141,19 +141,9 @@ fn maintenance_groups(
                 Some(crate::ui_theme::blue()),
             ),
             updater::UpdateStatus::Applying { version } => (
-                "正在重启更新".to_string(),
-                format!("正在安全交接会话并应用更新包 {version}…"),
+                "正在启动更新安装器".to_string(),
+                format!("正在为更新包 {version} 创建受控安装事务；成功后 App 才会退出"),
                 Some(crate::ui_theme::blue()),
-            ),
-            updater::UpdateStatus::WaitingForSafeHandoff(update) => (
-                "等待 ACP 回合结束".to_string(),
-                format!(
-                    "更新包 {} 已准备；运行中的 Agent 回合结束后将自动重启，\
-                             超过 {} 秒未结束会回到就绪状态，可随时再次点击",
-                    update.version,
-                    updater::SAFE_HANDOFF_WAIT_TIMEOUT.as_secs()
-                ),
-                Some(crate::ui_theme::yellow()),
             ),
             updater::UpdateStatus::ReadyToInstall(update) => (
                 "更新已准备就绪".to_string(),
@@ -170,11 +160,6 @@ fn maintenance_groups(
                     update.version
                 ),
                 Some(crate::ui_theme::red()),
-            ),
-            updater::UpdateStatus::RestartRequired { version } => (
-                "更新已安装".to_string(),
-                format!("更新包 {version} 已生效到磁盘，请重试自动重启"),
-                Some(crate::ui_theme::yellow()),
             ),
             updater::UpdateStatus::Failed(failure) => (
                 failure.title().to_string(),
@@ -205,14 +190,12 @@ fn maintenance_groups(
         let can_check = status.can_check();
         let can_request_check = can_check || status.can_retry_recovery();
         let ready = status.ready_update().is_some();
-        let restart_required = matches!(&status, updater::UpdateStatus::RestartRequired { .. });
 
         let check_label: String = match &status {
             updater::UpdateStatus::Checking => "检查中…".into(),
             updater::UpdateStatus::Downloading { .. } => "下载中…".into(),
             updater::UpdateStatus::Installing { .. } => "准备中…".into(),
-            updater::UpdateStatus::Applying { .. } => "重启中…".into(),
-            updater::UpdateStatus::WaitingForSafeHandoff(_) => "等待回合结束…".into(),
+            updater::UpdateStatus::Applying { .. } => "正在退出…".into(),
             updater::UpdateStatus::InstallFailed(_) => "检查新版本".into(),
             updater::UpdateStatus::Failed(updater::UpdateFailure::Recovery) => "重试恢复".into(),
             _ => "检查更新".into(),
@@ -329,12 +312,10 @@ fn maintenance_groups(
         };
 
         let restart_entity = update_entity.clone();
-        let restart_btn = (ready || restart_required).then(|| {
+        let restart_btn = ready.then(|| {
             btn_hover(
                 "restart-update",
-                if restart_required {
-                    "重试自动重启".into()
-                } else if matches!(&status, updater::UpdateStatus::InstallFailed(_)) {
+                if matches!(&status, updater::UpdateStatus::InstallFailed(_)) {
                     "重试重启更新".into()
                 } else {
                     "立即重启更新".into()
@@ -348,37 +329,10 @@ fn maintenance_groups(
             )))
             .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                 restart_entity.update(cx, |this, cx| {
-                    if restart_required {
-                        this.retry_update_relaunch(cx);
-                    } else {
-                        this.begin_ready_update_install(cx);
-                    }
+                    this.begin_ready_update_install(cx);
                 });
             })
         });
-
-        let cancel_wait_entity = update_entity.clone();
-        let cancel_wait_btn = matches!(&status, updater::UpdateStatus::WaitingForSafeHandoff(_))
-            .then(|| {
-                btn_hover(
-                    "cancel-update-wait",
-                    "取消等待".into(),
-                    Hsla::from(crate::ui_theme::tint(crate::ui_theme::yellow(), 0x40)),
-                )
-                .text_color(rgb(crate::ui_theme::yellow()))
-                .bg(Hsla::from(crate::ui_theme::tint(
-                    crate::ui_theme::yellow(),
-                    0x24,
-                )))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    move |_, _window, cx: &mut App| {
-                        cancel_wait_entity.update(cx, |this, cx| {
-                            this.cancel_update_install_wait(cx);
-                        });
-                    },
-                )
-            });
 
         let mut action_row = h_flex().gap_2().items_center().child(check_btn);
         if let Some(download_btn) = download_btn {
@@ -386,9 +340,6 @@ fn maintenance_groups(
         }
         if let Some(restart_btn) = restart_btn {
             action_row = action_row.child(restart_btn);
-        }
-        if let Some(cancel_wait_btn) = cancel_wait_btn {
-            action_row = action_row.child(cancel_wait_btn);
         }
 
         let links = h_flex()

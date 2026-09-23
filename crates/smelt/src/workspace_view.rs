@@ -378,17 +378,16 @@ impl Workspace {
                             if this.quit_requested {
                                 return;
                             }
-                            // 正在落盘时绝不能让退出看门狗在 copy/rename 中间杀进程。
-                            // Waiting 态没有文件操作，取消它后可以安全走普通退出。
+                            // Applying 表示 helper 已派生且当前 GUI 正在退出，不能再启动
+                            // 第二条退出或安装流程。
                             if matches!(this.update_status, updater::UpdateStatus::Applying { .. })
                             {
                                 return;
                             }
-                            this.cancel_update_install_wait(cx);
                             this.quit_requested = true;
                             cx.notify();
-                            // 退出只是统一安装驱动的一种触发策略：只尝试一次，不等待 ACP，
-                            // 但沿用同一份事务、校验和错误处理。
+                            // 退出只是统一安装驱动的一种触发策略：helper 派生成功后退出，
+                            // 并在本进程完全消失后才提交同一份事务。
                             if let Some(update) = this.update_status.ready_update().cloned() {
                                 this.start_update_install(update, UpdateInstallTrigger::Quit, cx);
                                 return;

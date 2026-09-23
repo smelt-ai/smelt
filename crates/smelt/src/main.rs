@@ -2839,16 +2839,11 @@ struct Workspace {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateInstallTrigger {
-    Launch,
     User,
     Quit,
 }
 
 impl UpdateInstallTrigger {
-    fn retries_while_busy(self) -> bool {
-        !matches!(self, Self::Quit)
-    }
-
     fn relaunches(self) -> bool {
         !matches!(self, Self::Quit)
     }
@@ -4542,6 +4537,15 @@ fn main() {
         std::process::exit(code);
     }
     smelt_core::sqlite_state::enable_sqlite_state();
+    // 整个 GUI 生命周期持共享 lease。installer 只有等所有 GUI 退出并拿到独占 lease
+    // 后才可交换 Bundle；若交换已经开始，新 GUI fail-fast，避免从旧 vnode 启动。
+    let _app_runtime_lease = match updater::acquire_app_runtime_lease() {
+        Ok(lease) => lease,
+        Err(error) => {
+            eprintln!("Smelt 正在更新，暂时无法启动：{error:#}");
+            std::process::exit(75);
+        }
+    };
     // GUI 启动失败时用户通常看不到终端输出；把原始 panic 先落到统一日志，
     // 尤其能保留 GPUI 清理阶段二次 panic 之前的第一条错误。
     smelt_core::app_log::install_panic_hook("smelt");
