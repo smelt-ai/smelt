@@ -718,6 +718,30 @@ fn acp_event_name(event: &smelt_core::acp_conn::ConversationEvent) -> &'static s
     }
 }
 
+/// 把已经堆在通道里的一批事件收成一次快照游标。
+///
+/// 重放会在几毫秒里把几十条历史都 `try_send` 进来。若每条都立刻序列化一份
+/// 快照，写线程还堵在第一行上，邮箱就会顶满 8MB 并拆掉整条连接；主进程读到
+/// 半行 JSON，只能当成宿主挂了再重连，于是同一份历史永远恢复失败。
+/// `Some(0)` 表示这一批里清空过或要求全量重发。否则取最早的增量游标。
+/// 全都没动 entries 时返回 `None`，调用方按当前长度发空增量。
+pub(crate) fn coalesce_snapshot_offset<I>(offsets: I) -> Option<usize>
+where
+    I: IntoIterator<Item = Option<usize>>,
+{
+    let mut earliest = None;
+    for offset in offsets {
+        match offset {
+            Some(0) => return Some(0),
+            Some(offset) => {
+                earliest = Some(earliest.map_or(offset, |earliest: usize| earliest.min(offset)));
+            }
+            None => {}
+        }
+    }
+    earliest
+}
+
 /// 事件 drain：整个会话生命周期只有这一条线程在改 `reduced`（`apply_acp_user_action`
 /// 里权限/选择题相关的写也在这条线程外发生，但两边改的是不相交的字段/走
 /// 互斥锁，不会踩踏）。通道关闭（连接线程收尾）就退出；如果退出时相位还不是
@@ -737,80 +761,112 @@ pub(crate) fn start_acp_event_drain(
         let sess = &slot.value;
         let mut fallback_to_fresh = false;
         smol::block_on(async {
-            while let Ok(ev) = event_rx.recv().await {
+            while let Ok(first) = event_rx.recv().await {
                 let _turn_completion = sess.turn_completion.lock().unwrap();
-                if sess.connection_generation.load(Ordering::SeqCst) != generation {
-                    // 这条连接已被换掉，剩下的事件不能再改新连接的状态。但被丢掉的
-                    // 若是 Ready，会话就会一直停在 Connecting——必须留痕，否则现场
-                    // 只看得到「卡着」。
-                    crate::dlog(&format!(
-                        "acp drain 代数失配退出 id={session_id} gen={generation} \
-                         current={} 丢弃事件={}",
-                        sess.connection_generation.load(Ordering::SeqCst),
-                        acp_event_name(&ev),
-                    ));
-                    break;
+                // 重放把整段历史一次性塞进通道。先收干已经到达的事件，再发一份
+                // 快照；实时流通常一次只有一条，行为与逐条推送相同。
+                let mut batch = vec![first];
+                while let Ok(next) = event_rx.try_recv() {
+                    batch.push(next);
                 }
-                let turn_ended = ev.ends_turn();
-                let ready = matches!(&ev, smelt_core::acp_conn::ConversationEvent::Ready { .. });
-                if matches!(restore_policy, Some(AcpRestorePolicy::FreshOnMissing))
-                    && matches!(
-                        &ev,
-                        smelt_core::acp_conn::ConversationEvent::RestoreFailed(failure)
-                            if failure.allows_fresh_session()
-                    )
-                {
-                    // 这是一个没有任何本地消息的失效历史身份：不要先把失败态
-                    // 广播给 GUI，直接在旧连接收尾后用同一个 smeltd slot 开
-                    // `session/new`。有本地投影的历史和瞬态错误继续走严格失败路径。
-                    fallback_to_fresh = true;
-                    continue;
-                }
-                if matches!(
-                    &ev,
-                    smelt_core::acp_conn::ConversationEvent::Ready {
-                        kind: smelt_core::acp_conn::ReadyKind::ResumedWithReplay
-                            | smelt_core::acp_conn::ReadyKind::ResumedKeepHistory,
-                        ..
+                let mut offsets = Vec::with_capacity(batch.len());
+                let mut should_persist = false;
+                let mut runtime_debug_changed = false;
+                let mut turn_ended = false;
+                let mut ready = false;
+                let mut applied = false;
+                let mut stop = false;
+                for ev in batch {
+                    if sess.connection_generation.load(Ordering::SeqCst) != generation {
+                        // 这条连接已被换掉，剩下的事件不能再改新连接的状态。但被丢掉的
+                        // 若是 Ready，会话就会一直停在 Connecting——必须留痕，否则现场
+                        // 只看得到「卡着」。
+                        crate::dlog(&format!(
+                            "acp drain 代数失配退出 id={session_id} gen={generation} \
+                             current={} 丢弃事件={}",
+                            sess.connection_generation.load(Ordering::SeqCst),
+                            acp_event_name(&ev),
+                        ));
+                        stop = true;
+                        break;
                     }
-                ) {
-                    crate::dlog(&format!(
-                        "acp drain 收到恢复 Ready id={session_id} gen={generation}"
-                    ));
-                    let history_id = sess.reduced.lock().unwrap().history_session_id.clone();
-                    sess.restore_state
-                        .lock()
-                        .unwrap()
-                        .mark_restored(history_id.as_deref());
+                    turn_ended |= ev.ends_turn();
+                    ready |= matches!(&ev, smelt_core::acp_conn::ConversationEvent::Ready { .. });
+                    if matches!(restore_policy, Some(AcpRestorePolicy::FreshOnMissing))
+                        && matches!(
+                            &ev,
+                            smelt_core::acp_conn::ConversationEvent::RestoreFailed(failure)
+                                if failure.allows_fresh_session()
+                        )
+                    {
+                        // 这是一个没有任何本地消息的失效历史身份：不要先把失败态
+                        // 广播给 GUI，直接在旧连接收尾后用同一个 smeltd slot 开
+                        // `session/new`。有本地投影的历史和瞬态错误继续走严格失败路径。
+                        fallback_to_fresh = true;
+                        continue;
+                    }
+                    if matches!(
+                        &ev,
+                        smelt_core::acp_conn::ConversationEvent::Ready {
+                            kind: smelt_core::acp_conn::ReadyKind::ResumedWithReplay
+                                | smelt_core::acp_conn::ReadyKind::ResumedKeepHistory,
+                            ..
+                        }
+                    ) {
+                        crate::dlog(&format!(
+                            "acp drain 收到恢复 Ready id={session_id} gen={generation}"
+                        ));
+                        let history_id = sess.reduced.lock().unwrap().history_session_id.clone();
+                        sess.restore_state
+                            .lock()
+                            .unwrap()
+                            .mark_restored(history_id.as_deref());
+                    }
+                    let (outcome, owner_ids) = {
+                        let mut st = sess.reduced.lock().unwrap();
+                        let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
+                        let owner_ids = live_acp_owner_ids(&st);
+                        (outcome, owner_ids)
+                    };
+                    if let Err(error) = acp_sessions.try_acquire_resumes(&owner_ids, &session_id) {
+                        let mut reduced = sess.reduced.lock().unwrap();
+                        smelt_core::acp_session::force_end(
+                            &mut reduced,
+                            smelt_core::acp_session::AcpEndKind::SessionOwnershipConflict,
+                            error.to_string(),
+                        );
+                        drop(reduced);
+                        offsets.push(outcome.entries_offset);
+                        push_acp_snapshot_since(
+                            sess,
+                            true,
+                            coalesce_snapshot_offset(offsets.iter().copied()),
+                        );
+                        update_acp_daemon_state(sess, &subscribers);
+                        stop = true;
+                        applied = false;
+                        break;
+                    }
+                    offsets.push(outcome.entries_offset);
+                    should_persist |= outcome.should_persist;
+                    runtime_debug_changed |= outcome.runtime_debug_changed;
+                    applied = true;
                 }
-                let (outcome, owner_ids) = {
-                    let mut st = sess.reduced.lock().unwrap();
-                    let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
-                    let owner_ids = live_acp_owner_ids(&st);
-                    (outcome, owner_ids)
-                };
-                if let Err(error) = acp_sessions.try_acquire_resumes(&owner_ids, &session_id) {
-                    let mut reduced = sess.reduced.lock().unwrap();
-                    smelt_core::acp_session::force_end(
-                        &mut reduced,
-                        smelt_core::acp_session::AcpEndKind::SessionOwnershipConflict,
-                        error.to_string(),
+                if applied {
+                    push_acp_snapshot_since_with_runtime_debug(
+                        sess,
+                        should_persist,
+                        coalesce_snapshot_offset(offsets.iter().copied()),
+                        runtime_debug_changed,
                     );
-                    drop(reduced);
-                    push_acp_snapshot_since(sess, true, outcome.entries_offset);
                     update_acp_daemon_state(sess, &subscribers);
+                    // TurnEnded / Ready 之后只要相位已 Idle 就放闸。迟到工具终态
+                    // 按 tool id 归到旧条目，不会把新回合重新打开。
+                    settle_acp_turn_locked(sess, turn_ended, ready, &subscribers);
+                }
+                if stop {
                     break;
                 }
-                push_acp_snapshot_since_with_runtime_debug(
-                    sess,
-                    outcome.should_persist,
-                    outcome.entries_offset,
-                    outcome.runtime_debug_changed,
-                );
-                update_acp_daemon_state(sess, &subscribers);
-                // TurnEnded / Ready 之后只要相位已 Idle 就放闸。迟到工具终态
-                // 按 tool id 归到旧条目，不会把新回合重新打开。
-                settle_acp_turn_locked(sess, turn_ended, ready, &subscribers);
             }
         });
         let _lifecycle = slot.lifecycle.lock().unwrap();
@@ -3150,4 +3206,26 @@ pub(crate) fn acp_upgrade_blockers(acp_sessions: &AcpSessions) -> Vec<String> {
             (phase_blocks || has_unfinished_tool || in_flight || prompt_queue_held).then_some(id)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod snapshot_batch_tests {
+    use super::coalesce_snapshot_offset;
+
+    #[test]
+    fn replay_burst_collapses_to_one_full_snapshot() {
+        // HistoryReplayStarted 是 0，后面每条历史都是递增游标。必须整批从 0 重发，
+        // 不能为每一条各占一份快照。
+        let offsets = std::iter::once(Some(0)).chain((1..78).map(Some));
+        assert_eq!(coalesce_snapshot_offset(offsets), Some(0));
+    }
+
+    #[test]
+    fn incremental_burst_starts_at_the_earliest_change() {
+        assert_eq!(
+            coalesce_snapshot_offset([Some(12), None, Some(4), Some(9)]),
+            Some(4)
+        );
+        assert_eq!(coalesce_snapshot_offset([None, None]), None);
+    }
 }
