@@ -8,23 +8,24 @@ use super::{
     cached_diff_stats, can_dispatch_prompt_immediately, can_load_older_history,
     classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
     composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
-    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
-    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    conversation_phase_label, current_turn_has_agent_output, did_recover_from_ended,
-    diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
-    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
-    is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    loaded_entries_end, markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
-    merge_snapshot_entries, model_label_with_provider, move_queue_item_to_front,
-    native_queue_from_snapshot, native_queue_item_kind_label, next_snapshot_prompt_gate,
-    overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
-    pending_config_choice_names, plan_current_step, plan_native_immediate_send, preformatted_html,
-    process_group_header_label, process_group_label, progress_has_details, progress_summary,
-    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
-    resolve_restart_launch, restorable_gui_prompt, search_summary_text, selected_provider_group,
-    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
+    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
+    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    conversation_input_for_submit, conversation_phase_label, current_turn_has_agent_output,
+    did_recover_from_ended, diff_cache_matches_output, diff_stats_for_output,
+    escape_html_tags_for_markdown, external_clipboard_image_paths, filter_trajectory_events,
+    format_attached_paths, is_active_permission_selection, is_dispatch_in_flight,
+    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
+    is_stale_blank_history_id, loaded_entries_end, markdown_text_for_cwd,
+    markdown_user_text_for_cwd, merge_rejected_prompt, merge_snapshot_entries,
+    model_label_with_provider, move_queue_item_to_front, native_queue_from_snapshot,
+    native_queue_item_kind_label, next_snapshot_prompt_gate, overlay_model_state,
+    overlay_pending_initial_config, overlay_session_configs, pending_config_choice_names,
+    plan_current_step, plan_native_immediate_send, preformatted_html, process_group_header_label,
+    process_group_label, progress_has_details, progress_summary, provider_switch_value,
+    reconcile_pending_config_values, refresh_markdown_cache, resolve_restart_launch,
+    restorable_gui_prompt, search_summary_text, selected_provider_group, session_trajectory_events,
+    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_replace_session_title,
     should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
     tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
@@ -128,6 +129,18 @@ fn session_menu_nests_models_when_other_sections_exist() {
     assert!(composer_should_nest_models(0, 3, 8));
     assert!(!composer_should_nest_models(0, 1, 40));
     assert!(!composer_should_nest_models(2, 2, 1));
+}
+
+#[test]
+fn long_model_menu_scrolls_without_hiding_the_submenu() {
+    // 可滚动的根菜单画不出「模型」二级，超长列表必须滚在没有再嵌套的那一层。
+    let nested = composer_model_scroll(true);
+    assert!(nested.submenu);
+    assert!(!nested.root);
+
+    let flat = composer_model_scroll(false);
+    assert!(flat.root);
+    assert!(!flat.submenu);
 }
 
 #[test]

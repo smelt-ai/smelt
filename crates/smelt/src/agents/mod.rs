@@ -1711,7 +1711,8 @@ fn render_agent_model_control(
                                     }),
                             );
                         }
-                        sub
+                        // 这一层没有再嵌套。模型一多就超出窗口，在二级里滚。
+                        sub.scrollable(true)
                     },
                 );
             }

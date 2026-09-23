@@ -352,6 +352,30 @@ fn composer_should_nest_models(
     model_count > 1 && (extra_config_count > 0 || provider_count > 1)
 }
 
+/// 长模型列表滚哪一层。
+///
+/// gpui-component 的可滚动菜单画不出二级菜单，所以这两项互斥：模型收进
+/// 「模型」二级时只滚二级；平铺时根菜单没有二级，才滚根菜单。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComposerModelScroll {
+    root: bool,
+    submenu: bool,
+}
+
+fn composer_model_scroll(nest_models: bool) -> ComposerModelScroll {
+    if nest_models {
+        ComposerModelScroll {
+            root: false,
+            submenu: true,
+        }
+    } else {
+        ComposerModelScroll {
+            root: true,
+            submenu: false,
+        }
+    }
+}
+
 /// 模型胶囊弹层的一个分区。`Config` 带的是 `extra_configs` 下标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerMenuSection {
@@ -590,7 +614,7 @@ fn apply_pending_config_selection(
     }
 }
 
-/// agent 回包对上了才清 pending；带着旧值的快照不能把勾选打回去。
+/// 快照里的当前值等于所点的那一项才清 pending。旧快照不能把勾选打回去。
 fn reconcile_pending_config_values(
     pending: &mut Vec<(String, String)>,
     configs: &[SessionConfigState],
