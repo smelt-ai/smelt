@@ -387,6 +387,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
     assert_eq!(skipped.last_revision, 1);
     assert!(!skipped.skip_next);
     assert_eq!(skipped.restore_texts, None);
+    assert_eq!(skipped.discarded_revision, Some(1));
     assert_eq!(
         native_queue_from_snapshot(true, vec!["换方向".into()], vec!["总结".into()]),
         (Vec::new(), Vec::new())
@@ -397,6 +398,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
         restored.restore_texts.as_deref(),
         Some(&["换方向".to_string()][..])
     );
+    assert_eq!(restored.discarded_revision, None);
     assert_eq!(
         native_queue_from_snapshot(false, vec!["换方向".into()], vec!["总结".into()]),
         (vec!["换方向".into()], vec!["总结".into()])
@@ -406,6 +408,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
     assert!(pending.skip_next);
     assert_eq!(pending.last_revision, 1);
     assert_eq!(pending.restore_texts, None);
+    assert_eq!(pending.discarded_revision, None);
 }
 
 #[test]

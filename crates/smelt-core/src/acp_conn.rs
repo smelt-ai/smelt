@@ -429,7 +429,8 @@ pub enum ConversationEvent {
         steering: Vec<String>,
         follow_up: Vec<String>,
     },
-    /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加，客户端只应用一次。
+    /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
+    /// 发送 `AcknowledgeComposerRestore`，服务端清文本但保留 revision 水位。
     ComposerRestore {
         revision: u64,
         texts: Vec<String>,

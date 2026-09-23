@@ -2234,6 +2234,37 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
 }
 
 #[test]
+fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
+    let mut state = fresh_state();
+    apply_event(
+        &mut state,
+        ConversationEvent::ComposerRestore {
+            revision: 1,
+            texts: vec!["旧草稿".into()],
+        },
+    );
+
+    assert!(acknowledge_composer_restore(&mut state, 1));
+    assert_eq!(state.composer_restore_revision, 1);
+    assert!(state.composer_restore_texts.is_empty());
+    assert!(!acknowledge_composer_restore(&mut state, 1));
+
+    apply_event(
+        &mut state,
+        ConversationEvent::ComposerRestore {
+            revision: 2,
+            texts: vec!["新草稿".into()],
+        },
+    );
+    assert!(
+        !acknowledge_composer_restore(&mut state, 1),
+        "迟到的旧确认不能清除新 revision"
+    );
+    assert_eq!(state.composer_restore_revision, 2);
+    assert_eq!(state.composer_restore_texts, ["新草稿"]);
+}
+
+#[test]
 fn mid_turn_steer_stays_in_queue_until_consumed() {
     let mut state = fresh_state();
     note_prompt_sent(&mut state, "先做这个".into(), Vec::new());

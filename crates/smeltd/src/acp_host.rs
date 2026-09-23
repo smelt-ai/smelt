@@ -1708,6 +1708,15 @@ fn apply_acp_user_action_inner(
             delivery_id,
         } => send_acp_follow_up(sess, text, images, delivery_id, subscribers),
         AcpUserAction::Compact => send_acp_compact(sess),
+        AcpUserAction::AcknowledgeComposerRestore { revision } => {
+            if smelt_core::acp_session::acknowledge_composer_restore(
+                &mut sess.reduced.lock().unwrap(),
+                revision,
+            ) {
+                push_acp_snapshot_since(sess, false, None);
+            }
+            Ok(())
+        }
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
         AcpUserAction::RewindToMessage { entry_index } => send_acp_rewind(sess, entry_index),
         AcpUserAction::Cancel => {

@@ -474,6 +474,7 @@ struct ComposerRestoreConsume {
     last_revision: u64,
     skip_next: bool,
     restore_texts: Option<Vec<String>>,
+    discarded_revision: Option<u64>,
 }
 
 /// cancel 会把整队还回输入框。立即发送已经把选中条改成新 prompt，这次还原必须丢掉。
@@ -488,6 +489,7 @@ fn consume_composer_restore(
             last_revision,
             skip_next,
             restore_texts: None,
+            discarded_revision: None,
         };
     }
     if skip_next {
@@ -495,12 +497,14 @@ fn consume_composer_restore(
             last_revision: incoming_revision,
             skip_next: false,
             restore_texts: None,
+            discarded_revision: Some(incoming_revision),
         };
     }
     ComposerRestoreConsume {
         last_revision: incoming_revision,
         skip_next: false,
         restore_texts: (!incoming_texts.is_empty()).then_some(incoming_texts),
+        discarded_revision: None,
     }
 }
 
@@ -1339,6 +1343,11 @@ pub struct AcpView {
     queued_follow_up: Vec<String>,
     last_composer_restore_revision: u64,
     pending_composer_restore: Option<Vec<String>>,
+    /// `pending_composer_restore` 中来自 daemon 的最新 revision。文本真正写入
+    /// Textarea 后才确认；本地“立即发送”产生的 leftovers 没有 revision。
+    pending_composer_restore_revision: Option<u64>,
+    /// 已处理、等待写回 daemon 的 revision。action 队列暂满时留到下次渲染重试。
+    pending_composer_restore_ack: Option<u64>,
     /// 原生排队「立即发送」已把选中条改成新 prompt。随后 cancel 的 ComposerRestore
     /// 不能再把同一条还进输入框，否则会和即将发出的 prompt 重复。
     skip_next_composer_restore: bool,
@@ -1712,6 +1721,8 @@ impl AcpView {
             queued_follow_up: Vec::new(),
             last_composer_restore_revision: 0,
             pending_composer_restore: None,
+            pending_composer_restore_revision: None,
+            pending_composer_restore_ack: None,
             skip_next_composer_restore: false,
             starting_since: None,
             plan: None,
@@ -3325,15 +3336,34 @@ impl AcpView {
         }
     }
 
+    fn try_acknowledge_composer_restore(&mut self) {
+        let Some(revision) = self.pending_composer_restore_ack else {
+            return;
+        };
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        if handle
+            .action_tx
+            .try_send(AcpUserAction::AcknowledgeComposerRestore { revision })
+            .is_ok()
+        {
+            self.pending_composer_restore_ack = None;
+        }
+    }
+
     fn apply_pending_composer_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.try_acknowledge_composer_restore();
         let Some(texts) = self.pending_composer_restore.take() else {
             return;
         };
+        let revision = self.pending_composer_restore_revision.take();
         if texts.is_empty() {
             return;
         }
         let Some(input) = self.input.clone() else {
             self.pending_composer_restore = Some(texts);
+            self.pending_composer_restore_revision = revision;
             return;
         };
         let restored = texts.join("\n\n");
@@ -3348,6 +3378,13 @@ impl AcpView {
             input.focus(window, cx);
         });
         self.input_has_draft = !merged.trim().is_empty();
+        if let Some(revision) = revision {
+            self.pending_composer_restore_ack = Some(
+                self.pending_composer_restore_ack
+                    .map_or(revision, |pending| pending.max(revision)),
+            );
+            self.try_acknowledge_composer_restore();
+        }
     }
 
     /// 快照应用：整份状态从 smeltd 镜像过来。归约（entries 合并/phase 机/
@@ -3524,16 +3561,31 @@ impl AcpView {
         let skip_restore = self.skip_next_composer_restore;
         (self.queued_steering, self.queued_follow_up) =
             native_queue_from_snapshot(skip_restore, snap.queued_steering, snap.queued_follow_up);
+        let restore_revision = snap.composer_restore_revision;
         let restore = consume_composer_restore(
             self.last_composer_restore_revision,
-            snap.composer_restore_revision,
+            restore_revision,
             snap.composer_restore_texts,
             skip_restore,
         );
         self.last_composer_restore_revision = restore.last_revision;
         self.skip_next_composer_restore = restore.skip_next;
         if let Some(texts) = restore.restore_texts {
-            self.pending_composer_restore = Some(texts);
+            match &mut self.pending_composer_restore {
+                Some(pending) => pending.extend(texts),
+                None => self.pending_composer_restore = Some(texts),
+            }
+            self.pending_composer_restore_revision = Some(
+                self.pending_composer_restore_revision
+                    .map_or(restore_revision, |pending| pending.max(restore_revision)),
+            );
+        }
+        if let Some(revision) = restore.discarded_revision {
+            self.pending_composer_restore_ack = Some(
+                self.pending_composer_restore_ack
+                    .map_or(revision, |pending| pending.max(revision)),
+            );
+            self.try_acknowledge_composer_restore();
         }
         self.plan = snap.plan;
         self.model = snap.model;

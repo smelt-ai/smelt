@@ -1636,6 +1636,39 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
 }
 
 #[test]
+fn composer_restore_ack_action_clears_text_but_preserves_revision() {
+    let mut reduced = AcpSessionState::default();
+    reduced.composer_restore_revision = 7;
+    reduced.composer_restore_texts = vec!["不要在重启后复活".into()];
+    let session = make_acp_session("acp-composer-restore-ack", reduced);
+    let subscribers = new_event_hub();
+
+    apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::AcknowledgeComposerRestore { revision: 7 },
+        &subscribers,
+    )
+    .unwrap();
+    {
+        let reduced = session.reduced.lock().unwrap();
+        assert_eq!(reduced.composer_restore_revision, 7);
+        assert!(reduced.composer_restore_texts.is_empty());
+    }
+
+    session.reduced.lock().unwrap().composer_restore_texts = vec!["更新的一次恢复".into()];
+    session.reduced.lock().unwrap().composer_restore_revision = 8;
+    apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::AcknowledgeComposerRestore { revision: 7 },
+        &subscribers,
+    )
+    .unwrap();
+    let reduced = session.reduced.lock().unwrap();
+    assert_eq!(reduced.composer_restore_revision, 8);
+    assert_eq!(reduced.composer_restore_texts, ["更新的一次恢复"]);
+}
+
+#[test]
 fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     let mut reduced = AcpSessionState::default();
     reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {

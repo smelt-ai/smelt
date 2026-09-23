@@ -15,6 +15,14 @@ use crate::acp_conn::{
 };
 use crate::daemon_state::DaemonPhase;
 
+pub fn acknowledge_composer_restore(state: &mut AcpSessionState, revision: u64) -> bool {
+    if revision != state.composer_restore_revision || state.composer_restore_texts.is_empty() {
+        return false;
+    }
+    state.composer_restore_texts.clear();
+    true
+}
+
 /// `apply_event` 的旁路效果——旧版直接在 GPUI `Context` 上做（`cx.notify()`/
 /// `cx.emit(Changed)`/推 `PendingAgentNotifs`），归约函数本身不该管这些，
 /// 交给调用方（smeltd）根据这份结果自己决定广播/落盘/要不要弹通知。

@@ -29,7 +29,9 @@ use crate::acp_conn::{
 use crate::daemon_state::DaemonPhase;
 
 mod apply;
-pub use apply::{ApplyOutcome, apply_event, finalize_dangling_tool_calls};
+pub use apply::{
+    ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
+};
 use apply::{pending_action_phase, resume_running};
 
 // ===================== wire 快照类型（无 agent_client_protocol 依赖） =====================
@@ -464,7 +466,8 @@ pub struct ConversationSnapshot {
     /// `clear_queue` 还回输入框的单调版本。0 表示从未还原。
     #[serde(default)]
     pub composer_restore_revision: u64,
-    /// 与 `composer_restore_revision` 配套的原文。
+    /// 与 `composer_restore_revision` 配套、尚未被客户端确认写入输入框的原文。
+    /// 确认后只清文本而保留 revision 水位，避免迟到确认误伤后续恢复。
     #[serde(default)]
     pub composer_restore_texts: Vec<String>,
     /// 当前回合开始的 Unix 毫秒时间戳；None = 当前没有运行中的回合。
@@ -1605,6 +1608,11 @@ pub enum AcpUserAction {
     },
     /// 手动压缩上下文。
     Compact,
+    /// GUI 已将指定 revision 的恢复文本写入输入框。daemon 只在它仍是当前
+    /// revision 时清空文本；动作幂等，迟到确认不会误清后续恢复。
+    AcknowledgeComposerRestore {
+        revision: u64,
+    },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
     /// 回退到指定历史用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
