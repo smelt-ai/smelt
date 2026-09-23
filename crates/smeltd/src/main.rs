@@ -332,14 +332,16 @@ fn finalize_staged_handoff_executable() {
     );
 }
 
-/// 返回可用于派生守护子进程的可执行文件。参数化一层是为了覆盖 macOS 上
+/// 返回 `current_exe()` 这条路径现在指向的文件。参数化一层是为了覆盖 macOS 上
 /// `current_exe()` 在文件被 rename 后仍返回旧启动路径的行为。
+///
+/// 路径还在不等于映像还是启动时那一份：原地替换（rename 覆盖 `smeltd`）后路径
+/// 仍在，inode 已经换了。会话宿主不能走这里，必须用 [`session_host_executable`]。
 fn daemon_executable_from_current(
     current: std::path::PathBuf,
 ) -> std::io::Result<std::path::PathBuf> {
-    // `current_exe()` 返回的是启动时使用的路径。路径还在就用它——这就是正在跑的映像。
     // 路径没了（rename 掉 smeltd.next、删掉历史硬链、测试误伤）时，回退到同目录的
-    // 正式 `smeltd`，不能把「文件不存在」抛给 ACP host spawn。
+    // 正式 `smeltd`，不能把「文件不存在」抛给调用方。
     if current.is_file() {
         return Ok(current);
     }
@@ -361,6 +363,63 @@ fn daemon_executable_from_current(
 
 fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
     daemon_executable_from_current(std::env::current_exe()?)
+}
+
+/// 启动时 `current_exe()` 的 inode。安装协议保证这条路径在进程活着时不会被换成
+/// 另一份文件；spawn 前再对一次，对不上就拒绝启动，而不是去跑目录里的新文件。
+struct PinnedDaemonInode {
+    dev: u64,
+    ino: u64,
+}
+
+static PINNED_DAEMON_INODE: OnceLock<PinnedDaemonInode> = OnceLock::new();
+
+fn pin_running_daemon_image() {
+    let Ok(path) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    use std::os::unix::fs::MetadataExt;
+    let _ = PINNED_DAEMON_INODE.set(PinnedDaemonInode {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    });
+}
+
+fn path_has_inode(path: &std::path::Path, dev: u64, ino: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    use std::os::unix::fs::MetadataExt;
+    meta.dev() == dev && meta.ino() == ino
+}
+
+fn session_host_executable_from(
+    current: std::path::PathBuf,
+    pinned: Option<(u64, u64)>,
+) -> std::io::Result<std::path::PathBuf> {
+    let Some((dev, ino)) = pinned else {
+        return Ok(current);
+    };
+    if path_has_inode(&current, dev, ino) {
+        return Ok(current);
+    }
+    Err(std::io::Error::other(format!(
+        "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
+        current.display()
+    )))
+}
+
+/// 会话宿主必须和本进程是同一个 inode。路径被换掉时直接失败，不能 exec 新文件，
+/// 也不能另拷一份再跑——那份拷贝的 `current_exe()` 和签名都不再是正在映射的映像。
+fn session_host_executable() -> std::io::Result<std::path::PathBuf> {
+    let current = daemon_executable_path()?;
+    let pinned = PINNED_DAEMON_INODE
+        .get()
+        .map(|pinned| (pinned.dev, pinned.ino));
+    session_host_executable_from(current, pinned)
 }
 
 /// 已 stage、尚未应用到运行中守护的候选映像。daemon 在跑时安装只写这个文件，
@@ -1966,6 +2025,7 @@ fn main() {
     // 在线升级先 exec 已验证存在的暂存映像；候选映像一旦真的启动，就在任何线程和
     // 状态初始化之前把自身提升到正式路径，再以正式名继续同一份 handoff。
     finalize_staged_handoff_executable();
+    pin_running_daemon_image();
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
     // 先装 panic hook，再记一条启动事件——守护本身没有终端可看，崩溃/异常全靠这份

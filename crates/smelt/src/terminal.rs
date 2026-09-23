@@ -1118,14 +1118,86 @@ fn same_daemon_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
+/// 套接字无人应答，并且这份文件没有被任何进程映射，才可以覆盖 `smeltd`。
+fn may_replace_managed_daemon_image(probe: &DaemonProbe, executable_mapped: bool) -> bool {
+    matches!(probe, DaemonProbe::NotRunning) && !executable_mapped
+}
+
+/// 这个路径是不是某个活进程的可执行映像。安装方自己没打开它时，命中的就是正在跑的 daemon。
+fn path_is_live_executable(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(c_path) =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+        else {
+            return true;
+        };
+        // 第一次只拿缓冲区大小。这个返回值在没人映射时也是正数，不能拿来判断。
+        let hint = unsafe {
+            proc_listpidspath(
+                PROC_ALL_PIDS,
+                0,
+                c_path.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if hint <= 0 {
+            return false;
+        }
+        let mut buf = vec![0u8; hint as usize];
+        let bytes = unsafe {
+            proc_listpidspath(
+                PROC_ALL_PIDS,
+                0,
+                c_path.as_ptr(),
+                0,
+                buf.as_mut_ptr().cast(),
+                hint,
+            )
+        };
+        bytes > 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+const PROC_ALL_PIDS: u32 = 1;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn proc_listpidspath(
+        ty: u32,
+        typeinfo: u32,
+        path: *const libc::c_char,
+        pathflags: u32,
+        buffer: *mut libc::c_void,
+        buffersize: i32,
+    ) -> i32;
+}
+
 /// 守护没在跑时把 `src` 装到正式路径 `~/.smelt/bin/smeltd`。
 /// 先写 `smeltd.next` 再 rename，避免半截文件。
+/// 文件仍被进程映射时，不 rename，只留下 `smeltd.next`。
 fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
+        if managed.is_file() && path_is_live_executable(&managed) {
+            stage_managed_daemon_update(src)?;
+            eprintln!(
+                "[workspace] {} 仍被进程映射，不覆盖，已暂存 smeltd.next",
+                managed.display()
+            );
+            return Ok(managed);
+        }
         let staged = staged_daemon_path();
         stage_daemon_binary(src, &staged)?;
         // Unix rename 会原子替换目标；先 remove 会制造一个路径不存在的窗口，
@@ -1193,6 +1265,9 @@ fn finish_staged_managed_install(
     managed: &std::path::Path,
 ) -> std::io::Result<()> {
     if staged == managed {
+        return Ok(());
+    }
+    if managed.is_file() && path_is_live_executable(managed) {
         return Ok(());
     }
     match std::fs::rename(staged, managed) {
@@ -1795,8 +1870,6 @@ pub enum AppInstallOutcome {
     Installed,
     /// 当前 ACP 回合或另一条 handoff 正在占用安全边界；App 包尚未替换。
     WaitingForSafeHandoff,
-    /// 暂存包在最终校验时已失效并被 updater 作废，需要重新下载。
-    UpdateInvalidated,
 }
 
 /// 无缝升级守护：发 "upgrade" op，守护 exec 磁盘上的新二进制、PTY fd 原地交接，
@@ -1911,9 +1984,16 @@ fn install_commit_action_for_running_daemon(
 fn commit_candidate_daemon(
     candidate_smeltd: &std::path::Path,
 ) -> anyhow::Result<AppInstallOutcome> {
-    match probe_daemon_detail() {
+    let probe = probe_daemon_detail();
+    let managed = managed_daemon_path();
+    let mapped = managed.is_file() && path_is_live_executable(&managed);
+    if may_replace_managed_daemon_image(&probe, mapped) {
+        install_managed_daemon_from(candidate_smeltd)?;
+        return Ok(AppInstallOutcome::Installed);
+    }
+    match probe {
         DaemonProbe::NotRunning | DaemonProbe::Unresponsive => {
-            install_managed_daemon_from(candidate_smeltd)?;
+            stage_managed_daemon_update(candidate_smeltd)?;
             Ok(AppInstallOutcome::Installed)
         }
         DaemonProbe::Running { exe_path, .. } => {
@@ -1944,62 +2024,6 @@ fn prepare_and_commit_candidate_app(
 ) -> anyhow::Result<AppInstallOutcome> {
     let candidate_smeltd = prepare_candidate_daemon(candidate_app)?;
     commit_candidate_daemon(&candidate_smeltd)
-}
-
-/// 装新版 `.app`（在线更新）时保留 smeltd 会话：
-/// 1. updater 先把候选包复制到正式 App 同卷并完成签名/指纹校验
-/// 2. 再把候选包里的 smeltd handoff 到 `~/.smelt/bin/smeltd`（离开即将被删的 .app）
-/// 3. 再替换 `/Applications/Smelt.app`
-/// 4. 再 ensure managed 与新 App 内 smeltd 对齐
-///
-/// 顺序绝不能反：若先整包覆盖，App 内 smeltd 会被 SIGKILL → 会话全灭 → 对话「重新初始化」。
-pub fn install_app_preserving_sessions(
-    update: &crate::updater::StagedUpdate,
-) -> anyhow::Result<AppInstallOutcome> {
-    let _gate = match MANAGED_DAEMON_GATE.try_lock() {
-        Ok(gate) => gate,
-        Err(TryLockError::WouldBlock) => return Ok(AppInstallOutcome::WaitingForSafeHandoff),
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-    };
-    let Some(_file_gate) = try_acquire_managed_daemon_file_lock()? else {
-        return Ok(AppInstallOutcome::WaitingForSafeHandoff);
-    };
-
-    let finalized = crate::updater::finalize_pending_update(update, |candidate_app| {
-        match prepare_and_commit_candidate_app(candidate_app)? {
-            AppInstallOutcome::Installed => Ok(crate::updater::InstallPreparation::Proceed),
-            AppInstallOutcome::WaitingForSafeHandoff => {
-                Ok(crate::updater::InstallPreparation::RetryLater)
-            }
-            AppInstallOutcome::UpdateInvalidated => {
-                anyhow::bail!("候选包在守护交接前已失效")
-            }
-        }
-    })?;
-    match finalized {
-        crate::updater::FinalizeOutcome::Installed => {}
-        crate::updater::FinalizeOutcome::RetryLater => {
-            return Ok(AppInstallOutcome::WaitingForSafeHandoff);
-        }
-        crate::updater::FinalizeOutcome::Invalidated => {
-            return Ok(AppInstallOutcome::UpdateInvalidated);
-        }
-    }
-
-    // 新包落盘后：managed 与 App 内 smeltd 对齐
-    if let Ok(app) = crate::updater::current_app_bundle_path() {
-        let app_smeltd = app.join("Contents/MacOS/smeltd");
-        if app_smeltd.is_file() {
-            match remember_managed_daemon_ensure(
-                ensure_managed_daemon_current_locked(),
-                &CONNECT_MANAGED_ENSURED,
-            ) {
-                Ok(p) => eprintln!("[workspace] 装包后 managed 守护：{}", p.display()),
-                Err(e) => eprintln!("[workspace] 装包后同步 managed 失败：{e}"),
-            }
-        }
-    }
-    Ok(AppInstallOutcome::Installed)
 }
 
 /// 本地 `make install` 入口：与在线更新同一套「插件映射 → 守护交接 → 换 App」。
@@ -2060,10 +2084,6 @@ where
                 "⏸ ACP 会话仍在运行，未替换 App（与在线更新一致）。回合结束后再 make install。"
             );
             Some(75)
-        }
-        Ok(AppInstallOutcome::UpdateInvalidated) => {
-            eprintln!("✗ 候选包已失效");
-            Some(1)
         }
         Err(error) => {
             eprintln!("✗ 安装失败：{error:#}");
@@ -4339,6 +4359,46 @@ mod install_commit_tests {
             install_commit_action_for_running_daemon(Some(&staged)),
             InstallCommitAction::StageDiskOnly
         );
+    }
+
+    #[test]
+    fn only_a_down_and_unmapped_daemon_may_be_replaced() {
+        assert!(may_replace_managed_daemon_image(
+            &DaemonProbe::NotRunning,
+            false
+        ));
+        assert!(!may_replace_managed_daemon_image(
+            &DaemonProbe::NotRunning,
+            true
+        ));
+        assert!(!may_replace_managed_daemon_image(
+            &DaemonProbe::Unresponsive,
+            false
+        ));
+        assert!(!may_replace_managed_daemon_image(
+            &DaemonProbe::Unresponsive,
+            true
+        ));
+    }
+
+    #[test]
+    fn mapped_executable_is_live_and_a_fresh_file_is_not() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            path_is_live_executable(&exe),
+            "正在跑的测试二进制必须被看成活映像"
+        );
+        let fresh = std::env::temp_dir().join(format!(
+            "smelt-unmapped-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&fresh, b"not-mapped").unwrap();
+        assert!(
+            !path_is_live_executable(&fresh),
+            "没人映射的文件必须允许替换"
+        );
+        std::fs::remove_file(fresh).unwrap();
     }
 
     /// 守护仍住在 .app 里：必须 handoff 迁出，否则换 App 会被 SIGKILL。

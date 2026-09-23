@@ -12,6 +12,15 @@ use std::sync::atomic::AtomicI32;
 
 const SESSION_HOST_ARG: &str = "--acp-session-host";
 
+/// `Command::spawn` 返回后，`Command` 仍握着交给子进程的 stdin fd。
+/// 必须在写启动帧之前丢掉它：子进程一旦退出，这个没人读的读端会让
+/// `write_all` 把套接字写满后永久阻塞。
+fn spawn_host_process(mut command: std::process::Command) -> std::io::Result<std::process::Child> {
+    let child = command.spawn()?;
+    drop(command);
+    Ok(child)
+}
+
 #[derive(Debug)]
 pub(crate) struct HostedSnapshotEnvelope {
     pub(crate) snapshot: smelt_core::acp_session::ConversationSnapshot,
@@ -45,7 +54,7 @@ impl HostedConversationHandle {
         set_cloexec(child.as_raw_fd(), true);
 
         let child_fd = unsafe { OwnedFd::from_raw_fd(child.into_raw_fd()) };
-        let exe = daemon_executable_path()?;
+        let exe = session_host_executable()?;
         let mut command = std::process::Command::new(exe);
         command
             .arg(SESSION_HOST_ARG)
@@ -62,7 +71,7 @@ impl HostedConversationHandle {
         // fork 出来并意外继承已清 CLOEXEC 的其它会话描述符。
         let child = {
             let _spawn = spawn_gate.read().unwrap();
-            command.spawn()?
+            spawn_host_process(command)?
         };
         let pid = child.id() as i32;
         drop(child);
@@ -347,6 +356,43 @@ pub(crate) fn run_session_host() {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    /// 回归：session host 子进程如果在读启动帧之前就退出，父进程不能卡在 write。
+    /// `Command` 在 spawn 之后仍占着 stdin 那端；不丢掉它的话，对端已经是僵尸，
+    /// 写大于缓冲的帧也会永远阻塞，外层 `ensure_acp_session` 的生命周期锁一起冻住。
+    #[test]
+    fn open_frame_write_fails_fast_when_host_already_exited() {
+        let (mut parent, child_sock) = UnixStream::pair().unwrap();
+        let child_fd = unsafe { OwnedFd::from_raw_fd(child_sock.into_raw_fd()) };
+        let mut command = std::process::Command::new("/usr/bin/true");
+        command
+            .stdin(Stdio::from(child_fd))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        parent
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut child = spawn_host_process(command).unwrap();
+        let _ = child.wait();
+        let payload = vec![b'x'; 1024 * 1024];
+        let started = Instant::now();
+        let error = parent
+            .write_all(&payload)
+            .expect_err("已退出的宿主不能把启动帧写成功");
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "写启动帧不能堵住，实际 {error:?} 用时 {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "子进程已退出应立刻 EPIPE，实际 {error:?}"
+        );
+    }
 
     /// 回归：host 与主 daemon 版本不一致时，快照 JSON 会解析失败。旧实现在这里
     /// 静默 `continue`，主 daemon 的镜像就永久冻结在最后一份可解析的快照上——

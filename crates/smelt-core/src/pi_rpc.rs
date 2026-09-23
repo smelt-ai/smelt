@@ -4630,7 +4630,7 @@ mod tests {
         assert_eq!(request["type"], "reload");
         assert_eq!(state.reload_request_ids.len(), 1);
         assert!(event_rx.try_recv().is_err());
-        assert!(state.active_turn == false);
+        assert!(!state.active_turn);
 
         let id = request["id"].as_str().unwrap().to_string();
         let mut writer = futures::io::Cursor::new(Vec::new());
