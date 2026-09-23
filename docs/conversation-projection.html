@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>对话怎么送到界面上</title>
+<style>
+  :root {
+    --bg: #14120e;
+    --paper: #1c1914;
+    --ink: #efe6d6;
+    --muted: #a39886;
+    --line: #3a342b;
+    --amber: #e0a15a;
+    --red: #e15b4a;
+    --green: #7dba7a;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); color: var(--ink); }
+  body {
+    margin: 0 auto;
+    max-width: 880px;
+    padding: 48px 28px 96px;
+    font: 18px/1.7 "PingFang SC", "Iowan Old Style", "Songti SC", serif;
+  }
+  h1, h2, .kicker, .label, table, .note, .ex {
+    font-family: "Avenir Next", "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  h1 { font-size: 36px; line-height: 1.2; font-weight: 600; letter-spacing: -0.03em; margin: 0 0 14px; }
+  h2 { font-size: 22px; margin: 52px 0 12px; font-weight: 600; }
+  p { margin: 0 0 14px; }
+  .kicker { color: var(--amber); letter-spacing: 0.12em; font-size: 12px; margin-bottom: 10px; }
+  .lede { font-size: 20px; }
+  .grid { display: grid; gap: 14px; }
+  .two { grid-template-columns: 1fr 1fr; }
+  .three { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 760px) {
+    .two, .three { grid-template-columns: 1fr; }
+    h1 { font-size: 30px; }
+  }
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 16px 6px;
+  }
+  .card.bad { border-color: #6a332c; }
+  .card.good { border-color: #2f5a34; }
+  .label { font-size: 12px; letter-spacing: 0.08em; color: var(--muted); }
+  .bad .label { color: var(--red); }
+  .good .label { color: var(--green); }
+  ul { margin: 8px 0 14px; padding-left: 1.15em; }
+  li { margin: 4px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.5; margin: 8px 0 18px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  code { font-family: "SF Mono", ui-monospace, monospace; font-size: 0.86em; }
+  svg { width: 100%; height: auto; display: block; }
+  .diagram {
+    background: #100e0b;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px;
+    margin: 12px 0 20px;
+  }
+  .note {
+    font-size: 14.5px;
+    color: var(--muted);
+    border-left: 3px solid var(--amber);
+    padding: 2px 0 2px 12px;
+    margin: 8px 0 18px;
+  }
+  .ex {
+    background: #231f19;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 0 0 14px;
+    font-size: 15px;
+  }
+</style>
+</head>
+<body>
+
+<p class="kicker">技术方案</p>
+<h1>装满窗口，或者取到第一条</h1>
+<p class="lede">正文是一份只往后追加的 jsonl。界面从最新一条往前取，画完用真实高度去量：盖过窗口再加约一屏就停，取到第一条也停。连接上只放对方还没画上的最新画面。这张还没写出去的画面，左边可以停住或往更早扩，写出去之前不能往前推。</p>
+
+<h2>三份东西</h2>
+<div class="grid three">
+  <div class="card">
+    <p class="label">正文</p>
+    <p>一条对话一份 jsonl，只往后追加。Codex 的 rollout、Pi 的会话文件都是这样。它是源，不把正文再抄进 SQLite。</p>
+  </div>
+  <div class="card">
+    <p class="label">会话列表</p>
+    <p>要查询、筛选的索引留在 SQLite。里面不放消息正文。</p>
+  </div>
+  <div class="card">
+    <p class="label">邮箱</p>
+    <p>不是电子邮件。是连接在内存里的等候区。终端刷屏用它，满了就断开这个窗口。对话不再挤进这个盒子。</p>
+  </div>
+</div>
+
+<h2>寄出去的那一张</h2>
+<p>连接上只放对方还没画上的最新画面。又有新变化时，换掉还没写到套接字上的那一张，不另排一封。</p>
+<p class="ex">对方已经有 <code>[900, 1000)</code>，新字在 1000，这一张从 1000 开始就够了。若 998 的工具还在这张没寄出的画面里，左边就留在 998。写出去之后，下一张才从这个位置继续。只带最新一个字、把前一张换掉，中间的工具就没了。</p>
+<ul>
+  <li>读旧记录时，没人要看「刚读到第 12 条」。整理完再寄当前这一张。</li>
+  <li>模型打字时，内存里一个字一个字改。未寄出的那张跟着变宽，左边不往前跳。</li>
+  <li>对方收得慢，就少看几眼中间过程。最后看到的仍是现在的对话。</li>
+  <li>只有写失败，或对方把连接关了，才算断线。</li>
+</ul>
+
+<h2>怎么知道满了</h2>
+<p>消息、工具、展开、合并，都要等画出来才知道有多高。不事先算几条能装满，也不先判断这是长对话还是短对话。</p>
+<div class="diagram" aria-label="用真实高度决定还要不要再取">
+<svg viewBox="0 0 860 188" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .t { font: 14px "PingFang SC", sans-serif; fill: #efe6d6; }
+    .s { font: 12px "PingFang SC", sans-serif; fill: #a39886; }
+    .box { fill: #1c1914; stroke: #3a342b; }
+    .ok { fill: #142018; stroke: #7dba7a; }
+  </style>
+  <rect class="box" x="8" y="24" width="190" height="72" rx="10"/>
+  <text class="t" x="24" y="54">从最新往前取一小批</text>
+  <text class="s" x="24" y="76">按 jsonl 里的位置</text>
+  <rect class="ok" x="230" y="24" width="200" height="72" rx="10"/>
+  <text class="t" x="246" y="54">画完量真实高度</text>
+  <text class="s" x="246" y="76">展开、合并都重算</text>
+  <rect class="ok" x="462" y="24" width="180" height="72" rx="10"/>
+  <text class="t" x="478" y="54">盖过窗口加一屏</text>
+  <text class="s" x="478" y="76">就停</text>
+  <rect class="box" x="674" y="24" width="174" height="72" rx="10"/>
+  <text class="t" x="690" y="54">或者到了第一条</text>
+  <text class="s" x="690" y="76">也停</text>
+  <path d="M198 60 H230 M430 60 H462 M642 60 H674" stroke="#7dba7a" stroke-width="1.5" fill="none"/>
+  <text class="s" x="8" y="128">短对话取到第一条就停。长对话盖过窗口就停。没有模式开关。</text>
+  <text class="s" x="8" y="152">未量到之前把每条当成 96 像素，100 条记成 9600 像素。滚动条会和内容对不上，这个数不能用来判断满没满。</text>
+  <text class="s" x="8" y="176">一条展开的工具比窗口还高，它自己就已经占满。再往上滚到边界，再补一截。</text>
+</svg>
+</div>
+<p>更早的一页按 jsonl 里的绝对位置接在前面，接的时候按住现在看的那一行。合并之后如果窗口空了，并且上面还有记录，重新量完就再补。列表顶上的「还有更早的」就是这一窗的边界：它出现就加载，失败就停在那里，可以重试。这和滚到边缘是同一件事。</p>
+<p>大约一屏的余量，是为了展开附近一张卡片时不必马上再请求。偏了只是多要一次，或少留几条。窗口变高、字号变大，用新的高度再量一次。</p>
+
+<h2>现在的两个故障</h2>
+<div class="grid two">
+  <div class="card bad">
+    <p class="label">打开旧对话时断线</p>
+    <p>读 jsonl 的每一步都寄一张图，一张大约 200KB。几十张在几毫秒里涌进终端那个 8MB 等候盒。第一张还没写完，盒子满了，连接被拆。界面收到半封信，显示会话结束。</p>
+  </div>
+  <div class="card bad">
+    <p class="label">记录在，屏幕上没有</p>
+    <p>打开时只要最后 100 条记录。一轮里有思考和工具，常常只剩最近两三轮。Codex 桌面那次是服务端已经返回了 21 页，虚拟列表的高度和拼接让人翻不到。只加一个「加载更多」按钮、不改高度和拼接，旧消息照样会丢。</p>
+  </div>
+</div>
+<p>8MB 对终端刷屏有必要。对话不该用这个数决定能不能打开。手机更慢，进后台就不读。按现在的规矩会被当成坏窗口，桌上的会话跟着断。</p>
+
+<h2>要改成什么样</h2>
+<table>
+  <thead><tr><th></th><th>怎么做</th></tr></thead>
+  <tbody>
+    <tr><td>正文</td><td>一份 jsonl，只追加。会话列表仍在 SQLite，不存正文。</td></tr>
+    <tr><td>寄什么</td><td>只留一张还没写出去的画面。左边在写出去之前不往前推。</td></tr>
+    <tr><td>取多少</td><td>从最新往前取，画完用真实高度量。盖过窗口加约一屏，或取到第一条，就停。</td></tr>
+    <tr><td>往上翻</td><td>按绝对位置接在前面，按住当前行。顶上的边界出现就再取，失败留在原地可重试。能翻到第一条。</td></tr>
+    <tr><td>展开和合并</td><td>重新量高度。空出窗口并且上面还有记录，就再补。</td></tr>
+    <tr><td>手机</td><td>按它自己的窗口高度装满。进后台停住，回来要最新画面。审批仍是来一次提醒、取一次当前画面。</td></tr>
+    <tr><td>断开</td><td>写失败或对方关闭。</td></tr>
+    <tr><td>终端</td><td>刷屏继续用自己的 8MB 等候盒。</td></tr>
+  </tbody>
+</table>
+
+<h2>不改的事</h2>
+<ul>
+  <li>窗口仍然不自己解析 Pi 或 Claude 的格式。整理留在连着模型的那个进程里，正文仍写回那份 jsonl。</li>
+  <li>审批背后的回执仍然不出那个进程。窗口只看到问题和按钮。</li>
+  <li>一张画面可以比 8MB 大。要限的是不要积压很多张过期的图。</li>
+</ul>
+
+<p class="note">100 条、8MB、先判断是不是长对话，都是写死的门槛。按通道里已经堆了多少条再合并，仍然看谁跑得更快。停机条件是量出来的高度，和 jsonl 里还有没有第一条。</p>
+
+</body>
+</html>
