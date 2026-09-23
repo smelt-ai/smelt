@@ -161,6 +161,7 @@ fn bun_spawn(bun: &Path) -> SpawnOptions {
         bun: Some(bun.to_path_buf()),
         startup_timeout: Duration::from_secs(20),
         shutdown_grace: Duration::from_secs(2),
+        inherited_fds: Vec::new(),
     }
 }
 /// 迁移完成后剩下的旧副本数，作为后续增量断言的基线。

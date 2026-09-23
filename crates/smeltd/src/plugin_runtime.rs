@@ -49,6 +49,17 @@ struct RuntimeState {
 #[derive(Default)]
 struct RuntimeHosts {
     shared_bun: Option<Arc<SharedBunHost>>,
+    /// Supervisor ownership: the generation cannot be collected until the host is reaped.
+    managed_bun: Option<smelt_core::managed_runtime::ManagedBunRuntime>,
+}
+
+impl Drop for RuntimeHosts {
+    fn drop(&mut self) {
+        // SharedBunHost::drop performs terminate + wait. Release the supervisor lease only after
+        // that direct child has been reaped; child-inherited FDs cover daemon crashes.
+        drop(self.shared_bun.take());
+        drop(self.managed_bun.take());
+    }
 }
 
 impl RuntimeState {
@@ -366,10 +377,14 @@ fn start_hosts(config: &RuntimeConfig) -> RuntimeHosts {
         return RuntimeHosts::default();
     }
 
+    let managed_bun = smelt_core::managed_runtime::try_current_managed_bun();
     let spawn = smelt_plugin_host::SpawnOptions {
-        // 每次起插件集都重新解析一次：受管 bun 可能是守护启动之后才下载完的，
-        // 捕获一份旧快照会让脚本插件一直起不来。
-        bun: smelt_core::acp_conn::managed_bun_if_ready(),
+        // 每次起插件集都重新解析一次：受管 bun 可能是守护启动之后才下载完的。
+        bun: managed_bun.as_ref().map(|runtime| runtime.path.clone()),
+        inherited_fds: managed_bun
+            .as_ref()
+            .map(|runtime| vec![runtime.inherited_fd()])
+            .unwrap_or_default(),
         ..Default::default()
     };
     let verifier = Arc::new(PluginVerifier);
@@ -386,6 +401,7 @@ fn start_hosts(config: &RuntimeConfig) -> RuntimeHosts {
                     HOST_PGID.store(pid as i32, Ordering::SeqCst);
                 }
                 hosts.shared_bun = Some(Arc::new(host));
+                hosts.managed_bun = managed_bun;
             }
             Err(error) => log_plugin_host(&format!("cannot start shared bun host: {error}")),
         }

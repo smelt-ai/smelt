@@ -2476,12 +2476,15 @@ fn run_serve_loop(
     // 受管 bun 既是 ACP 适配器的运行时，也是脚本插件的运行时。首次下载完成时插件集
     // 可能已经按"没有 bun"起过一轮了，所以下完要把它重新拉起来。
     std::thread::spawn(|| {
-        let had_bun = smelt_core::acp_conn::managed_bun_if_ready().is_some();
-        match smelt_core::acp_conn::sync_managed_bun(&|message| {
+        let had_bun = smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
+        match smelt_core::managed_runtime::sync_managed_bun(&|message| {
             smelt_core::app_log::info("bun", message)
         }) {
-            Ok(path) => {
-                smelt_core::app_log::info("bun", &format!("受管 bun 已就绪：{}", path.display()));
+            Ok(runtime) => {
+                smelt_core::app_log::info(
+                    "bun",
+                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
+                );
                 if !had_bun {
                     plugin_runtime::reload_for_runtime_change();
                 }

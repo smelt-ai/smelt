@@ -877,7 +877,7 @@ pub(crate) fn verify_plugin_process(
             expected.display()
         )));
     }
-    let managed = smelt_core::acp_conn::managed_bun_if_ready()
+    let managed = smelt_core::managed_runtime::managed_bun_path_if_ready()
         .and_then(|path| path.canonicalize().ok())
         .ok_or_else(|| {
             smelt_plugin_host::HostError::new("managed script runtime is unavailable")

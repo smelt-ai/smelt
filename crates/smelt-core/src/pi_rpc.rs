@@ -209,7 +209,7 @@ pub fn spawn_pi_rpc(
             let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
             let stderr_drain: Arc<Mutex<Option<smol::Task<()>>>> = Arc::default();
             let ready = Arc::new(AtomicBool::new(false));
-            let runtime = crate::acp_conn::sync_managed_pi_agent(&|message| {
+            let runtime = crate::managed_runtime::sync_managed_pi_agent(&|message| {
                 let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
             });
             let runtime = match runtime {
@@ -286,7 +286,7 @@ pub fn spawn_pi_rpc(
 #[allow(clippy::too_many_arguments)]
 async fn run_connection(
     launch: &ConversationLaunch,
-    runtime: crate::acp_conn::ManagedPiRuntime,
+    runtime: crate::managed_runtime::ManagedPiRuntime,
     cmd_rx: smol::channel::Receiver<ConversationCommand>,
     event_tx: smol::channel::Sender<ConversationEvent>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
@@ -310,7 +310,7 @@ async fn run_connection(
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let spawned = spawn_process(launch, inline_env, process_args)?;
+        let spawned = spawn_process(launch, inline_env, process_args, &runtime)?;
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
             stdin_fd: spawned.0.as_raw_fd(),
@@ -432,6 +432,7 @@ fn spawn_process(
     launch: &ConversationLaunch,
     inline_env: BTreeMap<String, String>,
     mut process_args: Vec<String>,
+    runtime: &crate::managed_runtime::ManagedPiRuntime,
 ) -> Result<SpawnedPi, String> {
     if process_args.len() < 2 {
         return Err("Pi 受管运行时启动参数不完整".to_string());
@@ -471,6 +472,7 @@ fn spawn_process(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
+    runtime.inherit_into(&mut command);
     let mut command = async_process::Command::from(command);
     let mut child = command
         .stdin(std::process::Stdio::piped())
@@ -992,9 +994,8 @@ fn model_value(model: &PiModel) -> String {
     format!("{}/{}", model.provider, model.id)
 }
 
-/// `set_model` 成功后必须让 `current_value` 等于用户点的 `provider/id`。
-/// Pi 回包有时是解析后的 pinned id，对不上 picker 里的值，pending 就永远清不掉，
-/// 之后每一轮都会显示「下轮生效」。
+/// 这次 `set_model` 成功后，会话当前模型就是请求里的 `provider/id`。
+/// 回包只提供显示名和上下文长度，不另立一个 id。
 fn apply_requested_pi_model(state: &mut PiState, value: &str, data: Option<&serde_json::Value>) {
     let from_data = data.and_then(parse_model);
     let from_list = state

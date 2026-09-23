@@ -4744,15 +4744,19 @@ fn main() {
         // 受管 bun 由 Smelt 代用户升级（启动时后台同步锁定版本）。下载约 25MB，
         // 不能挡首帧；与 smeltd 并发时靠 runtime 目录锁串行。首次就位后要重建 GUI
         // 的插件清单：refresh_once 可能已经在“没有 bun”的窗口里把脚本 tab 跳过了。
-        let had_managed_bun = smelt_core::acp_conn::managed_bun_if_ready().is_some();
+        let had_managed_bun =
+            smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
         let bun_sync = cx.background_executor().spawn(async move {
-            smelt_core::acp_conn::sync_managed_bun(&|message| {
+            smelt_core::managed_runtime::sync_managed_bun(&|message| {
                 smelt_core::app_log::info("bun", message)
             })
         });
         cx.spawn(async move |cx| match bun_sync.await {
-            Ok(path) => {
-                smelt_core::app_log::info("bun", &format!("受管 bun 已就绪：{}", path.display()));
+            Ok(runtime) => {
+                smelt_core::app_log::info(
+                    "bun",
+                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
+                );
                 if !had_managed_bun {
                     cx.update(|cx| {
                         cx.set_global(settings::PluginEnablementState::load());
