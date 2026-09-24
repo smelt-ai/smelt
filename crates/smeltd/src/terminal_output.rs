@@ -1,7 +1,8 @@
-//! 终端 / ACP attachment 的有界输出邮箱。
+//! 终端 attachment 的有界输出邮箱。
 //!
 //! 每个连接自己一条写队列和写线程：PTY 泵只做常数时间入队，绝不直接等 GUI socket。
-//! 从 `main.rs` 整块搬出，行为不变。
+//! ACP 快照不走这里。快照是状态，不是字节日志；复用这套超限摘连接的队列会在
+//! 历史重放时把还活着的控制通道掐掉。
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Write};

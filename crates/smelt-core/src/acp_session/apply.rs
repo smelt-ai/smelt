@@ -317,6 +317,7 @@ fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut Apply
     outcome.entries_offset = Some(0);
     state.entries.clear();
     state.tool_debug.clear();
+    state.note_tool_debug_changed();
     state.replaying_history = true;
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
@@ -649,6 +650,7 @@ fn apply_tool_debug(
     if name.is_none() && raw_input.is_none() {
         return;
     }
+    state.note_tool_debug_changed();
     let debug = state.tool_debug.entry(id).or_default();
     if name.is_some() {
         debug.name = name;
@@ -753,6 +755,7 @@ fn apply_tool_children(
     state
         .tool_debug
         .extend(debug.into_iter().filter(|(id, _)| next_ids.contains(id)));
+    state.note_tool_debug_changed();
 }
 
 fn apply_tool_finished(
@@ -970,6 +973,7 @@ fn apply_rewound(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, trunca
     state
         .tool_debug
         .retain(|id, _| remaining_tool_ids.contains(id));
+    state.note_tool_debug_changed();
     // fork 已把 provider 侧队列一并作废（teardown 会 abort），本地镜像同步清空。
     state.queued_steering.clear();
     state.queued_steering_images.clear();

@@ -399,8 +399,8 @@ pub struct ConversationSnapshot {
     /// 条目提供高度提示，而不必同步布局整段历史。
     pub replaying_history: bool,
     pub entries: Vec<AcpEntry>,
-    /// 工具原始名称/参数 sidecar。增量快照也发送完整索引，客户端直接替换。
-    /// None 表示旧 daemon 未提供，消费者必须保留自己的已知值。
+    /// 工具原始名称/参数 sidecar。`Some` 是整表替换，用来覆盖新增和删除。
+    /// `None` 表示这帧没变，或旧 daemon 没提供；消费者必须保留已知值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_debug: Option<BTreeMap<String, ToolCallDebug>>,
     /// 运行时 system prompt、工具定义和最近一次模型调用 sidecar。Some 表示本帧
@@ -710,6 +710,8 @@ pub struct LiveElicitation {
 pub struct AcpSessionState {
     pub entries: Vec<AcpEntry>,
     pub tool_debug: BTreeMap<String, ToolCallDebug>,
+    /// 只在内存里递增。快照不带它。连接用它判断这帧要不要再带整张工具参数表。
+    pub tool_debug_generation: u64,
     pub runtime_debug: RuntimeDebug,
     /// Agent 通过通用 ACP `session_info_update` 上报的标题。没有时由首条用户消息
     /// 生成稳定兜底；这不是某个 provider 的专属能力。
@@ -780,6 +782,7 @@ impl Default for AcpSessionState {
         Self {
             entries: Vec::new(),
             tool_debug: BTreeMap::new(),
+            tool_debug_generation: 0,
             runtime_debug: RuntimeDebug::default(),
             protocol_title: None,
             phase: DaemonPhase::Connecting,
@@ -853,6 +856,11 @@ impl AcpSessionState {
     /// `resume_acp_from_fds` 重新接上连接后被回放，SDK 重新解析出等价请求，
     /// 走一遍正常的 `apply_event(Permission/Elicitation)`，到时候会自然把
     /// `permission`/`elicitation` 填回去——不需要（也没法）在这里预置。
+    /// 工具参数表变了。没变的快照不要再拷这张表。
+    pub fn note_tool_debug_changed(&mut self) {
+        self.tool_debug_generation = self.tool_debug_generation.wrapping_add(1);
+    }
+
     pub fn from_snapshot(snap: ConversationSnapshot) -> Self {
         // Running 必须有对应的活跃回合。旧版可能先收到 TurnEnded、再收到 SDK
         // 迟交付的工具通知，把 phase 重新写成 Running，却已经清掉了开始时间。
@@ -865,6 +873,7 @@ impl AcpSessionState {
         let mut restored = Self {
             entries: snap.entries,
             tool_debug: snap.tool_debug.unwrap_or_default(),
+            tool_debug_generation: 0,
             runtime_debug: snap.runtime_debug.unwrap_or_default(),
             protocol_title: snap.session_title,
             phase,
@@ -989,6 +998,7 @@ impl AcpSessionState {
         self.entries.extend(entries);
         if let Some(tool_debug) = tool_debug {
             self.tool_debug = tool_debug;
+            self.note_tool_debug_changed();
         }
         if let Some(runtime_debug) = runtime_debug {
             self.runtime_debug = runtime_debug;
