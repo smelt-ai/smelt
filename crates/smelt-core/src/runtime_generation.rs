@@ -566,7 +566,7 @@ mod tests {
         let lease = store.acquire_shared(GenerationKind::Bun, id).unwrap();
         let mut command = Command::new("/bin/sh");
         command
-            .args(["-c", "printf ready; sleep 30"])
+            .args(["-c", "printf ready; exec sleep 30"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env("SMELT_GENERATION_LEASE_HELPER", "1");
