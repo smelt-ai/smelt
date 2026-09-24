@@ -1317,16 +1317,9 @@ impl AcpChildGuard {
         let _ = self.child.kill();
     }
 
-    async fn kill_and_reap(&mut self) {
-        self.kill_tree();
-        if self.child.status().await.is_ok() {
-            self.reaped = true;
-        }
-    }
-}
-
-impl Drop for AcpChildGuard {
-    fn drop(&mut self) {
+    /// 用 `waitpid` 确认直属子进程已经退出。`Child::status()` 要等 `SIGCHLD`
+    /// 投递才会再查一次；信号被掩码挡住或通知丢失时，僵尸会一直占着。
+    fn reap_now(&mut self) {
         if self.reaped {
             return;
         }
@@ -1345,6 +1338,17 @@ impl Drop for AcpChildGuard {
                 }
             }
         }
+        self.reaped = true;
+    }
+
+    fn kill_and_reap(&mut self) {
+        self.reap_now();
+    }
+}
+
+impl Drop for AcpChildGuard {
+    fn drop(&mut self) {
+        self.reap_now();
     }
 }
 
@@ -1979,7 +1983,7 @@ async fn run_connection(
             .await
         })
         .await;
-    child_guard.kill_and_reap().await;
+    child_guard.kill_and_reap();
     drop(managed_bun);
     if handshake_watchdog.timed_out() {
         return Err(agent_client_protocol::Error::internal_error().data(format!(
@@ -2050,7 +2054,7 @@ pub fn list_acp_sessions(
             })
             .await
             .map_err(|error| format!("ACP session/list 失败：{error}"));
-        child_guard.kill_and_reap().await;
+        child_guard.kill_and_reap();
         drop(managed_bun);
         result
     })

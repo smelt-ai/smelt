@@ -389,7 +389,7 @@ async fn run_connection(
     .await;
     // 必须先确认直属子进程已退出，再让 `runtime` 的 generation lease 析构。
     // 仅发送 SIGKILL 不等于进程已经消失，期间原地修复会与旧进程并发读模块树。
-    process.kill_and_reap().await;
+    process.kill_and_reap();
     result
 }
 
@@ -551,26 +551,17 @@ impl PiProcessGuard {
         unsafe {
             libc::kill(-self.pid, libc::SIGKILL);
         }
-        // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死，
-        // 否则下面的 status/try_status 会永久等住，generation lease 也永不释放。
+        // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死。
         let _ = self.child.kill();
     }
 
-    async fn kill_and_reap(&mut self) {
-        self.kill_process_tree();
-        if self.child.status().await.is_ok() {
-            self.reaped = true;
-        }
-    }
-}
-
-impl Drop for PiProcessGuard {
-    fn drop(&mut self) {
+    /// 用 `waitpid` 确认直属子进程已经退出。`Child::status()` 要等 `SIGCHLD`
+    /// 投递才会再查一次；信号被掩码挡住或通知丢失时，僵尸会一直占着，
+    /// generation lease 也不释放。
+    fn reap_now(&mut self) {
         if self.reaped {
             return;
         }
-        // 正常路径由 `kill_and_reap` 异步回收。这里只覆盖 panic/未来提前返回，
-        // 仍须在 generation lease 释放前同步确认主子进程已经退出。
         self.kill_process_tree();
         loop {
             match self.child.try_status() {
@@ -586,6 +577,17 @@ impl Drop for PiProcessGuard {
                 }
             }
         }
+        self.reaped = true;
+    }
+
+    fn kill_and_reap(&mut self) {
+        self.reap_now();
+    }
+}
+
+impl Drop for PiProcessGuard {
+    fn drop(&mut self) {
+        self.reap_now();
     }
 }
 
@@ -3600,7 +3602,7 @@ mod tests {
             .expect("spawn guarded process");
         let pid = child.id() as i32;
         let mut guard = PiProcessGuard::new(child);
-        smol::block_on(guard.kill_and_reap());
+        guard.kill_and_reap();
 
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(
@@ -3608,6 +3610,70 @@ mod tests {
             Some(libc::ESRCH),
             "guard 返回前必须已回收直属子进程"
         );
+    }
+
+    /// `fork` 之后只剩调用线程。先挡住 `SIGCHLD` 再拉起子进程，回收线程会继承
+    /// 这份掩码，没有别的线程能接住信号。`Child::status()` 会停在这里。
+    #[cfg(unix)]
+    #[test]
+    fn pi_process_guard_reaps_while_sigchld_is_blocked() {
+        let probe = unsafe { libc::fork() };
+        assert!(probe >= 0, "fork 失败");
+        if probe == 0 {
+            let code = reap_child_with_sigchld_blocked();
+            unsafe { libc::_exit(code) };
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(probe, &mut status, 0) };
+            let _ = sender.send((waited, status));
+        });
+        let finished = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        let Ok((waited, status)) = finished else {
+            unsafe { libc::kill(probe, libc::SIGKILL) };
+            panic!("SIGCHLD 被挡住时收尸没有返回");
+        };
+        assert_eq!(waited, probe);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "子进程退出状态 {status}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn reap_child_with_sigchld_blocked() -> i32 {
+        use std::os::unix::process::CommandExt as _;
+
+        unsafe {
+            let mut blocked = std::mem::zeroed();
+            if libc::sigemptyset(&mut blocked) != 0
+                || libc::sigaddset(&mut blocked, libc::SIGCHLD) != 0
+                || libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0
+            {
+                return 2;
+            }
+        }
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let Ok(child) = async_process::Command::from(command).spawn() else {
+            return 3;
+        };
+        let pid = child.id() as i32;
+        let mut guard = PiProcessGuard::new(child);
+        guard.kill_and_reap();
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            0
+        } else {
+            1
+        }
     }
 
     #[test]

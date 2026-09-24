@@ -2011,7 +2011,54 @@ fn new_sessions() -> Sessions {
     Arc::new(TerminalRegistry::new())
 }
 
+/// 卸掉继承来的信号掩码。`posix_spawn` 复制的是调用线程的掩码，不是进程默认值。
+#[cfg(unix)]
+fn clear_inherited_signal_mask() {
+    unsafe {
+        let mut empty = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn clear_inherited_signal_mask() {}
+
+#[cfg(all(test, unix))]
+#[test]
+fn startup_clears_inherited_sigchld_mask() {
+    unsafe {
+        let mut blocked = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGCHLD);
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()),
+            0
+        );
+        let mut current = std::mem::zeroed();
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current),
+            0
+        );
+        assert_eq!(libc::sigismember(&current, libc::SIGCHLD), 1);
+    }
+    clear_inherited_signal_mask();
+    unsafe {
+        let mut current = std::mem::zeroed();
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current),
+            0
+        );
+        assert_eq!(libc::sigismember(&current, libc::SIGCHLD), 0);
+    }
+}
+
 fn main() {
+    // GUI 从 libdispatch 工作线程 posix_spawn 本进程时，会把那套「屏蔽 SIGCHLD」
+    // 的线程掩码遗传进来。async-process 靠 SIGCHLD 回收子进程；掩码不清掉，
+    // Pi 退出后 status() 永远等不到通知，会话就停在「正在启动」。
+    // 必须赶在任何 thread::spawn / 再拉起 session host 之前做，新建线程才会复制空掩码。
+    clear_inherited_signal_mask();
     // Grok/CI 会给进程打 NO_COLOR=1。必须在任何线程/子进程之前卸掉，否则
     // 交互式 PTY（agy 等）会继承关色开关，整屏只剩默认灰白。
     smelt_core::tty_color::clear_process();
@@ -3020,6 +3067,11 @@ fn cleanup_hosted_acp_processes(
     }
 }
 
+/// 握手还没完成的宿主没有可保留的回合。换代时收养它，旧进程里已经卡住的等待会活过升级。
+fn hosted_handoff_keeps_process(phase: smelt_core::daemon_state::DaemonPhase) -> bool {
+    !matches!(phase, smelt_core::daemon_state::DaemonPhase::Connecting)
+}
+
 fn resume_hosted_acp_handoff_item(
     validated: ValidatedHostedAcpHandoff,
     acp_sessions: &AcpSessions,
@@ -3054,6 +3106,7 @@ fn resume_hosted_acp_handoff_item(
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
         return;
     }
+    let keep_host = hosted_handoff_keeps_process(reduced.phase);
     let prompt_in_flight = reduced.turn_started_at_ms.is_some()
         || matches!(
             reduced.phase,
@@ -3111,6 +3164,40 @@ fn resume_hosted_acp_handoff_item(
         eprintln!("[acp] 拒绝宿主 handoff 会话 {id}：{error}");
         acp_sessions.remove_if_same(&id, &slot);
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
+        return;
+    }
+
+    if !keep_host {
+        let resume_id = slot
+            .value
+            .reduced
+            .lock()
+            .unwrap()
+            .history_session_id
+            .clone();
+        let launch = slot
+            .value
+            .launch_spec
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("交接条目刚写入启动规格");
+        cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
+        // 临时环境故意不进交接记录（凭据不跨 exec）。分叉切点也只活在旧宿主里。
+        // 重开只用交接里已经有的启动规格和 history id，和冷启动同一份持久状态。
+        dlog(&format!(
+            "handoff: ACP session host {id} 仍在握手，丢弃旧宿主并重新拉起"
+        ));
+        acp_relaunch(
+            &slot,
+            &id,
+            launch,
+            resume_id,
+            None,
+            None,
+            Arc::clone(acp_sessions),
+            event_hub,
+        );
         return;
     }
 
