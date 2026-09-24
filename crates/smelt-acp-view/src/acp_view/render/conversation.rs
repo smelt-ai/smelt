@@ -2,6 +2,8 @@
 
 use super::*;
 
+const USER_MESSAGE_ACTION_GROUP: &str = "acp-user-message-actions";
+
 impl AcpView {
     pub(super) fn render_message_list(
         &self,
@@ -22,6 +24,7 @@ impl AcpView {
             .permissions
             .first()
             .map(|card| card.tool_call_id.clone());
+        let latest_user_message_index = super::super::latest_user_message_index(&self.entries);
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             let conversation_layout = conversation_layout.clone();
@@ -145,19 +148,43 @@ impl AcpView {
                     AcpEntry::User(_) => {
                         let task_view = view.clone();
                         let task_cwd = this.cwd.clone();
-                        let show_rewind =
-                            this.supports_rewind && !this.has_active_turn();
+                        let can_edit = this.supports_rewind && !this.has_active_turn();
+                        let show_edit = latest_user_message_index == Some(i) && can_edit;
+                        let show_fork_edit = latest_user_message_index != Some(i) && can_edit;
                         h_flex()
+                            .group(USER_MESSAGE_ACTION_GROUP)
                             .w_full()
                             .justify_end()
                             .gap_2()
-                            .when(show_rewind, |row| {
+                            .when(show_fork_edit, |row| {
                                 row.child(
-                                    Button::new(("acp-rewind-message", i))
+                                    Button::new(("acp-fork-edit-message", i))
+                                        .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
+                                        .ghost()
+                                        .xsmall()
+                                        .opacity(0.)
+                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
+                                            style.opacity(1.)
+                                        })
+                                        .tooltip("保留原对话，从这条之前分叉并编辑重发")
+                                        .on_click(cx.listener(
+                                            move |this, _ev, _window, cx| {
+                                                this.fork_from_user_message(i, cx);
+                                            },
+                                        )),
+                                )
+                            })
+                            .when(show_edit, |row| {
+                                row.child(
+                                    Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .tooltip("回到这里重发：丢弃这条之后的内容，原文回输入框")
+                                        .opacity(0.)
+                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
+                                            style.opacity(1.)
+                                        })
+                                        .tooltip("编辑并重发最后一条消息")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
                                                 this.rewind_to_message(i, cx);
@@ -206,6 +233,9 @@ impl AcpView {
                     AcpEntry::UserWithImages { text, images } => {
                         let task_view = view.clone();
                         let task_cwd = this.cwd.clone();
+                        let can_edit = this.supports_rewind && !this.has_active_turn();
+                        let show_edit = latest_user_message_index == Some(i) && can_edit;
+                        let show_fork_edit = latest_user_message_index != Some(i) && can_edit;
                         let mut content = v_flex().gap_2();
                         if !text.trim().is_empty() {
                             content = content.child(
@@ -235,15 +265,36 @@ impl AcpView {
                             .w_full()
                             .justify_end()
                             .gap_2()
-                            .when(
-                                this.supports_rewind && !this.has_active_turn(),
-                                |row| {
+                            .group(USER_MESSAGE_ACTION_GROUP)
+                            .when(show_fork_edit, |row| {
+                                row.child(
+                                    Button::new(("acp-fork-edit-message", i))
+                                        .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
+                                        .ghost()
+                                        .xsmall()
+                                        .opacity(0.)
+                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
+                                            style.opacity(1.)
+                                        })
+                                        .tooltip("保留原对话，从这条之前分叉并编辑重发（图片需重新添加）")
+                                        .on_click(cx.listener(
+                                            move |this, _ev, _window, cx| {
+                                                this.fork_from_user_message(i, cx);
+                                            },
+                                        )),
+                                )
+                            })
+                            .when(show_edit, |row| {
                                     row.child(
-                                        Button::new(("acp-rewind-message", i))
+                                        Button::new(("acp-edit-message", i))
                                             .icon(Icon::new(IconName::Undo2))
                                             .ghost()
                                             .xsmall()
-                                            .tooltip("回到这里重发：丢弃这条之后的内容，原文回输入框（附图不还原）")
+                                            .opacity(0.)
+                                            .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
+                                                style.opacity(1.)
+                                            })
+                                            .tooltip("编辑并重发最后一条消息（图片需重新添加）")
                                             .on_click(cx.listener(
                                                 move |this, _ev, _window, cx| {
                                                     this.rewind_to_message(i, cx);

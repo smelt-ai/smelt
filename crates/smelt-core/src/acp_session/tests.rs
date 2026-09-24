@@ -917,7 +917,7 @@ fn snapshot_wire_keeps_legacy_phase_names() {
 fn runtime_debug_event_round_trips_through_authoritative_snapshots() {
     let mut state = fresh_state();
     let debug = RuntimeDebug {
-        version: 2,
+        version: 3,
         source: "pi_runtime_debug".into(),
         system_prompt: Some("exact system prompt".into()),
         tools: vec![RuntimeDebugTool {
@@ -929,22 +929,42 @@ fn runtime_debug_event_round_trips_through_authoritative_snapshots() {
             }),
             source: Some("builtin".into()),
         }],
-        model_call: Some(RuntimeDebugModelCall {
+        model_calls: vec![RuntimeDebugModelCall {
             sequence: 4,
-            source: "pi_before_provider_request".into(),
+            turn: Some(2),
+            compaction_sequence: None,
+            captured_at_ms: 1_725_000_000_000,
+            source: "pi_context_with_system".into(),
             model: RuntimeDebugModel {
                 provider: Some("openai".into()),
                 id: Some("gpt-test".into()),
                 api: Some("responses".into()),
                 thinking_level: Some("high".into()),
             },
+            request_config: RuntimeDebugRequestConfig {
+                system_prompt: "exact system prompt".into(),
+                tools: vec![RuntimeDebugTool {
+                    name: "bash".into(),
+                    description: "Run a shell command".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    source: Some("builtin".into()),
+                }],
+            },
             payload: serde_json::json!({
                 "model": "gpt-test",
                 "messages": [{"role": "user", "content": "hello"}],
                 "api_key": "[REDACTED]"
             }),
-            redacted_paths: vec!["$.api_key".into()],
-        }),
+            response: None,
+            response_captured_at_ms: None,
+            response_redacted_paths: None,
+            redacted_paths: vec!["$.payload.api_key".into()],
+            ..RuntimeDebugModelCall::default()
+        }],
+        model_calls_omitted: 0,
+        compactions: Vec::new(),
+        compactions_omitted: 0,
+        model_call: None,
     };
 
     let outcome = apply_event(&mut state, ConversationEvent::RuntimeDebug(debug.clone()));
@@ -971,8 +991,7 @@ fn old_snapshot_does_not_clear_known_runtime_debug_during_hosted_merge() {
         version: 1,
         source: "pi_before_agent_start".into(),
         system_prompt: Some("known prompt".into()),
-        tools: Vec::new(),
-        model_call: None,
+        ..RuntimeDebug::default()
     };
     let mut old_snapshot = state.to_snapshot(false);
     old_snapshot.runtime_debug = None;

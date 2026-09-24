@@ -65,6 +65,15 @@ mod trajectory;
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
 const AUTO_RECONNECT_ATTEMPTS: u32 = 6;
 
+/// 可编辑重发只作用于活动记录里最近一条真实用户消息；agent 回显的中断标记不是输入。
+fn latest_user_message_index(entries: &[AcpEntry]) -> Option<usize> {
+    entries.iter().rposition(|entry| match entry {
+        AcpEntry::User(text) => !is_interrupt_marker(text),
+        AcpEntry::UserWithImages { text, .. } => !is_interrupt_marker(text),
+        _ => false,
+    })
+}
+
 fn model_label_with_provider(value: &str, name: &str) -> String {
     value
         .split_once('/')
@@ -1066,7 +1075,7 @@ pub enum AcpViewEvent {
     },
     PreviewImage(std::sync::Arc<gpui::Image>),
     NewSession(Box<AcpNewSessionRequest>),
-    /// Pi 活体最终回答上的分叉：新进程 `--fork` 源 session。
+    /// Pi 活体对话的新分支：从回答分叉，或从较早的用户消息分叉并预填编辑。
     ForkConversation(Box<AcpHandoffRequest>),
     NavigateToSession(String),
     /// 回合结束且无人在等（无 pending_permissions / pending_elicitation）的上升沿。
@@ -1189,6 +1198,7 @@ pub struct AcpHandoffRequest {
     pub config_values: Vec<(String, String)>,
     /// 本次 ACP 子进程专用环境变量；不能放进 `launch`，否则会被普通会话存档持久化。
     pub ephemeral_env: std::collections::BTreeMap<String, String>,
+    /// 新会话首包；Pi fork 请求携带时只预填输入框，供编辑后手动重发。
     pub prompt: String,
     /// 随首包一起发出去的图片。空 = 纯文本首包。
     pub images: Vec<smelt_core::acp_chat::AcpImage>,
@@ -1359,8 +1369,8 @@ pub struct AcpView {
     trajectory_window: Option<WindowHandle<trajectory::TrajectoryWindow>>,
     supports_compaction: bool,
     supports_native_queue: bool,
-    /// 驱动是否支持回退到历史消息重发（Pi 的 fork）。用户气泡上的
-    /// 「回到这里重发」按钮据此显隐。
+    /// 驱动是否支持编辑并重发最后一条用户消息（Pi 的 fork）。对应按钮只在
+    /// 最后一条用户气泡悬停时显示。
     supports_rewind: bool,
     compacting: bool,
     queued_steering: Vec<String>,
@@ -1591,10 +1601,19 @@ impl AcpView {
         this.starting_since = Some(std::time::Instant::now());
         this.init_input(window, cx);
         this.refresh_launch_from_settings = request.refresh_launch_from_settings;
+        let is_fork = request.fork_session_id.is_some();
         this.pending_initial_prompt = {
             let prompt = request.prompt.trim();
-            (!prompt.is_empty() && request.fork_session_id.is_none()).then_some(request.prompt)
+            (!prompt.is_empty() && !is_fork).then(|| request.prompt.clone())
         };
+        // 分叉编辑会带 fork session 和 prompt：prompt 只预填输入框，不能作为首包发出。
+        if is_fork
+            && !request.prompt.trim().is_empty()
+            && let Some(input) = this.input.clone()
+        {
+            let prompt = request.prompt.clone();
+            input.update(cx, |state, cx| state.set_value(&prompt, window, cx));
+        }
         // 首包图片解码成待发图片，Idle 时随首包一起发出去。
         this.pending_images = request.images.iter().filter_map(decode_acp_image).collect();
         this.restart_config_values = request.config_values.clone();
@@ -2861,7 +2880,38 @@ impl AcpView {
         }
     }
 
+    fn fork_from_user_message(&self, user_index: usize, cx: &mut Context<Self>) {
+        if !self.supports_rewind
+            || self.has_active_turn()
+            || latest_user_message_index(&self.entries) == Some(user_index)
+        {
+            return;
+        }
+        let Some((prompt, occurrence)) =
+            smelt_core::acp_chat::fork_cut_before(&self.entries, user_index)
+        else {
+            return;
+        };
+        let fork_cut = smelt_core::acp_conn::AcpForkCut {
+            text: prompt.clone(),
+            occurrence,
+        };
+        if let Some(request) = self.build_pi_fork_request_with_cut(Some(fork_cut), prompt) {
+            cx.emit(AcpViewEvent::ForkConversation(Box::new(request)));
+        }
+    }
+
     fn build_pi_fork_request(&self, through_index: usize) -> Option<AcpHandoffRequest> {
+        let fork_cut = smelt_core::acp_chat::fork_cut_after(&self.entries, through_index)
+            .map(|(text, occurrence)| smelt_core::acp_conn::AcpForkCut { text, occurrence });
+        self.build_pi_fork_request_with_cut(fork_cut, String::new())
+    }
+
+    fn build_pi_fork_request_with_cut(
+        &self,
+        fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
+        prompt: String,
+    ) -> Option<AcpHandoffRequest> {
         if !smelt_core::session_handoff::live_fork_is_available(self.agent) {
             return None;
         }
@@ -2888,13 +2938,12 @@ impl AcpView {
             profile_id: self.profile_id.clone(),
             config_values: self.current_config_values(),
             ephemeral_env: self.ephemeral_env.clone(),
-            prompt: String::new(),
+            prompt,
             images: Vec::new(),
             profile_label: None,
             resume_session_id: None,
             fork_session_id: Some(fork_session_id),
-            fork_cut: smelt_core::acp_chat::fork_cut_after(&self.entries, through_index)
-                .map(|(text, occurrence)| smelt_core::acp_conn::AcpForkCut { text, occurrence }),
+            fork_cut,
             conversation_binding: self.conversation_binding.clone(),
             agent_session: None,
         })
@@ -3219,24 +3268,22 @@ impl AcpView {
         .detach();
     }
 
-    /// 关闭标签：只摘掉本地连接（`ConversationClientHandle` Drop 会断开 socket），
-    /// **不**终止 smeltd 里的会话——跟关一个终端标签不会杀掉底下的 shell 是
-    /// 唯一调用方是 `main.rs::close_session`（用户点 × 主动关标签）——那条
-    /// 路径本来就跟终端会话共用同一个"用户主动关 = 让守护杀掉底层进程"的
-    /// 语气（挨着的 `terminal::kill_remote` 调用是同一个意图），不是"切标签/
-    /// 退出 App 这种先不看了"。唯一例外是 daemon-owned 自动化 Run：关闭它的
-    /// 临时查看页只能断开 GUI，停止必须走带 Run id 的自动化命令。
+    /// 用户主动关闭标签：立即摘掉本地连接，并让 daemon 在后台终结底层会话。
+    /// 唯一例外是 daemon-owned 自动化 Run：关闭临时查看页只能断开 GUI，停止必须
+    /// 走带 Run id 的自动化命令。
     pub fn shutdown(&mut self, _cx: &mut App) {
-        // 这是用户明确关闭会话的路径，必须在视图被移除、甚至 App 退出前完成一次
-        // 有界的 kill 往返。`kill_acp_session` 自带 5s 读写超时；把它丢进 detached
-        // 任务会让进程在任务送达前退出，daemon 里的 ACP 会话就会继续存活。
-        if !matches!(
+        let kill_sid = (!matches!(
             &self.conversation_binding,
             smelt_core::conversation::ConversationBinding::Automation { .. }
-        ) {
-            smelt_core::acp_client::kill_acp_session(&self.sid);
-        }
+        ))
+        .then(|| self.sid.clone());
+
+        // 先释放本地视图。daemon 会在 acp_kill 回包前等待 provider 退出，部分卡住的
+        // provider 会耗满 5s 控制超时；该等待绝不能发生在 GPUI 主线程。
         self.handle = None;
+        if let Some(sid) = kill_sid {
+            smelt_core::acp_client::kill_acp_session_in_background(sid);
+        }
     }
 
     fn submit_input(&mut self, window: &mut Window, follow_up: bool, cx: &mut Context<Self>) {
@@ -3339,7 +3386,7 @@ impl AcpView {
         cx.notify();
     }
 
-    /// 回退到某条历史用户消息（仅 Pi）：agent 切到该消息之前，消息原文回输入框。
+    /// 编辑并重发最后一条用户消息（仅 Pi）：agent 切到该消息之前，消息原文回输入框。
     /// `entry_index` 是本地列表下标；daemon 的投影才是事实源，这里只传绝对
     /// 下标，验证与同文本序号都由 daemon 侧做。失败只提示——会话状态不变。
     fn rewind_to_message(&mut self, entry_index: usize, cx: &mut Context<Self>) {
@@ -4805,6 +4852,8 @@ enum TrajectoryLane {
     Tool,
     /// Pi 在 provider 请求 hook 中捕获的真实调用 payload。
     ModelCall,
+    /// Pi 明确上报的 compaction 生命周期捕获。
+    Compaction,
     /// Pi 在回合开始时明确上报的 system prompt / tool schemas 组装配置。
     Request,
 }
@@ -4814,7 +4863,9 @@ struct TrajectoryContext {
     lane: TrajectoryLane,
     label: String,
     preview: String,
-    source: serde_json::Value,
+    source: String,
+    pi_turn: Option<u64>,
+    captured_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4833,10 +4884,18 @@ struct TrajectoryEvent {
     preview: String,
     /// Inspector Source 页的实际快照投影。
     source: String,
+    /// Pi session_manager branch 中观察到的用户 turn 序号；不等同于 ACP 转录索引。
+    pi_turn: Option<u64>,
+    /// Pi runtime callback 的观察时间，不冒充 provider 端精确时间。
+    captured_at_ms: Option<u64>,
 }
 
 fn pretty_json(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn tool_debug_preview(
@@ -4890,12 +4949,14 @@ fn append_trajectory_entry(
             TrajectoryLane::User,
             text.clone(),
             text.clone(),
-            pretty_json(&serde_json::json!({
+            compact_json(&serde_json::json!({
                 "role": if depth == 0 { "user" } else { "subagent_user" },
                 "turn": event_turn,
                 "relation": relation,
                 "entry": entry,
             })),
+            None,
+            None,
         )),
         AcpEntry::Assistant { text, thought } if !text.trim().is_empty() => {
             let lane = if *thought {
@@ -4907,12 +4968,14 @@ fn append_trajectory_entry(
                 lane,
                 text.clone(),
                 text.clone(),
-                pretty_json(&serde_json::json!({
+                compact_json(&serde_json::json!({
                     "role": if *thought { "assistant_thinking" } else { "assistant" },
                     "turn": event_turn,
                     "relation": relation,
                     "entry": entry,
                 })),
+                None,
+                None,
             ))
         }
         AcpEntry::ToolCall {
@@ -4943,12 +5006,14 @@ fn append_trajectory_entry(
                 TrajectoryLane::Tool,
                 compact_tool_headline(*kind, title),
                 tool_debug_preview(id, title, *kind, *status, output, debug),
-                pretty_json(&source),
+                compact_json(&source),
+                None,
+                None,
             ))
         }
         _ => None,
     };
-    if let Some((lane, text, preview, source)) = projected {
+    if let Some((lane, text, preview, source, pi_turn, captured_at_ms)) = projected {
         events.push(TrajectoryEvent {
             seq: events.len(),
             lane,
@@ -4958,6 +5023,8 @@ fn append_trajectory_entry(
             text,
             preview,
             source,
+            pi_turn,
+            captured_at_ms,
         });
     }
     if let AcpEntry::ToolCall { id, children, .. } = entry {
@@ -4984,7 +5051,9 @@ fn session_trajectory_events(
             parent_tool_id: None,
             text: context.label,
             preview: context.preview,
-            source: pretty_json(&context.source),
+            source: context.source,
+            pi_turn: context.pi_turn,
+            captured_at_ms: context.captured_at_ms,
         });
     }
     for entry in entries {
@@ -4993,37 +5062,68 @@ fn session_trajectory_events(
     events
 }
 
+#[cfg(test)]
 fn filter_trajectory_events<'a>(
     events: &'a [TrajectoryEvent],
     query: &str,
 ) -> Vec<&'a TrajectoryEvent> {
+    filter_trajectory_event_sequences(events, query)
+        .into_iter()
+        .filter_map(|sequence| events.get(sequence))
+        .collect()
+}
+
+fn filter_trajectory_event_sequences(events: &[TrajectoryEvent], query: &str) -> Vec<usize> {
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|term| term.to_lowercase())
         .filter(|term| !term.is_empty())
         .collect();
     if terms.is_empty() {
-        return events.iter().collect();
+        return (0..events.len()).collect();
     }
     events
         .iter()
-        .filter(|event| {
-            let haystack = format!(
-                "{} {} {} {} {}",
+        .enumerate()
+        .filter_map(|(sequence, event)| {
+            let turn_label = if event.turn == 0 {
+                event
+                    .pi_turn
+                    .map_or_else(String::new, |turn| format!("pi turn {turn}"))
+            } else {
+                format!("turn {}", event.turn)
+            };
+            let fields = [
                 trajectory_lane_label(event.lane),
-                event.text,
-                event.preview,
-                event.source,
-                if event.turn == 0 {
-                    String::new()
-                } else {
-                    format!("turn {}", event.turn)
-                }
-            )
-            .to_lowercase();
-            terms.iter().all(|term| haystack.contains(term))
+                event.text.as_str(),
+                event.preview.as_str(),
+                event.source.as_str(),
+                turn_label.as_str(),
+            ];
+            terms
+                .iter()
+                .all(|term| {
+                    fields
+                        .iter()
+                        .any(|field| contains_trajectory_term(field, term))
+                })
+                .then_some(sequence)
         })
         .collect()
+}
+
+fn contains_trajectory_term(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.is_ascii() {
+        haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    } else {
+        haystack.to_lowercase().contains(needle)
+    }
 }
 
 fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
@@ -5033,6 +5133,7 @@ fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
         TrajectoryLane::Thinking => "THINKING",
         TrajectoryLane::Tool => "TOOL",
         TrajectoryLane::ModelCall => "MODEL CALL",
+        TrajectoryLane::Compaction => "COMPACTION",
         TrajectoryLane::Request => "REQUEST CONFIG",
     }
 }
@@ -5044,6 +5145,7 @@ fn trajectory_lane_color(lane: TrajectoryLane) -> u32 {
         TrajectoryLane::Thinking => ui_theme::yellow(),
         TrajectoryLane::Tool => ui_theme::green(),
         TrajectoryLane::ModelCall => ui_theme::purple(),
+        TrajectoryLane::Compaction => ui_theme::yellow(),
         TrajectoryLane::Request => ui_theme::blue(),
     }
 }

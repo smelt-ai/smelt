@@ -24,6 +24,7 @@ use crate::acp_conn::{
 };
 use crate::acp_session::{
     ApprovalDetailsView, PermissionOptionKindView, PermissionOptionView, RuntimeDebug,
+    RuntimeDebugModelCall,
 };
 use crate::agent_kind::{ConversationLaunchSpec, SMELT_PI_AGENT_COMMAND};
 
@@ -1603,6 +1604,11 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                     event_tx.try_send(ConversationEvent::Status(format!("重新加载失败：{error}")));
             }
         }
+        // `/reload` 通过上层 Prompt 通道提交，因此投影已经为它开启了一个回合；
+        // 它不触发 agent_start/agent_end，必须由 RPC 回执显式闭合，否则界面会把
+        // 已完成的本地命令永久显示成“思考中”。失败详情已由 Status 展示，终态
+        // 仍只负责释放 prompt 闸门，避免再追加一条伪造的模型错误消息。
+        let _ = event_tx.try_send(ConversationEvent::TurnEnded(StopReason::EndTurn));
         finish_in_flight(in_flight_rpc);
         return Ok(());
     }
@@ -2960,10 +2966,12 @@ fn normalized_sensitive_key(key: &str) -> String {
 }
 
 fn is_sensitive_payload_key(key: &str) -> bool {
+    let normalized = normalized_sensitive_key(key);
     matches!(
-        normalized_sensitive_key(key).as_str(),
+        normalized.as_str(),
         "authorization"
             | "proxyauthorization"
+            | "auth"
             | "headers"
             | "apikey"
             | "accesstoken"
@@ -2977,21 +2985,53 @@ fn is_sensitive_payload_key(key: &str) -> bool {
             | "setcookie"
             | "credential"
             | "credentials"
-    )
+    ) || [
+        "authorization",
+        "auth",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "cookie",
+        "credential",
+    ]
+    .iter()
+    .any(|suffix| normalized.ends_with(suffix))
 }
 
 fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut Vec<String>) {
     match value {
+        serde_json::Value::String(text) if text.to_ascii_lowercase().starts_with("data:image/") => {
+            *value = serde_json::Value::String("[IMAGE DATA OMITTED]".to_string());
+            if !paths.contains(&path.to_string()) {
+                paths.push(path.to_string());
+            }
+        }
         serde_json::Value::Array(items) => {
             for (index, item) in items.iter_mut().enumerate() {
                 redact_runtime_payload(item, &format!("{path}[{index}]"), paths);
             }
         }
         serde_json::Value::Object(fields) => {
+            let image_like = fields
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| matches!(kind, "image" | "input_image" | "image_url"));
             for (key, child) in fields {
                 let child_path = format!("{path}.{key}");
                 if is_sensitive_payload_key(key) {
                     *child = serde_json::Value::String("[REDACTED]".to_string());
+                    if !paths.contains(&child_path) {
+                        paths.push(child_path);
+                    }
+                } else if image_like
+                    && matches!(
+                        normalized_sensitive_key(key).as_str(),
+                        "data" | "base64" | "bytes"
+                    )
+                {
+                    *child = serde_json::Value::String("[IMAGE DATA OMITTED]".to_string());
                     if !paths.contains(&child_path) {
                         paths.push(child_path);
                     }
@@ -3005,22 +3045,136 @@ fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut
 }
 
 fn validate_runtime_debug(debug: &mut RuntimeDebug) -> bool {
-    if debug.system_prompt.as_deref().is_none_or(str::is_empty) {
+    let has_system_prompt = debug
+        .system_prompt
+        .as_deref()
+        .is_some_and(|prompt| !prompt.is_empty());
+    if !has_system_prompt && debug.version != 3 {
         return false;
     }
     match (debug.version, debug.source.as_str()) {
-        (1, "pi_before_agent_start") => debug.model_call.is_none(),
+        (1, "pi_before_agent_start") => {
+            debug.model_call.is_none()
+                && debug.model_calls.is_empty()
+                && debug.compactions.is_empty()
+        }
         (2, "pi_runtime_debug") => {
-            if let Some(call) = &mut debug.model_call {
-                if call.sequence == 0 || call.source != "pi_before_provider_request" {
+            if !debug.model_calls.is_empty() || !debug.compactions.is_empty() {
+                return false;
+            }
+            if let Some(mut call) = debug.model_call.take() {
+                if !validate_runtime_debug_model_call(&mut call) {
                     return false;
                 }
-                redact_runtime_payload(&mut call.payload, "$", &mut call.redacted_paths);
+                debug.model_calls.push(call);
+            }
+            debug.version = 3;
+            true
+        }
+        (3, "pi_runtime_debug") => {
+            if debug.model_call.is_some() {
+                return false;
+            }
+            let mut previous_sequence = 0;
+            for call in &mut debug.model_calls {
+                if !validate_runtime_debug_model_call(call) || call.sequence <= previous_sequence {
+                    return false;
+                }
+                previous_sequence = call.sequence;
+            }
+            let mut previous_compaction_sequence = 0;
+            if !has_system_prompt && debug.model_calls.is_empty() && debug.compactions.is_empty() {
+                return false;
+            }
+            for compaction in &mut debug.compactions {
+                if compaction.sequence == 0
+                    || compaction.sequence <= previous_compaction_sequence
+                    || !matches!(
+                        compaction.status.as_str(),
+                        "started" | "completed" | "failed" | "aborted"
+                    )
+                    || !matches!(
+                        compaction.reason.as_str(),
+                        "manual" | "threshold" | "overflow"
+                    )
+                {
+                    return false;
+                }
+                previous_compaction_sequence = compaction.sequence;
+                if let Some(usage) = &mut compaction.usage {
+                    let mut redacted_paths = Vec::new();
+                    redact_runtime_payload(
+                        usage,
+                        &format!("$.compactions[{}].usage", compaction.sequence),
+                        &mut redacted_paths,
+                    );
+                }
+                for (index, headers) in compaction.request_headers.iter_mut().enumerate() {
+                    redact_runtime_payload(
+                        &mut headers.headers,
+                        &format!(
+                            "$.compactions[{}].requestHeaders[{index}].headers",
+                            compaction.sequence
+                        ),
+                        &mut headers.redacted_paths,
+                    );
+                }
+                for (index, response) in compaction.response_metadata.iter_mut().enumerate() {
+                    redact_runtime_payload(
+                        &mut response.headers,
+                        &format!(
+                            "$.compactions[{}].responseMetadata[{index}].headers",
+                            compaction.sequence
+                        ),
+                        &mut response.redacted_paths,
+                    );
+                }
             }
             true
         }
         _ => false,
     }
+}
+
+fn validate_runtime_debug_model_call(call: &mut RuntimeDebugModelCall) -> bool {
+    if call.sequence == 0
+        || !matches!(
+            call.source.as_str(),
+            "pi_context_with_system" | "pi_before_provider_request"
+        )
+        || call
+            .payload_source
+            .as_deref()
+            .is_some_and(|source| source != "pi_before_provider_request")
+    {
+        return false;
+    }
+    redact_runtime_payload(
+        &mut call.pi_context,
+        "$.piContext",
+        &mut call.pi_context_redacted_paths,
+    );
+    for (index, headers) in call.request_headers.iter_mut().enumerate() {
+        redact_runtime_payload(
+            &mut headers.headers,
+            &format!("$.requestHeaders[{index}].headers"),
+            &mut headers.redacted_paths,
+        );
+    }
+    redact_runtime_payload(&mut call.payload, "$.payload", &mut call.redacted_paths);
+    for (index, metadata) in call.response_metadata.iter_mut().enumerate() {
+        redact_runtime_payload(
+            &mut metadata.headers,
+            &format!("$.responseMetadata[{index}].headers"),
+            &mut metadata.redacted_paths,
+        );
+    }
+    if let Some(response) = &mut call.response {
+        let mut paths = call.response_redacted_paths.take().unwrap_or_default();
+        redact_runtime_payload(response, "$.response", &mut paths);
+        call.response_redacted_paths = Some(paths);
+    }
+    true
 }
 
 fn publish_extension_widget(
@@ -4327,13 +4481,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_debug_widget_publishes_exact_prompt_tools_and_redacted_model_call() {
+    fn runtime_debug_widget_publishes_call_history_and_redacts_sensitive_paths() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         publish_extension_widget(
             &serde_json::json!({
                 "widgetKey": "smelt-runtime-debug",
                 "widgetLines": [serde_json::json!({
-                    "version": 2,
+                    "version": 3,
                     "source": "pi_runtime_debug",
                     "systemPrompt": "system line 1\n<project_context>真实上下文</project_context>",
                     "tools": [{
@@ -4346,24 +4500,99 @@ mod tests {
                         },
                         "source": "builtin"
                     }],
-                    "modelCall": {
+                    "modelCalls": [{
                         "sequence": 3,
-                        "source": "pi_before_provider_request",
+                        "turn": 2,
+                        "compactionSequence": 1,
+                        "capturedAtMs": 1725000000000_u64,
+                        "source": "pi_context_with_system",
+                        "payloadSource": "pi_before_provider_request",
+                        "piContext": [
+                            {"role": "system", "content": "exact Pi system message"},
+                            {"role": "user", "content": "hello", "api_key": "context-secret"}
+                        ],
+                        "piContextRedactedPaths": [],
                         "model": {
                             "provider": "openai",
                             "id": "gpt-test",
                             "api": "responses",
                             "thinkingLevel": "high"
                         },
+                        "requestConfig": {
+                            "systemPrompt": "request-specific system prompt",
+                            "tools": [{
+                                "name": "bash",
+                                "description": "Run a shell command",
+                                "parameters": {"type": "object"},
+                                "source": "builtin"
+                            }]
+                        },
+                        "requestHeaders": [{
+                            "capturedAtMs": 1725000000001_u64,
+                            "headers": {
+                                "Authorization": "Bearer header-secret",
+                                "X-Api-Key": "header-api-secret",
+                                "X-Request-Source": "smelt"
+                            },
+                            "redactedPaths": []
+                        }],
+                        "requestCapturedAtMs": 1725000000002_u64,
                         "payload": {
                             "model": "gpt-test",
                             "max_tokens": 4096,
                             "messages": [{"role": "user", "content": "hello"}],
                             "api_key": "malicious-widget-secret",
-                            "nested": {"Authorization": "Bearer secret"}
+                            "nested": {"Authorization": "Bearer secret"},
+                            "image": {
+                                "type": "image",
+                                "data": "large-base64-payload",
+                                "url": "data:image/png;base64,also-large"
+                            }
                         },
+                        "response": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "done"}],
+                            "usage": {"input": 100, "output": 20},
+                            "provider_metadata": {"api_key": "response-secret"}
+                        },
+                        "responseCapturedAtMs": 1725000000100_u64,
+                        "responseRedactedPaths": [],
+                        "responseMetadata": [{
+                            "capturedAtMs": 1725000000050_u64,
+                            "status": 200,
+                            "headers": {
+                                "X-Request-Id": "request-1",
+                                "Set-Cookie": "cookie-secret"
+                            },
+                            "redactedPaths": []
+                        }],
                         "redactedPaths": []
-                    }
+                    }],
+                    "modelCallsOmitted": 0,
+                    "compactions": [{
+                        "sequence": 1,
+                        "turn": 2,
+                        "status": "completed",
+                        "reason": "manual",
+                        "willRetry": false,
+                        "startedAtMs": 1725000000000_u64,
+                        "finishedAtMs": 1725000001000_u64,
+                        "firstKeptEntryId": "entry-20",
+                        "tokensBefore": 90000,
+                        "summarizedMessageCount": 1,
+                        "turnPrefixMessageCount": 0,
+                        "sourceMessages": [{
+                            "segment": "summarized",
+                            "role": "user",
+                            "preview": "hello",
+                            "truncated": false
+                        }],
+                        "sourceMessagesOmitted": 0,
+                        "summary": "keep the login constraints",
+                        "usage": {"api_key": "compaction-secret"},
+                        "fromExtension": false
+                    }],
+                    "compactionsOmitted": 0
                 }).to_string()]
             }),
             &event_tx,
@@ -4371,7 +4600,7 @@ mod tests {
         let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
             panic!("expected runtime debug event");
         };
-        assert_eq!(debug.version, 2);
+        assert_eq!(debug.version, 3);
         assert_eq!(debug.source, "pi_runtime_debug");
         assert_eq!(
             debug.system_prompt.as_deref(),
@@ -4380,19 +4609,213 @@ mod tests {
         assert_eq!(debug.tools.len(), 1);
         assert_eq!(debug.tools[0].name, "bash");
         assert_eq!(debug.tools[0].parameters["required"][0], "command");
-        let call = debug.model_call.expect("model call");
+        assert_eq!(debug.model_calls_omitted, 0);
+        let call = debug.model_calls.first().expect("model call");
         assert_eq!(call.sequence, 3);
+        assert_eq!(call.turn, Some(2));
+        assert_eq!(call.compaction_sequence, Some(1));
+        assert_eq!(call.captured_at_ms, 1_725_000_000_000);
         assert_eq!(call.model.provider.as_deref(), Some("openai"));
+        assert_eq!(call.source, "pi_context_with_system");
+        assert_eq!(
+            call.payload_source.as_deref(),
+            Some("pi_before_provider_request")
+        );
+        assert_eq!(call.pi_context[0]["content"], "exact Pi system message");
+        assert_eq!(call.pi_context[1]["api_key"], "[REDACTED]");
+        assert_eq!(
+            call.pi_context_redacted_paths,
+            vec!["$.piContext[1].api_key"]
+        );
+        assert_eq!(
+            call.request_headers[0].headers["Authorization"],
+            "[REDACTED]"
+        );
+        assert_eq!(call.request_headers[0].headers["X-Api-Key"], "[REDACTED]");
+        assert_eq!(call.request_headers[0].headers["X-Request-Source"], "smelt");
+        assert_eq!(
+            call.request_headers[0].redacted_paths,
+            vec![
+                "$.requestHeaders[0].headers.Authorization",
+                "$.requestHeaders[0].headers.X-Api-Key"
+            ]
+        );
+        assert_eq!(call.response_metadata[0].status, 200);
+        assert_eq!(
+            call.response_metadata[0].headers["X-Request-Id"],
+            "request-1"
+        );
+        assert_eq!(
+            call.response_metadata[0].headers["Set-Cookie"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            call.response_metadata[0].redacted_paths,
+            vec!["$.responseMetadata[0].headers.Set-Cookie"]
+        );
+        assert_eq!(
+            call.request_config.system_prompt,
+            "request-specific system prompt"
+        );
+        assert_eq!(call.request_config.tools[0].name, "bash");
         assert_eq!(call.payload["max_tokens"], 4096);
         assert_eq!(call.payload["api_key"], "[REDACTED]");
         assert_eq!(call.payload["nested"]["Authorization"], "[REDACTED]");
+        assert_eq!(call.payload["image"]["data"], "[IMAGE DATA OMITTED]");
+        assert_eq!(call.payload["image"]["url"], "[IMAGE DATA OMITTED]");
+        assert_eq!(call.response.as_ref().unwrap()["usage"]["output"], 20);
+        assert_eq!(
+            call.response.as_ref().unwrap()["provider_metadata"]["api_key"],
+            "[REDACTED]"
+        );
+        assert_eq!(call.response_captured_at_ms, Some(1_725_000_000_100));
+        assert_eq!(
+            call.response_redacted_paths.as_ref().unwrap(),
+            &["$.response.provider_metadata.api_key"]
+        );
         assert_eq!(
             call.redacted_paths,
             vec![
-                "$.api_key".to_string(),
-                "$.nested.Authorization".to_string()
+                "$.payload.api_key".to_string(),
+                "$.payload.nested.Authorization".to_string(),
+                "$.payload.image.data".to_string(),
+                "$.payload.image.url".to_string()
             ]
         );
+        assert_eq!(debug.compactions.len(), 1);
+        assert_eq!(debug.compactions[0].turn, Some(2));
+        assert_eq!(debug.compactions[0].status, "completed");
+        assert_eq!(
+            debug.compactions[0].first_kept_entry_id.as_deref(),
+            Some("entry-20")
+        );
+        assert_eq!(
+            debug.compactions[0].usage.as_ref().unwrap()["api_key"],
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn runtime_debug_widget_migrates_legacy_single_call_into_history() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 2,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "system",
+                    "tools": [],
+                    "modelCall": {
+                        "sequence": 1,
+                        "source": "pi_before_provider_request",
+                        "model": {},
+                        "payload": {"messages": []},
+                        "redactedPaths": []
+                    }
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("expected migrated runtime debug event");
+        };
+        assert_eq!(debug.version, 3);
+        assert_eq!(debug.model_call, None);
+        assert_eq!(debug.model_calls.len(), 1);
+        assert_eq!(debug.model_calls[0].sequence, 1);
+    }
+
+    #[test]
+    fn runtime_debug_accepts_unbounded_call_and_compaction_history() {
+        let calls = (1..=40)
+            .map(|sequence| {
+                serde_json::json!({
+                    "sequence": sequence,
+                    "source": "pi_before_provider_request",
+                    "model": {},
+                    "requestConfig": {"systemPrompt": "system", "tools": []},
+                    "payload": {"messages": [{"role": "user", "content": sequence}]},
+                    "redactedPaths": []
+                })
+            })
+            .collect::<Vec<_>>();
+        let preview = "x".repeat(4_000);
+        let source_messages = (0..80)
+            .map(|index| {
+                serde_json::json!({
+                    "segment": "summarized",
+                    "role": "user",
+                    "preview": format!("{index}:{preview}"),
+                    "truncated": false
+                })
+            })
+            .collect::<Vec<_>>();
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 3,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "system",
+                    "tools": [],
+                    "modelCalls": calls,
+                    "compactions": [{
+                        "sequence": 1,
+                        "status": "completed",
+                        "reason": "manual",
+                        "willRetry": false,
+                        "startedAtMs": 1725000000000_u64,
+                        "sourceMessages": source_messages,
+                        "sourceMessagesOmitted": 0,
+                        "summary": "complete summary"
+                    }]
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("full model and compaction history should be accepted");
+        };
+        assert_eq!(debug.model_calls.len(), 40);
+        assert_eq!(debug.compactions.len(), 1);
+        assert_eq!(debug.compactions[0].source_messages.len(), 80);
+        assert_eq!(debug.compactions[0].source_messages[0].preview.len(), 4_002);
+    }
+
+    #[test]
+    fn runtime_debug_can_report_compaction_before_any_system_prompt_capture() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 3,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "",
+                    "tools": [],
+                    "modelCalls": [],
+                    "modelCallsOmitted": 0,
+                    "compactions": [{
+                        "sequence": 1,
+                        "status": "started",
+                        "reason": "manual",
+                        "willRetry": false,
+                        "startedAtMs": 1725000000000_u64,
+                        "sourceMessages": [],
+                        "sourceMessagesOmitted": 0
+                    }],
+                    "compactionsOmitted": 0
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("a real compaction capture must not require a prior prompt capture");
+        };
+        assert_eq!(debug.system_prompt.as_deref(), Some(""));
+        assert_eq!(debug.compactions.len(), 1);
     }
 
     #[test]
@@ -4400,7 +4823,7 @@ mod tests {
         let (event_tx, event_rx) = smol::channel::unbounded();
         for payload in [
             serde_json::json!({
-                "version": 3,
+                "version": 4,
                 "source": "pi_runtime_debug",
                 "systemPrompt": "future",
                 "tools": []
@@ -4825,6 +5248,10 @@ mod tests {
             event_rx.try_recv(),
             Ok(ConversationEvent::Status(text)) if text.contains("已重新加载")
         ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+        ));
         let refresh: serde_json::Value =
             serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
         assert_eq!(refresh["type"], "get_commands");
@@ -4863,6 +5290,40 @@ mod tests {
             Ok(ConversationEvent::AvailableCommands(commands))
                 if commands.iter().any(|(name, _)| name == "skill:new")
         ));
+    }
+
+    #[test]
+    fn failed_slash_reload_also_ends_the_local_turn() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.reload_request_ids.insert("reload-1".to_string());
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "reload-1",
+                "type": "response",
+                "command": "reload",
+                "success": false,
+                "error": "reload failed"
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("重新加载失败")
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+        ));
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[test]

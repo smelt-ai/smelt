@@ -130,7 +130,7 @@ pub enum ConversationCommand {
     Compact { custom_instructions: Option<String> },
     /// 清空 provider 侧 steering / follow-up 队列，并把原文还回输入框。
     ClearQueue,
-    /// 回退到某条历史用户消息：agent 把活动分支切到该消息之前（Pi 的
+    /// 编辑并重发最后一条用户消息：agent 把活动分支切到该消息之前（Pi 的
     /// `fork(entryId)`，进程内切换、同一条连接），并把该消息原文还回输入框供
     /// 编辑重发。`text` + `occurrence` 用来在 agent 的可分叉消息列表里定位
     /// entryId（事件流不带 entryId，只能按文本配对；`occurrence` 是同文本消息
@@ -811,8 +811,8 @@ pub struct ConversationHandle {
     pub supports_compaction: bool,
     /// 驱动能不能发 follow-up、以及取消前先 `clear_queue`（Pi 原生队列）。
     pub supports_native_queue: bool,
-    /// 驱动能不能回退到历史消息重发（Pi 的 fork）。GUI 据此决定是否显示
-    /// 「回到这里重发」；daemon 侧动作据此拒绝不支持的 agent。
+    /// 驱动能不能编辑并重发最后一条用户消息（Pi 的 fork）。GUI 据此决定是否显示
+    /// 最后一条用户消息上的编辑按钮；daemon 侧动作据此拒绝不支持的 agent。
     pub supports_rewind: bool,
 }
 

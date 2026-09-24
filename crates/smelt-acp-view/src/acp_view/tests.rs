@@ -16,16 +16,16 @@ use super::{
     escape_html_tags_for_markdown, external_clipboard_image_paths, filter_trajectory_events,
     format_attached_paths, is_active_permission_selection, is_dispatch_in_flight,
     is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
-    is_stale_blank_history_id, loaded_entries_end, markdown_text_for_cwd,
-    markdown_user_text_for_cwd, merge_rejected_prompt, merge_snapshot_entries,
-    model_label_with_provider, move_queue_item_to_front, native_queue_from_snapshot,
-    native_queue_item_kind_label, next_snapshot_prompt_gate, overlay_model_state,
-    overlay_pending_initial_config, overlay_session_configs, pending_config_choice_names,
-    plan_current_step, plan_native_immediate_send, preformatted_html, process_group_header_label,
-    process_group_label, progress_has_details, progress_summary, provider_switch_value,
-    reconcile_pending_config_values, refresh_markdown_cache, resolve_restart_launch,
-    restorable_gui_prompt, search_summary_text, selected_provider_group, session_trajectory_events,
-    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    is_stale_blank_history_id, latest_user_message_index, loaded_entries_end,
+    markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
+    merge_snapshot_entries, model_label_with_provider, move_queue_item_to_front,
+    native_queue_from_snapshot, native_queue_item_kind_label, next_snapshot_prompt_gate,
+    overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
+    pending_config_choice_names, plan_current_step, plan_native_immediate_send, preformatted_html,
+    process_group_header_label, process_group_label, progress_has_details, progress_summary,
+    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
+    resolve_restart_launch, restorable_gui_prompt, search_summary_text, selected_provider_group,
+    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_replace_session_title,
     should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
     tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
@@ -1493,6 +1493,39 @@ fn live_thoughts_count_as_agent_output() {
 }
 
 #[test]
+fn edit_resend_targets_only_the_latest_real_user_message() {
+    let entries = vec![
+        AcpEntry::User("第一条".into()),
+        AcpEntry::Assistant {
+            text: "回答一".into(),
+            thought: false,
+        },
+        AcpEntry::User("最后一条".into()),
+        AcpEntry::Assistant {
+            text: "回答二".into(),
+            thought: false,
+        },
+        AcpEntry::User("[Request interrupted by user]".into()),
+    ];
+
+    assert_eq!(latest_user_message_index(&entries), Some(2));
+    assert_eq!(latest_user_message_index(&[]), None);
+}
+
+#[test]
+fn edit_resend_recognizes_a_latest_image_message() {
+    let entries = vec![
+        AcpEntry::User("上一条".into()),
+        AcpEntry::UserWithImages {
+            text: "看这张图".into(),
+            images: Vec::new(),
+        },
+    ];
+
+    assert_eq!(latest_user_message_index(&entries), Some(1));
+}
+
+#[test]
 fn completed_process_group_appends_elapsed_like_grok() {
     let entries = vec![
         AcpEntry::User("看看今天的新闻".into()),
@@ -1936,9 +1969,9 @@ fn completed_tool(id: &str, kind: ToolKind, title: &str) -> AcpEntry {
 }
 
 #[test]
-fn runtime_debug_contexts_show_exact_prompt_and_tool_schema_when_available() {
+fn runtime_debug_contexts_show_request_config_and_multiple_turn_linked_calls() {
     let contexts = runtime_debug_contexts(&RuntimeDebug {
-        version: 2,
+        version: 3,
         source: "pi_runtime_debug".into(),
         system_prompt: Some("system line 1\n<project_context>真实上下文</project_context>".into()),
         tools: vec![RuntimeDebugTool {
@@ -1951,51 +1984,129 @@ fn runtime_debug_contexts_show_exact_prompt_and_tool_schema_when_available() {
             }),
             source: Some("builtin".into()),
         }],
-        model_call: Some(RuntimeDebugModelCall {
+        model_calls: vec![RuntimeDebugModelCall {
             sequence: 3,
-            source: "pi_before_provider_request".into(),
+            turn: Some(2),
+            compaction_sequence: None,
+            captured_at_ms: 1_725_000_000_000,
+            source: "pi_context_with_system".into(),
             model: RuntimeDebugModel {
                 provider: Some("openai".into()),
                 id: Some("gpt-test".into()),
                 api: Some("responses".into()),
                 thinking_level: Some("high".into()),
             },
+            request_config: smelt_core::acp_session::RuntimeDebugRequestConfig {
+                system_prompt: "prompt for call #3".into(),
+                tools: vec![RuntimeDebugTool {
+                    name: "bash".into(),
+                    description: "Run a shell command".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    source: Some("builtin".into()),
+                }],
+            },
+            pi_context: serde_json::json!([
+                {"role": "system", "content": "per-call system"},
+                {"role": "user", "content": "hello"}
+            ]),
             payload: serde_json::json!({
                 "model": "gpt-test",
                 "max_tokens": 4096,
                 "messages": [{"role": "user", "content": "hello"}],
                 "api_key": "[REDACTED]"
             }),
-            redacted_paths: vec!["$.api_key".into()],
-        }),
+            response: Some(serde_json::json!({
+                "role": "assistant",
+                "usage": {"input": 100, "output": 20}
+            })),
+            response_captured_at_ms: Some(1_725_000_000_100),
+            response_redacted_paths: Some(Vec::new()),
+            redacted_paths: vec!["$.payload.api_key".into()],
+            ..RuntimeDebugModelCall::default()
+        }],
+        ..RuntimeDebug::default()
     });
 
     assert_eq!(contexts.len(), 2, "调用 payload 与组装配置是不同证据边界");
-    assert_eq!(contexts[0].label, "MODEL CALL #3");
-    assert_eq!(contexts[0].lane, super::TrajectoryLane::ModelCall);
-    assert!(contexts[0].preview.contains("openai"));
-    assert!(contexts[0].preview.contains("gpt-test"));
-    assert!(contexts[0].preview.contains("high"));
-    assert!(contexts[0].preview.contains("\"max_tokens\": 4096"));
-    assert!(contexts[0].preview.contains("[REDACTED]"));
+    let config_source: serde_json::Value = serde_json::from_str(&contexts[0].source).unwrap();
+    let call_source: serde_json::Value = serde_json::from_str(&contexts[1].source).unwrap();
+    assert_eq!(contexts[0].label, "Pi REQUEST CONFIG");
+    assert_eq!(contexts[0].lane, super::TrajectoryLane::Request);
     assert_eq!(
-        contexts[0].source["payload"]["messages"][0]["content"],
-        "hello"
-    );
-    assert_eq!(contexts[0].source["redactedPaths"][0], "$.api_key");
-
-    assert_eq!(contexts[1].label, "Pi REQUEST CONFIG");
-    assert_eq!(contexts[1].lane, super::TrajectoryLane::Request);
-    assert_eq!(
-        contexts[1].source["systemPrompt"],
+        config_source["systemPrompt"],
         "system line 1\n<project_context>真实上下文</project_context>"
     );
-    assert_eq!(contexts[1].source["tools"][0]["name"], "bash");
-    assert!(contexts[1].preview.contains("Run a shell command"));
-    assert!(contexts[1].preview.contains("\"required\": ["));
-    assert!(contexts[1].source.get("available").is_none());
-    assert!(contexts[1].source.get("classification").is_none());
-    assert!(contexts[1].source.get("not_captured").is_none());
+    assert_eq!(config_source["tools"][0]["name"], "bash");
+    assert!(contexts[0].preview.contains("System prompt: "));
+    assert!(contexts[0].preview.contains("1 tools"));
+    assert!(config_source.get("available").is_none());
+    assert!(config_source.get("classification").is_none());
+    assert!(config_source.get("not_captured").is_none());
+
+    assert_eq!(contexts[1].label, "MODEL CALL #3 · PI TURN 2");
+    assert_eq!(contexts[1].lane, super::TrajectoryLane::ModelCall);
+    assert_eq!(contexts[1].pi_turn, Some(2));
+    assert_eq!(contexts[1].captured_at_ms, Some(1_725_000_000_000));
+    assert!(contexts[1].preview.contains("openai"));
+    assert!(contexts[1].preview.contains("gpt-test"));
+    assert!(contexts[1].preview.contains("2 Pi messages"));
+    assert!(contexts[1].source.contains("high"));
+    assert!(contexts[1].source.contains("max_tokens"));
+    assert!(contexts[1].source.contains("[REDACTED]"));
+    assert_eq!(call_source["piContext"][0]["content"], "per-call system");
+    assert_eq!(call_source["payload"]["messages"][0]["content"], "hello");
+    assert_eq!(call_source["redactedPaths"][0], "$.payload.api_key");
+    assert_eq!(
+        call_source["requestConfig"]["systemPrompt"], "prompt for call #3",
+        "每次模型调用都要保留当次的 Pi 组装配置，而不是用最近一份覆盖旧调用"
+    );
+    assert_eq!(call_source["response"]["usage"]["output"], 20);
+}
+
+#[test]
+fn compaction_traces_show_the_observed_boundary_without_joining_the_fake_timeline() {
+    let contexts = runtime_debug_contexts(&RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        compactions: vec![smelt_core::acp_session::RuntimeDebugCompaction {
+            sequence: 1,
+            turn: Some(3),
+            status: "completed".into(),
+            reason: "overflow".into(),
+            will_retry: true,
+            started_at_ms: 1_725_000_000_000,
+            finished_at_ms: Some(1_725_000_000_500),
+            first_kept_entry_id: Some("entry-20".into()),
+            tokens_before: Some(90_000),
+            summarized_message_count: Some(12),
+            source_messages: vec![smelt_core::acp_session::RuntimeDebugCompactionMessage {
+                segment: "summarized".into(),
+                role: "user".into(),
+                preview: "retain the auth constraint".into(),
+                truncated: false,
+            }],
+            summary: Some("The user is debugging auth".into()),
+            ..Default::default()
+        }],
+        ..RuntimeDebug::default()
+    });
+    let events = session_trajectory_events(&[], contexts, &Default::default());
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].lane, super::TrajectoryLane::Compaction);
+    assert_eq!(
+        events[0].turn, 0,
+        "a Pi capture is not inserted into ACP message order"
+    );
+    assert_eq!(events[0].pi_turn, Some(3));
+    assert!(events[0].text.contains("OVERFLOW · COMPLETED"));
+    assert!(events[0].source.contains("entry-20"));
+    assert!(events[0].preview.contains("12 messages summarized"));
+    assert!(events[0].source.contains("retain the auth constraint"));
+    assert_eq!(
+        filter_trajectory_events(&events, "pi turn 3 entry-20").len(),
+        1
+    );
 }
 
 #[test]
@@ -2004,14 +2115,14 @@ fn runtime_debug_contexts_show_only_request_config_without_a_model_call() {
         version: 1,
         source: "pi_before_agent_start".into(),
         system_prompt: Some("actual system prompt".into()),
-        tools: Vec::new(),
-        model_call: None,
+        ..RuntimeDebug::default()
     });
 
     assert_eq!(contexts.len(), 1);
     assert_eq!(contexts[0].lane, super::TrajectoryLane::Request);
     assert_eq!(contexts[0].label, "Pi REQUEST CONFIG");
-    assert_eq!(contexts[0].source["systemPrompt"], "actual system prompt");
+    let source: serde_json::Value = serde_json::from_str(&contexts[0].source).unwrap();
+    assert_eq!(source["systemPrompt"], "actual system prompt");
     assert!(!contexts[0].preview.contains("未捕获"));
 }
 
@@ -2097,7 +2208,9 @@ fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
         lane: super::TrajectoryLane::Request,
         label: "最近一次 Pi 请求组装配置".into(),
         preview: "system prompt".into(),
-        source: serde_json::json!({"system_prompt": "system prompt", "tools": []}),
+        source: "{\"system_prompt\":\"system prompt\",\"tools\":[]}".into(),
+        pi_turn: None,
+        captured_at_ms: None,
     }];
     let tool_debug = std::collections::BTreeMap::from([(
         "s1".to_string(),

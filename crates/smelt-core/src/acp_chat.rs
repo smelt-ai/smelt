@@ -317,6 +317,21 @@ pub fn fork_cut_after(entries: &[AcpEntry], through_index: usize) -> Option<(Str
     Some((text, occurrence))
 }
 
+/// 「从指定用户消息编辑重发」的切点：分叉到该条消息之前，并返回原文和它在
+/// 同文本用户消息中的序号，供 Pi `fork` 定位。中断标记、非用户条目和越界索引不是切点。
+pub fn fork_cut_before(entries: &[AcpEntry], user_index: usize) -> Option<(String, usize)> {
+    let text = user_entry_text(entries.get(user_index)?)?;
+    if is_interrupt_marker(text) {
+        return None;
+    }
+    let occurrence = entries
+        .iter()
+        .take(user_index)
+        .filter(|entry| user_entry_text(entry) == Some(text))
+        .count();
+    Some((text.to_string(), occurrence))
+}
+
 fn user_entry_text(entry: &AcpEntry) -> Option<&str> {
     match entry {
         AcpEntry::User(text) => Some(text),
@@ -705,6 +720,22 @@ mod tests {
         ];
         assert_eq!(fork_cut_after(&entries, 5), Some(("末尾".to_string(), 0)));
         assert_eq!(fork_cut_after(&entries, 3), Some(("再来".to_string(), 1)));
+    }
+
+    #[test]
+    fn fork_cut_before_user_message_counts_identical_prompts() {
+        let entries = vec![
+            user("same"),
+            assistant(),
+            user("other"),
+            assistant(),
+            user("same"),
+        ];
+
+        assert_eq!(fork_cut_before(&entries, 2), Some(("other".to_string(), 0)));
+        assert_eq!(fork_cut_before(&entries, 4), Some(("same".to_string(), 1)));
+        assert_eq!(fork_cut_before(&entries, 1), None);
+        assert_eq!(fork_cut_before(&entries, 99), None);
     }
 
     #[test]

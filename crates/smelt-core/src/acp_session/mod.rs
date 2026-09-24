@@ -328,8 +328,8 @@ pub struct RuntimeDebugTool {
     pub source: Option<String>,
 }
 
-/// Pi 在 provider 请求 hook 中暴露的模型身份。只记录请求归属所需字段，
-/// 不记录 base URL、headers、认证配置或环境变量。
+/// Pi 在 provider 请求 hook 中暴露的模型身份。只记录 provider/model/api/effort，
+/// 不记录 base URL、认证配置或环境变量；headers 走独立脱敏 sidecar。
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugModel {
@@ -343,26 +343,139 @@ pub struct RuntimeDebugModel {
     pub thinking_level: Option<String>,
 }
 
-/// 最近一次真实 provider 调用的请求 payload。payload 在 Pi 和 Rust 两层递归
-/// 脱敏；sequence 只表示本次运行时观察到的调用顺序，不冒充 provider request id。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugHeaderCapture {
+    pub captured_at_ms: u64,
+    pub headers: serde_json::Value,
+    #[serde(default)]
+    pub redacted_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugResponseMetadata {
+    pub captured_at_ms: u64,
+    pub status: u16,
+    pub headers: serde_json::Value,
+    #[serde(default)]
+    pub redacted_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugRequestConfig {
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub tools: Vec<RuntimeDebugTool>,
+}
+
+/// 一次模型调用的完整 Pi Context、请求头、provider payload 和规范化响应。Pi 和 Rust
+/// 两层都会递归脱敏；Pi API 不暴露原始响应流。sequence 是本地顺序，不冒充 provider request id。
+/// turn 是 Pi 当前分支中从用户消息计数得到的序号；captured_at_ms 是扩展观察时间，
+/// 不代表 provider 端的时间戳。
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugModelCall {
     #[serde(default)]
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_sequence: Option<u64>,
+    #[serde(default)]
+    pub captured_at_ms: u64,
     #[serde(default)]
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_source: Option<String>,
     #[serde(default)]
     pub model: RuntimeDebugModel,
     #[serde(default)]
+    pub request_config: RuntimeDebugRequestConfig,
+    #[serde(default)]
+    pub pi_context: serde_json::Value,
+    #[serde(default)]
+    pub pi_context_redacted_paths: Vec<String>,
+    #[serde(default)]
+    pub request_headers: Vec<RuntimeDebugHeaderCapture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_captured_at_ms: Option<u64>,
+    #[serde(default)]
     pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_captured_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_redacted_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub response_metadata: Vec<RuntimeDebugResponseMetadata>,
     #[serde(default)]
     pub redacted_paths: Vec<String>,
 }
 
-/// 受管运行时明确暴露的模型调试快照。v1 只含 `before_agent_start` 组装配置；
-/// v2 还可含最近一次 `before_provider_request` payload。通用 ACP 没有等价能力时
-/// 保持默认空值，不能从聊天标题或当前会话配置反推。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugCompactionMessage {
+    pub segment: String,
+    pub role: String,
+    pub preview: String,
+    pub truncated: bool,
+}
+
+/// Pi compaction 生命周期中实际可观察到的边界和摘要。来源消息保留完整文本；
+/// 图片二进制仍不进入轨迹。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugCompaction {
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    pub status: String,
+    pub reason: String,
+    pub will_retry: bool,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_kept_entry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_split_turn: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarized_message_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_prefix_message_count: Option<usize>,
+    #[serde(default)]
+    pub source_messages: Vec<RuntimeDebugCompactionMessage>,
+    #[serde(default)]
+    pub request_headers: Vec<RuntimeDebugHeaderCapture>,
+    #[serde(default)]
+    pub response_metadata: Vec<RuntimeDebugResponseMetadata>,
+    /// 旧版有界预览的计数；当前完整采集路径恒为 0。
+    #[serde(default)]
+    pub source_messages_omitted: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_extension: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aborted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Pi 实际上报的模型调试数据。v1/v2 为旧版单次快照；v3 保留逐次请求/响应，
+/// 并记录明确上报的 compaction 生命周期。通用 ACP 没有等价能力时保持空值，不能从
+/// 聊天内容或当前会话配置反推。由于完整 prompt/payload 可能敏感，这些记录是运行时
+/// 调试 sidecar，不作为普通会话 transcript 持久化。
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebug {
@@ -374,7 +487,16 @@ pub struct RuntimeDebug {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub tools: Vec<RuntimeDebugTool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub model_calls: Vec<RuntimeDebugModelCall>,
+    #[serde(default)]
+    pub model_calls_omitted: u64,
+    #[serde(default)]
+    pub compactions: Vec<RuntimeDebugCompaction>,
+    #[serde(default)]
+    pub compactions_omitted: u64,
+    /// 只接收旧版 v2 widget 的单数 `modelCall`，规范化后不再向 GUI 序列化。
+    #[serde(default, skip_serializing)]
     pub model_call: Option<RuntimeDebugModelCall>,
 }
 
@@ -451,7 +573,7 @@ pub struct ConversationSnapshot {
     /// 驱动是否支持 follow-up / clear_queue 原生队列。旧快照缺省为 false。
     #[serde(default)]
     pub supports_native_queue: bool,
-    /// 驱动是否支持回退到历史消息重发（Pi 的 fork）。旧快照缺省为 false。
+    /// 驱动是否支持编辑并重发最后一条用户消息（Pi 的 fork）。旧快照缺省为 false。
     #[serde(default)]
     pub supports_rewind: bool,
     /// 正在压缩上下文。
@@ -1625,8 +1747,8 @@ pub enum AcpUserAction {
     },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
-    /// 回退到指定历史用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
-    /// 回输入框供编辑重发。`entry_index` 是投影里的绝对 entry 下标。仅空闲
+    /// 编辑并重发最后一条用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
+    /// 回输入框供修改。`entry_index` 是投影里的绝对 entry 下标。仅空闲
     /// 会话可回退；旧 daemon 不认识这个动作，会回 unknown variant 错误。
     RewindToMessage {
         entry_index: usize,

@@ -1845,7 +1845,7 @@ fn send_acp_clear_queue(sess: &AcpSession) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// 回退到某条历史用户消息。入口是 GUI 传来的 entry 下标，但下标背后的一切
+/// 编辑并重发最后一条用户消息。入口是 GUI 传来的 entry 下标，但下标背后的一切
 /// 验证（相位、消息类型、同文本序号）都以 daemon 自己的投影为准——GUI 的
 /// 本地列表可能与投影有短暂分页差异，不能拿它当事实源。
 fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static str> {
@@ -1864,8 +1864,17 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
     }
     // 回退会丢弃之后的所有回合与未决审批，只能在完全空闲的会话上发生。
     // 相位不是 Idle 时拒绝，不给“边跑边回退”留出任何竞态窗口。
-    let (phase, target) = {
+    let (phase, target, latest_user_index) = {
         let reduced = sess.reduced.lock().unwrap();
+        let latest_user_index = reduced.entries.iter().rposition(|entry| match entry {
+            smelt_core::acp_chat::AcpEntry::User(text) => {
+                !smelt_core::acp_chat::is_interrupt_marker(text)
+            }
+            smelt_core::acp_chat::AcpEntry::UserWithImages { text, .. } => {
+                !smelt_core::acp_chat::is_interrupt_marker(text)
+            }
+            _ => false,
+        });
         (
             reduced.phase,
             reduced.entries.get(entry_index).map(|entry| match entry {
@@ -1873,6 +1882,7 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
                 smelt_core::acp_chat::AcpEntry::UserWithImages { text, .. } => Some(text.clone()),
                 _ => None,
             }),
+            latest_user_index,
         )
     };
     if phase != smelt_core::daemon_state::DaemonPhase::Idle {
@@ -1883,6 +1893,9 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
     };
     if smelt_core::acp_chat::is_interrupt_marker(&text) {
         return Err("rewind target is not a user message");
+    }
+    if latest_user_index != Some(entry_index) {
+        return Err("rewind target is not the latest user message");
     }
     // 同文本消息靠序号区分：agent 的可分叉列表里取第 N 条同文本消息，N 必须与
     // 本地同文本计数一致。中断标记不是真消息，不参与计数。

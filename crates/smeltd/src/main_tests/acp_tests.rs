@@ -1710,23 +1710,32 @@ fn composer_restore_ack_action_clears_text_but_preserves_revision() {
 fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     let mut reduced = AcpSessionState::default();
     reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
-        version: 2,
+        version: 3,
         source: "pi_runtime_debug".into(),
         system_prompt: Some("exact prompt".into()),
         tools: Vec::new(),
-        model_call: Some(smelt_core::acp_session::RuntimeDebugModelCall {
+        model_calls: vec![smelt_core::acp_session::RuntimeDebugModelCall {
             sequence: 1,
-            source: "pi_before_provider_request".into(),
+            turn: Some(1),
+            compaction_sequence: None,
+            captured_at_ms: 1_725_000_000_000,
+            source: "pi_context_with_system".into(),
             model: smelt_core::acp_session::RuntimeDebugModel {
                 provider: Some("openai".into()),
                 id: Some("gpt-test".into()),
                 ..Default::default()
             },
+            request_config: smelt_core::acp_session::RuntimeDebugRequestConfig::default(),
             payload: serde_json::json!({
                 "messages": [{"role": "user", "content": "hello"}]
             }),
+            response: None,
+            response_captured_at_ms: None,
+            response_redacted_paths: None,
             redacted_paths: Vec::new(),
-        }),
+            ..smelt_core::acp_session::RuntimeDebugModelCall::default()
+        }],
+        ..smelt_core::acp_session::RuntimeDebug::default()
     };
     let sess = make_acp_session("acp-runtime-debug-wire", reduced);
     let (server, client) = UnixStream::pair().unwrap();
@@ -1748,7 +1757,7 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     reader.read_line(&mut changed).unwrap();
     let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
     assert_eq!(
-        changed["snapshot"]["runtime_debug"]["modelCall"]["payload"]["messages"][0]["content"],
+        changed["snapshot"]["runtime_debug"]["modelCalls"][0]["payload"]["messages"][0]["content"],
         "hello"
     );
 }
@@ -2913,7 +2922,19 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     assert_eq!(rejected.unwrap_err(), "rewind requires an idle session");
     session.reduced.lock().unwrap().phase = DaemonPhase::Idle;
 
-    // 5) 合法目标：第 2 条 "same"（下标 3），occurrence 必须算出 1。
+    // 5) 编辑重发只允许最后一条真实用户消息；旧消息应走独立的分叉对话功能。
+    let rejected = apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 0 },
+        &new_event_hub(),
+    );
+    assert_eq!(
+        rejected.unwrap_err(),
+        "rewind target is not the latest user message"
+    );
+    assert!(cmd_rx.try_recv().is_err());
+
+    // 6) 合法目标：第 2 条 "same"（下标 3），occurrence 必须算出 1。
     apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 3 },
