@@ -14,8 +14,10 @@ fn main() {
         .canonicalize()
         .expect("packages/pi-agent");
     let src = package.join("src");
+    let patches = package.join("patches");
     println!("cargo:rerun-if-changed={}", package.display());
     println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", patches.display());
     println!(
         "cargo:rerun-if-changed={}",
         package.join("package.json").display()
@@ -33,14 +35,11 @@ fn main() {
         .as_str()
         .expect("pi-agent package.json 缺少 version");
 
-    let mut ts_files = fs::read_dir(&src)
-        .expect("读取 packages/pi-agent/src")
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| is_runtime_ts(path))
-        .collect::<Vec<_>>();
+    let mut ts_files = collect_files(&src, &is_runtime_ts);
     ts_files.sort();
-    for path in &ts_files {
+    let mut patch_files = collect_files(&patches, &|path| path.is_file());
+    patch_files.sort();
+    for path in ts_files.iter().chain(&patch_files) {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
@@ -59,10 +58,13 @@ fn main() {
     code.push_str("const PI_AGENT_RUNTIME_FILES: &[(&str, &str)] = &[\n");
     code.push_str("    (\"package.json\", PI_AGENT_PACKAGE_JSON),\n");
     code.push_str("    (\"bun.lock\", PI_AGENT_BUN_LOCK),\n");
-    for path in &ts_files {
-        let name = path.file_name().expect("ts 文件名").to_string_lossy();
+    for path in ts_files.iter().chain(&patch_files) {
+        let relative = path
+            .strip_prefix(&package)
+            .expect("Pi runtime 文件必须位于 package 内");
         code.push_str(&format!(
-            "    (\"src/{name}\", include_str!(\"{}\")),\n",
+            "    ({:?}, include_str!(\"{}\")),\n",
+            rust_path(relative),
             rust_path(path)
         ));
     }
@@ -71,6 +73,23 @@ fn main() {
     let out =
         PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("pi_agent_runtime_files.rs");
     fs::write(&out, code).expect("写入 Pi 运行时嵌入表");
+}
+
+fn collect_files(dir: &Path, include: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in
+        fs::read_dir(dir).unwrap_or_else(|error| panic!("读取 {} 失败：{error}", dir.display()))
+    {
+        let path = entry
+            .unwrap_or_else(|error| panic!("枚举 {} 失败：{error}", dir.display()))
+            .path();
+        if path.is_dir() {
+            files.extend(collect_files(&path, include));
+        } else if include(&path) {
+            files.push(path);
+        }
+    }
+    files
 }
 
 fn is_runtime_ts(path: &Path) -> bool {

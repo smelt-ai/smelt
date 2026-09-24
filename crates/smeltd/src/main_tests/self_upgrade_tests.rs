@@ -70,3 +70,24 @@ fn predecessor_exit_times_out() {
         "应约 100ms 超时返回，实际 {elapsed:?}"
     );
 }
+
+/// 活连接挡住 headless 自升级。不能用「最近鉴权过」这种会过期的时间戳：
+/// ACP 对话连着看很久也不再走 desktop 鉴权 / 终端 open，过期就会把正在跑的
+/// 回合当成没人看。
+#[test]
+fn holding_a_viewer_lease_means_someone_is_watching() {
+    let _lease = ViewerLease::acquire();
+    assert!(viewer_is_present(), "控制连接还在就必须当成有人在看");
+}
+
+#[test]
+fn nested_viewer_leases_keep_presence_until_the_last_drop() {
+    let outer = ViewerLease::acquire();
+    let inner = ViewerLease::acquire();
+    drop(inner);
+    assert!(
+        viewer_is_present(),
+        "还有一条观看连接时不能放行 headless 自升级"
+    );
+    drop(outer);
+}

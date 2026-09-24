@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,62 @@ describe("Pi RPC stdio entry", () => {
 				throw new Error("Pi RPC child did not exit after stdin closed");
 			}),
 		]);
+	});
+
+	test("binds extensions exactly once after a successful new_session", async () => {
+		const agentDir = await mkdtemp(join(tmpdir(), "smelt-pi-rebind-test-"));
+		tempDirs.push(agentDir);
+		const startsFile = join(agentDir, "session-starts.jsonl");
+		const extensionFile = join(agentDir, "count-session-starts.ts");
+		await writeFile(
+			extensionFile,
+			`import { appendFileSync } from "node:fs";\n` +
+				`export default function (pi) {\n` +
+				`  pi.on("session_start", (event) => {\n` +
+				`    appendFileSync(${JSON.stringify(startsFile)}, JSON.stringify(event) + "\\n");\n` +
+				`  });\n` +
+				`}\n`,
+		);
+
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"src/main.ts",
+				"--offline",
+				"--no-approve",
+				"--extension",
+				extensionFile,
+			],
+			{
+				cwd: join(import.meta.dir, ".."),
+				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		children.push(child);
+
+		child.stdin.write(`${JSON.stringify({ id: "initial", type: "get_state" })}\n`);
+		await child.stdin.flush();
+		expect(JSON.parse(await readLine(child.stdout))).toMatchObject({
+			id: "initial",
+			success: true,
+		});
+
+		child.stdin.write(`${JSON.stringify({ id: "new", type: "new_session" })}\n`);
+		await child.stdin.flush();
+		expect(JSON.parse(await readLine(child.stdout))).toMatchObject({
+			id: "new",
+			success: true,
+		});
+
+		const starts = (await readFile(startsFile, "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { reason: string });
+		expect(starts).toHaveLength(2);
+		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
 	});
 });
 

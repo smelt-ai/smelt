@@ -30,32 +30,21 @@ if [[ ! -f "$SOURCE/Contents/Info.plist" ]]; then
 fi
 
 target_name="$(basename "$TARGET" .app)"
-stage="/Applications/.${target_name}.smelt-local-$(date +%s)-$$.app"
+transaction_dir="$(mktemp -d "/Applications/.${target_name}.smelt-local.XXXXXX")"
+stage="$transaction_dir/${target_name}.app"
 swapped=false
 cleanup_uninstalled_stage() {
   status=$?
   trap - EXIT INT TERM
-  if [[ "$swapped" == false && -d "$stage" ]]; then
-    rm -rf -- "$stage"
+  if [[ "$swapped" == false && -d "$transaction_dir" ]]; then
+    rm -rf -- "$transaction_dir"
   fi
   exit "$status"
 }
 trap cleanup_uninstalled_stage EXIT INT TERM
 
-# 清理之前原子交换留下、且已没有任何进程引用的旧 App。lsof 不可用或探测
-# 出错时宁可保留；路径还要再次匹配固定前缀，绝不扩大删除范围。
-if command -v lsof >/dev/null 2>&1; then
-  for old in "/Applications/.${target_name}.smelt-local-"*.app; do
-    [[ -d "$old" ]] || continue
-    case "$old" in
-      "/Applications/.${target_name}.smelt-local-"*.app) ;;
-      *) continue ;;
-    esac
-    if ! lsof +D "$old" >/dev/null 2>&1; then
-      rm -rf -- "$old"
-    fi
-  done
-fi
+# 不扫描或删除历史 `.smelt-local.*` 目录：路径前缀不是事务所有权证明，并发安装
+# 时还可能误删另一个实例。当前进程只清理 mktemp 排他创建的 `$transaction_dir`。
 
 /usr/bin/ditto "$SOURCE" "$stage"
 
@@ -76,11 +65,13 @@ if renamex_np(left, right, RENAME_SWAP) != 0:
     raise OSError(error, os.strerror(error), sys.argv[2])
 PY
   swapped=true
-  # 交换后 stage 是完整旧包。运行中的旧 App 可能仍映射它，保留到下一次安装
-  # 确认无进程引用后再清理。
-  echo "· 旧 App 暂存于 ${stage}（退出旧进程后自动在下次安装清理）"
+  # 交换后 stage 是完整旧包。没有事务登记与可证明安全的 GC 前必须保留，不能按
+  # 路径前缀猜测删除。
+  echo "· 旧 App 暂存于 ${stage}（确认无进程引用后可人工清理）"
 else
   mv "$stage" "$TARGET"
   swapped=true
+  # App 已提交后，空事务目录清理失败不能把成功安装重新报告成失败。
+  rmdir "$transaction_dir" || echo "⚠ 无法清理空事务目录：$transaction_dir" >&2
 fi
 echo "✅ 已原子安装 $TARGET"

@@ -2839,16 +2839,11 @@ struct Workspace {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateInstallTrigger {
-    Launch,
     User,
     Quit,
 }
 
 impl UpdateInstallTrigger {
-    fn retries_while_busy(self) -> bool {
-        !matches!(self, Self::Quit)
-    }
-
     fn relaunches(self) -> bool {
         !matches!(self, Self::Quit)
     }
@@ -4542,6 +4537,15 @@ fn main() {
         std::process::exit(code);
     }
     smelt_core::sqlite_state::enable_sqlite_state();
+    // 整个 GUI 生命周期持共享 lease。installer 只有等所有 GUI 退出并拿到独占 lease
+    // 后才可交换 Bundle；若交换已经开始，新 GUI fail-fast，避免从旧 vnode 启动。
+    let _app_runtime_lease = match updater::acquire_app_runtime_lease() {
+        Ok(lease) => lease,
+        Err(error) => {
+            eprintln!("Smelt 正在更新，暂时无法启动：{error:#}");
+            std::process::exit(75);
+        }
+    };
     // GUI 启动失败时用户通常看不到终端输出；把原始 panic 先落到统一日志，
     // 尤其能保留 GPUI 清理阶段二次 panic 之前的第一条错误。
     smelt_core::app_log::install_panic_hook("smelt");
@@ -4740,15 +4744,19 @@ fn main() {
         // 受管 bun 由 Smelt 代用户升级（启动时后台同步锁定版本）。下载约 25MB，
         // 不能挡首帧；与 smeltd 并发时靠 runtime 目录锁串行。首次就位后要重建 GUI
         // 的插件清单：refresh_once 可能已经在“没有 bun”的窗口里把脚本 tab 跳过了。
-        let had_managed_bun = smelt_core::acp_conn::managed_bun_if_ready().is_some();
+        let had_managed_bun =
+            smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
         let bun_sync = cx.background_executor().spawn(async move {
-            smelt_core::acp_conn::sync_managed_bun(&|message| {
+            smelt_core::managed_runtime::sync_managed_bun(&|message| {
                 smelt_core::app_log::info("bun", message)
             })
         });
         cx.spawn(async move |cx| match bun_sync.await {
-            Ok(path) => {
-                smelt_core::app_log::info("bun", &format!("受管 bun 已就绪：{}", path.display()));
+            Ok(runtime) => {
+                smelt_core::app_log::info(
+                    "bun",
+                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
+                );
                 if !had_managed_bun {
                     cx.update(|cx| {
                         cx.set_global(settings::PluginEnablementState::load());

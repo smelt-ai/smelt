@@ -12,7 +12,6 @@ impl Workspace {
                     | updater::UpdateStatus::Downloading { .. }
                     | updater::UpdateStatus::Installing { .. }
                     | updater::UpdateStatus::Applying { .. }
-                    | updater::UpdateStatus::RestartRequired { .. }
             )
     }
 
@@ -267,10 +266,16 @@ impl Workspace {
                 Ok(Some(update)) => {
                     smelt_core::app_log::info(
                         "updater",
-                        &format!("恢复待安装更新 {}，接入统一安装流程", update.version),
+                        &format!("恢复待安装更新 {}，等待用户显式重试", update.version),
                     );
-                    this.update_status = updater::UpdateStatus::ReadyToInstall(update.clone());
-                    this.start_update_install(update, UpdateInstallTrigger::Launch, cx);
+                    // helper 的持续性失败不能演变成“拉起旧 GUI → 自动退出 → 再失败”循环。
+                    // 恢复只呈现 Ready 作业，由用户明确点击后才创建新 attempt。
+                    this.update_status = if update.installer_failed() {
+                        updater::UpdateStatus::InstallFailed(update)
+                    } else {
+                        updater::UpdateStatus::ReadyToInstall(update)
+                    };
+                    cx.notify();
                 }
                 Ok(None) => {
                     this.update_status = updater::UpdateStatus::Idle;
@@ -297,7 +302,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let version = update.version.clone();
-
         self.update_install_generation = self.update_install_generation.wrapping_add(1);
         let generation = self.update_install_generation;
         self.update_status = updater::UpdateStatus::Applying {
@@ -306,235 +310,50 @@ impl Workspace {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let mut wait_started_at: Option<std::time::Instant> = None;
-            loop {
-                let update_for_attempt = update.clone();
-                let result =
-                    cx.background_executor()
-                        .spawn(async move {
-                            terminal::install_app_preserving_sessions(&update_for_attempt)
-                        })
-                        .await;
-
-                match result {
-                    Ok(terminal::AppInstallOutcome::Installed) => {
-                        let current = this.update(cx, |this, _cx| {
-                            this.update_install_generation == generation
-                                && matches!(
-                                    &this.update_status,
-                                    updater::UpdateStatus::Applying {
-                                        version: current_version
-                                    } if current_version == &version
-                                )
-                        });
-                        if !matches!(current, Ok(true)) {
-                            return;
-                        }
-                        if trigger.relaunches() {
-                            match updater::relaunch() {
-                                Ok(()) => {
-                                    cx.update(request_app_quit);
-                                }
-                                Err(error) => {
-                                    smelt_core::app_log::error(
-                                        "updater",
-                                        &format!("更新已安装，但自动重启失败：{error:#}"),
-                                    );
-                                    let _ = this.update(cx, |this, cx| {
-                                        this.update_status =
-                                            updater::UpdateStatus::RestartRequired {
-                                                version: version.clone(),
-                                            };
-                                        cx.notify();
-                                    });
-                                }
-                            }
-                        } else {
-                            cx.update(request_app_quit);
-                        }
-                        return;
-                    }
-                    Ok(terminal::AppInstallOutcome::UpdateInvalidated) => {
-                        let handled = this.update(cx, |this, cx| {
-                            if this.update_install_generation != generation
-                                || !matches!(
-                                    &this.update_status,
-                                    updater::UpdateStatus::Applying {
-                                        version: current_version
-                                    } if current_version == &version
-                                )
-                            {
-                                return false;
-                            }
-                            match trigger {
-                                UpdateInstallTrigger::Launch => {
-                                    this.update_status = updater::UpdateStatus::Idle;
-                                    this.check_for_update(true, cx);
-                                }
-                                UpdateInstallTrigger::User => {
-                                    this.update_status = updater::UpdateStatus::Failed(
-                                        updater::UpdateFailure::Download,
-                                    );
-                                    cx.notify();
-                                }
-                                UpdateInstallTrigger::Quit => {
-                                    this.update_status = updater::UpdateStatus::Idle;
-                                    cx.notify();
-                                }
-                            }
-                            true
-                        });
-                        if matches!(handled, Ok(true))
-                            && matches!(trigger, UpdateInstallTrigger::Quit)
-                        {
-                            cx.update(request_app_quit);
-                        }
-                        return;
-                    }
-                    Ok(terminal::AppInstallOutcome::WaitingForSafeHandoff) => {
-                        if !trigger.retries_while_busy() {
-                            smelt_core::app_log::info(
-                                "updater",
-                                "退出安装遇到 ACP 回合占用，保留更新作业供下次启动恢复",
-                            );
-                            let _ = this.update(cx, |this, cx| {
-                                if this.update_install_generation == generation {
-                                    this.update_status =
-                                        updater::UpdateStatus::ReadyToInstall(update.clone());
-                                    cx.notify();
-                                }
-                            });
-                            cx.update(request_app_quit);
-                            return;
-                        }
-                        let waiting = this.update(cx, |this, cx| {
-                            if this.update_install_generation != generation
-                                || !matches!(
-                                    &this.update_status,
-                                    updater::UpdateStatus::Applying {
-                                        version: current_version
-                                    } if current_version == &version
-                                )
-                            {
-                                return false;
-                            }
-                            this.update_status =
-                                updater::UpdateStatus::WaitingForSafeHandoff(update.clone());
-                            cx.notify();
-                            true
-                        });
-                        if !matches!(waiting, Ok(true)) {
-                            return;
-                        }
-
-                        wait_started_at.get_or_insert_with(std::time::Instant::now);
-                        cx.background_executor()
-                            .timer(updater::SAFE_HANDOFF_RETRY_INTERVAL)
-                            .await;
-
-                        if wait_started_at.is_some_and(|started| {
-                            started.elapsed() >= updater::SAFE_HANDOFF_WAIT_TIMEOUT
-                        }) {
-                            let gave_up = this.update(cx, |this, cx| {
-                                let is_current_wait = matches!(
-                                    &this.update_status,
-                                    updater::UpdateStatus::WaitingForSafeHandoff(current)
-                                        if this.update_install_generation == generation
-                                            && current == &update
-                                );
-                                if !is_current_wait {
-                                    return false;
-                                }
-                                this.update_status =
-                                    updater::UpdateStatus::ReadyToInstall(update.clone());
-                                cx.notify();
-                                true
-                            });
-                            if matches!(gave_up, Ok(true)) {
-                                smelt_core::app_log::info(
-                                    "updater",
-                                    &format!(
-                                        "等待 ACP 回合结束安装 {version} 超过 {} 秒，\
-                                         暂停自动重试，更新作业仍可直接重试",
-                                        updater::SAFE_HANDOFF_WAIT_TIMEOUT.as_secs()
-                                    ),
-                                );
-                            }
-                            return;
-                        }
-
-                        let retry = this.update(cx, |this, cx| {
-                            let is_current_wait = matches!(
+            let relaunch = trigger.relaunches();
+            let update_for_installer = update.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { updater::launch_installer(&update_for_installer, relaunch) })
+                .await;
+            match result {
+                Ok(ticket) => {
+                    smelt_core::app_log::info(
+                        "updater",
+                        &format!(
+                            "installer 已接管更新 {version}（job={} attempt={}），等待 GUI 退出",
+                            ticket.update_id, ticket.attempt_id
+                        ),
+                    );
+                    // helper 已成功派生并持有精确 attempt。此后当前 GUI 不能继续运行：
+                    // helper 只会在本进程完全退出后提交原子交换。
+                    cx.update(request_app_quit);
+                }
+                Err(error) => {
+                    smelt_core::app_log::error(
+                        "updater",
+                        &format!("启动 installer 失败，当前 App 未替换：{error:#}"),
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        if this.update_install_generation == generation
+                            && matches!(
                                 &this.update_status,
-                                updater::UpdateStatus::WaitingForSafeHandoff(current)
-                                    if this.update_install_generation == generation
-                                        && current == &update
-                            );
-                            if !is_current_wait {
-                                return false;
-                            }
-                            this.update_status = updater::UpdateStatus::Applying {
-                                version: version.clone(),
-                            };
+                                updater::UpdateStatus::Applying {
+                                    version: current_version
+                                } if current_version == &version
+                            )
+                        {
+                            this.update_status = updater::UpdateStatus::InstallFailed(update);
                             cx.notify();
-                            true
-                        });
-                        if !matches!(retry, Ok(true)) {
-                            return;
                         }
-                    }
-                    Err(error) => {
-                        smelt_core::app_log::error(
-                            "updater",
-                            &format!("安装更新 {version} 失败：{error:#}"),
-                        );
-                        let _ = this.update(cx, |this, cx| {
-                            if this.update_install_generation == generation
-                                && matches!(
-                                    &this.update_status,
-                                    updater::UpdateStatus::Applying {
-                                        version: current_version
-                                    } if current_version == &version
-                                )
-                            {
-                                this.update_status =
-                                    updater::UpdateStatus::InstallFailed(update.clone());
-                                cx.notify();
-                            }
-                        });
-                        if matches!(trigger, UpdateInstallTrigger::Quit) {
-                            cx.update(request_app_quit);
-                        }
-                        return;
+                    });
+                    if matches!(trigger, UpdateInstallTrigger::Quit) {
+                        cx.update(request_app_quit);
                     }
                 }
             }
         })
         .detach();
-    }
-
-    /// 只在两次单次 handoff 尝试之间取消；已经进入 Applying 的原子落盘不能中途打断。
-    pub(crate) fn cancel_update_install_wait(&mut self, cx: &mut Context<Self>) {
-        let updater::UpdateStatus::WaitingForSafeHandoff(update) = self.update_status.clone()
-        else {
-            return;
-        };
-        self.update_install_generation = self.update_install_generation.wrapping_add(1);
-        self.update_status = updater::UpdateStatus::ReadyToInstall(update);
-        cx.notify();
-    }
-
-    pub(crate) fn retry_update_relaunch(&mut self, cx: &mut Context<Self>) {
-        let updater::UpdateStatus::RestartRequired { version } = self.update_status.clone() else {
-            return;
-        };
-        match updater::relaunch() {
-            Ok(()) => request_app_quit(cx),
-            Err(error) => smelt_core::app_log::error(
-                "updater",
-                &format!("再次尝试重启更新 {version} 失败：{error:#}"),
-            ),
-        }
     }
 
     /// 后台查一次守护是否落后于磁盘上的 smeltd 二进制，决定要不要在设置页/齿轮上

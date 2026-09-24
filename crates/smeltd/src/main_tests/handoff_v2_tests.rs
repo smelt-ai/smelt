@@ -576,10 +576,10 @@ fn import_abandon_is_not_takeover() {
     let _ = std::fs::remove_file(&sock_path);
 }
 
-/// ACP 活体 drill：hosted 会话正跑 tool call（Thinking + turn 已开始 + 未完成
-/// tool + prompt 闸门置位）时走完整 v2 回环。锁三件事：
-/// 1. blockers 放行（hosted 永不拦——SDK future 留在宿主进程里）；
-/// 2. 会话带 mid-turn 状态过去（相位/turn 标记/tool 记录原样）；
+/// ACP 活体灾备 drill：hosted 会话正跑 tool call（Thinking + turn 已开始 + 未完成
+/// tool + prompt 闸门置位）时直接演练完整 v2 回环。锁三件事：
+/// 1. 正常升级 blockers 会拒绝主动切换；
+/// 2. 底层 handoff 原语仍能把 mid-turn 状态带过去（相位/turn 标记/tool 记录原样）；
 /// 3. 恢复后控制通道双向活着：daemon→host 的 Refresh 能到，host→daemon 的
 ///    快照能被 drain merge（revision 落盘）。
 ///
@@ -605,15 +605,17 @@ fn import_loopback_restores_hosted_acp_mid_turn() {
     });
     let (slot, _) =
         acp_sessions.reserve_with("acp-drill", || make_acp_session_value("acp-drill", running));
-    // prompt 闸门也置位：direct 会话这就是 blocker，hosted 必须放行。
+    // prompt 闸门也置位：正常升级必须等待回合结束；下面直接调用 handoff
+    // 原语，验证异常接管/灾备时仍能恢复 mid-turn。
     slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
     let (hosted, mut peer) = acp_runtime_host::HostedConversationHandle::test_stub();
     *slot.value.hosted_handle.lock().unwrap() = Some(hosted);
 
-    // 1. 门控：hosted 活跃回合不能阻塞升级。
-    assert!(
-        acp_upgrade_blockers(&acp_sessions).is_empty(),
-        "hosted mid-turn 必须放行升级"
+    // 1. 门控：恢复能力不能成为正常升级主动切断回合的理由。
+    assert_eq!(
+        acp_upgrade_blockers(&acp_sessions),
+        vec!["acp-drill"],
+        "hosted mid-turn 必须阻止正常升级"
     );
 
     // 2. 回环：终端空表，只带 ACP。

@@ -110,7 +110,45 @@ except Exception:
 sys.exit(0)
 PY
 then
-  mv -f "$NEXT" "$MANAGED"
+  # 套接字连不上不等于进程已经退出。文件仍被映射就不要覆盖。
+  claim_status=0
+  python3 - "$NEXT" "$MANAGED" <<'PY' || claim_status=$?
+import ctypes, ctypes.util, os, sys
+
+next_path, managed = sys.argv[1], sys.argv[2]
+
+def mapped(path: str) -> bool:
+    if not os.path.exists(path):
+        return False
+    lib = ctypes.CDLL(ctypes.util.find_library("c") or "/usr/lib/libSystem.B.dylib")
+    fn = getattr(lib, "proc_listpidspath", None)
+    if fn is None:
+        return False
+    fn.argtypes = [
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p,
+        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int,
+    ]
+    fn.restype = ctypes.c_int
+    encoded = os.fsencode(path)
+    hint = fn(1, 0, encoded, 0, None, 0)
+    if hint <= 0:
+        return False
+    buf = ctypes.create_string_buffer(hint)
+    return fn(1, 0, encoded, 0, buf, hint) > 0
+
+if mapped(managed):
+    sys.exit(75)
+os.replace(next_path, managed)
+PY
+  if [[ "$claim_status" -eq 75 ]]; then
+    cp -f "$NEXT" "${MANAGED_DIR}/smeltd.next"
+    echo "· 守护仍被映射，未覆盖 $MANAGED，已暂存 ${MANAGED_DIR}/smeltd.next" >&2
+    exit 0
+  fi
+  if [[ "$claim_status" -ne 0 ]]; then
+    echo "✗ 写入 $MANAGED 失败（status=$claim_status）" >&2
+    exit "$claim_status"
+  fi
   if [[ "$BACKGROUND_ON_BUSY" == true ]]; then
     rm -f -- "$PENDING_MARKER"
   fi

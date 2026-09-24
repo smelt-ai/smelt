@@ -332,21 +332,22 @@ fn finalize_staged_handoff_executable() {
     );
 }
 
-/// 返回可用于派生守护子进程的可执行文件。参数化一层是为了覆盖 macOS 上
+/// 返回 `current_exe()` 这条路径现在指向的文件。参数化一层是为了覆盖 macOS 上
 /// `current_exe()` 在文件被 rename 后仍返回旧启动路径的行为。
+///
+/// 路径还在不等于映像还是启动时那一份：原地替换（rename 覆盖 `smeltd`）后路径
+/// 仍在，inode 已经换了。会话宿主不能走这里，必须用 [`session_host_executable`]。
 fn daemon_executable_from_current(
     current: std::path::PathBuf,
 ) -> std::io::Result<std::path::PathBuf> {
-    // `current_exe()` 返回的是启动时使用的路径。macOS 上进程从暂存文件 exec 后，
-    // 安装器再把暂存文件原子 rename 成 `smeltd`，这个旧路径会一直保留到进程退出。
-    // 暂存文件还在时必须优先使用它，避免交接窗口里误派生旧的稳定版本。
+    // 路径没了（rename 掉 smeltd.next、删掉历史硬链、测试误伤）时，回退到同目录的
+    // 正式 `smeltd`，不能把「文件不存在」抛给调用方。
     if current.is_file() {
         return Ok(current);
     }
 
-    let is_staged_daemon = is_staged_daemon_executable(&current);
     let stable = current.with_file_name("smeltd");
-    if is_staged_daemon && stable.is_file() {
+    if stable.is_file() {
         return Ok(stable);
     }
 
@@ -362,6 +363,70 @@ fn daemon_executable_from_current(
 
 fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
     daemon_executable_from_current(std::env::current_exe()?)
+}
+
+/// 启动时 `current_exe()` 的 inode。安装协议保证这条路径在进程活着时不会被换成
+/// 另一份文件；spawn 前再对一次，对不上就拒绝启动，而不是去跑目录里的新文件。
+struct PinnedDaemonInode {
+    dev: u64,
+    ino: u64,
+}
+
+static PINNED_DAEMON_INODE: OnceLock<PinnedDaemonInode> = OnceLock::new();
+
+fn pin_running_daemon_image() {
+    let Ok(path) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    use std::os::unix::fs::MetadataExt;
+    let _ = PINNED_DAEMON_INODE.set(PinnedDaemonInode {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    });
+}
+
+fn path_has_inode(path: &std::path::Path, dev: u64, ino: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    use std::os::unix::fs::MetadataExt;
+    meta.dev() == dev && meta.ino() == ino
+}
+
+fn session_host_executable_from(
+    current: std::path::PathBuf,
+    pinned: Option<(u64, u64)>,
+) -> std::io::Result<std::path::PathBuf> {
+    let Some((dev, ino)) = pinned else {
+        return Ok(current);
+    };
+    if path_has_inode(&current, dev, ino) {
+        return Ok(current);
+    }
+    Err(std::io::Error::other(format!(
+        "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
+        current.display()
+    )))
+}
+
+/// 会话宿主必须和本进程是同一个 inode。路径被换掉时直接失败，不能 exec 新文件，
+/// 也不能另拷一份再跑——那份拷贝的 `current_exe()` 和签名都不再是正在映射的映像。
+fn session_host_executable() -> std::io::Result<std::path::PathBuf> {
+    let current = daemon_executable_path()?;
+    let pinned = PINNED_DAEMON_INODE
+        .get()
+        .map(|pinned| (pinned.dev, pinned.ino));
+    session_host_executable_from(current, pinned)
+}
+
+/// 已 stage、尚未应用到运行中守护的候选映像。daemon 在跑时安装只写这个文件，
+/// 不覆盖正在 exec 的 `smeltd`，所以 `current_exe()` 派生的 ACP host 永远跟主进程同版。
+fn staged_successor_executable(running: &std::path::Path) -> Option<std::path::PathBuf> {
+    let next = running.with_file_name("smeltd.next");
+    (next.is_file() && next != running).then_some(next)
 }
 
 /// 进程指纹钉死（启动时调一次）：env 传过来的优先（handoff successor 的候选
@@ -1960,6 +2025,7 @@ fn main() {
     // 在线升级先 exec 已验证存在的暂存映像；候选映像一旦真的启动，就在任何线程和
     // 状态初始化之前把自身提升到正式路径，再以正式名继续同一份 handoff。
     finalize_staged_handoff_executable();
+    pin_running_daemon_image();
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
     // 先装 panic hook，再记一条启动事件——守护本身没有终端可看，崩溃/异常全靠这份
@@ -2016,7 +2082,6 @@ fn main() {
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘——StageDiskOnly
     // 后磁盘是新的、进程还是老的，重哈希会拿错插件集（与 -67034 同一类耦合）。
     let daemon_fingerprint = pinned_daemon_fingerprint(handoff_plugin_daemon_fingerprint);
-    let _ = PINNED_DAEMON_FINGERPRINT.set(daemon_fingerprint.clone());
     if let Some(sock_fd) = import_sock {
         import_main(sock_fd, daemon_fingerprint);
         return;
@@ -2261,13 +2326,14 @@ fn wait_for_predecessor_exit(sock: &UnixStream, timeout: Duration) {
     }
 }
 
-/// headless 空闲自升级：GUI 关着时磁盘新了没人触发 upgrade，这里兜底。
+/// headless 空闲自升级：没人看时，把已 stage 的 `smeltd.next` 应用到运行中的守护。
 /// 每 60s 看一次（与 GUI 的 watch 同频，首轮延迟 60s，把先手让给 GUI）。
 /// 门控：
 /// - 指纹未知（None）不升：证明不了自己旧，别乱动。
-/// - 5 分钟内有 viewer 活跃（desktop 鉴权 / 终端 open/watch）不升：GUI 活着，
-///   它有空闲门控（agent 忙不闪终端），让它拥有升级时机；我们只管“没人看”
-///   的情况。
+/// - 有活着的观看连接（桌面 event subscribe / 终端 open·watch / ACP open·watch）
+///   不升：GUI 活着，它有空闲门控（agent 忙不闪终端），让它拥有升级时机。
+/// - 只 exec `smeltd.next`。正在跑的 `smeltd` 在升级完成前不准被替换，ACP host
+///   从 `current_exe()` 派生，必须跟主进程同版。
 /// - ACP/peer 忙：不自判，直接发 upgrade op 让 handler 回 busy（单一数据源），
 ///   等下一轮。
 /// 发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
@@ -2282,12 +2348,14 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
             loop {
                 std::thread::sleep(Duration::from_secs(60));
                 // 有人在看就让 GUI 定点：它的空闲门控比我们懂用户。
-                if protocol::viewer_seen_within(Duration::from_secs(5 * 60)) {
+                if protocol::viewer_is_present() {
                     continue;
                 }
-                let target = match daemon_executable_path() {
-                    Ok(path) => path,
-                    Err(_) => continue,
+                let Ok(current) = daemon_executable_path() else {
+                    continue;
+                };
+                let Some(target) = staged_successor_executable(&current) else {
+                    continue;
                 };
                 let disk = match smelt_plugin_host::executable_fingerprint(&target) {
                     Ok(fingerprint) => fingerprint,
@@ -2296,7 +2364,7 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
                 if disk == pinned {
                     continue;
                 }
-                dlog("headless 自升级：磁盘有新版且 GUI 不在，尝试 upgrade");
+                dlog("headless 自升级：已 stage 新映像且没有观看连接，尝试 upgrade");
                 match request_self_upgrade(&target) {
                     SelfUpgradeOutcome::Upgraded => return, // COMMIT 后进程即退，defensive
                     SelfUpgradeOutcome::Busy(reason) => {
@@ -2361,31 +2429,6 @@ fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
     classify_self_upgrade_reply(&reply)
 }
 
-/// 本进程运行映像的指纹。启动时钉死一次，`spawn` session host 前要拿它跟磁盘
-/// 上的二进制比对——两者不一致时 spawn 出来的 host 会是另一个版本，双方的快照
-/// schema 未必兼容（`acp_runtime_host` 的镜像 reader 会因此断开）。
-static PINNED_DAEMON_FINGERPRINT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-
-/// 磁盘上的守护二进制是否已经跟本进程运行的映像不是同一份。
-///
-/// `make install` / 在线更新会先把新二进制 stage 到磁盘、等守护空闲再 handoff；
-/// 这个窗口里新 spawn 的 session host 用的是磁盘上的新版，而主 daemon 还是旧版。
-pub(crate) fn daemon_image_is_stale() -> Option<std::path::PathBuf> {
-    let pinned = PINNED_DAEMON_FINGERPRINT.get()?.as_deref()?;
-    let target = daemon_executable_path().ok()?;
-    let disk = smelt_plugin_host::executable_fingerprint(&target).ok()?;
-    (disk != pinned).then_some(target)
-}
-
-/// 对自己发一次 upgrade（供 `acp_host` 在开新会话前消除版本错配用）。
-pub(crate) fn upgrade_self_for_stale_image(target: &std::path::Path) -> String {
-    match request_self_upgrade(target) {
-        SelfUpgradeOutcome::Upgraded => "已升级".to_string(),
-        SelfUpgradeOutcome::Busy(reason) => format!("busy：{reason}"),
-        SelfUpgradeOutcome::Failed(reason) => format!("失败：{reason}"),
-    }
-}
-
 /// 服务主循环：远端自愈→bun→插件→accept（+macOS 菜单栏主线程编排）。
 /// 正常启动与 v2 import 共用；import 在 COMMIT 之后调这里。
 /// `handoff_sock`：Some=刚交接过来，插件启动推迟到 predecessor EOF 之后；
@@ -2433,12 +2476,15 @@ fn run_serve_loop(
     // 受管 bun 既是 ACP 适配器的运行时，也是脚本插件的运行时。首次下载完成时插件集
     // 可能已经按"没有 bun"起过一轮了，所以下完要把它重新拉起来。
     std::thread::spawn(|| {
-        let had_bun = smelt_core::acp_conn::managed_bun_if_ready().is_some();
-        match smelt_core::acp_conn::sync_managed_bun(&|message| {
+        let had_bun = smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
+        match smelt_core::managed_runtime::sync_managed_bun(&|message| {
             smelt_core::app_log::info("bun", message)
         }) {
-            Ok(path) => {
-                smelt_core::app_log::info("bun", &format!("受管 bun 已就绪：{}", path.display()));
+            Ok(runtime) => {
+                smelt_core::app_log::info(
+                    "bun",
+                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
+                );
                 if !had_bun {
                     plugin_runtime::reload_for_runtime_change();
                 }
@@ -2466,8 +2512,8 @@ fn run_serve_loop(
         }
     }
 
-    // headless 空闲自升级：GUI 关着时磁盘新了没人触发 upgrade，这里兜底。
-    // GUI 活着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
+    // headless 空闲自升级：没有观看连接时磁盘新了没人触发 upgrade，这里兜底。
+    // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
     spawn_headless_self_upgrade(daemon_fingerprint.clone());
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来

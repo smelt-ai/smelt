@@ -1,28 +1,71 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isElicitationInput } from "./elicitation.ts";
+import type { ExtensionAPI, SourceInfo } from "@earendil-works/pi-coding-agent";
+import {
+	SMELT_ELICITATION_EXTENSION_PATH,
+	SMELT_ELICITATION_TOOL_NAME,
+} from "./elicitation.ts";
 
 /** Rust 端据此识别 Smelt 自己的权限请求，不会误吞用户 Extension 的 confirm。 */
 export const SMELT_PERMISSION_TITLE = "smelt.permission.v1";
 
-const SAFE_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const READ_ONLY_BUILTIN_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
-/** 内置有副作用的工具即使参数碰巧像表单，也走审批，不能当成选择题放行。 */
-const MUTATING_BUILTIN_TOOLS = new Set(["bash", "powershell", "write", "edit"]);
+export type ToolIdentity = {
+	name: string;
+	sourceInfo: SourceInfo;
+};
 
-export function toolNeedsSmeltApproval(toolName: string, input?: unknown): boolean {
-	if (SAFE_TOOLS.has(toolName)) {
-		return false;
-	}
-	if (MUTATING_BUILTIN_TOOLS.has(toolName)) {
+function isActualBuiltin(tool: ToolIdentity): boolean {
+	return (
+		tool.sourceInfo.source === "builtin" &&
+		tool.sourceInfo.path === `<builtin:${tool.name}>`
+	);
+}
+
+function isSmeltElicitationTool(tool: ToolIdentity): boolean {
+	return (
+		tool.name === SMELT_ELICITATION_TOOL_NAME &&
+		tool.sourceInfo.source === "inline" &&
+		tool.sourceInfo.path === SMELT_ELICITATION_EXTENSION_PATH
+	);
+}
+
+export function isReservedSmeltToolConflict(
+	toolName: string,
+	tool: ToolIdentity | undefined,
+): boolean {
+	return toolName.startsWith("smelt_") && (!tool || !isSmeltElicitationTool(tool));
+}
+
+/** 只有 registry 证明身份的 Pi 内建只读工具和 Smelt 选择题免审批。其余一律 fail closed。 */
+export function toolNeedsSmeltApproval(tool: ToolIdentity | undefined, _input?: unknown): boolean {
+	if (!tool) {
 		return true;
 	}
-	// 选择题由宿主自带（也可能是用户同名工具）。参数像选择题就放行，避免审批框挡住选择卡。
-	return !isElicitationInput(input);
+	if (READ_ONLY_BUILTIN_TOOLS.has(tool.name) && isActualBuiltin(tool)) {
+		return false;
+	}
+	return !isSmeltElicitationTool(tool);
+}
+
+function resolveToolIdentity(pi: ExtensionAPI, toolName: string): ToolIdentity | undefined {
+	try {
+		const tool = pi.getAllTools().find((candidate) => candidate.name === toolName);
+		return tool ? { name: tool.name, sourceInfo: tool.sourceInfo } : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export default function smeltPermissionExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, context) => {
-		if (!toolNeedsSmeltApproval(event.toolName, event.input)) return;
+		const tool = resolveToolIdentity(pi, event.toolName);
+		if (isReservedSmeltToolConflict(event.toolName, tool)) {
+			return {
+				block: true,
+				reason: `工具名 ${event.toolName} 属于 Smelt 保留命名空间，但实际来源不是 Smelt`,
+			};
+		}
+		if (!toolNeedsSmeltApproval(tool, event.input)) return;
 
 		const approved = await context.ui.confirm(
 			SMELT_PERMISSION_TITLE,

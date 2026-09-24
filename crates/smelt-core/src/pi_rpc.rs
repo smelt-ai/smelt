@@ -22,12 +22,16 @@ use crate::acp_conn::{
     ElicitField, ElicitFieldKind, ElicitOption, ElicitationResponder, ModelProviderGroup,
     ModelState, PermissionResponder, ReadyKind, SessionConfigState,
 };
-use crate::acp_session::{ApprovalDetailsView, PermissionOptionKindView, PermissionOptionView};
+use crate::acp_session::{
+    ApprovalDetailsView, PermissionOptionKindView, PermissionOptionView, RuntimeDebug,
+    RuntimeDebugModelCall,
+};
 use crate::agent_kind::{ConversationLaunchSpec, SMELT_PI_AGENT_COMMAND};
 
 const PI_RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
+const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 
 #[derive(Clone, Debug)]
 struct PiModel {
@@ -64,6 +68,9 @@ struct PiState {
     steer_request_ids: HashSet<String>,
     follow_up_request_ids: HashSet<String>,
     compact_request_ids: HashSet<String>,
+    reload_request_ids: HashSet<String>,
+    /// `reload` 成功后补发的 `get_commands`。技能和提示词可能刚变过。
+    commands_refresh_id: Option<String>,
     /// `clear_queue` 回执后是否要把 in_flight 还回去（ClearQueue 动作才要）。
     pending_clear: Option<(String, bool)>,
     composer_restore_seq: u64,
@@ -74,7 +81,9 @@ struct PiState {
     /// 已解析的工具参数，结束时用来出 diff / 标题。
     tool_args: HashMap<String, serde_json::Value>,
     tool_names: HashMap<String, String>,
-    stats_request_ids: HashSet<String>,
+    /// 只接受最后一次 `get_session_stats` 的回包。Pi 会并发处理 stdin 命令，
+    /// 旧请求可能晚于压缩后的新请求返回，不能让旧上下文覆盖新估算。
+    latest_stats_request_id: Option<String>,
     /// 进行中的回退：先等 `get_fork_messages` 回执定位 entryId，再等 `fork` 回执。
     /// 两段用同一份 pending 而不是两个 id 集，因为它们的语义是连续的，
     /// 中途任何一段失败都要把整次回退作废。
@@ -201,7 +210,7 @@ pub fn spawn_pi_rpc(
             let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
             let stderr_drain: Arc<Mutex<Option<smol::Task<()>>>> = Arc::default();
             let ready = Arc::new(AtomicBool::new(false));
-            let runtime = crate::acp_conn::sync_managed_pi_agent(&|message| {
+            let runtime = crate::managed_runtime::sync_managed_pi_agent(&|message| {
                 let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
             });
             let runtime = match runtime {
@@ -278,7 +287,7 @@ pub fn spawn_pi_rpc(
 #[allow(clippy::too_many_arguments)]
 async fn run_connection(
     launch: &ConversationLaunch,
-    runtime: crate::acp_conn::ManagedPiRuntime,
+    runtime: crate::managed_runtime::ManagedPiRuntime,
     cmd_rx: smol::channel::Receiver<ConversationCommand>,
     event_tx: smol::channel::Sender<ConversationEvent>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
@@ -293,23 +302,16 @@ async fn run_connection(
     let resume_id = launch.resume_session_id.as_ref().map(|id| id.to_string());
     let fork_id = launch.fork_session_id.as_ref().map(|id| id.to_string());
     apply_pi_session_cli_args(&mut trailing, resume_id.as_deref(), fork_id.as_deref());
+    // `runtime` 在同步完成、全局锁释放前已经取得 shared generation lease；将它持有
+    // 到本连接结束，消除 prepare 与 spawn 之间被升级 GC 删除目录的窗口。
     let process_args = runtime.process_args(trailing);
-    // 钉住本次会话用的运行时目录，直到本连接结束。升级 GC 必须先拿到排他锁
-    // 才能删目录；不钉住的话，OAuth 刷新会按启动路径再 import 已卸载的文件。
-    let _runtime_lease = match crate::acp_conn::pin_managed_pi_runtime(&runtime.root) {
-        Ok(lease) => Some(lease),
-        Err(error) => {
-            crate::app_log::warn("pi-rpc", &format!("无法钉住 Pi 运行时目录：{error}"));
-            None
-        }
-    };
     let (child_stdin, child_stdout, child_stderr, child) = {
         let _spawn_permit = spawn_gate.as_ref().map(|gate| gate.read().unwrap());
         let mut stdio = stdio_out.lock().unwrap();
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let spawned = spawn_process(launch, inline_env, process_args)?;
+        let spawned = spawn_process(launch, inline_env, process_args, &runtime)?;
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
             stdin_fd: spawned.0.as_raw_fd(),
@@ -317,72 +319,78 @@ async fn run_connection(
         });
         spawned
     };
-    let pid = child.id() as i32;
-    let _child_keep_alive = child;
-    let _guard = KillPiProcessGroupOnDrop(pid);
+    let mut process = PiProcessGuard::new(child);
     *stderr_drain.lock().unwrap() = Some(spawn_stderr_drain(child_stderr, stderr_tail));
 
-    let mut writer = child_stdin;
-    let mut lines = futures::io::BufReader::new(child_stdout).lines();
-    let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
-    let mut state = PiState::new();
-    let initialize = initialize_session(
-        &mut lines,
-        &mut writer,
-        &outbound_tx,
-        &outbound_rx,
-        &event_tx,
-        &mut state,
-        launch,
-    );
-    smol::future::race(initialize, async {
-        smol::Timer::after(PI_RPC_HANDSHAKE_TIMEOUT).await;
-        Err(format!(
-            "Pi RPC 启动握手超时（{} 秒）",
-            PI_RPC_HANDSHAKE_TIMEOUT.as_secs()
-        ))
-    })
-    .await?;
-    ready.store(true, Ordering::Release);
+    let result = async {
+        let mut writer = child_stdin;
+        let mut lines = futures::io::BufReader::new(child_stdout).lines();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let initialize = initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            launch,
+        );
+        smol::future::race(initialize, async {
+            smol::Timer::after(PI_RPC_HANDSHAKE_TIMEOUT).await;
+            Err(format!(
+                "Pi RPC 启动握手超时（{} 秒）",
+                PI_RPC_HANDSHAKE_TIMEOUT.as_secs()
+            ))
+        })
+        .await?;
+        ready.store(true, Ordering::Release);
 
-    enum Next {
-        Command(Result<ConversationCommand, smol::channel::RecvError>),
-        Outbound(Result<serde_json::Value, smol::channel::RecvError>),
-        Line(Option<std::io::Result<String>>),
-    }
+        enum Next {
+            Command(Result<ConversationCommand, smol::channel::RecvError>),
+            Outbound(Result<serde_json::Value, smol::channel::RecvError>),
+            Line(Option<std::io::Result<String>>),
+        }
 
-    loop {
-        let next = smol::future::race(
-            async { Next::Command(cmd_rx.recv().await) },
-            smol::future::race(async { Next::Outbound(outbound_rx.recv().await) }, async {
-                Next::Line(lines.next().await)
-            }),
-        )
-        .await;
-        match next {
-            Next::Command(Ok(ConversationCommand::Shutdown)) | Next::Command(Err(_)) => {
-                return Ok(());
-            }
-            Next::Command(Ok(command)) => {
-                handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc).await?;
-            }
-            Next::Outbound(Ok(message)) => write_rpc(&mut writer, &message).await?,
-            Next::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
-            Next::Line(Some(Ok(line))) => {
-                let value = parse_rpc_line(&line)?;
-                if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
-                    handle_response(value, &mut writer, &event_tx, &mut state, &in_flight_rpc)
-                        .await?;
-                } else {
-                    handle_event(value, &event_tx, &outbound_tx, &mut state, launch);
+        loop {
+            let next = smol::future::race(
+                async { Next::Command(cmd_rx.recv().await) },
+                smol::future::race(async { Next::Outbound(outbound_rx.recv().await) }, async {
+                    Next::Line(lines.next().await)
+                }),
+            )
+            .await;
+            match next {
+                Next::Command(Ok(ConversationCommand::Shutdown)) | Next::Command(Err(_)) => {
+                    return Ok(());
                 }
+                Next::Command(Ok(command)) => {
+                    handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc)
+                        .await?;
+                }
+                Next::Outbound(Ok(message)) => write_rpc(&mut writer, &message).await?,
+                Next::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
+                Next::Line(Some(Ok(line))) => {
+                    let value = parse_rpc_line(&line)?;
+                    if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+                        handle_response(value, &mut writer, &event_tx, &mut state, &in_flight_rpc)
+                            .await?;
+                    } else {
+                        handle_event(value, &event_tx, &outbound_tx, &mut state, launch);
+                    }
+                }
+                Next::Line(Some(Err(error))) => {
+                    return Err(format!("读取 Pi RPC 输出失败：{error}"));
+                }
+                Next::Line(None) => return Err("Pi RPC 进程已关闭 stdout".to_string()),
             }
-            Next::Line(Some(Err(error))) => {
-                return Err(format!("读取 Pi RPC 输出失败：{error}"));
-            }
-            Next::Line(None) => return Err("Pi RPC 进程已关闭 stdout".to_string()),
         }
     }
+    .await;
+    // 必须先确认直属子进程已退出，再让 `runtime` 的 generation lease 析构。
+    // 仅发送 SIGKILL 不等于进程已经消失，期间原地修复会与旧进程并发读模块树。
+    process.kill_and_reap().await;
+    result
 }
 
 type SpawnedPi = (
@@ -425,6 +433,7 @@ fn spawn_process(
     launch: &ConversationLaunch,
     inline_env: BTreeMap<String, String>,
     mut process_args: Vec<String>,
+    runtime: &crate::managed_runtime::ManagedPiRuntime,
 ) -> Result<SpawnedPi, String> {
     if process_args.len() < 2 {
         return Err("Pi 受管运行时启动参数不完整".to_string());
@@ -464,6 +473,7 @@ fn spawn_process(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
+    runtime.inherit_into(&mut command);
     let mut command = async_process::Command::from(command);
     let mut child = command
         .stdin(std::process::Stdio::piped())
@@ -522,12 +532,59 @@ fn spawn_stderr_drain(
     })
 }
 
-struct KillPiProcessGroupOnDrop(i32);
+struct PiProcessGuard {
+    pid: i32,
+    child: async_process::Child,
+    reaped: bool,
+}
 
-impl Drop for KillPiProcessGroupOnDrop {
-    fn drop(&mut self) {
+impl PiProcessGuard {
+    fn new(child: async_process::Child) -> Self {
+        Self {
+            pid: child.id() as i32,
+            child,
+            reaped: false,
+        }
+    }
+
+    fn kill_process_tree(&mut self) {
         unsafe {
-            libc::kill(-self.0, libc::SIGKILL);
+            libc::kill(-self.pid, libc::SIGKILL);
+        }
+        // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死，
+        // 否则下面的 status/try_status 会永久等住，generation lease 也永不释放。
+        let _ = self.child.kill();
+    }
+
+    async fn kill_and_reap(&mut self) {
+        self.kill_process_tree();
+        if self.child.status().await.is_ok() {
+            self.reaped = true;
+        }
+    }
+}
+
+impl Drop for PiProcessGuard {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        // 正常路径由 `kill_and_reap` 异步回收。这里只覆盖 panic/未来提前返回，
+        // 仍须在 generation lease 释放前同步确认主子进程已经退出。
+        self.kill_process_tree();
+        loop {
+            match self.child.try_status() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    self.kill_process_tree();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break,
+                Err(_) => {
+                    self.kill_process_tree();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 }
@@ -734,24 +791,7 @@ where
         serde_json::json!({"type": "get_commands"}),
     )
     .await?;
-    state.available_commands = response_data(&response)?["commands"]
-        .as_array()
-        .map(|commands| {
-            commands
-                .iter()
-                .filter_map(|command| {
-                    Some((
-                        command.get("name")?.as_str()?.to_string(),
-                        command
-                            .get("description")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    state.available_commands = parse_pi_commands(response_data(&response)?);
 
     let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
     if resumed {
@@ -764,18 +804,21 @@ where
             event_tx,
             state,
             launch,
-            "smelt-init-messages",
-            serde_json::json!({"type": "get_messages"}),
+            "smelt-init-entries",
+            serde_json::json!({"type": "get_entries"}),
         )
         .await?;
-        if let Some(messages) = response_data(&response)?["messages"].as_array() {
-            crate::app_log::info(
-                "pi-rpc",
-                &format!("会话 {} 开始重放 {} 条历史消息", launch.sid, messages.len()),
-            );
-            replay_history(messages, event_tx, state);
-            crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
-        }
+        let messages = active_branch_messages(response_data(&response)?)?;
+        crate::app_log::info(
+            "pi-rpc",
+            &format!(
+                "会话 {} 开始重放 {} 条当前分支历史消息",
+                launch.sid,
+                messages.len()
+            ),
+        );
+        replay_history(&messages, event_tx, state);
+        crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
     }
 
     publish_configuration(state, event_tx);
@@ -955,9 +998,8 @@ fn model_value(model: &PiModel) -> String {
     format!("{}/{}", model.provider, model.id)
 }
 
-/// `set_model` 成功后必须让 `current_value` 等于用户点的 `provider/id`。
-/// Pi 回包有时是解析后的 pinned id，对不上 picker 里的值，pending 就永远清不掉，
-/// 之后每一轮都会显示「下轮生效」。
+/// 这次 `set_model` 成功后，会话当前模型就是请求里的 `provider/id`。
+/// 回包只提供显示名和上下文长度，不另立一个 id。
 fn apply_requested_pi_model(state: &mut PiState, value: &str, data: Option<&serde_json::Value>) {
     let from_data = data.and_then(parse_model);
     let from_list = state
@@ -1104,6 +1146,32 @@ fn thinking_name(level: &str) -> &str {
     }
 }
 
+fn parse_pi_commands(data: &serde_json::Value) -> Vec<(String, String)> {
+    data.get("commands")
+        .and_then(serde_json::Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some((
+                        command.get("name")?.as_str()?.to_string(),
+                        command
+                            .get("description")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/reload`。后面再跟字就不是这条指令，避免吞掉用户本来想发给模型的话。
+pub(crate) fn parse_reload_slash(text: &str) -> bool {
+    text.trim() == "/reload"
+}
+
 /// `/compact` 或 `/compact 自定义说明`。其它以 `/compact` 为前缀的词不算。
 pub(crate) fn parse_compact_slash(text: &str) -> Option<Option<String>> {
     let trimmed = text.trim();
@@ -1157,6 +1225,16 @@ async fn handle_command<W: AsyncWrite + Unpin>(
 ) -> Result<(), String> {
     match command {
         ConversationCommand::Prompt { text, images } => {
+            if parse_reload_slash(&text) {
+                if state.active_turn {
+                    finish_in_flight(in_flight_rpc);
+                    let _ = event_tx.try_send(ConversationEvent::Status(
+                        "回合进行中，结束后再 /reload".to_string(),
+                    ));
+                    return Ok(());
+                }
+                return send_reload(writer, state).await;
+            }
             if let Some(instructions) = parse_compact_slash(&text) {
                 return send_compact(instructions, writer, state).await;
             }
@@ -1313,6 +1391,15 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         | ConversationCommand::Shutdown => {}
     }
     Ok(())
+}
+
+async fn send_reload<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+) -> Result<(), String> {
+    let id = state.request_id("reload");
+    state.reload_request_ids.insert(id.clone());
+    write_rpc(writer, &serde_json::json!({"id": id, "type": "reload"})).await
 }
 
 async fn send_compact<W: AsyncWrite + Unpin>(
@@ -1498,6 +1585,43 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         finish_in_flight(in_flight_rpc);
         return Ok(());
     }
+    if state.reload_request_ids.remove(&id) {
+        match ensure_response_success(&response) {
+            Ok(()) => {
+                let _ = event_tx.try_send(ConversationEvent::Status(
+                    "已重新加载技能、扩展、提示词和上下文".to_string(),
+                ));
+                let refresh_id = state.request_id("commands");
+                state.commands_refresh_id = Some(refresh_id.clone());
+                write_rpc(
+                    writer,
+                    &serde_json::json!({"id": refresh_id, "type": "get_commands"}),
+                )
+                .await?;
+            }
+            Err(error) => {
+                let _ =
+                    event_tx.try_send(ConversationEvent::Status(format!("重新加载失败：{error}")));
+            }
+        }
+        // `/reload` 通过上层 Prompt 通道提交，因此投影已经为它开启了一个回合；
+        // 它不触发 agent_start/agent_end，必须由 RPC 回执显式闭合，否则界面会把
+        // 已完成的本地命令永久显示成“思考中”。失败详情已由 Status 展示，终态
+        // 仍只负责释放 prompt 闸门，避免再追加一条伪造的模型错误消息。
+        let _ = event_tx.try_send(ConversationEvent::TurnEnded(StopReason::EndTurn));
+        finish_in_flight(in_flight_rpc);
+        return Ok(());
+    }
+    if state.commands_refresh_id.as_deref() == Some(&id) {
+        state.commands_refresh_id = None;
+        if let Ok(data) = response_data(&response) {
+            state.available_commands = parse_pi_commands(data);
+            let _ = event_tx.try_send(ConversationEvent::AvailableCommands(
+                state.available_commands.clone(),
+            ));
+        }
+        return Ok(());
+    }
     if state
         .pending_clear
         .as_ref()
@@ -1524,7 +1648,8 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         }
         return Ok(());
     }
-    if state.stats_request_ids.remove(&id) {
+    if state.latest_stats_request_id.as_deref() == Some(&id) {
+        state.latest_stats_request_id = None;
         if ensure_response_success(&response).is_ok() {
             publish_session_stats(
                 response.get("data").unwrap_or(&serde_json::Value::Null),
@@ -1930,14 +2055,15 @@ fn handle_event(
             let Some(id) = event.get("toolCallId").and_then(serde_json::Value::as_str) else {
                 return;
             };
-            if let Some(children) = event
+            if let Some((children, debug)) = event
                 .get("partialResult")
                 .and_then(|value| value.get("details"))
-                .and_then(subagent_children_from_details)
+                .and_then(|details| subagent_children_from_details(id, details))
             {
                 let _ = event_tx.try_send(ConversationEvent::ToolChildren {
                     id: id.to_string(),
                     children,
+                    debug,
                 });
                 let text = content_text(
                     event
@@ -1983,14 +2109,15 @@ fn handle_event(
                 .cloned()
                 .or_else(|| state.tool_args.remove(id));
             state.partial_tool_args.remove(id);
-            if let Some(children) = event
+            if let Some((children, debug)) = event
                 .get("result")
                 .and_then(|value| value.get("details"))
-                .and_then(subagent_children_from_details)
+                .and_then(|details| subagent_children_from_details(id, details))
             {
                 let _ = event_tx.try_send(ConversationEvent::ToolChildren {
                     id: id.to_string(),
                     children,
+                    debug,
                 });
             }
             let output = event
@@ -2112,22 +2239,11 @@ fn publish_usage(
     let Some(usage) = message.get("usage") else {
         return;
     };
-    let used = usage
-        .get("totalTokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| {
-            usage
-                .get("input")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                + usage
-                    .get("output")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
-        });
     let cached_read = usage.get("cacheRead").and_then(serde_json::Value::as_u64);
     let _ = event_tx.try_send(ConversationEvent::Usage {
-        used,
+        // Provider usage is billing data. In particular, totalTokens may include
+        // cache/lifetime totals and is not Pi's active context size.
+        used: 0,
         size,
         cached_read,
         cost: None,
@@ -2140,8 +2256,12 @@ fn request_session_stats(
     outbound_tx: &smol::channel::Sender<serde_json::Value>,
 ) {
     let id = state.request_id("stats");
-    state.stats_request_ids.insert(id.clone());
-    let _ = outbound_tx.try_send(serde_json::json!({"id": id, "type": "get_session_stats"}));
+    if outbound_tx
+        .try_send(serde_json::json!({"id": id, "type": "get_session_stats"}))
+        .is_ok()
+    {
+        state.latest_stats_request_id = Some(id);
+    }
 }
 
 fn publish_session_stats(
@@ -2151,14 +2271,12 @@ fn publish_session_stats(
 ) {
     let tokens = data.get("tokens");
     let context = data.get("contextUsage");
+    // Pi deliberately returns contextUsage.tokens = null immediately after
+    // compaction until a later model response makes the active size reliable.
+    // Session tokens.total is lifetime billing usage, never a context fallback.
     let used = context
         .and_then(|value| value.get("tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .or_else(|| {
-            tokens
-                .and_then(|value| value.get("total"))
-                .and_then(serde_json::Value::as_u64)
-        });
+        .and_then(serde_json::Value::as_u64);
     let size = context
         .and_then(|value| value.get("contextWindow"))
         .and_then(serde_json::Value::as_u64)
@@ -2192,10 +2310,16 @@ fn emit_tool_started(
     name: &str,
     args: Option<&serde_json::Value>,
 ) {
+    // 保持既有生命周期顺序：先让卡片出现，再补仅供审计的原始元数据。
     let _ = event_tx.try_send(ConversationEvent::ToolStarted {
         id: id.to_string(),
         title: tool_title(name, args),
         kind: tool_kind(name),
+    });
+    let _ = event_tx.try_send(ConversationEvent::ToolDebug {
+        id: id.to_string(),
+        name: Some(name.to_string()),
+        raw_input: args.cloned(),
     });
 }
 
@@ -2355,48 +2479,53 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-fn subagent_children_from_details(details: &serde_json::Value) -> Option<Vec<AcpEntry>> {
+fn subagent_children_from_details(
+    parent_id: &str,
+    details: &serde_json::Value,
+) -> Option<(
+    Vec<AcpEntry>,
+    BTreeMap<String, crate::acp_session::ToolCallDebug>,
+)> {
     let results = details.get("results")?.as_array()?;
     if results.len() <= 1 {
         let result = results.first()?;
         return Some(entries_from_subagent_messages(
             result.get("messages").and_then(serde_json::Value::as_array),
-            "sa",
+            &format!("{parent_id}-child"),
             subagent_result_running(result),
         ));
     }
-    Some(
-        results
-            .iter()
-            .enumerate()
-            .map(|(index, result)| {
-                let agent = result
-                    .get("agent")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("agent");
-                let running = subagent_result_running(result);
-                let failed = subagent_result_failed(result);
-                AcpEntry::ToolCall {
-                    id: format!("sa-result-{index}"),
-                    title: agent.to_string(),
-                    kind: ToolKind::Collaborate,
-                    status: if running {
-                        ToolCallStatus::InProgress
-                    } else if failed {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    },
-                    output: Vec::new(),
-                    children: entries_from_subagent_messages(
-                        result.get("messages").and_then(serde_json::Value::as_array),
-                        &format!("sa-{index}"),
-                        running,
-                    ),
-                }
-            })
-            .collect(),
-    )
+    let mut entries = Vec::with_capacity(results.len());
+    let mut debug = BTreeMap::new();
+    for (index, result) in results.iter().enumerate() {
+        let agent = result
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("agent");
+        let running = subagent_result_running(result);
+        let failed = subagent_result_failed(result);
+        let (children, child_debug) = entries_from_subagent_messages(
+            result.get("messages").and_then(serde_json::Value::as_array),
+            &format!("{parent_id}-result-{index}-child"),
+            running,
+        );
+        debug.extend(child_debug);
+        entries.push(AcpEntry::ToolCall {
+            id: format!("{parent_id}-result-{index}"),
+            title: agent.to_string(),
+            kind: ToolKind::Collaborate,
+            status: if running {
+                ToolCallStatus::InProgress
+            } else if failed {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
+            },
+            output: Vec::new(),
+            children,
+        });
+    }
+    Some((entries, debug))
 }
 
 fn subagent_result_running(result: &serde_json::Value) -> bool {
@@ -2425,11 +2554,15 @@ fn entries_from_subagent_messages(
     messages: Option<&Vec<serde_json::Value>>,
     id_prefix: &str,
     running: bool,
-) -> Vec<AcpEntry> {
+) -> (
+    Vec<AcpEntry>,
+    BTreeMap<String, crate::acp_session::ToolCallDebug>,
+) {
     let Some(messages) = messages else {
-        return Vec::new();
+        return (Vec::new(), BTreeMap::new());
     };
     let mut entries = Vec::new();
+    let mut debug = BTreeMap::new();
     let mut tool_index = 0_usize;
     for message in messages {
         if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
@@ -2472,8 +2605,16 @@ fn entries_from_subagent_messages(
                         .unwrap_or("tool");
                     let args = part.get("arguments").or_else(|| part.get("args"));
                     tool_index += 1;
+                    let id = format!("{id_prefix}-{tool_index}");
+                    debug.insert(
+                        id.clone(),
+                        crate::acp_session::ToolCallDebug {
+                            name: Some(name.to_string()),
+                            raw_input: args.cloned(),
+                        },
+                    );
                     entries.push(AcpEntry::tool_call(
-                        format!("{id_prefix}-{tool_index}"),
+                        id,
                         tool_title(name, args),
                         tool_kind(name),
                         ToolCallStatus::Completed,
@@ -2492,7 +2633,7 @@ fn entries_from_subagent_messages(
             }
         }
     }
-    entries
+    (entries, debug)
 }
 
 fn content_text(content: Option<&serde_json::Value>) -> String {
@@ -2616,8 +2757,72 @@ fn text_looks_like_diff(text: &str) -> bool {
             .any(|line| line.starts_with("+++ ") || line.starts_with("--- "))
 }
 
-/// 全量重放 + 显式收尾。pi 是先把 `get_messages` 重放完再握手，边界在这里就确定了；
-/// 不发结束信号的话，恢复后只要用户不再发消息，`replaying_history` 就一直挂着。
+/// 从 Pi 的 append-only entry tree 中严格还原当前活动分支，再提取 UI transcript。
+/// `get_messages` 是 compaction-aware 的模型上下文，不能承担历史恢复；compaction、
+/// model change 等 entry 只参与 parent 链校验，不替代或裁掉它们之前的原始消息。
+fn active_branch_messages(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    let entries = data
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Pi get_entries 响应缺少 entries".to_string())?;
+    let leaf = match data.get("leafId") {
+        Some(serde_json::Value::Null) => return Ok(Vec::new()),
+        Some(serde_json::Value::String(id)) if !id.is_empty() => id.as_str(),
+        Some(_) => return Err("Pi get_entries 响应的 leafId 无效".to_string()),
+        None => return Err("Pi get_entries 响应缺少 leafId".to_string()),
+    };
+
+    let mut by_id = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "Pi get_entries 返回了没有有效 id 的 entry".to_string())?;
+        if by_id.insert(id, entry).is_some() {
+            return Err(format!("Pi get_entries 返回了重复 entry id：{id}"));
+        }
+    }
+
+    let mut branch = Vec::new();
+    let mut visited = HashSet::new();
+    let mut cursor = leaf;
+    loop {
+        if !visited.insert(cursor) {
+            return Err(format!("Pi 当前分支 parent 链成环：{cursor}"));
+        }
+        let entry = by_id
+            .get(cursor)
+            .copied()
+            .ok_or_else(|| format!("Pi 当前分支缺少 entry：{cursor}"))?;
+        branch.push(entry);
+        match entry.get("parentId") {
+            Some(serde_json::Value::Null) => break,
+            Some(serde_json::Value::String(parent)) if !parent.is_empty() => cursor = parent,
+            Some(_) => return Err(format!("Pi entry {cursor} 的 parentId 无效")),
+            None => return Err(format!("Pi entry {cursor} 缺少 parentId")),
+        }
+    }
+    branch.reverse();
+
+    Ok(branch
+        .into_iter()
+        .filter_map(|entry| match entry.get("type").and_then(serde_json::Value::as_str) {
+            Some("message") => entry.get("message").cloned(),
+            Some("custom_message") => Some(serde_json::json!({
+                "role": "custom",
+                "content": entry.get("content").cloned().unwrap_or_default(),
+                "display": entry.get("display").cloned().unwrap_or(serde_json::Value::Bool(true)),
+                "details": entry.get("details").cloned().unwrap_or_default(),
+            })),
+            _ => None,
+        })
+        .collect())
+}
+
+/// 全量重放 + 显式收尾。Pi 先把当前分支的原始 message entries 重放完再握手，
+/// 边界在这里就确定了；不发结束信号的话，恢复后只要用户不再发消息，
+/// `replaying_history` 就一直挂着。
 fn replay_history(
     messages: &[serde_json::Value],
     event_tx: &smol::channel::Sender<ConversationEvent>,
@@ -2753,14 +2958,232 @@ fn replay_assistant_content(
     }
 }
 
-fn publish_context_usage_widget(
+fn normalized_sensitive_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_sensitive_payload_key(key: &str) -> bool {
+    let normalized = normalized_sensitive_key(key);
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "proxyauthorization"
+            | "auth"
+            | "headers"
+            | "apikey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "token"
+            | "clientsecret"
+            | "secret"
+            | "password"
+            | "passwd"
+            | "cookie"
+            | "setcookie"
+            | "credential"
+            | "credentials"
+    ) || [
+        "authorization",
+        "auth",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "cookie",
+        "credential",
+    ]
+    .iter()
+    .any(|suffix| normalized.ends_with(suffix))
+}
+
+fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if text.to_ascii_lowercase().starts_with("data:image/") => {
+            *value = serde_json::Value::String("[IMAGE DATA OMITTED]".to_string());
+            if !paths.contains(&path.to_string()) {
+                paths.push(path.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                redact_runtime_payload(item, &format!("{path}[{index}]"), paths);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            let image_like = fields
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| matches!(kind, "image" | "input_image" | "image_url"));
+            for (key, child) in fields {
+                let child_path = format!("{path}.{key}");
+                if is_sensitive_payload_key(key) {
+                    *child = serde_json::Value::String("[REDACTED]".to_string());
+                    if !paths.contains(&child_path) {
+                        paths.push(child_path);
+                    }
+                } else if image_like
+                    && matches!(
+                        normalized_sensitive_key(key).as_str(),
+                        "data" | "base64" | "bytes"
+                    )
+                {
+                    *child = serde_json::Value::String("[IMAGE DATA OMITTED]".to_string());
+                    if !paths.contains(&child_path) {
+                        paths.push(child_path);
+                    }
+                } else {
+                    redact_runtime_payload(child, &child_path, paths);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_runtime_debug(debug: &mut RuntimeDebug) -> bool {
+    let has_system_prompt = debug
+        .system_prompt
+        .as_deref()
+        .is_some_and(|prompt| !prompt.is_empty());
+    if !has_system_prompt && debug.version != 3 {
+        return false;
+    }
+    match (debug.version, debug.source.as_str()) {
+        (1, "pi_before_agent_start") => {
+            debug.model_call.is_none()
+                && debug.model_calls.is_empty()
+                && debug.compactions.is_empty()
+        }
+        (2, "pi_runtime_debug") => {
+            if !debug.model_calls.is_empty() || !debug.compactions.is_empty() {
+                return false;
+            }
+            if let Some(mut call) = debug.model_call.take() {
+                if !validate_runtime_debug_model_call(&mut call) {
+                    return false;
+                }
+                debug.model_calls.push(call);
+            }
+            debug.version = 3;
+            true
+        }
+        (3, "pi_runtime_debug") => {
+            if debug.model_call.is_some() {
+                return false;
+            }
+            let mut previous_sequence = 0;
+            for call in &mut debug.model_calls {
+                if !validate_runtime_debug_model_call(call) || call.sequence <= previous_sequence {
+                    return false;
+                }
+                previous_sequence = call.sequence;
+            }
+            let mut previous_compaction_sequence = 0;
+            if !has_system_prompt && debug.model_calls.is_empty() && debug.compactions.is_empty() {
+                return false;
+            }
+            for compaction in &mut debug.compactions {
+                if compaction.sequence == 0
+                    || compaction.sequence <= previous_compaction_sequence
+                    || !matches!(
+                        compaction.status.as_str(),
+                        "started" | "completed" | "failed" | "aborted"
+                    )
+                    || !matches!(
+                        compaction.reason.as_str(),
+                        "manual" | "threshold" | "overflow"
+                    )
+                {
+                    return false;
+                }
+                previous_compaction_sequence = compaction.sequence;
+                if let Some(usage) = &mut compaction.usage {
+                    let mut redacted_paths = Vec::new();
+                    redact_runtime_payload(
+                        usage,
+                        &format!("$.compactions[{}].usage", compaction.sequence),
+                        &mut redacted_paths,
+                    );
+                }
+                for (index, headers) in compaction.request_headers.iter_mut().enumerate() {
+                    redact_runtime_payload(
+                        &mut headers.headers,
+                        &format!(
+                            "$.compactions[{}].requestHeaders[{index}].headers",
+                            compaction.sequence
+                        ),
+                        &mut headers.redacted_paths,
+                    );
+                }
+                for (index, response) in compaction.response_metadata.iter_mut().enumerate() {
+                    redact_runtime_payload(
+                        &mut response.headers,
+                        &format!(
+                            "$.compactions[{}].responseMetadata[{index}].headers",
+                            compaction.sequence
+                        ),
+                        &mut response.redacted_paths,
+                    );
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn validate_runtime_debug_model_call(call: &mut RuntimeDebugModelCall) -> bool {
+    if call.sequence == 0
+        || !matches!(
+            call.source.as_str(),
+            "pi_context_with_system" | "pi_before_provider_request"
+        )
+        || call
+            .payload_source
+            .as_deref()
+            .is_some_and(|source| source != "pi_before_provider_request")
+    {
+        return false;
+    }
+    redact_runtime_payload(
+        &mut call.pi_context,
+        "$.piContext",
+        &mut call.pi_context_redacted_paths,
+    );
+    for (index, headers) in call.request_headers.iter_mut().enumerate() {
+        redact_runtime_payload(
+            &mut headers.headers,
+            &format!("$.requestHeaders[{index}].headers"),
+            &mut headers.redacted_paths,
+        );
+    }
+    redact_runtime_payload(&mut call.payload, "$.payload", &mut call.redacted_paths);
+    for (index, metadata) in call.response_metadata.iter_mut().enumerate() {
+        redact_runtime_payload(
+            &mut metadata.headers,
+            &format!("$.responseMetadata[{index}].headers"),
+            &mut metadata.redacted_paths,
+        );
+    }
+    if let Some(response) = &mut call.response {
+        let mut paths = call.response_redacted_paths.take().unwrap_or_default();
+        redact_runtime_payload(response, "$.response", &mut paths);
+        call.response_redacted_paths = Some(paths);
+    }
+    true
+}
+
+fn publish_extension_widget(
     request: &serde_json::Value,
     event_tx: &smol::channel::Sender<ConversationEvent>,
 ) {
-    let key = request.get("widgetKey").and_then(serde_json::Value::as_str);
-    if key != Some(SMELT_CONTEXT_USAGE_WIDGET) {
+    let Some(key) = request.get("widgetKey").and_then(serde_json::Value::as_str) else {
         return;
-    }
+    };
     let Some(line) = request
         .get("widgetLines")
         .and_then(serde_json::Value::as_array)
@@ -2769,16 +3192,30 @@ fn publish_context_usage_widget(
     else {
         return;
     };
-    let Ok(breakdown) = serde_json::from_str::<ContextUsageBreakdown>(line) else {
-        return;
-    };
-    let _ = event_tx.try_send(ConversationEvent::Usage {
-        used: 0,
-        size: 0,
-        cached_read: None,
-        cost: None,
-        breakdown: Some(breakdown),
-    });
+    match key {
+        SMELT_CONTEXT_USAGE_WIDGET => {
+            let Ok(breakdown) = serde_json::from_str::<ContextUsageBreakdown>(line) else {
+                return;
+            };
+            let _ = event_tx.try_send(ConversationEvent::Usage {
+                used: 0,
+                size: 0,
+                cached_read: None,
+                cost: None,
+                breakdown: Some(breakdown),
+            });
+        }
+        SMELT_RUNTIME_DEBUG_WIDGET => {
+            let Ok(mut debug) = serde_json::from_str::<RuntimeDebug>(line) else {
+                return;
+            };
+            if !validate_runtime_debug(&mut debug) {
+                return;
+            }
+            let _ = event_tx.try_send(ConversationEvent::RuntimeDebug(debug));
+        }
+        _ => {}
+    }
 }
 
 fn handle_extension_ui(
@@ -2817,7 +3254,7 @@ fn handle_extension_ui(
                 let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
             }
         }
-        "setWidget" => publish_context_usage_widget(request, event_tx),
+        "setWidget" => publish_extension_widget(request, event_tx),
         "setTitle" => {
             if let Some(title) = request.get("title").and_then(serde_json::Value::as_str) {
                 let _ = event_tx.try_send(ConversationEvent::SessionTitle(Some(title.to_string())));
@@ -3146,6 +3583,33 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pi_process_guard_reaps_the_direct_child_before_returning() {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let child = async_process::Command::from(command)
+            .spawn()
+            .expect("spawn guarded process");
+        let pid = child.id() as i32;
+        let mut guard = PiProcessGuard::new(child);
+        smol::block_on(guard.kill_and_reap());
+
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "guard 返回前必须已回收直属子进程"
+        );
+    }
+
     #[test]
     fn only_exact_logical_command_selects_native_pi_rpc() {
         assert!(is_smelt_pi_launch(&ConversationLaunchSpec::from_command(
@@ -3362,6 +3826,111 @@ mod tests {
         assert!(state.active_turn);
     }
 
+    #[test]
+    fn active_pi_branch_keeps_pre_compaction_messages_and_excludes_other_branches() {
+        let messages = active_branch_messages(&serde_json::json!({
+            "entries": [
+                {
+                    "type": "message",
+                    "id": "user-old",
+                    "parentId": null,
+                    "message": {"role": "user", "content": "压缩前问题"}
+                },
+                {
+                    "type": "message",
+                    "id": "assistant-old",
+                    "parentId": "user-old",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩前回答"}]}
+                },
+                {
+                    "type": "compaction",
+                    "id": "compaction",
+                    "parentId": "assistant-old",
+                    "summary": "模型上下文摘要",
+                    "firstKeptEntryId": "assistant-old"
+                },
+                {
+                    "type": "message",
+                    "id": "other-branch",
+                    "parentId": "assistant-old",
+                    "message": {"role": "user", "content": "已放弃旁支"}
+                },
+                {
+                    "type": "message",
+                    "id": "user-new",
+                    "parentId": "compaction",
+                    "message": {"role": "user", "content": "压缩后问题"}
+                },
+                {
+                    "type": "custom_message",
+                    "id": "extension-note",
+                    "parentId": "user-new",
+                    "customType": "note",
+                    "content": "可见扩展消息",
+                    "display": true
+                },
+                {
+                    "type": "message",
+                    "id": "assistant-new",
+                    "parentId": "extension-note",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩后回答"}]}
+                }
+            ],
+            "leafId": "assistant-new"
+        }))
+        .unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["content"], "压缩前问题");
+        assert_eq!(messages[1]["content"][0]["text"], "压缩前回答");
+        assert_eq!(messages[2]["content"], "压缩后问题");
+        assert_eq!(messages[3]["role"], "custom");
+        assert_eq!(messages[3]["content"], "可见扩展消息");
+        assert_eq!(messages[4]["content"][0]["text"], "压缩后回答");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "已放弃旁支")
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "模型上下文摘要")
+        );
+    }
+
+    #[test]
+    fn active_pi_branch_rejects_a_broken_parent_chain() {
+        let error = active_branch_messages(&serde_json::json!({
+            "entries": [{
+                "type": "message",
+                "id": "leaf",
+                "parentId": "missing",
+                "message": {"role": "user", "content": "不能只恢复这一截"}
+            }],
+            "leafId": "leaf"
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn active_pi_branch_can_be_empty_while_the_entry_tree_is_not() {
+        let messages = active_branch_messages(&serde_json::json!({
+            "entries": [{
+                "type": "message",
+                "id": "old",
+                "parentId": null,
+                "message": {"role": "user", "content": "已离开分支"}
+            }],
+            "leafId": null
+        }))
+        .unwrap();
+
+        assert!(messages.is_empty());
+    }
+
     /// 重放必须以显式的结束信号收尾。没有它时，`replaying_history` 只能等「下一条
     /// prompt」才复位，恢复后就闲置的会话会永远挂在「重放中」。
     #[test]
@@ -3455,6 +4024,14 @@ mod tests {
         assert!(matches!(
             event_rx.try_recv(),
             Ok(ConversationEvent::ToolStarted { id, kind: ToolKind::Execute, .. }) if id == "tool-1"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: Some(args),
+            }) if id == "tool-1" && name == "bash" && args["command"] == "pwd"
         ));
         assert!(matches!(
             event_rx.try_recv(),
@@ -3559,11 +4136,29 @@ mod tests {
                 kind: ToolKind::Collaborate
             }) if id == "sa-1" && title == "find auth"
         ));
-        let ConversationEvent::ToolChildren { id, children } = event_rx.try_recv().unwrap() else {
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: Some(args),
+            }) if id == "sa-1" && name == "subagent" && args["task"] == "find auth"
+        ));
+        let ConversationEvent::ToolChildren {
+            id,
+            children,
+            debug,
+        } = event_rx.try_recv().unwrap()
+        else {
             panic!("expected nested subagent children");
         };
         assert_eq!(id, "sa-1");
         assert_eq!(children.len(), 2);
+        assert_eq!(debug["sa-1-child-1"].name.as_deref(), Some("read"));
+        assert_eq!(
+            debug["sa-1-child-1"].raw_input,
+            Some(serde_json::json!({"path": "README.md"}))
+        );
         assert!(matches!(
             &children[0],
             AcpEntry::Assistant { thought: true, text } if text == "looking"
@@ -3693,8 +4288,45 @@ mod tests {
         ));
         assert!(matches!(
             event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: None,
+            }) if id == "call-1" && name == "bash"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
             Ok(ConversationEvent::ToolStarted { id, title, kind: ToolKind::Execute })
                 if id == "call-1" && title == "ls -la"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ToolDebug {
+                id,
+                name: Some(name),
+                raw_input: Some(args),
+            }) if id == "call-1" && name == "bash" && args["command"] == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn message_usage_only_publishes_cache_without_clobbering_context() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_usage(
+            &serde_json::json!({
+                "usage": {"totalTokens": 35_400_000, "cacheRead": 31_000_000}
+            }),
+            Some(128_000),
+            &event_tx,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Usage {
+                used: 0,
+                size: 128_000,
+                cached_read: Some(31_000_000),
+                ..
+            })
         ));
     }
 
@@ -3723,9 +4355,109 @@ mod tests {
     }
 
     #[test]
+    fn stale_session_stats_response_cannot_overwrite_the_latest_context() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.model = Some(PiModel {
+            provider: "anthropic".into(),
+            id: "opus".into(),
+            name: "Opus".into(),
+            context_window: Some(200_000),
+        });
+
+        request_session_stats(&mut state, &outbound_tx);
+        let stale_id = outbound_rx.try_recv().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        request_session_stats(&mut state, &outbound_tx);
+        let latest_id = outbound_rx.try_recv().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let in_flight = AtomicUsize::new(0);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": latest_id,
+                "type": "response",
+                "command": "get_session_stats",
+                "success": true,
+                "data": {
+                    "tokens": {"cacheRead": 20_000},
+                    "cost": 0.5,
+                    "contextUsage": {"tokens": 32_000, "contextWindow": 200_000}
+                }
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Usage {
+                used: 32_000,
+                size: 200_000,
+                ..
+            })
+        ));
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": stale_id,
+                "type": "response",
+                "command": "get_session_stats",
+                "success": true,
+                "data": {
+                    "tokens": {"cacheRead": 100_000},
+                    "cost": 1.0,
+                    "contextUsage": {"tokens": 150_000, "contextWindow": 200_000}
+                }
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(
+            event_rx.try_recv().is_err(),
+            "迟到的旧统计不能覆盖较新的活动上下文"
+        );
+    }
+
+    #[test]
+    fn session_stats_do_not_replace_unknown_context_with_lifetime_tokens() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_session_stats(
+            &serde_json::json!({
+                "tokens": {"cacheRead": 31_000_000, "total": 35_400_000},
+                "cost": 1.25,
+                "contextUsage": {"tokens": null, "contextWindow": 128_000, "percent": null}
+            }),
+            Some(128_000),
+            &event_tx,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Usage {
+                used: 0,
+                size: 128_000,
+                cached_read: Some(31_000_000),
+                cost: Some(cost),
+                ..
+            }) if (cost - 1.25).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
     fn context_usage_widget_publishes_breakdown_without_clobbering_totals() {
         let (event_tx, event_rx) = smol::channel::unbounded();
-        publish_context_usage_widget(
+        publish_extension_widget(
             &serde_json::json!({
                 "widgetKey": "smelt-context-usage",
                 "widgetLines": ["{\"systemPrompt\":2000,\"toolsDefinition\":5600,\"rules\":1100,\"skills\":1700,\"mcpDynamic\":0,\"subagent\":0,\"summarized\":0,\"conversation\":1600}"]
@@ -3746,6 +4478,378 @@ mod tests {
         assert_eq!(breakdown.system_prompt, 2_000);
         assert_eq!(breakdown.tools_definition, 5_600);
         assert_eq!(breakdown.occupied(), 12_000);
+    }
+
+    #[test]
+    fn runtime_debug_widget_publishes_call_history_and_redacts_sensitive_paths() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 3,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "system line 1\n<project_context>真实上下文</project_context>",
+                    "tools": [{
+                        "name": "bash",
+                        "description": "Run a shell command",
+                        "parameters": {
+                            "type": "object",
+                            "required": ["command"],
+                            "properties": {"command": {"type": "string"}}
+                        },
+                        "source": "builtin"
+                    }],
+                    "modelCalls": [{
+                        "sequence": 3,
+                        "turn": 2,
+                        "compactionSequence": 1,
+                        "capturedAtMs": 1725000000000_u64,
+                        "source": "pi_context_with_system",
+                        "payloadSource": "pi_before_provider_request",
+                        "piContext": [
+                            {"role": "system", "content": "exact Pi system message"},
+                            {"role": "user", "content": "hello", "api_key": "context-secret"}
+                        ],
+                        "piContextRedactedPaths": [],
+                        "model": {
+                            "provider": "openai",
+                            "id": "gpt-test",
+                            "api": "responses",
+                            "thinkingLevel": "high"
+                        },
+                        "requestConfig": {
+                            "systemPrompt": "request-specific system prompt",
+                            "tools": [{
+                                "name": "bash",
+                                "description": "Run a shell command",
+                                "parameters": {"type": "object"},
+                                "source": "builtin"
+                            }]
+                        },
+                        "requestHeaders": [{
+                            "capturedAtMs": 1725000000001_u64,
+                            "headers": {
+                                "Authorization": "Bearer header-secret",
+                                "X-Api-Key": "header-api-secret",
+                                "X-Request-Source": "smelt"
+                            },
+                            "redactedPaths": []
+                        }],
+                        "requestCapturedAtMs": 1725000000002_u64,
+                        "payload": {
+                            "model": "gpt-test",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "api_key": "malicious-widget-secret",
+                            "nested": {"Authorization": "Bearer secret"},
+                            "image": {
+                                "type": "image",
+                                "data": "large-base64-payload",
+                                "url": "data:image/png;base64,also-large"
+                            }
+                        },
+                        "response": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "done"}],
+                            "usage": {"input": 100, "output": 20},
+                            "provider_metadata": {"api_key": "response-secret"}
+                        },
+                        "responseCapturedAtMs": 1725000000100_u64,
+                        "responseRedactedPaths": [],
+                        "responseMetadata": [{
+                            "capturedAtMs": 1725000000050_u64,
+                            "status": 200,
+                            "headers": {
+                                "X-Request-Id": "request-1",
+                                "Set-Cookie": "cookie-secret"
+                            },
+                            "redactedPaths": []
+                        }],
+                        "redactedPaths": []
+                    }],
+                    "modelCallsOmitted": 0,
+                    "compactions": [{
+                        "sequence": 1,
+                        "turn": 2,
+                        "status": "completed",
+                        "reason": "manual",
+                        "willRetry": false,
+                        "startedAtMs": 1725000000000_u64,
+                        "finishedAtMs": 1725000001000_u64,
+                        "firstKeptEntryId": "entry-20",
+                        "tokensBefore": 90000,
+                        "summarizedMessageCount": 1,
+                        "turnPrefixMessageCount": 0,
+                        "sourceMessages": [{
+                            "segment": "summarized",
+                            "role": "user",
+                            "preview": "hello",
+                            "truncated": false
+                        }],
+                        "sourceMessagesOmitted": 0,
+                        "summary": "keep the login constraints",
+                        "usage": {"api_key": "compaction-secret"},
+                        "fromExtension": false
+                    }],
+                    "compactionsOmitted": 0
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("expected runtime debug event");
+        };
+        assert_eq!(debug.version, 3);
+        assert_eq!(debug.source, "pi_runtime_debug");
+        assert_eq!(
+            debug.system_prompt.as_deref(),
+            Some("system line 1\n<project_context>真实上下文</project_context>")
+        );
+        assert_eq!(debug.tools.len(), 1);
+        assert_eq!(debug.tools[0].name, "bash");
+        assert_eq!(debug.tools[0].parameters["required"][0], "command");
+        assert_eq!(debug.model_calls_omitted, 0);
+        let call = debug.model_calls.first().expect("model call");
+        assert_eq!(call.sequence, 3);
+        assert_eq!(call.turn, Some(2));
+        assert_eq!(call.compaction_sequence, Some(1));
+        assert_eq!(call.captured_at_ms, 1_725_000_000_000);
+        assert_eq!(call.model.provider.as_deref(), Some("openai"));
+        assert_eq!(call.source, "pi_context_with_system");
+        assert_eq!(
+            call.payload_source.as_deref(),
+            Some("pi_before_provider_request")
+        );
+        assert_eq!(call.pi_context[0]["content"], "exact Pi system message");
+        assert_eq!(call.pi_context[1]["api_key"], "[REDACTED]");
+        assert_eq!(
+            call.pi_context_redacted_paths,
+            vec!["$.piContext[1].api_key"]
+        );
+        assert_eq!(
+            call.request_headers[0].headers["Authorization"],
+            "[REDACTED]"
+        );
+        assert_eq!(call.request_headers[0].headers["X-Api-Key"], "[REDACTED]");
+        assert_eq!(call.request_headers[0].headers["X-Request-Source"], "smelt");
+        assert_eq!(
+            call.request_headers[0].redacted_paths,
+            vec![
+                "$.requestHeaders[0].headers.Authorization",
+                "$.requestHeaders[0].headers.X-Api-Key"
+            ]
+        );
+        assert_eq!(call.response_metadata[0].status, 200);
+        assert_eq!(
+            call.response_metadata[0].headers["X-Request-Id"],
+            "request-1"
+        );
+        assert_eq!(
+            call.response_metadata[0].headers["Set-Cookie"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            call.response_metadata[0].redacted_paths,
+            vec!["$.responseMetadata[0].headers.Set-Cookie"]
+        );
+        assert_eq!(
+            call.request_config.system_prompt,
+            "request-specific system prompt"
+        );
+        assert_eq!(call.request_config.tools[0].name, "bash");
+        assert_eq!(call.payload["max_tokens"], 4096);
+        assert_eq!(call.payload["api_key"], "[REDACTED]");
+        assert_eq!(call.payload["nested"]["Authorization"], "[REDACTED]");
+        assert_eq!(call.payload["image"]["data"], "[IMAGE DATA OMITTED]");
+        assert_eq!(call.payload["image"]["url"], "[IMAGE DATA OMITTED]");
+        assert_eq!(call.response.as_ref().unwrap()["usage"]["output"], 20);
+        assert_eq!(
+            call.response.as_ref().unwrap()["provider_metadata"]["api_key"],
+            "[REDACTED]"
+        );
+        assert_eq!(call.response_captured_at_ms, Some(1_725_000_000_100));
+        assert_eq!(
+            call.response_redacted_paths.as_ref().unwrap(),
+            &["$.response.provider_metadata.api_key"]
+        );
+        assert_eq!(
+            call.redacted_paths,
+            vec![
+                "$.payload.api_key".to_string(),
+                "$.payload.nested.Authorization".to_string(),
+                "$.payload.image.data".to_string(),
+                "$.payload.image.url".to_string()
+            ]
+        );
+        assert_eq!(debug.compactions.len(), 1);
+        assert_eq!(debug.compactions[0].turn, Some(2));
+        assert_eq!(debug.compactions[0].status, "completed");
+        assert_eq!(
+            debug.compactions[0].first_kept_entry_id.as_deref(),
+            Some("entry-20")
+        );
+        assert_eq!(
+            debug.compactions[0].usage.as_ref().unwrap()["api_key"],
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn runtime_debug_widget_migrates_legacy_single_call_into_history() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 2,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "system",
+                    "tools": [],
+                    "modelCall": {
+                        "sequence": 1,
+                        "source": "pi_before_provider_request",
+                        "model": {},
+                        "payload": {"messages": []},
+                        "redactedPaths": []
+                    }
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("expected migrated runtime debug event");
+        };
+        assert_eq!(debug.version, 3);
+        assert_eq!(debug.model_call, None);
+        assert_eq!(debug.model_calls.len(), 1);
+        assert_eq!(debug.model_calls[0].sequence, 1);
+    }
+
+    #[test]
+    fn runtime_debug_accepts_unbounded_call_and_compaction_history() {
+        let calls = (1..=40)
+            .map(|sequence| {
+                serde_json::json!({
+                    "sequence": sequence,
+                    "source": "pi_before_provider_request",
+                    "model": {},
+                    "requestConfig": {"systemPrompt": "system", "tools": []},
+                    "payload": {"messages": [{"role": "user", "content": sequence}]},
+                    "redactedPaths": []
+                })
+            })
+            .collect::<Vec<_>>();
+        let preview = "x".repeat(4_000);
+        let source_messages = (0..80)
+            .map(|index| {
+                serde_json::json!({
+                    "segment": "summarized",
+                    "role": "user",
+                    "preview": format!("{index}:{preview}"),
+                    "truncated": false
+                })
+            })
+            .collect::<Vec<_>>();
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 3,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "system",
+                    "tools": [],
+                    "modelCalls": calls,
+                    "compactions": [{
+                        "sequence": 1,
+                        "status": "completed",
+                        "reason": "manual",
+                        "willRetry": false,
+                        "startedAtMs": 1725000000000_u64,
+                        "sourceMessages": source_messages,
+                        "sourceMessagesOmitted": 0,
+                        "summary": "complete summary"
+                    }]
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("full model and compaction history should be accepted");
+        };
+        assert_eq!(debug.model_calls.len(), 40);
+        assert_eq!(debug.compactions.len(), 1);
+        assert_eq!(debug.compactions[0].source_messages.len(), 80);
+        assert_eq!(debug.compactions[0].source_messages[0].preview.len(), 4_002);
+    }
+
+    #[test]
+    fn runtime_debug_can_report_compaction_before_any_system_prompt_capture() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-runtime-debug",
+                "widgetLines": [serde_json::json!({
+                    "version": 3,
+                    "source": "pi_runtime_debug",
+                    "systemPrompt": "",
+                    "tools": [],
+                    "modelCalls": [],
+                    "modelCallsOmitted": 0,
+                    "compactions": [{
+                        "sequence": 1,
+                        "status": "started",
+                        "reason": "manual",
+                        "willRetry": false,
+                        "startedAtMs": 1725000000000_u64,
+                        "sourceMessages": [],
+                        "sourceMessagesOmitted": 0
+                    }],
+                    "compactionsOmitted": 0
+                }).to_string()]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
+            panic!("a real compaction capture must not require a prior prompt capture");
+        };
+        assert_eq!(debug.system_prompt.as_deref(), Some(""));
+        assert_eq!(debug.compactions.len(), 1);
+    }
+
+    #[test]
+    fn runtime_debug_widget_rejects_unknown_versions_and_empty_prompts() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        for payload in [
+            serde_json::json!({
+                "version": 4,
+                "source": "pi_runtime_debug",
+                "systemPrompt": "future",
+                "tools": []
+            }),
+            serde_json::json!({
+                "version": 1,
+                "source": "pi_before_agent_start",
+                "systemPrompt": "",
+                "tools": []
+            }),
+            serde_json::json!({
+                "version": 1,
+                "source": "another_extension",
+                "systemPrompt": "spoofed",
+                "tools": []
+            }),
+        ] {
+            publish_extension_widget(
+                &serde_json::json!({
+                    "widgetKey": "smelt-runtime-debug",
+                    "widgetLines": [payload.to_string()]
+                }),
+                &event_tx,
+            );
+        }
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -4088,6 +5192,172 @@ mod tests {
         assert!(state.active_turn);
         assert_eq!(in_flight.load(Ordering::SeqCst), 2);
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reload_slash_is_only_the_exact_command() {
+        assert!(parse_reload_slash("  /reload  "));
+        assert!(!parse_reload_slash("/reload 现在"));
+        assert!(!parse_reload_slash("/reloader"));
+        assert!(!parse_reload_slash("reload"));
+    }
+
+    #[test]
+    fn slash_reload_sends_native_reload_instead_of_a_prompt() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "/reload".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let request: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
+        assert_eq!(request["type"], "reload");
+        assert_eq!(state.reload_request_ids.len(), 1);
+        assert!(event_rx.try_recv().is_err());
+        assert!(!state.active_turn);
+
+        let id = request["id"].as_str().unwrap().to_string();
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": id,
+                "type": "response",
+                "command": "reload",
+                "success": true
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("已重新加载")
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+        ));
+        let refresh: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
+        assert_eq!(refresh["type"], "get_commands");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+
+        let refresh_id = refresh["id"].as_str().unwrap();
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": refresh_id,
+                "type": "response",
+                "command": "get_commands",
+                "success": true,
+                "data": {
+                    "commands": [
+                        {"name": "reload", "description": "Reload skills"},
+                        {"name": "skill:new", "description": "刚加载的技能"}
+                    ]
+                }
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert_eq!(
+            state.available_commands,
+            vec![
+                ("reload".to_string(), "Reload skills".to_string()),
+                ("skill:new".to_string(), "刚加载的技能".to_string()),
+            ]
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::AvailableCommands(commands))
+                if commands.iter().any(|(name, _)| name == "skill:new")
+        ));
+    }
+
+    #[test]
+    fn failed_slash_reload_also_ends_the_local_turn() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.reload_request_ids.insert("reload-1".to_string());
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "reload-1",
+                "type": "response",
+                "command": "reload",
+                "success": false,
+                "error": "reload failed"
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("重新加载失败")
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+        ));
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn slash_reload_during_a_turn_is_not_sent_to_the_model() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "/reload".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(
+            String::from_utf8(writer.into_inner())
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+        assert!(state.active_turn);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
+        ));
     }
 
     #[test]
@@ -4666,6 +5936,124 @@ mod tests {
                 .into_iter()
                 .map(|value| Ok(serde_json::to_string(&value).unwrap())),
         )
+    }
+
+    #[test]
+    fn resumed_initialization_replays_raw_current_branch_entries() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("pi-session"));
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "pi-session",
+                    "model": {
+                        "provider": "test",
+                        "id": "model",
+                        "name": "Test Model",
+                        "contextWindow": 100_000
+                    },
+                    "thinkingLevel": "medium"
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": [{
+                    "provider": "test", "id": "model", "name": "Test Model",
+                    "contextWindow": 100_000
+                }]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-entries", "type": "response",
+                "command": "get_entries", "success": true,
+                "data": {
+                    "entries": [
+                        {
+                            "type": "message", "id": "old", "parentId": null,
+                            "message": {"role": "user", "content": "压缩前"}
+                        },
+                        {
+                            "type": "compaction", "id": "compact", "parentId": "old",
+                            "summary": "模型只看摘要", "firstKeptEntryId": "old"
+                        },
+                        {
+                            "type": "message", "id": "new", "parentId": "compact",
+                            "message": {"role": "user", "content": "压缩后"}
+                        }
+                    ],
+                    "leafId": "new"
+                }
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+        ))
+        .unwrap();
+
+        let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "get_state",
+                "get_available_models",
+                "get_available_thinking_levels",
+                "get_commands",
+                "get_entries"
+            ]
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        let replayed_user_text: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::UserChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed_user_text, ["压缩前", "压缩后"]);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+        );
     }
 
     #[test]

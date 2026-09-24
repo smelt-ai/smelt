@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>对话怎么送到界面上</title>
+<style>
+  :root {
+    --bg: #14120e;
+    --paper: #1c1914;
+    --ink: #efe6d6;
+    --muted: #a39886;
+    --line: #3a342b;
+    --amber: #e0a15a;
+    --red: #e15b4a;
+    --green: #7dba7a;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); color: var(--ink); }
+  body {
+    margin: 0 auto;
+    max-width: 1200px;
+    padding: 48px 28px 96px;
+    font: 18px/1.7 "PingFang SC", "Iowan Old Style", "Songti SC", serif;
+  }
+  h1, h2, .kicker, .label, table, .note, .ex {
+    font-family: "Avenir Next", "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  h1 { font-size: 36px; line-height: 1.2; font-weight: 600; letter-spacing: -0.03em; margin: 0 0 14px; }
+  h2 { font-size: 22px; margin: 52px 0 12px; font-weight: 600; }
+  p { margin: 0 0 14px; }
+  .kicker { color: var(--amber); letter-spacing: 0.12em; font-size: 12px; margin-bottom: 10px; }
+  .lede { font-size: 20px; }
+  .grid { display: grid; gap: 14px; }
+  .two { grid-template-columns: 1fr 1fr; }
+  .three { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 760px) {
+    .two, .three { grid-template-columns: 1fr; }
+    h1 { font-size: 30px; }
+  }
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 16px 6px;
+  }
+  .card.bad { border-color: #6a332c; }
+  .card.good { border-color: #2f5a34; }
+  .label { font-size: 12px; letter-spacing: 0.08em; color: var(--muted); }
+  .bad .label { color: var(--red); }
+  .good .label { color: var(--green); }
+  ul { margin: 8px 0 14px; padding-left: 1.15em; }
+  li { margin: 4px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.5; margin: 8px 0 18px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  code { font-family: "SF Mono", ui-monospace, monospace; font-size: 0.86em; }
+  svg { width: 100%; height: auto; display: block; }
+  .diagram {
+    background: #100e0b;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px;
+    margin: 12px 0 20px;
+  }
+  .note {
+    font-size: 14.5px;
+    color: var(--muted);
+    border-left: 3px solid var(--amber);
+    padding: 2px 0 2px 12px;
+    margin: 8px 0 18px;
+  }
+  .ex {
+    background: #231f19;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 0 0 14px;
+    font-size: 15px;
+  }
+</style>
+</head>
+<body>
+
+<p class="kicker">技术方案</p>
+<h1>装满窗口，或者取到第一条</h1>
+<p class="lede">Mac 和手机都从最近内容开始，只加载当前窗口需要的历史；画完按真实高度判断是否还要往前取。历史页与实时更新属于同一段对话，但走不同的交付规则：历史必须连续，未发送的实时状态可以合并。不要假设所有 agent 都把历史存成同一种 JSONL。</p>
+
+<h2>先看现状：数据实际上怎么走</h2>
+<p>下图上半部是逐段对照代码后的当前实现，下半部是尚未实现的目标设计。Smelt 把 ACP 内容事件归约成服务端内存投影，再把连续区间包装成 <code>ConversationSnapshot</code>；当前同步单位是 <code>AcpEntry</code> 下标，不是对话轮次。虚线框表示进程边界，因此可以看清每个队列究竟属于发送 daemon、Gateway 还是客户端。</p>
+<div class="diagram" aria-label="按进程分区的 ACP 当前链路、问题位置和目标改造">
+<svg viewBox="0 0 1120 1535" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow-current" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8eb4d4"/>
+    </marker>
+    <marker id="arrow-target" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7dba7a"/>
+    </marker>
+  </defs>
+  <style>
+    .t { font: 14px "PingFang SC", sans-serif; fill: #efe6d6; }
+    .s { font: 12px "PingFang SC", sans-serif; fill: #a39886; }
+    .a { font: 12px "SF Mono", monospace; fill: #e0a15a; }
+    .h { font: 700 15px "PingFang SC", sans-serif; fill: #efe6d6; }
+    .lane { fill: none; stroke: #4a4338; stroke-width: 1.2; stroke-dasharray: 5 5; }
+    .node { fill: #1c1914; stroke: #8eb4d4; stroke-width: 1.2; }
+    .state { fill: #142018; stroke: #7dba7a; stroke-width: 1.2; }
+    .warn { fill: #251c13; stroke: #e0a15a; stroke-width: 1.2; }
+    .bad { fill: #291715; stroke: #e15b4a; stroke-width: 1.4; }
+    .arrow { stroke: #8eb4d4; stroke-width: 1.6; fill: none; marker-end: url(#arrow-current); }
+    .target-arrow { stroke: #7dba7a; stroke-width: 1.7; fill: none; marker-end: url(#arrow-target); }
+    .problem { font: 700 12px "PingFang SC", sans-serif; fill: #ff7968; }
+    .target-label { font: 700 12px "PingFang SC", sans-serif; fill: #9dd59a; }
+  </style>
+
+  <text class="h" x="14" y="24">CURRENT · 当前实现（蓝色箭头是数据流；虚线框是进程边界）</text>
+  <rect class="node" x="14" y="42" width="196" height="112" rx="10"/>
+  <text class="t" x="30" y="67">Agent / provider</text>
+  <text class="s" x="30" y="91">历史恢复：session/load 重放</text>
+  <text class="s" x="30" y="112">实时：正文、工具、状态等</text>
+  <text class="s" x="30" y="135">进入同一 ConversationEvent 通道</text>
+  <text class="s" x="30" y="149">恢复阶段另有 started/state 标记</text>
+  <text class="s" x="28" y="178">运行时二选一：</text>
+  <text class="s" x="28" y="196">Direct 或 Hosted</text>
+
+  <!-- Direct process -->
+  <rect class="lane" x="232" y="42" width="874" height="112" rx="10"/>
+  <text class="h" x="248" y="66">Direct · main smeltd 进程</text>
+  <rect class="warn" x="248" y="79" width="286" height="58" rx="8"/>
+  <text class="t" x="264" y="102">事件 drain</text>
+  <text class="s" x="264" y="123">收一条后 try_recv，只合并当时已到达的一批</text>
+  <rect class="state" x="594" y="79" width="300" height="58" rx="8"/>
+  <text class="t" x="610" y="102">权威 AcpSessionState</text>
+  <text class="s" x="610" y="123">顶层 Vec&lt;AcpEntry&gt;，按 entry 下标同步</text>
+  <path class="arrow" d="M210 91 H248"/>
+  <path class="arrow" d="M534 108 H594"/>
+
+  <!-- Hosted path -->
+  <rect class="lane" x="232" y="174" width="594" height="190" rx="10"/>
+  <text class="h" x="248" y="198">Hosted · session-host 进程</text>
+  <rect class="warn" x="248" y="214" width="178" height="58" rx="8"/>
+  <text class="t" x="264" y="237">事件 drain</text>
+  <text class="s" x="264" y="258">同一归约逻辑</text>
+  <rect class="state" x="454" y="214" width="178" height="58" rx="8"/>
+  <text class="t" x="470" y="237">权威投影</text>
+  <text class="s" x="470" y="258">session-host 内存</text>
+  <rect class="bad" x="660" y="214" width="148" height="124" rx="8"/>
+  <text class="problem" x="676" y="236">问题 H1</text>
+  <text class="t" x="676" y="258">内部 acp_open</text>
+  <text class="s" x="676" y="279">OutputMailbox</text>
+  <text class="a" x="676" y="300">8 MiB FIFO</text>
+  <text class="s" x="676" y="320">首帧无 tail_limit</text>
+  <path class="arrow" d="M210 126 H220 V243 H248"/>
+  <path class="arrow" d="M426 243 H454"/>
+  <path class="arrow" d="M632 243 H660"/>
+
+  <rect class="lane" x="842" y="174" width="264" height="190" rx="10"/>
+  <text class="h" x="858" y="198">Hosted · main smeltd</text>
+  <rect class="bad" x="858" y="214" width="232" height="58" rx="8"/>
+  <text class="problem" x="874" y="236">问题 H2</text>
+  <text class="t" x="942" y="236">无界 snapshot_rx</text>
+  <text class="s" x="874" y="258">socketpair reader → channel</text>
+  <rect class="warn" x="858" y="290" width="232" height="58" rx="8"/>
+  <text class="t" x="874" y="313">镜像投影</text>
+  <text class="s" x="874" y="334">增量 revision 跳号 → 请求 offset=0</text>
+  <path class="arrow" d="M808 276 H834 V243 H858"/>
+  <path class="arrow" d="M974 272 V290"/>
+
+  <!-- Main smeltd output distribution -->
+  <rect class="lane" x="14" y="390" width="1092" height="336" rx="10"/>
+  <text class="h" x="30" y="415">main smeltd · ACP 数据分发层</text>
+  <text class="s" x="314" y="415">Direct 使用权威投影；Hosted 使用 main daemon 镜像投影</text>
+  <rect class="state" x="30" y="436" width="228" height="92" rx="8"/>
+  <text class="t" x="46" y="459">对外投影源</text>
+  <text class="a" x="46" y="481">entries[0..N)</text>
+  <text class="s" x="46" y="503">不是稳定 turn 容器</text>
+  <text class="s" x="46" y="520">工具 entry 内部仍可有 children</text>
+  <path class="arrow" d="M744 137 V376 H144 V436"/>
+  <path class="arrow" d="M974 348 V376 H144 V436"/>
+
+  <rect class="warn" x="296" y="436" width="284" height="92" rx="8"/>
+  <text class="t" x="312" y="459">生成 ConversationSnapshot</text>
+  <text class="a" x="312" y="481">offset=k, total=N</text>
+  <text class="a" x="312" y="502">entries=state.entries[k..N)</text>
+  <text class="s" x="312" y="520">可为空区间；不必是完整对话</text>
+  <path class="arrow" d="M258 482 H296"/>
+
+  <rect class="bad" x="618" y="436" width="458" height="92" rx="8"/>
+  <text class="problem" x="634" y="459">问题 P1 · publish</text>
+  <text class="t" x="754" y="459">同一 payload 序列化一次，再复制给每个 attachment</text>
+  <text class="s" x="634" y="482">邮箱只懂字节 FIFO：不覆盖旧 revision，也不合并 entries_offset</text>
+  <text class="s" x="634" y="504">下一批事件稍后到达，就会再生成并 enqueue 一帧</text>
+  <text class="s" x="634" y="521">这是快照积压的源头，不在 GUI / 手机 UI</text>
+  <path class="arrow" d="M580 482 H618"/>
+
+  <rect class="bad" x="30" y="558" width="500" height="142" rx="9"/>
+  <text class="problem" x="46" y="581">问题 P2 · smeltd 中该 acp_open attachment 独有</text>
+  <text class="t" x="46" y="605">Mac 控制连接的 OutputMailbox：8 MiB 待写 FIFO</text>
+  <text class="s" x="46" y="628">attach 首帧最多取当前投影尾部 100 entries</text>
+  <rect class="warn" x="46" y="646" width="76" height="28" rx="4"/>
+  <rect class="warn" x="132" y="646" width="76" height="28" rx="4"/>
+  <rect class="warn" x="218" y="646" width="76" height="28" rx="4"/>
+  <text class="s" x="60" y="665">rev 41</text><text class="s" x="146" y="665">rev 42</text><text class="s" x="232" y="665">rev 43</text>
+  <text class="s" x="310" y="665">→ writer → Unix socket</text>
+  <text class="s" x="46" y="691">超限清队列并关闭；正在 write_all 的一帧不计 queued_bytes</text>
+
+  <rect class="bad" x="570" y="558" width="506" height="142" rx="9"/>
+  <text class="problem" x="586" y="581">问题 P3 · smeltd 中每个 acp_watch watcher 各有一个</text>
+  <text class="t" x="586" y="605">手机旁观连接的 OutputMailbox：8 MiB 待写 FIFO</text>
+  <text class="s" x="586" y="628">默认尾部 100；history id + revision 都匹配才从 known_entries 接续</text>
+  <rect class="warn" x="586" y="646" width="76" height="28" rx="4"/>
+  <rect class="warn" x="672" y="646" width="76" height="28" rx="4"/>
+  <rect class="warn" x="758" y="646" width="76" height="28" rx="4"/>
+  <text class="s" x="600" y="665">rev 41</text><text class="s" x="686" y="665">rev 42</text><text class="s" x="772" y="665">rev 43</text>
+  <text class="s" x="850" y="665">→ writer → Unix socket</text>
+  <text class="s" x="586" y="691">空队列允许一个超过 8 MiB 的首包，因此 8 MiB 不是单帧硬上限</text>
+  <path class="arrow" d="M760 528 V544 H280 V558"/>
+  <path class="arrow" d="M916 528 V544 H823 V558"/>
+  <text class="s" x="30" y="718">结论：两个 8 MiB 都在发送方 smeltd；不在 Mac GUI、Gateway 或手机进程。Hosted 模式上游还会先经过 session-host 自己的 8 MiB FIFO。</text>
+
+  <!-- Desktop client process -->
+  <rect class="lane" x="14" y="748" width="536" height="194" rx="10"/>
+  <text class="h" x="30" y="773">Mac 桌面客户端进程</text>
+  <rect class="bad" x="30" y="790" width="222" height="64" rx="8"/>
+  <text class="problem" x="46" y="813">问题 P4</text>
+  <text class="t" x="116" y="813">无界 snapshot_rx</text>
+  <text class="s" x="46" y="837">socket reader 解析后 try_send</text>
+  <rect class="node" x="280" y="790" width="252" height="64" rx="8"/>
+  <text class="t" x="296" y="813">GUI 按 offset 合并窗口</text>
+  <text class="s" x="296" y="837">仅接受更大的 revision，不要求连续</text>
+  <rect class="bad" x="146" y="872" width="270" height="54" rx="8"/>
+  <text class="problem" x="162" y="895">问题 P5</text>
+  <text class="s" x="232" y="895">Markdown / 图片仍提前处理</text>
+  <text class="s" x="162" y="916">之后才进入 GPUI virtual list</text>
+  <path class="arrow" d="M280 700 V732 H141 V790"/>
+  <path class="arrow" d="M252 822 H280"/>
+  <path class="arrow" d="M406 854 V872"/>
+
+  <!-- Gateway and phone -->
+  <rect class="lane" x="570" y="748" width="536" height="108" rx="10"/>
+  <text class="h" x="586" y="773">smelt-remote-gateway 进程</text>
+  <rect class="bad" x="586" y="790" width="244" height="50" rx="8"/>
+  <text class="problem" x="602" y="813">问题 P6</text>
+  <text class="t" x="674" y="813">mpsc&lt;String&gt;(64)</text>
+  <text class="s" x="602" y="832">原始 JSON 行，不做快照语义合并</text>
+  <rect class="node" x="860" y="790" width="230" height="50" rx="8"/>
+  <text class="t" x="876" y="813">WebSocket 逐帧 await 发送</text>
+  <text class="s" x="876" y="832">64 条满后才向 smeltd 反压</text>
+  <path class="arrow" d="M823 700 V732 H708 V790"/>
+  <path class="arrow" d="M830 815 H860"/>
+
+  <rect class="lane" x="570" y="874" width="536" height="112" rx="10"/>
+  <text class="h" x="586" y="899">手机 Flutter 进程</text>
+  <rect class="bad" x="586" y="916" width="292" height="54" rx="8"/>
+  <text class="problem" x="602" y="939">问题 P7</text>
+  <text class="s" x="674" y="939">AcpSnapshot.fromJson 解析本帧全部 entries</text>
+  <text class="s" x="602" y="960">GatewayService 缓存窗口 merge</text>
+  <rect class="node" x="910" y="916" width="180" height="54" rx="8"/>
+  <text class="t" x="926" y="940">ListView.builder</text>
+  <text class="s" x="926" y="960">仅行组件懒创建</text>
+  <path class="arrow" d="M975 840 V900 H732 V916"/>
+  <path class="arrow" d="M878 943 H910"/>
+
+  <!-- History request -->
+  <rect class="lane" x="14" y="1008" width="1092" height="112" rx="10"/>
+  <text class="h" x="30" y="1033">历史请求是另一条路径</text>
+  <rect class="node" x="30" y="1050" width="278" height="52" rx="8"/>
+  <text class="t" x="46" y="1073">acp_snapshot(before, limit)</text>
+  <text class="s" x="46" y="1093">从 main smeltd 镜像/投影切连续页</text>
+  <rect class="node" x="352" y="1050" width="300" height="52" rx="8"/>
+  <text class="t" x="368" y="1073">请求连接直接 writeln! 响应</text>
+  <text class="s" x="368" y="1093">不创建、不经过实时 OutputMailbox</text>
+  <rect class="warn" x="696" y="1050" width="394" height="52" rx="8"/>
+  <text class="t" x="712" y="1073">注意：acp_open / acp_watch 的初始化尾页仍经过邮箱</text>
+  <text class="s" x="712" y="1093">offset=0 也可能只是最早一页，需结合 total 判断</text>
+  <path class="arrow" d="M308 1076 H352"/>
+  <path class="arrow" d="M652 1076 H696"/>
+
+  <!-- Target -->
+  <text class="h" x="14" y="1154">TARGET · 准备怎么改（尚未实现）</text>
+  <rect class="state" x="14" y="1172" width="1092" height="347" rx="11"/>
+  <text class="target-label" x="30" y="1198">T1 · 先根治发送端</text>
+  <text class="t" x="157" y="1198">只替换 ACP 的字节 FIFO 语义；终端字节流继续使用原 8 MiB FIFO</text>
+  <rect class="node" x="30" y="1216" width="256" height="66" rx="8"/>
+  <text class="t" x="46" y="1240">一帧正在 write_all</text>
+  <text class="a" x="46" y="1264">rev=41（不可中途改写）</text>
+  <rect class="warn" x="326" y="1216" width="326" height="66" rx="8"/>
+  <text class="t" x="342" y="1240">唯一待发“变化摘要”，不是旧 JSON</text>
+  <text class="a" x="342" y="1264">earliest=998, latest_rev=43, flags...</text>
+  <rect class="node" x="692" y="1216" width="382" height="66" rx="8"/>
+  <text class="t" x="708" y="1240">writer 空闲时，从最新权威投影再生成</text>
+  <text class="a" x="708" y="1264">ConversationSnapshot entries[998..N)</text>
+  <path class="target-arrow" d="M286 1249 H326"/>
+  <path class="target-arrow" d="M652 1249 H692"/>
+  <text class="s" x="30" y="1307">应用位置：Direct 的 main smeltd、Hosted 的 session-host 内部 acp_open，以及 Hosted 镜像向外分发处。</text>
+
+  <text class="target-label" x="30" y="1338">T2 · 清掉下游隐藏积压点</text>
+  <text class="s" x="214" y="1338">Hosted snapshot_rx、Mac snapshot_rx、Gateway mpsc(64) 都不能继续囤积过时快照。</text>
+  <text class="s" x="30" y="1360">改成 ACP 专用的有界状态槽/归约器；只有覆盖范围可证明连续时才合并，否则请求 offset=0 resync。统一桌面与 Hosted 的 revision 规则。</text>
+
+  <text class="target-label" x="30" y="1391">T3 · 降低客户端单帧成本</text>
+  <text class="s" x="214" y="1391">Mac Markdown/图片/布局改为接近可见区域再做；手机仍需解析收到的 JSON，但只对可见附近做重工作。</text>
+
+  <text class="target-label" x="30" y="1422">T4 · 历史初始化先测量</text>
+  <text class="s" x="214" y="1422">比较全量、分块全量、尾部优先分页；不把“100 entries”当成一屏，也不未经实测写死分页。</text>
+  <text class="s" x="30" y="1453">必须验证：慢 writer、GUI 卡顿、Gateway/网络变慢、Hosted revision 缺口、旧工具 entry 迟到更新、纯状态帧、rewind/reset。</text>
+  <text class="s" x="30" y="1477">验收边界：每个异步跳点最多保留一个不可变在途帧和一个可合并待发状态；无法安全合并时明确 resync，不能静默丢内容。</text>
+  <text class="s" x="30" y="1501">8 MiB 仍可作为异常单帧/总资源保护，但不再靠“排满后断开”处理正常 ACP 流式更新。</text>
+</svg>
+</div>
+<p class="note"><strong>8 MiB <code>OutputMailbox</code> 在发送方 daemon 的数据分发层，不在 Mac GUI 或手机 UI。</strong>Direct 模式的 <code>acp_open</code> / 每个 <code>acp_watch</code> attachment 由 main <code>smeltd</code> 持有；Hosted 模式还会先经过 session-host 内部 <code>acp_open</code> 的同款邮箱。红色问题也不止这一层：Hosted reader、Mac 客户端和 Gateway 当前分别还有无界或有界的下游队列，都会延后反压并保留过时帧。</p>
+<p>Smelt <strong>知道自己正处于历史恢复阶段</strong>：generic ACP 会在 <code>session/load</code> 前产生 <code>HistoryReplayStarted</code>，投影里有 <code>replaying_history</code>，恢复 Ready 也有专门类型；部分驱动还有显式结束标记。但 <code>AgentChunk</code>、<code>ToolCall</code> 等内容事件本身仍走同一种通道，不能仅凭“历史”身份丢弃，它们就是重建投影的数据。</p>
+<p><code>ConversationSnapshot</code> 的状态字段描述当前会话，但其中的 <code>entries</code> 只是带全局位置的连续区间。实时更新通常发送“本批最早变化的 entry 到当前末尾”；纯 phase 或审批状态更新可以不带 entries。当前实现也没有稳定的 turn 容器，迟到的工具终态可能修改旧 entry，因此现状图不能画成只追加轮次。</p>
+<p>“虚拟列表”目前只代表行组件按需创建，不代表所有工作都懒做：Mac 对变化区间仍会建 Markdown 缓存、解码图片；手机 <code>AcpSnapshot.fromJson</code> 也会把本帧携带的 entries 全部解析成对象。</p>
+
+<h2>先分清数据，不强行统一格式</h2>
+<div class="grid three">
+  <div class="card">
+    <p class="label">Agent 的历史源</p>
+    <p>恢复历史仍以 agent 自己的存储和协议为准。各 agent 的格式、分支和恢复语义不同；Smelt 不规定一份通用 JSONL，也不把完整 transcript 再复制进 SQLite。</p>
+  </div>
+  <div class="card">
+    <p class="label">ACP 投影</p>
+    <p>服务端把 ACP 事件归约为 <code>AcpEntry</code> 列表。<code>entries_offset</code> 是这份投影里的条目下标，不是 JSONL 行号或字节位置；现有历史页从这份投影切片。</p>
+  </div>
+  <div class="card">
+    <p class="label">客户端窗口</p>
+    <p>Mac 和手机各自只持有最近已加载的一段。窗口不够高时向前取页；短对话自然取到第一条，长对话不必在首屏传完。</p>
+  </div>
+</div>
+<p class="note">会话列表和查询索引仍在 SQLite，不存 transcript 正文。分页能限制客户端传输和渲染量；当前服务端仍把完整 ACP 投影留在内存中，因此这不是服务端内存分页方案。</p>
+
+<h2>实时更新：按变更范围合并，不按最后一帧覆盖</h2>
+<p>每条实时连接只需要一份正在写的不可变帧，以及一份尚未开始写的变更摘要。摘要记录最早发生变化的 ACP 条目、最新投影版本和需要替换的状态字段；writer 取出摘要时，从当前投影重新生成一份连续快照。不能只把最后一条已序列化 JSON 留下来。</p>
+<p class="ex">客户端已收到的投影覆盖 <code>[900, 1000)</code>。下一批变化包括 1000 的新内容和 998 的工具状态更新，就从 998 重新生成到当前末尾。若 998 在上一帧写完后又变化，下一帧仍须回到 998。会话清空、重放或分叉时换投影代数，并要求全量同步。</p>
+<ul>
+  <li>待发期间多次变化取最早的变更下标，合并到最新状态；旧条目被修改时，左边界可以向前退。</li>
+  <li>只有一帧正在写时不能改写它；后续变化进入单个待发摘要，不继续排快照队列。</li>
+  <li>revision 表示投影版本，不要求每个中间版本都传到客户端；合并帧必须说明覆盖范围，接收方不能把正常跳号当成丢失并永久等待。</li>
+  <li>权限卡片等当前状态可以从最新投影恢复；必须逐次送达的动作回执、提醒和持久化副作用不能依赖可丢弃的实时帧。</li>
+</ul>
+<p class="note">“写完”只表示这一帧已完整写入当前有序连接，不表示 UI 已经画完。凡是中间还有可丢帧队列的下一跳，也必须按自己的消费进度合并或在发现缺口时 resync。</p>
+
+<h2>怎么知道满了</h2>
+<p>消息、工具、展开、合并，都要等画出来才知道有多高。不事先算几条能装满，也不先判断这是长对话还是短对话。</p>
+<div class="diagram" aria-label="用真实高度决定还要不要再取">
+<svg viewBox="0 0 860 188" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .t { font: 14px "PingFang SC", sans-serif; fill: #efe6d6; }
+    .s { font: 12px "PingFang SC", sans-serif; fill: #a39886; }
+    .box { fill: #1c1914; stroke: #3a342b; }
+    .ok { fill: #142018; stroke: #7dba7a; }
+  </style>
+  <rect class="box" x="8" y="24" width="190" height="72" rx="10"/>
+  <text class="t" x="24" y="54">从最新往前取一小批</text>
+  <text class="s" x="24" y="76">按 ACP 投影条目下标</text>
+  <rect class="ok" x="230" y="24" width="200" height="72" rx="10"/>
+  <text class="t" x="246" y="54">画完量真实高度</text>
+  <text class="s" x="246" y="76">展开、合并都重算</text>
+  <rect class="ok" x="462" y="24" width="180" height="72" rx="10"/>
+  <text class="t" x="478" y="54">盖过窗口加一屏</text>
+  <text class="s" x="478" y="76">就停</text>
+  <rect class="box" x="674" y="24" width="174" height="72" rx="10"/>
+  <text class="t" x="690" y="54">或者到了第一条</text>
+  <text class="s" x="690" y="76">也停</text>
+  <path d="M198 60 H230 M430 60 H462 M642 60 H674" stroke="#7dba7a" stroke-width="1.5" fill="none"/>
+  <text class="s" x="8" y="128">短对话取到第一条就停。长对话盖过窗口就停。没有模式开关。</text>
+  <text class="s" x="8" y="152">未量到之前把每条当成 96 像素，100 条记成 9600 像素。滚动条会和内容对不上，这个数不能用来判断满没满。</text>
+  <text class="s" x="8" y="176">一条展开的工具比窗口还高，它自己就已经占满。再往上滚到边界，再补一截。</text>
+</svg>
+</div>
+<p>历史页按 ACP 投影里的绝对条目下标接在前面，接入时保持当前可见行的位置。打开后先取最近一批；布局完成后，若已加载内容的真实高度还不到视口加约一屏，就再取更早的一批，直到够高或到第一条。向上翻到边界时继续取页；失败留在边界并显示重试。页与实时更新并发时，用投影代数和 revision 判断是否仍可拼接，不匹配就重新对齐，不能静默丢页。</p>
+<p>Mac 和手机使用同一套页接口，由各自实际视口决定何时继续取；手机可以采用更小的传输批次，Mac 可预取一页，但都不默认后台下载整段历史。约一屏余量是减少连续请求的缓冲，不是“装满”的固定条数。展开、合并、字号或窗口尺寸变化后重新量；只有尚有更早条目且内容不足时才补页。</p>
+
+<h2>现在的两个故障</h2>
+<div class="grid two">
+  <div class="card bad">
+    <p class="label">历史恢复时输出积压</p>
+    <p>ACP 的历史恢复会产生事件；服务端虽会把当时已到达的一批事件合并，但分批到达的多批仍可能各自产生快照。每份快照进入连接自己的 FIFO 邮箱，慢 writer 来不及排空时，8MB 上限会关闭 attachment。问题是“重复状态快照排队”，不是应该把终端邮箱调大。约 200KB/帧若作为依据，应附实际采样条件和大小分布。</p>
+  </div>
+  <div class="card bad">
+    <p class="label">收到的历史，窗口却不连续</p>
+    <p>首屏的 100 是 ACP 条目数，不是 100 轮，也不保证覆盖一个视口。再加上虚拟列表未测量条目的高度估值、分页边界和滚动锚点处理，可能出现内容不足或旧页无法接上的情况。单加“加载更多”按钮不能修复高度估算和拼接问题。</p>
+  </div>
+</div>
+<p>终端的 8MB FIFO 是保护终端字节流的策略，不能直接套给 ACP 状态快照。手机 watcher 背压应只影响手机订阅；不能据此推断桌面 ACP 会话或 provider 应结束。Hosted host → daemon 的内部控制连接另有生命周期约束，不能因“邮箱满”而被关闭。</p>
+
+<h2>要改成什么样</h2>
+<table>
+  <thead><tr><th></th><th>怎么做</th></tr></thead>
+  <tbody>
+    <tr><td>历史源</td><td>继续使用 agent 自己的持久化和恢复协议；不假定统一 JSONL，也不把 provider 文件偏移当作 ACP 条目游标。</td></tr>
+    <tr><td>打开</td><td>Mac、手机都先取最近一段并尽快显示。短对话自然到第一条；长对话不在首屏传完整本。</td></tr>
+    <tr><td>历史分页</td><td>通过独立的有界历史请求，按 ACP 投影条目范围取页。客户端画完后按真实高度继续补到视口加约一屏，或到第一条。</td></tr>
+    <tr><td>往上翻</td><td>旧页按绝对条目位置接在前面并保持滚动锚点。页失败可见、可重试；跨重放/分叉的旧游标显式失效并重新对齐。</td></tr>
+    <tr><td>实时更新</td><td>历史页不进实时邮箱。每连接只保留正在写的帧和一份待发变更摘要；摘要按最早变更位置合并，从当前投影重新生成。</td></tr>
+    <tr><td>版本与重置</td><td>更新携带投影代数和 revision。正常合并允许 revision 跳号；清空、重放、分叉切代数并发全量同步。</td></tr>
+    <tr><td>慢客户端</td><td>积压帧被合并，不作为断线理由。持续写入停滞或真实 I/O 错误时可摘掉该 observer；provider 会话不能因普通 observer 背压而结束。</td></tr>
+    <tr><td>移动端</td><td>按手机视口和传输预算分页；后台冻结期间不追补每个中间帧，恢复时重新订阅并同步当前状态。网关内部队列也必须支持合并或 resync。</td></tr>
+    <tr><td>单帧大小</td><td>历史页同时限制条目数和编码字节数。单条超大图片/工具负载另设上限或资源引用；“队列只有一帧”不等于内存有界。</td></tr>
+    <tr><td>终端</td><td>终端原样保留自己的 8MB 有界 FIFO；ACP 使用独立的状态快照邮箱，不改变终端字节流语义。</td></tr>
+  </tbody>
+</table>
+
+<h2>资源边界与非目标</h2>
+<ul>
+  <li>这次分页限制客户端的首屏传输、持有条目和渲染工作；服务端当前仍持有完整的 <code>AcpSessionState.entries</code>。若后续要限制 daemon 内存，必须另做 provider 历史分页或规范化存储方案，不能把客户端分页说成服务端分页。</li>
+  <li>流式输出队列必须按流类型分策略：终端是不能丢字节的有界 FIFO，ACP 是允许合并状态的邮箱。不能修改一个共用队列后让终端输出也被覆盖。</li>
+  <li>Hosted host → daemon 与 daemon → GUI/mobile 是不同故障边界。内部宿主连接不能因为客户端快照队列达到字节阈值而被摘除；移动端 watcher 断开也不能终结桌面会话。</li>
+  <li>当前快照在入队前已被构造和序列化。若只在字节邮箱里替换旧帧，虽能减少积压字节，却仍会重复做快照复制与 JSON 编码；合并应尽可能发生在序列化之前。</li>
+  <li>持久化提交与可丢弃的实时广播分开。若暂时仍通过帧携带持久化意图，合并时必须累积标记，不能被最后一帧覆盖；审批回执等一次性事实也不能只存在于可合并快照中。</li>
+</ul>
+
+<h2>验收条件</h2>
+<ul>
+  <li>短历史一次补到第一条；长历史首屏达到真实高度目标后停止，向上翻可连续取完，滚动锚点不跳。</li>
+  <li>分页与实时追加、旧工具状态更新并发时，没有缺条、重复条或静默丢页；过期代数明确触发重新对齐。</li>
+  <li>对同一慢读端持续产生超过 8MB 的 ACP 更新，待发内存保持有界，收到的最终投影完整；其他 observer 与 provider 不受影响。</li>
+  <li>覆盖 hosted host → daemon、桌面控制连接、手机 watcher 和 gateway 队列；验证慢连接、真实断开、前后台恢复及重连 resync。</li>
+  <li>构造更新覆盖已写帧中的旧条目、清空/重放/分叉、runtime debug 变更、持久化标记，以及单个超大条目的测试。</li>
+</ul>
+
+<h2>实施顺序</h2>
+<ol>
+  <li><strong>先定协议不变量。</strong>明确 ACP 投影下标、投影代数、revision 覆盖范围、重置语义，以及哪些状态允许合并、哪些事件必须可靠送达；先写出旧条目更新和重置的失败测试。</li>
+  <li><strong>再改实时出口。</strong>把 ACP 邮箱与终端 FIFO 分开；待发区保存变更摘要而非多份 JSON 字节，writer 在取帧时从 reducer 物化当前状态。覆盖直接连接和 hosted host → daemon 镜像连接。</li>
+  <li><strong>实现客户端按高度补页。</strong>沿用 ACP 投影范围读取，先让 Mac 首屏与 prepend 锚点正确，再接入手机相同的接口；页面布局决定是否继续取，页失败显示并允许重试。</li>
+  <li><strong>打通远端恢复。</strong>网关和 WebSocket 的积压队列采用同样的状态合并 / resync 语义；手机前后台切换后根据投影代数和 revision 重新订阅，而不是追补所有中间快照。</li>
+  <li><strong>最后压测资源边界。</strong>测量典型与极端条目的序列化大小、并发 watcher 数和阻塞写时长，再定单帧字节上限、停滞超时和总内存预算；不通过增大 FIFO 上限来掩盖过载。</li>
+</ol>
+
+<h2>不改的事</h2>
+<ul>
+  <li>窗口仍不解析 Pi、Claude 等 provider 私有历史格式；agent 的历史所有权和恢复协议不变。</li>
+  <li>SQLite 继续保存 Smelt 自己需要查询的会话目录和索引，不新增一份重复 transcript。</li>
+  <li>审批 responder 仍由持有 ACP 连接的进程处理；客户端看到当前待处理状态并发送动作。</li>
+</ul>
+
+<p class="note">100 是单次请求的批量上限，不是视口高度；8MB 是终端 FIFO 的保护线，不是 ACP 是否可打开的门槛。历史按真实布局逐页读取，实时流按语义变更范围合并；是否结束会话由真实生命周期和传输错误决定，而不是陈旧快照排了多少张。</p>
+
+</body>
+</html>

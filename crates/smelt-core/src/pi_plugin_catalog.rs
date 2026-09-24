@@ -1,14 +1,11 @@
 //! 智能体插件目录：枚举 Pi 会话可加载的 skill 与 extension。
 //!
 //! Pi 没有内置 MCP，可插拔的是 skill（Agent Skills 能力包）和 extension
-//! （注册工具/命令的 TS 模块）。两者都由 Pi 在启动时从全局位置自动发现，
-//! 所以默认每个会话吃全量。Smelt 要按智能体裁剪，就得先知道有哪些，
-//! 再用 `--no-skills`/`--no-extensions` 关掉发现、用 `--skill`/`-e` 显式加回。
+//! （注册工具/命令的 TS 模块）。裸 Pi 会自动发现全局资源及受信任项目中的原生资源；
+//! Smelt 的产品智能体则用勾选式加载：先关掉自动发现，再显式传入勾选插件和工作区技能。
 //!
-//! 这里只扫 Pi 的**全局**位置。工作台智能体对话的 cwd 是
-//! `~/.smelt/workspaces/conversations/<uuid>` 这种一次性空目录，项目级
-//! `.pi/skills` 永远是空的；而且 rpc 模式不弹信任提示、`defaultProjectTrust`
-//! 默认 `ask` 会直接忽略项目资源，扫它没有意义。
+//! `discover_plugins` 只扫供产品智能体勾选的全局插件目录。智能体 space 和绑定目录里的
+//! 技能由 `workspace_skill_args` 单独显式加载，避免依赖 Pi 的 cwd / 项目信任推断。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -110,10 +107,10 @@ pub fn global_skill_roots() -> Vec<PathBuf> {
 
 /// 工作区自带技能包的约定目录名，相对于绑定目录或智能体 space 根。
 ///
-/// 三套约定并存：`.claude/skills` 是 Agent Skills 标准（实际用得最多），
-/// `.pi/skills` 是 Pi 官方的项目级位置，`.skills` 是简写。做成表而不是写死在
-/// 扫描逻辑里，以后加约定只动这一行。
-pub const WORKSPACE_SKILL_DIRS: &[&str] = &[".claude/skills", ".pi/skills", ".skills"];
+/// `.agents/skills` 是通用 Agent Skills 位置，也是 Pi 原生支持的位置；`.pi/skills` 是
+/// Pi 原生项目级位置。`.claude/skills` 是 Smelt 为绑定目录提供的兼容入口，会通过显式
+/// `--skill` 加载；Pi 本身不会从该位置自动发现。
+pub const WORKSPACE_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills", ".pi/skills"];
 
 /// 把工作区自带的技能目录换成 Pi 的显式加载参数。
 ///
@@ -538,15 +535,32 @@ pub fn loaded_skills_for_launch(
         None => {
             let mut plugins = discover_plugins();
             if let Some(cwd) = cwd {
-                for relative in WORKSPACE_SKILL_DIRS {
-                    collect_skills(&cwd.join(relative), &mut plugins);
-                }
+                collect_pi_project_skills(cwd, &mut plugins);
             }
             plugins
         }
     };
     plugins.retain(|plugin| plugin.kind == PiPluginKind::Skill && plugin.is_usable());
     dedupe(plugins)
+}
+
+/// 收集 Pi 裸会话按自身约定自动发现的项目技能。
+///
+/// Pi 从 cwd 到 Git 仓库根（没有仓库时到文件系统根）逐层找 `.agents/skills`，
+/// `.pi/skills` 则只从当前工作目录发现。不要把 Smelt 的兼容目录混进来：它们只有在
+/// 产品智能体显式传 `--skill` 时才会加载。
+fn collect_pi_project_skills(cwd: &Path, out: &mut Vec<PiPlugin>) {
+    collect_skills(&cwd.join(".pi/skills"), out);
+
+    let git_root = cwd
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists());
+    for ancestor in cwd.ancestors() {
+        collect_skills(&ancestor.join(".agents/skills"), out);
+        if git_root == Some(ancestor) {
+            break;
+        }
+    }
 }
 
 fn skill_paths_from_plugin_args(args: &[String]) -> Vec<PathBuf> {
@@ -633,19 +647,23 @@ mod tests {
     #[test]
     fn workspace_skill_directories_become_explicit_load_flags() {
         let root = std::env::temp_dir().join(format!("smelt-ws-skills-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".agents/skills/demo")).unwrap();
         std::fs::create_dir_all(root.join(".claude/skills/demo")).unwrap();
-        std::fs::create_dir_all(root.join(".skills")).unwrap();
+        std::fs::create_dir_all(root.join(".pi/skills/demo")).unwrap();
+        std::fs::create_dir_all(root.join(".skills/demo")).unwrap();
 
         let args = workspace_skill_args(std::slice::from_ref(&root));
 
-        // 顺序跟着约定表走，`.pi/skills` 不存在就不该出现。
+        // 顺序跟着约定表走。
         assert_eq!(
             args,
             vec![
                 "--skill".to_string(),
+                root.join(".agents/skills").to_string_lossy().into_owned(),
+                "--skill".to_string(),
                 root.join(".claude/skills").to_string_lossy().into_owned(),
                 "--skill".to_string(),
-                root.join(".skills").to_string_lossy().into_owned(),
+                root.join(".pi/skills").to_string_lossy().into_owned(),
             ]
         );
         std::fs::remove_dir_all(&root).ok();
@@ -874,22 +892,51 @@ mod tests {
     }
 
     #[test]
-    fn missing_plugin_args_includes_workspace_skills() {
-        let cwd = std::env::temp_dir().join(format!("smelt-loaded-cwd-{}", uuid::Uuid::new_v4()));
+    fn bare_pi_discovers_native_project_skill_locations() {
+        let root = std::env::temp_dir().join(format!("smelt-loaded-cwd-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        let cwd = repo.join("nested");
+        std::fs::create_dir_all(root.join(".agents/skills/outside-repo")).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
         write(
-            &cwd.join(".claude/skills/from-project/SKILL.md"),
-            &skill_manifest("from-project", "项目级"),
+            &repo.join(".agents/skills/from-repo/SKILL.md"),
+            &skill_manifest("from-repo", "仓库级"),
+        );
+        write(
+            &cwd.join(".agents/skills/from-nested/SKILL.md"),
+            &skill_manifest("from-nested", "子目录级"),
+        );
+        write(
+            &cwd.join(".pi/skills/from-pi/SKILL.md"),
+            &skill_manifest("from-pi", "Pi 原生"),
+        );
+        write(
+            &cwd.join(".claude/skills/not-native/SKILL.md"),
+            &skill_manifest("not-native", "需要显式加载"),
+        );
+        write(
+            &cwd.join(".skills/not-native/SKILL.md"),
+            &skill_manifest("not-native-shortcut", "需要显式加载"),
+        );
+        write(
+            &root.join(".agents/skills/outside-repo/SKILL.md"),
+            &skill_manifest("outside-repo", "仓库外"),
         );
 
         let loaded = loaded_skills_for_launch(
             &ConversationLaunchSpec::from_command("pi"),
             Some(cwd.as_path()),
         );
-        assert!(
-            loaded.iter().any(|skill| skill.name == "from-project"),
-            "{loaded:?}"
-        );
+        let names: std::collections::BTreeSet<_> =
+            loaded.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains("from-repo"), "{names:?}");
+        assert!(names.contains("from-nested"), "{names:?}");
+        assert!(names.contains("from-pi"), "{names:?}");
+        assert!(!names.contains("outside-repo"), "{names:?}");
+        assert!(!names.contains("not-native"), "{names:?}");
+        assert!(!names.contains("not-native-shortcut"), "{names:?}");
 
-        std::fs::remove_dir_all(&cwd).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 }

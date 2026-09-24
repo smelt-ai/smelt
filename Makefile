@@ -48,9 +48,11 @@ sdk-check: ## 检查 TS 插件 SDK（类型 + 单测）
 	@./scripts/sdk-consumer-check.sh
 
 pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
-	@bun="$$(./scripts/bun.sh)" || { \
-		echo "✗ 找不到 bun。跑一次 GUI 会自动装受管 bun，或自行安装到 PATH"; exit 1; }; \
-	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent && "$$bun" run check
+	@bun="$$(./scripts/bun.sh --managed-only)" || { \
+		echo "✗ 找不到源码锁定版本的受管 Bun。请先运行一次 Smelt 完成 runtime 准备"; exit 1; }; \
+	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
+		&& "$$bun" run check \
+		&& "$$bun" run production-smoke
 
 check-all: fmt-check lint lint-sh test sdk-check pi-agent-check ## 完整检查 (格式 + Clippy + shell + Rust/TS 测试)
 
@@ -58,13 +60,13 @@ build: ## 编译 release 二进制（GUI + 守护 + helpers）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝构建"; exit 1; \
 	}
-	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-sync-plugins
+	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-sync-plugins --bin smelt-installer
 
 run: ## 本地直接跑 GUI（开发用）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝构建"; exit 1; \
 	}
-	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp
+	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
 	cargo run --bin $(BIN)
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
@@ -83,9 +85,11 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝安装"; exit 1; \
 	}
-	@[ -f target/release/$(BIN) ] && [ -f target/release/$(DAEMON) ] || { \
+	@[ -f target/release/$(BIN) ] && [ -f target/release/$(DAEMON) ] \
+		&& [ -f target/release/smelt-notify ] && [ -f target/release/smelt-agent-mcp ] \
+		&& [ -f target/release/smelt-installer ] || { \
 		echo "✗ 缺少 release 产物，先 make build"; exit 1; }
-	if [ -d dist/Smelt.app/Contents/Resources/plugin-packages ]; then \
+	@if [ -d dist/Smelt.app/Contents/Resources/plugin-packages ]; then \
 		if ! plugin_sources_changed="$$(./scripts/bundled-plugins.sh newer-than dist/Smelt.app/Contents/Resources/plugin-packages)"; then \
 			echo "✗ bundled plugin package 状态无效，拒绝安装旧 dist"; exit 1; \
 		fi; \
@@ -95,16 +99,20 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 	if [ ! -d dist/Smelt.app ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(DAEMON) ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(BIN) ] \
+		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-notify ] \
+		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
+		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-installer ] \
 		|| [ target/release/$(DAEMON) -nt dist/Smelt.app/Contents/MacOS/$(DAEMON) ] \
 		|| [ target/release/$(BIN) -nt dist/Smelt.app/Contents/MacOS/$(BIN) ] \
+		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
+		|| [ target/release/smelt-agent-mcp -nt dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
+		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
 		|| [ -n "$$plugin_sources_changed" ]; then \
 		echo "· dist 落后于 release 或 bundled plugin package，重新打包"; \
 		./scripts/package-mac.sh; \
 	fi
-	@# 与在线更新同一条路径：先绑插件集，再交接守护，最后原子换 App。
-	@# 守护已在 managed 路径时安装只 stage 磁盘、不 handoff（版本升级等空闲），
-	@# ACP 再忙也不退出 75；只有守护仍住在 .app 里（存量一次性迁移）且 ACP 忙时，
-	@# 才退出 75、不替换 App，和 GUI 更新的 WaitingForSafeHandoff 一致。
+	@# 存量 make install 仍走旧的显式安装入口；在线更新已改由进程外 installer
+	@# 在 GUI 完全退出后提交。这里保留 daemon handoff 语义，后续再收敛到同一 core。
 	@./target/release/$(BIN) --install-app dist/Smelt.app /Applications/Smelt.app
 	@echo "✅ 安装完成"
 

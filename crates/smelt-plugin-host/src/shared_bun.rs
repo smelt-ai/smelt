@@ -365,8 +365,21 @@ impl SharedBunHost {
         }
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        let inherited_fds = self
+            .options
+            .spawn
+            .inherited_fds
+            .iter()
+            .map(|fd| fd.as_raw_fd())
+            .collect::<Vec<_>>();
         unsafe {
-            command.pre_exec(move || set_cloexec_io(child_fd, false));
+            command.pre_exec(move || {
+                set_cloexec_io(child_fd, false)?;
+                for fd in &inherited_fds {
+                    set_cloexec_io(*fd, false)?;
+                }
+                Ok(())
+            });
         }
         let mut child = command
             .spawn()

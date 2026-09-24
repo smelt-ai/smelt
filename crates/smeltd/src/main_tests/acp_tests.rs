@@ -7,8 +7,36 @@ fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
     Arc::new(make_acp_session_value(id, reduced))
 }
 
-fn test_acp_attachment(stream: UnixStream, id: &str) -> OutputAttachment {
-    OutputAttachment::new(stream, Vec::new(), id, "acp-test").unwrap()
+fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> AcpSnapshotLink {
+    let tool_debug_generation_sent = sess.reduced.lock().unwrap().tool_debug_generation;
+    let encode_sess = Arc::downgrade(sess);
+    let detach_sess = Arc::downgrade(sess);
+    spawn_acp_snapshot_link(
+        stream,
+        Vec::new(),
+        tool_debug_generation_sent,
+        id,
+        "acp-test",
+        Arc::new(
+            move |from, should_persist, include_runtime_debug, tool_debug_generation_sent| {
+                let sess = encode_sess.upgrade()?;
+                Some(encode_acp_snapshot(
+                    &sess,
+                    from,
+                    should_persist,
+                    include_runtime_debug,
+                    tool_debug_generation_sent,
+                ))
+            },
+        ),
+        Arc::new(move |fd| {
+            let Some(sess) = detach_sess.upgrade() else {
+                return;
+            };
+            detach_failed_snapshot_link(&sess, fd);
+        }),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -376,7 +404,17 @@ fn one_shot_action_keeps_existing_control_client_attached() {
 
     let (control_server, _control_client) = UnixStream::pair().unwrap();
     let control_fd = control_server.as_raw_fd();
-    slot.value.out.lock().unwrap().client = Some(test_acp_attachment(control_server, "acp-action"));
+    slot.value.out.lock().unwrap().client = Some(
+        acp_snapshot_link_for_slot(
+            &slot,
+            control_server,
+            Vec::new(),
+            0,
+            "acp-action",
+            "acp-test",
+        )
+        .unwrap(),
+    );
 
     let (action_server, action_client) = UnixStream::pair().unwrap();
     handle_acp_action(
@@ -1592,9 +1630,9 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     let mut c_probe = c_server.try_clone().unwrap();
     {
         let mut out = sess.out.lock().unwrap();
-        out.client = Some(test_acp_attachment(c_server, "acp-2-client"));
+        out.client = Some(test_acp_attachment(&sess, c_server, "acp-2-client"));
         out.watchers
-            .push(test_acp_attachment(w_server, "acp-2-watcher"));
+            .push(test_acp_attachment(&sess, w_server, "acp-2-watcher"));
     }
     drop(c_client); // 控制连接对端已经断了：推送应该发现写失败并自己摘掉
     let mut eof = [0u8; 1];
@@ -1636,6 +1674,95 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
 }
 
 #[test]
+fn composer_restore_ack_action_clears_text_but_preserves_revision() {
+    let mut reduced = AcpSessionState::default();
+    reduced.composer_restore_revision = 7;
+    reduced.composer_restore_texts = vec!["不要在重启后复活".into()];
+    let session = make_acp_session("acp-composer-restore-ack", reduced);
+    let subscribers = new_event_hub();
+
+    apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::AcknowledgeComposerRestore { revision: 7 },
+        &subscribers,
+    )
+    .unwrap();
+    {
+        let reduced = session.reduced.lock().unwrap();
+        assert_eq!(reduced.composer_restore_revision, 7);
+        assert!(reduced.composer_restore_texts.is_empty());
+    }
+
+    session.reduced.lock().unwrap().composer_restore_texts = vec!["更新的一次恢复".into()];
+    session.reduced.lock().unwrap().composer_restore_revision = 8;
+    apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::AcknowledgeComposerRestore { revision: 7 },
+        &subscribers,
+    )
+    .unwrap();
+    let reduced = session.reduced.lock().unwrap();
+    assert_eq!(reduced.composer_restore_revision, 8);
+    assert_eq!(reduced.composer_restore_texts, ["更新的一次恢复"]);
+}
+
+#[test]
+fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
+    let mut reduced = AcpSessionState::default();
+    reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        system_prompt: Some("exact prompt".into()),
+        tools: Vec::new(),
+        model_calls: vec![smelt_core::acp_session::RuntimeDebugModelCall {
+            sequence: 1,
+            turn: Some(1),
+            compaction_sequence: None,
+            captured_at_ms: 1_725_000_000_000,
+            source: "pi_context_with_system".into(),
+            model: smelt_core::acp_session::RuntimeDebugModel {
+                provider: Some("openai".into()),
+                id: Some("gpt-test".into()),
+                ..Default::default()
+            },
+            request_config: smelt_core::acp_session::RuntimeDebugRequestConfig::default(),
+            payload: serde_json::json!({
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            response: None,
+            response_captured_at_ms: None,
+            response_redacted_paths: None,
+            redacted_paths: Vec::new(),
+            ..smelt_core::acp_session::RuntimeDebugModelCall::default()
+        }],
+        ..smelt_core::acp_session::RuntimeDebug::default()
+    };
+    let sess = make_acp_session("acp-runtime-debug-wire", reduced);
+    let (server, client) = UnixStream::pair().unwrap();
+    sess.out.lock().unwrap().client =
+        Some(test_acp_attachment(&sess, server, "acp-runtime-debug-wire"));
+    let mut reader = BufReader::new(client);
+
+    push_acp_snapshot_since(&sess, false, None);
+    let mut incremental = String::new();
+    reader.read_line(&mut incremental).unwrap();
+    let incremental: serde_json::Value = serde_json::from_str(&incremental).unwrap();
+    assert!(
+        incremental["snapshot"].get("runtime_debug").is_none(),
+        "普通流式帧不应重复携带完整 provider payload"
+    );
+
+    push_acp_snapshot_with_runtime_debug_for_test(&sess);
+    let mut changed = String::new();
+    reader.read_line(&mut changed).unwrap();
+    let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
+    assert_eq!(
+        changed["snapshot"]["runtime_debug"]["modelCalls"][0]["payload"]["messages"][0]["content"],
+        "hello"
+    );
+}
+
+#[test]
 fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
     let mut reduced = AcpSessionState::default();
     for id in ["tool-a", "tool-b"] {
@@ -1650,7 +1777,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
     }
     let sess = make_acp_session("acp-parallel", reduced);
     let (server, client) = UnixStream::pair().unwrap();
-    sess.out.lock().unwrap().client = Some(test_acp_attachment(server, "acp-parallel"));
+    sess.out.lock().unwrap().client = Some(test_acp_attachment(&sess, server, "acp-parallel"));
 
     let outcome = {
         let mut state = sess.reduced.lock().unwrap();
@@ -1681,6 +1808,52 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
 }
 
 #[test]
+fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
+    let sess = make_acp_session("acp-tool-debug", AcpSessionState::default());
+    let (server, client) = UnixStream::pair().unwrap();
+    sess.out.lock().unwrap().client = Some(test_acp_attachment(&sess, server, "acp-tool-debug"));
+    let mut reader = BufReader::new(client);
+
+    push_acp_snapshot_since(&sess, false, None);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let first: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(
+        first["snapshot"].get("tool_debug").is_none(),
+        "没变过的工具参数表不该出现在增量帧里"
+    );
+
+    {
+        let mut state = sess.reduced.lock().unwrap();
+        smelt_core::acp_session::apply_event(
+            &mut state,
+            smelt_core::acp_conn::ConversationEvent::ToolDebug {
+                id: "tool-1".into(),
+                name: Some("bash".into()),
+                raw_input: Some(serde_json::json!({"cmd": "ls"})),
+            },
+        );
+    }
+    push_acp_snapshot_since(&sess, false, Some(0));
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let changed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        changed["snapshot"]["tool_debug"]["tool-1"]["raw_input"]["cmd"],
+        "ls"
+    );
+
+    push_acp_snapshot_since(&sess, false, None);
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let later: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(
+        later["snapshot"].get("tool_debug").is_none(),
+        "参数表没再变时，下一帧必须省略整表"
+    );
+}
+
+#[test]
 fn kill_removes_session_and_closes_connections() {
     let acp_sessions = new_test_acp_sessions();
     let remote_sessions = new_test_remote_sessions();
@@ -1690,7 +1863,9 @@ fn kill_removes_session_and_closes_connections() {
     });
 
     let (c_server, c_client) = UnixStream::pair().unwrap();
-    slot.value.out.lock().unwrap().client = Some(test_acp_attachment(c_server, "acp-3"));
+    slot.value.out.lock().unwrap().client = Some(
+        acp_snapshot_link_for_slot(&slot, c_server, Vec::new(), 0, "acp-3", "acp-test").unwrap(),
+    );
 
     let (server, client) = UnixStream::pair().unwrap();
     handle_acp_kill(
@@ -2103,7 +2278,7 @@ fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
 }
 
 #[test]
-fn hosted_runtime_never_blocks_upgrade_during_an_active_turn() {
+fn hosted_runtime_blocks_upgrade_until_the_active_turn_is_idle() {
     let acp_sessions = new_test_acp_sessions();
     let mut running = AcpSessionState::default();
     running.phase = DaemonPhase::AwaitingApproval;
@@ -2115,10 +2290,19 @@ fn hosted_runtime_never_blocks_upgrade_during_an_active_turn() {
     let (hosted, peer) = acp_runtime_host::HostedConversationHandle::test_stub();
     *slot.value.hosted_handle.lock().unwrap() = Some(hosted);
 
-    assert!(
-        acp_upgrade_blockers(&acp_sessions).is_empty(),
-        "SDK future 和 responder 留在 session host 后，活跃回合不能再阻塞 daemon exec"
+    assert_eq!(
+        acp_upgrade_blockers(&acp_sessions),
+        vec!["acp-hosted"],
+        "session host 能恢复回合不等于应主动打断回合；升级必须等到 idle"
     );
+
+    {
+        let mut reduced = slot.value.reduced.lock().unwrap();
+        reduced.phase = DaemonPhase::Idle;
+        reduced.turn_started_at_ms = None;
+    }
+    slot.value.prompt_in_flight.store(false, Ordering::SeqCst);
+    assert!(acp_upgrade_blockers(&acp_sessions).is_empty());
     drop(peer);
 }
 
@@ -2738,7 +2922,19 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     assert_eq!(rejected.unwrap_err(), "rewind requires an idle session");
     session.reduced.lock().unwrap().phase = DaemonPhase::Idle;
 
-    // 5) 合法目标：第 2 条 "same"（下标 3），occurrence 必须算出 1。
+    // 5) 编辑重发只允许最后一条真实用户消息；旧消息应走独立的分叉对话功能。
+    let rejected = apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 0 },
+        &new_event_hub(),
+    );
+    assert_eq!(
+        rejected.unwrap_err(),
+        "rewind target is not the latest user message"
+    );
+    assert!(cmd_rx.try_recv().is_err());
+
+    // 6) 合法目标：第 2 条 "same"（下标 3），occurrence 必须算出 1。
     apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 3 },

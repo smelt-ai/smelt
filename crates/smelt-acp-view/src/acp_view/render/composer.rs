@@ -191,6 +191,13 @@ impl AcpView {
                     // 输入栏贴窗口底，默认 TopLeft 会往下弹，长模型列表把配置挤出屏幕。
                     .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, cx| {
                         let mut menu = menu;
+                        let nest_models = composer_should_nest_models(
+                            extra_configs.len(),
+                            provider_groups.len(),
+                            model_options.len(),
+                        );
+                        // 根菜单一带滚动就画不出「模型」二级，滚动只能放在没有再嵌套的那一层。
+                        let model_scroll = composer_model_scroll(nest_models);
                         let sections = composer_menu_sections(
                             provider_groups.len(),
                             model_options.len(),
@@ -238,11 +245,6 @@ impl AcpView {
                                     }
                                 }
                                 ComposerMenuSection::Model => {
-                                    let nest = composer_should_nest_models(
-                                        extra_configs.len(),
-                                        provider_groups.len(),
-                                        model_options.len(),
-                                    );
                                     let model_options = model_options.clone();
                                     let current_model = current_model.clone();
                                     let config_id = model_config_id.clone();
@@ -288,9 +290,14 @@ impl AcpView {
                                         }),
                                         next_turn_hint,
                                     );
-                                    menu = if nest {
+                                    menu = if nest_models {
                                         menu.submenu(model_section, window, cx, move |menu, _, _| {
-                                            fill(menu)
+                                            let menu = fill(menu);
+                                            if model_scroll.submenu {
+                                                menu.scrollable(true)
+                                            } else {
+                                                menu
+                                            }
                                         })
                                     } else {
                                         fill(menu.item(PopupMenuItem::label(model_section)))
@@ -329,6 +336,9 @@ impl AcpView {
                                     }
                                 }
                             }
+                        }
+                        if model_scroll.root {
+                            menu = menu.scrollable(true);
                         }
                         menu
                     })
@@ -759,14 +769,10 @@ impl AcpView {
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .hover(|d| d.bg(ui_theme::overlay(0x22)))
                                         .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("轨迹")
+                                            gpui_component::tooltip::Tooltip::new("会话追踪")
                                                 .build(window, cx)
                                         })
-                                        .child(
-                                            Icon::empty()
-                                                .path("smelt-icons/git-commit.svg")
-                                                .size(px(16.)),
-                                        )
+                                        .child(Icon::new(IconName::Inspector).size(px(16.)))
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.open_trajectory_window(cx);
                                         })),

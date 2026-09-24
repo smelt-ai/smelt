@@ -35,7 +35,7 @@ use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, ConversationSnapshot,
     ElicitFieldKindView, PendingElicitation, PendingPermission, PermissionOptionKindView,
-    PlanEntryStatusView, PlanView,
+    PlanEntryStatusView, PlanView, RuntimeDebug, ToolCallDebug,
 };
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
@@ -64,6 +64,15 @@ mod trajectory;
 
 const RESTORED_ENTRY_HEIGHT_HINT_PX: f32 = 96.;
 const AUTO_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// 可编辑重发只作用于活动记录里最近一条真实用户消息；agent 回显的中断标记不是输入。
+fn latest_user_message_index(entries: &[AcpEntry]) -> Option<usize> {
+    entries.iter().rposition(|entry| match entry {
+        AcpEntry::User(text) => !is_interrupt_marker(text),
+        AcpEntry::UserWithImages { text, .. } => !is_interrupt_marker(text),
+        _ => false,
+    })
+}
 
 fn model_label_with_provider(value: &str, name: &str) -> String {
     value
@@ -352,6 +361,30 @@ fn composer_should_nest_models(
     model_count > 1 && (extra_config_count > 0 || provider_count > 1)
 }
 
+/// 长模型列表滚哪一层。
+///
+/// gpui-component 的可滚动菜单画不出二级菜单，所以这两项互斥：模型收进
+/// 「模型」二级时只滚二级；平铺时根菜单没有二级，才滚根菜单。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComposerModelScroll {
+    root: bool,
+    submenu: bool,
+}
+
+fn composer_model_scroll(nest_models: bool) -> ComposerModelScroll {
+    if nest_models {
+        ComposerModelScroll {
+            root: false,
+            submenu: true,
+        }
+    } else {
+        ComposerModelScroll {
+            root: true,
+            submenu: false,
+        }
+    }
+}
+
 /// 模型胶囊弹层的一个分区。`Config` 带的是 `extra_configs` 下标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerMenuSection {
@@ -474,6 +507,7 @@ struct ComposerRestoreConsume {
     last_revision: u64,
     skip_next: bool,
     restore_texts: Option<Vec<String>>,
+    discarded_revision: Option<u64>,
 }
 
 /// cancel 会把整队还回输入框。立即发送已经把选中条改成新 prompt，这次还原必须丢掉。
@@ -488,6 +522,7 @@ fn consume_composer_restore(
             last_revision,
             skip_next,
             restore_texts: None,
+            discarded_revision: None,
         };
     }
     if skip_next {
@@ -495,12 +530,14 @@ fn consume_composer_restore(
             last_revision: incoming_revision,
             skip_next: false,
             restore_texts: None,
+            discarded_revision: Some(incoming_revision),
         };
     }
     ComposerRestoreConsume {
         last_revision: incoming_revision,
         skip_next: false,
         restore_texts: (!incoming_texts.is_empty()).then_some(incoming_texts),
+        discarded_revision: None,
     }
 }
 
@@ -586,7 +623,7 @@ fn apply_pending_config_selection(
     }
 }
 
-/// agent 回包对上了才清 pending；带着旧值的快照不能把勾选打回去。
+/// 快照里的当前值等于所点的那一项才清 pending。旧快照不能把勾选打回去。
 fn reconcile_pending_config_values(
     pending: &mut Vec<(String, String)>,
     configs: &[SessionConfigState],
@@ -1038,7 +1075,7 @@ pub enum AcpViewEvent {
     },
     PreviewImage(std::sync::Arc<gpui::Image>),
     NewSession(Box<AcpNewSessionRequest>),
-    /// Pi 活体最终回答上的分叉：新进程 `--fork` 源 session。
+    /// Pi 活体对话的新分支：从回答分叉，或从较早的用户消息分叉并预填编辑。
     ForkConversation(Box<AcpHandoffRequest>),
     NavigateToSession(String),
     /// 回合结束且无人在等（无 pending_permissions / pending_elicitation）的上升沿。
@@ -1161,6 +1198,7 @@ pub struct AcpHandoffRequest {
     pub config_values: Vec<(String, String)>,
     /// 本次 ACP 子进程专用环境变量；不能放进 `launch`，否则会被普通会话存档持久化。
     pub ephemeral_env: std::collections::BTreeMap<String, String>,
+    /// 新会话首包；Pi fork 请求携带时只预填输入框，供编辑后手动重发。
     pub prompt: String,
     /// 随首包一起发出去的图片。空 = 纯文本首包。
     pub images: Vec<smelt_core::acp_chat::AcpImage>,
@@ -1218,6 +1256,8 @@ pub struct AcpView {
     elicitation: Option<PendingElicitation>,
     /// 自由文本 elicitation 的本地编辑器；协议状态只保存字符串，不持有 GPUI 实体。
     elicitation_inputs: std::collections::HashMap<usize, Entity<InputState>>,
+    /// 输入变化负责刷新提交按钮，Enter 负责提交；订阅必须和动态字段同生命周期。
+    elicitation_input_subscriptions: std::collections::HashMap<usize, gpui::Subscription>,
     phase: DaemonPhase,
     /// `phase == Dead` 时的展示文案。
     end_reason: String,
@@ -1288,6 +1328,10 @@ pub struct AcpView {
     /// 显式换算，不能再假设本地 Vec 从全局 0 开始。
     loaded_entries_offset: usize,
     entries_total: usize,
+    /// Provider 明确暴露的工具原始名称/参数；与聊天条目按 tool call id 关联。
+    tool_debug: std::collections::BTreeMap<String, ToolCallDebug>,
+    /// 受管运行时在本轮开始时明确上报的 system prompt 与可用工具定义。
+    runtime_debug: RuntimeDebug,
     history_loading: bool,
     /// 分页尾页可能不含首条用户消息，标题由快照单独携带。
     session_title: Option<String>,
@@ -1325,14 +1369,19 @@ pub struct AcpView {
     trajectory_window: Option<WindowHandle<trajectory::TrajectoryWindow>>,
     supports_compaction: bool,
     supports_native_queue: bool,
-    /// 驱动是否支持回退到历史消息重发（Pi 的 fork）。用户气泡上的
-    /// 「回到这里重发」按钮据此显隐。
+    /// 驱动是否支持编辑并重发最后一条用户消息（Pi 的 fork）。对应按钮只在
+    /// 最后一条用户气泡悬停时显示。
     supports_rewind: bool,
     compacting: bool,
     queued_steering: Vec<String>,
     queued_follow_up: Vec<String>,
     last_composer_restore_revision: u64,
     pending_composer_restore: Option<Vec<String>>,
+    /// `pending_composer_restore` 中来自 daemon 的最新 revision。文本真正写入
+    /// Textarea 后才确认；本地“立即发送”产生的 leftovers 没有 revision。
+    pending_composer_restore_revision: Option<u64>,
+    /// 已处理、等待写回 daemon 的 revision。action 队列暂满时留到下次渲染重试。
+    pending_composer_restore_ack: Option<u64>,
     /// 原生排队「立即发送」已把选中条改成新 prompt。随后 cancel 的 ComposerRestore
     /// 不能再把同一条还进输入框，否则会和即将发出的 prompt 重复。
     skip_next_composer_restore: bool,
@@ -1552,10 +1601,19 @@ impl AcpView {
         this.starting_since = Some(std::time::Instant::now());
         this.init_input(window, cx);
         this.refresh_launch_from_settings = request.refresh_launch_from_settings;
+        let is_fork = request.fork_session_id.is_some();
         this.pending_initial_prompt = {
             let prompt = request.prompt.trim();
-            (!prompt.is_empty() && request.fork_session_id.is_none()).then_some(request.prompt)
+            (!prompt.is_empty() && !is_fork).then(|| request.prompt.clone())
         };
+        // 分叉编辑会带 fork session 和 prompt：prompt 只预填输入框，不能作为首包发出。
+        if is_fork
+            && !request.prompt.trim().is_empty()
+            && let Some(input) = this.input.clone()
+        {
+            let prompt = request.prompt.clone();
+            input.update(cx, |state, cx| state.set_value(&prompt, window, cx));
+        }
         // 首包图片解码成待发图片，Idle 时随首包一起发出去。
         this.pending_images = request.images.iter().filter_map(decode_acp_image).collect();
         this.restart_config_values = request.config_values.clone();
@@ -1649,6 +1707,7 @@ impl AcpView {
             permission_submitting: None,
             elicitation: None,
             elicitation_inputs: Default::default(),
+            elicitation_input_subscriptions: Default::default(),
             status_line: None,
             phase: DaemonPhase::Dead,
             end_reason: reason,
@@ -1678,6 +1737,8 @@ impl AcpView {
             rendered_markdown,
             loaded_entries_offset: 0,
             entries_total: initial_entry_count,
+            tool_debug: Default::default(),
+            runtime_debug: Default::default(),
             history_loading: false,
             session_title: None,
             supports_image: true,
@@ -1703,6 +1764,8 @@ impl AcpView {
             queued_follow_up: Vec::new(),
             last_composer_restore_revision: 0,
             pending_composer_restore: None,
+            pending_composer_restore_revision: None,
+            pending_composer_restore_ack: None,
             skip_next_composer_restore: false,
             starting_since: None,
             plan: None,
@@ -1791,6 +1854,7 @@ impl AcpView {
         self.permission_submitting = None;
         self.elicitation = None;
         self.elicitation_inputs.clear();
+        self.elicitation_input_subscriptions.clear();
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
@@ -2015,9 +2079,11 @@ impl AcpView {
                 .collect();
             self.elicitation_inputs
                 .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
+            self.elicitation_input_subscriptions
+                .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
             for (ix, secret, title, value) in text_fields {
-                self.elicitation_inputs.entry(ix).or_insert_with(|| {
-                    cx.new(|cx| {
+                if !self.elicitation_inputs.contains_key(&ix) {
+                    let input = cx.new(|cx| {
                         let mut state = InputState::new(window, cx)
                             .placeholder(&title)
                             .default_value(value);
@@ -2025,8 +2091,25 @@ impl AcpView {
                             state = state.masked(true);
                         }
                         state
-                    })
-                });
+                    });
+                    self.elicitation_inputs.insert(ix, input);
+                }
+                if !self.elicitation_input_subscriptions.contains_key(&ix) {
+                    let input = self.elicitation_inputs[&ix].clone();
+                    let subscription = cx.subscribe_in(
+                        &input,
+                        window,
+                        |this, _, event: &InputEvent, _window, cx| match event {
+                            InputEvent::PressEnter { .. } if this.elicit_ready(cx) => {
+                                this.submit_elicitation(cx);
+                            }
+                            InputEvent::Change => cx.notify(),
+                            _ => {}
+                        },
+                    );
+                    self.elicitation_input_subscriptions
+                        .insert(ix, subscription);
+                }
             }
         }
     }
@@ -2147,6 +2230,12 @@ impl AcpView {
         self.entries_total = self.entries_total.max(snapshot.entries_total);
         if snapshot.session_title.is_some() {
             self.session_title = snapshot.session_title;
+        }
+        if let Some(tool_debug) = snapshot.tool_debug {
+            self.tool_debug = tool_debug;
+        }
+        if let Some(runtime_debug) = snapshot.runtime_debug {
+            self.runtime_debug = runtime_debug;
         }
 
         self.rendered_images = self
@@ -2791,7 +2880,38 @@ impl AcpView {
         }
     }
 
+    fn fork_from_user_message(&self, user_index: usize, cx: &mut Context<Self>) {
+        if !self.supports_rewind
+            || self.has_active_turn()
+            || latest_user_message_index(&self.entries) == Some(user_index)
+        {
+            return;
+        }
+        let Some((prompt, occurrence)) =
+            smelt_core::acp_chat::fork_cut_before(&self.entries, user_index)
+        else {
+            return;
+        };
+        let fork_cut = smelt_core::acp_conn::AcpForkCut {
+            text: prompt.clone(),
+            occurrence,
+        };
+        if let Some(request) = self.build_pi_fork_request_with_cut(Some(fork_cut), prompt) {
+            cx.emit(AcpViewEvent::ForkConversation(Box::new(request)));
+        }
+    }
+
     fn build_pi_fork_request(&self, through_index: usize) -> Option<AcpHandoffRequest> {
+        let fork_cut = smelt_core::acp_chat::fork_cut_after(&self.entries, through_index)
+            .map(|(text, occurrence)| smelt_core::acp_conn::AcpForkCut { text, occurrence });
+        self.build_pi_fork_request_with_cut(fork_cut, String::new())
+    }
+
+    fn build_pi_fork_request_with_cut(
+        &self,
+        fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
+        prompt: String,
+    ) -> Option<AcpHandoffRequest> {
         if !smelt_core::session_handoff::live_fork_is_available(self.agent) {
             return None;
         }
@@ -2818,13 +2938,12 @@ impl AcpView {
             profile_id: self.profile_id.clone(),
             config_values: self.current_config_values(),
             ephemeral_env: self.ephemeral_env.clone(),
-            prompt: String::new(),
+            prompt,
             images: Vec::new(),
             profile_label: None,
             resume_session_id: None,
             fork_session_id: Some(fork_session_id),
-            fork_cut: smelt_core::acp_chat::fork_cut_after(&self.entries, through_index)
-                .map(|(text, occurrence)| smelt_core::acp_conn::AcpForkCut { text, occurrence }),
+            fork_cut,
             conversation_binding: self.conversation_binding.clone(),
             agent_session: None,
         })
@@ -3149,24 +3268,22 @@ impl AcpView {
         .detach();
     }
 
-    /// 关闭标签：只摘掉本地连接（`ConversationClientHandle` Drop 会断开 socket），
-    /// **不**终止 smeltd 里的会话——跟关一个终端标签不会杀掉底下的 shell 是
-    /// 唯一调用方是 `main.rs::close_session`（用户点 × 主动关标签）——那条
-    /// 路径本来就跟终端会话共用同一个"用户主动关 = 让守护杀掉底层进程"的
-    /// 语气（挨着的 `terminal::kill_remote` 调用是同一个意图），不是"切标签/
-    /// 退出 App 这种先不看了"。唯一例外是 daemon-owned 自动化 Run：关闭它的
-    /// 临时查看页只能断开 GUI，停止必须走带 Run id 的自动化命令。
+    /// 用户主动关闭标签：立即摘掉本地连接，并让 daemon 在后台终结底层会话。
+    /// 唯一例外是 daemon-owned 自动化 Run：关闭临时查看页只能断开 GUI，停止必须
+    /// 走带 Run id 的自动化命令。
     pub fn shutdown(&mut self, _cx: &mut App) {
-        // 这是用户明确关闭会话的路径，必须在视图被移除、甚至 App 退出前完成一次
-        // 有界的 kill 往返。`kill_acp_session` 自带 5s 读写超时；把它丢进 detached
-        // 任务会让进程在任务送达前退出，daemon 里的 ACP 会话就会继续存活。
-        if !matches!(
+        let kill_sid = (!matches!(
             &self.conversation_binding,
             smelt_core::conversation::ConversationBinding::Automation { .. }
-        ) {
-            smelt_core::acp_client::kill_acp_session(&self.sid);
-        }
+        ))
+        .then(|| self.sid.clone());
+
+        // 先释放本地视图。daemon 会在 acp_kill 回包前等待 provider 退出，部分卡住的
+        // provider 会耗满 5s 控制超时；该等待绝不能发生在 GPUI 主线程。
         self.handle = None;
+        if let Some(sid) = kill_sid {
+            smelt_core::acp_client::kill_acp_session_in_background(sid);
+        }
     }
 
     fn submit_input(&mut self, window: &mut Window, follow_up: bool, cx: &mut Context<Self>) {
@@ -3269,7 +3386,7 @@ impl AcpView {
         cx.notify();
     }
 
-    /// 回退到某条历史用户消息（仅 Pi）：agent 切到该消息之前，消息原文回输入框。
+    /// 编辑并重发最后一条用户消息（仅 Pi）：agent 切到该消息之前，消息原文回输入框。
     /// `entry_index` 是本地列表下标；daemon 的投影才是事实源，这里只传绝对
     /// 下标，验证与同文本序号都由 daemon 侧做。失败只提示——会话状态不变。
     fn rewind_to_message(&mut self, entry_index: usize, cx: &mut Context<Self>) {
@@ -3290,15 +3407,34 @@ impl AcpView {
         }
     }
 
+    fn try_acknowledge_composer_restore(&mut self) {
+        let Some(revision) = self.pending_composer_restore_ack else {
+            return;
+        };
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        if handle
+            .action_tx
+            .try_send(AcpUserAction::AcknowledgeComposerRestore { revision })
+            .is_ok()
+        {
+            self.pending_composer_restore_ack = None;
+        }
+    }
+
     fn apply_pending_composer_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.try_acknowledge_composer_restore();
         let Some(texts) = self.pending_composer_restore.take() else {
             return;
         };
+        let revision = self.pending_composer_restore_revision.take();
         if texts.is_empty() {
             return;
         }
         let Some(input) = self.input.clone() else {
             self.pending_composer_restore = Some(texts);
+            self.pending_composer_restore_revision = revision;
             return;
         };
         let restored = texts.join("\n\n");
@@ -3313,6 +3449,13 @@ impl AcpView {
             input.focus(window, cx);
         });
         self.input_has_draft = !merged.trim().is_empty();
+        if let Some(revision) = revision {
+            self.pending_composer_restore_ack = Some(
+                self.pending_composer_restore_ack
+                    .map_or(revision, |pending| pending.max(revision)),
+            );
+            self.try_acknowledge_composer_restore();
+        }
     }
 
     /// 快照应用：整份状态从 smeltd 镜像过来。归约（entries 合并/phase 机/
@@ -3329,6 +3472,12 @@ impl AcpView {
         }
 
         let mut should_persist = snap.should_persist;
+        if let Some(tool_debug) = snap.tool_debug.take() {
+            self.tool_debug = tool_debug;
+        }
+        if let Some(runtime_debug) = snap.runtime_debug.take() {
+            self.runtime_debug = runtime_debug;
+        }
         if let Some(conversation_state) = snap.conversation_state.take() {
             let pending_changed =
                 self.pending_agent_preset != conversation_state.pending_agent_preset;
@@ -3437,6 +3586,7 @@ impl AcpView {
         self.elicitation = snap.pending_elicitation;
         if self.elicitation.is_none() {
             self.elicitation_inputs.clear();
+            self.elicitation_input_subscriptions.clear();
         }
         let previous_status_line = self.status_line.clone();
         self.status_line = snap.status_line;
@@ -3482,16 +3632,31 @@ impl AcpView {
         let skip_restore = self.skip_next_composer_restore;
         (self.queued_steering, self.queued_follow_up) =
             native_queue_from_snapshot(skip_restore, snap.queued_steering, snap.queued_follow_up);
+        let restore_revision = snap.composer_restore_revision;
         let restore = consume_composer_restore(
             self.last_composer_restore_revision,
-            snap.composer_restore_revision,
+            restore_revision,
             snap.composer_restore_texts,
             skip_restore,
         );
         self.last_composer_restore_revision = restore.last_revision;
         self.skip_next_composer_restore = restore.skip_next;
         if let Some(texts) = restore.restore_texts {
-            self.pending_composer_restore = Some(texts);
+            match &mut self.pending_composer_restore {
+                Some(pending) => pending.extend(texts),
+                None => self.pending_composer_restore = Some(texts),
+            }
+            self.pending_composer_restore_revision = Some(
+                self.pending_composer_restore_revision
+                    .map_or(restore_revision, |pending| pending.max(restore_revision)),
+            );
+        }
+        if let Some(revision) = restore.discarded_revision {
+            self.pending_composer_restore_ack = Some(
+                self.pending_composer_restore_ack
+                    .map_or(revision, |pending| pending.max(revision)),
+            );
+            self.try_acknowledge_composer_restore();
         }
         self.plan = snap.plan;
         self.model = snap.model;
@@ -4683,104 +4848,293 @@ fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
 enum TrajectoryLane {
     User,
     Assistant,
+    Thinking,
     Tool,
-    Context,
+    /// Pi 在 provider 请求 hook 中捕获的真实调用 payload。
+    ModelCall,
+    /// Pi 明确上报的 compaction 生命周期捕获。
+    Compaction,
+    /// Pi 在回合开始时明确上报的 system prompt / tool schemas 组装配置。
+    Request,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectoryContext {
+    lane: TrajectoryLane,
+    label: String,
+    preview: String,
+    source: String,
+    pi_turn: Option<u64>,
+    captured_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryEvent {
     seq: usize,
     lane: TrajectoryLane,
-    /// 1-based 回合；0 表示第一轮用户消息之前（CONTEXT）。
+    /// 1-based 回合；0 表示不属于聊天回合的请求捕获或辅助诊断。
     turn: usize,
+    /// 0 是主会话，正数表示嵌套在子代理工具结果中的层级。
+    depth: usize,
+    /// 嵌套事件所属的直接父工具；主会话事件为 None。
+    parent_tool_id: Option<String>,
+    /// 列表中的一行摘要，同时参与搜索。
     text: String,
+    /// Inspector 的可读完整内容，不截断工具参数或结果。
+    preview: String,
+    /// Inspector Source 页的实际快照投影。
+    source: String,
+    /// Pi session_manager branch 中观察到的用户 turn 序号；不等同于 ACP 转录索引。
+    pi_turn: Option<u64>,
+    /// Pi runtime callback 的观察时间，不冒充 provider 端精确时间。
+    captured_at_ms: Option<u64>,
 }
 
-/// 整场会话的轨迹事件，给轨迹窗口用。参考 DSH Trajectory 的 USER / CONTEXT / ASSISTANT / TOOL。
+fn pretty_json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn tool_debug_preview(
+    id: &str,
+    title: &str,
+    kind: ToolKind,
+    status: ToolCallStatus,
+    output: &[ToolOutputPart],
+    debug: Option<&ToolCallDebug>,
+) -> String {
+    let mut fields = Vec::new();
+    if let Some(name) = debug.and_then(|debug| debug.name.as_deref()) {
+        fields.push(format!("工具名称: {name}"));
+    }
+    fields.extend([
+        format!("调用 ID: {id}"),
+        format!("展示标题: {title}"),
+        format!("类型: {kind:?}"),
+        format!("状态: {status:?}"),
+    ]);
+    if let Some(input) = debug.and_then(|debug| debug.raw_input.as_ref()) {
+        fields.push(format!("参数\n{}", pretty_json(input)));
+    }
+    let output = pretty_json(&serde_json::to_value(output).unwrap_or(serde_json::Value::Null));
+    fields.push(format!("完整结果\n{output}"));
+    fields.join("\n\n")
+}
+
+fn append_trajectory_entry(
+    events: &mut Vec<TrajectoryEvent>,
+    entry: &AcpEntry,
+    tool_debug: &std::collections::BTreeMap<String, ToolCallDebug>,
+    turn: &mut usize,
+    depth: usize,
+    parent_tool_id: Option<&str>,
+) {
+    let event_turn = if depth == 0 {
+        if matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }) {
+            *turn += 1;
+        }
+        (*turn).max(1)
+    } else {
+        (*turn).max(1)
+    };
+    let relation = serde_json::json!({
+        "depth": depth,
+        "parent_tool_id": parent_tool_id,
+    });
+    let projected = match entry {
+        AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => Some((
+            TrajectoryLane::User,
+            text.clone(),
+            text.clone(),
+            compact_json(&serde_json::json!({
+                "role": if depth == 0 { "user" } else { "subagent_user" },
+                "turn": event_turn,
+                "relation": relation,
+                "entry": entry,
+            })),
+            None,
+            None,
+        )),
+        AcpEntry::Assistant { text, thought } if !text.trim().is_empty() => {
+            let lane = if *thought {
+                TrajectoryLane::Thinking
+            } else {
+                TrajectoryLane::Assistant
+            };
+            Some((
+                lane,
+                text.clone(),
+                text.clone(),
+                compact_json(&serde_json::json!({
+                    "role": if *thought { "assistant_thinking" } else { "assistant" },
+                    "turn": event_turn,
+                    "relation": relation,
+                    "entry": entry,
+                })),
+                None,
+                None,
+            ))
+        }
+        AcpEntry::ToolCall {
+            id,
+            title,
+            kind,
+            status,
+            output,
+            ..
+        } if !is_task_completion_tool_title(title) => {
+            let debug = tool_debug.get(id);
+            let mut source = serde_json::json!({
+                "kind": "tool_call",
+                "turn": event_turn,
+                "relation": relation,
+                "entry": entry,
+            });
+            if let Some(provider_debug) = debug
+                .and_then(|debug| serde_json::to_value(debug).ok())
+                .filter(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
+            {
+                source
+                    .as_object_mut()
+                    .expect("tool source is an object")
+                    .insert("provider_debug".to_string(), provider_debug);
+            }
+            Some((
+                TrajectoryLane::Tool,
+                compact_tool_headline(*kind, title),
+                tool_debug_preview(id, title, *kind, *status, output, debug),
+                compact_json(&source),
+                None,
+                None,
+            ))
+        }
+        _ => None,
+    };
+    if let Some((lane, text, preview, source, pi_turn, captured_at_ms)) = projected {
+        events.push(TrajectoryEvent {
+            seq: events.len(),
+            lane,
+            turn: event_turn,
+            depth,
+            parent_tool_id: parent_tool_id.map(str::to_string),
+            text,
+            preview,
+            source,
+            pi_turn,
+            captured_at_ms,
+        });
+    }
+    if let AcpEntry::ToolCall { id, children, .. } = entry {
+        for child in children {
+            append_trajectory_entry(events, child, tool_debug, turn, depth + 1, Some(id));
+        }
+    }
+}
+
+/// 整场会话的可审计轨迹。只展示条目和 sidecar 实际提供的数据；缺失字段不会从标题反推或用占位补齐。
 fn session_trajectory_events(
     entries: &[AcpEntry],
-    context_note: Option<String>,
+    contexts: Vec<TrajectoryContext>,
+    tool_debug: &std::collections::BTreeMap<String, ToolCallDebug>,
 ) -> Vec<TrajectoryEvent> {
     let mut events = Vec::new();
     let mut turn = 0usize;
-    if let Some(note) = context_note.filter(|note| !note.is_empty()) {
+    for context in contexts {
         events.push(TrajectoryEvent {
             seq: events.len(),
-            lane: TrajectoryLane::Context,
+            lane: context.lane,
             turn: 0,
-            text: note,
+            depth: 0,
+            parent_tool_id: None,
+            text: context.label,
+            preview: context.preview,
+            source: context.source,
+            pi_turn: context.pi_turn,
+            captured_at_ms: context.captured_at_ms,
         });
     }
     for entry in entries {
-        match entry {
-            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => {
-                turn += 1;
-                events.push(TrajectoryEvent {
-                    seq: events.len(),
-                    lane: TrajectoryLane::User,
-                    turn,
-                    text: text.clone(),
-                });
-            }
-            AcpEntry::Assistant { text, thought } if !thought && !text.trim().is_empty() => {
-                events.push(TrajectoryEvent {
-                    seq: events.len(),
-                    lane: TrajectoryLane::Assistant,
-                    turn: turn.max(1),
-                    text: text.clone(),
-                });
-            }
-            AcpEntry::ToolCall { kind, title, .. } if !is_task_completion_tool_title(title) => {
-                events.push(TrajectoryEvent {
-                    seq: events.len(),
-                    lane: TrajectoryLane::Tool,
-                    turn: turn.max(1),
-                    text: compact_tool_headline(*kind, title),
-                });
-            }
-            _ => {}
-        }
+        append_trajectory_entry(&mut events, entry, tool_debug, &mut turn, 0, None);
     }
     events
 }
 
+#[cfg(test)]
 fn filter_trajectory_events<'a>(
     events: &'a [TrajectoryEvent],
     query: &str,
 ) -> Vec<&'a TrajectoryEvent> {
+    filter_trajectory_event_sequences(events, query)
+        .into_iter()
+        .filter_map(|sequence| events.get(sequence))
+        .collect()
+}
+
+fn filter_trajectory_event_sequences(events: &[TrajectoryEvent], query: &str) -> Vec<usize> {
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|term| term.to_lowercase())
         .filter(|term| !term.is_empty())
         .collect();
     if terms.is_empty() {
-        return events.iter().collect();
+        return (0..events.len()).collect();
     }
     events
         .iter()
-        .filter(|event| {
-            let haystack = format!(
-                "{} {} {}",
+        .enumerate()
+        .filter_map(|(sequence, event)| {
+            let turn_label = if event.turn == 0 {
+                event
+                    .pi_turn
+                    .map_or_else(String::new, |turn| format!("pi turn {turn}"))
+            } else {
+                format!("turn {}", event.turn)
+            };
+            let fields = [
                 trajectory_lane_label(event.lane),
-                event.text,
-                if event.turn == 0 {
-                    String::new()
-                } else {
-                    format!("turn {}", event.turn)
-                }
-            )
-            .to_lowercase();
-            terms.iter().all(|term| haystack.contains(term))
+                event.text.as_str(),
+                event.preview.as_str(),
+                event.source.as_str(),
+                turn_label.as_str(),
+            ];
+            terms
+                .iter()
+                .all(|term| {
+                    fields
+                        .iter()
+                        .any(|field| contains_trajectory_term(field, term))
+                })
+                .then_some(sequence)
         })
         .collect()
+}
+
+fn contains_trajectory_term(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.is_ascii() {
+        haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    } else {
+        haystack.to_lowercase().contains(needle)
+    }
 }
 
 fn trajectory_lane_label(lane: TrajectoryLane) -> &'static str {
     match lane {
         TrajectoryLane::User => "USER",
         TrajectoryLane::Assistant => "ASSISTANT",
+        TrajectoryLane::Thinking => "THINKING",
         TrajectoryLane::Tool => "TOOL",
-        TrajectoryLane::Context => "CONTEXT",
+        TrajectoryLane::ModelCall => "MODEL CALL",
+        TrajectoryLane::Compaction => "COMPACTION",
+        TrajectoryLane::Request => "REQUEST CONFIG",
     }
 }
 
@@ -4788,18 +5142,29 @@ fn trajectory_lane_color(lane: TrajectoryLane) -> u32 {
     match lane {
         TrajectoryLane::User => ui_theme::blue(),
         TrajectoryLane::Assistant => ui_theme::purple(),
+        TrajectoryLane::Thinking => ui_theme::yellow(),
         TrajectoryLane::Tool => ui_theme::green(),
-        TrajectoryLane::Context => ui_theme::text_muted(),
+        TrajectoryLane::ModelCall => ui_theme::purple(),
+        TrajectoryLane::Compaction => ui_theme::yellow(),
+        TrajectoryLane::Request => ui_theme::blue(),
     }
+}
+
+fn nested_tool_count(entries: &[AcpEntry]) -> usize {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            AcpEntry::ToolCall {
+                title, children, ..
+            } => usize::from(!is_task_completion_tool_title(title)) + nested_tool_count(children),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn trajectory_counts(entries: &[AcpEntry]) -> (usize, usize) {
     let turns = entries.iter().filter(|entry| is_user_entry(entry)).count();
-    let calls = entries
-        .iter()
-        .filter(|entry| matches!(entry, AcpEntry::ToolCall { title, .. } if !is_task_completion_tool_title(title)))
-        .count();
-    (turns, calls)
+    (turns, nested_tool_count(entries))
 }
 
 fn compact_fetch_target(title: &str) -> String {

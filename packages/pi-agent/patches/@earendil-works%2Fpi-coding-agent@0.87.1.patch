@@ -1,0 +1,64 @@
+diff --git a/dist/modes/rpc/rpc-mode.js b/dist/modes/rpc/rpc-mode.js
+--- a/dist/modes/rpc/rpc-mode.js
++++ b/dist/modes/rpc/rpc-mode.js
+@@ -336,9 +336,6 @@
+             case "new_session": {
+                 const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+                 const result = await runtimeHost.newSession(options);
+-                if (!result.cancelled) {
+-                    await rebindSession();
+-                }
+                 return success(id, "new_session", result);
+             }
+             // =================================================================
+@@ -420,6 +417,10 @@
+                 const result = await session.compact(command.customInstructions);
+                 return success(id, "compact", result);
+             }
++            case "reload": {
++                await session.reload();
++                return success(id, "reload");
++            }
+             case "set_auto_compaction": {
+                 session.setAutoCompactionEnabled(command.enabled);
+                 return success(id, "set_auto_compaction");
+@@ -475,16 +476,10 @@
+             }
+             case "switch_session": {
+                 const result = await runtimeHost.switchSession(command.sessionPath);
+-                if (!result.cancelled) {
+-                    await rebindSession();
+-                }
+                 return success(id, "switch_session", result);
+             }
+             case "fork": {
+                 const result = await runtimeHost.fork(command.entryId);
+-                if (!result.cancelled) {
+-                    await rebindSession();
+-                }
+                 return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
+             }
+             case "clone": {
+@@ -493,9 +488,6 @@
+                     return error(id, "clone", "Cannot clone session: no current entry selected");
+                 }
+                 const result = await runtimeHost.fork(leafId, { position: "at" });
+-                if (!result.cancelled) {
+-                    await rebindSession();
+-                }
+                 return success(id, "clone", { cancelled: result.cancelled });
+             }
+             case "get_fork_messages": {
+@@ -540,7 +532,11 @@
+             // Commands (available for invocation via prompt)
+             // =================================================================
+             case "get_commands": {
+-                const commands = [];
++                const commands = [{
++                    name: "reload",
++                    description: "Reload keybindings, extensions, skills, prompts, themes, and context files",
++                    source: "extension",
++                }];
+                 for (const command of session.extensionRunner.getRegisteredCommands()) {
+                     commands.push({
+                         name: command.invocationName,

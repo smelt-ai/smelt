@@ -2,8 +2,9 @@
 //!
 //! GPUI 的重复动画默认跟随显示器刷新率；即使用 `with_max_fps`，每个动画元素也会
 //! 各自创建 timer。Smelt 的根视图较重，多个侧栏呼吸灯或 spinner 错峰唤醒时会让
-//! 整窗持续布局、绘制和提交 Metal。这里把状态进入动画限制为一次、同窗共用 timer，
-//! 到达静态终态后停止唤醒；面板开合等交互过渡仍由调用方使用默认动画帧率。
+//! 整窗持续布局、绘制和提交 Metal。状态进入动画只走一次、同窗共用 timer，
+//! 到达静态终态后停止唤醒。进行中的 spinner 也走这只时钟，按周期循环，
+//! 不跟显示器刷新率。面板开合等交互过渡仍由调用方使用默认动画帧率。
 
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, EntityId, Global, GlobalElementId, Hsla,
@@ -128,6 +129,15 @@ fn ambient_transition_phase(duration: Duration, elapsed: Duration) -> (f32, bool
     }
 }
 
+/// 进行中的 spinner 按周期折返。`running` 由调用方决定，这里只给角度。
+fn ambient_loop_phase(duration: Duration, elapsed: Duration) -> f32 {
+    if duration.is_zero() {
+        return 0.0;
+    }
+    let cycle = duration.as_secs_f32();
+    (elapsed.as_secs_f32() % cycle) / cycle
+}
+
 struct AmbientAnimationState {
     animate: bool,
     started_at: Instant,
@@ -144,6 +154,7 @@ pub struct AmbientAnimationElement {
     id: ElementId,
     duration: Duration,
     animate: bool,
+    repeat: bool,
     renderer: Box<dyn Fn(f32) -> AnyElement>,
 }
 
@@ -177,6 +188,7 @@ impl Element for AmbientAnimationElement {
         let id = id.expect("状态动画元素必须有稳定 id");
         let duration = self.duration;
         let animate = self.animate;
+        let repeat = self.repeat;
         let now = cx.background_executor().now();
         let (phase, running) =
             window.with_element_state(id, |state: Option<AmbientAnimationState>, _window| {
@@ -188,13 +200,13 @@ impl Element for AmbientAnimationElement {
                     state.started_at = now;
                 }
                 state.animate = animate;
+                let elapsed = now.saturating_duration_since(state.started_at);
                 let transition = if !animate || cx.reduce_motion() {
                     (1.0, false)
+                } else if repeat {
+                    (ambient_loop_phase(duration, elapsed), true)
                 } else {
-                    ambient_transition_phase(
-                        duration,
-                        now.saturating_duration_since(state.started_at),
-                    )
+                    ambient_transition_phase(duration, elapsed)
                 };
                 (transition, state)
             });
@@ -244,22 +256,24 @@ pub fn ambient_animation<E: IntoElement + 'static>(
         id: id.into(),
         duration,
         animate,
+        repeat: false,
         renderer: Box::new(move |phase| renderer(phase).into_any_element()),
     }
 }
 
 /// 低能耗的小号 loading spinner。
 ///
-/// `gpui-component::Spinner` 的循环动画没有限帧，放在长耗时 ACP 状态里会持续按
-/// 60/120 FPS 重绘整窗。这里仅在状态出现时旋转一圈，之后停在同一静态图标。
+/// 进行中一直转。帧率和同窗其它装饰动画共用一只时钟，不按显示器刷新率重绘。
+/// `animate == false` 或系统开启减弱动态效果时停在静态图标。
 pub fn ambient_spinner(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyElement {
-    ambient_animation(id, Duration::from_millis(800), animate, move |delta| {
+    let mut animation = ambient_animation(id, Duration::from_millis(800), animate, move |delta| {
         Icon::new(IconName::Loader)
             .xsmall()
             .text_color(color)
             .transform(Transformation::rotate(percentage(delta)))
-    })
-    .into_any_element()
+    });
+    animation.repeat = true;
+    animation.into_any_element()
 }
 
 #[cfg(test)]
@@ -305,6 +319,18 @@ mod tests {
             ambient_frame_interval(),
             Duration::from_secs_f32(1.0 / AMBIENT_ANIMATION_MAX_FPS),
             "装饰动画不能退回显示器刷新率"
+        );
+    }
+
+    #[test]
+    fn ambient_spinner_phase_keeps_cycling_for_as_long_as_work_is_running() {
+        let cycle = Duration::from_millis(800);
+        assert_eq!(ambient_loop_phase(cycle, Duration::ZERO), 0.0);
+        assert!((ambient_loop_phase(cycle, Duration::from_millis(400)) - 0.5).abs() < 0.01);
+        assert!(ambient_loop_phase(cycle, cycle).abs() < 0.01);
+        assert!(
+            (ambient_loop_phase(cycle, Duration::from_millis(1_200)) - 0.5).abs() < 0.01,
+            "超过一圈后必须继续转，不能停在终态"
         );
     }
 

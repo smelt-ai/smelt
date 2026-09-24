@@ -26,6 +26,7 @@ BIN="$ROOT/target/release/$BIN_NAME"
 DAEMON_BIN="$ROOT/target/release/smeltd"   # 终端持久化守护（GUI 按同目录寻址拉起）
 NOTIFY_BIN="$ROOT/target/release/smelt-notify" # Agent hooks → smeltd 状态通道
 AGENT_MCP_BIN="$ROOT/target/release/smelt-agent-mcp" # Agent 间消息的 STDIO MCP 适配器
+INSTALLER_BIN="$ROOT/target/release/smelt-installer" # GUI 退出后提交原子 App 交换
 PLUGIN_SOURCES="$ROOT/plugins"        # 每个子目录一个插件包（基础 manifest + 可选 UI sidecar/web）
 
 # dmgbuild 1.6.7 要求 Python >= 3.10；Command Line Tools 自带的
@@ -50,7 +51,7 @@ if [[ "${1:-}" == "--build" ]]; then
     echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝继续打包" >&2
     exit 1
   fi
-  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-agent-mcp
+  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -67,6 +68,10 @@ if [[ ! -f "$NOTIFY_BIN" ]]; then
 fi
 if [[ ! -f "$AGENT_MCP_BIN" ]]; then
   echo "✗ 找不到 ${AGENT_MCP_BIN}（cross-agent MCP helper），先：cargo build --release --bin smelt-agent-mcp" >&2
+  exit 1
+fi
+if [[ ! -f "$INSTALLER_BIN" ]]; then
+  echo "✗ 找不到 ${INSTALLER_BIN}（App installer helper），先：cargo build --release --bin smelt-installer" >&2
   exit 1
 fi
 # 插件按目录扫描，不写死名单：新增插件只要在 plugins/<name>/ 放好 plugin.json
@@ -121,6 +126,10 @@ chmod +x "$MACOS/smelt-notify"
 # 原子同步到 ~/.smelt/bin，供 managed smeltd 从同目录定位。
 cp "$AGENT_MCP_BIN" "$MACOS/smelt-agent-mcp"
 chmod +x "$MACOS/smelt-agent-mcp"
+# installer 运行前会复制到 ~/.smelt/installer/<attempt-id>/，随后等 GUI 完全退出；
+# 绝不能从即将被交换的 Bundle 内直接运行。
+cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
+chmod +x "$MACOS/smelt-installer"
 # first-party 插件与 GUI 一起分发；GUI 启动时把 bundled 插件包同步到
 # ~/.smelt/runtime/plugins，供同构建的 smeltd 拉起。
 #
@@ -326,7 +335,7 @@ if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
   # 否则公证会因某个内层文件缺 runtime 而整体被拒。主程序 smelt 由对 .app 的签名覆盖。
   echo "  … 签内层：smeltd"
   codesign "${standard_sign_opts[@]}" "$MACOS/smeltd"
-  for inner in smelt-notify smelt-agent-mcp; do
+  for inner in smelt-notify smelt-agent-mcp smelt-installer; do
     echo "  … 签内层：$inner"
     codesign "${standard_sign_opts[@]}" "$MACOS/$inner"
   done

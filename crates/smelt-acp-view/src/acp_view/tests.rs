@@ -1,5 +1,6 @@
 //! ACP 视图状态决策、Markdown/差异展示辅助逻辑的回归测试。
 
+use super::trajectory::runtime_debug_contexts;
 use super::{
     CachedDiff, ComposerMenuSection, RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text,
     apply_pending_config_selection, build_conversation_layout,
@@ -7,15 +8,16 @@ use super::{
     cached_diff_stats, can_dispatch_prompt_immediately, can_load_older_history,
     classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
     composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
-    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
-    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    conversation_phase_label, current_turn_has_agent_output, did_recover_from_ended,
-    diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
-    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
-    is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    loaded_entries_end, markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
+    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
+    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
+    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    conversation_input_for_submit, conversation_phase_label, current_turn_has_agent_output,
+    did_recover_from_ended, diff_cache_matches_output, diff_stats_for_output,
+    escape_html_tags_for_markdown, external_clipboard_image_paths, filter_trajectory_events,
+    format_attached_paths, is_active_permission_selection, is_dispatch_in_flight,
+    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
+    is_stale_blank_history_id, latest_user_message_index, loaded_entries_end,
+    markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
     merge_snapshot_entries, model_label_with_provider, move_queue_item_to_front,
     native_queue_from_snapshot, native_queue_item_kind_label, next_snapshot_prompt_gate,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
@@ -35,7 +37,8 @@ use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
     AcpTurnOutcome, ApprovalDetailsView, ElicitFieldKindView, ElicitFieldView, ElicitOptionView,
     PendingElicitation, PendingPermission, PermissionOptionKindView, PermissionOptionView,
-    PlanEntryStatusView, PlanEntryView, PlanView, TurnTiming,
+    PlanEntryStatusView, PlanEntryView, PlanView, RuntimeDebug, RuntimeDebugModel,
+    RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
 };
 use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::daemon_state::DaemonPhase;
@@ -126,6 +129,18 @@ fn session_menu_nests_models_when_other_sections_exist() {
     assert!(composer_should_nest_models(0, 3, 8));
     assert!(!composer_should_nest_models(0, 1, 40));
     assert!(!composer_should_nest_models(2, 2, 1));
+}
+
+#[test]
+fn long_model_menu_scrolls_without_hiding_the_submenu() {
+    // 可滚动的根菜单画不出「模型」二级，超长列表必须滚在没有再嵌套的那一层。
+    let nested = composer_model_scroll(true);
+    assert!(nested.submenu);
+    assert!(!nested.root);
+
+    let flat = composer_model_scroll(false);
+    assert!(flat.root);
+    assert!(!flat.submenu);
 }
 
 #[test]
@@ -385,6 +400,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
     assert_eq!(skipped.last_revision, 1);
     assert!(!skipped.skip_next);
     assert_eq!(skipped.restore_texts, None);
+    assert_eq!(skipped.discarded_revision, Some(1));
     assert_eq!(
         native_queue_from_snapshot(true, vec!["换方向".into()], vec!["总结".into()]),
         (Vec::new(), Vec::new())
@@ -395,6 +411,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
         restored.restore_texts.as_deref(),
         Some(&["换方向".to_string()][..])
     );
+    assert_eq!(restored.discarded_revision, None);
     assert_eq!(
         native_queue_from_snapshot(false, vec!["换方向".into()], vec!["总结".into()]),
         (vec!["换方向".into()], vec!["总结".into()])
@@ -404,6 +421,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
     assert!(pending.skip_next);
     assert_eq!(pending.last_revision, 1);
     assert_eq!(pending.restore_texts, None);
+    assert_eq!(pending.discarded_revision, None);
 }
 
 #[test]
@@ -1475,6 +1493,39 @@ fn live_thoughts_count_as_agent_output() {
 }
 
 #[test]
+fn edit_resend_targets_only_the_latest_real_user_message() {
+    let entries = vec![
+        AcpEntry::User("第一条".into()),
+        AcpEntry::Assistant {
+            text: "回答一".into(),
+            thought: false,
+        },
+        AcpEntry::User("最后一条".into()),
+        AcpEntry::Assistant {
+            text: "回答二".into(),
+            thought: false,
+        },
+        AcpEntry::User("[Request interrupted by user]".into()),
+    ];
+
+    assert_eq!(latest_user_message_index(&entries), Some(2));
+    assert_eq!(latest_user_message_index(&[]), None);
+}
+
+#[test]
+fn edit_resend_recognizes_a_latest_image_message() {
+    let entries = vec![
+        AcpEntry::User("上一条".into()),
+        AcpEntry::UserWithImages {
+            text: "看这张图".into(),
+            images: Vec::new(),
+        },
+    ];
+
+    assert_eq!(latest_user_message_index(&entries), Some(1));
+}
+
+#[test]
 fn completed_process_group_appends_elapsed_like_grok() {
     let entries = vec![
         AcpEntry::User("看看今天的新闻".into()),
@@ -1918,27 +1969,302 @@ fn completed_tool(id: &str, kind: ToolKind, title: &str) -> AcpEntry {
 }
 
 #[test]
-fn session_trajectory_events_follow_dsh_lanes() {
+fn runtime_debug_contexts_show_request_config_and_multiple_turn_linked_calls() {
+    let contexts = runtime_debug_contexts(&RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        system_prompt: Some("system line 1\n<project_context>真实上下文</project_context>".into()),
+        tools: vec![RuntimeDebugTool {
+            name: "bash".into(),
+            description: "Run a shell command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": {"command": {"type": "string"}}
+            }),
+            source: Some("builtin".into()),
+        }],
+        model_calls: vec![RuntimeDebugModelCall {
+            sequence: 3,
+            turn: Some(2),
+            compaction_sequence: None,
+            captured_at_ms: 1_725_000_000_000,
+            source: "pi_context_with_system".into(),
+            model: RuntimeDebugModel {
+                provider: Some("openai".into()),
+                id: Some("gpt-test".into()),
+                api: Some("responses".into()),
+                thinking_level: Some("high".into()),
+            },
+            request_config: smelt_core::acp_session::RuntimeDebugRequestConfig {
+                system_prompt: "prompt for call #3".into(),
+                tools: vec![RuntimeDebugTool {
+                    name: "bash".into(),
+                    description: "Run a shell command".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    source: Some("builtin".into()),
+                }],
+            },
+            pi_context: serde_json::json!([
+                {"role": "system", "content": "per-call system"},
+                {"role": "user", "content": "hello"}
+            ]),
+            payload: serde_json::json!({
+                "model": "gpt-test",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": "hello"}],
+                "api_key": "[REDACTED]"
+            }),
+            response: Some(serde_json::json!({
+                "role": "assistant",
+                "usage": {"input": 100, "output": 20}
+            })),
+            response_captured_at_ms: Some(1_725_000_000_100),
+            response_redacted_paths: Some(Vec::new()),
+            redacted_paths: vec!["$.payload.api_key".into()],
+            ..RuntimeDebugModelCall::default()
+        }],
+        ..RuntimeDebug::default()
+    });
+
+    assert_eq!(contexts.len(), 2, "调用 payload 与组装配置是不同证据边界");
+    let config_source: serde_json::Value = serde_json::from_str(&contexts[0].source).unwrap();
+    let call_source: serde_json::Value = serde_json::from_str(&contexts[1].source).unwrap();
+    assert_eq!(contexts[0].label, "Pi REQUEST CONFIG");
+    assert_eq!(contexts[0].lane, super::TrajectoryLane::Request);
+    assert_eq!(
+        config_source["systemPrompt"],
+        "system line 1\n<project_context>真实上下文</project_context>"
+    );
+    assert_eq!(config_source["tools"][0]["name"], "bash");
+    assert!(contexts[0].preview.contains("System prompt: "));
+    assert!(contexts[0].preview.contains("1 tools"));
+    assert!(config_source.get("available").is_none());
+    assert!(config_source.get("classification").is_none());
+    assert!(config_source.get("not_captured").is_none());
+
+    assert_eq!(contexts[1].label, "MODEL CALL #3 · PI TURN 2");
+    assert_eq!(contexts[1].lane, super::TrajectoryLane::ModelCall);
+    assert_eq!(contexts[1].pi_turn, Some(2));
+    assert_eq!(contexts[1].captured_at_ms, Some(1_725_000_000_000));
+    assert!(contexts[1].preview.contains("openai"));
+    assert!(contexts[1].preview.contains("gpt-test"));
+    assert!(contexts[1].preview.contains("2 Pi messages"));
+    assert!(contexts[1].source.contains("high"));
+    assert!(contexts[1].source.contains("max_tokens"));
+    assert!(contexts[1].source.contains("[REDACTED]"));
+    assert_eq!(call_source["piContext"][0]["content"], "per-call system");
+    assert_eq!(call_source["payload"]["messages"][0]["content"], "hello");
+    assert_eq!(call_source["redactedPaths"][0], "$.payload.api_key");
+    assert_eq!(
+        call_source["requestConfig"]["systemPrompt"], "prompt for call #3",
+        "每次模型调用都要保留当次的 Pi 组装配置，而不是用最近一份覆盖旧调用"
+    );
+    assert_eq!(call_source["response"]["usage"]["output"], 20);
+}
+
+#[test]
+fn compaction_traces_show_the_observed_boundary_without_joining_the_fake_timeline() {
+    let contexts = runtime_debug_contexts(&RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        compactions: vec![smelt_core::acp_session::RuntimeDebugCompaction {
+            sequence: 1,
+            turn: Some(3),
+            status: "completed".into(),
+            reason: "overflow".into(),
+            will_retry: true,
+            started_at_ms: 1_725_000_000_000,
+            finished_at_ms: Some(1_725_000_000_500),
+            first_kept_entry_id: Some("entry-20".into()),
+            tokens_before: Some(90_000),
+            summarized_message_count: Some(12),
+            source_messages: vec![smelt_core::acp_session::RuntimeDebugCompactionMessage {
+                segment: "summarized".into(),
+                role: "user".into(),
+                preview: "retain the auth constraint".into(),
+                truncated: false,
+            }],
+            summary: Some("The user is debugging auth".into()),
+            ..Default::default()
+        }],
+        ..RuntimeDebug::default()
+    });
+    let events = session_trajectory_events(&[], contexts, &Default::default());
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].lane, super::TrajectoryLane::Compaction);
+    assert_eq!(
+        events[0].turn, 0,
+        "a Pi capture is not inserted into ACP message order"
+    );
+    assert_eq!(events[0].pi_turn, Some(3));
+    assert!(events[0].text.contains("OVERFLOW · COMPLETED"));
+    assert!(events[0].source.contains("entry-20"));
+    assert!(events[0].preview.contains("12 messages summarized"));
+    assert!(events[0].source.contains("retain the auth constraint"));
+    assert_eq!(
+        filter_trajectory_events(&events, "pi turn 3 entry-20").len(),
+        1
+    );
+}
+
+#[test]
+fn runtime_debug_contexts_show_only_request_config_without_a_model_call() {
+    let contexts = runtime_debug_contexts(&RuntimeDebug {
+        version: 1,
+        source: "pi_before_agent_start".into(),
+        system_prompt: Some("actual system prompt".into()),
+        ..RuntimeDebug::default()
+    });
+
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].lane, super::TrajectoryLane::Request);
+    assert_eq!(contexts[0].label, "Pi REQUEST CONFIG");
+    let source: serde_json::Value = serde_json::from_str(&contexts[0].source).unwrap();
+    assert_eq!(source["systemPrompt"], "actual system prompt");
+    assert!(!contexts[0].preview.contains("未捕获"));
+}
+
+#[test]
+fn runtime_debug_contexts_are_empty_without_a_runtime_capture() {
+    let contexts = runtime_debug_contexts(&RuntimeDebug::default());
+    assert!(
+        contexts.is_empty(),
+        "Trajectory 只能投影 runtime 实际上报的数据，不能合成未捕获占位记录"
+    );
+}
+
+#[test]
+fn nested_subagent_entries_are_independent_trajectory_events() {
+    let entries = vec![
+        AcpEntry::User("排查认证".into()),
+        AcpEntry::ToolCall {
+            id: "sa-1".into(),
+            title: "scout auth".into(),
+            kind: ToolKind::Collaborate,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: vec![
+                AcpEntry::Assistant {
+                    text: "先检查配置".into(),
+                    thought: true,
+                },
+                AcpEntry::tool_call(
+                    "sa-1-child-1",
+                    "config.rs",
+                    ToolKind::Read,
+                    ToolCallStatus::Completed,
+                    vec![ToolOutputPart::Text("issuer = demo".into())],
+                ),
+            ],
+        },
+    ];
+    let tool_debug = std::collections::BTreeMap::from([(
+        "sa-1-child-1".to_string(),
+        smelt_core::acp_session::ToolCallDebug {
+            name: Some("read".into()),
+            raw_input: Some(serde_json::json!({"path": "config.rs"})),
+        },
+    )]);
+    let events = session_trajectory_events(&entries, Vec::new(), &tool_debug);
+
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[2].lane, super::TrajectoryLane::Thinking);
+    assert_eq!(events[2].depth, 1);
+    assert_eq!(events[2].parent_tool_id.as_deref(), Some("sa-1"));
+    assert_eq!(events[3].lane, super::TrajectoryLane::Tool);
+    assert_eq!(events[3].turn, 1);
+    assert_eq!(events[3].depth, 1);
+    assert_eq!(events[3].parent_tool_id.as_deref(), Some("sa-1"));
+    assert!(events[3].preview.contains("工具名称: read"));
+    assert!(events[3].source.contains("config.rs"));
+    assert_eq!(trajectory_counts(&entries), (1, 2));
+}
+
+#[test]
+fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
     let entries = vec![
         AcpEntry::User("你好".into()),
-        completed_tool("s1", ToolKind::Search, "icon"),
+        AcpEntry::Assistant {
+            text: "先找图标定义".into(),
+            thought: true,
+        },
+        AcpEntry::ToolCall {
+            id: "s1".into(),
+            title: "icon".into(),
+            kind: ToolKind::Search,
+            status: ToolCallStatus::Completed,
+            output: vec![ToolOutputPart::Text("found icon.rs".into())],
+            children: Vec::new(),
+        },
         completed_tool("done", ToolKind::Other, "task_complete"),
         AcpEntry::Assistant {
             text: "好了".into(),
             thought: false,
         },
     ];
-    let events = session_trajectory_events(&entries, Some("skills: demo".into()));
-    assert_eq!(events[0].lane, super::TrajectoryLane::Context);
+    let contexts = vec![super::TrajectoryContext {
+        lane: super::TrajectoryLane::Request,
+        label: "最近一次 Pi 请求组装配置".into(),
+        preview: "system prompt".into(),
+        source: "{\"system_prompt\":\"system prompt\",\"tools\":[]}".into(),
+        pi_turn: None,
+        captured_at_ms: None,
+    }];
+    let tool_debug = std::collections::BTreeMap::from([(
+        "s1".to_string(),
+        smelt_core::acp_session::ToolCallDebug {
+            name: Some("grep".into()),
+            raw_input: Some(serde_json::json!({"pattern": "IconName", "path": "src"})),
+        },
+    )]);
+    let events = session_trajectory_events(&entries, contexts, &tool_debug);
+    assert_eq!(events[0].lane, super::TrajectoryLane::Request);
     assert_eq!(events[1].lane, super::TrajectoryLane::User);
     assert_eq!(events[1].text, "你好");
-    assert_eq!(events[2].lane, super::TrajectoryLane::Tool);
-    assert_eq!(events[2].text, "搜索 icon");
-    assert_eq!(events[3].lane, super::TrajectoryLane::Assistant);
+    assert_eq!(events[2].lane, super::TrajectoryLane::Thinking);
+    assert_eq!(events[3].lane, super::TrajectoryLane::Tool);
+    assert_eq!(events[3].text, "搜索 icon");
+    assert!(events[3].preview.contains("工具名称: grep"));
+    assert!(events[3].preview.contains("found icon.rs"));
+    assert!(events[3].source.contains("IconName"));
+    assert!(events[3].source.contains("raw_input"));
+    assert!(!events[3].source.contains("raw_input_available"));
+    assert_eq!(events[4].lane, super::TrajectoryLane::Assistant);
+    assert_eq!(
+        super::trajectory_lane_label(events[4].lane),
+        "ASSISTANT",
+        "模型产出的消息不是一次模型调用"
+    );
     assert_eq!(events[1].turn, 1);
     assert_eq!(trajectory_counts(&entries), (1, 1));
-    assert_eq!(filter_trajectory_events(&events, "icon").len(), 1);
-    assert_eq!(filter_trajectory_events(&events, "turn 1").len(), 3);
+    assert_eq!(filter_trajectory_events(&events, "IconName src").len(), 1);
+    assert_eq!(filter_trajectory_events(&events, "turn 1").len(), 4);
+}
+
+#[test]
+fn tool_trajectory_omits_debug_fields_when_no_sidecar_was_reported() {
+    let entries = vec![
+        AcpEntry::User("执行".into()),
+        AcpEntry::tool_call(
+            "call-1",
+            "展示标题",
+            ToolKind::Other,
+            ToolCallStatus::Completed,
+            vec![ToolOutputPart::Text("真实结果".into())],
+        ),
+    ];
+
+    let events = session_trajectory_events(&entries, Vec::new(), &Default::default());
+    let tool = &events[1];
+    assert_eq!(tool.lane, super::TrajectoryLane::Tool);
+    assert!(tool.preview.contains("调用 ID: call-1"));
+    assert!(tool.preview.contains("真实结果"));
+    assert!(!tool.preview.contains("工具名称:"));
+    assert!(!tool.preview.contains("参数\n"));
+    assert!(!tool.preview.contains("未提供"));
+    assert!(!tool.source.contains("provider_debug"));
 }
 
 #[test]
@@ -2506,6 +2832,52 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
         "choice card must stay on the conversation column, not stretch across the window: {:?}",
         card.size
     );
+}
+
+#[gpui::test]
+fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestAppContext) {
+    use gpui::VisualTestContext;
+
+    cx.update(gpui_component::init);
+    let (_view, cx) = cx.add_window_view(|_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Claude,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: None,
+                reason: "test placeholder".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-custom-answer-test".into()),
+            },
+        );
+        view.elicitation = Some(PendingElicitation {
+            message: "下一步要我执行哪项？".into(),
+            fields: vec![ElicitFieldView {
+                key: "answer".into(),
+                title: "请选择或输入自己的答案".into(),
+                required: true,
+                allow_custom_input: true,
+                kind: ElicitFieldKindView::Select(vec![ElicitOptionView {
+                    label: "暂时都不做".into(),
+                }]),
+            }],
+            chosen: Default::default(),
+            text_values: Default::default(),
+        });
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    cx.debug_bounds("acp-elicit-submit")
+        .expect("single-select cards with custom input need an explicit submit button");
 }
 
 #[gpui::test]

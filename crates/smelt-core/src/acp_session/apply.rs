@@ -15,6 +15,14 @@ use crate::acp_conn::{
 };
 use crate::daemon_state::DaemonPhase;
 
+pub fn acknowledge_composer_restore(state: &mut AcpSessionState, revision: u64) -> bool {
+    if revision != state.composer_restore_revision || state.composer_restore_texts.is_empty() {
+        return false;
+    }
+    state.composer_restore_texts.clear();
+    true
+}
+
 /// `apply_event` 的旁路效果——旧版直接在 GPUI `Context` 上做（`cx.notify()`/
 /// `cx.emit(Changed)`/推 `PendingAgentNotifs`），归约函数本身不该管这些，
 /// 交给调用方（smeltd）根据这份结果自己决定广播/落盘/要不要弹通知。
@@ -25,6 +33,9 @@ pub struct ApplyOutcome {
     /// 本次事件修改 entries 的最早位置。daemon 从这里发送尾部快照；`None`
     /// 表示 entries 未变化，只需同步 phase / permission 等旁路状态。
     pub entries_offset: Option<usize>,
+    /// 本次事件替换了大体积 runtime debug sidecar。实时广播只在该位为真时携带
+    /// sidecar，避免完整 provider payload 随每个流式 token 重复传输。
+    pub runtime_debug_changed: bool,
     /// 相位刚变成需要人处理 → (标题, 正文, is_approval)，调用方决定要不要弹
     /// 通知（GUI 按各类 Agent 通知开关决定；这个决定权不下放到
     /// smeltd，因为那是纯 GUI 展示偏好，smeltd 不该知道）。
@@ -148,6 +159,15 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::ToolCallUpdate(update) => {
             apply_tool_call_update(state, &mut outcome, update)
         }
+        ConversationEvent::ToolDebug {
+            id,
+            name,
+            raw_input,
+        } => apply_tool_debug(state, id, name, raw_input),
+        ConversationEvent::RuntimeDebug(debug) => {
+            state.runtime_debug = debug;
+            outcome.runtime_debug_changed = true;
+        }
         ConversationEvent::ToolStarted { id, title, kind } => {
             apply_tool_started(state, &mut outcome, id, title, kind);
         }
@@ -161,9 +181,11 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::ToolFinished { id, status, output } => {
             apply_tool_finished(state, &mut outcome, id, status, output)
         }
-        ConversationEvent::ToolChildren { id, children } => {
-            apply_tool_children(state, &mut outcome, id, children)
-        }
+        ConversationEvent::ToolChildren {
+            id,
+            children,
+            debug,
+        } => apply_tool_children(state, &mut outcome, id, children, debug),
         ConversationEvent::Model(model) => state.model = Some(model),
         ConversationEvent::ConfigOptions(options) => state.config_options = options,
         ConversationEvent::Plan(plan) => apply_plan(state, plan),
@@ -262,6 +284,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::Model(_)
             | ConversationEvent::ConfigOptions(_)
             | ConversationEvent::Usage { .. }
+            | ConversationEvent::RuntimeDebug(_)
             | ConversationEvent::SessionControls { .. }
             | ConversationEvent::Compaction { .. }
             | ConversationEvent::PromptQueue { .. }
@@ -277,6 +300,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::Status(_)
             | ConversationEvent::AvailableCommands(_)
             | ConversationEvent::Usage { .. }
+            | ConversationEvent::RuntimeDebug(_)
             | ConversationEvent::SessionControls { .. }
             | ConversationEvent::Compaction { .. }
             | ConversationEvent::PromptQueue { .. }
@@ -292,6 +316,8 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
 fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut ApplyOutcome) {
     outcome.entries_offset = Some(0);
     state.entries.clear();
+    state.tool_debug.clear();
+    state.note_tool_debug_changed();
     state.replaying_history = true;
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
@@ -431,6 +457,7 @@ fn apply_terminal_output(
 
 fn apply_tool_call(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, tc: ToolCall) {
     let tool_call_id = tc.tool_call_id.to_string();
+    apply_tool_debug(state, tool_call_id.clone(), None, tc.raw_input.clone());
     let incoming_status = crate::acp_conn::tool_status_from_acp(tc.status);
     let tool_kind = crate::acp_conn::tool_kind_from_acp_call(&tc);
     let parent_id = crate::acp_conn::parent_tool_id_from_meta(tc.meta.as_ref());
@@ -477,6 +504,12 @@ fn apply_tool_call_update(
     update: ToolCallUpdate,
 ) {
     let update_id = update.tool_call_id.to_string();
+    apply_tool_debug(
+        state,
+        update_id.clone(),
+        None,
+        update.fields.raw_input.clone(),
+    );
     remember_tool_turn_seq(state, &update_id);
     let update_status = update
         .fields
@@ -589,9 +622,11 @@ fn apply_usage(
     breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
 ) {
     if size > 0 {
-        if used > 0 || state.usage.is_none() {
+        if used > 0 {
             state.usage = Some((used, size));
         } else if let Some((_, window)) = &mut state.usage {
+            // used == 0 means this event only carries billing metadata or an
+            // explicitly unknown Pi context size. Preserve the last authority.
             *window = size;
         }
     }
@@ -603,6 +638,25 @@ fn apply_usage(
     }
     if breakdown.is_some() {
         state.usage_breakdown = breakdown;
+    }
+}
+
+fn apply_tool_debug(
+    state: &mut AcpSessionState,
+    id: String,
+    name: Option<String>,
+    raw_input: Option<serde_json::Value>,
+) {
+    if name.is_none() && raw_input.is_none() {
+        return;
+    }
+    state.note_tool_debug_changed();
+    let debug = state.tool_debug.entry(id).or_default();
+    if name.is_some() {
+        debug.name = name;
+    }
+    if raw_input.is_some() {
+        debug.raw_input = raw_input;
     }
 }
 
@@ -677,14 +731,31 @@ fn apply_tool_children(
     outcome: &mut ApplyOutcome,
     id: String,
     children: Vec<AcpEntry>,
+    debug: std::collections::BTreeMap<String, super::ToolCallDebug>,
 ) {
     outcome.entries_offset = crate::acp_chat::find_tool_top_level_index(&state.entries, &id);
+    let mut replaced_ids = std::collections::BTreeSet::new();
+    let mut next_ids = std::collections::BTreeSet::new();
+    collect_tool_ids(&children, &mut next_ids);
+    let mut replaced = false;
     if let Some(AcpEntry::ToolCall {
         children: current, ..
     }) = crate::acp_chat::find_tool_call_mut(&mut state.entries, &id)
     {
+        collect_tool_ids(current, &mut replaced_ids);
         *current = children;
+        replaced = true;
     }
+    if !replaced {
+        return;
+    }
+    state
+        .tool_debug
+        .retain(|tool_id, _| !replaced_ids.contains(tool_id));
+    state
+        .tool_debug
+        .extend(debug.into_iter().filter(|(id, _)| next_ids.contains(id)));
+    state.note_tool_debug_changed();
 }
 
 fn apply_tool_finished(
@@ -897,6 +968,12 @@ fn apply_rewound(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, trunca
         return;
     }
     state.entries.truncate(truncate_from);
+    let mut remaining_tool_ids = std::collections::BTreeSet::new();
+    collect_tool_ids(&state.entries, &mut remaining_tool_ids);
+    state
+        .tool_debug
+        .retain(|id, _| remaining_tool_ids.contains(id));
+    state.note_tool_debug_changed();
     // fork 已把 provider 侧队列一并作废（teardown 会 abort），本地镜像同步清空。
     state.queued_steering.clear();
     state.queued_steering_images.clear();
@@ -915,6 +992,15 @@ fn apply_rewound(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, trunca
 
 /// Pi fork 之后 provider 侧身份换了新 session 文件。恢复 / 续接必须认新 id，
 /// 否则下次重连会把被丢弃的旧分支重新放出来。
+fn collect_tool_ids(entries: &[AcpEntry], ids: &mut std::collections::BTreeSet<String>) {
+    for entry in entries {
+        if let AcpEntry::ToolCall { id, children, .. } = entry {
+            ids.insert(id.clone());
+            collect_tool_ids(children, ids);
+        }
+    }
+}
+
 fn apply_provider_session_id_changed(state: &mut AcpSessionState, session_id: SessionId) {
     let session_id = session_id.to_string();
     if session_id.is_empty() {

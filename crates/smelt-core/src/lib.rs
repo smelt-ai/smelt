@@ -38,6 +38,8 @@ pub mod font_config;
 pub mod fs;
 pub mod isolated_workspace;
 pub mod login_env;
+#[cfg(unix)]
+pub mod managed_runtime;
 pub mod new_session;
 pub mod osc;
 pub mod pi_auth;
@@ -51,6 +53,8 @@ pub mod project_catalog;
 pub mod provider_api;
 pub mod provider_quota;
 pub mod remote_config;
+#[cfg(unix)]
+pub mod runtime_generation;
 pub mod session_control;
 pub mod session_handoff;
 pub mod session_history;
@@ -61,6 +65,7 @@ pub mod subprocess;
 pub mod term_text;
 pub mod terminal_theme;
 pub mod tty_color;
+pub mod updater;
 pub mod workspace_menu;
 pub mod workspace_override;
 pub mod worktree_inherit;

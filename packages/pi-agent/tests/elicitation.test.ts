@@ -7,12 +7,13 @@ import {
 	ExtensionRunner,
 	type ExtensionFactory,
 	type ExtensionUIContext,
+	type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import {
-	HOST_ELICITATION_TOOL_NAMES,
 	MULTI_SELECT_TITLE_MARK,
-	isElicitationInput,
+	SMELT_ELICITATION_EXTENSION_PATH,
+	SMELT_ELICITATION_TOOL_NAME,
 	parseAskUserQuestions,
 } from "../src/elicitation.ts";
 import { SMELT_EXTENSION_FACTORIES } from "../src/runtime-extensions.ts";
@@ -38,7 +39,7 @@ function toolConflicts(
 const userAskUserQuestion: ExtensionFactory = (pi) => {
 	pi.registerTool(
 		defineTool({
-			name: "ask_user_question",
+			name: SMELT_ELICITATION_TOOL_NAME,
 			label: "Ask User Question",
 			description: "user-owned",
 			parameters: Type.Object({}),
@@ -49,18 +50,28 @@ const userAskUserQuestion: ExtensionFactory = (pi) => {
 	);
 };
 
+function inlineFactory(input: InlineExtension): ExtensionFactory {
+	return typeof input === "function" ? input : input.factory;
+}
+
+function inlinePath(input: InlineExtension, index: number): string {
+	return typeof input === "function" ? `<inline:${index + 1}>` : `<inline:${input.name}>`;
+}
+
 async function loadFactories(preceding: ExtensionFactory[] = []) {
 	const runtime = createExtensionRuntime();
 	const eventBus = createEventBus();
-	const factories = [...preceding, ...SMELT_EXTENSION_FACTORIES];
+	const factories: InlineExtension[] = [...preceding, ...SMELT_EXTENSION_FACTORIES];
 	const extensions = await Promise.all(
-		factories.map((factory, index) =>
+		factories.map((input, index) =>
 			loadExtensionFromFactory(
-				factory,
+				inlineFactory(input),
 				process.cwd(),
 				eventBus,
 				runtime,
-				index < preceding.length ? "/Users/c.chen/.pi/agent/extensions/ask_user_question.ts" : `<inline:${index}>`,
+				index < preceding.length
+					? "/Users/c.chen/.pi/agent/extensions/smelt_ask_user.ts"
+					: inlinePath(input, index),
 			),
 		),
 	);
@@ -140,33 +151,31 @@ describe("elicitation payload shape", () => {
 	test("rejects payloads that cannot become a choice card", () => {
 		expect(parseAskUserQuestions({})).toEqual([]);
 		expect(parseAskUserQuestions({ questions: [{ question: "空的", options: [] }] })).toEqual([]);
-		expect(isElicitationInput({ command: "rm -rf /" })).toBe(false);
-		expect(isElicitationInput({ path: "src/main.ts" })).toBe(false);
 	});
 });
 
 describe("host elicitation tool", () => {
-	test("registers one implementation under the names models actually call", async () => {
+	test("registers only the canonical Smelt tool", async () => {
 		const { runner } = await loadHostExtensions();
 		const names = runner.getAllRegisteredTools().map((tool) => tool.definition.name);
-		expect(names).toEqual([...HOST_ELICITATION_TOOL_NAMES]);
+		expect(names).toEqual([SMELT_ELICITATION_TOOL_NAME]);
+		expect(runner.getAllRegisteredTools()[0]?.sourceInfo.path).toBe(
+			SMELT_ELICITATION_EXTENSION_PATH,
+		);
+		for (const alias of ["question", "questionnaire", "ask_user_question", "AskUserQuestion"]) {
+			expect(runner.getToolDefinition(alias)).toBeUndefined();
+		}
 	});
 
-	test("does not register ask_user_question during load when ~/.pi already has it", async () => {
-		const { extensions } = await loadFactories([userAskUserQuestion]);
-		expect(toolConflicts(extensions)).toEqual([]);
-	});
-
-	test("skips user-owned names after session start and fills in the rest", async () => {
+	test("does not override a user tool that occupies the reserved name", async () => {
 		const { runner, extensions } = await loadHostExtensions([userAskUserQuestion]);
-		expect(runner.getToolDefinition("ask_user_question")?.description).toBe("user-owned");
-		expect(runner.getToolDefinition("question")).toBeDefined();
+		expect(runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME)?.description).toBe("user-owned");
 		expect(toolConflicts(extensions)).toEqual([]);
 	});
 
 	test("shows a choice card through ui.select", async () => {
 		const { runner } = await loadHostExtensions();
-		const tool = runner.getToolDefinition("question");
+		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
 		expect(tool).toBeDefined();
 		const shown: Array<{ title: string; options: string[] }> = [];
 		const result = await tool!.execute(
@@ -192,9 +201,32 @@ describe("host elicitation tool", () => {
 		]);
 	});
 
+	test("single-select preserves labels that look like JSON arrays", async () => {
+		const { runner } = await loadHostExtensions();
+		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
+		expect(tool).toBeDefined();
+		const result = await tool!.execute(
+			"tool-json-label",
+			{ question: "选哪个原文？", options: ['["A"]', "普通标签"] },
+			new AbortController().signal,
+			() => {},
+			{
+				ui: {
+					select: async () => '["A"]',
+				} as unknown as ExtensionUIContext,
+			} as never,
+		);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: JSON.stringify([{ question: "选哪个原文？", answer: '["A"]' }]),
+			},
+		]);
+	});
+
 	test("multi-select returns every chosen label", async () => {
 		const { runner } = await loadHostExtensions();
-		const tool = runner.getToolDefinition("ask_user_question");
+		const tool = runner.getToolDefinition(SMELT_ELICITATION_TOOL_NAME);
 		expect(tool).toBeDefined();
 		const shown: string[] = [];
 		const result = await tool!.execute(

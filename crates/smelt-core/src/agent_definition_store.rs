@@ -853,6 +853,7 @@ mod tests {
     #[test]
     fn skills_shipped_inside_a_bound_folder_are_loaded_with_it() {
         let folder = std::env::temp_dir().join(format!("smelt-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(folder.join(".agents/skills/demo")).unwrap();
         std::fs::create_dir_all(folder.join(".claude/skills/demo")).unwrap();
         let definition = definition_with_context(&[folder.to_string_lossy().as_ref()], &[]);
 
@@ -866,7 +867,12 @@ mod tests {
         let expected = folder.join(".claude/skills").to_string_lossy().into_owned();
         assert!(
             args.contains(&expected),
-            "绑定目录的技能没进启动参数: {args:?}"
+            "绑定目录的兼容技能没进启动参数: {args:?}"
+        );
+        let expected = folder.join(".agents/skills").to_string_lossy().into_owned();
+        assert!(
+            args.contains(&expected),
+            "绑定目录的通用 Agent Skills 没进启动参数: {args:?}"
         );
         // 自动发现仍然要关掉，否则勾选式加载就成了摆设。
         assert!(args.contains(&"--no-skills".to_string()));

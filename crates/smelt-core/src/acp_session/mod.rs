@@ -29,7 +29,9 @@ use crate::acp_conn::{
 use crate::daemon_state::DaemonPhase;
 
 mod apply;
-pub use apply::{ApplyOutcome, apply_event, finalize_dangling_tool_calls};
+pub use apply::{
+    ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
+};
 use apply::{pending_action_phase, resume_running};
 
 // ===================== wire 快照类型（无 agent_client_protocol 依赖） =====================
@@ -302,9 +304,206 @@ impl TurnTiming {
     }
 }
 
+/// Provider 实际暴露的工具调试信息。它与聊天条目分离，避免普通消息模型承载
+/// 仅供审计的原始参数；按 tool call id 关联，旧历史缺失时不做反推。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCallDebug {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<serde_json::Value>,
+}
+
+/// Pi 在实际组装 system prompt 时一并报告的工具定义。只包含会送给模型的
+/// name/description/parameters 和来源，不包含 provider 请求头、凭据或环境变量。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// Pi 在 provider 请求 hook 中暴露的模型身份。只记录 provider/model/api/effort，
+/// 不记录 base URL、认证配置或环境变量；headers 走独立脱敏 sidecar。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugModel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugHeaderCapture {
+    pub captured_at_ms: u64,
+    pub headers: serde_json::Value,
+    #[serde(default)]
+    pub redacted_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugResponseMetadata {
+    pub captured_at_ms: u64,
+    pub status: u16,
+    pub headers: serde_json::Value,
+    #[serde(default)]
+    pub redacted_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugRequestConfig {
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub tools: Vec<RuntimeDebugTool>,
+}
+
+/// 一次模型调用的完整 Pi Context、请求头、provider payload 和规范化响应。Pi 和 Rust
+/// 两层都会递归脱敏；Pi API 不暴露原始响应流。sequence 是本地顺序，不冒充 provider request id。
+/// turn 是 Pi 当前分支中从用户消息计数得到的序号；captured_at_ms 是扩展观察时间，
+/// 不代表 provider 端的时间戳。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugModelCall {
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_sequence: Option<u64>,
+    #[serde(default)]
+    pub captured_at_ms: u64,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_source: Option<String>,
+    #[serde(default)]
+    pub model: RuntimeDebugModel,
+    #[serde(default)]
+    pub request_config: RuntimeDebugRequestConfig,
+    #[serde(default)]
+    pub pi_context: serde_json::Value,
+    #[serde(default)]
+    pub pi_context_redacted_paths: Vec<String>,
+    #[serde(default)]
+    pub request_headers: Vec<RuntimeDebugHeaderCapture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_captured_at_ms: Option<u64>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_captured_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_redacted_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub response_metadata: Vec<RuntimeDebugResponseMetadata>,
+    #[serde(default)]
+    pub redacted_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugCompactionMessage {
+    pub segment: String,
+    pub role: String,
+    pub preview: String,
+    pub truncated: bool,
+}
+
+/// Pi compaction 生命周期中实际可观察到的边界和摘要。来源消息保留完整文本；
+/// 图片二进制仍不进入轨迹。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebugCompaction {
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    pub status: String,
+    pub reason: String,
+    pub will_retry: bool,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_kept_entry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_split_turn: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarized_message_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_prefix_message_count: Option<usize>,
+    #[serde(default)]
+    pub source_messages: Vec<RuntimeDebugCompactionMessage>,
+    #[serde(default)]
+    pub request_headers: Vec<RuntimeDebugHeaderCapture>,
+    #[serde(default)]
+    pub response_metadata: Vec<RuntimeDebugResponseMetadata>,
+    /// 旧版有界预览的计数；当前完整采集路径恒为 0。
+    #[serde(default)]
+    pub source_messages_omitted: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_extension: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aborted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Pi 实际上报的模型调试数据。v1/v2 为旧版单次快照；v3 保留逐次请求/响应，
+/// 并记录明确上报的 compaction 生命周期。通用 ACP 没有等价能力时保持空值，不能从
+/// 聊天内容或当前会话配置反推。由于完整 prompt/payload 可能敏感，这些记录是运行时
+/// 调试 sidecar，不作为普通会话 transcript 持久化。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDebug {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<RuntimeDebugTool>,
+    #[serde(default)]
+    pub model_calls: Vec<RuntimeDebugModelCall>,
+    #[serde(default)]
+    pub model_calls_omitted: u64,
+    #[serde(default)]
+    pub compactions: Vec<RuntimeDebugCompaction>,
+    #[serde(default)]
+    pub compactions_omitted: u64,
+    /// 只接收旧版 v2 widget 的单数 `modelCall`，规范化后不再向 GUI 序列化。
+    #[serde(default, skip_serializing)]
+    pub model_call: Option<RuntimeDebugModelCall>,
+}
+
 /// smeltd → GUI 的完整快照：`acp_watch`/`acp_open` 接上时发一份，之后每次
-/// `apply_event` 有实质变化再发一份（懒得做增量 diff——快照本身就不大，
-/// 消息流几十条 + 几个标量字段，序列化成本远低于维护增量协议的复杂度）。
+/// `apply_event` 有实质变化再发一份。entries 使用尾片增量；大体积 runtime debug
+/// sidecar 只在变更帧、显式全量恢复和初始 attach 时携带，避免完整模型历史随每个
+/// 流式 token 重复传输。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(from = "ConversationSnapshotDe", into = "ConversationSnapshotDe")]
 pub struct ConversationSnapshot {
@@ -322,6 +521,15 @@ pub struct ConversationSnapshot {
     /// 条目提供高度提示，而不必同步布局整段历史。
     pub replaying_history: bool,
     pub entries: Vec<AcpEntry>,
+    /// 工具原始名称/参数 sidecar。`Some` 是整表替换，用来覆盖新增和删除。
+    /// `None` 表示这帧没变，或旧 daemon 没提供；消费者必须保留已知值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_debug: Option<BTreeMap<String, ToolCallDebug>>,
+    /// 运行时 system prompt、工具定义和最近一次模型调用 sidecar。Some 表示本帧
+    /// 给出的权威替换值；None 表示旧 daemon 不支持，或本增量帧刻意省略未变化的
+    /// 大字段。两种情况消费者都必须保留已知值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_debug: Option<RuntimeDebug>,
     /// ACP 当前活动，与守护相位同一套枚举。
     pub phase: DaemonPhase,
     /// `phase == Dead` 时的展示文案；活会话为空。
@@ -365,7 +573,7 @@ pub struct ConversationSnapshot {
     /// 驱动是否支持 follow-up / clear_queue 原生队列。旧快照缺省为 false。
     #[serde(default)]
     pub supports_native_queue: bool,
-    /// 驱动是否支持回退到历史消息重发（Pi 的 fork）。旧快照缺省为 false。
+    /// 驱动是否支持编辑并重发最后一条用户消息（Pi 的 fork）。旧快照缺省为 false。
     #[serde(default)]
     pub supports_rewind: bool,
     /// 正在压缩上下文。
@@ -380,7 +588,8 @@ pub struct ConversationSnapshot {
     /// `clear_queue` 还回输入框的单调版本。0 表示从未还原。
     #[serde(default)]
     pub composer_restore_revision: u64,
-    /// 与 `composer_restore_revision` 配套的原文。
+    /// 与 `composer_restore_revision` 配套、尚未被客户端确认写入输入框的原文。
+    /// 确认后只清文本而保留 revision 水位，避免迟到确认误伤后续恢复。
     #[serde(default)]
     pub composer_restore_texts: Vec<String>,
     /// 当前回合开始的 Unix 毫秒时间戳；None = 当前没有运行中的回合。
@@ -417,6 +626,10 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     replaying_history: bool,
     entries: Vec<AcpEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_debug: Option<BTreeMap<String, ToolCallDebug>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_debug: Option<RuntimeDebug>,
     phase: AcpPhaseWire,
     #[serde(default)]
     end_reason: String,
@@ -490,6 +703,8 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             session_title: de.session_title,
             replaying_history: de.replaying_history,
             entries: de.entries,
+            tool_debug: de.tool_debug,
+            runtime_debug: de.runtime_debug,
             phase,
             end_reason,
             end_kind: de.end_kind,
@@ -537,6 +752,8 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             session_title: snap.session_title,
             replaying_history: snap.replaying_history,
             entries: snap.entries,
+            tool_debug: snap.tool_debug,
+            runtime_debug: snap.runtime_debug,
             phase: daemon_phase_to_wire(snap.phase, &snap.end_reason),
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
@@ -614,6 +831,10 @@ pub struct LiveElicitation {
 /// ExecutingTool 是守护广播层的投影。
 pub struct AcpSessionState {
     pub entries: Vec<AcpEntry>,
+    pub tool_debug: BTreeMap<String, ToolCallDebug>,
+    /// 只在内存里递增。快照不带它。连接用它判断这帧要不要再带整张工具参数表。
+    pub tool_debug_generation: u64,
+    pub runtime_debug: RuntimeDebug,
     /// Agent 通过通用 ACP `session_info_update` 上报的标题。没有时由首条用户消息
     /// 生成稳定兜底；这不是某个 provider 的专属能力。
     pub protocol_title: Option<String>,
@@ -682,6 +903,9 @@ impl Default for AcpSessionState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            tool_debug: BTreeMap::new(),
+            tool_debug_generation: 0,
+            runtime_debug: RuntimeDebug::default(),
             protocol_title: None,
             phase: DaemonPhase::Connecting,
             end_reason: String::new(),
@@ -754,6 +978,11 @@ impl AcpSessionState {
     /// `resume_acp_from_fds` 重新接上连接后被回放，SDK 重新解析出等价请求，
     /// 走一遍正常的 `apply_event(Permission/Elicitation)`，到时候会自然把
     /// `permission`/`elicitation` 填回去——不需要（也没法）在这里预置。
+    /// 工具参数表变了。没变的快照不要再拷这张表。
+    pub fn note_tool_debug_changed(&mut self) {
+        self.tool_debug_generation = self.tool_debug_generation.wrapping_add(1);
+    }
+
     pub fn from_snapshot(snap: ConversationSnapshot) -> Self {
         // Running 必须有对应的活跃回合。旧版可能先收到 TurnEnded、再收到 SDK
         // 迟交付的工具通知，把 phase 重新写成 Running，却已经清掉了开始时间。
@@ -765,6 +994,9 @@ impl AcpSessionState {
         };
         let mut restored = Self {
             entries: snap.entries,
+            tool_debug: snap.tool_debug.unwrap_or_default(),
+            tool_debug_generation: 0,
+            runtime_debug: snap.runtime_debug.unwrap_or_default(),
             protocol_title: snap.session_title,
             phase,
             end_reason: snap.end_reason,
@@ -832,6 +1064,8 @@ impl AcpSessionState {
             session_title,
             replaying_history,
             entries,
+            tool_debug,
+            runtime_debug,
             phase,
             end_reason,
             end_kind,
@@ -884,6 +1118,13 @@ impl AcpSessionState {
 
         self.entries.truncate(entries_offset);
         self.entries.extend(entries);
+        if let Some(tool_debug) = tool_debug {
+            self.tool_debug = tool_debug;
+            self.note_tool_debug_changed();
+        }
+        if let Some(runtime_debug) = runtime_debug {
+            self.runtime_debug = runtime_debug;
+        }
         self.protocol_title = session_title;
         self.phase = phase;
         self.end_reason = end_reason;
@@ -999,6 +1240,8 @@ impl AcpSessionState {
             session_title: self.resolved_session_title(),
             replaying_history: self.replaying_history,
             entries: self.entries[entries_offset..entries_end].to_vec(),
+            tool_debug: Some(self.tool_debug.clone()),
+            runtime_debug: Some(self.runtime_debug.clone()),
             phase: self.phase,
             end_reason: self.end_reason.clone(),
             end_kind: self.end_kind,
@@ -1167,6 +1410,7 @@ pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<S
 /// spawn 那部分是 smeltd 的事，不在这个纯状态函数里）。
 pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.permissions.clear();
+    state.runtime_debug = RuntimeDebug::default();
     state.elicitation = None;
     state.plan = None;
     state.model = None;
@@ -1496,10 +1740,15 @@ pub enum AcpUserAction {
     },
     /// 手动压缩上下文。
     Compact,
+    /// GUI 已将指定 revision 的恢复文本写入输入框。daemon 只在它仍是当前
+    /// revision 时清空文本；动作幂等，迟到确认不会误清后续恢复。
+    AcknowledgeComposerRestore {
+        revision: u64,
+    },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
-    /// 回退到指定历史用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
-    /// 回输入框供编辑重发。`entry_index` 是投影里的绝对 entry 下标。仅空闲
+    /// 编辑并重发最后一条用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
+    /// 回输入框供修改。`entry_index` 是投影里的绝对 entry 下标。仅空闲
     /// 会话可回退；旧 daemon 不认识这个动作，会回 unknown variant 错误。
     RewindToMessage {
         entry_index: usize,

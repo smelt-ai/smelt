@@ -14,9 +14,9 @@ use std::{
     fmt,
     fs::{self, File},
     io::{self, Read, Write},
-    os::unix::fs::PermissionsExt,
+    os::{fd::OwnedFd, unix::fs::PermissionsExt},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -1424,6 +1424,9 @@ pub struct SpawnOptions {
     pub startup_timeout: std::time::Duration,
     pub shutdown_grace: std::time::Duration,
     pub bun: Option<PathBuf>,
+    /// Owned descriptors that the shared Bun process must retain across exec.
+    /// Parent copies stay CLOEXEC; only the post-fork child clears that flag.
+    pub inherited_fds: Vec<Arc<OwnedFd>>,
 }
 
 impl Default for SpawnOptions {
@@ -1432,6 +1435,7 @@ impl Default for SpawnOptions {
             startup_timeout: std::time::Duration::from_secs(5),
             shutdown_grace: std::time::Duration::from_secs(2),
             bun: None,
+            inherited_fds: Vec::new(),
         }
     }
 }
