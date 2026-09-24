@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 把 profile 版 Smelt Mobile 重新构建并装到 iPhone 上。
 #
-# 解决的问题：用免费 Apple ID 签名时，provisioning profile 只有 7 天有效期
-# （证书本身是一年，过期的从来不是它）。到期后 app 在手机上直接起不来，只能
-# 重签一次——也就是重新构建 + 重装。这个循环一周一次，不该每次都去翻命令。
+# 免费 Apple ID 签名的 provisioning profile 只有 7 天有效期；Xcode 默认会复用
+# 尚未过期的 profile，所以单纯重建并不会延长有效期。本脚本每次安装前清除该 App
+# 的 Xcode 自动签名缓存，让 Xcode 重新申请 profile，并在未确认续期时拒绝安装。
 #
 # 用法：
 #   ./scripts/install-ios-profile.sh              # 自动挑唯一一台已连接的 iPhone
@@ -34,31 +34,116 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 报告 .app 里嵌的 profile 还有多久到期。这是整个脚本存在的理由，所以
-# 装完一定要打出来——否则用户还是不知道下次什么时候会被打断。
+profile_expiration() {
+  local plist
+  plist=$(security cms -D -i "$1" 2>/dev/null) || return 1
+  printf '%s' "$plist" | plutil -extract ExpirationDate raw -o - - 2>/dev/null
+}
+
+profile_expiration_epoch() {
+  date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$1" "+%s" 2>/dev/null
+}
+
+# Xcode 会复用还有效的自动签名 profile。只删除这个 App 的 Xcode 管理缓存，
+# 不碰手动 profile 或其他 App；清缓存不会撤销已安装 App 正在使用的签名。
+clear_cached_xcode_profiles() {
+  local profile_dir profile plist managed team_id app_identifier
+  local removed=0
+  local -a profile_dirs=(
+    "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+    "$HOME/Library/MobileDevice/Provisioning Profiles"
+  )
+
+  for profile_dir in "${profile_dirs[@]}"; do
+    [[ -d "$profile_dir" ]] || continue
+    while IFS= read -r -d '' profile; do
+      plist=$(security cms -D -i "$profile" 2>/dev/null) || continue
+      managed=$(printf '%s' "$plist" | plutil -extract IsXcodeManaged raw -o - - 2>/dev/null) || continue
+      [[ "$managed" == "true" ]] || continue
+      team_id=$(printf '%s' "$plist" | plutil -extract TeamIdentifier.0 raw -o - - 2>/dev/null) || continue
+      app_identifier=$(printf '%s' "$plist" | plutil -extract Entitlements.application-identifier raw -o - - 2>/dev/null) || continue
+
+      case "$app_identifier" in
+        "$team_id.$BUNDLE_ID"|"$team_id.$BUNDLE_ID".*)
+          rm -f "$profile"
+          removed=$((removed + 1))
+          ;;
+      esac
+    done < <(find "$profile_dir" -maxdepth 1 -type f \
+      \( -name '*.mobileprovision' -o -name '*.provisionprofile' \) -print0)
+  done
+
+  if (( removed > 0 )); then
+    echo "已清除 ${removed} 个 $BUNDLE_ID 的 Xcode 自动签名缓存，构建时将重新申请 profile。"
+  else
+    echo "未找到 $BUNDLE_ID 的 Xcode 自动签名缓存，继续由 Xcode 自动签名。"
+  fi
+}
+
+verify_profile_refresh() {
+  local previous_expiry="$1"
+  local mp="$APP_PATH/embedded.mobileprovision"
+  [[ -f "$mp" ]] || {
+    echo "构建产物缺少 embedded.mobileprovision，取消安装。" >&2
+    exit 1
+  }
+
+  local expires expires_epoch now_epoch previous_epoch
+  expires=$(profile_expiration "$mp") || {
+    echo "无法解析构建产物中的 provisioning profile，取消安装。" >&2
+    exit 1
+  }
+  expires_epoch=$(profile_expiration_epoch "$expires") || {
+    echo "无法读取新 profile 的到期时间，取消安装。" >&2
+    exit 1
+  }
+  now_epoch=$(date "+%s")
+
+  if [[ -n "$previous_expiry" ]]; then
+    previous_epoch=$(profile_expiration_epoch "$previous_expiry") || {
+      echo "无法读取旧 profile 的到期时间，取消安装。" >&2
+      exit 1
+    }
+    if (( expires_epoch <= previous_epoch )); then
+      echo "⚠️  profile 有效期未刷新（旧：${previous_expiry}；新：${expires}），取消安装。" >&2
+      echo "    请确认 Xcode 已登录 Apple ID、网络可用后重试。" >&2
+      exit 1
+    fi
+  fi
+
+  # 免费 Apple ID 的 profile 有效期为 7 天；允许构建耗时带来最多 1 天误差。
+  if (( expires_epoch - now_epoch < 6 * 86400 )); then
+    echo "⚠️  新 profile 剩余有效期不足 6 天（到期：${expires}），未能确认续成新的 7 天，取消安装。" >&2
+    exit 1
+  fi
+  echo "✓ profile 有效期已刷新至：$expires"
+}
+
+# 报告 .app 里嵌的 profile 还有多久到期。
 report_expiry() {
   local app="$1"
   local mp="$app/embedded.mobileprovision"
   [[ -f "$mp" ]] || { echo "（找不到 embedded.mobileprovision，跳过有效期检查）"; return; }
 
-  local plist expires
-  plist=$(security cms -D -i "$mp" 2>/dev/null) || { echo "（profile 解析失败，跳过）"; return; }
-  expires=$(printf '%s' "$plist" | plutil -extract ExpirationDate raw -o - - 2>/dev/null) || return
+  local expires
+  expires=$(profile_expiration "$mp") || { echo "（profile 解析失败，跳过）"; return; }
 
-  local expires_epoch now_epoch days
+  local expires_epoch now_epoch remaining days expired_days
   # profile 里是 ISO8601 UTC（2026-08-22T06:37:02Z）。
-  expires_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$expires" "+%s" 2>/dev/null) || return
+  expires_epoch=$(profile_expiration_epoch "$expires") || return
   now_epoch=$(date "+%s")
-  days=$(( (expires_epoch - now_epoch) / 86400 ))
+  remaining=$((expires_epoch - now_epoch))
+  days=$(( (remaining + 86399) / 86400 ))
 
   echo
   echo "签名有效期至：$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$expires" "+%Y-%m-%d %H:%M UTC" 2>/dev/null)"
-  if (( days < 0 )); then
-    echo "⚠️  已过期 $(( -days )) 天，app 现在起不来——重跑本脚本（不带 --check）续期。"
+  if (( remaining < 0 )); then
+    expired_days=$(( (-remaining + 86399) / 86400 ))
+    echo "⚠️  已过期 ${expired_days} 天，app 现在起不来——重跑本脚本（不带 --check）续期。"
   elif (( days <= 2 )); then
-    echo "⚠️  只剩 ${days} 天。免费账号的 profile 就是 7 天一轮，到期重跑本脚本。"
+    echo "⚠️  只剩 ${days} 天。免费账号的 profile 有效期为 7 天，重跑本脚本即可续期。"
   else
-    echo "还剩 ${days} 天。到期后重跑本脚本即可。"
+    echo "还剩 ${days} 天。重跑本脚本即可重新续期。"
   fi
 }
 
@@ -142,9 +227,17 @@ fi
 
 cd "$MOBILE_DIR"
 
+# 记录上次构建的到期时间，构建后验证有效期确实延长，避免静默装回旧 profile。
+PREVIOUS_PROFILE_EXPIRY=""
+if [[ -f "$APP_PATH/embedded.mobileprovision" ]]; then
+  PREVIOUS_PROFILE_EXPIRY=$(profile_expiration "$APP_PATH/embedded.mobileprovision" 2>/dev/null || true)
+fi
+clear_cached_xcode_profiles
+
 echo
 echo "构建 ${BUILD_MODE} 版（首次或改过 Rust 代码时要几分钟）…"
 flutter build ios "--${BUILD_MODE}"
+verify_profile_refresh "$PREVIOUS_PROFILE_EXPIRY"
 
 echo
 echo "安装到设备…"
