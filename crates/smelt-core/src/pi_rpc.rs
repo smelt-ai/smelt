@@ -803,18 +803,21 @@ where
             event_tx,
             state,
             launch,
-            "smelt-init-messages",
-            serde_json::json!({"type": "get_messages"}),
+            "smelt-init-entries",
+            serde_json::json!({"type": "get_entries"}),
         )
         .await?;
-        if let Some(messages) = response_data(&response)?["messages"].as_array() {
-            crate::app_log::info(
-                "pi-rpc",
-                &format!("会话 {} 开始重放 {} 条历史消息", launch.sid, messages.len()),
-            );
-            replay_history(messages, event_tx, state);
-            crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
-        }
+        let messages = active_branch_messages(response_data(&response)?)?;
+        crate::app_log::info(
+            "pi-rpc",
+            &format!(
+                "会话 {} 开始重放 {} 条当前分支历史消息",
+                launch.sid,
+                messages.len()
+            ),
+        );
+        replay_history(&messages, event_tx, state);
+        crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
     }
 
     publish_configuration(state, event_tx);
@@ -2748,8 +2751,72 @@ fn text_looks_like_diff(text: &str) -> bool {
             .any(|line| line.starts_with("+++ ") || line.starts_with("--- "))
 }
 
-/// 全量重放 + 显式收尾。pi 是先把 `get_messages` 重放完再握手，边界在这里就确定了；
-/// 不发结束信号的话，恢复后只要用户不再发消息，`replaying_history` 就一直挂着。
+/// 从 Pi 的 append-only entry tree 中严格还原当前活动分支，再提取 UI transcript。
+/// `get_messages` 是 compaction-aware 的模型上下文，不能承担历史恢复；compaction、
+/// model change 等 entry 只参与 parent 链校验，不替代或裁掉它们之前的原始消息。
+fn active_branch_messages(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    let entries = data
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Pi get_entries 响应缺少 entries".to_string())?;
+    let leaf = match data.get("leafId") {
+        Some(serde_json::Value::Null) => return Ok(Vec::new()),
+        Some(serde_json::Value::String(id)) if !id.is_empty() => id.as_str(),
+        Some(_) => return Err("Pi get_entries 响应的 leafId 无效".to_string()),
+        None => return Err("Pi get_entries 响应缺少 leafId".to_string()),
+    };
+
+    let mut by_id = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "Pi get_entries 返回了没有有效 id 的 entry".to_string())?;
+        if by_id.insert(id, entry).is_some() {
+            return Err(format!("Pi get_entries 返回了重复 entry id：{id}"));
+        }
+    }
+
+    let mut branch = Vec::new();
+    let mut visited = HashSet::new();
+    let mut cursor = leaf;
+    loop {
+        if !visited.insert(cursor) {
+            return Err(format!("Pi 当前分支 parent 链成环：{cursor}"));
+        }
+        let entry = by_id
+            .get(cursor)
+            .copied()
+            .ok_or_else(|| format!("Pi 当前分支缺少 entry：{cursor}"))?;
+        branch.push(entry);
+        match entry.get("parentId") {
+            Some(serde_json::Value::Null) => break,
+            Some(serde_json::Value::String(parent)) if !parent.is_empty() => cursor = parent,
+            Some(_) => return Err(format!("Pi entry {cursor} 的 parentId 无效")),
+            None => return Err(format!("Pi entry {cursor} 缺少 parentId")),
+        }
+    }
+    branch.reverse();
+
+    Ok(branch
+        .into_iter()
+        .filter_map(|entry| match entry.get("type").and_then(serde_json::Value::as_str) {
+            Some("message") => entry.get("message").cloned(),
+            Some("custom_message") => Some(serde_json::json!({
+                "role": "custom",
+                "content": entry.get("content").cloned().unwrap_or_default(),
+                "display": entry.get("display").cloned().unwrap_or(serde_json::Value::Bool(true)),
+                "details": entry.get("details").cloned().unwrap_or_default(),
+            })),
+            _ => None,
+        })
+        .collect())
+}
+
+/// 全量重放 + 显式收尾。Pi 先把当前分支的原始 message entries 重放完再握手，
+/// 边界在这里就确定了；不发结束信号的话，恢复后只要用户不再发消息，
+/// `replaying_history` 就一直挂着。
 fn replay_history(
     messages: &[serde_json::Value],
     event_tx: &smol::channel::Sender<ConversationEvent>,
@@ -3603,6 +3670,111 @@ mod tests {
         assert_eq!(request["images"][0]["mimeType"], "image/png");
         assert_eq!(request["images"][0]["data"], "aGVsbG8=");
         assert!(state.active_turn);
+    }
+
+    #[test]
+    fn active_pi_branch_keeps_pre_compaction_messages_and_excludes_other_branches() {
+        let messages = active_branch_messages(&serde_json::json!({
+            "entries": [
+                {
+                    "type": "message",
+                    "id": "user-old",
+                    "parentId": null,
+                    "message": {"role": "user", "content": "压缩前问题"}
+                },
+                {
+                    "type": "message",
+                    "id": "assistant-old",
+                    "parentId": "user-old",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩前回答"}]}
+                },
+                {
+                    "type": "compaction",
+                    "id": "compaction",
+                    "parentId": "assistant-old",
+                    "summary": "模型上下文摘要",
+                    "firstKeptEntryId": "assistant-old"
+                },
+                {
+                    "type": "message",
+                    "id": "other-branch",
+                    "parentId": "assistant-old",
+                    "message": {"role": "user", "content": "已放弃旁支"}
+                },
+                {
+                    "type": "message",
+                    "id": "user-new",
+                    "parentId": "compaction",
+                    "message": {"role": "user", "content": "压缩后问题"}
+                },
+                {
+                    "type": "custom_message",
+                    "id": "extension-note",
+                    "parentId": "user-new",
+                    "customType": "note",
+                    "content": "可见扩展消息",
+                    "display": true
+                },
+                {
+                    "type": "message",
+                    "id": "assistant-new",
+                    "parentId": "extension-note",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩后回答"}]}
+                }
+            ],
+            "leafId": "assistant-new"
+        }))
+        .unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["content"], "压缩前问题");
+        assert_eq!(messages[1]["content"][0]["text"], "压缩前回答");
+        assert_eq!(messages[2]["content"], "压缩后问题");
+        assert_eq!(messages[3]["role"], "custom");
+        assert_eq!(messages[3]["content"], "可见扩展消息");
+        assert_eq!(messages[4]["content"][0]["text"], "压缩后回答");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "已放弃旁支")
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "模型上下文摘要")
+        );
+    }
+
+    #[test]
+    fn active_pi_branch_rejects_a_broken_parent_chain() {
+        let error = active_branch_messages(&serde_json::json!({
+            "entries": [{
+                "type": "message",
+                "id": "leaf",
+                "parentId": "missing",
+                "message": {"role": "user", "content": "不能只恢复这一截"}
+            }],
+            "leafId": "leaf"
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn active_pi_branch_can_be_empty_while_the_entry_tree_is_not() {
+        let messages = active_branch_messages(&serde_json::json!({
+            "entries": [{
+                "type": "message",
+                "id": "old",
+                "parentId": null,
+                "message": {"role": "user", "content": "已离开分支"}
+            }],
+            "leafId": null
+        }))
+        .unwrap();
+
+        assert!(messages.is_empty());
     }
 
     /// 重放必须以显式的结束信号收尾。没有它时，`replaying_history` 只能等「下一条
@@ -5303,6 +5475,124 @@ mod tests {
                 .into_iter()
                 .map(|value| Ok(serde_json::to_string(&value).unwrap())),
         )
+    }
+
+    #[test]
+    fn resumed_initialization_replays_raw_current_branch_entries() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("pi-session"));
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "pi-session",
+                    "model": {
+                        "provider": "test",
+                        "id": "model",
+                        "name": "Test Model",
+                        "contextWindow": 100_000
+                    },
+                    "thinkingLevel": "medium"
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": [{
+                    "provider": "test", "id": "model", "name": "Test Model",
+                    "contextWindow": 100_000
+                }]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-entries", "type": "response",
+                "command": "get_entries", "success": true,
+                "data": {
+                    "entries": [
+                        {
+                            "type": "message", "id": "old", "parentId": null,
+                            "message": {"role": "user", "content": "压缩前"}
+                        },
+                        {
+                            "type": "compaction", "id": "compact", "parentId": "old",
+                            "summary": "模型只看摘要", "firstKeptEntryId": "old"
+                        },
+                        {
+                            "type": "message", "id": "new", "parentId": "compact",
+                            "message": {"role": "user", "content": "压缩后"}
+                        }
+                    ],
+                    "leafId": "new"
+                }
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+        ))
+        .unwrap();
+
+        let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "get_state",
+                "get_available_models",
+                "get_available_thinking_levels",
+                "get_commands",
+                "get_entries"
+            ]
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        let replayed_user_text: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::UserChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed_user_text, ["压缩前", "压缩后"]);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+        );
     }
 
     #[test]
