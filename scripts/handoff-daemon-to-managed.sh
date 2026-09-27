@@ -142,11 +142,11 @@ os.replace(next_path, managed)
 PY
   if [[ "$claim_status" -eq 75 ]]; then
     cp -f "$NEXT" "${MANAGED_DIR}/smeltd.next"
-    echo "· 守护仍被映射，未覆盖 $MANAGED，已暂存 ${MANAGED_DIR}/smeltd.next" >&2
+    echo "· 守护仍被映射，未覆盖 ${MANAGED}，已暂存 ${MANAGED_DIR}/smeltd.next" >&2
     exit 0
   fi
   if [[ "$claim_status" -ne 0 ]]; then
-    echo "✗ 写入 $MANAGED 失败（status=$claim_status）" >&2
+    echo "✗ 写入 ${MANAGED} 失败（status=${claim_status}）" >&2
     exit "$claim_status"
   fi
   if [[ "$BACKGROUND_ON_BUSY" == true ]]; then

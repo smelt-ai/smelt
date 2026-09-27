@@ -2073,6 +2073,33 @@ where
         .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
+            let pending = staged_daemon_path();
+            if pending.is_file() {
+                match upgrade_daemon_exe(Some(&pending)) {
+                    UpgradeOutcome::Upgraded => {
+                        eprintln!("✅ 守护进程已无缝升级到最新版本");
+                    }
+                    UpgradeOutcome::Busy => {
+                        eprintln!("⏸ 守护进程忙碌中，新版本已暂存，将在空闲时自升级");
+                    }
+                    UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
+                        eprintln!("ℹ️ 守护进程无需或无法直接无缝升级（已暂存，下次启动生效）");
+                    }
+                }
+            } else if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
+                let managed = managed_daemon_path();
+                if managed.is_file() {
+                    match upgrade_daemon_exe(Some(&managed)) {
+                        UpgradeOutcome::Upgraded => {
+                            eprintln!("✅ 守护进程已无缝升级到最新版本");
+                        }
+                        UpgradeOutcome::Busy => {
+                            eprintln!("⏸ 守护进程忙碌中，新版本已暂存，将在空闲时自升级");
+                        }
+                        UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {}
+                    }
+                }
+            }
             eprintln!(
                 "✅ 已安装 {}（守护交接与插件映射与在线更新相同）",
                 target.display()
