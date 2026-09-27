@@ -30,6 +30,16 @@ describe("Smelt Pi permission extension", () => {
 		}
 	});
 
+	test("the built-in subagent extension still requires host approval", () => {
+		expect(toolNeedsSmeltApproval(extension("subagent", "<inline:smelt-subagent>"))).toBe(true);
+	});
+
+	test("background task tools still require host approval", () => {
+		for (const name of ["background_task", "background_task_output", "background_task_stop", "background_task_wait"]) {
+			expect(toolNeedsSmeltApproval(extension(name, "<inline:smelt-background-task>"))).toBe(true);
+		}
+	});
+
 	test("only the Smelt-owned canonical elicitation tool bypasses approval", () => {
 		const choice = {
 			question: "用哪种节奏？",

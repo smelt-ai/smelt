@@ -340,6 +340,14 @@ pub struct RuntimeManagerLock {
     _file: File,
 }
 
+impl RuntimeManagerLock {
+    /// Keep the manager transaction alive if the supervisor dies while a staging subprocess is
+    /// still writing. This is only for bounded build/download children, never runtime sessions.
+    pub fn inherit_into(&self, command: &mut Command) {
+        inherit_raw_fds(command, &[self._file.as_raw_fd()]);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GenerationLease {
     kind: GenerationKind,
@@ -396,12 +404,19 @@ pub struct PiGenerationManifest {
 }
 
 pub fn inherit_generation_fds(command: &mut Command, leases: &[GenerationLease]) {
-    let fds = leases
-        .iter()
-        .map(|lease| lease.fd.as_raw_fd())
-        .collect::<Vec<_>>();
+    inherit_raw_fds(
+        command,
+        &leases
+            .iter()
+            .map(|lease| lease.fd.as_raw_fd())
+            .collect::<Vec<_>>(),
+    );
+}
+
+fn inherit_raw_fds(command: &mut Command, fds: &[std::os::fd::RawFd]) {
+    let fds = fds.to_vec();
     // SAFETY: the closure runs after fork in the child. It only calls async-signal-safe fcntl and
-    // never changes the parent's CLOEXEC flags, so concurrent unrelated spawns cannot leak leases.
+    // never changes the parent's CLOEXEC flags, so concurrent unrelated spawns cannot leak locks.
     unsafe {
         command.pre_exec(move || {
             for fd in &fds {
@@ -547,6 +562,94 @@ mod tests {
         assert!(final_root.join(READY_FILE).is_file());
     }
 
+    /// Re-executed by `child_process_acquired_shared_lease_blocks_exclusive_gc`.
+    /// The subprocess opens the stable lease inode itself; this is intentionally distinct from
+    /// inheriting the parent's already-acquired flock (which macOS treats differently).
+    #[test]
+    fn child_acquires_shared_lease() {
+        let (Some(runtime_root), Some(id), Some(ready_path), Some(release_path)) = (
+            std::env::var_os("SMELT_GENERATION_CHILD_RUNTIME"),
+            std::env::var_os("SMELT_GENERATION_CHILD_ID"),
+            std::env::var_os("SMELT_GENERATION_CHILD_READY"),
+            std::env::var_os("SMELT_GENERATION_CHILD_RELEASE"),
+        ) else {
+            return;
+        };
+        let store = GenerationStore::new(PathBuf::from(runtime_root));
+        let _lease = store
+            .acquire_shared(GenerationKind::Bun, id.to_string_lossy().as_ref())
+            .unwrap();
+        fs::write(&ready_path, b"ready").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !Path::new(&release_path).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent did not release child"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn child_process_acquired_shared_lease_blocks_exclusive_gc() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-bbbbbbbb";
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"runtime").map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        let ready = temp.path().join("child.ready");
+        let release = temp.path().join("child.release");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime_generation::tests::child_acquires_shared_lease",
+                "--nocapture",
+            ])
+            .env("SMELT_GENERATION_CHILD_RUNTIME", store.runtime_root())
+            .env("SMELT_GENERATION_CHILD_ID", id)
+            .env("SMELT_GENERATION_CHILD_READY", &ready)
+            .env("SMELT_GENERATION_CHILD_RELEASE", &release)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("lease child exited before acquiring lock: {status}");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not acquire lease"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        {
+            let _manager = store.lock_manager().unwrap();
+            store.gc_kind_locked(GenerationKind::Bun, &HashSet::new());
+        }
+        assert!(
+            store.generation_root(GenerationKind::Bun, id).exists(),
+            "子进程独立取得的 shared lease 必须阻止 exclusive GC"
+        );
+
+        fs::write(&release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
+        {
+            let _manager = store.lock_manager().unwrap();
+            store.gc_kind_locked(GenerationKind::Bun, &HashSet::new());
+        }
+        assert!(!store.generation_root(GenerationKind::Bun, id).exists());
+        assert!(store.lease_path(GenerationKind::Bun, id).exists());
+    }
+
     #[test]
     fn real_child_shared_lease_blocks_cross_process_gc() {
         if std::env::var_os("SMELT_GENERATION_LEASE_HELPER").is_some() {
@@ -602,6 +705,372 @@ mod tests {
         assert!(
             store.lease_path(GenerationKind::Bun, id).exists(),
             "外部 lease inode 必须永久保留"
+        );
+    }
+
+    /// Helper process that exits immediately after handing its manager-lock FD to a builder.
+    #[test]
+    fn manager_lock_supervisor_exits_after_spawning_builder() {
+        let (Some(runtime), Some(pid_file)) = (
+            std::env::var_os("SMELT_GENERATION_MANAGER_WORKER_RUNTIME"),
+            std::env::var_os("SMELT_GENERATION_MANAGER_WORKER_PID"),
+        ) else {
+            return;
+        };
+        let store = GenerationStore::new(PathBuf::from(runtime));
+        let manager = store.lock_manager().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        manager.inherit_into(&mut command);
+        let child = command.spawn().unwrap();
+        fs::write(pid_file, child.id().to_string()).unwrap();
+        drop(child); // Deliberately do not wait: this helper process is the simulated supervisor.
+        drop(manager);
+    }
+
+    /// The child keeps the exclusive manager transaction alive after its supervisor exits.
+    #[test]
+    fn inherited_manager_lock_survives_supervisor_process_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let pid_file = temp.path().join("builder.pid");
+        let helper = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime_generation::tests::manager_lock_supervisor_exits_after_spawning_builder",
+                "--nocapture",
+            ])
+            .env(
+                "SMELT_GENERATION_MANAGER_WORKER_RUNTIME",
+                store.runtime_root(),
+            )
+            .env("SMELT_GENERATION_MANAGER_WORKER_PID", &pid_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        assert!(helper.wait_with_output().unwrap().status.success());
+        let pid: i32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let mut orphan = OrphanProcess(pid);
+        assert!(store.try_lock_manager().unwrap().is_none());
+        orphan.kill();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(_manager) = store.try_lock_manager().unwrap() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "builder child did not release manager lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Helper process that exits after passing its shared generation lease to a child.
+    #[test]
+    fn lease_supervisor_exits_after_spawning_runtime_child() {
+        let (Some(runtime), Some(id), Some(pid_file)) = (
+            std::env::var_os("SMELT_GENERATION_LEASE_WORKER_RUNTIME"),
+            std::env::var_os("SMELT_GENERATION_LEASE_WORKER_ID"),
+            std::env::var_os("SMELT_GENERATION_LEASE_WORKER_PID"),
+        ) else {
+            return;
+        };
+        let store = GenerationStore::new(PathBuf::from(runtime));
+        let lease = store
+            .acquire_shared(GenerationKind::Bun, id.to_string_lossy().as_ref())
+            .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        inherit_generation_fds(&mut command, std::slice::from_ref(&lease));
+        let child = command.spawn().unwrap();
+        fs::write(pid_file, child.id().to_string()).unwrap();
+        drop(child); // Simulate a supervisor killed immediately after spawn.
+        drop(lease);
+    }
+
+    #[test]
+    fn inherited_lease_fd_survives_supervisor_process_exit_and_exec() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-cccccccc";
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"runtime").map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        let pid_file = temp.path().join("runtime-child.pid");
+        let helper = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime_generation::tests::lease_supervisor_exits_after_spawning_runtime_child",
+                "--nocapture",
+            ])
+            .env(
+                "SMELT_GENERATION_LEASE_WORKER_RUNTIME",
+                store.runtime_root(),
+            )
+            .env("SMELT_GENERATION_LEASE_WORKER_ID", id)
+            .env("SMELT_GENERATION_LEASE_WORKER_PID", &pid_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        assert!(helper.wait_with_output().unwrap().status.success());
+        let pid: i32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let mut orphan = OrphanProcess(pid);
+
+        {
+            let _manager = store.lock_manager().unwrap();
+            store.gc_kind_locked(GenerationKind::Bun, &HashSet::new());
+        }
+        assert!(
+            store.generation_root(GenerationKind::Bun, id).exists(),
+            "supervisor 已退出后，exec child 的 inherited shared lease 仍必须阻止 GC"
+        );
+        orphan.kill();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let _manager = store.lock_manager().unwrap();
+                store.gc_kind_locked(GenerationKind::Bun, &HashSet::new());
+            }
+            if !store.generation_root(GenerationKind::Bun, id).exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "runtime child did not release lease"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(store.lease_path(GenerationKind::Bun, id).exists());
+    }
+
+    struct OrphanProcess(i32);
+
+    impl OrphanProcess {
+        fn kill(&mut self) {
+            if self.0 > 1 {
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+                self.0 = 0;
+            }
+        }
+    }
+
+    impl Drop for OrphanProcess {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    /// Re-executed in two real processes to contend for the same generation identity.
+    #[test]
+    fn concurrent_publish_worker() {
+        let (Some(runtime), Some(id), Some(gate), Some(started), Some(payload)) = (
+            std::env::var_os("SMELT_GENERATION_WORKER_RUNTIME"),
+            std::env::var_os("SMELT_GENERATION_WORKER_ID"),
+            std::env::var_os("SMELT_GENERATION_WORKER_GATE"),
+            std::env::var_os("SMELT_GENERATION_WORKER_STARTED"),
+            std::env::var_os("SMELT_GENERATION_WORKER_PAYLOAD"),
+        ) else {
+            return;
+        };
+        fs::write(&started, b"started").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !Path::new(&gate).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "publish gate was not opened"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let store = GenerationStore::new(PathBuf::from(runtime));
+        let id = id.to_string_lossy().into_owned();
+        let payload = payload.to_string_lossy().into_owned();
+        let _manager = store.lock_manager().unwrap();
+        store
+            .publish_locked(GenerationKind::Bun, &id, &manifest(&id), |staging| {
+                fs::write(staging.join("bun"), payload).map_err(|error| error.to_string())?;
+                std::thread::sleep(Duration::from_millis(40));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn concurrent_processes_publish_one_complete_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-dddddddd";
+        let gate = temp.path().join("go");
+        let mut children = Vec::new();
+        let mut started = Vec::new();
+        for payload in ["worker-a", "worker-b"] {
+            let marker = temp.path().join(format!("{payload}.started"));
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime_generation::tests::concurrent_publish_worker",
+                    "--nocapture",
+                ])
+                .env("SMELT_GENERATION_WORKER_RUNTIME", store.runtime_root())
+                .env("SMELT_GENERATION_WORKER_ID", id)
+                .env("SMELT_GENERATION_WORKER_GATE", &gate)
+                .env("SMELT_GENERATION_WORKER_STARTED", &marker)
+                .env("SMELT_GENERATION_WORKER_PAYLOAD", payload)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            children.push(child);
+            started.push(marker);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while started.iter().any(|marker| !marker.exists()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "publish workers did not reach the barrier"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        fs::write(&gate, b"go").unwrap();
+        for child in children {
+            assert!(child.wait_with_output().unwrap().status.success());
+        }
+
+        let root = store.generation_root(GenerationKind::Bun, id);
+        let payload = fs::read(root.join("bun")).unwrap();
+        assert!(payload == b"worker-a" || payload == b"worker-b");
+        assert!(published_marker_is_valid(&root));
+        let parsed: BunGenerationManifest =
+            serde_json::from_slice(&fs::read(root.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(parsed, manifest(id));
+    }
+
+    #[test]
+    fn stale_staging_is_removed_without_touching_published_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-eeeeeeee";
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"published").map_err(|e| e.to_string())
+                })
+                .unwrap();
+            let stale = store.staging_root().join(".bun-interrupted-build");
+            fs::create_dir_all(&stale).unwrap();
+            fs::write(stale.join("partial"), b"not ready").unwrap();
+            store.remove_stale_staging_locked();
+        }
+        assert!(!store.staging_root().join(".bun-interrupted-build").exists());
+        assert_eq!(
+            fs::read(store.generation_root(GenerationKind::Bun, id).join("bun")).unwrap(),
+            b"published"
+        );
+    }
+
+    #[test]
+    fn damaged_generation_is_quarantined_only_after_lease_is_exclusive() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let id = "bun-ffffffff";
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"published").map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        let lease = store.acquire_shared(GenerationKind::Bun, id).unwrap();
+        {
+            let _manager = store.lock_manager().unwrap();
+            assert!(
+                store
+                    .discard_invalid_locked(GenerationKind::Bun, id)
+                    .is_err()
+            );
+        }
+        assert!(store.generation_root(GenerationKind::Bun, id).exists());
+        drop(lease);
+        {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .discard_invalid_locked(GenerationKind::Bun, id)
+                .unwrap();
+            assert!(!store.generation_root(GenerationKind::Bun, id).exists());
+            assert!(store.lease_path(GenerationKind::Bun, id).exists());
+            store
+                .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                    fs::write(staging.join("bun"), b"rebuilt").map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            fs::read(store.generation_root(GenerationKind::Bun, id).join("bun")).unwrap(),
+            b"rebuilt"
+        );
+    }
+
+    #[test]
+    fn current_switch_is_atomic_and_does_not_delete_old_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GenerationStore::new(temp.path().join("runtime"));
+        let ids = ["bun-11111111", "bun-22222222"];
+        {
+            let _manager = store.lock_manager().unwrap();
+            for id in ids {
+                store
+                    .publish_locked(GenerationKind::Bun, id, &manifest(id), |staging| {
+                        fs::write(staging.join("bun"), id).map_err(|error| error.to_string())
+                    })
+                    .unwrap();
+            }
+            store
+                .write_current_locked(GenerationKind::Bun, ids[0])
+                .unwrap();
+        }
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_store = store.clone();
+        let reader_done = done.clone();
+        let reader = std::thread::spawn(move || {
+            while !reader_done.load(std::sync::atomic::Ordering::Acquire) {
+                let current = reader_store.current_locked(GenerationKind::Bun);
+                assert!(current.as_deref().is_some_and(|id| ids.contains(&id)));
+            }
+        });
+        for index in 0..24 {
+            let _manager = store.lock_manager().unwrap();
+            store
+                .write_current_locked(GenerationKind::Bun, ids[index % ids.len()])
+                .unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::Release);
+        reader.join().unwrap();
+        assert!(
+            ids.iter()
+                .all(|id| store.generation_root(GenerationKind::Bun, id).is_dir())
+        );
+        assert!(
+            store
+                .current_locked(GenerationKind::Bun)
+                .as_deref()
+                .is_some_and(|id| ids.contains(&id))
         );
     }
 }

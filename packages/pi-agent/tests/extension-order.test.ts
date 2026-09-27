@@ -11,12 +11,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import { SMELT_EXTENSION_FACTORIES } from "../src/runtime-extensions.ts";
+import smeltBackgroundTaskExtension, {
+	SMELT_BACKGROUND_TASK_EXTENSION_NAME,
+} from "../src/background-task.ts";
 import smeltContextUsageExtension from "../src/context-usage.ts";
 import {
 	SMELT_ELICITATION_TOOL_NAME,
 	smeltElicitationExtension,
 } from "../src/elicitation.ts";
 import smeltPermissionExtension from "../src/smelt-permission.ts";
+import smeltSubagentExtension, { SMELT_SUBAGENT_EXTENSION_NAME } from "../src/subagent/index.ts";
 
 function inlineFactory(input: InlineExtension): ExtensionFactory {
 	return typeof input === "function" ? input : input.factory;
@@ -57,10 +61,12 @@ function bindToolRegistry(
 describe("Smelt Pi extension ordering", () => {
 	test("host ships named extensions and keeps permission last", () => {
 		expect(SMELT_EXTENSION_FACTORIES).toEqual([
-		{ name: "smelt-elicitation", factory: smeltElicitationExtension, hidden: true },
-		{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
-		{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
-	]);
+			{ name: "smelt-elicitation", factory: smeltElicitationExtension, hidden: true },
+			{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
+			{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
+			{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
+			{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
+		]);
 	});
 
 	test("host approval observes arguments after mutable user handlers", async () => {

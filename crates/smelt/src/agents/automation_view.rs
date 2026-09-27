@@ -780,7 +780,7 @@ impl Workspace {
                                 )
                             }),
                     )
-                    .child(render_notification_field(editor, entity.clone(), cx))
+                    .child(render_notification_field(editor, entity, cx))
                     .when(!editor.is_new && run_count > 0, |column| {
                         column.child(
                             automation_form_row()

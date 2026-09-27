@@ -152,14 +152,6 @@ impl PluginPackage {
         &self.entrypoint
     }
 
-    /// 检查当前机器是否具备启动该 package 所需的受管 Bun。GUI 只需要这个判断。
-    pub fn runtime_available(&self, bun: Option<&Path>) -> Result<(), HostError> {
-        match bun {
-            Some(path) if path.is_file() => Ok(()),
-            _ => Err(HostError::new("plugin runtime bun is unavailable")),
-        }
-    }
-
     pub fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
@@ -1419,7 +1411,17 @@ pub trait PluginProcessVerifier: Send + Sync + 'static {
     fn verify(&self, package: &PluginPackage, program: &Path, pid: u32) -> Result<(), HostError>;
 }
 
-#[derive(Clone, Debug)]
+/// Coordinates the narrow spawn window with the daemon lifecycle. `before_spawn` and `spawned`
+/// bracket only `Command::spawn`; callers may therefore wait for that window to close without
+/// waiting for plugin initialization or shutdown grace periods.
+pub trait PluginProcessTracker: Send + Sync + 'static {
+    fn before_spawn(&self) -> Result<(), HostError>;
+    fn spawned(&self, pid: u32);
+    fn spawn_failed(&self);
+    fn exited(&self, pid: u32);
+}
+
+#[derive(Clone)]
 pub struct SpawnOptions {
     pub startup_timeout: std::time::Duration,
     pub shutdown_grace: std::time::Duration,
@@ -1427,6 +1429,25 @@ pub struct SpawnOptions {
     /// Owned descriptors that the shared Bun process must retain across exec.
     /// Parent copies stay CLOEXEC; only the post-fork child clears that flag.
     pub inherited_fds: Vec<Arc<OwnedFd>>,
+    /// Optional daemon-owned lifecycle tracker. The host reports every shared Bun process from
+    /// immediately before spawn until it has been reaped.
+    pub process_tracker: Option<Arc<dyn PluginProcessTracker>>,
+}
+
+impl fmt::Debug for SpawnOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SpawnOptions")
+            .field("startup_timeout", &self.startup_timeout)
+            .field("shutdown_grace", &self.shutdown_grace)
+            .field("bun", &self.bun)
+            .field("inherited_fds", &self.inherited_fds)
+            .field(
+                "process_tracker",
+                &self.process_tracker.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
 }
 
 impl Default for SpawnOptions {
@@ -1436,6 +1457,7 @@ impl Default for SpawnOptions {
             shutdown_grace: std::time::Duration::from_secs(2),
             bun: None,
             inherited_fds: Vec::new(),
+            process_tracker: None,
         }
     }
 }

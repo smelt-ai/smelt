@@ -1278,10 +1278,6 @@ pub(crate) fn refresh(cx: &App) {
             |state| state.is_enabled(plugin_id),
         )
     };
-    // 脚本插件的运行时可能还没就位（首次启动正在下载受管 bun）。这时它的进程起不来，
-    // tab 摆在那里点开只有空白——跟插件被停用是同一种状态，就按同一条路径隐藏。
-    // 运行时下载完成后守护会重启插件集，GUI 这边下一次 refresh 自然把 tab 补回来。
-    let bun = smelt_core::managed_runtime::managed_bun_path_if_ready();
     let mut tabs = Vec::new();
     let mut surfaces = Vec::new();
     let mut agents = Vec::new();
@@ -1309,10 +1305,6 @@ pub(crate) fn refresh(cx: &App) {
         agents.extend(package_agents);
         assets.extend(package_assets);
         if !is_enabled(&plugin_id) {
-            continue;
-        }
-        if let Err(error) = package.runtime_available(bun.as_deref()) {
-            eprintln!("[plugin-ui] {plugin_id} 暂不可用：{error}");
             continue;
         }
         session_actions.extend(discover_package_session_actions(&package));

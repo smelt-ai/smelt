@@ -605,16 +605,16 @@ pub(crate) fn spawn_acp_snapshot_link(
     thread::Builder::new()
         .name("smelt-acp-snapshot".to_string())
         .spawn(move || {
-            acp_snapshot_writer(
+            acp_snapshot_writer(SnapshotWriter {
                 stream,
                 initial,
                 encode,
                 detach,
-                writer_inner,
-                writer_id,
+                inner: writer_inner,
+                id: writer_id,
                 kind,
                 fd,
-            );
+            });
         })
         .map_err(std::io::Error::other)?;
     Ok(AcpSnapshotLink {
@@ -661,8 +661,8 @@ pub(crate) fn acp_snapshot_link_for_slot(
     )
 }
 
-fn acp_snapshot_writer(
-    mut stream: UnixStream,
+struct SnapshotWriter {
+    stream: UnixStream,
     initial: Vec<u8>,
     encode: SnapshotEncode,
     detach: SnapshotDetach,
@@ -670,7 +670,19 @@ fn acp_snapshot_writer(
     id: String,
     kind: &'static str,
     fd: RawFd,
-) {
+}
+
+fn acp_snapshot_writer(writer: SnapshotWriter) {
+    let SnapshotWriter {
+        mut stream,
+        initial,
+        encode,
+        detach,
+        inner,
+        id,
+        kind,
+        fd,
+    } = writer;
     if !initial.is_empty()
         && let Err(error) = stream.write_all(&initial)
     {
@@ -3346,6 +3358,17 @@ fn recorded_handoff_launch(sess: &AcpSession) -> smelt_core::agent_kind::Convers
     })
 }
 
+/// 交接帧必须整帧成功。调试 sidecar 留空表示这一帧不替换：已打开的界面保留
+/// 自己的副本，新进程从后续模型调用重新记录。
+fn conversation_snapshot_for_handoff(
+    reduced: &smelt_core::acp_session::AcpSessionState,
+) -> smelt_core::acp_session::ConversationSnapshot {
+    let mut snapshot = reduced.to_snapshot(false);
+    snapshot.runtime_debug = None;
+    snapshot.tool_debug = None;
+    snapshot
+}
+
 /// 交接 v2 typed 收集：与旧版同锁、同过滤、同 retire 语义，只换 typed 输出。
 /// 旧 JSON 版已删：v2 写端不再产文件，legacy 文件读端只认旧二进制写的文件。
 pub(crate) fn collect_acp_handoff_typed(
@@ -3381,7 +3404,7 @@ pub(crate) fn collect_acp_handoff_typed(
                 let state = sess.state.lock().unwrap();
                 (state.agent_mcp, state.agent_token.clone())
             };
-            let mut snapshot = sess.reduced.lock().unwrap().to_snapshot(false);
+            let mut snapshot = conversation_snapshot_for_handoff(&sess.reduced.lock().unwrap());
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             set_conversation_snapshot(sess, &mut snapshot);
             acp_items.push(AcpHandoff::Hosted {
@@ -3421,7 +3444,7 @@ pub(crate) fn collect_acp_handoff_typed(
         let (mut snapshot, pending_raw_line) = {
             let reduced = sess.reduced.lock().unwrap();
             (
-                reduced.to_snapshot(false),
+                conversation_snapshot_for_handoff(&reduced),
                 reduced.pending_raw_request_line().map(str::to_string),
             )
         };

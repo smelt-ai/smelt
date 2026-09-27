@@ -1012,7 +1012,7 @@ fn render_notification_field(
     _cx: &App,
 ) -> AnyElement {
     let selected = editor.notification;
-    let picker_entity = entity.clone();
+    let picker_entity = entity;
     let picker = automation_form_row().child(
         Button::new("automation-notification")
             .ghost()

@@ -1232,7 +1232,7 @@ pub fn create_agent_conversation(
     let title = if definition.name.trim().is_empty() {
         "智能体对话".to_string()
     } else {
-        definition.name.clone()
+        definition.name
     };
     create_remote_acp_session(&RemoteAcpSession {
         id: session_id.clone(),
@@ -1769,11 +1769,8 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = RemoteSessionCatalog::load_from_paths(
-            Some(acp_path.clone()),
-            Some(terminal_path.clone()),
-        )
-        .unwrap();
+        let catalog =
+            RemoteSessionCatalog::load_from_paths(Some(acp_path), Some(terminal_path)).unwrap();
         assert_eq!(catalog.acp_sessions.len(), 1);
         assert!(catalog.terminal_sessions.is_empty());
         std::fs::remove_dir_all(root).unwrap();

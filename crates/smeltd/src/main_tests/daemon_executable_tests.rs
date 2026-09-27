@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::MetadataExt;
 
 #[test]
 fn renamed_staging_executable_falls_back_to_stable_smeltd_path() {
@@ -146,10 +147,33 @@ fn matching_inode_keeps_the_current_exe_path() {
     let path = root.join("smeltd");
     std::fs::write(&path, b"running-image").unwrap();
     let meta = std::fs::metadata(&path).unwrap();
-    use std::os::unix::fs::MetadataExt;
     let chosen =
         session_host_executable_from(path.clone(), Some((meta.dev(), meta.ino()))).unwrap();
     assert_eq!(chosen, path);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_host_falls_back_to_stable_when_staging_path_is_replaced() {
+    let root = std::env::temp_dir().join(format!(
+        "smeltd-fallback-stable-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let staged = root.join("smeltd.next");
+    let stable = root.join("smeltd");
+    std::fs::write(&stable, b"original-running-image").unwrap();
+    let meta = std::fs::metadata(&stable).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let dev = meta.dev();
+    let ino = meta.ino();
+
+    // staged 文件被别人重新写成了新映像（inode 改变）
+    std::fs::write(&staged, b"newer-staged-image").unwrap();
+
+    let chosen = session_host_executable_from(staged, Some((dev, ino))).unwrap();
+    assert_eq!(chosen, stable);
     std::fs::remove_dir_all(root).unwrap();
 }
 

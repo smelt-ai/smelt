@@ -304,7 +304,8 @@ fn promote_staged_handoff_executable(
 }
 
 fn finalize_staged_handoff_executable() {
-    let came_from_handoff = std::env::var_os("SMELTD_HANDOFF").is_some();
+    let came_from_handoff = std::env::var_os("SMELTD_HANDOFF").is_some()
+        || std::env::var_os("SMELTD_HANDOFF_SOCK").is_some();
     let Ok(current) = std::env::current_exe() else {
         return;
     };
@@ -405,6 +406,10 @@ fn session_host_executable_from(
     };
     if path_has_inode(&current, dev, ino) {
         return Ok(current);
+    }
+    let stable = current.with_file_name("smeltd");
+    if stable.is_file() && path_has_inode(&stable, dev, ino) {
+        return Ok(stable);
     }
     Err(std::io::Error::other(format!(
         "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
@@ -2383,8 +2388,8 @@ fn wait_for_predecessor_exit(sock: &UnixStream, timeout: Duration) {
 ///   从 `current_exe()` 派生，必须跟主进程同版。
 /// - ACP/peer 忙：不自判，直接发 upgrade op 让 handler 回 busy（单一数据源），
 ///   等下一轮。
-/// 发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
-/// COMMIT 后本进程 exit，线程随之死，无需清理。
+///   发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
+///   COMMIT 后本进程 exit，线程随之死，无需清理。
 fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
     let Some(pinned) = daemon_fingerprint else {
         return;
@@ -2518,46 +2523,38 @@ fn run_serve_loop(
         Arc::clone(&iroh_connections),
     );
 
-    // 受管 bun 跟 helper 一样是版本单元：锁定版本变了由守护代用户下载并清旧目录，
-    // 不堵 accept 循环。ACP 启动路径会再 ensure 一次（同目录锁串行）。
-    // 受管 bun 既是 ACP 适配器的运行时，也是脚本插件的运行时。首次下载完成时插件集
-    // 可能已经按"没有 bun"起过一轮了，所以下完要把它重新拉起来。
-    std::thread::spawn(|| {
-        let had_bun = smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
-        match smelt_core::managed_runtime::sync_managed_bun(&|message| {
-            smelt_core::app_log::info("bun", message)
-        }) {
-            Ok(runtime) => {
-                smelt_core::app_log::info(
-                    "bun",
-                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
-                );
-                if !had_bun {
-                    plugin_runtime::reload_for_runtime_change();
+    // 先钉死插件集身份，再异步准备受管 Bun。插件 supervisor 只消费同步成功
+    // 返回的 runtime + lease，不再通过全局 current 指针猜测可用性。同步失败使用
+    // 有上限退避持续重试，不会把一次瞬时错误变成守护进程生命周期内的永久故障。
+    // handoff 时 Bun 就绪后仍需等 predecessor EOF，避免两套用户插件并存。
+    plugin_runtime::prepare(daemon_fingerprint.clone());
+    std::thread::spawn(move || {
+        let mut attempt = 0_u32;
+        let runtime = loop {
+            match smelt_core::managed_runtime::sync_managed_bun(&|message| {
+                smelt_core::app_log::info("bun", message)
+            }) {
+                Ok(runtime) => break runtime,
+                Err(error) => {
+                    attempt = attempt.saturating_add(1);
+                    let delay = plugin_runtime::bootstrap_retry_delay(attempt);
+                    smelt_core::app_log::warn(
+                        "bun",
+                        &format!("同步受管 bun 失败：{error}；{} 秒后重试", delay.as_secs()),
+                    );
+                    thread::sleep(delay);
                 }
             }
-            Err(error) => {
-                smelt_core::app_log::warn("bun", &format!("同步受管 bun 失败：{error}"));
-            }
+        };
+        smelt_core::app_log::info(
+            "bun",
+            &format!("受管 bun 已就绪：{}", runtime.path.display()),
+        );
+        if let Some(sock) = handoff_sock {
+            wait_for_predecessor_exit(&sock, Duration::from_secs(10));
         }
+        plugin_runtime::start(runtime);
     });
-
-    // 插件启动：正常启动立即起；交接过来则等 predecessor EOF（=老插件已停
-    // +老进程已退）再起，避免新旧两套 user 插件同时在线。终端/ACP 不等——
-    // 它们已经恢复，accept 立刻开始服务。
-    match handoff_sock {
-        None => plugin_runtime::start(daemon_fingerprint.clone()),
-        Some(sock) => {
-            let fingerprint = daemon_fingerprint.clone();
-            std::thread::Builder::new()
-                .name("smelt-handoff-plugin-wait".into())
-                .spawn(move || {
-                    wait_for_predecessor_exit(&sock, Duration::from_secs(10));
-                    plugin_runtime::start(fingerprint);
-                })
-                .ok();
-        }
-    }
 
     // headless 空闲自升级：没有观看连接时磁盘新了没人触发 upgrade，这里兜底。
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
@@ -3892,8 +3889,8 @@ fn handle_upgrade(
     listen_fd: RawFd,
 ) {
     let mut c = conn;
-    // 可选 `"exe":"/path/to/smeltd"`：spawn 指定二进制做 successor（暂存
-    // `.next` 由事务内先扶正到正式路径再 spawn）；未传则 spawn current_exe。
+    // 可选 `"exe":"/path/to/smeltd"`：spawn 指定二进制做 successor。暂存
+    // `.next` 原样 exec，COMMIT 之后才扶正到正式路径。未传则 spawn current_exe。
     let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let path = std::path::PathBuf::from(p);
         if !path.is_file() {

@@ -2182,6 +2182,77 @@ fn open_then_handoff_keeps_one_stable_registry_slot() {
 }
 
 #[test]
+fn handoff_snapshot_keeps_the_conversation_and_omits_debug_sidecars() {
+    let acp_sessions = new_test_acp_sessions();
+    let (stdin_fd_owner, _stdin_peer) = UnixStream::pair().unwrap();
+    let (stdout_fd_owner, _stdout_peer) = UnixStream::pair().unwrap();
+    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    let mut reduced = AcpSessionState::default();
+    reduced.entries.push(AcpEntry::User("继续这条对话".into()));
+    reduced.tool_debug.insert(
+        "call-1".into(),
+        smelt_core::acp_session::ToolCallDebug {
+            name: Some("read".into()),
+            raw_input: Some(serde_json::json!({"path": "/tmp/secret"})),
+        },
+    );
+    reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        system_prompt: Some("完整系统提示".into()),
+        model_calls: vec![smelt_core::acp_session::RuntimeDebugModelCall {
+            sequence: 1,
+            source: "pi_context_with_system".into(),
+            payload: serde_json::json!({"messages": [{"role": "user", "content": "hello"}]}),
+            ..smelt_core::acp_session::RuntimeDebugModelCall::default()
+        }],
+        ..smelt_core::acp_session::RuntimeDebug::default()
+    };
+    acp_sessions.reserve_with("acp-debug-handoff", || {
+        let sess = make_acp_session_value("acp-debug-handoff", reduced);
+        *sess.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
+                pid: std::process::id() as i32,
+                stdin_fd: stdin_fd_owner.as_raw_fd(),
+                stdout_fd: stdout_fd_owner.as_raw_fd(),
+            }))),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supports_mid_turn_input: false,
+            supports_compaction: false,
+            supports_native_queue: false,
+            supports_rewind: false,
+        });
+        sess
+    });
+
+    let (items, _) = collect_acp_handoff_typed(&acp_sessions);
+    let crate::handoff_v2::manifest::AcpHandoff::Direct { snapshot, .. } = &items[0] else {
+        panic!("应为 direct 形态");
+    };
+    assert!(
+        matches!(&snapshot.entries[..], [AcpEntry::User(text)] if text == "继续这条对话"),
+        "交接必须带走对话本身"
+    );
+    assert!(snapshot.runtime_debug.is_none());
+    assert!(snapshot.tool_debug.is_none());
+    let wire = serde_json::to_value(snapshot).unwrap();
+    assert!(wire.get("runtime_debug").is_none());
+    assert!(wire.get("tool_debug").is_none());
+
+    let live = acp_sessions.get("acp-debug-handoff").unwrap();
+    let live = live.value.reduced.lock().unwrap();
+    assert_eq!(
+        live.runtime_debug.system_prompt.as_deref(),
+        Some("完整系统提示")
+    );
+    assert!(live.tool_debug.contains_key("call-1"));
+}
+
+#[test]
 fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
     let acp_sessions = new_test_acp_sessions();
 

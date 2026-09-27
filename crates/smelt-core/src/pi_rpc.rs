@@ -32,6 +32,7 @@ const PI_RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
+const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
 
 #[derive(Clone, Debug)]
 struct PiModel {
@@ -238,9 +239,12 @@ pub fn spawn_pi_rpc(
                 .await;
                 // run_connection 返回后进程组已 SIGKILL。stderr drain 必须仍在
                 // 同一个 smol executor 上被 poll，否则 EOF 永远到不了。
-                if result.is_err()
-                    && let Some(drain) = stderr_drain.lock().unwrap().take()
-                {
+                let drain = if result.is_err() {
+                    stderr_drain.lock().unwrap().take()
+                } else {
+                    None
+                };
+                if let Some(drain) = drain {
                     drain.await;
                 }
                 result
@@ -305,13 +309,26 @@ async fn run_connection(
     // `runtime` 在同步完成、全局锁释放前已经取得 shared generation lease；将它持有
     // 到本连接结束，消除 prepare 与 spawn 之间被升级 GC 删除目录的窗口。
     let process_args = runtime.process_args(trailing);
+    let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+    let background = crate::background_tasks::BackgroundSupervisor::start(
+        &launch.sid,
+        launch.cwd.clone(),
+        event_tx.clone(),
+        outbound_tx.clone(),
+    )?;
     let (child_stdin, child_stdout, child_stderr, child) = {
         let _spawn_permit = spawn_gate.as_ref().map(|gate| gate.read().unwrap());
         let mut stdio = stdio_out.lock().unwrap();
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let spawned = spawn_process(launch, inline_env, process_args, &runtime)?;
+        let spawned = spawn_process(
+            launch,
+            inline_env,
+            process_args,
+            &runtime,
+            Some(background.socket_path()),
+        )?;
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
             stdin_fd: spawned.0.as_raw_fd(),
@@ -325,7 +342,6 @@ async fn run_connection(
     let result = async {
         let mut writer = child_stdin;
         let mut lines = futures::io::BufReader::new(child_stdout).lines();
-        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
         let mut state = PiState::new();
         let initialize = initialize_session(
             &mut lines,
@@ -368,7 +384,32 @@ async fn run_connection(
                     handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc)
                         .await?;
                 }
-                Next::Outbound(Ok(message)) => write_rpc(&mut writer, &message).await?,
+                Next::Outbound(Ok(message)) => {
+                    if message.get("type").and_then(serde_json::Value::as_str)
+                        == Some("smelt_background_notify")
+                    {
+                        let text = message
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let command = if state.active_turn {
+                            ConversationCommand::FollowUp {
+                                text,
+                                images: Vec::new(),
+                            }
+                        } else {
+                            ConversationCommand::Prompt {
+                                text,
+                                images: Vec::new(),
+                            }
+                        };
+                        handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc)
+                            .await?;
+                    } else {
+                        write_rpc(&mut writer, &message).await?;
+                    }
+                }
                 Next::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
                 Next::Line(Some(Ok(line))) => {
                     let value = parse_rpc_line(&line)?;
@@ -390,6 +431,7 @@ async fn run_connection(
     // 必须先确认直属子进程已退出，再让 `runtime` 的 generation lease 析构。
     // 仅发送 SIGKILL 不等于进程已经消失，期间原地修复会与旧进程并发读模块树。
     process.kill_and_reap();
+    drop(background);
     result
 }
 
@@ -434,6 +476,7 @@ fn spawn_process(
     inline_env: BTreeMap<String, String>,
     mut process_args: Vec<String>,
     runtime: &crate::managed_runtime::ManagedPiRuntime,
+    background_sock: Option<&std::path::Path>,
 ) -> Result<SpawnedPi, String> {
     if process_args.len() < 2 {
         return Err("Pi 受管运行时启动参数不完整".to_string());
@@ -465,6 +508,9 @@ fn spawn_process(
             .to_string_lossy()
             .as_ref(),
     );
+    if let Some(path) = background_sock {
+        command.env("SMELT_BACKGROUND_TASK_SOCK", path);
+    }
     if let Some(cwd) = launch.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
         command.current_dir(cwd);
     }
@@ -887,7 +933,15 @@ where
         })
         .await
         {
-            Wait::Outbound(Ok(message)) => write_rpc(writer, &message).await?,
+            Wait::Outbound(Ok(message)) => {
+                // 握手还没完成，完成通知留到主循环。这里直接丢掉，避免把内部消息写进 Pi。
+                if message.get("type").and_then(serde_json::Value::as_str)
+                    == Some("smelt_background_notify")
+                {
+                    continue;
+                }
+                write_rpc(writer, &message).await?;
+            }
             Wait::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
             Wait::Line(Some(Ok(line))) => {
                 let value = parse_rpc_line(&line)?;
@@ -1192,6 +1246,29 @@ pub(crate) fn parse_compact_slash(text: &str) -> Option<Option<String>> {
     })
 }
 
+/// `/handoff` 或 `/handoff 自定义说明`。其它以 `/handoff` 为前缀的词不算。
+pub(crate) fn parse_handoff_slash(text: &str) -> Option<Option<String>> {
+    let trimmed = text.trim();
+    let rest = trimmed.strip_prefix("/handoff")?;
+    if rest.is_empty() {
+        return Some(None);
+    }
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let instructions = rest.trim();
+    Some(if instructions.is_empty() {
+        None
+    } else {
+        Some(instructions.to_string())
+    })
+}
+
+/// `/shake`。后面再跟字就不是这条指令，避免吞掉用户本来想发给模型的话。
+pub(crate) fn parse_shake_slash(text: &str) -> bool {
+    text.trim() == "/shake"
+}
+
 fn json_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
     value
         .get(key)
@@ -1237,7 +1314,17 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 }
                 return send_reload(writer, state).await;
             }
+            if parse_shake_slash(&text) && state.active_turn {
+                finish_in_flight(in_flight_rpc);
+                let _ = event_tx.try_send(ConversationEvent::Status(
+                    "回合进行中，结束后再 /shake".to_string(),
+                ));
+                return Ok(());
+            }
             if let Some(instructions) = parse_compact_slash(&text) {
+                return send_compact(instructions, writer, state).await;
+            }
+            if let Some(instructions) = parse_handoff_slash(&text) {
                 return send_compact(instructions, writer, state).await;
             }
             if state.active_turn {
@@ -1359,9 +1446,14 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             .await?;
         }
         ConversationCommand::Cancel => {
+            // 回合由宿主关闭。abort 只通知 Pi 停下，不决定界面还转不转。
             state.cancel_requested = true;
-            // 先清队列再 abort，但两者必须连续写出。如果等 clear_queue 回执
-            // 再 abort，Pi 还在跑模型时 Stop 会一直没反应。
+            if state.active_turn {
+                finish_turn(state, event_tx, None);
+            } else {
+                state.cancel_requested = false;
+                let _ = event_tx.try_send(ConversationEvent::TurnEnded(StopReason::Cancelled));
+            }
             send_clear_queue(writer, state, false).await?;
             let abort_id = state.request_id("abort");
             write_rpc(
@@ -2491,8 +2583,8 @@ fn subagent_children_from_details(
     let results = details.get("results")?.as_array()?;
     if results.len() <= 1 {
         let result = results.first()?;
-        return Some(entries_from_subagent_messages(
-            result.get("messages").and_then(serde_json::Value::as_array),
+        return Some(entries_from_subagent_result(
+            result,
             &format!("{parent_id}-child"),
             subagent_result_running(result),
         ));
@@ -2506,8 +2598,8 @@ fn subagent_children_from_details(
             .unwrap_or("agent");
         let running = subagent_result_running(result);
         let failed = subagent_result_failed(result);
-        let (children, child_debug) = entries_from_subagent_messages(
-            result.get("messages").and_then(serde_json::Value::as_array),
+        let (children, child_debug) = entries_from_subagent_result(
+            result,
             &format!("{parent_id}-result-{index}-child"),
             running,
         );
@@ -2552,6 +2644,80 @@ fn subagent_result_failed(result: &serde_json::Value) -> bool {
         )
 }
 
+fn entries_from_subagent_result(
+    result: &serde_json::Value,
+    id_prefix: &str,
+    running: bool,
+) -> (
+    Vec<AcpEntry>,
+    BTreeMap<String, crate::acp_session::ToolCallDebug>,
+) {
+    if let Some(messages) = result.get("messages").and_then(serde_json::Value::as_array) {
+        return entries_from_subagent_messages(Some(messages), id_prefix, running);
+    }
+    entries_from_subagent_items(
+        result.get("items").and_then(serde_json::Value::as_array),
+        id_prefix,
+        running,
+    )
+}
+
+fn entries_from_subagent_items(
+    items: Option<&Vec<serde_json::Value>>,
+    id_prefix: &str,
+    running: bool,
+) -> (
+    Vec<AcpEntry>,
+    BTreeMap<String, crate::acp_session::ToolCallDebug>,
+) {
+    let Some(items) = items else {
+        return (Vec::new(), BTreeMap::new());
+    };
+    let mut entries = Vec::with_capacity(items.len());
+    let mut debug = BTreeMap::new();
+    let mut tool_index = 0_usize;
+    for item in items {
+        match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(serde_json::Value::as_str)
+                    && !text.is_empty()
+                {
+                    entries.push(AcpEntry::Assistant {
+                        text: text.to_string(),
+                        thought: false,
+                    });
+                }
+            }
+            Some("toolCall") => {
+                let name = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("tool");
+                let args = item.get("args").or_else(|| item.get("arguments"));
+                tool_index += 1;
+                let id = format!("{id_prefix}-{tool_index}");
+                debug.insert(
+                    id.clone(),
+                    crate::acp_session::ToolCallDebug {
+                        name: Some(name.to_string()),
+                        raw_input: args.cloned(),
+                    },
+                );
+                entries.push(AcpEntry::tool_call(
+                    id,
+                    tool_title(name, args),
+                    tool_kind(name),
+                    ToolCallStatus::Completed,
+                    Vec::new(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    mark_last_subagent_tool_in_progress(&mut entries, running);
+    (entries, debug)
+}
+
 fn entries_from_subagent_messages(
     messages: Option<&Vec<serde_json::Value>>,
     id_prefix: &str,
@@ -2580,24 +2746,24 @@ fn entries_from_subagent_messages(
                 .unwrap_or("");
             match kind {
                 "text" => {
-                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
-                        if !text.is_empty() {
-                            entries.push(AcpEntry::Assistant {
-                                text: text.to_string(),
-                                thought: false,
-                            });
-                        }
+                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str)
+                        && !text.is_empty()
+                    {
+                        entries.push(AcpEntry::Assistant {
+                            text: text.to_string(),
+                            thought: false,
+                        });
                     }
                 }
                 "thinking" => {
                     // pi 协议 thinking block 的字段是 `thinking`，不是 `text`。
-                    if let Some(text) = part.get("thinking").and_then(serde_json::Value::as_str) {
-                        if !text.is_empty() {
-                            entries.push(AcpEntry::Assistant {
-                                text: text.to_string(),
-                                thought: true,
-                            });
-                        }
+                    if let Some(text) = part.get("thinking").and_then(serde_json::Value::as_str)
+                        && !text.is_empty()
+                    {
+                        entries.push(AcpEntry::Assistant {
+                            text: text.to_string(),
+                            thought: true,
+                        });
                     }
                 }
                 "toolCall" | "tool_call" => {
@@ -2627,15 +2793,20 @@ fn entries_from_subagent_messages(
             }
         }
     }
-    if running {
-        for entry in entries.iter_mut().rev() {
-            if let AcpEntry::ToolCall { status, .. } = entry {
-                *status = ToolCallStatus::InProgress;
-                break;
-            }
+    mark_last_subagent_tool_in_progress(&mut entries, running);
+    (entries, debug)
+}
+
+fn mark_last_subagent_tool_in_progress(entries: &mut [AcpEntry], running: bool) {
+    if !running {
+        return;
+    }
+    for entry in entries.iter_mut().rev() {
+        if let AcpEntry::ToolCall { status, .. } = entry {
+            *status = ToolCallStatus::InProgress;
+            break;
         }
     }
-    (entries, debug)
 }
 
 fn content_text(content: Option<&serde_json::Value>) -> String {
@@ -2715,7 +2886,7 @@ fn tool_output_parts(
             path = path_from_unified_diff(patch).unwrap_or_default();
         }
         output.push(ToolOutputPart::Diff {
-            path: path.clone(),
+            path,
             old_text: (!old.is_empty()).then_some(old),
             new_text: new,
         });
@@ -2854,6 +3025,16 @@ fn replay_messages(
                     "content": message.get("content").cloned().unwrap_or_default(),
                     "details": message.get("details").cloned().unwrap_or_default(),
                 });
+                if let Some((children, debug)) = message
+                    .get("details")
+                    .and_then(|details| subagent_children_from_details(id, details))
+                {
+                    let _ = event_tx.try_send(ConversationEvent::ToolChildren {
+                        id: id.to_string(),
+                        children,
+                        debug,
+                    });
+                }
                 let name = state
                     .tool_names
                     .get(id)
@@ -3046,6 +3227,22 @@ fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut
     }
 }
 
+/// 与 Pi 侧 `MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS` 一致。每次调用都带着完整请求，
+/// 只留最近几次，更早的计入 `model_calls_omitted`。
+const MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS: usize = 4;
+/// 与 Pi 侧 `MAX_RETAINED_RUNTIME_DEBUG_COMPACTIONS` 一致。
+const MAX_RETAINED_RUNTIME_DEBUG_COMPACTIONS: usize = 4;
+
+fn retain_debug_tail<T>(items: &mut Vec<T>, omitted: &mut u64, max: usize) {
+    let len = items.len();
+    if len <= max {
+        return;
+    }
+    let drop_count = len - max;
+    items.drain(..drop_count);
+    *omitted = omitted.saturating_add(drop_count as u64);
+}
+
 fn validate_runtime_debug(debug: &mut RuntimeDebug) -> bool {
     let has_system_prompt = debug
         .system_prompt
@@ -3132,6 +3329,16 @@ fn validate_runtime_debug(debug: &mut RuntimeDebug) -> bool {
                     );
                 }
             }
+            retain_debug_tail(
+                &mut debug.model_calls,
+                &mut debug.model_calls_omitted,
+                MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS,
+            );
+            retain_debug_tail(
+                &mut debug.compactions,
+                &mut debug.compactions_omitted,
+                MAX_RETAINED_RUNTIME_DEBUG_COMPACTIONS,
+            );
             true
         }
         _ => false,
@@ -3214,7 +3421,13 @@ fn publish_extension_widget(
             if !validate_runtime_debug(&mut debug) {
                 return;
             }
-            let _ = event_tx.try_send(ConversationEvent::RuntimeDebug(debug));
+            let _ = event_tx.try_send(ConversationEvent::RuntimeDebug(Box::new(debug)));
+        }
+        SMELT_BACKGROUND_TASK_WIDGET => {
+            let Some(tasks) = crate::acp_session::parse_background_task_widget(line) else {
+                return;
+            };
+            let _ = event_tx.try_send(ConversationEvent::BackgroundTasks(tasks));
         }
         _ => {}
     }
@@ -4022,6 +4235,129 @@ mod tests {
     }
 
     #[test]
+    fn replayed_subagent_tool_result_restores_nested_transcript() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let messages = [
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "subagent-call",
+                    "name": "subagent",
+                    "arguments": {"task": "inspect the project"}
+                }]
+            }),
+            serde_json::json!({
+                "role": "toolResult",
+                "toolCallId": "subagent-call",
+                "toolName": "subagent",
+                "content": [{"type": "text", "text": "finished"}],
+                "details": {
+                    "mode": "single",
+                    "results": [{
+                        "agent": "scout",
+                        "exitCode": 0,
+                        "messages": [
+                            {"role": "assistant", "content": [{"type": "text", "text": "early child result"}]},
+                            {"role": "assistant", "content": [{"type": "toolCall", "name": "read", "arguments": {"path": "README.md"}}]},
+                            {"role": "assistant", "content": [{"type": "text", "text": "latest child result"}]}
+                        ]
+                    }]
+                }
+            }),
+        ];
+
+        replay_history(&messages, &event_tx, &mut state);
+
+        let mut restored_children = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let ConversationEvent::ToolChildren { id, children, .. } = event {
+                assert_eq!(id, "subagent-call");
+                restored_children = Some(children);
+            }
+        }
+        let children = restored_children.expect("completed subagent transcript should replay");
+        assert!(matches!(
+            &children[0],
+            AcpEntry::Assistant { thought: false, text } if text == "early child result"
+        ));
+        assert!(matches!(
+            &children[1],
+            AcpEntry::ToolCall {
+                kind: ToolKind::Read,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &children[2],
+            AcpEntry::Assistant { thought: false, text } if text == "latest child result"
+        ));
+    }
+
+    #[test]
+    fn replayed_subagent_item_details_restore_the_saved_transcript() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let messages = [
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "legacy-subagent-call",
+                    "name": "subagent",
+                    "arguments": {"task": "inspect the project"}
+                }]
+            }),
+            serde_json::json!({
+                "role": "toolResult",
+                "toolCallId": "legacy-subagent-call",
+                "toolName": "subagent",
+                "content": [{"type": "text", "text": "finished"}],
+                "details": {
+                    "mode": "single",
+                    "results": [{
+                        "agent": "scout",
+                        "exitCode": 0,
+                        "items": [
+                            {"type": "text", "text": "early child result"},
+                            {"type": "toolCall", "name": "read", "args": {"path": "README.md"}},
+                            {"type": "text", "text": "latest child result"}
+                        ]
+                    }]
+                }
+            }),
+        ];
+
+        replay_history(&messages, &event_tx, &mut state);
+
+        let mut restored_children = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let ConversationEvent::ToolChildren { id, children, .. } = event {
+                assert_eq!(id, "legacy-subagent-call");
+                restored_children = Some(children);
+            }
+        }
+        let children = restored_children.expect("persisted subagent items should replay");
+        assert_eq!(children.len(), 3);
+        assert!(matches!(
+            &children[0],
+            AcpEntry::Assistant { thought: false, text } if text == "early child result"
+        ));
+        assert!(matches!(
+            &children[1],
+            AcpEntry::ToolCall {
+                kind: ToolKind::Read,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &children[2],
+            AcpEntry::Assistant { thought: false, text } if text == "latest child result"
+        ));
+    }
+
+    #[test]
     fn native_event_sequence_maps_stream_tool_and_turn_lifecycle() {
         let launch = test_launch(SMELT_PI_AGENT_COMMAND);
         let (event_tx, event_rx) = smol::channel::unbounded();
@@ -4521,6 +4857,29 @@ mod tests {
     }
 
     #[test]
+    fn background_task_widget_publishes_the_task_list() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-background-tasks",
+                "widgetLines": ["{\"tasks\":[{\"id\":\"bg-1\",\"title\":\"测试\",\"command\":\"npm test\",\"status\":\"running\",\"exitCode\":null,\"output\":\"hi\",\"startedAtMs\":10}]}"]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::BackgroundTasks(tasks)) = event_rx.try_recv() else {
+            panic!("expected background tasks");
+        };
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "bg-1");
+        assert_eq!(
+            tasks[0].status,
+            crate::acp_session::BackgroundTaskStatus::Running
+        );
+        assert_eq!(tasks[0].output, "hi");
+        assert_eq!(tasks[0].exit_code, None);
+    }
+
+    #[test]
     fn context_usage_widget_publishes_breakdown_without_clobbering_totals() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         publish_extension_widget(
@@ -4793,7 +5152,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_debug_accepts_unbounded_call_and_compaction_history() {
+    fn runtime_debug_keeps_only_the_newest_calls_and_compactions() {
         let calls = (1..=40)
             .map(|sequence| {
                 serde_json::json!({
@@ -4817,6 +5176,24 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+        let compactions = (1..=6)
+            .map(|sequence| {
+                serde_json::json!({
+                    "sequence": sequence,
+                    "status": "completed",
+                    "reason": "manual",
+                    "willRetry": false,
+                    "startedAtMs": 1725000000000_u64 + sequence,
+                    "sourceMessages": if sequence == 6 {
+                        source_messages.clone()
+                    } else {
+                        Vec::<serde_json::Value>::new()
+                    },
+                    "sourceMessagesOmitted": 0,
+                    "summary": "complete summary"
+                })
+            })
+            .collect::<Vec<_>>();
         let (event_tx, event_rx) = smol::channel::unbounded();
         publish_extension_widget(
             &serde_json::json!({
@@ -4827,16 +5204,7 @@ mod tests {
                     "systemPrompt": "system",
                     "tools": [],
                     "modelCalls": calls,
-                    "compactions": [{
-                        "sequence": 1,
-                        "status": "completed",
-                        "reason": "manual",
-                        "willRetry": false,
-                        "startedAtMs": 1725000000000_u64,
-                        "sourceMessages": source_messages,
-                        "sourceMessagesOmitted": 0,
-                        "summary": "complete summary"
-                    }]
+                    "compactions": compactions
                 }).to_string()]
             }),
             &event_tx,
@@ -4844,10 +5212,15 @@ mod tests {
         let Ok(ConversationEvent::RuntimeDebug(debug)) = event_rx.try_recv() else {
             panic!("full model and compaction history should be accepted");
         };
-        assert_eq!(debug.model_calls.len(), 40);
-        assert_eq!(debug.compactions.len(), 1);
-        assert_eq!(debug.compactions[0].source_messages.len(), 80);
-        assert_eq!(debug.compactions[0].source_messages[0].preview.len(), 4_002);
+        assert_eq!(debug.model_calls.len(), 4);
+        assert_eq!(debug.model_calls[0].sequence, 37);
+        assert_eq!(debug.model_calls[3].sequence, 40);
+        assert_eq!(debug.model_calls_omitted, 36);
+        assert_eq!(debug.compactions.len(), 4);
+        assert_eq!(debug.compactions[0].sequence, 3);
+        assert_eq!(debug.compactions_omitted, 2);
+        assert_eq!(debug.compactions[3].source_messages.len(), 80);
+        assert_eq!(debug.compactions[3].source_messages[0].preview.len(), 4_002);
     }
 
     #[test]
@@ -5466,6 +5839,87 @@ mod tests {
     }
 
     #[test]
+    fn handoff_slash_is_only_the_exact_command() {
+        assert_eq!(parse_handoff_slash("/handoff"), Some(None));
+        assert_eq!(
+            parse_handoff_slash("  /handoff  重点关注发布流程  "),
+            Some(Some("重点关注发布流程".to_string()))
+        );
+        assert_eq!(parse_handoff_slash("/handoffs"), None);
+        assert_eq!(parse_handoff_slash("handoff"), None);
+    }
+
+    #[test]
+    fn slash_handoff_sends_native_compact_instead_of_a_prompt() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "/handoff 关注测试".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let request: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
+        assert_eq!(request["type"], "compact");
+        assert_eq!(request["customInstructions"], "关注测试");
+        assert!(state.active_turn);
+        assert_eq!(state.compact_request_ids.len(), 1);
+    }
+
+    #[test]
+    fn shake_slash_is_only_the_exact_command() {
+        assert!(parse_shake_slash("  /shake  "));
+        assert!(!parse_shake_slash("/shake 现在"));
+        assert!(!parse_shake_slash("/shaker"));
+        assert!(!parse_shake_slash("shake"));
+    }
+
+    #[test]
+    fn slash_shake_blocked_during_active_turn() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "  /shake  ".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(
+            String::from_utf8(writer.into_inner())
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+        assert!(state.active_turn);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
+        ));
+    }
+
+    #[test]
     fn follow_up_queues_until_the_turn_settles() {
         let (event_tx, _) = smol::channel::unbounded();
         let mut state = PiState::new();
@@ -5494,6 +5948,51 @@ mod tests {
     }
 
     #[test]
+    fn cancel_closes_an_idle_turn_without_waiting_for_pi() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let in_flight = AtomicUsize::new(0);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Cancel,
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(!state.active_turn);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::Cancelled))
+        ));
+    }
+
+    #[test]
+    fn cancel_closes_the_running_turn_before_pi_agrees() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Cancel,
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(!state.active_turn);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::Cancelled))
+        ));
+        let sent = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(sent.contains("\"type\":\"abort\"") || sent.contains("\"type\": \"abort\""));
+    }
+
+    #[test]
     fn cancel_clears_the_queue_before_abort() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let mut state = PiState::new();
@@ -5516,7 +6015,11 @@ mod tests {
         let abort: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(clear["type"], "clear_queue");
         assert_eq!(abort["type"], "abort");
-        assert!(state.cancel_requested);
+        assert!(!state.active_turn);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::Cancelled))
+        ));
         let id = clear["id"].as_str().unwrap().to_string();
 
         let mut writer = futures::io::Cursor::new(Vec::new());
@@ -5545,6 +6048,53 @@ mod tests {
         ));
         assert!(String::from_utf8(writer.into_inner()).unwrap().is_empty());
         assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancel_leaves_background_tasks_running() {
+        let (event_tx, _event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _outbound_rx) = smol::channel::unbounded();
+        let supervisor = crate::background_tasks::BackgroundSupervisor::start(
+            "test-cancel-bg",
+            None,
+            event_tx.clone(),
+            outbound_tx,
+        )
+        .unwrap();
+
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+        stream
+            .write_all(b"{\"op\":\"start\",\"command\":\"sleep 30\",\"title\":\"task\"}\n")
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let started: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(started["ok"], true);
+
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::Cancel,
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+        stream
+            .write_all(b"{\"op\":\"wait\",\"id\":\"bg-1\"}\n")
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let finished: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(finished["tasks"][0]["status"], "running", "{finished}");
     }
 
     #[test]

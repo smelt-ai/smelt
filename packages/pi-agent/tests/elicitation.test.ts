@@ -155,13 +155,14 @@ describe("elicitation payload shape", () => {
 });
 
 describe("host elicitation tool", () => {
-	test("registers only the canonical Smelt tool", async () => {
+	test("registers the canonical choice tool and built-in subagent", async () => {
 		const { runner } = await loadHostExtensions();
-		const names = runner.getAllRegisteredTools().map((tool) => tool.definition.name);
-		expect(names).toEqual([SMELT_ELICITATION_TOOL_NAME]);
-		expect(runner.getAllRegisteredTools()[0]?.sourceInfo.path).toBe(
-			SMELT_ELICITATION_EXTENSION_PATH,
-		);
+		const tools = runner.getAllRegisteredTools();
+		const names = tools.map((tool) => tool.definition.name);
+		expect(names).toContain(SMELT_ELICITATION_TOOL_NAME);
+		expect(names).toContain("subagent");
+		expect(tools[0]?.sourceInfo.path).toBe(SMELT_ELICITATION_EXTENSION_PATH);
+		expect(tools[1]?.sourceInfo.path).toBe("<inline:smelt-subagent>");
 		for (const alias of ["question", "questionnaire", "ask_user_question", "AskUserQuestion"]) {
 			expect(runner.getToolDefinition(alias)).toBeUndefined();
 		}

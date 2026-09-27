@@ -53,17 +53,8 @@ pub enum StoreError {
     #[error("未知 legacy import 状态: {status}")]
     UnknownLegacyStatus { status: String },
 
-    #[error(
-        "legacy source {legacy_source} 已映射到 {mapped_namespace}/{mapped_key}，拒绝{action}为 {namespace}/{key}"
-    )]
-    LegacyMappingMismatch {
-        legacy_source: String,
-        mapped_namespace: String,
-        mapped_key: String,
-        namespace: String,
-        key: String,
-        action: &'static str,
-    },
+    #[error(transparent)]
+    LegacyMappingMismatch(Box<LegacyMappingMismatch>),
 
     #[error("legacy source {legacy_source} 的 KV 元数据不完整")]
     IncompleteLegacyMetadata { legacy_source: String },
@@ -143,9 +134,25 @@ pub enum StoreError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
+    // rusqlite::Error 本身就超过 Result 的体积阈值，留在枚举里会让每个
+    // 返回 StoreError 的函数都触发 result_large_err。
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(Box<rusqlite::Error>),
+}
+
+/// legacy 映射冲突。字段多，单独装箱，避免撑大 `StoreError`。
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "legacy source {legacy_source} 已映射到 {mapped_namespace}/{mapped_key}，拒绝{action}为 {namespace}/{key}"
+)]
+pub struct LegacyMappingMismatch {
+    pub legacy_source: String,
+    pub mapped_namespace: String,
+    pub mapped_key: String,
+    pub namespace: String,
+    pub key: String,
+    pub action: &'static str,
 }
 
 /// 打开数据库文件时的底层失败。移动端没有 rusqlite，用 io 兜住 Display。
@@ -155,7 +162,7 @@ pub enum OpenSource {
     Io(#[from] std::io::Error),
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(Box<rusqlite::Error>),
 }
 
 impl StoreError {
@@ -181,6 +188,38 @@ impl StoreError {
 
     pub(crate) fn unrecognized_schema(version: u32) -> Self {
         Self::SchemaUnrecognized { version }
+    }
+
+    pub(crate) fn legacy_mapping_mismatch(
+        legacy_source: impl Into<String>,
+        mapped_namespace: impl Into<String>,
+        mapped_key: impl Into<String>,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        action: &'static str,
+    ) -> Self {
+        Self::LegacyMappingMismatch(Box::new(LegacyMappingMismatch {
+            legacy_source: legacy_source.into(),
+            mapped_namespace: mapped_namespace.into(),
+            mapped_key: mapped_key.into(),
+            namespace: namespace.into(),
+            key: key.into(),
+            action,
+        }))
+    }
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(Box::new(error))
+    }
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+impl From<rusqlite::Error> for OpenSource {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(Box::new(error))
     }
 }
 

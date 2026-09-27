@@ -2898,7 +2898,7 @@ impl Workspace {
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let (saved, workspace_state_load_failed, workspace_load_error) = match load_ws_state() {
-            WorkspaceLoad::Loaded(state) => (Some(state), false, None),
+            WorkspaceLoad::Loaded(state) => (Some(*state), false, None),
             WorkspaceLoad::Missing => (None, false, None),
             WorkspaceLoad::Failed(error) => {
                 eprintln!("[workspace] workspace 存档无法读取: {error}");
@@ -4741,35 +4741,6 @@ fn main() {
         if let Err(error) = crate::cli::sync_control_skill() {
             eprintln!("[workspace] 同步 smelt skill 失败：{error}");
         }
-        // 受管 bun 由 Smelt 代用户升级（启动时后台同步锁定版本）。下载约 25MB，
-        // 不能挡首帧；与 smeltd 并发时靠 runtime 目录锁串行。首次就位后要重建 GUI
-        // 的插件清单：refresh_once 可能已经在“没有 bun”的窗口里把脚本 tab 跳过了。
-        let had_managed_bun =
-            smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
-        let bun_sync = cx.background_executor().spawn(async move {
-            smelt_core::managed_runtime::sync_managed_bun(&|message| {
-                smelt_core::app_log::info("bun", message)
-            })
-        });
-        cx.spawn(async move |cx| match bun_sync.await {
-            Ok(runtime) => {
-                smelt_core::app_log::info(
-                    "bun",
-                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
-                );
-                if !had_managed_bun {
-                    cx.update(|cx| {
-                        cx.set_global(settings::PluginEnablementState::load());
-                        plugin_ui::refresh(cx);
-                        cx.refresh_windows();
-                    });
-                }
-            }
-            Err(error) => {
-                smelt_core::app_log::warn("bun", &format!("同步受管 bun 失败：{error}"));
-            }
-        })
-        .detach();
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装含 Codex app-server 信任握手和文件 IO，全部放后台，不能阻塞首帧。
         if agent_hooks_enabled {

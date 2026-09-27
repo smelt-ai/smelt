@@ -289,6 +289,82 @@ pub(super) fn plan_view_from_acp(p: &Plan) -> PlanView {
     }
 }
 
+/// Pi 后台任务的展示态。每次 widget 推送都是全量覆盖，输出只保留尾部。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTaskView {
+    pub id: String,
+    pub title: String,
+    pub command: String,
+    pub status: BackgroundTaskStatus,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub output: String,
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundTaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+    #[serde(rename = "timed_out")]
+    TimedOut,
+}
+
+impl BackgroundTaskStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "进行中",
+            Self::Completed => "完成",
+            Self::Failed => "失败",
+            Self::Stopped => "已停止",
+            Self::TimedOut => "超时",
+        }
+    }
+}
+
+const BACKGROUND_TASK_OUTPUT_CAP: usize = 8_000;
+const BACKGROUND_TASK_LIMIT: usize = 12;
+
+/// 解析 `smelt-background-tasks` widget 的一行 JSON。
+/// `tasks` 缺失时返回 None，调用方保留上一份；空数组表示清空。
+pub fn parse_background_task_widget(line: &str) -> Option<Vec<BackgroundTaskView>> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let tasks = value.get("tasks")?.as_array()?;
+    let mut parsed = Vec::new();
+    for task in tasks {
+        let Ok(mut view) = serde_json::from_value::<BackgroundTaskView>(task.clone()) else {
+            continue;
+        };
+        if view.id.is_empty() || view.command.is_empty() {
+            continue;
+        }
+        view.output = cap_task_output(view.output);
+        parsed.push(view);
+    }
+    if parsed.len() > BACKGROUND_TASK_LIMIT {
+        parsed.drain(0..parsed.len() - BACKGROUND_TASK_LIMIT);
+    }
+    Some(parsed)
+}
+
+fn cap_task_output(text: String) -> String {
+    if text.len() <= BACKGROUND_TASK_OUTPUT_CAP {
+        return text;
+    }
+    let mut start = text.len() - BACKGROUND_TASK_OUTPUT_CAP;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
 /// 一次用户 prompt 对应的回合计时。旧快照没有这个字段。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnTiming {
@@ -562,6 +638,9 @@ pub struct ConversationSnapshot {
     #[serde(default)]
     pub usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     pub plan: Option<PlanView>,
+    /// Pi 后台任务。旧快照缺省为空；空列表表示当前没有任务。
+    #[serde(default)]
+    pub background_tasks: Vec<BackgroundTaskView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     /// 宿主级会话输入状态。旧 daemon / 独立 session host 不提供时为 None，客户端
@@ -658,6 +737,8 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     plan: Option<PlanView>,
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTaskView>,
     model: Option<ModelState>,
     config_options: Vec<SessionConfigState>,
     #[serde(default)]
@@ -723,6 +804,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             usage_cost: de.usage_cost,
             usage_breakdown: de.usage_breakdown,
             plan: de.plan,
+            background_tasks: de.background_tasks,
             model: de.model,
             config_options: de.config_options,
             conversation_state: de.conversation_state,
@@ -772,6 +854,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             usage_cost: snap.usage_cost,
             usage_breakdown: snap.usage_breakdown,
             plan: snap.plan,
+            background_tasks: snap.background_tasks,
             model: snap.model,
             config_options: snap.config_options,
             conversation_state: snap.conversation_state,
@@ -867,6 +950,7 @@ pub struct AcpSessionState {
     pub usage_cost: Option<f64>,
     pub usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     pub plan: Option<PlanView>,
+    pub background_tasks: Vec<BackgroundTaskView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     pub supports_compaction: bool,
@@ -929,6 +1013,7 @@ impl Default for AcpSessionState {
             usage_cost: None,
             usage_breakdown: None,
             plan: None,
+            background_tasks: Vec::new(),
             model: None,
             config_options: Vec::new(),
             supports_compaction: false,
@@ -1020,6 +1105,7 @@ impl AcpSessionState {
             usage_cost: snap.usage_cost,
             usage_breakdown: snap.usage_breakdown,
             plan: snap.plan,
+            background_tasks: snap.background_tasks,
             model: snap.model,
             config_options: snap.config_options,
             supports_compaction: snap.supports_compaction,
@@ -1084,6 +1170,7 @@ impl AcpSessionState {
             usage_cost,
             usage_breakdown,
             plan,
+            background_tasks,
             model,
             config_options,
             conversation_state: _,
@@ -1168,6 +1255,7 @@ impl AcpSessionState {
         self.usage_cost = usage_cost;
         self.usage_breakdown = usage_breakdown;
         self.plan = plan;
+        self.background_tasks = background_tasks;
         self.model = model;
         self.config_options = config_options;
         self.supports_compaction = supports_compaction;
@@ -1274,6 +1362,7 @@ impl AcpSessionState {
             usage_cost: self.usage_cost,
             usage_breakdown: self.usage_breakdown.clone(),
             plan: self.plan.clone(),
+            background_tasks: self.background_tasks.clone(),
             model: self.model.clone(),
             config_options: self.config_options.clone(),
             conversation_state: None,

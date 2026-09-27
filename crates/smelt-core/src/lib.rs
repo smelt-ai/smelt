@@ -23,6 +23,7 @@ pub mod auto_model_store;
 pub mod automation;
 pub mod automation_store;
 pub mod automation_transcript;
+pub mod background_tasks;
 pub mod block_on;
 pub mod claude_paths;
 pub mod codex_app_server;

@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext, Skill } from "@earendil-works/pi-c
 import { formatSkillsForPrompt } from "@earendil-works/pi-coding-agent";
 import {
 	appendRuntimeDebugModelCall,
+	MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS,
 	buildCompactionStartTrace,
 	buildContextUsageBuckets,
 	buildRuntimeDebugPayload,
@@ -291,7 +292,7 @@ describe("context usage buckets", () => {
 		]);
 	});
 
-	test("model-call history retains every observed request", () => {
+	test("model-call history keeps the newest requests and drops the rest", () => {
 		let calls: ReturnType<typeof capturePiContext>[] = [];
 		for (let sequence = 1; sequence <= 100; sequence += 1) {
 			calls = appendRuntimeDebugModelCall(
@@ -299,8 +300,8 @@ describe("context usage buckets", () => {
 				capturePiContext(sequence, [], {}, { systemPrompt: "", tools: [] }),
 			);
 		}
-		expect(calls).toHaveLength(100);
-		expect(calls[0]?.sequence).toBe(1);
+		expect(calls).toHaveLength(MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS);
+		expect(calls[0]?.sequence).toBe(100 - MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS + 1);
 		expect(calls.at(-1)?.sequence).toBe(100);
 	});
 
@@ -386,5 +387,178 @@ describe("context usage buckets", () => {
 			summarized: 0,
 			conversation: 0,
 		});
+	});
+
+	test("context event runs shake pruning and returns pruned messages", () => {
+		type Handler = (event: any, context: ExtensionContext) => any;
+		const handlers = new Map<string, Handler>();
+		const widgets: Array<{ key: string; lines: string[] }> = [];
+		const pi = {
+			on: (event: string, handler: Handler) => {
+				handlers.set(event, handler);
+				return () => {};
+			},
+			getActiveTools: () => [],
+			getAllTools: () => [],
+		} as unknown as ExtensionAPI;
+		const context = {
+			ui: {
+				setWidget: (key: string, lines: string[]) => widgets.push({ key, lines }),
+			},
+			sessionManager: {
+				getBranch: () => [],
+			},
+			model: { provider: "openai", id: "gpt-test", api: "responses" },
+			getSystemPrompt: () => "system prompt",
+		} as unknown as ExtensionContext;
+
+		smeltContextUsageExtension(pi);
+		const contextHandler = handlers.get("context");
+		expect(contextHandler).toBeDefined();
+
+		const messages = [
+			{ role: "user", content: "read a.txt" },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "a.txt" } }],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: "stale content ".repeat(20) }],
+			},
+			{ role: "user", content: "write a.txt" },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "write-1", name: "write", arguments: { path: "a.txt" } }],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "write-1",
+				toolName: "write",
+				content: [{ type: "text", text: "written" }],
+			},
+			{ role: "user", content: "what next?" },
+		];
+
+		const result = contextHandler!({ type: "context", messages }, context);
+		expect(result).toBeDefined();
+		expect(result.messages).toBeDefined();
+		expect(result.messages[2].content[0].text).toContain("Stale read of \"a.txt\" elided by shake");
+	});
+
+	test("registers /shake and /handoff commands and intercepts slash input", async () => {
+		type Handler = (event: any, context: ExtensionContext) => any;
+		const handlers = new Map<string, Handler>();
+		const commands = new Map<string, { description?: string; handler: (args: string, ctx: ExtensionContext) => any }>();
+		const notifications: Array<{ msg: string; type: string }> = [];
+		let compactedInstructions: string | undefined;
+
+		const pi = {
+			on: (event: string, handler: Handler) => {
+				handlers.set(event, handler);
+				return () => {};
+			},
+			registerCommand: (name: string, def: any) => {
+				commands.set(name, def);
+			},
+			getActiveTools: () => [],
+			getAllTools: () => [],
+		} as unknown as ExtensionAPI;
+
+		const branchEntries = [
+			{
+				type: "message",
+				message: { role: "user", content: "read a.txt" },
+			},
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } }],
+				},
+			},
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "read",
+					content: [{ type: "text", text: "stale read content ".repeat(20) }],
+				},
+			},
+			{
+				type: "message",
+				message: { role: "user", content: "now write a.txt" },
+			},
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c2", name: "write", arguments: { path: "a.txt" } }],
+				},
+			},
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "c2",
+					toolName: "write",
+					content: [{ type: "text", text: "written" }],
+				},
+			},
+			{
+				type: "message",
+				message: { role: "user", content: "done" },
+			},
+		];
+
+		const context = {
+			hasUI: true,
+			ui: {
+				setWidget: () => {},
+				notify: (msg: string, type: string) => notifications.push({ msg, type }),
+			},
+			sessionManager: {
+				getBranch: () => branchEntries,
+			},
+			compact: (options: any) => {
+				compactedInstructions = options?.customInstructions;
+				options?.onComplete?.();
+			},
+			getSystemPrompt: () => "system prompt",
+		} as unknown as ExtensionContext;
+
+		smeltContextUsageExtension(pi);
+
+		// 1. Verify commands registration
+		expect(commands.has("shake")).toBe(true);
+		expect(commands.has("handoff")).toBe(true);
+
+		// 2. Test shake command execution
+		const shakeCmd = commands.get("shake")!;
+		await shakeCmd.handler("", context);
+		expect(notifications.some((n) => n.msg.includes("Shake completed: pruned 1 item(s)"))).toBe(true);
+
+		// 3. Test handoff command execution
+		const handoffCmd = commands.get("handoff")!;
+		await handoffCmd.handler("Focus on testing", context);
+		expect(compactedInstructions).toBe("Focus on testing");
+		expect(notifications.some((n) => n.msg.includes("Handoff compaction completed."))).toBe(true);
+
+		// 4. Test input interception
+		const inputHandler = handlers.get("input");
+		expect(inputHandler).toBeDefined();
+
+		const shakeInputRes = await inputHandler!({ text: "  /shake  " }, context);
+		expect(shakeInputRes).toEqual({ action: "handled" });
+
+		const handoffInputRes = await inputHandler!({ text: "/handoff Focus on release" }, context);
+		expect(handoffInputRes).toEqual({ action: "handled" });
+		expect(compactedInstructions).toBe("Focus on release");
+
+		const normalInputRes = await inputHandler!({ text: "hello world" }, context);
+		expect(normalInputRes).toEqual({ action: "continue" });
 	});
 });

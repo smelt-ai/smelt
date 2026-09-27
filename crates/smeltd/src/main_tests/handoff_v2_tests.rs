@@ -292,8 +292,7 @@ fn snapshot_skips_childless_and_carries_exited() {
         let write_end = unsafe { std::fs::File::from_raw_fd(pair[1]) };
         let state = Arc::new(Mutex::new(SessionState::default()));
         let color_replies = Arc::new(Mutex::new(VecDeque::new()));
-        let listener =
-            StateListener::with_color_replies(Arc::clone(&state), hub.clone(), color_replies);
+        let listener = StateListener::with_color_replies(Arc::clone(&state), hub, color_replies);
         let (slot, _) = sessions.reserve("t-exited");
         let sess = Arc::new(Session {
             instance: next_session_instance(),

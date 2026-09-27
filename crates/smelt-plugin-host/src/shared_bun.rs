@@ -58,6 +58,7 @@ struct SharedBunProcess {
     child: Child,
     control: BufReader<UnixStream>,
     shutdown_grace: Duration,
+    process_tracker: Option<Arc<dyn super::PluginProcessTracker>>,
 }
 
 #[derive(Serialize)]
@@ -381,9 +382,23 @@ impl SharedBunHost {
                 Ok(())
             });
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| HostError::new(format!("spawn shared bun host: {error}")))?;
+        let process_tracker = self.options.spawn.process_tracker.clone();
+        if let Some(tracker) = &process_tracker {
+            tracker.before_spawn()?;
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(tracker) = &process_tracker {
+                    tracker.spawn_failed();
+                }
+                return Err(HostError::new(format!("spawn shared bun host: {error}")));
+            }
+        };
+        let child_pid = child.id();
+        if let Some(tracker) = &process_tracker {
+            tracker.spawned(child_pid);
+        }
         drop(child_control);
         let result = (|| {
             self.verifier.verify(&first_package, &bun, child.id())?;
@@ -412,11 +427,15 @@ impl SharedBunHost {
                     child,
                     control,
                     shutdown_grace: self.options.spawn.shutdown_grace,
+                    process_tracker,
                 });
                 Ok(())
             }
             Err(error) => {
                 terminate_child(&mut child, self.options.spawn.shutdown_grace);
+                if let Some(tracker) = &process_tracker {
+                    tracker.exited(child_pid);
+                }
                 Err(error)
             }
         }
@@ -435,8 +454,12 @@ impl Drop for SharedBunHost {
 
 impl SharedBunProcess {
     fn stop(&mut self) {
+        let pid = self.child.id();
         let _ = write_json_line(self.control.get_mut(), &HostMessage::Shutdown);
         terminate_child(&mut self.child, self.shutdown_grace);
+        if let Some(tracker) = &self.process_tracker {
+            tracker.exited(pid);
+        }
     }
 }
 

@@ -4,6 +4,22 @@ use super::*;
 
 const USER_MESSAGE_ACTION_GROUP: &str = "acp-user-message-actions";
 
+struct SubagentCard<'a> {
+    index: usize,
+    id: &'a str,
+    title: &'a str,
+    status: ToolCallStatus,
+    output: &'a [ToolOutputPart],
+    children: &'a [AcpEntry],
+    has_expandable_content: bool,
+    default_expanded: bool,
+    card_expanded: bool,
+    failed: bool,
+    animate_ambient: bool,
+    muted: gpui::Hsla,
+    border: gpui::Hsla,
+}
+
 impl AcpView {
     pub(super) fn render_message_list(
         &self,
@@ -628,19 +644,21 @@ impl AcpView {
                             }
                         } else if is_subagent {
                             this.render_subagent_card(
-                                i,
-                                id,
-                                title,
-                                *status,
-                                output,
-                                children,
-                                has_expandable_content,
-                                default_expanded,
-                                card_expanded,
-                                failed,
-                                animate_ambient,
-                                muted,
-                                t.border,
+                                SubagentCard {
+                                    index: i,
+                                    id,
+                                    title,
+                                    status: *status,
+                                    output,
+                                    children,
+                                    has_expandable_content,
+                                    default_expanded,
+                                    card_expanded,
+                                    failed,
+                                    animate_ambient,
+                                    muted,
+                                    border: t.border,
+                                },
                                 cx,
                             )
                         } else {
@@ -1277,21 +1295,24 @@ impl AcpView {
 
     fn render_subagent_card(
         &self,
-        i: usize,
-        id: &str,
-        title: &str,
-        status: ToolCallStatus,
-        output: &[ToolOutputPart],
-        children: &[AcpEntry],
-        has_expandable_content: bool,
-        default_expanded: bool,
-        card_expanded: bool,
-        failed: bool,
-        animate_ambient: bool,
-        muted: gpui::Hsla,
-        border: gpui::Hsla,
+        card: SubagentCard<'_>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let SubagentCard {
+            index: i,
+            id,
+            title,
+            status,
+            output,
+            children,
+            has_expandable_content,
+            default_expanded,
+            card_expanded,
+            failed,
+            animate_ambient,
+            muted,
+            border,
+        } = card;
         let faint = gpui::rgb(ui_theme::text_faint());
         let red = gpui::rgb(ui_theme::red());
         let ink = if failed { red.into() } else { muted };
@@ -1789,7 +1810,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                     .text_color(muted)
                     .into_any_element()
                 } else {
-                    selectable_plain_text(("acp-tool-pop-text", entry_ix * 100 + part_ix), &body)
+                    selectable_plain_text(("acp-tool-pop-text", entry_ix * 100 + part_ix), body)
                         .text_xs()
                         .text_color(muted)
                         .font_family(smelt_core::font_config::font_family())

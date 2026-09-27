@@ -260,8 +260,8 @@ pub fn git_log_view(
     // 提交列表：uniform_list 只构造可视区附近的行元素（每行等高 ROW_H），
     // 之前用 v_flex + children() 把 ~500 条提交每帧全量建一遍，是本页 FPS 崩到
     // 个位数的主因。分支图 canvas 与列表共用同一个滚动句柄，随列表同步滚动。
-    let ws_rows = ws.clone();
-    let root_rows = Rc::new(root.clone());
+    let ws_rows = ws;
+    let root_rows = Rc::new(root);
     let list = uniform_list("git-log-list", count, move |range, _window, _app| {
         range
             .map(|i| {

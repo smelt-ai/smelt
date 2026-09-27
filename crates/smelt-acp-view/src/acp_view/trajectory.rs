@@ -88,8 +88,7 @@ impl TrajectoryOverview {
         }
 
         let mut bins = vec![OverviewBin::default(); bin_count];
-        let mut position = 0usize;
-        for event in events.iter().filter(|event| event.turn > 0) {
+        for (position, event) in events.iter().filter(|event| event.turn > 0).enumerate() {
             let bin = position * bin_count / ordered_event_count;
             let cell = &mut bins[bin.min(bin_count - 1)];
             match event.lane {
@@ -98,7 +97,6 @@ impl TrajectoryOverview {
                 TrajectoryLane::Tool => cell.tools = true,
                 _ => {}
             }
-            position += 1;
         }
         Self {
             ordered_event_count,
@@ -313,12 +311,12 @@ impl Render for TrajectoryWindow {
         let session_entity = self.session.clone();
         let (cache_key, rebuilt_events, rebuilt_stats, live_elapsed) = {
             let session = session_entity.read(cx);
-            let cache_key = TrajectoryCacheKey::for_session(&session);
+            let cache_key = TrajectoryCacheKey::for_session(session);
             let should_rebuild = self.cached_key != Some(cache_key);
             let rebuilt_events = should_rebuild.then(|| {
                 session_trajectory_events(
                     &session.entries,
-                    trajectory_contexts(&session),
+                    trajectory_contexts(session),
                     &session.tool_debug,
                 )
             });

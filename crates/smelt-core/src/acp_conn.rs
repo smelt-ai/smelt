@@ -336,7 +336,7 @@ pub enum ConversationEvent {
         raw_input: Option<serde_json::Value>,
     },
     /// 受管运行时明确上报的本轮 system prompt 与可用工具定义。
-    RuntimeDebug(crate::acp_session::RuntimeDebug),
+    RuntimeDebug(Box<crate::acp_session::RuntimeDebug>),
     /// Provider-neutral tool lifecycle used by native drivers such as Codex app-server.
     ToolStarted {
         id: String,
@@ -361,6 +361,8 @@ pub enum ConversationEvent {
     /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
     /// UI 渲染成消息流上方的可折叠 PLAN 条。
     Plan(Plan),
+    /// Pi 后台任务的全量快照。输出是尾部，不随每个字节落盘。
+    BackgroundTasks(Vec<crate::acp_session::BackgroundTaskView>),
     /// 模型状态：当前名 + 可选列表。来自会话配置项里 category=Model 的那条
     /// select；建会话时给一次，切换或 agent 侧改动时通过 ConfigOptionUpdate 再给。
     /// 取不到就一直是 None，UI 不假装知道。
@@ -1101,11 +1103,13 @@ pub fn spawn_acp(
                     cmd_tx: cmd_tx_for_thread,
                     event_tx: event_tx.clone(),
                 },
-                stderr_tail.clone(),
-                stdio_for_thread,
-                spawn_gate,
-                in_flight_rpc_for_thread,
-                shutdown_requested_for_thread,
+                ConnectionSync {
+                    stderr_tail: stderr_tail.clone(),
+                    stdio_out: stdio_for_thread,
+                    spawn_gate,
+                    in_flight_rpc: in_flight_rpc_for_thread,
+                    shutdown_requested: shutdown_requested_for_thread,
+                },
             ));
             if let Err(e) = result {
                 let tail = stderr_tail.lock().unwrap().join("\n");
@@ -1554,18 +1558,29 @@ fn resolve_terminal_command(command: &str) -> String {
     resolve_in_path(command, &extended_search_path()).unwrap_or_else(|| command.to_string())
 }
 
+struct ConnectionSync {
+    stderr_tail: Arc<Mutex<Vec<String>>>,
+    stdio_out: Arc<Mutex<Option<AcpStdio>>>,
+    spawn_gate: Option<Arc<RwLock<()>>>,
+    in_flight_rpc: Arc<AtomicUsize>,
+    shutdown_requested: Arc<AtomicBool>,
+}
+
 /// 连接主体：spawn agent 子进程 → initialize → newSession → 双源 loop
 /// （UI 指令 / agent 更新流）。返回 Ok 表示用户主动 Shutdown。
 async fn run_connection(
     launch: &ConversationLaunch,
     managed_bun: Option<crate::managed_runtime::ManagedBunRuntime>,
     channels: AcpChannels,
-    stderr_tail: Arc<Mutex<Vec<String>>>,
-    stdio_out: Arc<Mutex<Option<AcpStdio>>>,
-    spawn_gate: Option<Arc<RwLock<()>>>,
-    in_flight_rpc: Arc<AtomicUsize>,
-    shutdown_requested: Arc<AtomicBool>,
+    sync: ConnectionSync,
 ) -> Result<(), agent_client_protocol::Error> {
+    let ConnectionSync {
+        stderr_tail,
+        stdio_out,
+        spawn_gate,
+        in_flight_rpc,
+        shutdown_requested,
+    } = sync;
     let agent = build_agent(
         &launch.launch,
         &launch.ephemeral_env,
@@ -2440,21 +2455,16 @@ impl HandleDispatchFrom<Agent> for InheritedSessionHandler {
     ) -> Result<Handled<Dispatch>, agent_client_protocol::Error> {
         MatchDispatchFrom::new(message, &cx)
             .if_dispatch_from(Agent, async |message: Dispatch| {
-                if message.has_field("sessionId") {
-                    if let Ok(untyped) = message.to_untyped_message() {
-                        if let Some(value) = untyped.params().get("sessionId") {
-                            if let Ok(session_id) =
-                                serde_json::from_value::<SessionId>(value.clone())
-                            {
-                                if session_id == self.session_id {
-                                    self.update_tx
-                                        .unbounded_send(SessionMessage::SessionMessage(message))
-                                        .map_err(|_| acp_err("session channel closed"))?;
-                                    return Ok(Handled::Yes);
-                                }
-                            }
-                        }
-                    }
+                if message.has_field("sessionId")
+                    && let Ok(untyped) = message.to_untyped_message()
+                    && let Some(value) = untyped.params().get("sessionId")
+                    && let Ok(session_id) = serde_json::from_value::<SessionId>(value.clone())
+                    && session_id == self.session_id
+                {
+                    self.update_tx
+                        .unbounded_send(SessionMessage::SessionMessage(message))
+                        .map_err(|_| acp_err("session channel closed"))?;
+                    return Ok(Handled::Yes);
                 }
                 Ok(Handled::No {
                     message,
@@ -2496,15 +2506,11 @@ impl SessionDrive for InheritedSession {
         &self.connection
     }
 
-    fn read_update(
-        &mut self,
-    ) -> impl Future<Output = Result<SessionMessage, agent_client_protocol::Error>> + Send {
-        async move {
-            self.update_rx
-                .next()
-                .await
-                .ok_or_else(|| acp_err("session channel closed unexpectedly"))
-        }
+    async fn read_update(&mut self) -> Result<SessionMessage, agent_client_protocol::Error> {
+        self.update_rx
+            .next()
+            .await
+            .ok_or_else(|| acp_err("session channel closed unexpectedly"))
     }
 }
 
@@ -2537,13 +2543,13 @@ async fn drive_session<S: SessionDrive>(
         // 「cmd 分支也要 &mut session」的借用冲突。
         enum Next {
             Cmd(Option<ConversationCommand>),
-            Update(Result<SessionMessage, agent_client_protocol::Error>),
+            Update(Box<Result<SessionMessage, agent_client_protocol::Error>>),
         }
         let next = {
             let read = session.read_update();
             smol::future::race(
                 async { Next::Cmd(channels.cmd_rx.recv().await.ok()) },
-                async move { Next::Update(read.await) },
+                async move { Next::Update(Box::new(read.await)) },
             )
             .await
         };
@@ -2674,7 +2680,7 @@ async fn drive_session<S: SessionDrive>(
                 }
             }
             Next::Update(update) => {
-                let update = update?;
+                let update = (*update)?;
                 let completes_prompt = matches!(&update, SessionMessage::StopReason(_));
                 translate_update(update, &channels.event_tx).await?;
                 if completes_prompt {
@@ -4866,6 +4872,26 @@ mod runtime_tests {
         ] {
             assert_eq!(resolve_runtime_command(cmd, &noop).unwrap(), cmd);
         }
+    }
+
+    #[test]
+    fn bun_and_bunx_rewrites_are_deterministic_and_preserve_argument_order() {
+        assert_eq!(
+            rewrite_runtime_command_with_bun("bunx pkg@1 --flag", "/managed/bun").as_deref(),
+            Some("/managed/bun x pkg@1 --flag")
+        );
+        assert_eq!(
+            rewrite_runtime_command_with_bun("bunx --bun pkg@1 --flag", "/managed/bun").as_deref(),
+            Some("/managed/bun x --bun pkg@1 --flag")
+        );
+        assert_eq!(
+            rewrite_runtime_command_with_bun("bun --version", "/managed/bun").as_deref(),
+            Some("/managed/bun --version")
+        );
+        assert_eq!(
+            rewrite_runtime_command_with_bun("node app.js", "/managed/bun"),
+            None
+        );
     }
 
     #[test]

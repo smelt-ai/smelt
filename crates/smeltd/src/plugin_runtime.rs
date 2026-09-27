@@ -2,29 +2,149 @@
 
 use smelt_plugin_api::PluginId;
 use smelt_plugin_host::{
-    HostError, PluginPackage, PluginProcessVerifier, SharedBunHost, SharedBunHostOptions,
-    active_plugin_set_root_for_daemon_id, discover_all_plugins,
+    HostError, PluginPackage, PluginProcessTracker, PluginProcessVerifier, SharedBunHost,
+    SharedBunHostOptions, active_plugin_set_root_for_daemon_id, discover_all_plugins,
 };
 use std::{
     collections::BTreeSet,
     path::PathBuf,
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicI32, Ordering},
-    },
+    sync::{Arc, Condvar, Mutex, OnceLock},
     time::Duration,
 };
 
 static RUNTIME: OnceLock<Mutex<RuntimeState>> = OnceLock::new();
 static PLUGIN_BOOT: OnceLock<Mutex<Option<PluginBoot>>> = OnceLock::new();
+/// Serializes host replacement with every daemon API that can keep a host alive or spawn Bun.
 static RUNTIME_LIFECYCLE_GATE: Mutex<()> = Mutex::new(());
-/// 共享 Bun 进程组。退出路径即使拿不到 lifecycle 闸门也能 SIGKILL，避免 reload
-/// 死锁把 shutdown / predecessor stop 一起钉死。
-static HOST_PGID: AtomicI32 = AtomicI32::new(0);
+static PROCESS_TRACKER: OnceLock<Arc<DaemonPluginProcessTracker>> = OnceLock::new();
+
+#[derive(Default)]
+struct TrackedProcessState {
+    cancelled: bool,
+    spawning: bool,
+    pid: Option<u32>,
+}
+
+#[derive(Default)]
+struct DaemonPluginProcessTracker {
+    state: Mutex<TrackedProcessState>,
+    changed: Condvar,
+}
+
+impl DaemonPluginProcessTracker {
+    fn prepare(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        debug_assert!(!state.spawning && state.pid.is_none());
+        state.cancelled = false;
+    }
+
+    fn resume(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cancelled = false;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cancelled
+    }
+
+    /// Linearize cancellation with `Command::spawn`: after this returns, no future spawn is
+    /// admitted and every process whose spawn already began has received SIGKILL.
+    fn cancel_and_kill(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.cancelled = true;
+        while state.spawning {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        if let Some(pid) = state.pid {
+            let process_group = pid as i32;
+            let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    let _ = unsafe { libc::kill(process_group, libc::SIGKILL) };
+                }
+            }
+            wait_for_child_exit(pid);
+        }
+    }
+}
+
+fn wait_for_child_exit(pid: u32) {
+    loop {
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            // The host's Child owner won the waitpid race; the process has already exited.
+            Some(libc::ECHILD) => return,
+            _ => return,
+        }
+    }
+}
+
+impl PluginProcessTracker for DaemonPluginProcessTracker {
+    fn before_spawn(&self) -> Result<(), HostError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            return Err(HostError::new("plugin runtime startup was cancelled"));
+        }
+        if state.spawning || state.pid.is_some() {
+            return Err(HostError::new(
+                "another plugin runtime process is already active",
+            ));
+        }
+        state.spawning = true;
+        Ok(())
+    }
+
+    fn spawned(&self, pid: u32) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.pid = Some(pid);
+        state.spawning = false;
+        self.changed.notify_all();
+    }
+
+    fn spawn_failed(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.spawning = false;
+        self.changed.notify_all();
+    }
+
+    fn exited(&self, pid: u32) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.pid == Some(pid) {
+            state.pid = None;
+        }
+        self.changed.notify_all();
+    }
+}
+
+fn process_tracker() -> &'static Arc<DaemonPluginProcessTracker> {
+    PROCESS_TRACKER.get_or_init(|| Arc::new(DaemonPluginProcessTracker::default()))
+}
 
 #[derive(Clone)]
 struct PluginBoot {
     daemon_fingerprint: Option<String>,
+    managed_bun: Option<smelt_core::managed_runtime::ManagedBunRuntime>,
 }
 
 fn plugin_boot() -> &'static Mutex<Option<PluginBoot>> {
@@ -88,12 +208,10 @@ impl PluginProcessVerifier for PluginVerifier {
     }
 }
 
-pub(crate) fn start(daemon_fingerprint: Option<String>) {
-    let Some(smelt_root) = smelt_paths::smelt_home() else {
-        log_plugin_host("cannot determine plugin data directory");
-        return;
-    };
-    let plugin_data_root = smelt_root.join("plugin-data");
+/// Pin the plugin set identity before any asynchronous bootstrap work starts.
+/// Package reloads may arrive while Bun is still being prepared; they must retain this identity
+/// but cannot start a host until `start` receives the published generation and its lease.
+pub(crate) fn prepare(daemon_fingerprint: Option<String>) {
     // 指纹钉死：调用方（main 启动 / handoff）传钉死值；None（单测直调）则就地
     // 哈希一次并存进 boot。此后 reload 只用 boot 里的钉死值，永不重哈希磁盘——
     // StageDiskOnly 后磁盘是新的、进程还是老的，重哈希会拿错插件集。
@@ -102,32 +220,56 @@ pub(crate) fn start(daemon_fingerprint: Option<String>) {
             .ok()
             .and_then(|exe| smelt_plugin_host::executable_fingerprint(&exe).ok())
     });
+    process_tracker().prepare();
     *plugin_boot()
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(PluginBoot {
-        daemon_fingerprint: pinned.clone(),
+        daemon_fingerprint: pinned,
+        managed_bun: None,
     });
-    match managed_plugin_root(pinned.as_deref()) {
-        Ok(Some(package_root)) => {
-            start_with_root(package_root, smelt_root, plugin_data_root);
+}
+
+/// Start the pinned plugin set with the exact runtime generation returned by bootstrap.
+/// This path deliberately never probes the global `current` pointer: manager-lock contention is
+/// not runtime absence, and the lease already proves this generation is published and alive.
+pub(crate) fn start(managed_bun: smelt_core::managed_runtime::ManagedBunRuntime) {
+    let _lifecycle = RUNTIME_LIFECYCLE_GATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let pinned = {
+        let mut boot = plugin_boot()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(boot) = boot.as_mut() else {
+            log_plugin_host("plugin runtime was not prepared");
+            return;
+        };
+        boot.managed_bun = Some(managed_bun.clone());
+        if process_tracker().is_cancelled() {
+            return;
         }
+        boot.daemon_fingerprint.clone()
+    };
+    let Some(smelt_root) = smelt_paths::smelt_home() else {
+        log_plugin_host("cannot determine plugin data directory");
+        return;
+    };
+    match managed_plugin_root(pinned.as_deref()) {
+        Ok(Some(package_root)) => replace_runtime_while_locked(
+            RuntimeConfig {
+                package_root,
+                plugin_data_root: smelt_root.join("plugin-data"),
+                smelt_root,
+            },
+            managed_bun,
+        ),
         Ok(None) => {
             // 映射未写好就先空转。GUI / make install 写完 daemon-sets 后会发
             // plugin_reload，由 reload() 再解析映射并拉起。
             log_plugin_host("plugin set not mapped yet; waiting for plugin_reload");
         }
-        Err(error) => {
-            log_plugin_host(&format!("cannot resolve managed plugin set: {error}"));
-        }
+        Err(error) => log_plugin_host(&format!("cannot resolve managed plugin set: {error}")),
     }
-}
-
-fn start_with_root(package_root: PathBuf, smelt_root: PathBuf, plugin_data_root: PathBuf) {
-    replace_runtime(RuntimeConfig {
-        package_root,
-        smelt_root,
-        plugin_data_root,
-    });
 }
 
 fn log_plugin_host(message: &str) {
@@ -136,25 +278,10 @@ fn log_plugin_host(message: &str) {
 }
 
 pub(crate) fn stop() {
-    kill_recorded_host_process();
+    process_tracker().cancel_and_kill();
     if let Ok(_lifecycle) = RUNTIME_LIFECYCLE_GATE.try_lock() {
         drop(retire_current_hosts());
     }
-}
-
-fn kill_recorded_host_process() {
-    let pid = HOST_PGID.swap(0, Ordering::SeqCst);
-    if pid > 1 {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-}
-
-/// 受管运行时就位后重启插件集。脚本插件在运行时缺席时根本起不来，等它下载完成
-/// 必须有人把它们拉起来，否则要等到下一次守护重启才可用。
-pub(crate) fn reload_for_runtime_change() {
-    reload();
 }
 
 /// 用户包安装、更新或卸载完成后重建同一个 supervisor。GUI 只改磁盘并发这个信号，
@@ -167,23 +294,38 @@ fn reload() {
     let _lifecycle = RUNTIME_LIFECYCLE_GATE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    // 必须先 clone 再放锁。`if let Some(config) = runtime().lock()....clone()` 会把
-    // MutexGuard 活到 if 函数体结束；随后 replace 再 lock 同一把非可重入锁就死锁，
-    // 插件 invoke / contributions / 产品级 Pi 对话会永远停在「启动中」。
-    let existing = runtime()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .config
-        .clone();
+    let Some(managed_bun) = prepared_managed_bun() else {
+        log_plugin_host("plugin_reload while Bun bootstrap is pending; deferring startup");
+        return;
+    };
+    let existing = configured_runtime();
     if let Some(config) = existing {
-        replace_runtime_while_locked(config);
+        replace_runtime_while_locked(config, managed_bun);
         return;
     }
     let Some(config) = resolve_boot_config() else {
         log_plugin_host("plugin_reload with no mapping yet; still waiting");
         return;
     };
-    replace_runtime_while_locked(config);
+    replace_runtime_while_locked(config, managed_bun);
+}
+
+fn prepared_managed_bun() -> Option<smelt_core::managed_runtime::ManagedBunRuntime> {
+    let boot = plugin_boot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if process_tracker().is_cancelled() {
+        return None;
+    }
+    boot.as_ref()?.managed_bun.clone()
+}
+
+fn configured_runtime() -> Option<RuntimeConfig> {
+    runtime()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .config
+        .clone()
 }
 
 fn resolve_boot_config() -> Option<RuntimeConfig> {
@@ -211,32 +353,43 @@ pub(crate) fn restart_after_failed_exec() {
     let _lifecycle = RUNTIME_LIFECYCLE_GATE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    process_tracker().resume();
+    let previous = retire_current_hosts();
+    drop(previous);
     let config = runtime()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .restart_config();
-    if let Some(config) = config {
-        let hosts = start_hosts(&config);
-        install_hosts(hosts, Some(config));
+        .restart_config()
+        .or_else(resolve_boot_config);
+    if let (Some(config), Some(managed_bun)) = (config, prepared_managed_bun()) {
+        let hosts = start_hosts(&config, managed_bun);
+        publish_hosts_if_active(hosts, Some(config));
     }
 }
 
 /// Replaces every plugin supervisor without letting two generations dispatch concurrently.
-fn replace_runtime_while_locked(config: RuntimeConfig) {
+fn replace_runtime_while_locked(
+    config: RuntimeConfig,
+    managed_bun: smelt_core::managed_runtime::ManagedBunRuntime,
+) {
     let previous = retire_current_hosts();
-    HOST_PGID.store(0, Ordering::SeqCst);
     drop(previous);
-    let hosts = start_hosts(&config);
-    install_hosts(hosts, Some(config));
+    let hosts = start_hosts(&config, managed_bun);
+    publish_hosts_if_active(hosts, Some(config));
+}
+
+/// Never publish a host after lifecycle cancellation. A cancellation racing after this check is
+/// still safe: the process tracker registered the child before spawn, and stop kills that exact
+/// process group before allowing the predecessor to exit.
+fn publish_hosts_if_active(hosts: RuntimeHosts, config: Option<RuntimeConfig>) {
+    if process_tracker().is_cancelled() {
+        drop(hosts);
+        return;
+    }
+    install_hosts(hosts, config);
 }
 
 fn install_hosts(hosts: RuntimeHosts, config: Option<RuntimeConfig>) {
-    let pid = hosts
-        .shared_bun
-        .as_ref()
-        .and_then(|host| host.process_id())
-        .unwrap_or(0);
-    HOST_PGID.store(pid as i32, Ordering::SeqCst);
     let cache = contribution_snapshot(hosts.shared_bun.as_deref());
     let mut state = runtime().lock().unwrap_or_else(|error| error.into_inner());
     state.hosts = hosts;
@@ -261,13 +414,6 @@ fn republish_contribution_cache() {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .contribution_cache = cache;
-}
-
-fn replace_runtime(config: RuntimeConfig) {
-    let _lifecycle = RUNTIME_LIFECYCLE_GATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    replace_runtime_while_locked(config);
 }
 
 fn retire_current_hosts() -> RuntimeHosts {
@@ -298,6 +444,9 @@ pub(crate) fn contributions() -> Vec<smelt_plugin_api::PluginContributionSet> {
 
 /// 当前所有插件的运行状态。设置页据此显示"跑没跑起来、为什么没起来"。
 pub(crate) fn statuses() -> Vec<smelt_plugin_host::PluginStatus> {
+    let _lifecycle = RUNTIME_LIFECYCLE_GATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut statuses = shared_bun_host()
         .map(|host| host.statuses())
         .unwrap_or_default();
@@ -310,6 +459,9 @@ pub(crate) fn invoke(
     request: smelt_plugin_api::InvocationRequest,
     timeout: Duration,
 ) -> Result<smelt_plugin_api::InvocationResponse, String> {
+    let _lifecycle = RUNTIME_LIFECYCLE_GATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let Some(host) = shared_bun_host() else {
         return Err("plugin is not installed".to_string());
     };
@@ -324,6 +476,9 @@ pub(crate) fn set_enabled(
     plugin_id: smelt_plugin_api::PluginId,
     enabled: bool,
 ) -> Result<(), String> {
+    let _lifecycle = RUNTIME_LIFECYCLE_GATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut enablement = smelt_core::plugin_enablement::PluginEnablement::load();
     enablement.set_enabled(plugin_id.as_str(), enabled);
     if let Err(error) = enablement.save() {
@@ -339,9 +494,6 @@ pub(crate) fn set_enabled(
         .set_enabled(plugin_id, enabled)
         .map_err(|error| error.to_string());
     republish_contribution_cache();
-    if let Some(pid) = shared_bun_host().and_then(|host| host.process_id()) {
-        HOST_PGID.store(pid as i32, Ordering::SeqCst);
-    }
     result
 }
 
@@ -349,11 +501,19 @@ fn runtime() -> &'static Mutex<RuntimeState> {
     RUNTIME.get_or_init(|| Mutex::new(RuntimeState::default()))
 }
 
+pub(crate) fn bootstrap_retry_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(5);
+    Duration::from_secs((1_u64 << exponent).min(30))
+}
+
 fn has_plugin(statuses: Vec<smelt_plugin_host::PluginStatus>, plugin_id: &PluginId) -> bool {
     statuses.iter().any(|status| status.plugin_id == *plugin_id)
 }
 
-fn start_hosts(config: &RuntimeConfig) -> RuntimeHosts {
+fn start_hosts(
+    config: &RuntimeConfig,
+    managed_bun: smelt_core::managed_runtime::ManagedBunRuntime,
+) -> RuntimeHosts {
     let disabled = smelt_core::plugin_enablement::PluginEnablement::load().disabled_plugin_ids();
     let packages = discover_all_plugins(Some(&config.package_root), &config.smelt_root)
         .into_iter()
@@ -377,14 +537,10 @@ fn start_hosts(config: &RuntimeConfig) -> RuntimeHosts {
         return RuntimeHosts::default();
     }
 
-    let managed_bun = smelt_core::managed_runtime::try_current_managed_bun();
     let spawn = smelt_plugin_host::SpawnOptions {
-        // 每次起插件集都重新解析一次：受管 bun 可能是守护启动之后才下载完的。
-        bun: managed_bun.as_ref().map(|runtime| runtime.path.clone()),
-        inherited_fds: managed_bun
-            .as_ref()
-            .map(|runtime| vec![runtime.inherited_fd()])
-            .unwrap_or_default(),
+        bun: Some(managed_bun.path.clone()),
+        inherited_fds: vec![managed_bun.inherited_fd()],
+        process_tracker: Some(process_tracker().clone()),
         ..Default::default()
     };
     let verifier = Arc::new(PluginVerifier);
@@ -397,11 +553,8 @@ fn start_hosts(config: &RuntimeConfig) -> RuntimeHosts {
             SharedBunHostOptions { spawn, disabled },
         ) {
             Ok(host) => {
-                if let Some(pid) = host.process_id() {
-                    HOST_PGID.store(pid as i32, Ordering::SeqCst);
-                }
                 hosts.shared_bun = Some(Arc::new(host));
-                hosts.managed_bun = managed_bun;
+                hosts.managed_bun = Some(managed_bun);
             }
             Err(error) => log_plugin_host(&format!("cannot start shared bun host: {error}")),
         }
@@ -438,9 +591,11 @@ mod tests {
     static TEST_RUNTIME_GATE: Mutex<()> = Mutex::new(());
 
     fn lock_test_runtime() -> std::sync::MutexGuard<'static, ()> {
-        TEST_RUNTIME_GATE
+        let guard = TEST_RUNTIME_GATE
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(|error| error.into_inner());
+        process_tracker().resume();
+        guard
     }
 
     #[test]
@@ -511,7 +666,7 @@ mod tests {
         let (hold_tx, hold_rx) = mpsc::channel::<Arc<SharedBunHost>>();
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let thread = std::thread::spawn(move || {
-            if let Some(host) = hold_rx.recv_timeout(Duration::from_secs(1)).ok() {
+            if let Ok(host) = hold_rx.recv_timeout(Duration::from_secs(1)) {
                 let _ = host.statuses();
                 let _ = release_rx.recv_timeout(Duration::from_secs(1));
                 drop(host);
@@ -532,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_releases_runtime_lock_before_replacing_hosts() {
+    fn runtime_config_snapshot_releases_lock_before_replacement() {
         use std::sync::mpsc;
         use std::time::Duration;
 
@@ -543,29 +698,83 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        {
-            let mut state = runtime().lock().unwrap_or_else(|error| error.into_inner());
-            state.config = Some(RuntimeConfig {
-                package_root: root.clone(),
-                smelt_root: root.join("smelt"),
-                plugin_data_root: root.join("data"),
-            });
-        }
+        runtime()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .config = Some(RuntimeConfig {
+            package_root: root.clone(),
+            smelt_root: root.join("smelt"),
+            plugin_data_root: root.join("data"),
+        });
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            reload();
-            let _ = tx.send(());
+            let config = configured_runtime();
+            let _ = tx.send(config.is_some());
         });
-        rx.recv_timeout(Duration::from_secs(3)).expect(
-            "reload 在已有 config 时死锁：if let 仍握着 runtime 锁又进入 replace_runtime_while_locked",
-        );
+        assert!(rx.recv_timeout(Duration::from_secs(3)).expect(
+            "cloning plugin config must not retain runtime lock and deadlock the replacement"
+        ));
         drop(
             runtime()
                 .try_lock()
-                .expect("reload 返回后 runtime 锁必须已释放"),
+                .expect("runtime config snapshot must release the runtime lock"),
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bootstrap_cancellation_blocks_and_drains_an_in_flight_spawn() {
+        let tracker = Arc::new(DaemonPluginProcessTracker::default());
+        tracker.prepare();
+        tracker.before_spawn().unwrap();
+
+        let stopping = Arc::clone(&tracker);
+        let stop_thread = std::thread::spawn(move || stopping.cancel_and_kill());
+        while !tracker.is_cancelled() {
+            std::thread::yield_now();
+        }
+        assert!(
+            tracker.before_spawn().is_err(),
+            "取消后不得再开始新的插件进程"
+        );
+        tracker.spawn_failed();
+        stop_thread.join().unwrap();
+        assert!(tracker.is_cancelled());
+        tracker.resume();
+        assert!(
+            !tracker.is_cancelled(),
+            "exec 回滚后必须允许 supervisor 恢复"
+        );
+    }
+
+    #[test]
+    fn stop_waits_until_the_registered_child_has_exited() {
+        use std::os::unix::process::CommandExt;
+
+        let tracker = DaemonPluginProcessTracker::default();
+        tracker.prepare();
+        tracker.before_spawn().unwrap();
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        tracker.spawned(pid);
+        tracker.cancel_and_kill();
+        let mut child = child;
+        assert!(child.try_wait().unwrap().is_some());
+        tracker.exited(pid);
+        assert!(tracker.state.lock().unwrap().pid.is_none());
+    }
+
+    #[test]
+    fn managed_runtime_bootstrap_backoff_is_bounded() {
+        assert_eq!(bootstrap_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(bootstrap_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(bootstrap_retry_delay(5), Duration::from_secs(16));
+        assert_eq!(bootstrap_retry_delay(u32::MAX), Duration::from_secs(30));
     }
 
     #[test]
@@ -582,22 +791,17 @@ mod tests {
             plugin_data_root: root.join("data"),
         };
         let mut state = RuntimeState {
-            hosts: start_hosts(&config),
+            hosts: RuntimeHosts::default(),
             config: Some(config),
             contribution_cache: Vec::new(),
         };
-        assert!(state.hosts.shared_bun.is_none());
-        let stopped = state.take_hosts();
-        assert!(state.hosts.shared_bun.is_none());
-        drop(stopped);
 
-        let config = state
-            .restart_config()
-            .expect("stopped runtime should retain its configuration");
-        state.hosts = start_hosts(&config);
-        state.config = Some(config);
-        assert!(state.hosts.shared_bun.is_none());
-        drop(state.take_hosts());
+        let stopped = state.take_hosts();
+        drop(stopped);
+        assert!(
+            state.restart_config().is_some(),
+            "停止 host 后必须保留可用于 exec 回滚的配置"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

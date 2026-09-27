@@ -4,17 +4,39 @@ use smelt_plugin_api::{
     ContributionId, InvocationId, InvocationOperation, InvocationRequest, InvocationResponse,
 };
 use smelt_plugin_host::{
-    HostError, PluginPackage, PluginProcessVerifier, SharedBunHost, SharedBunHostOptions,
-    SpawnOptions,
+    HostError, PluginPackage, PluginProcessTracker, PluginProcessVerifier, SharedBunHost,
+    SharedBunHostOptions, SpawnOptions,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 struct RecordingVerifier;
+
+#[derive(Default)]
+struct RecordingProcessTracker(Mutex<Vec<(&'static str, u32)>>);
+
+impl PluginProcessTracker for RecordingProcessTracker {
+    fn before_spawn(&self) -> Result<(), HostError> {
+        self.0.lock().unwrap().push(("before_spawn", 0));
+        Ok(())
+    }
+
+    fn spawned(&self, pid: u32) {
+        self.0.lock().unwrap().push(("spawned", pid));
+    }
+
+    fn spawn_failed(&self) {
+        self.0.lock().unwrap().push(("spawn_failed", 0));
+    }
+
+    fn exited(&self, pid: u32) {
+        self.0.lock().unwrap().push(("exited", pid));
+    }
+}
 
 impl PluginProcessVerifier for RecordingVerifier {
     fn verify(&self, package: &PluginPackage, program: &Path, _pid: u32) -> Result<(), HostError> {
@@ -36,13 +58,21 @@ fn managed_bun() -> Option<PathBuf> {
     let runtime_dir = std::env::var_os("HOME")
         .map(PathBuf::from)?
         .join(".smelt/runtime");
-    fs::read_dir(&runtime_dir)
+    if let Ok(generation) = fs::read_to_string(runtime_dir.join("current/bun")) {
+        let generation = generation.trim();
+        if !generation.is_empty() && !generation.contains('/') {
+            let current = runtime_dir.join("store/bun").join(generation).join("bun");
+            if let Ok(path) = current.canonicalize() {
+                return Some(path);
+            }
+        }
+    }
+    fs::read_dir(runtime_dir)
         .ok()?
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("bun-v"))
         .map(|entry| entry.path().join("bun"))
-        .find(|path| path.is_file())?
-        .canonicalize()
-        .ok()
+        .find_map(|path| path.canonicalize().ok())
 }
 
 fn fixture_root(label: &str) -> PathBuf {
@@ -162,6 +192,7 @@ fn bun_spawn(bun: &Path) -> SpawnOptions {
         startup_timeout: Duration::from_secs(20),
         shutdown_grace: Duration::from_secs(2),
         inherited_fds: Vec::new(),
+        process_tracker: None,
     }
 }
 /// 迁移完成后剩下的旧副本数，作为后续增量断言的基线。
@@ -328,6 +359,44 @@ fn shared_bun_plugins_use_one_managed_bun_process() {
     assert_eq!(remaining["echo"]["still_loaded"], true);
 
     drop(host);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn shared_bun_reports_process_lifecycle_to_its_owner() {
+    let Some(bun) = managed_bun() else {
+        eprintln!("受管 bun 未安装，跳过（真实下载见 smelt-core 的 manual_ensure_bun）");
+        return;
+    };
+    let root = fixture_root("tracked-lifecycle");
+    fs::create_dir_all(&root).unwrap();
+    let package = stage_echo_bun(&root, "com.example.tracked");
+    let tracker = Arc::new(RecordingProcessTracker::default());
+    let mut spawn = bun_spawn(&bun);
+    spawn.process_tracker = Some(tracker.clone());
+    let host = SharedBunHost::start_packages(
+        vec![package],
+        root.join("data"),
+        Arc::new(RecordingVerifier),
+        SharedBunHostOptions {
+            spawn,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let pid = host
+        .process_id()
+        .expect("tracked Bun host should be running");
+    assert_eq!(
+        *tracker.0.lock().unwrap(),
+        vec![("before_spawn", 0), ("spawned", pid)]
+    );
+
+    drop(host);
+    assert_eq!(
+        *tracker.0.lock().unwrap(),
+        vec![("before_spawn", 0), ("spawned", pid), ("exited", pid)]
+    );
     fs::remove_dir_all(&root).ok();
 }
 

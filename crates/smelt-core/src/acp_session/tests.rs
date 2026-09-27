@@ -12,6 +12,34 @@ fn fresh_state() -> AcpSessionState {
 }
 
 #[test]
+fn background_task_updates_replace_the_list_without_persisting_or_clearing_echo() {
+    let mut state = fresh_state();
+    state.awaiting_user_echo = true;
+    let tasks = vec![BackgroundTaskView {
+        id: "bg-1".into(),
+        title: "测试".into(),
+        command: "npm test".into(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        output: "running".into(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+    }];
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::BackgroundTasks(tasks.clone()),
+    );
+    assert!(!outcome.should_persist);
+    assert!(state.awaiting_user_echo);
+    assert_eq!(state.background_tasks, tasks);
+    assert_eq!(state.to_snapshot(false).background_tasks, tasks);
+
+    let outcome = apply_event(&mut state, ConversationEvent::BackgroundTasks(Vec::new()));
+    assert!(!outcome.should_persist);
+    assert!(state.background_tasks.is_empty());
+}
+
+#[test]
 fn protocol_title_overrides_prompt_fallback_and_clear_restores_it() {
     let mut state = fresh_state();
     note_prompt_sent(&mut state, "帮我排查登录接口为什么超时".into(), Vec::new());
@@ -967,7 +995,10 @@ fn runtime_debug_event_round_trips_through_authoritative_snapshots() {
         model_call: None,
     };
 
-    let outcome = apply_event(&mut state, ConversationEvent::RuntimeDebug(debug.clone()));
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::RuntimeDebug(Box::new(debug.clone())),
+    );
     assert!(
         !outcome.should_persist,
         "大体积审计事件不应单独触发流式落盘"

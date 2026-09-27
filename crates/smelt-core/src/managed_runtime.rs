@@ -4,7 +4,7 @@
 
 use crate::runtime_generation::{
     BunGenerationManifest, GENERATION_SCHEMA, GenerationKind, GenerationLease, GenerationStore,
-    PiGenerationManifest, inherit_generation_fds,
+    PiGenerationManifest, RuntimeManagerLock, inherit_generation_fds,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -193,7 +193,7 @@ pub fn sync_managed_bun(_status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, Str
 pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
     let store = GenerationStore::managed()?;
     let manager = store.lock_manager()?;
-    let runtime = sync_managed_bun_locked(&store, status)?;
+    let runtime = sync_managed_bun_locked(&store, status, &manager)?;
     drop(manager);
     Ok(runtime)
 }
@@ -202,6 +202,7 @@ pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, Stri
 fn sync_managed_bun_locked(
     store: &GenerationStore,
     status: &dyn Fn(&str),
+    manager: &RuntimeManagerLock,
 ) -> Result<ManagedBunRuntime, String> {
     let manifest = bun_manifest();
     store.remove_stale_staging_locked();
@@ -213,7 +214,7 @@ fn sync_managed_bun_locked(
             GenerationKind::Bun,
             &manifest.generation_id,
             &manifest,
-            |staging| install_bun_generation(staging, status),
+            |staging| install_bun_generation(staging, status, manager),
         )?;
     }
     let lease = store.acquire_shared_locked(GenerationKind::Bun, &manifest.generation_id)?;
@@ -229,13 +230,20 @@ fn sync_managed_bun_locked(
 }
 
 #[cfg(target_os = "macos")]
-fn install_bun_generation(staging: &Path, status: &dyn Fn(&str)) -> Result<(), String> {
+fn install_bun_generation(
+    staging: &Path,
+    status: &dyn Fn(&str),
+    manager: &RuntimeManagerLock,
+) -> Result<(), String> {
     let (url, expected_archive_sha) = BUN_DOWNLOAD;
     let archive = staging.join("download.zip");
-    let output = Command::new("curl")
+    let mut download = Command::new("curl");
+    download
         .args(["-fsSL", "--retry", "2", "-o"])
         .arg(&archive)
-        .arg(url)
+        .arg(url);
+    manager.inherit_into(&mut download);
+    let output = download
         .output()
         .map_err(|error| format!("无法执行 curl：{error}"))?;
     if !output.status.success() {
@@ -253,11 +261,10 @@ fn install_bun_generation(staging: &Path, status: &dyn Fn(&str)) -> Result<(), S
     status("校验并解压 Bun 运行时…");
     let unpack = staging.join("unpack");
     fs::create_dir(&unpack).map_err(|error| format!("创建 Bun 解压目录失败：{error}"))?;
-    let output = Command::new("unzip")
-        .args(["-q"])
-        .arg(&archive)
-        .arg("-d")
-        .arg(&unpack)
+    let mut unzip = Command::new("unzip");
+    unzip.args(["-q"]).arg(&archive).arg("-d").arg(&unpack);
+    manager.inherit_into(&mut unzip);
+    let output = unzip
         .output()
         .map_err(|error| format!("无法执行 unzip：{error}"))?;
     if !output.status.success() {
@@ -347,7 +354,7 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
     #[cfg(target_os = "macos")]
     let manager = store.lock_manager()?;
     #[cfg(target_os = "macos")]
-    let bun_runtime = sync_managed_bun_locked(&store, status)
+    let bun_runtime = sync_managed_bun_locked(&store, status, &manager)
         .map_err(|error| format!("无法准备 Smelt Pi 运行时：{error}"))?;
     #[cfg(target_os = "macos")]
     let manifest = pi_manifest(&bun_runtime.generation_id);
@@ -362,7 +369,7 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
             &manifest,
             |staging| {
                 materialize_pi_files(staging)?;
-                run_pi_install(&bun_runtime.path, staging)?;
+                run_pi_install(&bun_runtime, &manager, staging)?;
                 if !managed_pi_agent_dependencies_installed(staging) {
                     return Err("Pi 依赖安装完成，但必要的 RPC 补丁或入口不完整".to_string());
                 }
@@ -373,7 +380,7 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
     let pi_lease = store.acquire_shared_locked(GenerationKind::Pi, &manifest.generation_id)?;
     store.write_current_locked(GenerationKind::Pi, &manifest.generation_id)?;
     let mut keep = HashSet::new();
-    keep.insert(manifest.generation_id.clone());
+    keep.insert(manifest.generation_id);
     store.gc_kind_locked(GenerationKind::Pi, &keep);
     drop(manager);
     Ok(ManagedPiRuntime {
@@ -408,9 +415,14 @@ fn materialize_pi_files(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_pi_install(bun: &Path, root: &Path) -> Result<(), String> {
+fn run_pi_install(
+    bun_runtime: &ManagedBunRuntime,
+    manager: &RuntimeManagerLock,
+    root: &Path,
+) -> Result<(), String> {
     const TIMEOUT: Duration = Duration::from_secs(15 * 60);
-    let mut child = Command::new(bun)
+    let mut command = Command::new(&bun_runtime.path);
+    command
         .args([
             "install",
             "--frozen-lockfile",
@@ -421,7 +433,12 @@ fn run_pi_install(bun: &Path, root: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .env("NO_COLOR", "1")
+        .env("NO_COLOR", "1");
+    // If the supervisor is killed during install, the child keeps both the global staging
+    // transaction lock and the referenced Bun generation alive until it exits.
+    manager.inherit_into(&mut command);
+    bun_runtime.inherit_into(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("无法启动 Pi 运行时依赖安装：{error}"))?;
     let deadline = Instant::now() + TIMEOUT;
@@ -517,10 +534,12 @@ pub(crate) fn pi_runtime_version() -> &'static str {
     PI_AGENT_RUNTIME_VERSION
 }
 
+#[cfg(test)]
 pub(crate) fn pi_package_json() -> &'static str {
     PI_AGENT_PACKAGE_JSON
 }
 
+#[cfg(test)]
 pub(crate) fn pi_runtime_files() -> &'static [(&'static str, &'static str)] {
     PI_AGENT_RUNTIME_FILES
 }

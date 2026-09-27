@@ -3,42 +3,43 @@
 use super::trajectory::runtime_debug_contexts;
 use super::{
     CachedDiff, ComposerMenuSection, RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text,
-    apply_pending_config_selection, build_conversation_layout,
-    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
-    cached_diff_stats, can_dispatch_prompt_immediately, can_load_older_history,
-    classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
-    composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
-    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
-    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
-    conversation_input_for_submit, conversation_phase_label, current_turn_has_agent_output,
-    did_recover_from_ended, diff_cache_matches_output, diff_stats_for_output,
-    escape_html_tags_for_markdown, external_clipboard_image_paths, filter_trajectory_events,
-    format_attached_paths, is_active_permission_selection, is_dispatch_in_flight,
-    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
-    is_stale_blank_history_id, latest_user_message_index, loaded_entries_end,
-    markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
+    apply_pending_config_selection, background_task_output_lines, background_task_summary,
+    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
+    build_tool_image_parts, cached_diff_stats, can_dispatch_prompt_immediately,
+    can_load_older_history, classify_attached_paths, compact_token_count, compact_tool_headline,
+    compact_tool_run_label, composer_config_section_label, composer_menu_sections,
+    composer_model_label, composer_model_scroll, composer_native_queue_shortcut_hint,
+    composer_next_turn_notice, composer_should_nest_models, composer_usage_breakdown,
+    config_selection_is_pending, config_update_failure_is_new, consecutive_compact_tool_run,
+    consume_composer_restore, conversation_input_for_submit, conversation_phase_label,
+    current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
+    diff_stats_for_output, escape_html_tags_for_markdown, external_clipboard_image_paths,
+    filter_trajectory_events, format_attached_paths, is_active_permission_selection,
+    is_dispatch_in_flight, is_fresh_conversation_start, is_match_count_line,
+    is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
+    loaded_entries_end, markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
     merge_snapshot_entries, model_label_with_provider, move_queue_item_to_front,
     native_queue_from_snapshot, native_queue_item_kind_label, next_snapshot_prompt_gate,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
     pending_config_choice_names, plan_current_step, plan_native_immediate_send, preformatted_html,
     process_group_header_label, process_group_label, progress_has_details, progress_summary,
     provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
-    resolve_restart_launch, restorable_gui_prompt, search_summary_text, selected_provider_group,
-    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
-    should_clear_history_session_id_after_snapshot, should_replace_session_title,
-    should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
-    tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
-    tool_uses_compact_process_row, trajectory_counts, usage_percent, usage_warn_color,
+    resolve_restart_launch, restorable_gui_prompt, running_background_tasks, search_summary_text,
+    selected_provider_group, session_trajectory_events, should_apply_snapshot_revision,
+    should_cancel_for_immediate_prompt, should_clear_history_session_id_after_snapshot,
+    should_replace_session_title, should_seed_restored_height_hints, task_body_from_selection,
+    tool_card_default_expanded, tool_image_cache_matches_output, tool_output_has_content,
+    tool_result_summary, tool_uses_compact_process_row, trajectory_counts, usage_percent,
+    usage_warn_color,
 };
 use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
 use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
-    AcpTurnOutcome, ApprovalDetailsView, ElicitFieldKindView, ElicitFieldView, ElicitOptionView,
-    PendingElicitation, PendingPermission, PermissionOptionKindView, PermissionOptionView,
-    PlanEntryStatusView, PlanEntryView, PlanView, RuntimeDebug, RuntimeDebugModel,
-    RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
+    AcpTurnOutcome, ApprovalDetailsView, BackgroundTaskStatus, BackgroundTaskView,
+    ElicitFieldKindView, ElicitFieldView, ElicitOptionView, PendingElicitation, PendingPermission,
+    PermissionOptionKindView, PermissionOptionView, PlanEntryStatusView, PlanEntryView, PlanView,
+    RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
 };
 use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::daemon_state::DaemonPhase;
@@ -81,7 +82,7 @@ fn classify_attached_paths_splits_images_from_other_files() {
 #[test]
 fn classify_attached_paths_keeps_images_as_paths_when_agent_cannot_take_them() {
     let png = std::path::PathBuf::from("/tmp/shot.png");
-    let (images, files) = classify_attached_paths(&[png.clone()], false);
+    let (images, files) = classify_attached_paths(std::slice::from_ref(&png), false);
     assert!(images.is_empty());
     assert_eq!(files, vec![png]);
 }
@@ -2411,6 +2412,41 @@ fn compact_tool_headlines_use_verbs_like_opened_page() {
 }
 
 #[test]
+fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
+    let running = BackgroundTaskView {
+        id: "bg-1".into(),
+        title: "测试".into(),
+        command: "npm test".into(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        output: String::new(),
+        started_at_ms: 1,
+        finished_at_ms: None,
+    };
+    let done = BackgroundTaskView {
+        status: BackgroundTaskStatus::Completed,
+        ..running.clone()
+    };
+    assert_eq!(background_task_summary(1), "1 个进行中");
+    assert_eq!(
+        running_background_tasks(&[running, done.clone()])
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["bg-1"]
+    );
+    assert!(running_background_tasks(&[done]).is_empty());
+    let output = (1..=12)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        background_task_output_lines(&output),
+        ["5", "6", "7", "8", "9", "10", "11", "12"]
+    );
+}
+
+#[test]
 fn subagent_headline_strips_spawn_prefixes() {
     assert_eq!(
         smelt_core::acp_chat::subagent_visible_title("Start subagent explorer"),
@@ -2952,4 +2988,44 @@ fn snapshot_agent_session_becomes_the_views_persisted_product_identity(
             .context["strategy_id"],
         "strategy-1"
     );
+}
+
+#[gpui::test]
+fn stop_button_click_requests_cancel_then_force_restarts_on_second_click(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: None,
+                reason: "test placeholder".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: None,
+            },
+        )
+    });
+    // 第一次点击：发起温和取消，记录 cancel_requested_at
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(view.cancel_requested_at.is_none());
+            view.on_stop_button_click(cx);
+            assert!(view.cancel_requested_at.is_some());
+            assert!(!view.restarting);
+        });
+    });
+
+    // 第二次点击：进入 force_restart
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.on_stop_button_click(cx);
+            assert!(view.restarting);
+        });
+    });
 }

@@ -1660,14 +1660,14 @@ mod imp {
             None => LegacyState::Pending,
             Some((mapped_namespace, mapped_key, status)) => {
                 if mapped_namespace != namespace || mapped_key != key {
-                    return Err(StoreError::LegacyMappingMismatch {
-                        legacy_source: source.to_string(),
+                    return Err(StoreError::legacy_mapping_mismatch(
+                        source,
                         mapped_namespace,
                         mapped_key,
-                        namespace: namespace.to_string(),
-                        key: key.to_string(),
-                        action: "读取",
-                    });
+                        namespace,
+                        key,
+                        "读取",
+                    ));
                 }
                 match status.as_str() {
                     "imported" => LegacyState::Imported,
@@ -1750,14 +1750,14 @@ mod imp {
         if let Some((existing_namespace, existing_key, _)) = mapped
             && (existing_namespace != namespace || existing_key != key)
         {
-            return Err(StoreError::LegacyMappingMismatch {
-                legacy_source: source.to_string(),
-                mapped_namespace: existing_namespace,
-                mapped_key: existing_key,
-                namespace: namespace.to_string(),
-                key: key.to_string(),
-                action: "改写",
-            });
+            return Err(StoreError::legacy_mapping_mismatch(
+                source,
+                existing_namespace,
+                existing_key,
+                namespace,
+                key,
+                "改写",
+            ));
         }
         Ok(())
     }

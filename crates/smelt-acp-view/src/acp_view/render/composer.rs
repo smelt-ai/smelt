@@ -863,6 +863,19 @@ impl AcpView {
                         )
                         // 主操作始终一个：跑着是停止，空闲才是发送。排队仍走 Enter。
                         .when(self.is_visibly_running(), |row| {
+                            let in_cancel = self.cancel_requested_at.is_some() || self.restarting;
+                            let label = if self.restarting {
+                                "正在重启..."
+                            } else if in_cancel {
+                                "强制停止"
+                            } else {
+                                "停止"
+                            };
+                            let bg_color = if in_cancel {
+                                ui_theme::tint(ui_theme::red(), 0x50)
+                            } else {
+                                ui_theme::tint(ui_theme::red(), 0x28)
+                            };
                             row.child(
                                 div()
                                     .id("acp-stop")
@@ -870,7 +883,7 @@ impl AcpView {
                                     .h(px(32.))
                                     .px_3()
                                     .rounded(ui_theme::row_radius())
-                                    .bg(ui_theme::tint(ui_theme::red(), 0x28))
+                                    .bg(bg_color)
                                     .flex()
                                     .items_center()
                                     .text_xs()
@@ -878,9 +891,9 @@ impl AcpView {
                                     .text_color(gpui::rgb(ui_theme::red()))
                                     .cursor_pointer()
                                     .hover(|d| d.opacity(0.85))
-                                    .child("停止")
+                                    .child(label)
                                     .on_click(
-                                        cx.listener(|this, _ev, _window, _cx| this.cancel_turn()),
+                                        cx.listener(|this, _ev, _window, cx| this.on_stop_button_click(cx)),
                                     ),
                             )
                         })

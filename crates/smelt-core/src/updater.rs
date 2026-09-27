@@ -1906,7 +1906,7 @@ fn finalize_pending_update_at(
                 "updater",
                 &format!("待安装更新校验已失效，作废后重新下载：{error:#}"),
             );
-            abandon_pending_update_locked(&state_path, &mut state, &pending, &app_bundle, None)?;
+            abandon_pending_update_locked(&state_path, &mut state, &pending, app_bundle, None)?;
             return Ok(FinalizeOutcome::Invalidated);
         }
     };
@@ -1919,32 +1919,32 @@ fn finalize_pending_update_at(
     state.staged = Some(pending.clone());
     save_update_state_locked(&state_path, &state)?;
 
-    let swap = swap_path(&app_bundle, &pending.id)?;
-    remove_registered_swap(&app_bundle, &swap)?;
+    let swap = swap_path(app_bundle, &pending.id)?;
+    remove_registered_swap(app_bundle, &swap)?;
     if let Err(error) = copy_app_bundle(&pending.staged_app, &swap) {
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(error);
     }
     let copied_fingerprint = match validate_app_bundle_against(&swap, app_bundle) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
-            let _ = remove_registered_swap(&app_bundle, &swap);
+            let _ = remove_registered_swap(app_bundle, &swap);
             return Err(error).context("复制到安装目录后的 App 校验失败");
         }
     };
     if copied_fingerprint != fingerprint {
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         anyhow::bail!("复制到安装目录后的 App 指纹发生变化");
     }
 
     match prepare(&swap) {
         Ok(InstallPreparation::Proceed) => {}
         Ok(InstallPreparation::RetryLater) => {
-            remove_registered_swap(&app_bundle, &swap)?;
+            remove_registered_swap(app_bundle, &swap)?;
             return Ok(FinalizeOutcome::RetryLater);
         }
         Err(error) => {
-            let _ = remove_registered_swap(&app_bundle, &swap);
+            let _ = remove_registered_swap(app_bundle, &swap);
             return Err(error);
         }
     }
@@ -1953,11 +1953,11 @@ fn finalize_pending_update_at(
     pending.swap_app = Some(swap.clone());
     state.staged = Some(pending.clone());
     if let Err(error) = save_update_state_locked(&state_path, &state) {
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(error);
     }
 
-    if let Err(error) = swap_app_bundles(&app_bundle, &swap) {
+    if let Err(error) = swap_app_bundles(app_bundle, &swap) {
         pending.phase = StagedUpdatePhase::Ready;
         pending.swap_app = None;
         state.staged = Some(pending);
@@ -1968,7 +1968,7 @@ fn finalize_pending_update_at(
                 "App 原子交换失败，且恢复 Ready 状态写入失败；已保留交换现场：{persist_error:#}"
             ));
         }
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(error);
     }
 
@@ -1977,7 +1977,7 @@ fn finalize_pending_update_at(
     state.staged = None;
     state.cleanup_app = Some(swap.clone());
     if let Err(commit_error) = save_update_state_locked(&state_path, &state) {
-        if let Err(rollback_error) = swap_app_bundles(&app_bundle, &swap) {
+        if let Err(rollback_error) = swap_app_bundles(app_bundle, &swap) {
             return Err(commit_error).context(format!(
                 "更新状态提交失败，且 App 原子回滚也失败：{rollback_error:#}"
             ));
@@ -1994,7 +1994,7 @@ fn finalize_pending_update_at(
                 "App 已原子回滚，但恢复 Ready 状态写入失败；已保留交换现场：{persist_error:#}"
             ));
         }
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(commit_error);
     }
 
@@ -2871,7 +2871,7 @@ mod tests {
         assert!(unrelated.is_dir());
         assert_eq!(
             load_update_state_locked(&state_path).unwrap().cleanup_app,
-            Some(unrelated.clone())
+            Some(unrelated)
         );
         std::fs::remove_dir_all(root).unwrap();
     }

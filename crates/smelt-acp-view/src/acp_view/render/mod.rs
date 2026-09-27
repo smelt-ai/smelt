@@ -575,6 +575,7 @@ impl AcpView {
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
         let input_row = self.render_composer(composer_focused, cx);
         let plan_bar = self.render_plan_bar(cx);
+        let background_bar = self.render_background_task_bar(cx);
         v_flex()
             .size_full()
             .relative()
@@ -669,6 +670,7 @@ impl AcpView {
             .children(banner)
             .children(fork_banner)
             .children(plan_bar)
+            .children(background_bar)
             .child(
                 v_flex()
                     .relative()

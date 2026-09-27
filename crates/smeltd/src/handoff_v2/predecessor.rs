@@ -207,12 +207,9 @@ pub(crate) fn run_transaction(
         ));
     }
 
-    // 暂存二进制先扶正再 spawn：rename 不影响运行中进程（握旧 inode），
-    // successor 从生下来名字就是对的；GUI 事后 rename 有 NotFound 容忍。
-    let target = match promote_staged_executable(exe) {
-        Ok(target) => target,
-        Err(error) => return rollback(format!("扶正暂存二进制失败：{error}")),
-    };
+    // 提交前 spawn 调用方给的路径。暂存的 smeltd.next 先不扶正：rename 会让
+    // 正在跑的 smeltd 路径指向新映像，回滚后会话宿主会因 inode 不符而拒绝启动。
+    let target = exe.to_path_buf();
     let fingerprint = match smelt_plugin_host::executable_fingerprint(&target) {
         Ok(fingerprint) => fingerprint,
         Err(error) => return rollback(format!("计算候选守护指纹失败：{error}")),
@@ -269,6 +266,12 @@ pub(crate) fn run_transaction(
     }
 
     // ---- 不可逆段开始：successor 已在服务 ----
+    // 现在才把 smeltd.next 扶正。successor 已从暂存路径 exec，握着同一 inode；
+    // 旧进程即将退出，不再用这条路径拉会话宿主。
+    if let Err(error) = promote_staged_executable(exe) {
+        crate::dlog(&format!("handoff: COMMIT 后扶正暂存二进制失败：{error}"));
+    }
+
     // 先停 sidecars（让端口），再停插件（杀 bun 子进程防孤儿），调用方随后
     // 回 ok + exit。网关自启有 AddrInUse 重试，撞上"predecessor 退出中"的
     // 毫秒窗口会自愈；此处失败也不回滚（已无可回滚之处），只留痕。
@@ -436,24 +439,29 @@ mod tests {
     }
 
     #[test]
-    fn staged_executable_is_promoted_before_spawn() {
+    fn staged_executable_stays_until_commit_promotes_it() {
         let root = std::env::temp_dir().join(format!(
             "smeltd-promote-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let staged = root.join("smeltd.install.123.next");
+        let live = root.join("smeltd");
+        let staged = root.join("smeltd.next");
+        std::fs::write(&live, b"running").unwrap();
         std::fs::write(&staged, b"candidate").unwrap();
 
+        // spawn 用暂存路径，正在跑的正式文件保持原映像。
+        assert_eq!(staged, root.join("smeltd.next"));
+        assert_eq!(std::fs::read(&live).unwrap(), b"running");
+
         let target = promote_staged_executable(&staged).unwrap();
-        assert_eq!(target, root.join("smeltd"));
-        assert!(target.is_file());
+        assert_eq!(target, live);
+        assert_eq!(std::fs::read(&live).unwrap(), b"candidate");
         assert!(!staged.exists());
 
         // 非暂存原样返回，不碰文件系统。
-        let plain = root.join("smeltd");
-        assert_eq!(promote_staged_executable(&plain).unwrap(), plain);
+        assert_eq!(promote_staged_executable(&live).unwrap(), live);
         std::fs::remove_dir_all(root).unwrap();
     }
 

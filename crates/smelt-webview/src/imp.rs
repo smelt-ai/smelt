@@ -312,7 +312,7 @@ fn original_accepts_first_mouse(this: &Object) -> Option<Imp> {
             if is_wk == objc::runtime::YES {
                 let ptr = WKCONTENT_ACCEPTS_FIRST_MOUSE.load(Ordering::Acquire);
                 if !ptr.is_null() {
-                    return Some(std::mem::transmute(ptr));
+                    return Some(std::mem::transmute::<*mut c_void, Imp>(ptr));
                 }
             }
         }
@@ -320,7 +320,7 @@ fn original_accepts_first_mouse(this: &Object) -> Option<Imp> {
         if ptr.is_null() {
             return None;
         }
-        Some(std::mem::transmute(ptr))
+        Some(std::mem::transmute::<*mut c_void, Imp>(ptr))
     }
 }
 

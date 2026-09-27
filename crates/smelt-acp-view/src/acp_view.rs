@@ -33,9 +33,10 @@ use smelt_core::acp_client::{
 };
 use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
-    AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, ConversationSnapshot,
-    ElicitFieldKindView, PendingElicitation, PendingPermission, PermissionOptionKindView,
-    PlanEntryStatusView, PlanView, RuntimeDebug, ToolCallDebug,
+    AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
+    BackgroundTaskView, ConversationSnapshot, ElicitFieldKindView, PendingElicitation,
+    PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView, RuntimeDebug,
+    ToolCallDebug,
 };
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
@@ -1394,6 +1395,12 @@ pub struct AcpView {
     plan: Option<PlanView>,
     /// PLAN 条折叠态（默认展开，跟设计稿一致）。
     plan_collapsed: bool,
+    /// Pi 后台任务的最新快照。空表示没有任务。
+    background_tasks: Vec<BackgroundTaskView>,
+    /// 后台任务条默认收起，避免挡住消息。
+    background_tasks_collapsed: bool,
+    /// 用户展开了输出的后台任务 id。
+    expanded_background_tasks: std::collections::HashSet<String>,
     /// 用户手动展开的过程/分析摘要（key = entries 索引）。过程组外的思考、
     /// 以及过程组里对用户说的中间正文共用这份状态；只属于当前视图。
     expanded_thoughts: std::collections::HashSet<usize>,
@@ -1443,6 +1450,8 @@ pub struct AcpView {
     /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
     /// Connecting 快照之间有个网络往返）。
     restarting: bool,
+    /// 用户点击「停止」的时间戳：用于在 UI 上呈现取消状态并支持二次点击「强制停止」。
+    cancel_requested_at: Option<std::time::Instant>,
     /// 「强制重启」失败时的提示文案（连不上 smeltd、会话已不存在等）；下次
     /// 操作前一直显示，成功后清空。只属于本地展示状态，不落盘。
     restart_error: Option<String>,
@@ -1611,7 +1620,7 @@ impl AcpView {
             && !request.prompt.trim().is_empty()
             && let Some(input) = this.input.clone()
         {
-            let prompt = request.prompt.clone();
+            let prompt = request.prompt;
             input.update(cx, |state, cx| state.set_value(&prompt, window, cx));
         }
         // 首包图片解码成待发图片，Idle 时随首包一起发出去。
@@ -1772,6 +1781,9 @@ impl AcpView {
             // 计划是导航摘要，不应该在打开会话时占据整块消息区；需要细节时
             // 由用户主动展开，保持第一眼聚焦在目标和结果上。
             plan_collapsed: true,
+            background_tasks: Vec::new(),
+            background_tasks_collapsed: true,
+            expanded_background_tasks: std::collections::HashSet::new(),
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
             expanded_tool_runs: std::collections::HashSet::new(),
@@ -1791,6 +1803,7 @@ impl AcpView {
             awaiting_initial_history_snapshot: true,
             viewing_history: false,
             restarting: false,
+            cancel_requested_at: None,
             restart_error: None,
             pending_initial_prompt: None,
             pending_initial_config: Vec::new(),
@@ -1856,6 +1869,8 @@ impl AcpView {
         self.elicitation_inputs.clear();
         self.elicitation_input_subscriptions.clear();
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
+        self.background_tasks.clear();
+        self.expanded_background_tasks.clear();
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
         self.pending_config_values.clear();
@@ -2082,8 +2097,8 @@ impl AcpView {
             self.elicitation_input_subscriptions
                 .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
             for (ix, secret, title, value) in text_fields {
-                if !self.elicitation_inputs.contains_key(&ix) {
-                    let input = cx.new(|cx| {
+                self.elicitation_inputs.entry(ix).or_insert_with(|| {
+                    cx.new(|cx| {
                         let mut state = InputState::new(window, cx)
                             .placeholder(&title)
                             .default_value(value);
@@ -2091,9 +2106,8 @@ impl AcpView {
                             state = state.masked(true);
                         }
                         state
-                    });
-                    self.elicitation_inputs.insert(ix, input);
-                }
+                    })
+                });
                 if !self.elicitation_input_subscriptions.contains_key(&ix) {
                     let input = self.elicitation_inputs[&ix].clone();
                     let subscription = cx.subscribe_in(
@@ -2434,8 +2448,23 @@ impl AcpView {
 
     /// 停止当前 turn（session/cancel）。agent 会以 Cancelled 收尾，相位随 TurnEnded 回 Idle。
     fn cancel_turn(&mut self) {
+        self.cancel_requested_at = Some(std::time::Instant::now());
         if let Some(h) = &self.handle {
             let _ = h.action_tx.try_send(AcpUserAction::Cancel);
+        }
+    }
+
+    /// 用户点击输入框右侧「停止」按钮：
+    /// 第一次点击发起温和取消；如果在取消过程中用户再次点击，则触发「强制重启」强杀底层进程组作为终极兜底。
+    pub fn on_stop_button_click(&mut self, cx: &mut Context<Self>) {
+        if self.restarting {
+            return;
+        }
+        if self.cancel_requested_at.is_some() {
+            self.force_restart(cx);
+        } else {
+            self.cancel_turn();
+            cx.notify();
         }
     }
 
@@ -2461,6 +2490,7 @@ impl AcpView {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.restarting = false;
+                view.cancel_requested_at = None;
                 if let Err(err) = result {
                     view.restart_error = Some(err);
                 }
@@ -3659,6 +3689,7 @@ impl AcpView {
             self.try_acknowledge_composer_restore();
         }
         self.plan = snap.plan;
+        self.background_tasks = snap.background_tasks;
         self.model = snap.model;
         self.config_options = snap.config_options;
         reconcile_pending_config_values(
@@ -3747,6 +3778,7 @@ impl AcpView {
         }
 
         if matches!(self.phase, DaemonPhase::Idle) {
+            self.cancel_requested_at = None;
             let initial_config = std::mem::take(&mut self.pending_initial_config);
             self.queue_config_values(initial_config);
             if let Some(prompt) = self.pending_initial_prompt.take() {
@@ -4287,6 +4319,138 @@ impl AcpView {
         Some(bar.into_any_element())
     }
 
+    /// 后台任务条只表示仍在跑的进程。结束后的记录留在对话正文里。
+    fn render_background_task_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let running = running_background_tasks(&self.background_tasks);
+        if running.is_empty() {
+            return None;
+        }
+        let summary = background_task_summary(running.len());
+        let mut bar = gpui_component::v_flex()
+            .border_b_1()
+            .border_color(gpui::rgb(ui_theme::border_dim()))
+            .bg(gpui::rgb(ui_theme::bg_status()))
+            .child(
+                h_flex()
+                    .id("acp-background-task-toggle")
+                    .px_4()
+                    .py_2()
+                    .gap_2p5()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|row| row.bg(ui_theme::overlay(0x14)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.background_tasks_collapsed = !this.background_tasks_collapsed;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .text_xs()
+                            .text_color(gpui::rgb(ui_theme::text_muted()))
+                            .child(if self.background_tasks_collapsed {
+                                "▸"
+                            } else {
+                                "▾"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .child("后台任务"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(gpui::rgb(ui_theme::text_bright()))
+                            .child(summary),
+                    ),
+            );
+        if !self.background_tasks_collapsed {
+            let mut rows = gpui_component::v_flex().px_4().pb_3().gap_1();
+            for (index, task) in running.iter().enumerate() {
+                let id = task.id.clone();
+                let expanded = self.expanded_background_tasks.contains(&task.id);
+                let status_color = match task.status {
+                    BackgroundTaskStatus::Running => ui_theme::accent(),
+                    BackgroundTaskStatus::Completed => ui_theme::green(),
+                    BackgroundTaskStatus::Failed => ui_theme::red(),
+                    BackgroundTaskStatus::Stopped => ui_theme::text_muted(),
+                    BackgroundTaskStatus::TimedOut => ui_theme::yellow(),
+                };
+                let mut row = gpui_component::v_flex()
+                    .id(("acp-background-task", index))
+                    .gap_1()
+                    .py_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        if !this.expanded_background_tasks.remove(&id) {
+                            this.expanded_background_tasks.insert(id.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(gpui::rgb(status_color))
+                                    .child(task.status.label()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_family(smelt_core::font_config::font_family())
+                                    .text_color(gpui::rgb(ui_theme::text_faint()))
+                                    .child(task.id.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(gpui::rgb(ui_theme::text_bright()))
+                                    .child(task.title.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl(px(4.))
+                            .text_xs()
+                            .truncate()
+                            .font_family(smelt_core::font_config::font_family())
+                            .text_color(gpui::rgb(ui_theme::text_muted()))
+                            .child(task.command.clone()),
+                    );
+                if expanded && !task.output.is_empty() {
+                    let mut output = gpui_component::v_flex()
+                        .pl(px(4.))
+                        .gap_0()
+                        .font_family(smelt_core::font_config::font_family())
+                        .text_xs()
+                        .text_color(gpui::rgb(ui_theme::text_mid()));
+                    for line in background_task_output_lines(&task.output) {
+                        output = output.child(div().truncate().child(line.to_string()));
+                    }
+                    row = row.child(output);
+                }
+                rows = rows.child(row);
+            }
+            bar = bar.child(rows);
+        }
+        Some(bar.into_any_element())
+    }
+
     /// ⌘⏎ 快捷批准：选第一个 allow 类选项（跟绿色主按钮同一目标）。
     fn pick_permission_primary(&mut self, cx: &mut Context<Self>) {
         let Some(card) = self.permissions.first() else {
@@ -4329,6 +4493,24 @@ impl AcpView {
             cx.notify();
         }
     }
+}
+
+fn running_background_tasks(tasks: &[BackgroundTaskView]) -> Vec<&BackgroundTaskView> {
+    tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskStatus::Running)
+        .collect()
+}
+
+fn background_task_summary(running: usize) -> String {
+    format!("{running} 个进行中")
+}
+
+fn background_task_output_lines(output: &str) -> Vec<&str> {
+    const MAX_LINES: usize = 8;
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].to_vec()
 }
 
 /// 折叠计划也要告诉用户“现在具体在做什么”，不能只剩一个 2/4。没有显式
