@@ -2475,7 +2475,12 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     let mut completed = AcpSessionState::default();
     completed.phase = DaemonPhase::Idle;
     completed.completed_unread = true;
-    assert_eq!(compute_acp_daemon_phase(&completed), Phase::Succeeded);
+    assert_eq!(
+        compute_acp_daemon_phase(&completed),
+        Phase::Idle,
+        "没有回合结果不是成功"
+    );
+    completed.turn_outcome = Some(AcpTurnOutcome::Succeeded);
 
     completed.entries.push(AcpEntry::ToolCall {
         id: "late-tool".into(),

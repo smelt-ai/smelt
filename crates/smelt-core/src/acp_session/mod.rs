@@ -36,40 +36,6 @@ use apply::{pending_action_phase, resume_running};
 
 // ===================== wire 快照类型（无 agent_client_protocol 依赖） =====================
 
-/// ACP 快照线上仍用这组历史变体名（`Starting` / `Running` / `Ended`…），
-/// 内存里立刻转成 [`DaemonPhase`]。混升期间 GUI 与 smeltd 必须能互读。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-enum AcpPhaseWire {
-    Starting,
-    Idle,
-    Running,
-    AwaitingApproval,
-    AwaitingChoice,
-    Ended(String),
-}
-
-fn daemon_phase_from_wire(phase: AcpPhaseWire) -> (DaemonPhase, String) {
-    match phase {
-        AcpPhaseWire::Starting => (DaemonPhase::Connecting, String::new()),
-        AcpPhaseWire::Idle => (DaemonPhase::Idle, String::new()),
-        AcpPhaseWire::Running => (DaemonPhase::Thinking, String::new()),
-        AcpPhaseWire::AwaitingApproval => (DaemonPhase::AwaitingApproval, String::new()),
-        AcpPhaseWire::AwaitingChoice => (DaemonPhase::WaitingForUser, String::new()),
-        AcpPhaseWire::Ended(reason) => (DaemonPhase::Dead, reason),
-    }
-}
-
-fn daemon_phase_to_wire(phase: DaemonPhase, end_reason: &str) -> AcpPhaseWire {
-    match phase {
-        DaemonPhase::Connecting => AcpPhaseWire::Starting,
-        DaemonPhase::Idle | DaemonPhase::Succeeded => AcpPhaseWire::Idle,
-        DaemonPhase::Thinking | DaemonPhase::ExecutingTool => AcpPhaseWire::Running,
-        DaemonPhase::AwaitingApproval => AcpPhaseWire::AwaitingApproval,
-        DaemonPhase::WaitingForUser => AcpPhaseWire::AwaitingChoice,
-        DaemonPhase::Dead | DaemonPhase::Failed => AcpPhaseWire::Ended(end_reason.to_string()),
-    }
-}
-
 /// ACP 连接结束的稳定分类。展示文案留在 `end_reason`，控制流只能依据
 /// 这里的结构化原因，避免改文案或本地化后悄悄改变重连/失败语义。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -130,6 +96,11 @@ impl AcpTurnOutcome {
             StopReason::Refusal => Self::Refused,
             _ => Self::Failed,
         }
+    }
+
+    /// 只有协议明确给出的成功才是成功。调用方对 `None` 不能再补成成功。
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Succeeded)
     }
 
     /// 需要作为失败提醒展示的稳定文案。用户主动取消是正常控制动作，不产生
@@ -681,7 +652,7 @@ pub struct ConversationSnapshot {
     /// 边沿，只是现在从服务端算，客户端不用自己维护。具体结果必须结合
     /// `turn_outcome`，不能把取消/拒绝一律解释成成功。
     pub completed_unread: bool,
-    /// 最近一次 `TurnEnded` 的真实结果。旧快照缺失时为 None，兼容解释为成功。
+    /// 最近一次 `TurnEnded` 的结果。`None` 表示还没有回合结果，不是成功。
     pub turn_outcome: Option<AcpTurnOutcome>,
     /// 这份快照值不值得触发一次落盘。**不是**"数据有没有变"（每次推送数据
     /// 都变了），是旧版 `apply_event` 里 `skip_persist` 那条线的服务端版本：
@@ -709,7 +680,7 @@ struct ConversationSnapshotDe {
     tool_debug: Option<BTreeMap<String, ToolCallDebug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_debug: Option<RuntimeDebug>,
-    phase: AcpPhaseWire,
+    phase: DaemonPhase,
     #[serde(default)]
     end_reason: String,
     #[serde(default)]
@@ -771,12 +742,6 @@ struct ConversationSnapshotDe {
 
 impl From<ConversationSnapshotDe> for ConversationSnapshot {
     fn from(de: ConversationSnapshotDe) -> Self {
-        let (phase, ended_reason) = daemon_phase_from_wire(de.phase);
-        let end_reason = if ended_reason.is_empty() {
-            de.end_reason
-        } else {
-            ended_reason
-        };
         Self {
             entries_offset: de.entries_offset,
             entries_total: de.entries_total,
@@ -786,8 +751,8 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             entries: de.entries,
             tool_debug: de.tool_debug,
             runtime_debug: de.runtime_debug,
-            phase,
-            end_reason,
+            phase: de.phase,
+            end_reason: de.end_reason,
             end_kind: de.end_kind,
             accepted_delivery_ids: de.accepted_delivery_ids,
             active_delivery_id: de.active_delivery_id,
@@ -836,7 +801,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             entries: snap.entries,
             tool_debug: snap.tool_debug,
             runtime_debug: snap.runtime_debug,
-            phase: daemon_phase_to_wire(snap.phase, &snap.end_reason),
+            phase: snap.phase,
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
             accepted_delivery_ids: snap.accepted_delivery_ids,

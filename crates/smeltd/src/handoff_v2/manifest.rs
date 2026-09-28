@@ -457,7 +457,7 @@ mod tests {
         // 最小合法快照：必填字段给空值，其余走 default。
         serde_json::from_value(serde_json::json!({
             "entries": [],
-            "phase": "Idle",
+            "phase": "idle",
             "pending_elicitation": null,
             "status_line": null,
             "acp_session_id": null,

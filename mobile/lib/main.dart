@@ -2161,12 +2161,16 @@ class _SessionPageState extends State<SessionPage> {
     final phase = _snapshot!.phase;
     // 图标 + 颜色是这里唯一的信息载体，读屏和色盲都拿不到。补一句文字标签。
     final label = switch (phase) {
-      AcpPhaseIdle() => 'Idle',
-      AcpPhaseStarting() => 'Starting',
-      AcpPhaseRunning() => 'Running',
+      AcpPhaseConnecting() => 'Starting',
+      AcpPhaseThinking() => 'Thinking',
+      AcpPhaseExecutingTool() => 'Running a tool',
       AcpPhaseAwaitingApproval() => 'Waiting for your approval',
-      AcpPhaseAwaitingChoice() => 'Waiting for your choice',
-      AcpPhaseEnded(reason: final r) => 'Ended: $r',
+      AcpPhaseWaitingForUser() => 'Waiting for your choice',
+      AcpPhaseSucceeded() => 'Completed',
+      AcpPhaseFailed() => 'Failed',
+      AcpPhaseIdle() => 'Idle',
+      AcpPhaseDead() =>
+        _snapshot!.endReason.isEmpty ? 'Ended' : 'Ended: ${_snapshot!.endReason}',
     };
     return Semantics(label: label, child: _phaseIcon(phase));
   }
@@ -2174,33 +2178,27 @@ class _SessionPageState extends State<SessionPage> {
   Widget _phaseIcon(AcpPhase phase) {
     final status = context.smeltColors;
     return switch (phase) {
-      AcpPhaseIdle() => Icon(Icons.pause_circle, color: status.idle),
-      AcpPhaseStarting() => const SizedBox(
+      AcpPhaseConnecting() ||
+      AcpPhaseThinking() ||
+      AcpPhaseExecutingTool() => const SizedBox(
         width: 20,
         height: 20,
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      AcpPhaseRunning() => const SizedBox(
-        width: 20,
-        height: 20,
-        child: CircularProgressIndicator(strokeWidth: 2),
-      ),
-      // 等审批用红：跟列表「要你」同一色。这里原本是橙色，
-      // 同一个会话在列表里是红、进去以后变成橙。
       AcpPhaseAwaitingApproval() => Icon(
         Icons.warning_amber,
         color: status.waitingApproval,
       ),
-      AcpPhaseAwaitingChoice() => Icon(
+      AcpPhaseWaitingForUser() => Icon(
         Icons.help_outline,
         color: status.needsAttention,
       ),
-      // Ended 只在 Fatal / RestoreFailed 时出现——正常结束一轮走的是 Idle
-      // （见 acp_session.rs `finish_turn`）。所以它确实是错误终态，用红。
-      AcpPhaseEnded(reason: final r) => Tooltip(
-        message: r,
+      AcpPhaseSucceeded() => Icon(Icons.check_circle, color: status.idle),
+      AcpPhaseFailed() || AcpPhaseDead() => Tooltip(
+        message: _snapshot!.endReason,
         child: Icon(Icons.stop_circle, color: status.danger),
       ),
+      AcpPhaseIdle() => Icon(Icons.pause_circle, color: status.idle),
     };
   }
 
@@ -2212,23 +2210,33 @@ class _SessionPageState extends State<SessionPage> {
     final phase = snapshot.phase;
     if (phase is AcpPhaseIdle ||
         phase is AcpPhaseAwaitingApproval ||
-        phase is AcpPhaseAwaitingChoice) {
+        phase is AcpPhaseWaitingForUser) {
       return const SizedBox.shrink();
     }
     final (icon, label, color) = switch (phase) {
-      AcpPhaseStarting() => (
+      AcpPhaseConnecting() => (
         Icons.rocket_launch_outlined,
         snapshot.statusLine ?? 'Starting agent...',
         running,
       ),
-      AcpPhaseRunning() => (
+      AcpPhaseThinking() || AcpPhaseExecutingTool() => (
         Icons.auto_awesome,
         snapshot.statusLine ?? 'Agent is working',
         running,
       ),
-      AcpPhaseEnded(reason: final reason) => (
+      AcpPhaseSucceeded() => (
+        Icons.check_circle_outline,
+        snapshot.statusLine ?? 'Completed',
+        running,
+      ),
+      AcpPhaseFailed() => (
         Icons.error_outline,
-        reason.isEmpty ? 'Session ended' : reason,
+        snapshot.endReason.isEmpty ? 'Failed' : snapshot.endReason,
+        colors.error,
+      ),
+      AcpPhaseDead() => (
+        Icons.error_outline,
+        snapshot.endReason.isEmpty ? 'Session ended' : snapshot.endReason,
         colors.error,
       ),
       _ => (Icons.info_outline, '', colors.onSurfaceVariant),
@@ -2240,7 +2248,9 @@ class _SessionPageState extends State<SessionPage> {
       color: color.withAlpha(31),
       child: Row(
         children: [
-          if (phase is AcpPhaseRunning || phase is AcpPhaseStarting)
+          if (phase is AcpPhaseConnecting ||
+              phase is AcpPhaseThinking ||
+              phase is AcpPhaseExecutingTool)
             SizedBox(
               width: 16,
               height: 16,
@@ -2250,7 +2260,9 @@ class _SessionPageState extends State<SessionPage> {
             Icon(icon, size: 18, color: color),
           const SizedBox(width: 8),
           Expanded(
-            child: phase is AcpPhaseRunning && snapshot.turnStartedAtMs != null
+            child:
+                (phase is AcpPhaseThinking || phase is AcpPhaseExecutingTool) &&
+                    snapshot.turnStartedAtMs != null
                 ? TurnElapsedLabel(
                     label: label,
                     startedAtMs: snapshot.turnStartedAtMs!,
@@ -2263,7 +2275,8 @@ class _SessionPageState extends State<SessionPage> {
                     style: TextStyle(color: color, fontSize: 12),
                   ),
           ),
-          if (phase is AcpPhaseRunning && gatewayService.writeEnabled)
+          if ((phase is AcpPhaseThinking || phase is AcpPhaseExecutingTool) &&
+              gatewayService.writeEnabled)
             IconButton(
               visualDensity: VisualDensity.compact,
               tooltip: 'Stop current turn',
@@ -2456,8 +2469,7 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   bool _isFinalAnswer(int index) {
-    if (_snapshot?.phase is! AcpPhaseIdle &&
-        _snapshot?.phase is! AcpPhaseEnded) {
+    if (_snapshot?.phase.turnFinished != true) {
       return false;
     }
     final entries = _snapshot?.entries ?? const <AcpEntry>[];

@@ -3720,7 +3720,7 @@ impl AcpView {
         // 完成边沿以 TurnEnded 为准：回合明确成功、无人等待即可。未完成工具
         // 只影响展示，迟到终态按 tool id 回写，不再挡住 CompletedTurn。
         let waiting_on_user = !self.permissions.is_empty() || self.elicitation.is_some();
-        let succeeded = matches!(self.turn_outcome, Some(AcpTurnOutcome::Succeeded) | None);
+        let succeeded = self.turn_outcome.is_some_and(AcpTurnOutcome::is_success);
         let completed = snap.completed_unread
             && !self.was_completed_unread
             && !waiting_on_user

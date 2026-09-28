@@ -386,22 +386,29 @@ pub(crate) fn compute_acp_daemon_phase(
     let executing_tool = !reduced.replaying_history && has_unfinished_tool_call(&reduced.entries);
     match reduced.phase {
         DaemonPhase::Connecting => Phase::Connecting,
-        // `TurnEnded` 在 ACP 归约器里落成 Idle + completed_unread。若这里只投影
-        // Idle，统一状态订阅永远看不到完成边沿，Dock/菜单栏/系统通知只能碰运气
-        // 等别的 fallback。完成事实必须在 daemon 层直接成为 Succeeded；下一条
-        // prompt 会清 completed_unread 并切回 Thinking。这个终态还必须优先于
-        // 悬空工具明细：adapter 常会先发 TurnEnded、后补 ToolFinished，后者不能
-        // 把已经确认的完成重新解释成“执行工具”。
+        // `TurnEnded` 在 ACP 归约器里落成 Idle + completed_unread，并写上
+        // `turn_outcome`。成功边沿只认 `Succeeded`。没有结果、取消都不是成功；
+        // 带失败文案的结果才是失败。下一条 prompt 会清 completed_unread 并切回
+        // Thinking。已确认的成功必须优先于悬空工具明细：adapter 常会先发
+        // TurnEnded、后补 ToolFinished，后者不能把完成重新解释成“执行工具”。
         //
         // 没有 completed_unread 的 Idle 同样不能靠未收尾工具回到 ExecutingTool：
         // 那是回合被掐断后欠下的终态，不是当前活动。
-        DaemonPhase::Idle if reduced.completed_unread => match reduced.turn_outcome {
-            Some(smelt_core::acp_session::AcpTurnOutcome::Cancelled) => Phase::Idle,
-            Some(outcome) if outcome.failure_message().is_some() => Phase::Failed,
-            // 旧 handoff/快照没有 outcome；它们过去只表达“有完成结果”，兼容
-            // 解释为成功，不能在升级后把历史正常完成突然翻成失败。
-            Some(_) | None => Phase::Succeeded,
-        },
+        DaemonPhase::Idle if reduced.completed_unread => {
+            if reduced
+                .turn_outcome
+                .is_some_and(smelt_core::acp_session::AcpTurnOutcome::is_success)
+            {
+                Phase::Succeeded
+            } else if reduced
+                .turn_outcome
+                .is_some_and(|outcome| outcome.failure_message().is_some())
+            {
+                Phase::Failed
+            } else {
+                Phase::Idle
+            }
+        }
         DaemonPhase::Idle => Phase::Idle,
         DaemonPhase::Thinking | DaemonPhase::ExecutingTool if executing_tool => {
             Phase::ExecutingTool

@@ -22,6 +22,7 @@ class AcpSnapshot {
   final int? lastTurnDurationMs;
   final bool completedUnread;
   final bool shouldPersist;
+  final String endReason;
 
   AcpSnapshot({
     this.entriesOffset = 0,
@@ -44,6 +45,7 @@ class AcpSnapshot {
     this.lastTurnDurationMs,
     this.completedUnread = false,
     this.shouldPersist = false,
+    this.endReason = '',
   }) : entriesTotal = entriesTotal ?? entriesOffset + entries.length;
 
   int get entriesEnd => entriesOffset + entries.length;
@@ -105,6 +107,7 @@ class AcpSnapshot {
       lastTurnDurationMs: (data['last_turn_duration_ms'] as num?)?.toInt(),
       completedUnread: data['completed_unread'] as bool? ?? false,
       shouldPersist: data['should_persist'] as bool? ?? false,
+      endReason: data['end_reason'] as String? ?? '',
     );
   }
 
@@ -132,6 +135,7 @@ class AcpSnapshot {
     if (lastTurnDurationMs != null) 'last_turn_duration_ms': lastTurnDurationMs,
     'completed_unread': completedUnread,
     'should_persist': shouldPersist,
+    'end_reason': endReason,
   };
 
   AcpSnapshot cacheTail({int limit = 100}) {
@@ -223,65 +227,87 @@ class AcpSnapshot {
       lastTurnDurationMs: lastTurnDurationMs,
       completedUnread: completedUnread,
       shouldPersist: shouldPersist,
+      endReason: endReason,
     );
   }
 }
 
-/// ACP 会话阶段
+/// 与守护进程 `DaemonPhase` 同一套 snake_case 名字。
 sealed class AcpPhase {
   const AcpPhase();
 
   factory AcpPhase.fromJson(dynamic json) {
-    if (json == null) return const AcpPhaseIdle();
-    if (json is String) {
-      return switch (json) {
-        'Starting' => const AcpPhaseStarting(),
-        'Idle' => const AcpPhaseIdle(),
-        'Running' => const AcpPhaseRunning(),
-        'AwaitingApproval' => const AcpPhaseAwaitingApproval(),
-        'AwaitingChoice' => const AcpPhaseAwaitingChoice(),
-        _ => const AcpPhaseIdle(),
-      };
+    if (json is! String) {
+      throw FormatException('ACP phase must be a string, got $json');
     }
-    if (json is Map<String, dynamic>) {
-      if (json.containsKey('Ended')) {
-        return AcpPhaseEnded(reason: json['Ended'] as String? ?? '');
-      }
-    }
-    return const AcpPhaseIdle();
+    return switch (json) {
+      'connecting' => const AcpPhaseConnecting(),
+      'thinking' => const AcpPhaseThinking(),
+      'executing_tool' => const AcpPhaseExecutingTool(),
+      'awaiting_approval' => const AcpPhaseAwaitingApproval(),
+      'waiting_for_user' => const AcpPhaseWaitingForUser(),
+      'succeeded' => const AcpPhaseSucceeded(),
+      'failed' => const AcpPhaseFailed(),
+      'idle' => const AcpPhaseIdle(),
+      'dead' => const AcpPhaseDead(),
+      _ => throw FormatException('unknown ACP phase: $json'),
+    };
   }
 
   bool get isActive =>
-      this is AcpPhaseRunning ||
+      this is AcpPhaseThinking ||
+      this is AcpPhaseExecutingTool ||
       this is AcpPhaseAwaitingApproval ||
-      this is AcpPhaseAwaitingChoice;
+      this is AcpPhaseWaitingForUser;
 
-  bool get acceptsPrompt => this is AcpPhaseIdle || this is AcpPhaseRunning;
+  bool get acceptsPrompt =>
+      this is AcpPhaseIdle ||
+      this is AcpPhaseThinking ||
+      this is AcpPhaseExecutingTool ||
+      this is AcpPhaseSucceeded ||
+      this is AcpPhaseFailed;
+
+  bool get turnFinished =>
+      this is AcpPhaseIdle ||
+      this is AcpPhaseSucceeded ||
+      this is AcpPhaseFailed ||
+      this is AcpPhaseDead;
 }
 
-class AcpPhaseStarting extends AcpPhase {
-  const AcpPhaseStarting();
+class AcpPhaseConnecting extends AcpPhase {
+  const AcpPhaseConnecting();
 }
 
-class AcpPhaseIdle extends AcpPhase {
-  const AcpPhaseIdle();
+class AcpPhaseThinking extends AcpPhase {
+  const AcpPhaseThinking();
 }
 
-class AcpPhaseRunning extends AcpPhase {
-  const AcpPhaseRunning();
+class AcpPhaseExecutingTool extends AcpPhase {
+  const AcpPhaseExecutingTool();
 }
 
 class AcpPhaseAwaitingApproval extends AcpPhase {
   const AcpPhaseAwaitingApproval();
 }
 
-class AcpPhaseAwaitingChoice extends AcpPhase {
-  const AcpPhaseAwaitingChoice();
+class AcpPhaseWaitingForUser extends AcpPhase {
+  const AcpPhaseWaitingForUser();
 }
 
-class AcpPhaseEnded extends AcpPhase {
-  final String reason;
-  const AcpPhaseEnded({required this.reason});
+class AcpPhaseSucceeded extends AcpPhase {
+  const AcpPhaseSucceeded();
+}
+
+class AcpPhaseFailed extends AcpPhase {
+  const AcpPhaseFailed();
+}
+
+class AcpPhaseIdle extends AcpPhase {
+  const AcpPhaseIdle();
+}
+
+class AcpPhaseDead extends AcpPhase {
+  const AcpPhaseDead();
 }
 
 /// ACP 条目（消息/工具调用）
@@ -433,12 +459,15 @@ String completionSummaryText(List<ToolOutputPart> output) => output
     .join('\n\n');
 
 dynamic _phaseToJson(AcpPhase phase) => switch (phase) {
-  AcpPhaseStarting() => 'Starting',
-  AcpPhaseIdle() => 'Idle',
-  AcpPhaseRunning() => 'Running',
-  AcpPhaseAwaitingApproval() => 'AwaitingApproval',
-  AcpPhaseAwaitingChoice() => 'AwaitingChoice',
-  AcpPhaseEnded(reason: final reason) => {'Ended': reason},
+  AcpPhaseConnecting() => 'connecting',
+  AcpPhaseThinking() => 'thinking',
+  AcpPhaseExecutingTool() => 'executing_tool',
+  AcpPhaseAwaitingApproval() => 'awaiting_approval',
+  AcpPhaseWaitingForUser() => 'waiting_for_user',
+  AcpPhaseSucceeded() => 'succeeded',
+  AcpPhaseFailed() => 'failed',
+  AcpPhaseIdle() => 'idle',
+  AcpPhaseDead() => 'dead',
 };
 
 dynamic _entryToJson(AcpEntry entry) => switch (entry) {

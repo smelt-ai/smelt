@@ -897,48 +897,67 @@ fn delivery_identity_follows_turn_end_and_handoff_snapshot() {
 }
 
 #[test]
-fn snapshot_wire_keeps_legacy_phase_names() {
-    let mut starting = AcpSessionState::default();
-    assert_eq!(starting.phase, DaemonPhase::Connecting);
-    let value = serde_json::to_value(starting.to_snapshot(true)).unwrap();
-    assert_eq!(value["phase"], "Starting");
+fn missing_turn_outcome_is_not_success() {
+    assert!(AcpTurnOutcome::Succeeded.is_success());
+    assert!(!AcpTurnOutcome::Cancelled.is_success());
+    assert!(!AcpTurnOutcome::Failed.is_success());
+    assert!(!AcpTurnOutcome::MaxTokens.is_success());
+    assert!(!AcpTurnOutcome::MaxTurnRequests.is_success());
+    assert!(!AcpTurnOutcome::Refused.is_success());
+}
 
+#[test]
+fn snapshot_phase_round_trips_daemon_phase() {
+    for phase in [
+        DaemonPhase::Connecting,
+        DaemonPhase::Thinking,
+        DaemonPhase::ExecutingTool,
+        DaemonPhase::AwaitingApproval,
+        DaemonPhase::WaitingForUser,
+        DaemonPhase::Succeeded,
+        DaemonPhase::Failed,
+        DaemonPhase::Idle,
+        DaemonPhase::Dead,
+    ] {
+        let mut state = AcpSessionState::default();
+        state.phase = phase;
+        if phase == DaemonPhase::Dead {
+            state.end_reason = "超时".into();
+        }
+        let value = serde_json::to_value(state.to_snapshot(true)).unwrap();
+        let parsed: ConversationSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.phase, phase, "{phase:?} 不能在快照往返后改名");
+        if phase == DaemonPhase::Dead {
+            assert_eq!(parsed.end_reason, "超时");
+        }
+    }
+
+    let mut executing = AcpSessionState::default();
+    executing.phase = DaemonPhase::ExecutingTool;
+    let wire = serde_json::to_value(executing.to_snapshot(true)).unwrap();
+    assert_eq!(wire["phase"], "executing_tool");
+
+    let mut ended = AcpSessionState::default();
     force_end(
-        &mut starting,
+        &mut ended,
         AcpEndKind::TransportDisconnected,
         "连接意外中断",
     );
-    let ended = serde_json::to_value(starting.to_snapshot(true)).unwrap();
-    assert_eq!(ended["phase"]["Ended"], "连接意外中断");
+    let ended_wire = serde_json::to_value(ended.to_snapshot(true)).unwrap();
+    assert_eq!(ended_wire["phase"], "dead");
+    assert_eq!(ended_wire["end_reason"], "连接意外中断");
 
-    let parsed: ConversationSnapshot = serde_json::from_value(serde_json::json!({
+    let rejected = serde_json::from_value::<ConversationSnapshot>(serde_json::json!({
         "entries": [],
-        "phase": {"Ended": "超时"},
+        "phase": "Starting",
         "pending_elicitation": null,
         "supports_image": true,
         "available_commands": [],
         "config_options": [],
         "completed_unread": false,
         "should_persist": true,
-    }))
-    .unwrap();
-    assert_eq!(parsed.phase, DaemonPhase::Dead);
-    assert_eq!(parsed.end_reason, "超时");
-    assert_eq!(parsed.tool_debug, None);
-    assert_eq!(parsed.runtime_debug, None);
-
-    let choice: ConversationSnapshot = serde_json::from_value(serde_json::json!({
-        "entries": [],
-        "phase": "AwaitingChoice",
-        "pending_elicitation": null,
-        "supports_image": true,
-        "available_commands": [],
-        "config_options": [],
-        "completed_unread": false,
-        "should_persist": true,
-    }))
-    .unwrap();
-    assert_eq!(choice.phase, DaemonPhase::WaitingForUser);
+    }));
+    assert!(rejected.is_err(), "旧阶段名 Starting 不能再进快照");
 }
 
 #[test]

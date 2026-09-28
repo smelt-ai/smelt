@@ -17,11 +17,20 @@ void main() {
 
     test('accepts prompts while idle or running', () {
       expect(const AcpPhaseIdle().acceptsPrompt, isTrue);
-      expect(const AcpPhaseRunning().acceptsPrompt, isTrue);
-      expect(const AcpPhaseStarting().acceptsPrompt, isFalse);
+      expect(const AcpPhaseThinking().acceptsPrompt, isTrue);
+      expect(const AcpPhaseExecutingTool().acceptsPrompt, isTrue);
+      expect(const AcpPhaseConnecting().acceptsPrompt, isFalse);
       expect(const AcpPhaseAwaitingApproval().acceptsPrompt, isFalse);
-      expect(const AcpPhaseAwaitingChoice().acceptsPrompt, isFalse);
-      expect(const AcpPhaseEnded(reason: '').acceptsPrompt, isFalse);
+      expect(const AcpPhaseWaitingForUser().acceptsPrompt, isFalse);
+      expect(const AcpPhaseDead().acceptsPrompt, isFalse);
+      expect(
+        () => AcpPhase.fromJson('Starting'),
+        throwsFormatException,
+      );
+      expect(
+        AcpPhase.fromJson('executing_tool'),
+        isA<AcpPhaseExecutingTool>(),
+      );
     });
 
     test('parses the current smeltd snapshot schema', () {
@@ -42,7 +51,8 @@ void main() {
               'Assistant': {'text': 'History restored.', 'thought': false},
             },
           ],
-          'phase': 'Idle',
+          'phase': 'idle',
+          'end_reason': '',
           'pending_permissions': [
             {
               'tool_call_id': 'tool-1',
@@ -132,7 +142,7 @@ void main() {
           AcpEntryAssistant(text: 'old answer'),
           AcpEntryUser(text: 'old tail'),
         ],
-        phase: const AcpPhaseRunning(),
+        phase: const AcpPhaseThinking(),
       );
       final update = AcpSnapshot(
         entriesOffset: 2,
@@ -152,7 +162,7 @@ void main() {
     test('drops an untrusted prefix when entries_offset is out of range', () {
       final original = AcpSnapshot(
         entries: const [AcpEntryUser(text: 'local entry')],
-        phase: const AcpPhaseRunning(),
+        phase: const AcpPhaseThinking(),
       );
       final update = AcpSnapshot(
         entriesOffset: 3,
@@ -205,7 +215,7 @@ void main() {
           AcpEntryUser(text: 'cached'),
           AcpEntryAssistant(text: 'answer'),
         ],
-        phase: const AcpPhaseRunning(),
+        phase: const AcpPhaseThinking(),
         historySessionId: 'history-1',
       );
       final metadata = AcpSnapshot(
@@ -253,7 +263,7 @@ void main() {
           AcpEntryAssistant(text: 'fourth'),
           AcpEntryAssistant(text: 'new live tail'),
         ],
-        phase: const AcpPhaseRunning(),
+        phase: const AcpPhaseThinking(),
         historySessionId: 'history-1',
       );
       final olderPage = AcpSnapshot(
@@ -273,14 +283,14 @@ void main() {
       expect(merged.entries, hasLength(5));
       expect(merged.entriesTotal, 5);
       expect(merged.snapshotRevision, 8);
-      expect(merged.phase, isA<AcpPhaseRunning>());
+      expect(merged.phase, isA<AcpPhaseThinking>());
     });
 
     test('parses elicitation fields and selected options', () {
       final snapshot = AcpSnapshot.fromJson({
         'snapshot': {
           'entries': [],
-          'phase': 'AwaitingChoice',
+          'phase': 'waiting_for_user',
           'pending_elicitation': {
             'message': 'Choose a notification channel',
             'fields': [
