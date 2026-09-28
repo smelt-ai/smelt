@@ -661,6 +661,14 @@ pub struct ConversationSnapshot {
     /// 了，那时候存一次就够。客户端拿这个字段决定要不要 `cx.emit(Changed)`，
     /// 不用自己在两次快照之间做增量判断。
     pub should_persist: bool,
+    /// 活状态已经生效，但历史正文读失败。空表示这帧的历史可用。
+    /// 客户端不能因为这个字段把相位退回启动中。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_error: Option<String>,
+    /// 交接文件故意没带已提交正文。恢复后向 agent `session/load` 重放。
+    /// 旧交接文件没有这个字段，仍按其中的 `entries` 恢复。
+    #[serde(default)]
+    pub history_omitted: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -680,7 +688,7 @@ struct ConversationSnapshotDe {
     tool_debug: Option<BTreeMap<String, ToolCallDebug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_debug: Option<RuntimeDebug>,
-    phase: DaemonPhase,
+    phase: SnapshotPhase,
     #[serde(default)]
     end_reason: String,
     #[serde(default)]
@@ -738,6 +746,10 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     turn_outcome: Option<AcpTurnOutcome>,
     should_persist: bool,
+    #[serde(default)]
+    history_error: Option<String>,
+    #[serde(default)]
+    history_omitted: bool,
 }
 
 impl From<ConversationSnapshotDe> for ConversationSnapshot {
@@ -751,8 +763,12 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             entries: de.entries,
             tool_debug: de.tool_debug,
             runtime_debug: de.runtime_debug,
-            phase: de.phase,
-            end_reason: de.end_reason,
+            phase: de.phase.phase,
+            end_reason: if de.end_reason.is_empty() {
+                de.phase.ended_reason
+            } else {
+                de.end_reason
+            },
             end_kind: de.end_kind,
             accepted_delivery_ids: de.accepted_delivery_ids,
             active_delivery_id: de.active_delivery_id,
@@ -786,6 +802,8 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             completed_unread: de.completed_unread,
             turn_outcome: de.turn_outcome,
             should_persist: de.should_persist,
+            history_error: de.history_error,
+            history_omitted: de.history_omitted,
         }
     }
 }
@@ -801,7 +819,10 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             entries: snap.entries,
             tool_debug: snap.tool_debug,
             runtime_debug: snap.runtime_debug,
-            phase: snap.phase,
+            phase: SnapshotPhase {
+                phase: snap.phase,
+                ended_reason: String::new(),
+            },
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
             accepted_delivery_ids: snap.accepted_delivery_ids,
@@ -836,7 +857,56 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             completed_unread: snap.completed_unread,
             turn_outcome: snap.turn_outcome,
             should_persist: snap.should_persist,
+            history_error: snap.history_error,
+            history_omitted: snap.history_omitted,
         }
+    }
+}
+
+/// 快照相位只认 [`DaemonPhase`] 的 snake_case。旧名字（`Idle`、`Starting`、
+/// `Running`、`Ended`）不再读入。
+struct SnapshotPhase {
+    phase: DaemonPhase,
+    ended_reason: String,
+}
+
+fn snapshot_phase_from_value(value: &serde_json::Value) -> Result<SnapshotPhase, String> {
+    match value {
+        serde_json::Value::String(name) => {
+            snapshot_phase_from_name(name).map(|phase| SnapshotPhase {
+                phase,
+                ended_reason: String::new(),
+            })
+        }
+        _ => Err(format!("无法识别的相位：{value}")),
+    }
+}
+
+fn snapshot_phase_from_name(name: &str) -> Result<DaemonPhase, String> {
+    match name {
+        "connecting" => Ok(DaemonPhase::Connecting),
+        "thinking" => Ok(DaemonPhase::Thinking),
+        "executing_tool" => Ok(DaemonPhase::ExecutingTool),
+        "awaiting_approval" => Ok(DaemonPhase::AwaitingApproval),
+        "waiting_for_user" => Ok(DaemonPhase::WaitingForUser),
+        "succeeded" => Ok(DaemonPhase::Succeeded),
+        "failed" => Ok(DaemonPhase::Failed),
+        "idle" => Ok(DaemonPhase::Idle),
+        "dead" => Ok(DaemonPhase::Dead),
+        _ => Err(format!("无法识别的相位：{name}")),
+    }
+}
+
+impl serde::Serialize for SnapshotPhase {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.phase.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SnapshotPhase {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        snapshot_phase_from_value(&serde_json::Value::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1152,6 +1222,8 @@ impl AcpSessionState {
             completed_unread,
             turn_outcome,
             should_persist: _,
+            history_error: _,
+            history_omitted: _,
         } = snap;
 
         if entries_offset > self.entries.len() {
@@ -1265,6 +1337,35 @@ impl AcpSessionState {
     /// `should_persist` 不是从 `self` 能算出来的——它是"这次变化是怎么发生的"
     /// 这个上下文信息，调用方（smeltd 的事件循环）从 `apply_event` 的返回值
     /// 里拿，这里只负责原样塞进快照，见该字段注释。
+    /// 已落进会话文件的历史终点，以及还没写完的这一轮。
+    /// 空闲且没有进行中的工具时，这一轮是空的。
+    pub fn open_turn_range(&self) -> (usize, usize) {
+        let active = self.turn_started_at_ms.is_some()
+            || matches!(
+                self.phase,
+                DaemonPhase::Thinking
+                    | DaemonPhase::ExecutingTool
+                    | DaemonPhase::AwaitingApproval
+                    | DaemonPhase::WaitingForUser
+            )
+            || crate::acp_chat::has_unfinished_tool_call(&self.entries);
+        if !active {
+            return (self.entries.len(), self.entries.len());
+        }
+        let start = self
+            .entries
+            .iter()
+            .rposition(|entry| {
+                matches!(
+                    entry,
+                    crate::acp_chat::AcpEntry::User(_)
+                        | crate::acp_chat::AcpEntry::UserWithImages { .. }
+                )
+            })
+            .unwrap_or(0);
+        (start, self.entries.len())
+    }
+
     pub fn to_snapshot(&self, should_persist: bool) -> ConversationSnapshot {
         self.to_snapshot_since(should_persist, 0)
     }
@@ -1344,8 +1445,111 @@ impl AcpSessionState {
             completed_unread: self.completed_unread,
             turn_outcome: self.turn_outcome,
             should_persist,
+            history_error: None,
+            history_omitted: false,
         }
     }
+}
+
+/// 会话的活状态。不含历史正文。窗口靠它离开「正在启动」；
+/// 历史读失败不能把相位退回去。
+#[derive(Clone, Debug)]
+pub struct SessionLive {
+    pub phase: DaemonPhase,
+    pub end_reason: String,
+    pub end_kind: AcpEndKind,
+    pub acp_session_id: Option<String>,
+    pub history_session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub status_line: Option<String>,
+    /// 已提交历史的长度。`None` 表示这帧仍把历史放在快照 `entries` 里（旧守护）。
+    pub history_len: Option<usize>,
+    /// 还没写进会话文件的这一轮：用户刚发出的消息、半句话、进行中的工具。
+    pub open_turn: Vec<crate::acp_chat::AcpEntry>,
+}
+
+impl SessionLive {
+    pub fn from_snapshot(snap: &ConversationSnapshot) -> Self {
+        Self {
+            phase: snap.phase,
+            end_reason: snap.end_reason.clone(),
+            end_kind: snap.end_kind,
+            acp_session_id: snap.acp_session_id.clone(),
+            history_session_id: snap.history_session_id.clone(),
+            session_title: snap.session_title.clone(),
+            status_line: snap.status_line.clone(),
+            history_len: None,
+            open_turn: Vec::new(),
+        }
+    }
+
+    pub fn from_state(state: &AcpSessionState) -> Self {
+        let (history_len, end) = state.open_turn_range();
+        let mut live = Self::from_snapshot(&state.to_snapshot(false));
+        live.history_len = Some(history_len);
+        live.open_turn = state.entries[history_len..end].to_vec();
+        live
+    }
+
+    /// 从 `live` 对象或快照对象里取出活状态。相位只认当前 snake_case。
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let phase_value = value.get("phase").ok_or_else(|| "缺少相位".to_string())?;
+        let decoded = snapshot_phase_from_value(phase_value)?;
+        let stored_reason = value
+            .get("end_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let end_reason = if stored_reason.is_empty() {
+            decoded.ended_reason
+        } else {
+            stored_reason.to_string()
+        };
+        let end_kind = value
+            .get("end_kind")
+            .and_then(|kind| serde_json::from_value(kind.clone()).ok())
+            .unwrap_or_default();
+        Ok(Self {
+            phase: decoded.phase,
+            end_reason,
+            end_kind,
+            acp_session_id: json_string(value, "acp_session_id"),
+            history_session_id: json_string(value, "history_session_id"),
+            session_title: json_string(value, "session_title"),
+            status_line: json_string(value, "status_line"),
+            history_len: value
+                .get("history_len")
+                .and_then(serde_json::Value::as_u64)
+                .map(|len| len as usize),
+            open_turn: value
+                .get("open_turn")
+                .and_then(|entries| serde_json::from_value(entries.clone()).ok())
+                .unwrap_or_default(),
+        })
+    }
+}
+
+impl serde::Serialize for SessionLive {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("SessionLive", 9)?;
+        state.serialize_field("phase", &self.phase)?;
+        state.serialize_field("end_reason", &self.end_reason)?;
+        state.serialize_field("end_kind", &self.end_kind)?;
+        state.serialize_field("acp_session_id", &self.acp_session_id)?;
+        state.serialize_field("history_session_id", &self.history_session_id)?;
+        state.serialize_field("session_title", &self.session_title)?;
+        state.serialize_field("status_line", &self.status_line)?;
+        state.serialize_field("history_len", &self.history_len)?;
+        state.serialize_field("open_turn", &self.open_turn)?;
+        state.end()
+    }
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// daemon 镜像只需把 host 快照重新投影给 GUI，不会在本地把字段翻译回 ACP

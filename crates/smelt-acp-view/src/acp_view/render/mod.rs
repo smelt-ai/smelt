@@ -67,6 +67,9 @@ impl AcpView {
         );
         let show_ended_placeholder =
             matches!(self.phase, DaemonPhase::Dead) && self.entries.is_empty();
+        let history_error = (!matches!(self.phase, DaemonPhase::Connecting))
+            .then(|| self.history_error.clone())
+            .flatten();
         let show_empty_conversation_state = should_show_empty_conversation_state(
             &self.phase,
             self.entries.is_empty(),
@@ -667,6 +670,17 @@ impl AcpView {
                 }
             }))
             .bg(acp_surface)
+            .children(history_error.map(|error| {
+                div()
+                    .w_full()
+                    .px_4()
+                    .py_2()
+                    .text_sm()
+                    .text_color(t.danger)
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(error)
+            }))
             .children(banner)
             .children(fork_banner)
             .children(plan_bar)

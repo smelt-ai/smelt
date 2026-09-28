@@ -23,8 +23,11 @@ void main() {
       expect(const AcpPhaseAwaitingApproval().acceptsPrompt, isFalse);
       expect(const AcpPhaseWaitingForUser().acceptsPrompt, isFalse);
       expect(const AcpPhaseDead().acceptsPrompt, isFalse);
+      expect(() => AcpPhase.fromJson('Starting'), throwsFormatException);
+      expect(() => AcpPhase.fromJson('Idle'), throwsFormatException);
+      expect(() => AcpPhase.fromJson('Running'), throwsFormatException);
       expect(
-        () => AcpPhase.fromJson('Starting'),
+        () => AcpPhase.fromJson({'Ended': '握手超时'}),
         throwsFormatException,
       );
       expect(

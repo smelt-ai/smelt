@@ -354,6 +354,7 @@ impl Driver {
             }),
             agent_session: None,
             pending_agent_preset: None,
+            omit_history: false,
         };
         let remote = RemoteAcpSession {
             id: session_id.to_string(),

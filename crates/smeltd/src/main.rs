@@ -3648,6 +3648,13 @@ pub(crate) fn resume_from_value(
             .conversation_state
             .as_ref()
             .and_then(|state| state.agent_session.clone());
+        let reload_history = snapshot.history_omitted;
+        let open_turn = if snapshot.history_omitted {
+            snapshot.entries.clone()
+        } else {
+            Vec::new()
+        };
+        let reload_cwd = cwd.clone();
         let reduced = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
         // `from_snapshot` 会收尾已结束回合中永远不会补到的工具终态。必须在
         // 这一步之后再决定是否恢复活跃 RPC；否则 `Idle + Pending tool` 已经
@@ -3742,6 +3749,9 @@ pub(crate) fn resume_from_value(
                     supports_image,
                     pending_raw_line,
                     recover_running_turn,
+                    reload_history,
+                    cwd: reload_cwd.map(std::path::PathBuf::from),
+                    open_turn,
                 },
             );
             let event_rx = handle.event_rx.clone();

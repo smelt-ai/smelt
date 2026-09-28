@@ -1270,6 +1270,10 @@ pub struct AcpView {
     completed_delivery_id: Option<String>,
     /// 启动阶段的进度文案（下载运行时等），Starting 横幅显示。
     status_line: Option<String>,
+    /// 活状态已生效，历史正文读失败。页面不能因此回到启动中。
+    history_error: Option<String>,
+    /// 第一帧只带未完成的这一轮时，自动向守护要一页已提交历史。
+    history_backfill_started: bool,
     /// None = 已结束的占位视图（重开后才建；Ended 态没有输入框）。
     input: Option<Entity<TextareaState>>,
     /// 输入框是否已有文字草稿；空会话引导随草稿隐藏，清空后再出现。
@@ -1718,6 +1722,8 @@ impl AcpView {
             elicitation_inputs: Default::default(),
             elicitation_input_subscriptions: Default::default(),
             status_line: None,
+            history_error: None,
+            history_backfill_started: false,
             phase: DaemonPhase::Dead,
             end_reason: reason,
             end_kind: AcpEndKind::Unknown,
@@ -2186,6 +2192,7 @@ impl AcpView {
         let stream_generation = self.snapshot_stream_generation;
         self.last_snapshot_revision = 0;
         self.handle = Some(handle);
+        self.history_backfill_started = false;
         if !self.is_fresh_conversation_start() {
             self.tick_starting(cx);
         }
@@ -2222,7 +2229,10 @@ impl AcpView {
                 view.history_loading = false;
                 match result {
                     Ok(snapshot) => view.prepend_history_page(snapshot, cx),
-                    Err(error) => eprintln!("[workspace] ACP 历史分页失败：{error}"),
+                    Err(error) => {
+                        view.history_error = Some(format!("历史读不出来：{error}"));
+                        eprintln!("[workspace] ACP 历史分页失败：{error}");
+                    }
                 }
             });
         })
@@ -3596,6 +3606,10 @@ impl AcpView {
         if new_entries_len > 0 {
             self.awaiting_initial_history_snapshot = false;
         }
+        if self.loaded_entries_offset > 0 && !self.history_backfill_started {
+            self.history_backfill_started = true;
+            self.load_older_history(cx);
+        }
         let snapshot_phase = snap.phase;
         self.phase = snap.phase;
         self.end_reason = snap.end_reason;
@@ -3620,6 +3634,7 @@ impl AcpView {
         }
         let previous_status_line = self.status_line.clone();
         self.status_line = snap.status_line;
+        self.history_error = snap.history_error;
         if config_update_failure_is_new(
             previous_status_line.as_deref(),
             self.status_line.as_deref(),

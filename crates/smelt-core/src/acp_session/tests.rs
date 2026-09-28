@@ -907,6 +907,31 @@ fn missing_turn_outcome_is_not_success() {
 }
 
 #[test]
+fn idle_session_keeps_history_out_of_the_open_turn() {
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    state.entries = vec![
+        AcpEntry::User("以前".into()),
+        AcpEntry::Assistant {
+            text: "好".into(),
+            thought: false,
+        },
+    ];
+    let (start, end) = state.open_turn_range();
+    assert_eq!((start, end), (2, 2));
+    let live = SessionLive::from_state(&state);
+    assert_eq!(live.history_len, Some(2));
+    assert!(live.open_turn.is_empty());
+
+    state.phase = DaemonPhase::Thinking;
+    state.turn_started_at_ms = Some(1);
+    state.entries.push(AcpEntry::User("现在".into()));
+    let snapshot = state.to_snapshot_range(false, state.open_turn_range().0, state.entries.len());
+    assert_eq!(snapshot.entries.len(), 1);
+    assert!(matches!(snapshot.entries[0], AcpEntry::User(ref text) if text == "现在"));
+}
+
+#[test]
 fn snapshot_phase_round_trips_daemon_phase() {
     for phase in [
         DaemonPhase::Connecting,
@@ -947,17 +972,30 @@ fn snapshot_phase_round_trips_daemon_phase() {
     assert_eq!(ended_wire["phase"], "dead");
     assert_eq!(ended_wire["end_reason"], "连接意外中断");
 
-    let rejected = serde_json::from_value::<ConversationSnapshot>(serde_json::json!({
+    let legacy = serde_json::json!({
         "entries": [],
-        "phase": "Starting",
         "pending_elicitation": null,
         "supports_image": true,
         "available_commands": [],
         "config_options": [],
         "completed_unread": false,
         "should_persist": true,
-    }));
-    assert!(rejected.is_err(), "旧阶段名 Starting 不能再进快照");
+    });
+    let mut current = legacy.clone();
+    current["phase"] = serde_json::json!("idle");
+    let parsed: ConversationSnapshot = serde_json::from_value(current).unwrap();
+    assert!(matches!(parsed.phase, DaemonPhase::Idle));
+    for wire in ["Starting", "Idle", "Running", "AwaitingChoice"] {
+        let mut value = legacy.clone();
+        value["phase"] = serde_json::json!(wire);
+        assert!(
+            serde_json::from_value::<ConversationSnapshot>(value).is_err(),
+            "{wire} 不能再进快照"
+        );
+    }
+    let mut ended = legacy;
+    ended["phase"] = serde_json::json!({"Ended": "握手超时"});
+    assert!(serde_json::from_value::<ConversationSnapshot>(ended).is_err());
 }
 
 #[test]

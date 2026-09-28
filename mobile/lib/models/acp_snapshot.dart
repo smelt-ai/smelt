@@ -68,7 +68,7 @@ class AcpSnapshot {
               ?.map((e) => AcpEntry.fromJson(e))
               .toList() ??
           [],
-      phase: AcpPhase.fromJson(data['phase']),
+      phase: _readPhase(data['phase']).phase,
       pendingPermissions:
           (data['pending_permissions'] as List<dynamic>?)
               ?.whereType<Map<String, dynamic>>()
@@ -107,7 +107,11 @@ class AcpSnapshot {
       lastTurnDurationMs: (data['last_turn_duration_ms'] as num?)?.toInt(),
       completedUnread: data['completed_unread'] as bool? ?? false,
       shouldPersist: data['should_persist'] as bool? ?? false,
-      endReason: data['end_reason'] as String? ?? '',
+      endReason: () {
+        final stored = data['end_reason'] as String? ?? '';
+        if (stored.isNotEmpty) return stored;
+        return _readPhase(data['phase']).endedReason;
+      }(),
     );
   }
 
@@ -236,23 +240,7 @@ class AcpSnapshot {
 sealed class AcpPhase {
   const AcpPhase();
 
-  factory AcpPhase.fromJson(dynamic json) {
-    if (json is! String) {
-      throw FormatException('ACP phase must be a string, got $json');
-    }
-    return switch (json) {
-      'connecting' => const AcpPhaseConnecting(),
-      'thinking' => const AcpPhaseThinking(),
-      'executing_tool' => const AcpPhaseExecutingTool(),
-      'awaiting_approval' => const AcpPhaseAwaitingApproval(),
-      'waiting_for_user' => const AcpPhaseWaitingForUser(),
-      'succeeded' => const AcpPhaseSucceeded(),
-      'failed' => const AcpPhaseFailed(),
-      'idle' => const AcpPhaseIdle(),
-      'dead' => const AcpPhaseDead(),
-      _ => throw FormatException('unknown ACP phase: $json'),
-    };
-  }
+  factory AcpPhase.fromJson(dynamic json) => _readPhase(json).phase;
 
   bool get isActive =>
       this is AcpPhaseThinking ||
@@ -457,6 +445,32 @@ String completionSummaryText(List<ToolOutputPart> output) => output
     .map((part) => part.text.trim())
     .where((text) => text.isNotEmpty)
     .join('\n\n');
+
+class _ReadPhase {
+  const _ReadPhase(this.phase, [this.endedReason = '']);
+
+  final AcpPhase phase;
+  final String endedReason;
+}
+
+/// 只认 `DaemonPhase` 的 snake_case。旧名字直接失败。
+_ReadPhase _readPhase(dynamic json) {
+  if (json is! String) {
+    throw FormatException('ACP phase must be a string, got $json');
+  }
+  return switch (json) {
+    'connecting' => const _ReadPhase(AcpPhaseConnecting()),
+    'thinking' => const _ReadPhase(AcpPhaseThinking()),
+    'executing_tool' => const _ReadPhase(AcpPhaseExecutingTool()),
+    'awaiting_approval' => const _ReadPhase(AcpPhaseAwaitingApproval()),
+    'waiting_for_user' => const _ReadPhase(AcpPhaseWaitingForUser()),
+    'succeeded' => const _ReadPhase(AcpPhaseSucceeded()),
+    'failed' => const _ReadPhase(AcpPhaseFailed()),
+    'idle' => const _ReadPhase(AcpPhaseIdle()),
+    'dead' => const _ReadPhase(AcpPhaseDead()),
+    _ => throw FormatException('unknown ACP phase: $json'),
+  };
+}
 
 dynamic _phaseToJson(AcpPhase phase) => switch (phase) {
   AcpPhaseConnecting() => 'connecting',

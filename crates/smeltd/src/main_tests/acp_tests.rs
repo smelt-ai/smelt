@@ -26,6 +26,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                     should_persist,
                     include_runtime_debug,
                     tool_debug_generation_sent,
+                    true,
                 ))
             },
         ),
@@ -412,6 +413,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
             0,
             "acp-action",
             "acp-test",
+            true,
         )
         .unwrap(),
     );
@@ -2099,7 +2101,8 @@ fn kill_removes_session_and_closes_connections() {
 
     let (c_server, c_client) = UnixStream::pair().unwrap();
     slot.value.out.lock().unwrap().client = Some(
-        acp_snapshot_link_for_slot(&slot, c_server, Vec::new(), 0, "acp-3", "acp-test").unwrap(),
+        acp_snapshot_link_for_slot(&slot, c_server, Vec::new(), 0, "acp-3", "acp-test", true)
+            .unwrap(),
     );
 
     let (server, client) = UnixStream::pair().unwrap();

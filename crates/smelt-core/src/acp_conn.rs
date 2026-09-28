@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt, channel::mpsc};
 
@@ -492,8 +492,8 @@ pub enum ReadyKind {
     /// 前后投递回放通知；投影由 `HistoryReplayStarted` 提前清空，Ready 本身
     /// 不得再修改消息。
     ResumedWithReplay,
-    /// smeltd 无缝升级继承 agent stdio fd：连接和完整内存快照都还在，不重放
-    /// 历史。普通冷恢复不走这条，只能通过 `session/load` 重建投影。
+    /// smeltd 无缝升级继承 agent stdio fd，且这次没有重放历史。
+    /// 投影保持交接时的样子：旧文件里的正文还在；新文件加载失败时只剩未完成的一轮。
     ResumedKeepHistory,
 }
 
@@ -1528,6 +1528,11 @@ pub struct ResumedSession {
     pub supports_image: bool,
     pub pending_raw_line: Option<String>,
     pub recover_running_turn: bool,
+    /// 交接文件没有已提交正文。接上后用 `session/load` 重放 agent 会话。
+    /// 只在加载成功之后才清空投影，失败则留下交接里的未完成一轮。
+    pub reload_history: bool,
+    pub cwd: Option<std::path::PathBuf>,
+    pub open_turn: Vec<crate::acp_chat::AcpEntry>,
 }
 
 fn acp_err(message: impl Into<String>) -> agent_client_protocol::Error {
@@ -2392,11 +2397,63 @@ async fn run_resumed_connection(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
-            // 跳过 initialize/newSession/resume/load：agent 早就跟上一个进程
-            // 完成过握手了，这里只是换了个"读它输出的人"。2.1 把
-            // attach_session 收成 crate 私有，无缝升级只能自己挂动态路由。
-            // modes/config_options 留空——只影响"切模型"下拉暂时是空的，下次
-            // agent 发 ConfigOptionUpdate 会自动补上，不影响对话本身。
+            // 这条连接早就跟旧进程握过手，不再 initialize。交接文件没带已提交
+            // 正文时，向仍活着的 agent 发 session/load，让它把会话文件重放出来。
+            // 2.1 的 load 会在请求发出前装好路由，响应返回时，响应前的重放已经
+            // 在会话队列里。只有这一步成功才清空投影；失败就留下未完成的一轮。
+            if resumed.reload_history
+                && let Some(cwd) = resumed.cwd.clone()
+            {
+                let load_request = LoadSessionRequest::new(session_id.clone(), cwd);
+                match wait_for_acp_request(
+                    connection
+                        .load_session_from(load_request)
+                        .block_task()
+                        .start_session(),
+                    "session/load",
+                )
+                .await
+                {
+                    Ok(restored) => {
+                        let (mut session, loaded) = restored.into_parts();
+                        let _ = channels
+                            .event_tx
+                            .try_send(ConversationEvent::HistoryReplayStarted);
+                        let mut replay = ReplayCursor::default();
+                        drain_loaded_replay(&mut session, &channels.event_tx, &mut replay).await?;
+                        for event in
+                            unflushed_open_turn_events(&resumed.open_turn, &replay)
+                        {
+                            let _ = channels.event_tx.try_send(event);
+                        }
+                        let _ = channels
+                            .event_tx
+                            .try_send(ConversationEvent::HistoryReplayFinished);
+                        publish_session_surface(
+                            loaded.config_options.as_deref(),
+                            loaded.modes.as_ref(),
+                            &channels.event_tx,
+                        );
+                        return drive_session(
+                            session,
+                            channels,
+                            ReadyKind::ResumedWithReplay,
+                            resumed.supports_image,
+                            in_flight_rpc,
+                            resumed.recover_running_turn,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        crate::app_log::info(
+                            "acp",
+                            &format!("直接交接重放历史失败，保留未完成的这一轮：{error}"),
+                        );
+                    }
+                }
+            }
+            // 不重放时自己挂动态路由。2.1 把 attach_session 收成 crate 私有。
+            // 加载失败时 modes/config_options 先空着，下次 ConfigOptionUpdate 会补上。
             let session = attach_inherited_session(&connection, session_id)?;
             drive_session(
                 session,
@@ -2409,6 +2466,398 @@ async fn run_resumed_connection(
             .await
         })
         .await
+}
+
+/// 把 `session/load` 响应前已经入队的重放翻译进投影，并记下当前这一轮的形状。
+///
+/// 只取已经就绪的更新。`poll_once` 拿不到就停，不会把还没到的消息从队列里丢掉。
+async fn drain_loaded_replay<S: SessionDrive>(
+    session: &mut S,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    replay: &mut ReplayCursor,
+) -> Result<(), agent_client_protocol::Error> {
+    loop {
+        let ready = {
+            let read = session.read_update();
+            futures::pin_mut!(read);
+            smol::future::poll_once(read).await
+        };
+        match ready {
+            Some(update) => {
+                let update = update?;
+                observe_replay(&update, replay);
+                translate_update(update, event_tx).await?;
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+/// `session/load` 重放里，最后一条用户消息之后的内容。用来判断交接里的
+/// 未完成一轮有哪些已经在会话文件里，避免再贴一份。
+#[derive(Default)]
+struct ReplayCursor {
+    saw_user: bool,
+    in_user: bool,
+    last_user: String,
+    after_user: Vec<ReplaySegment>,
+    tool_ids: BTreeSet<String>,
+}
+
+enum ReplaySegment {
+    Assistant { thought: bool, text: String },
+    Tool,
+}
+
+impl ReplayCursor {
+    fn note_user(&mut self, text: &str) {
+        if !self.in_user {
+            self.last_user.clear();
+            self.after_user.clear();
+            self.in_user = true;
+            self.saw_user = true;
+        }
+        self.last_user.push_str(text);
+    }
+
+    fn note_assistant(&mut self, thought: bool, text: &str) {
+        self.in_user = false;
+        if text.is_empty() {
+            return;
+        }
+        match self.after_user.last_mut() {
+            Some(ReplaySegment::Assistant {
+                thought: same,
+                text: buf,
+            }) if *same == thought => buf.push_str(text),
+            _ => self.after_user.push(ReplaySegment::Assistant {
+                thought,
+                text: text.to_string(),
+            }),
+        }
+    }
+
+    fn note_tool(&mut self, id: &str) {
+        self.in_user = false;
+        if id.is_empty() || !self.tool_ids.insert(id.to_string()) {
+            return;
+        }
+        self.after_user.push(ReplaySegment::Tool);
+    }
+}
+
+fn observe_replay(message: &SessionMessage, replay: &mut ReplayCursor) {
+    let SessionMessage::SessionMessage(dispatch) = message else {
+        return;
+    };
+    let Ok(untyped) = dispatch.to_untyped_message() else {
+        return;
+    };
+    if untyped.method() != "session/update" {
+        return;
+    }
+    let params = untyped.params();
+    let Some(update) = params.get("update") else {
+        return;
+    };
+    if replay_update_is_nested(params, update) {
+        return;
+    }
+    match update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("user_message_chunk") => replay.note_user(update_text(update)),
+        Some("agent_message_chunk") => replay.note_assistant(false, update_text(update)),
+        Some("agent_thought_chunk") => replay.note_assistant(true, update_text(update)),
+        Some("tool_call" | "tool_call_update") => replay.note_tool(update_tool_id(update)),
+        _ => {}
+    }
+}
+
+fn replay_update_is_nested(params: &serde_json::Value, update: &serde_json::Value) -> bool {
+    meta_has_parent(params.get("_meta")) || meta_has_parent(update.get("_meta"))
+}
+
+fn meta_has_parent(meta: Option<&serde_json::Value>) -> bool {
+    parent_tool_id_from_meta(meta.and_then(serde_json::Value::as_object)).is_some()
+}
+
+fn update_text(update: &serde_json::Value) -> &str {
+    update
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+fn update_tool_id(update: &serde_json::Value) -> &str {
+    update
+        .get("toolCallId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+/// 交接里未完成的这一轮，减去会话文件已经重放过的部分。
+///
+/// 用户消息已经在重放里就不再发。助手正文只补文件里还没有的后缀。
+/// 文件里没有的工具按交接时的卡片补回去。
+fn unflushed_open_turn_events(
+    open_turn: &[crate::acp_chat::AcpEntry],
+    replay: &ReplayCursor,
+) -> Vec<ConversationEvent> {
+    let Some(user) = open_turn.first() else {
+        return Vec::new();
+    };
+    let user_text = match user {
+        crate::acp_chat::AcpEntry::User(text) => text.as_str(),
+        crate::acp_chat::AcpEntry::UserWithImages { text, .. } => text.as_str(),
+        _ => {
+            let mut events = Vec::new();
+            push_aligned_tail(open_turn, replay, &mut events);
+            return events;
+        }
+    };
+    let mut events = Vec::new();
+    if !(replay.saw_user && replay.last_user == user_text) {
+        push_user_entry(user, &mut events);
+        for entry in &open_turn[1..] {
+            push_snapshot_entry(entry, replay, &mut events);
+        }
+        return events;
+    }
+    push_aligned_tail(&open_turn[1..], replay, &mut events);
+    events
+}
+
+fn push_aligned_tail(
+    tail: &[crate::acp_chat::AcpEntry],
+    replay: &ReplayCursor,
+    events: &mut Vec<ConversationEvent>,
+) {
+    let mut segments = replay.after_user.iter().peekable();
+    for entry in tail {
+        match entry {
+            crate::acp_chat::AcpEntry::Assistant { text, thought } => {
+                let suffix = match segments.peek() {
+                    Some(ReplaySegment::Assistant {
+                        thought: replayed_thought,
+                        text: replayed,
+                    }) if replayed_thought == thought => {
+                        let replayed = (*replayed).clone();
+                        segments.next();
+                        assistant_suffix(text, &replayed)
+                    }
+                    _ => Some(text.clone()),
+                };
+                if let Some(suffix) = suffix {
+                    push_assistant(*thought, suffix, events);
+                }
+            }
+            crate::acp_chat::AcpEntry::ToolCall { .. } => {
+                if matches!(segments.peek(), Some(ReplaySegment::Tool)) {
+                    segments.next();
+                }
+                push_missing_tool(entry, replay, events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_snapshot_entry(
+    entry: &crate::acp_chat::AcpEntry,
+    replay: &ReplayCursor,
+    events: &mut Vec<ConversationEvent>,
+) {
+    match entry {
+        crate::acp_chat::AcpEntry::Assistant { text, thought } => {
+            push_assistant(*thought, text.clone(), events);
+        }
+        crate::acp_chat::AcpEntry::ToolCall { .. } => push_missing_tool(entry, replay, events),
+        crate::acp_chat::AcpEntry::User(_) | crate::acp_chat::AcpEntry::UserWithImages { .. } => {
+            push_user_entry(entry, events);
+        }
+        crate::acp_chat::AcpEntry::Divider(_) => {}
+    }
+}
+
+fn push_user_entry(entry: &crate::acp_chat::AcpEntry, events: &mut Vec<ConversationEvent>) {
+    match entry {
+        crate::acp_chat::AcpEntry::User(text) => {
+            if !text.is_empty() {
+                events.push(ConversationEvent::UserChunk(text.clone()));
+            }
+        }
+        crate::acp_chat::AcpEntry::UserWithImages { text, images } => {
+            if !text.is_empty() {
+                events.push(ConversationEvent::UserChunk(text.clone()));
+            }
+            for image in images {
+                events.push(ConversationEvent::UserImage(image.clone()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_assistant(thought: bool, text: String, events: &mut Vec<ConversationEvent>) {
+    if text.is_empty() {
+        return;
+    }
+    events.push(ConversationEvent::AgentChunk {
+        thought,
+        text,
+        parent_id: None,
+    });
+}
+
+fn push_missing_tool(
+    entry: &crate::acp_chat::AcpEntry,
+    replay: &ReplayCursor,
+    events: &mut Vec<ConversationEvent>,
+) {
+    let crate::acp_chat::AcpEntry::ToolCall {
+        id,
+        title,
+        kind,
+        status,
+        output,
+        children,
+    } = entry
+    else {
+        return;
+    };
+    if replay.tool_ids.contains(id) {
+        return;
+    }
+    events.push(ConversationEvent::ToolStarted {
+        id: id.clone(),
+        title: title.clone(),
+        kind: *kind,
+    });
+    events.push(ConversationEvent::ToolFinished {
+        id: id.clone(),
+        status: *status,
+        output: output.clone(),
+    });
+    if !children.is_empty() {
+        events.push(ConversationEvent::ToolChildren {
+            id: id.clone(),
+            children: children.clone(),
+            debug: BTreeMap::new(),
+        });
+    }
+}
+
+/// 快照里的助手正文减去文件已经写过的前缀。对不上时保留快照全文，半句不能丢。
+fn assistant_suffix(snapshot: &str, replayed: &str) -> Option<String> {
+    if let Some(suffix) = snapshot.strip_prefix(replayed) {
+        return (!suffix.is_empty()).then(|| suffix.to_string());
+    }
+    if replayed.starts_with(snapshot) {
+        return None;
+    }
+    Some(snapshot.to_string())
+}
+
+#[cfg(test)]
+mod open_turn_replay_tests {
+    use super::*;
+
+    fn user_turn(user: &str, assistant: &str) -> Vec<crate::acp_chat::AcpEntry> {
+        vec![
+            crate::acp_chat::AcpEntry::User(user.into()),
+            crate::acp_chat::AcpEntry::Assistant {
+                text: assistant.into(),
+                thought: false,
+            },
+        ]
+    }
+
+    fn replay_of(user: &str, assistant: &str) -> ReplayCursor {
+        let mut replay = ReplayCursor::default();
+        replay.note_user(user);
+        if !assistant.is_empty() {
+            replay.note_assistant(false, assistant);
+        }
+        replay
+    }
+
+    #[test]
+    fn flushed_prefix_keeps_only_the_unwritten_suffix() {
+        let events = unflushed_open_turn_events(
+            &user_turn("现在", "Hello wor"),
+            &replay_of("现在", "Hello"),
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ConversationEvent::AgentChunk { thought: false, text, parent_id: None }
+                if text == " wor"
+        ));
+    }
+
+    #[test]
+    fn fully_flushed_assistant_is_not_sent_again() {
+        let events =
+            unflushed_open_turn_events(&user_turn("现在", "Hello"), &replay_of("现在", "Hello"));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn missing_user_message_is_sent_with_the_whole_turn() {
+        let events =
+            unflushed_open_turn_events(&user_turn("现在", "半句"), &ReplayCursor::default());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ConversationEvent::UserChunk(text) if text == "现在"));
+        assert!(matches!(
+            &events[1],
+            ConversationEvent::AgentChunk { text, .. } if text == "半句"
+        ));
+    }
+
+    #[test]
+    fn tool_missing_from_replay_is_restored_from_the_snapshot() {
+        let open_turn = vec![
+            crate::acp_chat::AcpEntry::User("现在".into()),
+            crate::acp_chat::AcpEntry::tool_call(
+                "tc-1",
+                "读文件",
+                crate::acp_chat::ToolKind::Read,
+                crate::acp_chat::ToolCallStatus::InProgress,
+                vec![crate::acp_chat::ToolOutputPart::Text("一部分".into())],
+            ),
+        ];
+        let events = unflushed_open_turn_events(&open_turn, &replay_of("现在", ""));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::ToolStarted { id, .. } if id == "tc-1"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::ToolFinished { id, output, .. }
+                if id == "tc-1" && output.len() == 1
+        )));
+    }
+
+    #[test]
+    fn tool_already_replayed_is_not_emitted_again() {
+        let open_turn = vec![
+            crate::acp_chat::AcpEntry::User("现在".into()),
+            crate::acp_chat::AcpEntry::tool_call(
+                "tc-1",
+                "读文件",
+                crate::acp_chat::ToolKind::Read,
+                crate::acp_chat::ToolCallStatus::InProgress,
+                Vec::new(),
+            ),
+        ];
+        let mut replay = replay_of("现在", "");
+        replay.note_tool("tc-1");
+        let events = unflushed_open_turn_events(&open_turn, &replay);
+        assert!(events.is_empty());
+    }
 }
 
 /// 已建立会话的最小读写面：官方 `ActiveSession` 和无缝升级的自建路由共用。

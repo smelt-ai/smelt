@@ -224,6 +224,8 @@ pub(crate) struct AcpOpenRequest {
     /// 分叉副本的切点（与 `fork_id` 搭配）：整拷打开后、重放前切到该用户消息
     /// 之前。见 `smelt_core::acp_conn::AcpForkCut`。
     pub(crate) fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
+    /// 旧客户端用来限制首帧历史长度。窗口现在按页另取历史，这个字段保留给协议，不再裁首帧。
+    #[allow(dead_code)]
     pub(crate) tail_limit: Option<usize>,
     /// `None` 表示客户端未指定。已有会话仅在 daemon 自己仍未知时采用该值。
     pub(crate) conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
@@ -231,6 +233,8 @@ pub(crate) struct AcpOpenRequest {
     pub(crate) agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     /// 仅在创建新的 daemon 会话时采用；热 attach 不得用客户端旧存档覆盖已消费值。
     pub(crate) pending_agent_preset: Option<String>,
+    /// 窗口只要活状态。会话宿主和守护之间的镜像必须带历史，否则分页没有正文。
+    pub(crate) omit_history: bool,
 }
 
 pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenRequest> {
@@ -278,6 +282,7 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
             .map(str::trim)
             .filter(|prompt| !prompt.is_empty())
             .map(String::from),
+        omit_history: v["omit_history"].as_bool().unwrap_or(false),
     })
 }
 
@@ -638,6 +643,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
     tool_debug_generation_sent: u64,
     id: &str,
     kind: &'static str,
+    include_history: bool,
 ) -> std::io::Result<AcpSnapshotLink> {
     let encode_slot = Arc::downgrade(slot);
     let detach_slot = Arc::downgrade(slot);
@@ -656,6 +662,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
                     should_persist,
                     include_runtime_debug,
                     tool_debug_generation_sent,
+                    include_history,
                 ))
             },
         ),
@@ -777,12 +784,24 @@ pub(crate) fn encode_acp_snapshot(
     should_persist: bool,
     include_runtime_debug: bool,
     tool_debug_generation_sent: u64,
+    include_history: bool,
 ) -> EncodedAcpSnapshot {
-    let (mut snap, tool_debug_generation, included_tool_debug) = {
+    let (mut snap, live, tool_debug_generation, included_tool_debug) = {
         let reduced = sess.reduced.lock().unwrap();
         let tool_debug_generation = reduced.tool_debug_generation;
         let included_tool_debug = tool_debug_generation != tool_debug_generation_sent;
-        let mut snapshot = reduced.to_snapshot_since(should_persist, from);
+        let live = if include_history {
+            smelt_core::acp_session::SessionLive::from_snapshot(&reduced.to_snapshot(false))
+        } else {
+            smelt_core::acp_session::SessionLive::from_state(&reduced)
+        };
+        let mut snapshot = if include_history {
+            reduced.to_snapshot_since(should_persist, from)
+        } else {
+            let history_len = live.history_len.unwrap_or(0);
+            let end = history_len.saturating_add(live.open_turn.len());
+            reduced.to_snapshot_range(should_persist, history_len, end)
+        };
         if !include_runtime_debug {
             snapshot.runtime_debug = None;
         }
@@ -790,7 +809,7 @@ pub(crate) fn encode_acp_snapshot(
             snapshot.tool_debug = None;
         }
         snapshot.snapshot_revision = sess.snapshot_revision.fetch_add(1, Ordering::SeqCst) + 1;
-        (snapshot, tool_debug_generation, included_tool_debug)
+        (snapshot, live, tool_debug_generation, included_tool_debug)
     };
     set_conversation_snapshot(sess, &mut snap);
     let provider_pid = sess
@@ -800,6 +819,7 @@ pub(crate) fn encode_acp_snapshot(
         .as_ref()
         .and_then(|handle| handle.stdio.lock().unwrap().map(|stdio| stdio.pid));
     let mut payload = serde_json::json!({
+        "live": live,
         "snapshot": snap,
         "provider_pid": provider_pid,
     })
@@ -2799,12 +2819,16 @@ pub(crate) fn handle_acp_open(
             let _output_gate = sess.output_gate.lock().unwrap();
             let Ok(c) = conn.try_clone() else { return };
             let reduced = sess.reduced.lock().unwrap();
-            let offset = req
-                .tail_limit
-                .map(|limit| reduced.entries.len().saturating_sub(limit))
-                .unwrap_or(0);
+            let omit_history = req.omit_history;
+            let live = smelt_core::acp_session::SessionLive::from_state(&reduced);
             let tool_debug_generation = reduced.tool_debug_generation;
-            let mut snapshot = reduced.to_snapshot_since(false, offset);
+            let mut snapshot = if omit_history {
+                let history_len = live.history_len.unwrap_or(0);
+                let end = history_len.saturating_add(live.open_turn.len());
+                reduced.to_snapshot_range(false, history_len, end)
+            } else {
+                reduced.to_snapshot(false)
+            };
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             drop(reduced);
             set_conversation_snapshot(sess, &mut snapshot);
@@ -2815,6 +2839,7 @@ pub(crate) fn handle_acp_open(
                 .as_ref()
                 .and_then(|handle| handle.stdio.lock().unwrap().map(|stdio| stdio.pid));
             let mut initial = serde_json::json!({
+                "live": live,
                 "snapshot": snapshot,
                 "provider_pid": provider_pid,
             })
@@ -2828,6 +2853,7 @@ pub(crate) fn handle_acp_open(
                 tool_debug_generation,
                 &id,
                 "acp-client",
+                !req.omit_history,
             ) else {
                 return;
             };
@@ -3194,6 +3220,7 @@ pub(crate) fn handle_acp_watch(
             tool_debug_generation,
             &id,
             "acp-watcher",
+            true,
         ) else {
             return;
         };
@@ -3516,12 +3543,16 @@ fn recorded_handoff_launch(sess: &AcpSession) -> smelt_core::agent_kind::Convers
     })
 }
 
-/// 交接帧必须整帧成功。调试 sidecar 留空表示这一帧不替换：已打开的界面保留
-/// 自己的副本，新进程从后续模型调用重新记录。
+/// 交接不带走已提交的消息正文。那些在 agent 自己的会话文件里，新进程重读。
+/// 这里只留相位、身份，以及还没写完的这一轮。
 fn conversation_snapshot_for_handoff(
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> smelt_core::acp_session::ConversationSnapshot {
-    let mut snapshot = reduced.to_snapshot(false);
+    let (history_len, end) = reduced.open_turn_range();
+    let mut snapshot = reduced.to_snapshot_range(false, history_len, end);
+    snapshot.entries_offset = 0;
+    snapshot.entries_total = snapshot.entries.len();
+    snapshot.history_omitted = true;
     snapshot.runtime_debug = None;
     snapshot.tool_debug = None;
     snapshot
@@ -3736,6 +3767,31 @@ mod snapshot_link_tests {
     /// 历史重放会在写线程还堵在 socket 上时连续 mark。旧邮箱把这些快照排成字节
     /// 队列，超限就摘连接；现在必须还连着，并且只序列化一份覆盖全部 mark 的快照。
     #[test]
+    fn direct_handoff_snapshot_omits_committed_history() {
+        let mut state = smelt_core::acp_session::AcpSessionState::default();
+        state.phase = smelt_core::daemon_state::DaemonPhase::Idle;
+        state.entries = vec![smelt_core::acp_chat::AcpEntry::User("以前".into())];
+        let snapshot = conversation_snapshot_for_handoff(&state);
+        assert!(
+            snapshot.entries.is_empty(),
+            "空闲会话的已提交消息不能进交接文件"
+        );
+
+        state.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
+        state.turn_started_at_ms = Some(1);
+        state
+            .entries
+            .push(smelt_core::acp_chat::AcpEntry::User("现在".into()));
+        let snapshot = conversation_snapshot_for_handoff(&state);
+        assert!(snapshot.history_omitted);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert!(matches!(
+            &snapshot.entries[0],
+            smelt_core::acp_chat::AcpEntry::User(text) if text == "现在"
+        ));
+    }
+
+    #[test]
     fn burst_while_writer_is_blocked_coalesces_and_stays_connected() {
         let slot = Arc::new(AcpSlot {
             lifecycle: Mutex::new(()),
@@ -3765,6 +3821,7 @@ mod snapshot_link_tests {
             0,
             "acp-burst",
             "acp-client",
+            true,
         )
         .unwrap();
         slot.value.out.lock().unwrap().client = Some(link);
