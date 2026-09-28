@@ -200,6 +200,35 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
     }
 }
 
+/// 一行控制连接上的消息。没有 `snapshot` 的行忽略；`snapshot` 在但读不懂时
+/// 必须结束启动等待，不能当成「还没连上」继续转圈。
+enum SnapshotFrame {
+    Ignore,
+    Snapshot(ConversationSnapshot),
+    Unreadable(ConversationSnapshot),
+}
+
+fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return SnapshotFrame::Ignore;
+    };
+    let Some(snapshot) = value.get("snapshot") else {
+        return SnapshotFrame::Ignore;
+    };
+    match serde_json::from_value::<ConversationSnapshot>(snapshot.clone()) {
+        Ok(snapshot) => SnapshotFrame::Snapshot(snapshot),
+        Err(error) => {
+            let mut terminal = fallback_snapshot(
+                &format!("会话快照无法解析，启动等待已结束：{error}"),
+                entries_offset,
+            );
+            // 传输断开会触发自动重连，重连后还是这份读不懂的快照，页面会回到转圈。
+            terminal.end_kind = AcpEndKind::Unknown;
+            SnapshotFrame::Unreadable(terminal)
+        }
+    }
+}
+
 fn snapshot_after_stream_disconnect(
     last_phase: Option<DaemonPhase>,
     entries_offset: usize,
@@ -332,21 +361,20 @@ pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientH
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-                    continue;
-                };
-                let Some(snap_v) = v.get("snapshot") else {
-                    continue;
-                };
-                let Ok(snap) = serde_json::from_value::<ConversationSnapshot>(snap_v.clone())
-                else {
-                    continue;
-                };
-                known_entries_end = snap.entries_offset.saturating_add(snap.entries.len());
-                known_session_title = snap.session_title.clone();
-                last_phase = Some(snap.phase);
-                if snapshot_tx.try_send(snap).is_err() {
-                    return; // 接收端（GUI 视图）没了
+                match read_snapshot_frame(&line, known_entries_end) {
+                    SnapshotFrame::Ignore => continue,
+                    SnapshotFrame::Unreadable(terminal) => {
+                        let _ = snapshot_tx.try_send(terminal);
+                        return;
+                    }
+                    SnapshotFrame::Snapshot(snap) => {
+                        known_entries_end = snap.entries_offset.saturating_add(snap.entries.len());
+                        known_session_title = snap.session_title.clone();
+                        last_phase = Some(snap.phase);
+                        if snapshot_tx.try_send(snap).is_err() {
+                            return; // 接收端（GUI 视图）没了
+                        }
+                    }
                 }
             }
             if let Some(disconnected) =
@@ -437,7 +465,8 @@ pub fn restart_acp_session(id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACP_INITIAL_TAIL_LIMIT, ConversationClientLaunch, acp_open_request, acp_snapshot_request,
+        ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, SnapshotFrame,
+        acp_open_request, acp_snapshot_request, read_snapshot_frame,
         snapshot_after_stream_disconnect, spawn_acp_session_kill,
     };
     use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
@@ -572,6 +601,30 @@ mod tests {
         assert_eq!(
             req["agent_session"]["agent"]["contribution_id"],
             "quant-agent"
+        );
+    }
+
+    #[test]
+    fn unreadable_snapshot_phase_ends_startup_wait() {
+        let mut snapshot = crate::acp_session::AcpSessionState::default().to_snapshot(false);
+        snapshot.phase = crate::daemon_state::DaemonPhase::Idle;
+        let mut frame = serde_json::json!({ "snapshot": snapshot });
+        frame["snapshot"]["phase"] = serde_json::json!("Idle");
+
+        let SnapshotFrame::Unreadable(terminal) = read_snapshot_frame(&frame.to_string(), 12)
+        else {
+            panic!("旧相位名不能再被悄悄丢掉，否则页面会停在正在启动");
+        };
+        assert!(matches!(
+            terminal.phase,
+            crate::daemon_state::DaemonPhase::Dead
+        ));
+        assert_eq!(terminal.end_kind, AcpEndKind::Unknown);
+        assert_eq!(terminal.entries_offset, 12);
+        assert!(
+            terminal.end_reason.contains("Idle"),
+            "失败原因要带上读不懂的相位，实际是：{}",
+            terminal.end_reason
         );
     }
 
