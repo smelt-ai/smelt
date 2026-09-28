@@ -557,7 +557,7 @@ fn write_json_file(path: &Path, value: &serde_json::Value, secure: bool) -> Resu
     let content =
         serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
 
-    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp_path = unique_tmp_path(path);
     {
         use std::io::Write as _;
         let mut file = std::fs::File::create(&tmp_path)
@@ -571,10 +571,114 @@ fn write_json_file(path: &Path, value: &serde_json::Value, secure: bool) -> Resu
             .map_err(|e| format!("写入临时文件 {} 失败：{e}", tmp_path.display()))?;
         file.flush()
             .map_err(|e| format!("刷新临时文件 {} 失败：{e}", tmp_path.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("同步临时文件 {} 失败：{e}", tmp_path.display()))?;
     }
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("覆盖写入 {} 失败：{e}", path.display()))?;
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("覆盖写入 {} 失败：{error}", path.display()));
+    }
     Ok(())
+}
+
+/// Pi 和登录助手用 `proper-lockfile` 锁 `auth.json`：锁是旁边的 `auth.json.lock` 目录。
+/// 不参与这把锁就可能用旧快照把刚刷新的 OAuth 覆盖掉。
+const AUTH_LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(30);
+const AUTH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug)]
+struct AuthFileLock {
+    path: PathBuf,
+}
+
+impl AuthFileLock {
+    fn acquire(auth_path: &Path, wait: std::time::Duration) -> Result<Self, String> {
+        if let Some(parent) = auth_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("创建目录 {} 失败：{error}", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let path = auth_lock_path(auth_path);
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if auth_lock_is_stale(&path) {
+                        let _ = std::fs::remove_dir(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err("auth.json 正被其它进程写入，请稍后再试".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => {
+                    return Err(format!("无法锁定 {}：{error}", auth_path.display()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for AuthFileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+fn auth_lock_path(auth_path: &Path) -> PathBuf {
+    let mut name = auth_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("auth.json"));
+    name.push(".lock");
+    auth_path.with_file_name(name)
+}
+
+fn auth_lock_is_stale(lock_path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(lock_path) else {
+        return true;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    modified
+        .checked_add(AUTH_LOCK_STALE)
+        .is_none_or(|expires| expires <= std::time::SystemTime::now())
+}
+
+fn update_auth_json(
+    auth_path: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<(), String> {
+    let _lock = AuthFileLock::acquire(auth_path, AUTH_LOCK_WAIT)?;
+    let mut auth = read_or_create_json(auth_path)?;
+    let Some(obj) = auth.as_object_mut() else {
+        return Err(format!("{} 不是 JSON 对象", auth_path.display()));
+    };
+    let before = obj.clone();
+    mutate(obj);
+    if *obj == before {
+        return Ok(());
+    }
+    write_json_file(auth_path, &auth, true)
+}
+
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("json"));
+    name.push(format!(".tmp.{}.{nonce}", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// 保存默认模型配置及可选 API Key。
@@ -616,53 +720,79 @@ pub fn save_pi_default_model_at(
     if let Some(key) = api_key {
         let key = key.trim();
         if !key.is_empty() {
-            let mut auth = read_or_create_json(&auth_path)?;
-            if let Some(obj) = auth.as_object_mut() {
+            let provider = config.provider.trim().to_string();
+            update_auth_json(&auth_path, |obj| {
                 obj.insert(
-                    config.provider.trim().to_string(),
+                    provider,
                     serde_json::json!({
                         "type": "api_key",
                         "key": key
                     }),
                 );
-            }
-            write_json_file(&auth_path, &auth, true)?;
+            })?;
         }
     }
 
+    // 空 base_url 是「这次没改地址」，不是删除。设默认模型的调用方没有这个字段，
+    // 不能借保存默认模型清掉用户已经配好的网关。要清地址走 `clear_pi_provider_base_url`。
     let base_url = config.base_url.trim();
-    let mut models = read_or_create_json(&models_path)?;
-    let mut models_changed = false;
-    if let Some(models_obj) = models.as_object_mut() {
-        let providers = models_obj
-            .entry("providers")
-            .or_insert_with(|| serde_json::json!({}));
-        if let Some(providers_obj) = providers.as_object_mut() {
-            if !base_url.is_empty() {
+    if !base_url.is_empty() {
+        let mut models = read_or_create_json(&models_path)?;
+        if let Some(models_obj) = models.as_object_mut() {
+            let providers = models_obj
+                .entry("providers")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(providers_obj) = providers.as_object_mut() {
                 let entry = providers_obj
                     .entry(config.provider.trim())
                     .or_insert_with(|| serde_json::json!({}));
                 if let Some(entry_obj) = entry.as_object_mut() {
                     entry_obj.insert("baseUrl".to_string(), serde_json::json!(base_url));
-                    models_changed = true;
-                }
-            } else if let Some(entry) = providers_obj.get_mut(config.provider.trim())
-                && let Some(entry_obj) = entry.as_object_mut()
-            {
-                if entry_obj.remove("baseUrl").is_some() {
-                    models_changed = true;
-                }
-                if entry_obj.is_empty() {
-                    providers_obj.remove(config.provider.trim());
-                    models_changed = true;
+                    write_json_file(&models_path, &models, false)?;
                 }
             }
         }
     }
-    if models_changed {
+
+    Ok(())
+}
+
+/// 去掉一个 provider 的 `baseUrl` 覆写，其它字段不动。
+///
+/// 设置页清空地址框是明确的删除。设默认模型不走这里。
+pub fn clear_pi_provider_base_url(provider_id: &str) -> Result<(), String> {
+    clear_pi_provider_base_url_at(&pi_agent_dir(), provider_id)
+}
+
+pub fn clear_pi_provider_base_url_at(agent_dir: &Path, provider_id: &str) -> Result<(), String> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        return Ok(());
+    }
+    let models_path = agent_dir.join("models.json");
+    if !models_path.is_file() {
+        return Ok(());
+    }
+    let mut models = read_or_create_json(&models_path)?;
+    let mut changed = false;
+    if let Some(providers) = models
+        .get_mut("providers")
+        .and_then(|providers| providers.as_object_mut())
+        && let Some(entry) = providers
+            .get_mut(provider_id)
+            .and_then(|entry| entry.as_object_mut())
+    {
+        if entry.remove("baseUrl").is_some() {
+            changed = true;
+        }
+        if entry.is_empty() {
+            providers.remove(provider_id);
+            changed = true;
+        }
+    }
+    if changed {
         write_json_file(&models_path, &models, false)?;
     }
-
     Ok(())
 }
 
@@ -696,8 +826,37 @@ pub fn save_pi_custom_provider(
     save_pi_custom_provider_at(&pi_agent_dir(), provider, api_key, set_default)
 }
 
+/// 保存自定义 provider，并在同一次写入里把 `previous_id` 改成新 id。
+///
+/// 先删后存会在保存失败时把旧 provider 和凭据一起丢掉。这里只改内存里的两份
+/// JSON，写盘失败则磁盘上的旧条目还在。
+pub fn save_pi_custom_provider_replacing(
+    previous_id: Option<&str>,
+    provider: &PiCustomProvider,
+    api_key: Option<&str>,
+    set_default: bool,
+) -> Result<(), String> {
+    save_pi_custom_provider_replacing_at(
+        &pi_agent_dir(),
+        previous_id,
+        provider,
+        api_key,
+        set_default,
+    )
+}
+
 pub fn save_pi_custom_provider_at(
     agent_dir: &Path,
+    provider: &PiCustomProvider,
+    api_key: Option<&str>,
+    set_default: bool,
+) -> Result<(), String> {
+    save_pi_custom_provider_replacing_at(agent_dir, None, provider, api_key, set_default)
+}
+
+pub fn save_pi_custom_provider_replacing_at(
+    agent_dir: &Path,
+    previous_id: Option<&str>,
     provider: &PiCustomProvider,
     api_key: Option<&str>,
     set_default: bool,
@@ -705,6 +864,13 @@ pub fn save_pi_custom_provider_at(
     let models_path = agent_dir.join("models.json");
     let auth_path = agent_dir.join("auth.json");
     let settings_path = agent_dir.join("settings.json");
+    let new_id = provider.id.trim();
+    if new_id.is_empty() {
+        return Err("Provider ID 不能为空".to_string());
+    }
+    let previous_id = previous_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != new_id);
 
     let mut models = read_or_create_json(&models_path)?;
     if let Some(models_obj) = models.as_object_mut() {
@@ -712,70 +878,70 @@ pub fn save_pi_custom_provider_at(
             .entry("providers")
             .or_insert_with(|| serde_json::json!({}));
         if let Some(providers_obj) = providers.as_object_mut() {
-            let model_items: Vec<serde_json::Value> = provider
-                .models
-                .iter()
-                .map(|m| {
-                    let id = m.id.trim();
-                    let name = if m.name.trim().is_empty() {
-                        id
-                    } else {
-                        m.name.trim()
-                    };
-                    let mut item = serde_json::json!({
-                        "id": id,
-                        "name": name
-                    });
-                    if let Some(cw) = m.context_window {
-                        item.as_object_mut()
-                            .unwrap()
-                            .insert("contextWindow".to_string(), serde_json::json!(cw));
-                    }
-                    if let Some(mt) = m.max_tokens {
-                        item.as_object_mut()
-                            .unwrap()
-                            .insert("maxTokens".to_string(), serde_json::json!(mt));
-                    }
-                    item
-                })
-                .collect();
-
-            let display_name = if provider.display_name.trim().is_empty() {
-                provider.id.trim()
-            } else {
-                provider.display_name.trim()
-            };
-            let mut entry = serde_json::json!({
-                "name": display_name,
-                "api": provider.api.trim(),
-                "models": model_items
-            });
-            if !provider.base_url.trim().is_empty() {
-                entry.as_object_mut().unwrap().insert(
-                    "baseUrl".to_string(),
-                    serde_json::json!(provider.base_url.trim()),
-                );
+            let existing = previous_id
+                .and_then(|id| providers_obj.get(id).cloned())
+                .or_else(|| providers_obj.get(new_id).cloned());
+            let entry = merge_custom_provider_entry(existing.as_ref(), provider);
+            if let Some(previous_id) = previous_id {
+                providers_obj.remove(previous_id);
             }
-            providers_obj.insert(provider.id.trim().to_string(), entry);
+            providers_obj.insert(new_id.to_string(), entry);
         }
     }
-    write_json_file(&models_path, &models, false)?;
 
-    if let Some(key) = api_key {
-        let key = key.trim();
-        if !key.is_empty() {
-            let mut auth = read_or_create_json(&auth_path)?;
-            if let Some(obj) = auth.as_object_mut() {
+    // 两份文件不能一次 rename。持有 Pi 的 auth 锁期间先写凭据；models.json 失败时写回去。
+    let new_key = api_key.map(str::trim).filter(|key| !key.is_empty());
+    let _auth_lock = if new_key.is_some() || previous_id.is_some() {
+        Some(AuthFileLock::acquire(&auth_path, AUTH_LOCK_WAIT)?)
+    } else {
+        None
+    };
+    let original_auth = if auth_path.is_file() {
+        Some(read_or_create_json(&auth_path)?)
+    } else {
+        None
+    };
+    let mut auth_changed = false;
+    if new_key.is_some() || previous_id.is_some() {
+        let mut auth = original_auth
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = auth.as_object_mut() {
+            if let Some(key) = new_key {
                 obj.insert(
-                    provider.id.trim().to_string(),
+                    new_id.to_string(),
                     serde_json::json!({
                         "type": "api_key",
                         "key": key
                     }),
                 );
+                auth_changed = true;
+                if let Some(previous_id) = previous_id {
+                    obj.remove(previous_id);
+                }
+            } else if let Some(previous_id) = previous_id
+                && let Some(credential) = obj.remove(previous_id)
+            {
+                obj.insert(new_id.to_string(), credential);
+                auth_changed = true;
             }
+        }
+        if auth_changed {
             write_json_file(&auth_path, &auth, true)?;
         }
+    }
+    if let Err(error) = write_json_file(&models_path, &models, false) {
+        if auth_changed {
+            match &original_auth {
+                Some(original) => {
+                    let _ = write_json_file(&auth_path, original, true);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&auth_path);
+                }
+            }
+        }
+        return Err(error);
     }
 
     let should_set_default = set_default || !settings_path.is_file() || {
@@ -807,6 +973,91 @@ pub fn save_pi_custom_provider_at(
     }
 
     Ok(())
+}
+
+/// 只改编辑器拥有的字段。`headers`、`apiKey`、模型上的 `input` 等未建模字段留在原对象上。
+fn merge_custom_provider_entry(
+    existing: Option<&serde_json::Value>,
+    provider: &PiCustomProvider,
+) -> serde_json::Value {
+    let mut entry = existing
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let existing_models = entry
+        .get("models")
+        .and_then(|models| models.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let display_name = if provider.display_name.trim().is_empty() {
+        provider.id.trim()
+    } else {
+        provider.display_name.trim()
+    };
+    let Some(obj) = entry.as_object_mut() else {
+        return serde_json::json!({});
+    };
+    obj.insert("name".to_string(), serde_json::json!(display_name));
+    obj.insert("api".to_string(), serde_json::json!(provider.api.trim()));
+    if provider.base_url.trim().is_empty() {
+        obj.remove("baseUrl");
+    } else {
+        obj.insert(
+            "baseUrl".to_string(),
+            serde_json::json!(provider.base_url.trim()),
+        );
+    }
+    let models = provider
+        .models
+        .iter()
+        .filter(|model| !model.id.trim().is_empty())
+        .map(|model| merge_custom_model(&existing_models, model))
+        .collect();
+    obj.insert("models".to_string(), serde_json::Value::Array(models));
+    entry
+}
+
+fn merge_custom_model(
+    existing_models: &[serde_json::Value],
+    model: &PiCustomModel,
+) -> serde_json::Value {
+    let id = model.id.trim();
+    let mut item = existing_models
+        .iter()
+        .find(|candidate| candidate.get("id").and_then(|value| value.as_str()) == Some(id))
+        .filter(|candidate| candidate.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let name = if model.name.trim().is_empty() {
+        id
+    } else {
+        model.name.trim()
+    };
+    let Some(obj) = item.as_object_mut() else {
+        return serde_json::json!({ "id": id, "name": name });
+    };
+    obj.insert("id".to_string(), serde_json::json!(id));
+    obj.insert("name".to_string(), serde_json::json!(name));
+    match model.context_window {
+        Some(context_window) => {
+            obj.insert(
+                "contextWindow".to_string(),
+                serde_json::json!(context_window),
+            );
+        }
+        None => {
+            obj.remove("contextWindow");
+        }
+    }
+    match model.max_tokens {
+        Some(max_tokens) => {
+            obj.insert("maxTokens".to_string(), serde_json::json!(max_tokens));
+        }
+        None => {
+            obj.remove("maxTokens");
+        }
+    }
+    item
 }
 
 /// 读一个自定义 provider 的 API key。
@@ -907,12 +1158,9 @@ pub fn remove_pi_custom_provider_at(agent_dir: &Path, provider_id: &str) -> Resu
     write_json_file(&models_path, &models, false)?;
 
     if auth_path.is_file() {
-        let mut auth = read_or_create_json(&auth_path)?;
-        if let Some(obj) = auth.as_object_mut()
-            && obj.remove(provider_id).is_some()
-        {
-            write_json_file(&auth_path, &auth, true)?;
-        }
+        update_auth_json(&auth_path, |obj| {
+            obj.remove(provider_id);
+        })?;
     }
 
     Ok(())
@@ -1055,6 +1303,114 @@ mod tests {
             read_pi_provider_api_key_at(temp.path(), "gw").as_deref(),
             Some("sk-test")
         );
+    }
+
+    #[test]
+    fn setting_default_model_keeps_an_unspecified_base_url() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("models.json"),
+            r#"{"providers":{"gw":{"baseUrl":"https://gw.example/v1","headers":{"X-Test":"1"}}}}"#,
+        )
+        .unwrap();
+        save_pi_default_model_at(
+            temp.path(),
+            &PiDefaultModelConfig {
+                provider: "gw".to_string(),
+                model: "m1".to_string(),
+                base_url: String::new(),
+                thinking_level: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(temp.path().join("models.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["providers"]["gw"]["baseUrl"], "https://gw.example/v1");
+        assert_eq!(value["providers"]["gw"]["headers"]["X-Test"], "1");
+
+        clear_pi_provider_base_url_at(temp.path(), "gw").unwrap();
+        let raw = std::fs::read_to_string(temp.path().join("models.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value["providers"]["gw"].get("baseUrl").is_none());
+        assert_eq!(value["providers"]["gw"]["headers"]["X-Test"], "1");
+    }
+
+    #[test]
+    fn saving_custom_provider_keeps_unmodeled_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("models.json"),
+            r#"{"providers":{"gw":{"name":"Old","api":"openai-completions","baseUrl":"https://old.example/v1","apiKey":"sk-inline","headers":{"X-Test":"1"},"models":[{"id":"m1","name":"M1","input":["text","image"],"cost":{"input":1}}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("auth.json"),
+            r#"{"gw":{"type":"api_key","key":"sk-auth"}}"#,
+        )
+        .unwrap();
+        let provider = PiCustomProvider {
+            id: "gw2".to_string(),
+            display_name: "Gateway".to_string(),
+            api: "openai-responses".to_string(),
+            base_url: "https://new.example/v1".to_string(),
+            credential_configured: false,
+            models: vec![PiCustomModel {
+                id: "m1".to_string(),
+                name: "M1 renamed".to_string(),
+                context_window: None,
+                max_tokens: None,
+            }],
+        };
+        save_pi_custom_provider_replacing_at(temp.path(), Some("gw"), &provider, None, false)
+            .unwrap();
+        let raw = std::fs::read_to_string(temp.path().join("models.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value["providers"].get("gw").is_none());
+        let saved = &value["providers"]["gw2"];
+        assert_eq!(saved["apiKey"], "sk-inline");
+        assert_eq!(saved["headers"]["X-Test"], "1");
+        assert_eq!(saved["name"], "Gateway");
+        assert_eq!(saved["api"], "openai-responses");
+        assert_eq!(saved["models"][0]["input"][0], "text");
+        assert_eq!(saved["models"][0]["cost"]["input"], 1);
+        assert_eq!(saved["models"][0]["name"], "M1 renamed");
+        let auth = std::fs::read_to_string(temp.path().join("auth.json")).unwrap();
+        let auth: serde_json::Value = serde_json::from_str(&auth).unwrap();
+        assert!(auth.get("gw").is_none());
+        assert_eq!(auth["gw2"]["key"], "sk-auth");
+    }
+
+    #[test]
+    fn auth_writes_take_the_pi_directory_lock_and_release_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let auth_path = temp.path().join("auth.json");
+        std::fs::write(&auth_path, r#"{"gw":{"type":"api_key","key":"old"}}"#).unwrap();
+        let lock_path = auth_lock_path(&auth_path);
+        std::fs::create_dir(&lock_path).unwrap();
+        let error = match AuthFileLock::acquire(&auth_path, std::time::Duration::from_millis(40)) {
+            Err(error) => error,
+            Ok(_) => panic!("a fresh Pi lock must not be stolen"),
+        };
+        assert!(error.contains("正被"));
+        assert!(lock_path.is_dir());
+
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(31);
+        std::fs::File::open(&lock_path)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        update_auth_json(&auth_path, |obj| {
+            obj.insert(
+                "gw".to_string(),
+                serde_json::json!({"type": "api_key", "key": "new"}),
+            );
+        })
+        .unwrap();
+        assert!(!lock_path.exists(), "lock must be released after the write");
+        let auth: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+        assert_eq!(auth["gw"]["key"], "new");
     }
 
     /// provider 已经被删掉了就不该被一次刷新重新造出来。
