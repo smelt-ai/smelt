@@ -1714,6 +1714,81 @@ pub(crate) fn send_acp_prompt_reserved(
     }
 }
 
+/// Pi 的会话命令在进入 Prompt / Steer / FollowUp 之前处理。
+///
+/// 其它 agent 的同名文本仍是普通输入。空闲时的 `/reload` 和 `/shake` 继续走
+/// 原 prompt 路径：reload 的 RPC 回执要靠那条本地回合来释放闸门。
+fn dispatch_pi_session_command(
+    sess: &AcpSession,
+    text: &str,
+    images: Vec<smelt_core::acp_conn::PromptImage>,
+) -> Result<bool, &'static str> {
+    let is_pi = sess
+        .launch_spec
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(smelt_core::pi_rpc::is_smelt_pi_launch);
+    if !is_pi {
+        return Ok(false);
+    }
+    let Some(slash) = smelt_core::pi_rpc::parse_session_slash(text) else {
+        return Ok(false);
+    };
+    let in_turn = sess.prompt_in_flight.load(Ordering::SeqCst);
+    match slash {
+        smelt_core::pi_rpc::PiSessionSlash::Compact {
+            custom_instructions,
+        } => {
+            send_driver_command(
+                sess,
+                smelt_core::acp_conn::ConversationCommand::Compact {
+                    custom_instructions,
+                },
+            )?;
+            Ok(true)
+        }
+        smelt_core::pi_rpc::PiSessionSlash::Reload | smelt_core::pi_rpc::PiSessionSlash::Shake
+            if in_turn =>
+        {
+            // 驱动在活动回合上拒绝这两条，并发状态而不是模型消息。不能走
+            // `note_prompt_sent`，否则会把正在跑的回合覆盖成一条新回合。
+            send_driver_command(
+                sess,
+                smelt_core::acp_conn::ConversationCommand::Prompt {
+                    text: text.to_string(),
+                    images,
+                },
+            )?;
+            Ok(true)
+        }
+        smelt_core::pi_rpc::PiSessionSlash::Reload | smelt_core::pi_rpc::PiSessionSlash::Shake => {
+            Ok(false)
+        }
+    }
+}
+
+fn send_driver_command(
+    sess: &AcpSession,
+    command: smelt_core::acp_conn::ConversationCommand,
+) -> Result<(), &'static str> {
+    let handle = sess
+        .handle
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|h| (h.cmd_tx.clone(), Arc::clone(&h.in_flight_rpc)));
+    let Some((cmd_tx, in_flight_rpc)) = handle else {
+        return Err("ACP session is not running");
+    };
+    in_flight_rpc.fetch_add(1, Ordering::SeqCst);
+    if cmd_tx.try_send(command).is_err() {
+        in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
+        return Err("ACP command channel is busy or closed");
+    }
+    Ok(())
+}
+
 /// 把一条消息插进正在跑的回合。只有 `supports_mid_turn_input` 的驱动能走这里：
 /// 不占 `prompt_in_flight` 闸门（当前回合仍归上一条 prompt），不进 daemon 队列。
 /// 先进入 steering 队列，等 Pi 吃掉后再写入消息流。
@@ -2038,6 +2113,22 @@ fn apply_acp_user_action_inner(
                     .accepted_delivery_ids
                     .insert(delivery_id.clone());
             }
+            // 会话命令不是模型输入。必须在 steer / 本地队列之前认出来，否则
+            // `/reload` 会进 steering 队列，驱动也收不到可解析的 Prompt。
+            match dispatch_pi_session_command(sess, &text, images.clone()) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => {
+                    if let Some(delivery_id) = delivery_id.as_deref() {
+                        sess.reduced
+                            .lock()
+                            .unwrap()
+                            .accepted_delivery_ids
+                            .remove(delivery_id);
+                    }
+                    return Err(error);
+                }
+            }
             if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
                 // 回合正在跑。驱动支持中途插入（Pi 的 steer）就直接送进当前
                 // 回合，不占闸门；不支持的才排到回合结束后再发。
@@ -2083,7 +2174,14 @@ fn apply_acp_user_action_inner(
             text,
             images,
             delivery_id,
-        } => send_acp_follow_up(sess, text, images, delivery_id, subscribers),
+        } => {
+            match dispatch_pi_session_command(sess, &text, images.clone()) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => return Err(error),
+            }
+            send_acp_follow_up(sess, text, images, delivery_id, subscribers)
+        }
         AcpUserAction::Compact => send_acp_compact(sess),
         AcpUserAction::AcknowledgeComposerRestore { revision } => {
             if smelt_core::acp_session::acknowledge_composer_restore(

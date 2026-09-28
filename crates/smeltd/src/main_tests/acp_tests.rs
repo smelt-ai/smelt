@@ -1189,6 +1189,136 @@ fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     );
 }
 
+fn pi_launch() -> smelt_core::agent_kind::ConversationLaunchSpec {
+    smelt_core::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
+}
+
+#[test]
+fn pi_session_commands_are_not_steered_during_a_turn() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-slash", || {
+        let session = make_acp_session_value("acp-pi-slash", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: true,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: "/reload".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &subscribers,
+    )
+    .unwrap();
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::FollowUp {
+            text: "/handoff 关注测试".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &subscribers,
+    )
+    .unwrap();
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "/reload");
+        }
+        _ => panic!("reload must stay a prompt so the driver can reject it"),
+    }
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Compact {
+            custom_instructions,
+        } => {
+            assert_eq!(custom_instructions.as_deref(), Some("关注测试"));
+        }
+        _ => panic!("handoff must be native compact"),
+    }
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    assert_eq!(
+        slot.value
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .in_flight_rpc
+            .load(Ordering::SeqCst),
+        3
+    );
+    let state = slot.value.reduced.lock().unwrap();
+    assert_eq!(state.turn_started_at_ms, Some(1));
+    assert!(state.queued_steering.is_empty());
+    assert!(state.entries.is_empty());
+}
+
+#[test]
+fn non_pi_slash_text_is_still_steered() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-claude-slash", || {
+        let session = make_acp_session_value("acp-claude-slash", reduced);
+        *session.launch_spec.lock().unwrap() =
+            Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
+        session
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: "/reload".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &new_event_hub(),
+    )
+    .unwrap();
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Steer { text, .. } => {
+            assert_eq!(text, "/reload");
+        }
+        _ => panic!("non-pi slash text is ordinary input"),
+    }
+}
+
 #[test]
 fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
     let mut reduced = AcpSessionState::default();
