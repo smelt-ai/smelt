@@ -385,27 +385,13 @@ async fn run_connection(
                         .await?;
                 }
                 Next::Outbound(Ok(message)) => {
-                    if message.get("type").and_then(serde_json::Value::as_str)
-                        == Some("smelt_background_notify")
-                    {
-                        let text = message
-                            .get("message")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let command = if state.active_turn {
-                            ConversationCommand::FollowUp {
-                                text,
-                                images: Vec::new(),
-                            }
-                        } else {
-                            ConversationCommand::Prompt {
-                                text,
-                                images: Vec::new(),
-                            }
-                        };
-                        handle_command(command, &mut writer, &event_tx, &mut state, &in_flight_rpc)
-                            .await?;
+                    if let Some(event) = background_notice_from_outbound(&message) {
+                        // 不在这里发 prompt。开回合只由 daemon 的闸门做。
+                        if let ConversationEvent::BackgroundNotice(text) = &event
+                            && !text.is_empty()
+                        {
+                            let _ = event_tx.try_send(event);
+                        }
                     } else {
                         write_rpc(&mut writer, &message).await?;
                     }
@@ -935,9 +921,7 @@ where
         {
             Wait::Outbound(Ok(message)) => {
                 // 握手还没完成，完成通知留到主循环。这里直接丢掉，避免把内部消息写进 Pi。
-                if message.get("type").and_then(serde_json::Value::as_str)
-                    == Some("smelt_background_notify")
-                {
+                if background_notice_from_outbound(&message).is_some() {
                     continue;
                 }
                 write_rpc(writer, &message).await?;
@@ -1269,6 +1253,76 @@ pub(crate) fn parse_shake_slash(text: &str) -> bool {
     text.trim() == "/shake"
 }
 
+/// 会话命令，不是模型输入。宿主在选 Prompt / Steer / FollowUp 之前就要认出来，
+/// 驱动在写给 Pi 之前再认一次：回合中的用户文本会被宿主改写成 `Steer`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PiSessionSlash {
+    Reload,
+    Shake,
+    Compact { custom_instructions: Option<String> },
+}
+
+pub fn parse_session_slash(text: &str) -> Option<PiSessionSlash> {
+    if parse_reload_slash(text) {
+        return Some(PiSessionSlash::Reload);
+    }
+    if parse_shake_slash(text) {
+        return Some(PiSessionSlash::Shake);
+    }
+    if let Some(custom_instructions) = parse_compact_slash(text) {
+        return Some(PiSessionSlash::Compact {
+            custom_instructions,
+        });
+    }
+    if let Some(custom_instructions) = parse_handoff_slash(text) {
+        return Some(PiSessionSlash::Compact {
+            custom_instructions,
+        });
+    }
+    None
+}
+
+/// 已识别的会话命令不再交给模型。`turn_is_active == false` 时 `/shake` 仍是普通文本。
+async fn consume_session_slash<W: AsyncWrite + Unpin>(
+    text: &str,
+    writer: &mut W,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+    in_flight_rpc: &AtomicUsize,
+    turn_is_active: bool,
+) -> Result<bool, String> {
+    let Some(slash) = parse_session_slash(text) else {
+        return Ok(false);
+    };
+    match slash {
+        PiSessionSlash::Reload => {
+            if turn_is_active {
+                finish_in_flight(in_flight_rpc);
+                let _ = event_tx.try_send(ConversationEvent::Status(
+                    "回合进行中，结束后再 /reload".to_string(),
+                ));
+                return Ok(true);
+            }
+            send_reload(writer, state).await?;
+            Ok(true)
+        }
+        PiSessionSlash::Shake if turn_is_active => {
+            finish_in_flight(in_flight_rpc);
+            let _ = event_tx.try_send(ConversationEvent::Status(
+                "回合进行中，结束后再 /shake".to_string(),
+            ));
+            Ok(true)
+        }
+        PiSessionSlash::Shake => Ok(false),
+        PiSessionSlash::Compact {
+            custom_instructions,
+        } => {
+            send_compact(custom_instructions, writer, state).await?;
+            Ok(true)
+        }
+    }
+}
+
 fn json_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
     value
         .get(key)
@@ -1295,6 +1349,21 @@ fn encode_pi_images(images: Vec<crate::acp_conn::PromptImage>) -> Vec<serde_json
         .collect()
 }
 
+/// 后台任务完成通知。其它出站消息返回 `None`，调用方按原样写给 Pi。
+/// 空文本也算通知，调用方丢掉，不能写进 Pi。
+fn background_notice_from_outbound(message: &serde_json::Value) -> Option<ConversationEvent> {
+    if message.get("type").and_then(serde_json::Value::as_str) != Some("smelt_background_notify") {
+        return None;
+    }
+    let text = message
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Some(ConversationEvent::BackgroundNotice(text))
+}
+
 async fn handle_command<W: AsyncWrite + Unpin>(
     command: ConversationCommand,
     writer: &mut W,
@@ -1304,28 +1373,17 @@ async fn handle_command<W: AsyncWrite + Unpin>(
 ) -> Result<(), String> {
     match command {
         ConversationCommand::Prompt { text, images } => {
-            if parse_reload_slash(&text) {
-                if state.active_turn {
-                    finish_in_flight(in_flight_rpc);
-                    let _ = event_tx.try_send(ConversationEvent::Status(
-                        "回合进行中，结束后再 /reload".to_string(),
-                    ));
-                    return Ok(());
-                }
-                return send_reload(writer, state).await;
-            }
-            if parse_shake_slash(&text) && state.active_turn {
-                finish_in_flight(in_flight_rpc);
-                let _ = event_tx.try_send(ConversationEvent::Status(
-                    "回合进行中，结束后再 /shake".to_string(),
-                ));
+            if consume_session_slash(
+                &text,
+                writer,
+                event_tx,
+                state,
+                in_flight_rpc,
+                state.active_turn,
+            )
+            .await?
+            {
                 return Ok(());
-            }
-            if let Some(instructions) = parse_compact_slash(&text) {
-                return send_compact(instructions, writer, state).await;
-            }
-            if let Some(instructions) = parse_handoff_slash(&text) {
-                return send_compact(instructions, writer, state).await;
             }
             if state.active_turn {
                 // 回合还在跑时回车必须插进当前回合。丢掉这条 prompt 会让输入
@@ -1369,6 +1427,9 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 ))
                 .await;
             }
+            if consume_session_slash(&text, writer, event_tx, state, in_flight_rpc, true).await? {
+                return Ok(());
+            }
             let id = state.request_id("steer");
             state.steer_request_ids.insert(id.clone());
             let mut request = serde_json::json!({
@@ -1392,6 +1453,9 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                     in_flight_rpc,
                 ))
                 .await;
+            }
+            if consume_session_slash(&text, writer, event_tx, state, in_flight_rpc, true).await? {
+                return Ok(());
             }
             let id = state.request_id("follow-up");
             state.follow_up_request_ids.insert(id.clone());
@@ -5634,6 +5698,26 @@ mod tests {
     }
 
     #[test]
+    fn background_notify_becomes_an_event_and_is_not_a_pi_prompt() {
+        let event = background_notice_from_outbound(&serde_json::json!({
+            "type": "smelt_background_notify",
+            "message": "  后台任务 bg-1 已结束  ",
+        }));
+        assert!(matches!(
+            event,
+            Some(ConversationEvent::BackgroundNotice(text)) if text == "后台任务 bg-1 已结束"
+        ));
+        assert!(background_notice_from_outbound(&serde_json::json!({"type": "other"})).is_none());
+        assert!(matches!(
+            background_notice_from_outbound(&serde_json::json!({
+                "type": "smelt_background_notify",
+                "message": "   ",
+            })),
+            Some(ConversationEvent::BackgroundNotice(text)) if text.is_empty()
+        ));
+    }
+
+    #[test]
     fn reload_slash_is_only_the_exact_command() {
         assert!(parse_reload_slash("  /reload  "));
         assert!(!parse_reload_slash("/reload 现在"));
@@ -5917,6 +6001,75 @@ mod tests {
             event_rx.try_recv(),
             Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
         ));
+    }
+
+    #[test]
+    fn session_commands_are_not_delivered_as_steer_or_follow_up() {
+        let cases = [
+            (
+                ConversationCommand::Steer {
+                    text: "/reload".to_string(),
+                    images: Vec::new(),
+                },
+                None,
+                Some("结束后再"),
+            ),
+            (
+                ConversationCommand::Steer {
+                    text: "/compact 聚焦 diff".to_string(),
+                    images: Vec::new(),
+                },
+                Some("compact"),
+                None,
+            ),
+            (
+                ConversationCommand::FollowUp {
+                    text: "/handoff 关注测试".to_string(),
+                    images: Vec::new(),
+                },
+                Some("compact"),
+                None,
+            ),
+            (
+                ConversationCommand::FollowUp {
+                    text: "/shake".to_string(),
+                    images: Vec::new(),
+                },
+                None,
+                Some("结束后再"),
+            ),
+        ];
+        for (command, wire_type, status_fragment) in cases {
+            let (event_tx, event_rx) = smol::channel::unbounded();
+            let mut state = PiState::new();
+            state.active_turn = true;
+            let in_flight = AtomicUsize::new(1);
+            let mut writer = futures::io::Cursor::new(Vec::new());
+            smol::block_on(handle_command(
+                command,
+                &mut writer,
+                &event_tx,
+                &mut state,
+                &in_flight,
+            ))
+            .unwrap();
+            let written = String::from_utf8(writer.into_inner()).unwrap();
+            assert!(state.active_turn);
+            if let Some(wire_type) = wire_type {
+                let request: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+                assert_eq!(request["type"], wire_type);
+                assert_ne!(request["type"], "steer");
+                assert_ne!(request["type"], "follow_up");
+                assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(written.trim().is_empty());
+                assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+                assert!(matches!(
+                    event_rx.try_recv(),
+                    Ok(ConversationEvent::Status(text)) if status_fragment.is_some_and(|fragment| text.contains(fragment))
+                ));
+            }
+        }
     }
 
     #[test]

@@ -1566,6 +1566,22 @@ fn streaming_updates_keep_awaiting_approval_while_a_card_is_pending() {
     assert!(matches!(s.phase, DaemonPhase::Thinking));
 }
 
+#[test]
+fn background_notice_does_not_open_a_turn_by_itself() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Idle;
+    state.awaiting_user_echo = true;
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::BackgroundNotice("后台任务 bg-1 已结束".into()),
+    );
+    assert!(!outcome.should_persist);
+    assert!(state.awaiting_user_echo);
+    assert!(matches!(state.phase, DaemonPhase::Idle));
+    assert!(state.turn_started_at_ms.is_none());
+    assert!(state.entries.is_empty());
+}
+
 /// 回合失败 != 会话结束。曾经 `session/prompt` 的错误响应会一路拖垮连接，
 /// 「没配 API key」这种一句话能改好的问题直接表现为会话猝死、输入框消失。
 #[test]

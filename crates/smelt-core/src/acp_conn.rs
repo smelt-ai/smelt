@@ -363,6 +363,9 @@ pub enum ConversationEvent {
     Plan(Plan),
     /// Pi 后台任务的全量快照。输出是尾部，不随每个字节落盘。
     BackgroundTasks(Vec<crate::acp_session::BackgroundTaskView>),
+    /// 后台任务结束通知。只携带原文。开不开回合由 daemon 的
+    /// `prompt_in_flight` 决定，和用户 prompt 走同一道闸门。
+    BackgroundNotice(String),
     /// 模型状态：当前名 + 可选列表。来自会话配置项里 category=Model 的那条
     /// select；建会话时给一次，切换或 agent 侧改动时通过 ConfigOptionUpdate 再给。
     /// 取不到就一直是 None，UI 不假装知道。

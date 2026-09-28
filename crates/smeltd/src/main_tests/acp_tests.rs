@@ -1129,6 +1129,111 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
     ));
 }
 
+fn attach_prompt_handle(
+    session: &AcpSession,
+) -> smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand> {
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+    cmd_rx
+}
+
+#[test]
+fn background_notice_while_idle_opens_the_normal_prompt_turn() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-bg-idle", || {
+        make_acp_session_value("acp-bg-idle", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    let subscribers = new_event_hub();
+    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+
+    deliver_background_notices_locked(
+        &slot.value,
+        vec!["后台任务 bg-1 已结束".into()],
+        &subscribers,
+    );
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, images } => {
+            assert_eq!(text, "后台任务 bg-1 已结束");
+            assert!(images.is_empty());
+        }
+        _ => panic!("idle notice must use the prompt gate"),
+    }
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    let state = slot.value.reduced.lock().unwrap();
+    assert!(state.turn_started_at_ms.is_some());
+    assert!(matches!(state.phase, DaemonPhase::Thinking));
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::User(text)) if text == "后台任务 bg-1 已结束"
+    ));
+}
+
+#[test]
+fn background_notice_during_a_turn_flushes_through_the_same_gate_when_it_ends() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-bg-busy", || {
+        make_acp_session_value("acp-bg-busy", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+
+    deliver_background_notices_locked(
+        &slot.value,
+        vec!["后台任务 bg-2 已结束".into()],
+        &subscribers,
+    );
+    assert!(cmd_rx.try_recv().is_err());
+    assert_eq!(slot.value.pending_prompts.lock().unwrap().len(), 1);
+    assert_eq!(
+        slot.value.reduced.lock().unwrap().turn_started_at_ms,
+        Some(1)
+    );
+
+    smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::TurnEnded(
+            agent_client_protocol::schema::v1::StopReason::EndTurn,
+        ),
+    );
+    settle_acp_turn_locked(&slot.value, true, false, &subscribers);
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "后台任务 bg-2 已结束");
+        }
+        _ => panic!("ended turn must flush the notice as one prompt"),
+    }
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    let state = slot.value.reduced.lock().unwrap();
+    assert!(matches!(state.phase, DaemonPhase::Thinking));
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::User(text)) if text == "后台任务 bg-2 已结束"
+    ));
+}
+
 #[test]
 fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     let acp_sessions = new_test_acp_sessions();

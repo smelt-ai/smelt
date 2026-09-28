@@ -222,6 +222,11 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             responder,
             raw_request_line,
         ),
+        ConversationEvent::BackgroundNotice(_) => {
+            // 投递在持有回合闸门的 daemon 线程上做。归约不能开回合，
+            // 否则又会和 `send_acp_prompt_reserved` 各记一份。
+            skip_persist = true;
+        }
         ConversationEvent::TurnEnded(reason) => outcome.entries_offset = finish_turn(state, reason),
         ConversationEvent::TurnFailed(msg) => apply_turn_failed(state, &mut outcome, msg),
         ConversationEvent::Rewound { truncate_from } => {
@@ -309,6 +314,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ComposerRestore { .. }
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
+            | ConversationEvent::BackgroundNotice(_)
             | ConversationEvent::Model(_)
             | ConversationEvent::ConfigOptions(_)
             | ConversationEvent::SessionTitle(_)

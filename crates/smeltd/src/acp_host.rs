@@ -1077,6 +1077,17 @@ pub(crate) fn start_acp_event_drain(
                 while let Ok(next) = event_rx.try_recv() {
                     batch.push(next);
                 }
+                let mut notices = Vec::new();
+                let batch: Vec<_> = batch
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        smelt_core::acp_conn::ConversationEvent::BackgroundNotice(text) => {
+                            notices.push(text);
+                            None
+                        }
+                        other => Some(other),
+                    })
+                    .collect();
                 let mut offsets = Vec::with_capacity(batch.len());
                 let mut should_persist = false;
                 let mut runtime_debug_changed = false;
@@ -1171,6 +1182,11 @@ pub(crate) fn start_acp_event_drain(
                     // TurnEnded / Ready 之后只要相位已 Idle 就放闸。迟到工具终态
                     // 按 tool id 归到旧条目，不会把新回合重新打开。
                     settle_acp_turn_locked(sess, turn_ended, ready, &subscribers);
+                }
+                if !stop && sess.connection_generation.load(Ordering::SeqCst) == generation {
+                    // 先让本批里的 TurnEnded 放闸并冲掉更早的排队，再投递通知。
+                    // 这样通知要么成为下一条 prompt，要么排在已经发出的那条后面。
+                    deliver_background_notices_locked(sess, notices, &subscribers);
                 }
                 if stop {
                     break;
@@ -2019,6 +2035,43 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
         return Err("ACP command channel is busy or closed");
     }
     Ok(())
+}
+
+/// 后台任务结束通知走用户 prompt 的同一道闸门。调用方必须持有 `turn_completion`。
+///
+/// 回合还在就排进 `pending_prompts`，等 `TurnEnded` 之后由
+/// [`flush_pending_acp_prompt_locked`] 放出恰好一条。空闲就当场
+/// `send_acp_prompt_reserved`。不在 Pi RPC 里另开回合，也不发 `follow_up`：
+/// 那条命令在 Pi 已经停下时只会把通知留在死队列里。
+pub(crate) fn deliver_background_notices_locked(
+    sess: &AcpSession,
+    notices: Vec<String>,
+    subscribers: &EventHubHandle,
+) {
+    for text in notices {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let queued = QueuedAcpPrompt {
+            text: text.to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        };
+        if sess.prompt_in_flight.load(Ordering::SeqCst) {
+            sess.pending_prompts.lock().unwrap().push_back(queued);
+            continue;
+        }
+        if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
+            sess.pending_prompts.lock().unwrap().push_back(queued);
+            continue;
+        }
+        if send_acp_prompt_reserved(sess, queued.text.clone(), Vec::new(), None, subscribers)
+            .is_err()
+        {
+            sess.pending_prompts.lock().unwrap().push_front(queued);
+        }
+    }
 }
 
 /// 回合结束后只释放一条 daemon 队列中的 prompt。调用方必须持有/// `turn_completion`；剩余消息等下一次 TurnEnded，保证 provider 永远不会看到
