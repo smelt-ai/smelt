@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 mod error;
 pub use error::{OpenSource, StoreError};
@@ -176,6 +177,14 @@ pub enum LegacyState {
 #[derive(Clone)]
 pub struct Store {
     backend: imp::Backend,
+    durable_notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+}
+
+fn store_from_backend(backend: imp::Backend) -> Store {
+    Store {
+        backend,
+        durable_notify: Arc::new(Mutex::new(None)),
+    }
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -220,21 +229,36 @@ impl Store {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
         let backend = imp::Backend::open(&path)?;
-        Ok(Self { backend })
+        Ok(store_from_backend(backend))
     }
 
     /// 在空位上建新库。主文件或 sidecar 已在则失败。
     pub fn create(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
         let backend = imp::Backend::create(&path)?;
-        Ok(Self { backend })
+        Ok(store_from_backend(backend))
     }
 
     /// 已有则打开，主文件与 sidecar 都不在才建库。orphan sidecar 拒绝建空库。
     pub fn open_or_create(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let path = path.into();
         let backend = imp::Backend::open_or_create(&path)?;
-        Ok(Self { backend })
+        Ok(store_from_backend(backend))
+    }
+
+    pub fn set_durable_notify(&self, sender: std::sync::mpsc::Sender<()>) {
+        if let Ok(mut slot) = self.durable_notify.lock() {
+            *slot = Some(sender);
+        }
+    }
+
+    fn notify_durable(&self) {
+        let Ok(slot) = self.durable_notify.lock() else {
+            return;
+        };
+        if let Some(sender) = slot.as_ref() {
+            let _ = sender.send(());
+        }
     }
 
     /// 只读库的 `user_version`，不建库、不迁移。交接 tripwire 用：
@@ -548,7 +572,9 @@ impl Store {
         &self,
         operation: impl FnOnce(&mut StoreTransaction<'_>) -> Result<R, StoreError>,
     ) -> Result<R, StoreError> {
-        imp::store_transaction(&self.backend, operation)
+        let result = imp::store_transaction(&self.backend, operation)?;
+        self.notify_durable();
+        Ok(result)
     }
 
     pub fn legacy_state(&self, source: &str) -> Result<LegacyState, StoreError> {
@@ -630,7 +656,11 @@ impl Store {
         &self,
         events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
-        imp::append_outbox_batch(&self.backend, events)
+        imp::append_outbox_batch(&self.backend, events)?;
+        if !events.is_empty() {
+            self.notify_durable();
+        }
+        Ok(())
     }
 
     pub fn load_pending_outbox(&self, limit: usize) -> Result<Vec<OutboxEvent>, StoreError> {
@@ -692,7 +722,11 @@ impl Store {
         validate_name("request fingerprint", &result.request_fingerprint)?;
         validate_name("message id", &result.message_id)?;
         validate_name("target session id", &result.target_session_id)?;
-        imp::commit_peer_message_delivery(&self.backend, result, event)
+        let outcome = imp::commit_peer_message_delivery(&self.backend, result, event)?;
+        if outcome == PeerMessageCommitOutcome::Inserted {
+            self.notify_durable();
+        }
+        Ok(outcome)
     }
 }
 

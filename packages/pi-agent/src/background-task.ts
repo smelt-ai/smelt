@@ -1,4 +1,4 @@
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { createBashTool, defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
@@ -13,6 +13,8 @@ export const SMELT_BACKGROUND_TASK_STOP_TOOL_NAME = "background_task_stop";
 export const SMELT_BACKGROUND_TASK_WAIT_TOOL_NAME = "background_task_wait";
 /** 普通 bash 超过这段时间仍未结束，就留在宿主里继续跑。 */
 export const AUTO_BACKGROUND_SECONDS = 60;
+/** Pi 会话里这条自定义消息的类型。界面不画它，重放时还原成状态行。 */
+export const SMELT_BACKGROUND_TASK_CUSTOM_TYPE = "smelt.background_task";
 
 /**
  * `nohup` 或行尾 `&` 会脱离工具管理。返回剥掉这两处之后的命令；不是这种写法时返回 undefined。
@@ -53,6 +55,133 @@ export type BackgroundHostResponse = {
 };
 
 type HostRequest = Record<string, unknown>;
+
+export type TaskCompletionNotice = {
+	id: string;
+	title: string;
+	status: string;
+	exitCode: number | null;
+	output: string;
+	outputTail: string;
+	wake: boolean;
+};
+
+/**
+ * 写给模型的结果。这句话要说明是命令结束，不是用户又提了一个要求。
+ * 输出用宿主给的尾部，退出码单独写明。
+ */
+export function taskNotificationText(notice: Pick<TaskCompletionNotice, "id" | "title" | "status" | "exitCode" | "output">): string {
+	const title = notice.title ? `（${notice.title}）` : "";
+	const code = notice.exitCode == null ? "无" : String(notice.exitCode);
+	const lines = [
+		"<task-notification>",
+		`这是已结束命令的结果，不是用户的新请求。后台任务 ${notice.id}${title} 已结束，状态 ${notice.status}，退出码 ${code}。`,
+	];
+	const output = notice.output.trim();
+	if (output) {
+		lines.push("<output>", output, "</output>");
+	}
+	lines.push("</task-notification>");
+	return lines.join("\n");
+}
+
+/** 只决定要不要开一轮。不传 deliverAs，避免落到 followUp 队列。 */
+export function completionSendOptions(wake: boolean): { triggerTurn: boolean } {
+	return { triggerTurn: wake };
+}
+
+function parseCompletion(value: unknown): TaskCompletionNotice | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const row = value as Record<string, unknown>;
+	if (row.op !== "completion" || typeof row.id !== "string" || !row.id) return undefined;
+	return {
+		id: row.id,
+		title: typeof row.title === "string" ? row.title : "",
+		status: typeof row.status === "string" ? row.status : "",
+		exitCode: typeof row.exitCode === "number" ? row.exitCode : null,
+		output: typeof row.output === "string" ? row.output : "",
+		outputTail: typeof row.outputTail === "string" ? row.outputTail : "",
+		wake: row.wake === true,
+	};
+}
+
+function deliverCompletion(pi: ExtensionAPI, notice: TaskCompletionNotice): void {
+	// 同一批里连续调用，不等待。第一条会同步进入运行，后面的跟进当前这一轮。
+	void pi.sendMessage(
+		{
+			customType: SMELT_BACKGROUND_TASK_CUSTOM_TYPE,
+			content: [{ type: "text", text: taskNotificationText(notice) }],
+			display: false,
+			details: {
+				id: notice.id,
+				title: notice.title,
+				status: notice.status,
+				exitCode: notice.exitCode,
+				outputTail: notice.outputTail,
+			},
+		},
+		completionSendOptions(notice.wake),
+	);
+}
+
+type CompletionListener = {
+	socket?: Socket;
+	closed: boolean;
+};
+
+/** 已经收下 ack 的连接断开，并且扩展还在，就由新连接接着收还没写到的结果。没连上过就停。 */
+export function reconnectAfterClose(closed: boolean, acknowledged: boolean): boolean {
+	return !closed && acknowledged;
+}
+
+function ensureCompletionListener(pi: ExtensionAPI, state: CompletionListener): void {
+	if (state.closed) return;
+	if (state.socket && !state.socket.destroyed) return;
+	const path = process.env[SMELT_BACKGROUND_TASK_SOCK_ENV];
+	if (!path) return;
+	const socket = connect(path);
+	state.socket = socket;
+	let buffer = "";
+	let acknowledged = false;
+	let finished = false;
+	const stop = () => {
+		if (finished) return;
+		finished = true;
+		if (state.socket === socket) state.socket = undefined;
+		if (!reconnectAfterClose(state.closed, acknowledged)) return;
+		queueMicrotask(() => ensureCompletionListener(pi, state));
+	};
+	socket.on("connect", () => {
+		socket.write(`${JSON.stringify({ op: "listen" })}\n`);
+	});
+	socket.on("data", (chunk: Buffer | string) => {
+		buffer += chunk.toString();
+		const lines = buffer.split("\n");
+		buffer = lines.pop() ?? "";
+		const batch: TaskCompletionNotice[] = [];
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const row = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+			if (row?.ok === true && row.op !== "completion") {
+				acknowledged = true;
+				continue;
+			}
+			const notice = parseCompletion(parsed);
+			if (notice) batch.push(notice);
+		}
+		for (const notice of batch) deliverCompletion(pi, notice);
+	});
+	socket.on("error", () => {
+		socket.destroy();
+	});
+	socket.on("close", () => stop());
+}
 
 /** 向会话宿主发一条请求。套接字不在时说明这轮 Pi 不是宿主拉起的。 */
 export function callBackgroundHost(
@@ -99,6 +228,7 @@ export function callBackgroundHost(
 		});
 		socket.on("timeout", () => finish({ ok: false, error: "后台任务请求超时" }));
 		socket.on("error", (error) => finish({ ok: false, error: error.message }));
+		socket.on("close", () => finish({ ok: false, error: "后台任务连接已断开" }));
 		socket.write(`${JSON.stringify(request)}\n`);
 	});
 }
@@ -228,11 +358,19 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 							cwd: ctx.cwd,
 							title: command.slice(0, 80),
 							timeoutSeconds: timeout,
+							watch: true,
 						}, signal);
 						return { ok: started.ok, id: started.id, error: started.error || started.text };
 					},
-					snapshot: async (id) => {
-						const status = await callBackgroundHost(socket(), { op: "wait", id }, signal);
+					release: async (id, consumed) => {
+						await callBackgroundHost(socket(), { op: "unwatch", id, consumed });
+					},
+					until: async (id, timeoutMs) => {
+						const status = await callBackgroundHost(socket(), {
+							op: "wait",
+							id,
+							...(timeoutMs > 0 ? { timeoutMs } : {}),
+						}, signal);
 						const task = status.tasks?.find((item) => item.id === id) ?? status.tasks?.[0];
 						if (!status.ok || !task || task.status === "running") {
 							onUpdate?.({ content: [{ type: "text", text: status.text || "" }], details: undefined });
@@ -290,10 +428,18 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 
 export function smeltBackgroundTaskExtension(pi: ExtensionAPI): void {
 	registerBackgroundTools(pi);
+	const listener: CompletionListener = { closed: false };
+	ensureCompletionListener(pi, listener);
 	// 工具表在工厂执行时可能还没绑上。session_start 再注册一次。
 	// 这里不停任务：进程在会话宿主里，/reload 只重建扩展。
 	pi.on("session_start", () => {
 		registerBackgroundTools(pi);
+		ensureCompletionListener(pi, listener);
+	});
+	pi.on("session_shutdown", () => {
+		listener.closed = true;
+		listener.socket?.destroy();
+		listener.socket = undefined;
 	});
 	pi.on("user_bash", async (event) => {
 		const detached = detachedShellCommand(event.command);

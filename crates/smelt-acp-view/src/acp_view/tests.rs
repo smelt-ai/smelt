@@ -33,7 +33,7 @@ use super::{
     usage_warn_color,
 };
 use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
-use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind, ToolOutputPart};
+use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
 use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
     AcpTurnOutcome, ApprovalDetailsView, BackgroundTaskStatus, BackgroundTaskView,
@@ -397,7 +397,8 @@ fn native_immediate_send_takes_the_clicked_item_and_returns_the_rest() {
 
 #[test]
 fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() {
-    let skipped = consume_composer_restore(0, 1, vec!["换方向".into(), "总结".into()], true);
+    let skipped =
+        consume_composer_restore(0, 1, vec!["换方向".into(), "总结".into()], Vec::new(), true);
     assert_eq!(skipped.last_revision, 1);
     assert!(!skipped.skip_next);
     assert_eq!(skipped.restore_texts, None);
@@ -407,7 +408,7 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
         (Vec::new(), Vec::new())
     );
 
-    let restored = consume_composer_restore(0, 1, vec!["换方向".into()], false);
+    let restored = consume_composer_restore(0, 1, vec!["换方向".into()], Vec::new(), false);
     assert_eq!(
         restored.restore_texts.as_deref(),
         Some(&["换方向".to_string()][..])
@@ -418,11 +419,19 @@ fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() 
         (vec!["换方向".into()], vec!["总结".into()])
     );
 
-    let pending = consume_composer_restore(1, 1, vec!["换方向".into()], true);
+    let pending = consume_composer_restore(1, 1, vec!["换方向".into()], Vec::new(), true);
     assert!(pending.skip_next);
     assert_eq!(pending.last_revision, 1);
     assert_eq!(pending.restore_texts, None);
     assert_eq!(pending.discarded_revision, None);
+
+    let image = smelt_core::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    };
+    let images_only = consume_composer_restore(1, 2, Vec::new(), vec![image.clone()], false);
+    assert_eq!(images_only.restore_texts, None);
+    assert_eq!(images_only.restore_images, Some(vec![image]));
 }
 
 #[test]
@@ -1583,6 +1592,40 @@ fn active_turn_wraps_tools_in_a_live_process_group() {
     let group = layout[1].process_group.expect("进行中也应收成过程组");
     assert!(group.active);
     assert_eq!(layout[2].process_group.map(|item| item.first), Some(1));
+}
+
+#[test]
+fn task_note_stays_outside_the_process_group() {
+    let entries = vec![
+        AcpEntry::User("跑一下".into()),
+        AcpEntry::ToolCall {
+            id: "bash-1".into(),
+            title: "cargo test".into(),
+            kind: ToolKind::Execute,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+        },
+        AcpEntry::TaskNote(TaskNote {
+            id: "bg-1".into(),
+            title: "编译".into(),
+            status: "failed".into(),
+            exit_code: Some(1),
+            output_tail: "error: boom".into(),
+        }),
+        AcpEntry::Assistant {
+            text: "编译失败了".into(),
+            thought: false,
+        },
+    ];
+
+    let layout = build_conversation_layout(&entries, false);
+    assert!(layout[1].process_group.is_some());
+    assert!(
+        layout[2].process_group.is_none(),
+        "后台任务状态行不收进执行过程，折叠后仍要看得见"
+    );
+    assert!(layout[3].final_answer);
 }
 
 #[test]
@@ -3028,4 +3071,129 @@ fn stop_button_click_requests_cancel_then_force_restarts_on_second_click(
             assert!(view.restarting);
         });
     });
+}
+
+#[test]
+fn short_tool_log_stays_inline() {
+    assert_eq!(super::tool_log_mode(0, true), super::ToolLogMode::Inline);
+    assert_eq!(super::tool_log_mode(8, false), super::ToolLogMode::Inline);
+    assert_eq!(super::tool_log_mode(8, true), super::ToolLogMode::Inline);
+}
+
+#[test]
+fn long_tool_log_expands_into_a_bounded_viewport() {
+    assert_eq!(super::tool_log_mode(9, false), super::ToolLogMode::Preview);
+    assert_eq!(
+        super::tool_log_mode(4_000, false),
+        super::ToolLogMode::Preview
+    );
+    assert_eq!(
+        super::tool_log_mode(4_000, true),
+        super::ToolLogMode::Viewport
+    );
+    assert_eq!(
+        super::tool_log_viewport_height(9),
+        9. * super::TOOL_LOG_LINE_HEIGHT_PX
+    );
+    assert_eq!(
+        super::tool_log_viewport_height(4_000),
+        super::TOOL_LOG_VIEWPORT_LINES as f32 * super::TOOL_LOG_LINE_HEIGHT_PX
+    );
+}
+
+#[test]
+fn tool_log_preview_keeps_the_head_and_counts_every_line() {
+    let body = "a\r\n\nb\n";
+    assert_eq!(super::split_log_lines(body), vec!["a", "", "b"]);
+    let long = (0..20)
+        .map(|index| format!("l{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview = super::tool_log_preview(&long);
+    assert_eq!(preview.total, 20);
+    assert!(preview.truncated());
+    assert_eq!(
+        preview.shown.lines().count(),
+        super::TOOL_OUTPUT_PREVIEW_LINES
+    );
+    assert!(preview.shown.starts_with("l0\n"));
+    assert!(preview.shown.ends_with("l7"));
+}
+
+#[test]
+fn widest_log_line_counts_wide_characters() {
+    let lines = vec![
+        "short".to_string(),
+        "一二三四五六七八九十".to_string(),
+        "abcdefghij".to_string(),
+    ];
+    assert_eq!(super::widest_log_line_index(&lines), 1);
+}
+
+#[gpui::test]
+fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext) {
+    use gpui::VisualTestContext;
+
+    let log = (0..200)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let entries = vec![
+        AcpEntry::User("跑一下".into()),
+        AcpEntry::ToolCall {
+            id: "log-1".into(),
+            title: "bash".into(),
+            kind: ToolKind::Execute,
+            status: ToolCallStatus::Completed,
+            output: vec![ToolOutputPart::Text(log)],
+            children: Vec::new(),
+        },
+        AcpEntry::Assistant {
+            text: "好了".into(),
+            thought: false,
+        },
+    ];
+    let layout = super::build_conversation_layout(&entries, false);
+    let group_ix = layout
+        .iter()
+        .find_map(|entry| entry.process_group.map(|group| group.first))
+        .expect("tool output belongs to a process group");
+
+    cx.update(gpui_component::init);
+    let (_view, cx) = cx.add_window_view(move |_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "log viewport".into(),
+                entries,
+                resume_session_id: None,
+                saved_sid: Some("acp-log-viewport".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.expanded_process_groups.insert(group_ix);
+        view.expanded_tool_cards.insert("log-1".into());
+        view.expanded_tools.insert("log-1".into());
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let bounds = cx
+        .debug_bounds("ACP_TOOL_LOG_log-1_0")
+        .expect("expanded log viewport should paint");
+    let cap = gpui::px(super::tool_log_viewport_height(200));
+    assert!(
+        (bounds.size.height - cap).abs() < gpui::px(1.),
+        "log viewport grew with the full output: {:?} cap {cap:?}",
+        bounds.size.height,
+    );
 }

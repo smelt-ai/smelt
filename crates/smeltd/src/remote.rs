@@ -422,6 +422,43 @@ pub(crate) fn rotate_remote_token_at(
 /// 幂等：已经开着直接回现有 token/addr/write，不重启、不换 token——包括 `write`
 /// 参数；运行中的写权限由 `remote_set_write` 单独热更新，bind/port 等监听参数
 /// 仍需重开网关。
+/// 网关起不来。`addr_in_use` 是 bind 的 `ErrorKind`，给自启决定要不要等前任退出。
+#[derive(Debug)]
+pub(crate) struct GatewayFailure {
+    pub(crate) addr_in_use: bool,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for GatewayFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<GatewayFailure> for String {
+    fn from(error: GatewayFailure) -> Self {
+        error.message
+    }
+}
+
+impl From<String> for GatewayFailure {
+    fn from(message: String) -> Self {
+        Self {
+            addr_in_use: false,
+            message,
+        }
+    }
+}
+
+impl From<&str> for GatewayFailure {
+    fn from(message: &str) -> Self {
+        Self {
+            addr_in_use: false,
+            message: message.to_string(),
+        }
+    }
+}
+
 /// bind 非法 / 端口绑不上 / 服务线程起不来都走 Err，调用方原样透传给客户端。
 ///
 /// **先等 serve 就绪再写 `RemoteState`**：以前 spawn 后立刻标 running，子线程
@@ -431,7 +468,7 @@ pub(crate) fn start_remote_gateway(
     bind: &str,
     port: u16,
     write: bool,
-) -> Result<(String, std::net::SocketAddr, bool), String> {
+) -> Result<(String, std::net::SocketAddr, bool), GatewayFailure> {
     let mut guard = state.lock().unwrap();
     if guard.stopping {
         return Err("守护正在升级，远程网关已停止".into());
@@ -452,8 +489,10 @@ pub(crate) fn start_remote_gateway(
     let ip: std::net::IpAddr = bind
         .parse()
         .map_err(|e| format!("非法绑定地址 {bind}：{e}"))?;
-    let std_listener = std::net::TcpListener::bind((ip, port))
-        .map_err(|e| format!("绑定 {bind}:{port} 失败：{e}"))?;
+    let std_listener = std::net::TcpListener::bind((ip, port)).map_err(|error| GatewayFailure {
+        addr_in_use: error.kind() == std::io::ErrorKind::AddrInUse,
+        message: format!("绑定 {bind}:{port} 失败：{error}"),
+    })?;
     std_listener
         .set_nonblocking(true)
         .map_err(|e| e.to_string())?;
@@ -518,7 +557,7 @@ pub(crate) fn start_remote_gateway(
             }
             Ok((token, addr, write))
         }
-        Ok(Err(e)) => Err(e),
+        Ok(Err(error)) => Err(error.into()),
         Err(_) => Err("远程网关启动超时（5s）".into()),
     }
 }
@@ -876,12 +915,25 @@ pub(crate) fn autostart_remote_from_config(
     );
 }
 
-/// 网关自启的 AddrInUse 判定：Rust io 错误文案不随 locale 变化，
-/// macOS `os error 48` / Linux `os error 98` 双保险。
-fn is_addr_in_use_message(message: &str) -> bool {
-    message.contains("Address already in use")
-        || message.contains("os error 48")
-        || message.contains("os error 98")
+/// 交接窗口里 successor 的父进程还是 predecessor。端口被占就等它退出，再绑一次。
+/// 父进程已经是 init，或这段时间里没有退出，就按这一次失败返回。
+const AUTOSTART_HOLDER_EXIT: Duration = Duration::from_secs(4);
+
+pub(crate) fn retry_gateway_after_holder_exit<T>(
+    holder: i32,
+    timeout: Duration,
+    mut start: impl FnMut() -> Result<T, GatewayFailure>,
+) -> Result<T, GatewayFailure> {
+    match start() {
+        Err(error) if error.addr_in_use && holder > 1 => {
+            if smelt_core::process_wait::wait_until_exit(holder, timeout) {
+                start()
+            } else {
+                Err(error)
+            }
+        }
+        other => other,
+    }
 }
 
 /// `autostart_remote_from_config` 里除「读配置」以外的部分。拆出来是为了能测
@@ -907,34 +959,21 @@ pub(crate) fn spawn_remote_autostart(
         // 网关只绑回环、不联网，先起它：即使 relay 没配好，GUI 侧「本机链接」
         // 和后续的 iroh_start 幂等路径也有东西可用。
         //
-        // AddrInUse 有界重试：交接 v2 里 successor 在 predecessor 退出中的毫秒
-        // 窗口里自启会撞端口（stop 在 COMMIT 发送之后，见 predecessor::run_transaction）。
-        // 只重试"地址被占"（io 文案不随 locale 变，可匹配；48=macOS，98=Linux），
-        // 其它错误（非法地址/权限）一次失败就停，不空转。
-        let mut gateway_addr = None;
-        for attempt in 0..5 {
-            match ensure_remote_gateway_with_write(&remote_state, config.write_enabled) {
-                Ok((_, addr, _)) => {
-                    gateway_addr = Some(addr);
-                    break;
-                }
-                Err(error) if is_addr_in_use_message(&error) && attempt < 4 => {
-                    dlog(&format!(
-                        "远程网关端口被占（多半是对端退出中），1s 后重试（第 {} 次）：{error}",
-                        attempt + 1
-                    ));
-                    thread::sleep(Duration::from_secs(1));
-                }
+        // 交接时 stop 在 COMMIT 之后（见 predecessor::run_transaction）。自启若
+        // 撞上前任还占着端口，就等这个父进程退出后再绑一次。
+        // SAFETY: getppid 无参数、不失败，只读取当前进程的父进程号。
+        let holder = unsafe { libc::getppid() };
+        let gateway_addr =
+            match retry_gateway_after_holder_exit(holder, AUTOSTART_HOLDER_EXIT, || {
+                ensure_remote_gateway_with_write(&remote_state, config.write_enabled)
+            }) {
+                Ok((_, addr, _)) => addr,
                 Err(error) => {
                     dlog(&format!("自动恢复远程网关失败：{error}"));
                     return;
                 }
-            }
-        }
-        match gateway_addr {
-            Some(addr) => dlog(&format!("按配置自动恢复远程网关：{addr}")),
-            None => return,
-        }
+            };
+        dlog(&format!("按配置自动恢复远程网关：{gateway_addr}"));
 
         if config.iroh_relay.trim().is_empty() {
             dlog("未配置 iroh relay，跳过隧道自动恢复");
@@ -1030,7 +1069,7 @@ pub(crate) fn cleanup_sidecar_services() {
 pub(crate) fn ensure_remote_gateway_with_write(
     state: &RemoteState,
     write: bool,
-) -> Result<(String, std::net::SocketAddr, bool), String> {
+) -> Result<(String, std::net::SocketAddr, bool), GatewayFailure> {
     {
         let guard = state.lock().unwrap();
         if let Some(g) = guard.gateway.as_ref()

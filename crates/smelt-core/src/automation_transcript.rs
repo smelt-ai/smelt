@@ -143,6 +143,14 @@ fn render_entry(entry: &AcpEntry, out: &mut String, depth: usize) {
                 out.push_str("\n\n");
             }
         }
+        AcpEntry::TaskNote(note) => {
+            let mut body = note.summary();
+            if !note.output_tail.trim().is_empty() {
+                body.push_str("\n\n");
+                body.push_str(note.output_tail.trim_end());
+            }
+            push_block(out, heading, "后台任务", &body);
+        }
     }
 }
 

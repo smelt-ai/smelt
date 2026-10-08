@@ -3,6 +3,7 @@
 //! 从 `main.rs` 整块搬出。连接与归约仍在 `smelt_core::acp_session`；这里只跑守护侧的会话活体。
 
 use super::*;
+use std::collections::BTreeSet;
 
 // ===================== ACP 会话托管 =====================
 //
@@ -141,7 +142,14 @@ pub(crate) struct AcpSession {
     /// 服务端 prompt 闸门。GUI 侧会乐观排队，但多个客户端可能共用一个 ACP
     /// 会话，且快照可能与 provider 的最终更新竞态，最终顺序必须由 daemon 保证。
     pub(crate) prompt_in_flight: AtomicBool,
+    /// 自动化只关心相位、投递账本和闸门。流式文本不进这组，避免每来一个字就整段重算。
+    pub(crate) automation_watch: Mutex<Option<AutomationWatch>>,
     pub(crate) pending_prompts: Mutex<VecDeque<QueuedAcpPrompt>>,
+    /// 已经写给 Pi、还没被收下的那条。收下之前不回显；拒绝后回到队列，不记回合失败。
+    pub(crate) unaccepted_prompt: Mutex<Option<QueuedAcpPrompt>>,
+    /// 界面上的「思考中」只是为了接住还在跑的 Pi，并不是一条已被收下的回合。
+    /// 下一次 `ProviderIdle` 要把它收回去，进门才能放行。
+    pub(crate) provider_hold: AtomicBool,
     /// 主 daemon 只持有独立 session-host 的控制连接；真正的 ACP SDK handle
     /// 留在宿主进程。session-host 自己运行本模块时则只使用下面的直接 handle。
     pub(crate) hosted_handle: Mutex<Option<acp_runtime_host::HostedConversationHandle>>,
@@ -186,11 +194,17 @@ pub(crate) struct AcpSession {
     pub(crate) pending_agent_preset: Mutex<Option<String>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AcpPromptOrigin {
+    User,
+}
+
 #[derive(Clone)]
 pub(crate) struct QueuedAcpPrompt {
     pub(crate) text: String,
     pub(crate) images: Vec<smelt_core::acp_conn::PromptImage>,
     pub(crate) delivery_id: Option<String>,
+    pub(crate) origin: AcpPromptOrigin,
 }
 
 pub(crate) type AcpSessions = Arc<AcpRegistry<AcpSession>>;
@@ -477,6 +491,40 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         st.clone()
     };
     broadcast_state(subscribers, &snapshot);
+    note_automation_watch(sess);
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct AutomationWatch {
+    phase: smelt_core::daemon_state::DaemonPhase,
+    active_delivery_id: Option<String>,
+    completed_delivery_id: Option<String>,
+    accepted_delivery_ids: BTreeSet<String>,
+    turn_outcome: Option<smelt_core::acp_session::AcpTurnOutcome>,
+    end_reason: String,
+    prompt_in_flight: bool,
+}
+
+fn note_automation_watch(sess: &AcpSession) {
+    let next = {
+        let reduced = sess.reduced.lock().unwrap();
+        AutomationWatch {
+            phase: reduced.phase,
+            active_delivery_id: reduced.active_delivery_id.clone(),
+            completed_delivery_id: reduced.completed_delivery_id.clone(),
+            accepted_delivery_ids: reduced.accepted_delivery_ids.clone(),
+            turn_outcome: reduced.turn_outcome,
+            end_reason: reduced.end_reason.clone(),
+            prompt_in_flight: sess.prompt_in_flight.load(Ordering::SeqCst),
+        }
+    };
+    let mut slot = sess.automation_watch.lock().unwrap();
+    let changed = slot.as_ref() != Some(&next);
+    *slot = Some(next);
+    drop(slot);
+    if changed {
+        crate::automation_runtime::nudge_automation_driver();
+    }
 }
 
 /// 推一份最新快照给控制连接 + 全部旁观者。这里只复制到各 attachment 的输出邮箱；
@@ -1005,16 +1053,25 @@ pub(crate) fn validate_conversation_state(
     Ok(())
 }
 
+fn session_uses_pi_admission(sess: &AcpSession) -> bool {
+    sess.launch_spec
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(smelt_core::pi_rpc::is_smelt_pi_launch)
+}
+
 /// 在持有 [`AcpSession::turn_completion`] 时，根据最新状态释放刚结束回合的
 /// prompt 闸门并最多派发一条排队消息。
 ///
-/// `TurnEnded` 是回合结束的唯一事实。未完成工具只影响展示：迟到的
-/// `ToolFinished` 仍可改写旧 tool id；下一条 prompt 发出时再收尾仍未终态的工具。
-/// 不按时间猜尾包，也不为悬空工具再握闸门。
+/// 界面回合结束和 Pi 能不能再收一条 prompt 是两件事。其它 agent 仍在回合结束时放行。
+/// Pi 只有 `provider_idle` 才放行；已经写出、还没被收下的那条会占住闸门。
+/// 未完成工具只影响展示：迟到的 `ToolFinished` 仍可改写旧 tool id。
 pub(crate) fn settle_acp_turn_locked(
     sess: &AcpSession,
     turn_ended: bool,
     ready: bool,
+    provider_idle: bool,
     subscribers: &EventHubHandle,
 ) {
     let idle = matches!(
@@ -1024,8 +1081,18 @@ pub(crate) fn settle_acp_turn_locked(
     if !idle {
         return;
     }
+    let pi = session_uses_pi_admission(sess);
+    if pi && sess.unaccepted_prompt.lock().unwrap().is_some() {
+        return;
+    }
+    if pi && sess.prompt_in_flight.load(Ordering::SeqCst) && !provider_idle {
+        return;
+    }
     let gate_was_held = sess.prompt_in_flight.swap(false, Ordering::SeqCst);
-    if gate_was_held || turn_ended || ready {
+    if gate_was_held {
+        note_automation_watch(sess);
+    }
+    if gate_was_held || turn_ended || ready || provider_idle {
         flush_pending_acp_prompt_locked(sess, subscribers);
     }
 }
@@ -1097,22 +1164,13 @@ pub(crate) fn start_acp_event_drain(
                 while let Ok(next) = event_rx.try_recv() {
                     batch.push(next);
                 }
-                let mut notices = Vec::new();
-                let batch: Vec<_> = batch
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        smelt_core::acp_conn::ConversationEvent::BackgroundNotice(text) => {
-                            notices.push(text);
-                            None
-                        }
-                        other => Some(other),
-                    })
-                    .collect();
                 let mut offsets = Vec::with_capacity(batch.len());
                 let mut should_persist = false;
                 let mut runtime_debug_changed = false;
                 let mut turn_ended = false;
                 let mut ready = false;
+                let mut provider_idle = false;
+                let mut prompt_refused = false;
                 let mut applied = false;
                 let mut stop = false;
                 for ev in batch {
@@ -1128,6 +1186,40 @@ pub(crate) fn start_acp_event_drain(
                         ));
                         stop = true;
                         break;
+                    }
+                    if matches!(&ev, smelt_core::acp_conn::ConversationEvent::PromptAccepted) {
+                        if accept_unaccepted_prompt(sess) {
+                            let len = sess.reduced.lock().unwrap().entries.len();
+                            offsets.push(Some(len.saturating_sub(1)));
+                            should_persist = true;
+                            applied = true;
+                        }
+                        continue;
+                    }
+                    if matches!(
+                        &ev,
+                        smelt_core::acp_conn::ConversationEvent::PromptNotAccepted
+                    ) {
+                        requeue_unaccepted_prompt(sess);
+                        prompt_refused = true;
+                        applied = true;
+                        continue;
+                    }
+                    if matches!(&ev, smelt_core::acp_conn::ConversationEvent::ProviderIdle) {
+                        provider_idle = true;
+                        applied = true;
+                        continue;
+                    }
+                    if matches!(
+                        &ev,
+                        smelt_core::acp_conn::ConversationEvent::TurnEnded(
+                            agent_client_protocol::schema::v1::StopReason::Cancelled
+                        )
+                    ) {
+                        park_unaccepted_after_cancel(sess);
+                    } else if matches!(&ev, smelt_core::acp_conn::ConversationEvent::TurnFailed(_))
+                    {
+                        restore_unaccepted_to_composer(sess);
                     }
                     turn_ended |= ev.ends_turn();
                     ready |= matches!(&ev, smelt_core::acp_conn::ConversationEvent::Ready { .. });
@@ -1191,6 +1283,14 @@ pub(crate) fn start_acp_event_drain(
                     runtime_debug_changed |= outcome.runtime_debug_changed;
                     applied = true;
                 }
+                if prompt_refused && !provider_idle {
+                    // 同一批里如果已经空闲，不能先把相位改成思考中，否则这条空闲信号放不出队。
+                    remember_provider_hold(sess);
+                    applied = true;
+                }
+                if provider_idle {
+                    release_provider_hold(sess);
+                }
                 if applied {
                     push_acp_snapshot_since_with_runtime_debug(
                         sess,
@@ -1199,14 +1299,8 @@ pub(crate) fn start_acp_event_drain(
                         runtime_debug_changed,
                     );
                     update_acp_daemon_state(sess, &subscribers);
-                    // TurnEnded / Ready 之后只要相位已 Idle 就放闸。迟到工具终态
-                    // 按 tool id 归到旧条目，不会把新回合重新打开。
-                    settle_acp_turn_locked(sess, turn_ended, ready, &subscribers);
-                }
-                if !stop && sess.connection_generation.load(Ordering::SeqCst) == generation {
-                    // 先让本批里的 TurnEnded 放闸并冲掉更早的排队，再投递通知。
-                    // 这样通知要么成为下一条 prompt，要么排在已经发出的那条后面。
-                    deliver_background_notices_locked(sess, notices, &subscribers);
+                    // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
+                    settle_acp_turn_locked(sess, turn_ended, ready, provider_idle, &subscribers);
                 }
                 if stop {
                     break;
@@ -1612,13 +1706,14 @@ pub(crate) fn upgrade_released_adapter_launch(
 /// 不是父进程）。失败时留下 unreaped_pid，调用方不得 spawn。
 pub(crate) fn retire_acp_runtime(sess: &AcpSession) -> bool {
     sess.connection_generation.fetch_add(1, Ordering::SeqCst);
-    // unreaped 重试只做 prove、不重杀：上次已经发过 SIGKILL；此 pid 若已被
-    // 复用，重杀会误伤无辜进程组。探得仍在就继续留着不 spawn（fail closed）。
+    // unreaped 重试只观察、不收尸、也不重杀。上次的 wait 还占着这个 pid，
+    // 这里再 waitpid 会和它抢；此 pid 若已被复用，重杀会误伤无辜进程组。
+    // 探得仍在就继续留着不 spawn（fail closed）。
     // 先 take 掉再判：`if let` 的 scrutinee guard 会活过整个 body，里面再
     // lock 同一把就是自死锁（之前 instant-true 从不进 body，雷没爆过）。
     let unreaped = sess.unreaped_pid.lock().unwrap().take();
     if let Some(pid) = unreaped
-        && !smelt_core::acp_conn::prove_process_group_dead(pid, ACP_SHUTDOWN_GRACE)
+        && !smelt_core::acp_conn::prove_process_group_dead_without_reaping(pid, ACP_SHUTDOWN_GRACE)
     {
         *sess.unreaped_pid.lock().unwrap() = Some(pid);
         return false;
@@ -1660,7 +1755,10 @@ pub(crate) fn make_acp_session(
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),
         prompt_in_flight: AtomicBool::new(false),
+        automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        unaccepted_prompt: Mutex::new(None),
+        provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),
         host_snapshot_revision: AtomicU64::new(0),
         handle: Mutex::new(None),
@@ -1708,13 +1806,93 @@ pub(crate) fn make_acp_session(
     }
 }
 
-/// 在调用方取得 daemon 回合槽位后发送 prompt。状态回显也放在这里，避免排队的
-/// prompt 在上一轮 TurnEnded 归约前就被记录到消息流。
+/// Pi 还在跑。空闲界面拉回转圈，好接住迟到的输出；这不是一条新回合。
+pub(crate) fn remember_provider_hold(sess: &AcpSession) {
+    let mut state = sess.reduced.lock().unwrap();
+    let was_idle = matches!(state.phase, smelt_core::daemon_state::DaemonPhase::Idle)
+        && state.turn_started_at_ms.is_none();
+    smelt_core::acp_session::note_provider_still_running(&mut state);
+    drop(state);
+    if was_idle {
+        sess.provider_hold.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 占位用的转圈随着 Pi 空闲一起收回。真正被收下的回合不走这里。
+pub(crate) fn release_provider_hold(sess: &AcpSession) {
+    if !sess.provider_hold.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let mut state = sess.reduced.lock().unwrap();
+    smelt_core::acp_session::clear_provider_queue_status(&mut state);
+    if matches!(state.phase, smelt_core::daemon_state::DaemonPhase::Thinking) {
+        state.phase = smelt_core::daemon_state::DaemonPhase::Idle;
+        state.turn_started_at_ms = None;
+    }
+}
+
+fn take_unaccepted_prompt(sess: &AcpSession) -> Option<QueuedAcpPrompt> {
+    sess.unaccepted_prompt.lock().unwrap().take()
+}
+
+pub(crate) fn requeue_unaccepted_prompt(sess: &AcpSession) {
+    let Some(prompt) = take_unaccepted_prompt(sess) else {
+        return;
+    };
+    sess.prompt_in_flight.store(true, Ordering::SeqCst);
+    sess.pending_prompts.lock().unwrap().push_front(prompt);
+}
+
+pub(crate) fn restore_unaccepted_to_composer(sess: &AcpSession) {
+    let Some(prompt) = take_unaccepted_prompt(sess) else {
+        return;
+    };
+    smelt_core::acp_session::queue_composer_restore(
+        &mut sess.reduced.lock().unwrap(),
+        vec![prompt.text],
+        prompt.images,
+    );
+}
+
+pub(crate) fn park_unaccepted_after_cancel(sess: &AcpSession) {
+    let Some(prompt) = take_unaccepted_prompt(sess) else {
+        return;
+    };
+    match prompt.origin {
+        AcpPromptOrigin::User => smelt_core::acp_session::queue_composer_restore(
+            &mut sess.reduced.lock().unwrap(),
+            vec![prompt.text],
+            prompt.images,
+        ),
+    }
+}
+
+pub(crate) fn accept_unaccepted_prompt(sess: &AcpSession) -> bool {
+    let Some(prompt) = take_unaccepted_prompt(sess) else {
+        return false;
+    };
+    sess.provider_hold.store(false, Ordering::SeqCst);
+    let mut state = sess.reduced.lock().unwrap();
+    smelt_core::acp_session::clear_provider_queue_status(&mut state);
+    smelt_core::acp_session::note_prompt_sent_with_delivery(
+        &mut state,
+        prompt.text,
+        prompt.images,
+        prompt.delivery_id,
+    );
+    true
+}
+
+/// 在调用方取得 daemon 回合槽位后发送 prompt。
+///
+/// 其它 agent 立刻回显。Pi 先记在 `unaccepted_prompt`，等 `PromptAccepted` 再回显；
+/// 会话命令（`/reload`）没有模型回合，不回显。
 pub(crate) fn send_acp_prompt_reserved(
     sess: &AcpSession,
     text: String,
     images: Vec<smelt_core::acp_conn::PromptImage>,
     delivery_id: Option<String>,
+    origin: AcpPromptOrigin,
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
     let handle = sess
@@ -1725,6 +1903,7 @@ pub(crate) fn send_acp_prompt_reserved(
         .map(|h| (h.cmd_tx.clone(), Arc::clone(&h.in_flight_rpc)));
     let Some((cmd_tx, in_flight_rpc)) = handle else {
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
+        *sess.unaccepted_prompt.lock().unwrap() = None;
         return Err("ACP session is not running");
     };
     let shown_images = images.clone();
@@ -1734,20 +1913,47 @@ pub(crate) fn send_acp_prompt_reserved(
         .try_send(smelt_core::acp_conn::ConversationCommand::Prompt { text, images })
         .is_ok()
     {
-        smelt_core::acp_session::note_prompt_sent_with_delivery(
-            &mut sess.reduced.lock().unwrap(),
-            shown_text,
-            shown_images,
-            delivery_id,
-        );
-        push_acp_snapshot(sess, false);
-        update_acp_daemon_state(sess, subscribers);
+        if remember_outgoing_prompt(sess, shown_text, shown_images, delivery_id, origin) {
+            push_acp_snapshot(sess, false);
+            update_acp_daemon_state(sess, subscribers);
+        }
         Ok(())
     } else {
         in_flight_rpc.fetch_sub(1, Ordering::SeqCst);
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
+        *sess.unaccepted_prompt.lock().unwrap() = None;
         Err("ACP command channel is busy or closed")
     }
+}
+
+/// 投影已经写入用户气泡时返回 true。Pi 的普通消息要等收下，会话命令不写气泡。
+fn remember_outgoing_prompt(
+    sess: &AcpSession,
+    text: String,
+    images: Vec<smelt_core::acp_conn::PromptImage>,
+    delivery_id: Option<String>,
+    origin: AcpPromptOrigin,
+) -> bool {
+    let pi = session_uses_pi_admission(sess);
+    if pi && smelt_core::pi_rpc::parse_session_slash(&text).is_some() {
+        return false;
+    }
+    if pi {
+        *sess.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+            text,
+            images,
+            delivery_id,
+            origin,
+        });
+        return false;
+    }
+    smelt_core::acp_session::note_prompt_sent_with_delivery(
+        &mut sess.reduced.lock().unwrap(),
+        text,
+        images,
+        delivery_id,
+    );
+    true
 }
 
 /// Pi 的会话命令在进入 Prompt / Steer / FollowUp 之前处理。
@@ -2057,45 +2263,8 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
     Ok(())
 }
 
-/// 后台任务结束通知走用户 prompt 的同一道闸门。调用方必须持有 `turn_completion`。
-///
-/// 回合还在就排进 `pending_prompts`，等 `TurnEnded` 之后由
-/// [`flush_pending_acp_prompt_locked`] 放出恰好一条。空闲就当场
-/// `send_acp_prompt_reserved`。不在 Pi RPC 里另开回合，也不发 `follow_up`：
-/// 那条命令在 Pi 已经停下时只会把通知留在死队列里。
-pub(crate) fn deliver_background_notices_locked(
-    sess: &AcpSession,
-    notices: Vec<String>,
-    subscribers: &EventHubHandle,
-) {
-    for text in notices {
-        let text = text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let queued = QueuedAcpPrompt {
-            text: text.to_string(),
-            images: Vec::new(),
-            delivery_id: None,
-        };
-        if sess.prompt_in_flight.load(Ordering::SeqCst) {
-            sess.pending_prompts.lock().unwrap().push_back(queued);
-            continue;
-        }
-        if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
-            sess.pending_prompts.lock().unwrap().push_back(queued);
-            continue;
-        }
-        if send_acp_prompt_reserved(sess, queued.text.clone(), Vec::new(), None, subscribers)
-            .is_err()
-        {
-            sess.pending_prompts.lock().unwrap().push_front(queued);
-        }
-    }
-}
-
-/// 回合结束后只释放一条 daemon 队列中的 prompt。调用方必须持有/// `turn_completion`；剩余消息等下一次 TurnEnded，保证 provider 永远不会看到
-/// 并发回合。
+/// 回合结束后只释放一条 daemon 队列中的 prompt。调用方必须持有 `turn_completion`；
+/// 剩余消息等下一次 TurnEnded，保证 provider 永远不会看到并发回合。
 pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &EventHubHandle) {
     if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
         return;
@@ -2109,6 +2278,7 @@ pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &E
         prompt.text.clone(),
         prompt.images.clone(),
         prompt.delivery_id.clone(),
+        prompt.origin,
         subscribers,
     )
     .is_err()
@@ -2226,12 +2396,19 @@ fn apply_acp_user_action_inner(
                         text,
                         images,
                         delivery_id,
+                        origin: AcpPromptOrigin::User,
                     });
                 push_acp_snapshot_since(sess, false, None);
                 return Ok(());
             }
-            let result =
-                send_acp_prompt_reserved(sess, text, images, delivery_id.clone(), subscribers);
+            let result = send_acp_prompt_reserved(
+                sess,
+                text,
+                images,
+                delivery_id.clone(),
+                AcpPromptOrigin::User,
+                subscribers,
+            );
             if result.is_err()
                 && let Some(delivery_id) = delivery_id.as_deref()
             {

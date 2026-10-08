@@ -1,6 +1,7 @@
 //! 舞台和右栏共用的 34px 顶栏：窗口开关 + 可见舞台身份。
 //! 用其他应用打开在项目右键；文件/变更/技能/历史在右抽屉里。
 //!
+//! 标题不拉成通栏。它是舞台列正中的一颗胶囊，右栏打开时也不跟着偏到分栏上。
 //! 标题槽只填当前舞台没有自己页头的那一面（项目会话、智能体对话、插件面）。
 //! 智能体/自动化目录和钻取已有页头，铬不重复写，也不回落到上一会话。
 //!
@@ -41,6 +42,48 @@ impl ChromeTitle {
     }
 }
 
+/// 舞台自己有页头或页签时，拖窗口交给那一条，不要再盖一层把按钮挡住。
+pub(crate) fn stage_has_page_header(
+    route: &WorkspaceRoute,
+    agent_conversation_open: bool,
+    tool_panel_fills_stage: bool,
+) -> bool {
+    if tool_panel_fills_stage {
+        return true;
+    }
+    match route {
+        WorkspaceRoute::Agents => !agent_conversation_open,
+        WorkspaceRoute::Automations => true,
+        WorkspaceRoute::Session | WorkspaceRoute::Plugin { .. } => false,
+    }
+}
+
+/// 内容贴到窗口顶时，交通灯这一条仍然拖窗口。
+///
+/// 侧栏收起且不是全屏时从 80px 起，跟侧栏安全条一样躲开红绿灯。
+/// 右栏打开时停在分栏左边。返回值是 `(left, right, height)`。
+pub(crate) fn stage_content_drag_band(
+    sidebar_open: bool,
+    fullscreen: bool,
+    panel_width: Pixels,
+    page_header: bool,
+) -> Option<(Pixels, Pixels, Pixels)> {
+    if page_header {
+        return None;
+    }
+    let left = if sidebar_open || fullscreen {
+        px(0.)
+    } else {
+        px(80.)
+    };
+    let right = if panel_width > px(0.) {
+        panel_width
+    } else {
+        px(0.)
+    };
+    Some((left, right, workspace_frame::TOP_BAR_HEIGHT))
+}
+
 /// 铬标题跟可见面走，不读裸的 `active_session`。
 ///
 /// `project_session` 是项目舞台上那条会话；切到智能体目录后它往往还在，
@@ -50,7 +93,12 @@ pub(crate) fn chrome_title_for_stage(
     agent_conversation: Option<ChromeSessionTitle>,
     project_session: Option<ChromeSessionTitle>,
     plugin_title: Option<String>,
+    tool_panel_fills_stage: bool,
 ) -> ChromeTitle {
+    // 右栏铺满舞台时，页签就是标题。会话胶囊会压在那条页签上。
+    if tool_panel_fills_stage && matches!(route, WorkspaceRoute::Session) {
+        return ChromeTitle::Hidden;
+    }
     match route {
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
@@ -60,6 +108,50 @@ pub(crate) fn chrome_title_for_stage(
             _ => ChromeTitle::Hidden,
         },
     }
+}
+
+/// 右上角两个圆形开关加上右边距。胶囊居中时让开它，页头按钮也别钻到它下面。
+pub(crate) const CHROME_TOGGLE_RESERVE: f32 = 72.;
+
+/// 静止宽度。胶囊浮在内容第一行正中，左右常是终端自己的路径和用量，只能留一个短名字。
+const CHROME_ISLAND_MAX_WIDTH: f32 = 200.;
+
+/// 舞台标题胶囊。只显示名字；模型留在悬停和输入条上。
+fn chrome_title_island(title: String, model: Option<String>) -> Stateful<Div> {
+    let tip = match &model {
+        Some(model) if !model.is_empty() => format!("{title} · {model}"),
+        _ => title.clone(),
+    };
+    workspace_frame::with_window_drag(
+        div()
+            .id("stage-title")
+            .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
+            .max_w(px(CHROME_ISLAND_MAX_WIDTH))
+            .px_3()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            // 浮层实色：平时一档卡片底，指上去再抬到悬停色。不透、不糊。
+            .bg(ui_theme::glass_floating())
+            .border_1()
+            .border_color(ui_theme::card_stroke())
+            .hover(|island| island.bg(rgb(ui_theme::bg_hover())))
+            .shadow_lg()
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(rgb(ui_theme::text_bright()))
+                    .truncate()
+                    .child(title),
+            )
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            }),
+    )
 }
 
 /// 首次 IDE 扫描完成后需要更新的菜单。菜单可能已经被用户关闭，因此只持有弱引用。
@@ -271,6 +363,17 @@ impl Workspace {
         }
     }
 
+    /// 侧栏收起时，舞台左缘要让开交通灯和侧栏开关。侧栏开着时让位是 0。
+    pub(crate) fn chrome_left_guard(&self, window: &Window) -> Pixels {
+        if self.sidebar_open {
+            px(0.)
+        } else if window.is_fullscreen() {
+            px(48.)
+        } else {
+            px(128.)
+        }
+    }
+
     fn chrome_title(&self, cx: &App) -> ChromeTitle {
         let agent_conversation =
             self.selected_agent_conversation_view(cx)
@@ -298,59 +401,72 @@ impl Workspace {
             agent_conversation,
             project_session,
             plugin_title,
+            self.tool_panel_promoted(),
         )
     }
 
-    /// 舞台和右栏共用的 34px 顶栏：可见舞台身份 + 窗口开关。
-    /// 用其他应用打开在项目右键；文件/变更/技能/历史在抽屉里。
+    /// 浮在内容上的标题胶囊、右上角开关，以及没有页头时的拖窗口条。
+    /// 不占布局高度。页头和右栏页签自己拖，这里不再盖住它们。
+    /// `panel_reserve` 是停靠右栏的宽度，胶囊按舞台列居中，不漂到右栏上。
     pub(crate) fn render_shared_right_chrome(
         &mut self,
         left_guard: Pixels,
+        panel_reserve: Pixels,
+        fullscreen: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let (title, model) = match self.chrome_title(cx) {
             ChromeTitle::Visible { title, model } => (Some(title), model),
             ChromeTitle::Hidden => (None, None),
         };
-        workspace_frame::with_window_drag(
-            workspace_frame::top_bar()
-                .w_full()
-                .h(workspace_frame::TOP_BAR_HEIGHT)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_2p5()
-                .bg(rgb(ui_theme::bg_stage()))
-                .border_b_1()
-                .border_color(ui_theme::hairline())
-                .when(left_guard > px(0.), |d| d.pl(left_guard))
-                .when(left_guard == px(0.), |d| d.pl_4())
-                .pr(px(18.))
-                .children(title.map(|title| {
-                    let tip = title.clone();
-                    div()
-                        .id("stage-title")
-                        .min_w(px(56.))
-                        .flex_shrink(1.)
-                        .overflow_hidden()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(rgb(ui_theme::text_bright()))
-                        .truncate()
-                        .child(title)
-                        .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                        })
-                }))
-                .children(model.map(|m| {
-                    div()
-                        .text_xs()
-                        .text_color(rgb(ui_theme::text_mid()))
-                        .child(m)
-                }))
-                .child(div().flex_1().min_w_0())
-                .child(self.render_window_trailing_toggles(cx)),
-        )
+        // 右栏收起时开关叠在舞台右缘，居中范围要让开它。
+        let stage_right = if panel_reserve > px(0.) {
+            panel_reserve
+        } else {
+            px(CHROME_TOGGLE_RESERVE)
+        };
+        let toggles = self.render_window_trailing_toggles(cx);
+        let drag_band = stage_content_drag_band(
+            self.sidebar_open,
+            fullscreen,
+            panel_reserve,
+            stage_has_page_header(
+                self.active_tab(),
+                self.selected_agent_conversation_view(cx).is_some(),
+                self.tool_panel_promoted(),
+            ),
+        );
+        div()
+            .size_full()
+            .relative()
+            // 拖动条在胶囊和开关下面。点到按钮时按钮先拦住，不会把窗口拖走。
+            .children(drag_band.map(|(left, right, height)| {
+                workspace_frame::with_window_drag(
+                    div().absolute().top_0().left(left).right(right).h(height),
+                )
+            }))
+            .children(title.map(|title| {
+                div()
+                    .absolute()
+                    .top(px(ui_theme::CHROME_ISLAND_TOP_PX))
+                    .left(left_guard)
+                    .right(stage_right)
+                    .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(chrome_title_island(title, model))
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right(px(12.))
+                    .h(workspace_frame::TOP_BAR_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .child(toggles),
+            )
     }
 
     /// 窗口级开关：全屏 / 右侧抽屉。挂在共用顶栏右侧，不进浮层。
@@ -440,8 +556,12 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChromeSessionTitle, ChromeTitle, chrome_title_for_stage};
-    use crate::WorkspaceRoute;
+    use super::{
+        ChromeSessionTitle, ChromeTitle, chrome_title_for_stage, stage_content_drag_band,
+        stage_has_page_header,
+    };
+    use crate::{WorkspaceRoute, workspace_frame};
+    use gpui::px;
 
     fn grok() -> ChromeSessionTitle {
         ChromeSessionTitle {
@@ -460,7 +580,7 @@ mod tests {
     #[test]
     fn leaving_a_session_for_the_agent_catalog_clears_the_chrome_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None),
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None, false),
             ChromeTitle::Hidden,
         );
     }
@@ -468,7 +588,13 @@ mod tests {
     #[test]
     fn automations_do_not_keep_the_previous_session() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Automations, None, Some(grok()), None),
+            chrome_title_for_stage(
+                &WorkspaceRoute::Automations,
+                None,
+                Some(grok()),
+                None,
+                false
+            ),
             ChromeTitle::Hidden,
         );
     }
@@ -481,6 +607,7 @@ mod tests {
                 Some(agent_chat()),
                 Some(grok()),
                 None,
+                false,
             ),
             ChromeTitle::Visible {
                 title: "查登录".into(),
@@ -492,14 +619,20 @@ mod tests {
     #[test]
     fn project_stage_still_shows_the_session_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None),
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None, false),
             ChromeTitle::Visible {
                 title: grok().title,
                 model: None,
             },
         );
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None, None),
+            chrome_title_for_stage(
+                &WorkspaceRoute::Session,
+                Some(agent_chat()),
+                None,
+                None,
+                false
+            ),
             ChromeTitle::Hidden,
         );
     }
@@ -514,6 +647,7 @@ mod tests {
                 None,
                 Some(grok()),
                 Some("看板".into()),
+                false,
             ),
             ChromeTitle::Visible {
                 title: "看板".into(),
@@ -528,6 +662,7 @@ mod tests {
                 None,
                 Some(grok()),
                 None,
+                false,
             ),
             ChromeTitle::Hidden,
         );
@@ -544,8 +679,63 @@ mod tests {
                     model: None,
                 }),
                 None,
+                false,
             ),
             ChromeTitle::Hidden,
         );
+    }
+
+    #[test]
+    fn promoted_tool_panel_hides_the_session_capsule() {
+        assert_eq!(
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None, true),
+            ChromeTitle::Hidden,
+        );
+        assert_eq!(
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None, true),
+            ChromeTitle::Hidden,
+        );
+    }
+
+    #[test]
+    fn session_top_drags_in_the_traffic_light_band() {
+        let band = stage_content_drag_band(true, false, px(0.), false).expect("会话顶要能拖");
+        assert_eq!(band, (px(0.), px(0.), workspace_frame::TOP_BAR_HEIGHT));
+
+        let closed = stage_content_drag_band(false, false, px(0.), false).expect("侧栏收起也能拖");
+        assert_eq!(closed.0, px(80.));
+        assert_eq!(closed.2, workspace_frame::TOP_BAR_HEIGHT);
+
+        let fullscreen = stage_content_drag_band(false, true, px(0.), false).expect("全屏从左边拖");
+        assert_eq!(fullscreen.0, px(0.));
+
+        let docked =
+            stage_content_drag_band(true, false, px(320.), false).expect("停靠右栏时舞台仍能拖");
+        assert_eq!(docked.1, px(320.));
+    }
+
+    #[test]
+    fn page_headers_own_the_drag_instead_of_a_covering_strip() {
+        assert!(stage_content_drag_band(true, false, px(0.), true).is_none());
+        assert!(stage_has_page_header(
+            &WorkspaceRoute::Automations,
+            false,
+            false
+        ));
+        assert!(stage_has_page_header(&WorkspaceRoute::Agents, false, false));
+        assert!(!stage_has_page_header(&WorkspaceRoute::Agents, true, false));
+        assert!(!stage_has_page_header(
+            &WorkspaceRoute::Session,
+            false,
+            false
+        ));
+        assert!(stage_has_page_header(&WorkspaceRoute::Session, false, true));
+        assert!(!stage_has_page_header(
+            &WorkspaceRoute::Plugin {
+                key: "files".into()
+            },
+            false,
+            false
+        ));
     }
 }

@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use sha2::{Digest, Sha256};
@@ -189,7 +189,6 @@ pub struct InstallerTicket {
 }
 
 const INSTALLER_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
-const INSTALLER_PARENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 判断 manifest 是否指向一个本机没有记录过的发布包。
 ///
@@ -478,38 +477,85 @@ pub fn acquire_app_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
 }
 
 #[cfg(unix)]
+enum ExclusiveLockWait {
+    TimedOut,
+    Failed(anyhow::Error),
+}
+
+/// 在拥有这个文件的线程上阻塞 `flock`。到点只丢掉接收端：锁由那条线程在
+/// `flock` 返回后自己放开，别的线程不能关这个 fd。
+#[cfg(unix)]
+fn wait_exclusive_flock(
+    file: File,
+    timeout: Duration,
+    context: &str,
+) -> Result<File, ExclusiveLockWait> {
+    if timeout.is_zero() {
+        return Err(ExclusiveLockWait::TimedOut);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::thread::Builder::new()
+        .name("smelt-flock".to_string())
+        .spawn(move || {
+            let error = loop {
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                    break None;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                break Some(error);
+            };
+            let _ = tx.send((file, error));
+        });
+    if started.is_err() {
+        return Err(ExclusiveLockWait::Failed(anyhow::anyhow!(
+            "{context}：无法启动等待线程"
+        )));
+    }
+    match rx.recv_timeout(timeout) {
+        Ok((file, None)) => Ok(file),
+        Ok((_file, Some(error))) => Err(ExclusiveLockWait::Failed(
+            anyhow::Error::from(error).context(context.to_string()),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ExclusiveLockWait::TimedOut),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ExclusiveLockWait::Failed(
+            anyhow::anyhow!("{context}：等待线程在拿到锁之前退出"),
+        )),
+    }
+}
+
+#[cfg(unix)]
 fn acquire_installer_runtime_lease_at(
     dir: &Path,
     timeout: Duration,
 ) -> anyhow::Result<AppRuntimeLease> {
+    let started = Instant::now();
     let launch_gate = open_app_lock_at(dir, APP_LAUNCH_GATE_FILE)?;
-    let runtime = open_app_lock_at(dir, APP_RUNTIME_LOCK_FILE)?;
-    let started = std::time::Instant::now();
-    loop {
-        if try_flock(
-            &launch_gate,
-            libc::LOCK_EX,
-            "获取 App launch gate 独占锁失败",
-        )? {
-            break;
-        }
-        if started.elapsed() >= timeout {
-            anyhow::bail!("等待 App launch gate 超时，未提交 App 更新");
-        }
-        std::thread::sleep(INSTALLER_PARENT_POLL_INTERVAL);
-    }
+    let launch_gate =
+        match wait_exclusive_flock(launch_gate, timeout, "获取 App launch gate 独占锁失败") {
+            Ok(file) => file,
+            Err(ExclusiveLockWait::TimedOut) => {
+                anyhow::bail!("等待 App launch gate 超时，未提交 App 更新");
+            }
+            Err(ExclusiveLockWait::Failed(error)) => return Err(error),
+        };
     // 从这里起新 GUI 无法进入；只需等待已经持有 runtime lease 的 GUI 全部退出。
-    loop {
-        if try_flock(&runtime, libc::LOCK_EX, "获取 App runtime 独占锁失败")? {
-            return Ok(AppRuntimeLease {
-                _runtime_file: runtime,
-                _launch_gate_file: Some(launch_gate),
-            });
-        }
-        if started.elapsed() >= timeout {
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        anyhow::bail!("等待其它 Smelt GUI 退出超时，未提交 App 更新");
+    }
+    let runtime = open_app_lock_at(dir, APP_RUNTIME_LOCK_FILE)?;
+    match wait_exclusive_flock(runtime, remaining, "获取 App runtime 独占锁失败") {
+        Ok(runtime) => Ok(AppRuntimeLease {
+            _runtime_file: runtime,
+            _launch_gate_file: Some(launch_gate),
+        }),
+        Err(ExclusiveLockWait::TimedOut) => {
             anyhow::bail!("等待其它 Smelt GUI 退出超时，未提交 App 更新");
         }
-        std::thread::sleep(INSTALLER_PARENT_POLL_INTERVAL);
+        Err(ExclusiveLockWait::Failed(error)) => Err(error),
     }
 }
 

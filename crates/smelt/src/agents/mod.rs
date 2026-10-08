@@ -19,7 +19,6 @@ use gpui_component::{
     Sizable as _, StyledExt as _,
 };
 
-use crate::workspace_nav::AutomationsView;
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_core::pi_plugin_catalog::{PiPlugin, discover_plugins};
@@ -58,8 +57,8 @@ pub(crate) struct AutomationsSurface {
     pub(crate) error: Option<String>,
     pub(crate) catalog_tab: AutomationCatalogTab,
     pub(crate) template_filter: Option<automation_templates::AutomationTemplateCategory>,
-    /// 从目录打开 History / Run 时，返回应回到目录而不是编辑器。
-    pub(crate) return_to_catalog: bool,
+    /// 编辑器里选中的那一次运行。`None` 表示右侧仍是任务表单。
+    pub(crate) selected_run_id: Option<String>,
 }
 
 impl Default for AutomationsSurface {
@@ -71,7 +70,7 @@ impl Default for AutomationsSurface {
             error: None,
             catalog_tab: AutomationCatalogTab::Tasks,
             template_filter: None,
-            return_to_catalog: false,
+            selected_run_id: None,
         }
     }
 }
@@ -265,7 +264,7 @@ fn conversation_icon_color(status: AgentStatus, phase: Option<f32>) -> gpui::Rgb
 /// 选中态不再单独染色：状态色本身就是这一行要传达的信息，被选中压过去就等于
 /// 「选中的那条永远看不出在不在跑」。选中与否已经由整行底色表达。
 fn conversation_status_icon(
-    ix: usize,
+    session_id: &str,
     status: AgentStatus,
     animate_running: bool,
     engine: Option<settings::ConversationAgentKind>,
@@ -277,7 +276,7 @@ fn conversation_status_icon(
     };
     if animate_running && status == AgentStatus::Running {
         return smelt_ui::motion::ambient_animation(
-            ("product-conv-glow", ix),
+            format!("product-conv-glow-{session_id}"),
             crate::session_list::SESSION_GLOW_PERIOD,
             true,
             move |phase| icon().size(px(17.)).text_color(color(Some(phase))),
@@ -946,21 +945,26 @@ fn render_trigger_entry(
         .into_any_element()
 }
 
-fn automation_trigger_glyph(icon: IconName) -> AnyElement {
+/// 目录和编辑器里的小图标。不染色，底就是悬停灰。
+fn neutral_icon_mark(icon: IconName, size: f32) -> AnyElement {
     div()
-        .size(px(32.))
-        .rounded_full()
+        .size(px(size))
+        .rounded(crate::ui_theme::row_radius())
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
-        .bg(crate::ui_theme::tint(crate::ui_theme::blue(), 0x28))
+        .bg(rgb(crate::ui_theme::bg_hover()))
         .child(
             Icon::new(icon)
-                .size(px(16.))
-                .text_color(rgb(crate::ui_theme::blue())),
+                .size(px((size * 0.5).round()))
+                .text_color(rgb(crate::ui_theme::text_mid())),
         )
         .into_any_element()
+}
+
+fn automation_trigger_glyph(icon: IconName) -> AnyElement {
+    neutral_icon_mark(icon, 32.)
 }
 
 fn trigger_entry_title(entry: &TriggerEntryEditor, cx: &App) -> String {
@@ -1583,12 +1587,17 @@ fn agent_definition_column() -> Div {
     div().w_full().max_w(px(720.)).mx_auto().px_8()
 }
 
-fn agent_surface_card() -> Div {
+/// 内容卡：12px 圆角加发丝描边。智能体空状态、自动化表和表单共用。
+fn content_card() -> Div {
     div()
-        .rounded(px(16.))
+        .rounded(crate::ui_theme::card_radius())
         .border_1()
-        .border_color(rgb(crate::ui_theme::border_mid()))
+        .border_color(crate::ui_theme::card_stroke())
         .bg(rgb(crate::ui_theme::bg_card()))
+}
+
+fn agent_surface_card() -> Div {
+    content_card()
 }
 
 fn render_agent_error(error: String) -> AnyElement {
@@ -1763,19 +1772,45 @@ fn render_agent_settings_entry(entity: Entity<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
+/// 页头前缘的返回。可见的只有符号，悬停提示是控件名。它只退一层，侧栏标题负责回根页。
+fn product_back_button(
+    id: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    Button::new(id)
+        .ghost()
+        .icon(IconName::ChevronLeft)
+        .tooltip("返回")
+        .on_click(on_click)
+}
+
+/// 目录和编辑器的页头。这些面不画标题胶囊，标题住在交通灯那一条上。
+/// 左侧让开交通灯，右侧让开窗口开关，底边是发丝。空白处拖窗口，按钮自己拦住点击。
+fn product_page_chrome(left_guard: Pixels) -> Div {
+    crate::workspace_frame::with_window_drag(
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .min_h(crate::workspace_frame::TOP_BAR_HEIGHT)
+            .pl(left_guard + px(20.))
+            .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
+            .border_b_1()
+            .border_color(crate::ui_theme::hairline())
+            .flex()
+            .items_center(),
+    )
+}
+
 fn product_page_header(
     title: &'static str,
     subtitle: &'static str,
     count: usize,
     count_unit: &'static str,
     action: AnyElement,
+    left_guard: Pixels,
 ) -> AnyElement {
-    div()
-        .flex_shrink_0()
-        .px_5()
-        .py_4()
-        .flex()
-        .items_center()
+    product_page_chrome(left_guard)
+        .py_2()
         .justify_between()
         .gap_4()
         .child(
@@ -2311,12 +2346,40 @@ fn compact_chip(id: impl Into<ElementId>) -> Button {
 }
 
 fn automation_form_shell() -> Div {
+    content_card().w_full()
+}
+
+/// 一次运行的三行字：标题、时间或来源，失败时再加一行红字。目录和编辑器共用。
+fn automation_run_lines(title: String, detail: String, error: Option<String>) -> Div {
     div()
-        .w_full()
-        .rounded(px(16.))
-        .border_1()
-        .border_color(crate::ui_theme::card_stroke())
-        .bg(rgb(crate::ui_theme::bg_card()))
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_bright()))
+                .truncate()
+                .child(title),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .truncate()
+                .child(detail),
+        )
+        .when_some(error, |column, error| {
+            column.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::red()))
+                    .truncate()
+                    .child(error),
+            )
+        })
 }
 
 fn automation_form_row() -> Div {

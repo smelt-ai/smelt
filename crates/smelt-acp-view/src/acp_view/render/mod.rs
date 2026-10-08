@@ -96,7 +96,7 @@ impl AcpView {
                         .bg(gpui::rgb(ui_theme::bg_bar()))
                         .child(ambient_spinner(
                             "acp-starting-banner-spinner",
-                            gpui::rgb(ui_theme::accent()).into(),
+                            gpui::rgb(ui_theme::text_muted()).into(),
                             animate_ambient,
                         ))
                         .child(
@@ -178,32 +178,15 @@ impl AcpView {
             let (title, detail, elapsed) = starting_copy
                 .as_ref()
                 .expect("non-fresh startup always has loading copy");
-            let indicator = ambient_animation(
-                "acp-starting-pulse",
-                std::time::Duration::from_millis(1800),
+            let indicator = ambient_spinner(
+                "acp-starting-placeholder-spinner",
+                gpui::rgb(ui_theme::text_muted()).into(),
                 animate_ambient,
-                move |delta| {
-                    let wave = (delta * std::f32::consts::PI).sin().clamp(0.0, 1.0);
-                    h_flex()
-                        .size(px(48.))
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(ui_theme::tint(ui_theme::accent(), 0x48))
-                        .bg(ui_theme::tint(ui_theme::accent(), 0x14))
-                        .opacity(1.0 - wave * 0.28)
-                        .child(ambient_spinner(
-                            "acp-starting-placeholder-spinner",
-                            gpui::rgb(ui_theme::accent()).into(),
-                            animate_ambient,
-                        ))
-                },
             )
             .into_any_element();
             v_flex()
                 .absolute()
-                .top_0()
+                .top(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
                 .right_0()
                 .bottom_0()
                 .left_0()
@@ -238,7 +221,7 @@ impl AcpView {
                                 .px_3()
                                 .py_1()
                                 .rounded_full()
-                                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                                .bg(ui_theme::overlay(0x14))
                                 .text_xs()
                                 .text_color(muted)
                                 .child(elapsed.clone()),
@@ -265,7 +248,7 @@ impl AcpView {
             };
             v_flex()
                 .absolute()
-                .top_0()
+                .top(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
                 .right_0()
                 .bottom_0()
                 .left_0()
@@ -387,7 +370,7 @@ impl AcpView {
 
             v_flex()
                 .absolute()
-                .top_0()
+                .top(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
                 .right_0()
                 .bottom_0()
                 .left_0()
@@ -504,7 +487,7 @@ impl AcpView {
                 };
                 h_flex()
                     .absolute()
-                    .top_0()
+                    .top(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
                     .left_0()
                     .right_0()
                     .justify_center()
@@ -574,11 +557,29 @@ impl AcpView {
                 )
         });
         let border = t.border;
-        let list = self.render_message_list(animate_ambient, cx);
-        let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
-        let input_row = self.render_composer(composer_focused, cx);
         let plan_bar = self.render_plan_bar(cx);
         let background_bar = self.render_background_task_bar(cx);
+        let history_error_banner = history_error.map(|error| {
+            div()
+                .w_full()
+                .px_4()
+                .py_2()
+                .text_sm()
+                .text_color(t.danger)
+                .border_b_1()
+                .border_color(t.border)
+                .child(error)
+                .into_any_element()
+        });
+        // 顶上的条已经让开胶囊时，列表第一条不要再让一次。
+        let clear_capsule = history_error_banner.is_none()
+            && banner.is_none()
+            && fork_banner.is_none()
+            && plan_bar.is_none()
+            && background_bar.is_none();
+        let list = self.render_message_list(animate_ambient, clear_capsule, cx);
+        let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
+        let input_row = self.render_composer(composer_focused, cx);
         v_flex()
             .size_full()
             .relative()
@@ -670,21 +671,16 @@ impl AcpView {
                 }
             }))
             .bg(acp_surface)
-            .children(history_error.map(|error| {
-                div()
+            .children((!clear_capsule).then(|| {
+                v_flex()
                     .w_full()
-                    .px_4()
-                    .py_2()
-                    .text_sm()
-                    .text_color(t.danger)
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(error)
+                    .pt(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
+                    .children(history_error_banner)
+                    .children(banner)
+                    .children(fork_banner)
+                    .children(plan_bar)
+                    .children(background_bar)
             }))
-            .children(banner)
-            .children(fork_banner)
-            .children(plan_bar)
-            .children(background_bar)
             .child(
                 v_flex()
                     .relative()

@@ -612,10 +612,19 @@ impl AuthFileLock {
                         let _ = std::fs::remove_dir(&path);
                         continue;
                     }
-                    if std::time::Instant::now() >= deadline {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
                         return Err("auth.json 正被其它进程写入，请稍后再试".to_string());
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    let until_give_up = deadline.saturating_duration_since(now);
+                    let until_stale =
+                        auth_lock_fresh_for(&path).unwrap_or(std::time::Duration::ZERO);
+                    let slice = until_give_up.min(until_stale);
+                    if slice.is_zero() {
+                        continue;
+                    }
+                    // 目录还在就堵到它被删掉，或堵到陈旧/放弃这两个截止里更早的那个。
+                    wait_for_dir_delete(&path, slice);
                 }
                 Err(error) => {
                     return Err(format!("无法锁定 {}：{error}", auth_path.display()));
@@ -650,6 +659,153 @@ fn auth_lock_is_stale(lock_path: &Path) -> bool {
     modified
         .checked_add(AUTH_LOCK_STALE)
         .is_none_or(|expires| expires <= std::time::SystemTime::now())
+}
+
+fn auth_lock_fresh_for(lock_path: &Path) -> Option<std::time::Duration> {
+    let modified = std::fs::metadata(lock_path).ok()?.modified().ok()?;
+    let expires = modified.checked_add(AUTH_LOCK_STALE)?;
+    expires.duration_since(std::time::SystemTime::now()).ok()
+}
+
+/// 等到 `path` 这个目录被删掉，或者 `timeout` 到了。
+///
+/// 锁协议仍是 `mkdir` 出来的目录，这样和 Pi 的 proper-lockfile 互斥。
+/// 释放是 `rmdir`，所以等的是目录自己被删掉这件事。
+fn wait_for_dir_delete(path: &Path, timeout: std::time::Duration) {
+    if timeout.is_zero() || !path.exists() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        wait_for_dir_delete_kqueue(path, timeout);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        wait_for_dir_delete_inotify(path, timeout);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        std::thread::park_timeout(timeout);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_dir_delete_kqueue(path: &Path, timeout: std::time::Duration) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        std::thread::park_timeout(timeout);
+        return;
+    };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+    if fd < 0 && path.exists() {
+        std::thread::park_timeout(timeout);
+        return;
+    }
+    if fd < 0 {
+        return;
+    }
+    let dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        std::thread::park_timeout(timeout);
+        return;
+    }
+    let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+    let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+    change.ident = dir.as_raw_fd() as usize;
+    change.filter = libc::EVFILT_VNODE;
+    change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+    change.fflags = libc::NOTE_DELETE;
+    let armed = unsafe {
+        libc::kevent(
+            kq.as_raw_fd(),
+            &change,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if armed < 0 {
+        std::thread::park_timeout(timeout);
+        return;
+    }
+    if !path.exists() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let ts = libc::timespec {
+            tv_sec: remaining.as_secs() as libc::time_t,
+            tv_nsec: remaining.subsec_nanos() as libc::c_long,
+        };
+        let fired =
+            unsafe { libc::kevent(kq.as_raw_fd(), std::ptr::null(), 0, &mut event, 1, &ts) };
+        if fired > 0 || !path.exists() {
+            return;
+        }
+        if fired < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_dir_delete_inotify(path: &Path, timeout: std::time::Duration) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        std::thread::park_timeout(timeout);
+        return;
+    };
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    if fd < 0 {
+        std::thread::park_timeout(timeout);
+        return;
+    }
+    let notify = unsafe { OwnedFd::from_raw_fd(fd) };
+    let watch = unsafe {
+        libc::inotify_add_watch(notify.as_raw_fd(), c_path.as_ptr(), libc::IN_DELETE_SELF)
+    };
+    if watch < 0 && path.exists() {
+        std::thread::park_timeout(timeout);
+        return;
+    }
+    if watch < 0 {
+        return;
+    }
+    if !path.exists() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut pollfd = libc::pollfd {
+        fd: notify.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let millis = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        let ready = unsafe { libc::poll(&mut pollfd, 1, millis.max(1)) };
+        if ready > 0 || !path.exists() {
+            return;
+        }
+        if ready < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
 }
 
 fn update_auth_json(
@@ -1411,6 +1567,31 @@ mod tests {
         let auth: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
         assert_eq!(auth["gw"]["key"], "new");
+    }
+
+    #[test]
+    fn auth_lock_unblocks_when_the_directory_is_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let auth_path = temp.path().join("auth.json");
+        std::fs::write(&auth_path, "{}").unwrap();
+        let lock_path = auth_lock_path(&auth_path);
+        std::fs::create_dir(&lock_path).unwrap();
+        let lock_for_releaser = lock_path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = std::fs::remove_dir(&lock_for_releaser);
+        });
+        let started = std::time::Instant::now();
+        let lock = AuthFileLock::acquire(&auth_path, std::time::Duration::from_secs(5))
+            .expect("目录被删掉后应拿到锁");
+        let elapsed = started.elapsed();
+        assert!(lock_path.is_dir(), "拿到锁时目录应还在");
+        drop(lock);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "等到目录删除即可返回，实际 {elapsed:?}"
+        );
+        assert!(!lock_path.exists(), "锁在 drop 时释放");
     }
 
     /// provider 已经被删掉了就不该被一次刷新重新造出来。

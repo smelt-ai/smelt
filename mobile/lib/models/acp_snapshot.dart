@@ -366,6 +366,16 @@ sealed class AcpEntry {
       );
     }
 
+    if (json['TaskNote'] case final Map<String, dynamic> note) {
+      return AcpEntryTaskNote(
+        id: note['id'] as String? ?? '',
+        title: note['title'] as String? ?? '',
+        status: note['status'] as String? ?? '',
+        exitCode: (note['exitCode'] as num?)?.toInt(),
+        outputTail: note['outputTail'] as String? ?? '',
+      );
+    }
+
     // 分隔线
     if (json.containsKey('Divider')) {
       final divider = json['Divider'];
@@ -431,6 +441,36 @@ class AcpEntryToolCall extends AcpEntry {
 class AcpEntryDivider extends AcpEntry {
   final String label;
   const AcpEntryDivider({required this.label});
+}
+
+class AcpEntryTaskNote extends AcpEntry {
+  final String id;
+  final String title;
+  final String status;
+  final int? exitCode;
+  final String outputTail;
+
+  const AcpEntryTaskNote({
+    required this.id,
+    required this.title,
+    required this.status,
+    this.exitCode,
+    this.outputTail = '',
+  });
+
+  String get summary {
+    final label = switch (status) {
+      'completed' => '完成',
+      'failed' => '失败',
+      'timed_out' => '超时',
+      'stopped' => '已停止',
+      'running' => '进行中',
+      _ => status,
+    };
+    final code = exitCode == null ? '' : '，退出码 $exitCode';
+    if (title.isEmpty) return '后台任务 $id 已结束，状态 $label$code';
+    return '后台任务 $id（$title）已结束，状态 $label$code';
+  }
 }
 
 class AcpEntryUnknown extends AcpEntry {
@@ -514,6 +554,22 @@ dynamic _entryToJson(AcpEntry entry) => switch (entry) {
   AcpEntryDivider(label: final label) => {
     'Divider': {'label': label},
   },
+  AcpEntryTaskNote(
+    id: final id,
+    title: final title,
+    status: final status,
+    exitCode: final exitCode,
+    outputTail: final outputTail,
+  ) =>
+    {
+      'TaskNote': {
+        'id': id,
+        'title': title,
+        'status': status,
+        'exitCode': exitCode,
+        'outputTail': outputTail,
+      },
+    },
   AcpEntryUnknown() => const <String, dynamic>{},
 };
 

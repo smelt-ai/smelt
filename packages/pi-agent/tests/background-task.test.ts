@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { keepsForegroundTimeout, watchHostCommand } from "../src/bash-run.ts";
-import { callBackgroundHost, detachedShellCommand } from "../src/background-task.ts";
+import {
+	callBackgroundHost,
+	completionSendOptions,
+	detachedShellCommand,
+	reconnectAfterClose,
+	taskNotificationText,
+} from "../src/background-task.ts";
 
 async function fakeHost(reply: (request: Record<string, unknown>) => Record<string, unknown>) {
 	const path = join(tmpdir(), `smelt-bg-test-${process.pid}-${Math.random().toString(16).slice(2)}.sock`);
@@ -60,7 +66,7 @@ describe("background task host client", () => {
 		const result = await watchHostCommand({
 			promoteAfterMs: 1_000,
 			start: async () => ({ ok: true, id: "bg-1" }),
-			snapshot: async () => ({ ok: true, status: "completed", exitCode: 0, output: "ready" }),
+			until: async () => ({ ok: true, status: "completed", exitCode: 0, output: "ready" }),
 		});
 		expect(result).toEqual({ promoted: false, exitCode: 0, output: "ready" });
 	});
@@ -69,9 +75,42 @@ describe("background task host client", () => {
 		const result = await watchHostCommand({
 			promoteAfterMs: 60,
 			start: async () => ({ ok: true, id: "bg-9" }),
-			snapshot: async () => ({ ok: true, status: "running", exitCode: null, output: "" }),
+			until: async () => ({ ok: true, status: "running", exitCode: null, output: "" }),
 		});
 		expect(result).toEqual({ promoted: true, id: "bg-9" });
+	});
+
+	test("abort during a snapshot promotes the command instead of a foreground error", async () => {
+		const released: Array<{ id: string; consumed: boolean }> = [];
+		const controller = new AbortController();
+		const result = await watchHostCommand({
+			promoteAfterMs: 5_000,
+			signal: controller.signal,
+			start: async () => ({ ok: true, id: "bg-7" }),
+			until: async () => {
+				controller.abort();
+				return { ok: false, error: "操作已取消" };
+			},
+			release: async (id, consumed) => {
+				released.push({ id, consumed });
+			},
+		});
+		expect(result).toEqual({ promoted: true, id: "bg-7" });
+		expect(released).toEqual([{ id: "bg-7", consumed: false }]);
+	});
+
+	test("a snapshot the tool could not read promotes the command", async () => {
+		const released: Array<{ id: string; consumed: boolean }> = [];
+		const result = await watchHostCommand({
+			promoteAfterMs: 1_000,
+			start: async () => ({ ok: true, id: "bg-8" }),
+			until: async () => ({ ok: false, error: "无法读取任务状态" }),
+			release: async (id, consumed) => {
+				released.push({ id, consumed });
+			},
+		});
+		expect(result).toEqual({ promoted: true, id: "bg-8" });
+		expect(released).toEqual([{ id: "bg-8", consumed: false }]);
 	});
 
 	test("abort during the foreground window returns the host id and leaves the task", async () => {
@@ -80,7 +119,7 @@ describe("background task host client", () => {
 			promoteAfterMs: 5_000,
 			signal: controller.signal,
 			start: async () => ({ ok: true, id: "bg-3" }),
-			snapshot: async () => {
+			until: async () => {
 				controller.abort();
 				return { ok: true, status: "running", exitCode: null };
 			},
@@ -88,11 +127,54 @@ describe("background task host client", () => {
 		expect(result).toEqual({ promoted: true, id: "bg-3" });
 	});
 
+	test("a command that finishes inside the window tells the host the result was taken", async () => {
+		const released: Array<{ id: string; consumed: boolean }> = [];
+		const result = await watchHostCommand({
+			promoteAfterMs: 1_000,
+			start: async () => ({ ok: true, id: "bg-1" }),
+			until: async () => ({ ok: true, status: "completed", exitCode: 0, output: "ready" }),
+			release: async (id, consumed) => {
+				released.push({ id, consumed });
+			},
+		});
+		expect(result).toEqual({ promoted: false, exitCode: 0, output: "ready" });
+		expect(released).toEqual([{ id: "bg-1", consumed: true }]);
+	});
+
+	test("a command still running after the window tells the host the result was not taken", async () => {
+		const released: Array<{ id: string; consumed: boolean }> = [];
+		const result = await watchHostCommand({
+			promoteAfterMs: 0,
+			start: async () => ({ ok: true, id: "bg-9" }),
+			until: async () => ({ ok: true, status: "running", exitCode: null, output: "" }),
+			release: async (id, consumed) => {
+				released.push({ id, consumed });
+			},
+		});
+		expect(result).toEqual({ promoted: true, id: "bg-9" });
+		expect(released).toEqual([{ id: "bg-9", consumed: false }]);
+	});
+
+	test("one wait returns a finish that is already done", async () => {
+		let calls = 0;
+		const result = await watchHostCommand({
+			promoteAfterMs: 0,
+			start: async () => ({ ok: true, id: "bg-4" }),
+			until: async () => {
+				calls += 1;
+				return { ok: true, status: "completed", exitCode: 0, output: "late" };
+			},
+			release: async () => {},
+		});
+		expect(calls).toBe(1);
+		expect(result).toEqual({ promoted: false, exitCode: 0, output: "late" });
+	});
+
 	test("a failing host command stays a foreground error", async () => {
 		const result = await watchHostCommand({
 			promoteAfterMs: 1_000,
 			start: async () => ({ ok: true, id: "bg-2" }),
-			snapshot: async () => ({ ok: true, status: "failed", exitCode: 3, output: "nope" }),
+			until: async () => ({ ok: true, status: "failed", exitCode: 3, output: "nope" }),
 		});
 		expect(result).toEqual({ promoted: false, exitCode: 3, output: "nope" });
 	});
@@ -114,6 +196,29 @@ describe("background task host client", () => {
 				server.close((error) => (error ? reject(error) : resolve()));
 			});
 		}
+	});
+
+	test("an acknowledged listener reconnects while the extension is alive", () => {
+		expect(reconnectAfterClose(false, true)).toBe(true);
+		expect(reconnectAfterClose(true, true)).toBe(false);
+		expect(reconnectAfterClose(false, false)).toBe(false);
+	});
+
+	test("completion text is a command result with the exit code and output", () => {
+		const text = taskNotificationText({
+			id: "bg-13",
+			title: "编译",
+			status: "failed",
+			exitCode: 1,
+			output: "error: boom",
+		});
+		expect(text).toContain("不是用户的新请求");
+		expect(text).toContain("bg-13");
+		expect(text).toContain("退出码 1");
+		expect(text).toContain("error: boom");
+		expect(JSON.stringify(completionSendOptions(true))).toBe('{"triggerTurn":true}');
+		expect(JSON.stringify(completionSendOptions(false))).toBe('{"triggerTurn":false}');
+		expect(JSON.stringify(completionSendOptions(true))).not.toContain("followUp");
 	});
 
 	test("reports a missing socket instead of spawning locally", async () => {

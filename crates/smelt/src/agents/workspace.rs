@@ -38,7 +38,7 @@ impl Workspace {
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
             self.automation_surface.editor = None;
-            self.automation_surface.return_to_catalog = false;
+            self.automation_surface.selected_run_id = None;
         }
         if self.active_tab().is_session() {
             self.stage_cover = None;
@@ -722,7 +722,7 @@ impl Workspace {
         );
     }
 
-    pub(crate) fn open_automation_run_session(
+    fn attach_automation_run_session(
         &mut self,
         session_id: &str,
         window: &mut Window,
@@ -739,10 +739,6 @@ impl Workspace {
             cx.notify();
             return;
         };
-        self.nav
-            .automations_mut()
-            .open_live(run.automation_id.clone(), run.id.clone());
-        self.reveal_workspace_tab(WorkspaceRoute::Automations);
         if self
             .automation_surface
             .live_view
@@ -800,21 +796,47 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn open_automation_run_detail(&mut self, run_id: String, cx: &mut Context<Self>) {
-        self.automation_surface.return_to_catalog = false;
-        let Some(automation_id) = cx
+    /// 停在编辑器里，并选中这一次运行。有会话时右侧详情就是现场。
+    pub(super) fn select_automation_run(
+        &mut self,
+        run_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(run) = cx
             .global::<settings::AgentHostState>()
             .automation_runs
             .iter()
             .find(|run| run.id == run_id)
-            .map(|run| run.automation_id.clone())
+            .cloned()
         else {
             return;
         };
-        self.navigate_to_automation_run(automation_id, run_id, cx);
+        self.automation_surface.selected_run_id = Some(run.id);
+        if let Some(session_id) = run.session_id {
+            self.attach_automation_run_session(&session_id, window, cx);
+        } else {
+            self.automation_surface.live_view = None;
+            self.automation_surface.live_sub = None;
+            self.automation_surface.error = None;
+            cx.notify();
+        }
     }
 
-    pub(super) fn open_catalog_automation_run(&mut self, run_id: String, cx: &mut Context<Self>) {
+    /// 回到任务表单。运行列表还在，只是右侧不再是某一次运行。
+    pub(super) fn show_automation_task(&mut self, cx: &mut Context<Self>) {
+        self.automation_surface.selected_run_id = None;
+        self.automation_surface.live_view = None;
+        self.automation_surface.live_sub = None;
+        cx.notify();
+    }
+
+    pub(super) fn open_catalog_automation_run(
+        &mut self,
+        run_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(automation_id) = cx
             .global::<settings::AgentHostState>()
             .automation_runs
@@ -824,71 +846,39 @@ impl Workspace {
         else {
             return;
         };
-        self.automation_surface.return_to_catalog = true;
-        self.navigate_to_automation_run(automation_id, run_id, cx);
+        self.navigate_to_automation_run(automation_id, run_id, window, cx);
     }
 
     pub(crate) fn navigate_to_automation_run(
         &mut self,
         automation_id: String,
         run_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.reveal_workspace_tab(WorkspaceRoute::Automations);
-        self.nav.automations_mut().open_run(automation_id, run_id);
-        cx.notify();
+        self.nav.automations_mut().open_editor(automation_id);
+        self.select_automation_run(run_id, window, cx);
     }
 
-    pub(super) fn close_automation_run_detail(&mut self, cx: &mut Context<Self>) {
-        if self.automation_surface.return_to_catalog {
-            self.nav.automations_mut().pop_to_root();
-            self.automation_surface.return_to_catalog = false;
-        } else {
-            self.nav.automations_mut().back();
-        }
-        self.automation_surface.live_view = None;
-        self.automation_surface.live_sub = None;
-        cx.notify();
-    }
-
-    pub(super) fn open_automation_run_history(
+    /// 打开这条自动化的编辑器，右侧停在任务表单，不选中某一次运行。
+    pub(super) fn open_catalog_automation_task(
         &mut self,
         automation_id: String,
         cx: &mut Context<Self>,
     ) {
-        self.automation_surface.return_to_catalog = false;
-        self.nav.automations_mut().open_history(automation_id);
+        self.automation_surface.selected_run_id = None;
         self.automation_surface.live_view = None;
         self.automation_surface.live_sub = None;
-        cx.notify();
-    }
-
-    pub(super) fn open_catalog_automation_history(
-        &mut self,
-        automation_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.automation_surface.return_to_catalog = true;
-        self.nav.automations_mut().open_history(automation_id);
-        self.automation_surface.live_view = None;
-        self.automation_surface.live_sub = None;
-        cx.notify();
-    }
-
-    pub(super) fn close_automation_run_history(&mut self, cx: &mut Context<Self>) {
-        if self.automation_surface.return_to_catalog {
-            self.nav.automations_mut().pop_to_root();
-            self.automation_surface.return_to_catalog = false;
-        } else {
-            self.nav.automations_mut().back();
-        }
-        self.automation_surface.live_view = None;
-        self.automation_surface.live_sub = None;
+        self.nav.automations_mut().open_editor(automation_id);
         cx.notify();
     }
 
     pub(super) fn close_automation_editor(&mut self, cx: &mut Context<Self>) {
         self.automation_surface.editor = None;
+        self.automation_surface.selected_run_id = None;
+        self.automation_surface.live_view = None;
+        self.automation_surface.live_sub = None;
         self.nav.automations_mut().pop_to_root();
         cx.notify();
     }
@@ -995,6 +985,7 @@ impl Workspace {
         }
         if self.nav.automations().automation_id() == Some(automation_id.as_str()) {
             self.nav.automations_mut().pop_to_root();
+            self.automation_surface.selected_run_id = None;
             self.automation_surface.live_view = None;
             self.automation_surface.live_sub = None;
         }
@@ -1053,9 +1044,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let automation_id = automation.id.clone();
         self.nav
             .automations_mut()
-            .open_editor(automation.id.clone());
+            .open_editor(automation_id.clone());
+        let keep_run = self
+            .automation_surface
+            .selected_run_id
+            .as_ref()
+            .is_some_and(|run_id| {
+                cx.global::<settings::AgentHostState>()
+                    .automation_runs
+                    .iter()
+                    .any(|run| run.id == *run_id && run.automation_id == automation_id)
+            });
+        if !keep_run {
+            self.automation_surface.selected_run_id = None;
+            self.automation_surface.live_view = None;
+            self.automation_surface.live_sub = None;
+        }
         let action_kind = settings::AutomationActionKindId::from_action(&automation.action);
         let agent_id = automation
             .agent_definition_id()

@@ -504,6 +504,21 @@ pub fn composer_radius() -> Pixels {
     px(24.)
 }
 
+/// 用户消息气泡圆角。比内容卡片大，比输入条胶囊小。
+pub fn bubble_radius() -> Pixels {
+    px(20.)
+}
+
+/// 标题胶囊离开窗口顶边的距离。
+pub const CHROME_ISLAND_TOP_PX: f32 = 16.;
+/// 标题胶囊高度。
+pub const CHROME_ISLAND_HEIGHT_PX: f32 = 28.;
+/// 穿过舞台正中的内容要让开胶囊：顶距 + 高度 + 8px 缝。
+///
+/// 终端状态行写在胶囊左右两侧，不用这个净空。侧栏和工具页签走交通灯那条
+/// `TOP_BAR_HEIGHT`，也不用它。
+pub const CHROME_ISLAND_CLEARANCE_PX: f32 = CHROME_ISLAND_TOP_PX + CHROME_ISLAND_HEIGHT_PX + 8.;
+
 /// 主操作填充：深色近白、浅色近黑。Grok 发送钮同一套，不用品牌紫。
 pub fn action_fill() -> u32 {
     text_bright()
@@ -622,6 +637,16 @@ mod tests {
         );
         assert_eq!(card_padding(), px(12.));
         assert!(composer_radius() > card_radius());
+        assert!(bubble_radius() > card_radius());
+        assert!(composer_radius() > bubble_radius());
+        assert_eq!(bubble_radius(), px(20.));
+        assert_eq!(CHROME_ISLAND_TOP_PX, 16.);
+        assert_eq!(CHROME_ISLAND_HEIGHT_PX, 28.);
+        assert_eq!(
+            CHROME_ISLAND_CLEARANCE_PX,
+            CHROME_ISLAND_TOP_PX + CHROME_ISLAND_HEIGHT_PX + 8.,
+            "正中内容的净空必须由胶囊顶距、高度和缝加出来"
+        );
         assert_eq!(conversation_max_width(), px(768.));
         assert_eq!(action_fill(), text_bright());
         assert_eq!(action_on(), bg_stage());

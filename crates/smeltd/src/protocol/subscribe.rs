@@ -174,6 +174,97 @@ pub(super) fn write_event_protocol_error(conn: &mut UnixStream, error: impl std:
     );
 }
 
+const CONNECTION_MAILBOX_LIMIT: usize = 256;
+
+enum ConnectionMail {
+    Control(Result<SubscribeControlMessage, String>),
+    Delivery(Delivery),
+}
+
+struct ConnectionMailbox {
+    state: Mutex<ConnectionMailboxState>,
+    wake: Condvar,
+}
+
+struct ConnectionMailboxState {
+    items: VecDeque<ConnectionMail>,
+    client_closed: bool,
+    hub_closed: bool,
+    stopped: bool,
+}
+
+impl ConnectionMailbox {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ConnectionMailboxState {
+                items: VecDeque::new(),
+                client_closed: false,
+                hub_closed: false,
+                stopped: false,
+            }),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn push(&self, item: ConnectionMail) -> bool {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.stopped {
+                return false;
+            }
+            if state.items.len() < CONNECTION_MAILBOX_LIMIT {
+                state.items.push_back(item);
+                self.wake.notify_all();
+                return true;
+            }
+            state = self.wake.wait(state).unwrap();
+        }
+    }
+
+    fn mark_client_closed(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.client_closed = true;
+        self.wake.notify_all();
+    }
+
+    fn mark_hub_closed(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.hub_closed = true;
+        self.wake.notify_all();
+    }
+
+    fn stop(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.stopped = true;
+        self.wake.notify_all();
+    }
+
+    /// 先交出全部确认，再交出至多一条投递。客户端关掉之后，剩下的投递不再交。
+    /// 订阅通道关掉之后，确认处理完就结束。
+    fn next(&self) -> Option<ConnectionMail> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if let Some(index) = state
+                .items
+                .iter()
+                .position(|item| matches!(item, ConnectionMail::Control(_)))
+            {
+                let item = state.items.remove(index).expect("刚找到的确认");
+                self.wake.notify_all();
+                return Some(item);
+            }
+            if state.client_closed || state.hub_closed || state.stopped {
+                return None;
+            }
+            if let Some(item) = state.items.pop_front() {
+                self.wake.notify_all();
+                return Some(item);
+            }
+            state = self.wake.wait(state).unwrap();
+        }
+    }
+}
+
 pub(crate) fn handle_event_subscribe(
     mut conn: UnixStream,
     request: Option<&serde_json::Value>,
@@ -266,26 +357,85 @@ pub(crate) fn handle_event_subscribe(
         return;
     }
 
-    let (control_tx, control_rx) = std::sync::mpsc::channel();
     let Ok(reader) = conn.try_clone() else {
         let _ = event_hub
             .runtime()
             .unsubscribe(&identity.plugin_id, &request.subscription.id);
         return;
     };
-    let reader_worker = thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines() {
-            let message = line.map_err(|error| error.to_string()).and_then(|line| {
-                serde_json::from_str::<SubscribeControlMessage>(&line)
-                    .map_err(|error| format!("invalid ack/nack: {error}"))
-            });
-            if control_tx.send(message).is_err() {
-                return;
-            }
-        }
-    });
 
+    // 投递线程独占 `subscription.recv`。滞后时它自己先丢掉通道里溢出的增量，
+    // 再停在 resume 上，等主循环把快照写完。两条线程同时 recv / discard 会把
+    // 已经落后的旧增量又交出去。
+    let mailbox = Arc::new(ConnectionMailbox::new());
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let forward_mailbox = Arc::clone(&mailbox);
+    let forwarder = thread::Builder::new()
+        .name("smelt-subscribe-fwd".to_string())
+        .spawn(move || {
+            loop {
+                match subscription.recv() {
+                    Ok(Delivery::Lag {
+                        dropped,
+                        resume_after,
+                    }) => {
+                        subscription.discard_pending();
+                        if !forward_mailbox.push(ConnectionMail::Delivery(Delivery::Lag {
+                            dropped,
+                            resume_after,
+                        })) {
+                            break;
+                        }
+                        if resume_rx.recv().is_err() {
+                            break;
+                        }
+                    }
+                    Ok(delivery) => {
+                        if !forward_mailbox.push(ConnectionMail::Delivery(delivery)) {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        forward_mailbox.mark_hub_closed();
+                        break;
+                    }
+                }
+            }
+        });
+    let Ok(forwarder) = forwarder else {
+        let _ = event_hub
+            .runtime()
+            .unsubscribe(&identity.plugin_id, &request.subscription.id);
+        return;
+    };
+    let reader_mailbox = Arc::clone(&mailbox);
+    let reader_worker = thread::Builder::new()
+        .name("smelt-subscribe-read".to_string())
+        .spawn(move || {
+            let reader = BufReader::new(reader);
+            for line in reader.lines() {
+                let message = line.map_err(|error| error.to_string()).and_then(|line| {
+                    serde_json::from_str::<SubscribeControlMessage>(&line)
+                        .map_err(|error| format!("invalid ack/nack: {error}"))
+                });
+                if !reader_mailbox.push(ConnectionMail::Control(message)) {
+                    return;
+                }
+            }
+            reader_mailbox.mark_client_closed();
+        });
+    let Ok(reader_worker) = reader_worker else {
+        drop(resume_tx);
+        mailbox.stop();
+        let _ = event_hub
+            .runtime()
+            .unsubscribe(&identity.plugin_id, &request.subscription.id);
+        let _ = forwarder.join();
+        return;
+    };
+
+    // 转发线程先跑起来，再灌第一批。订阅通道只有 256 个位子，没人读的时候
+    // 发布方会把后面的增量标成滞后。
     if request.subscription.delivery == DeliveryClass::Durable
         && let Err(error) = event_hub.runtime().dispatch_durable(
             &identity.plugin_id,
@@ -297,63 +447,58 @@ pub(crate) fn handle_event_subscribe(
     }
 
     'connection: loop {
-        loop {
-            match control_rx.try_recv() {
-                Ok(control) => {
-                    let result = match control {
-                        Ok(SubscribeControlMessage::Ack { ack })
-                            if ack.subscription_id != request.subscription.id =>
-                        {
-                            Err(smelt_event_bus::EventBusError::new(
-                                "ack subscription_id does not match this connection",
-                            ))
-                        }
-                        Ok(SubscribeControlMessage::Ack { ack }) => {
-                            event_hub.runtime().ack(&identity.plugin_id, &ack)
-                        }
-                        Ok(SubscribeControlMessage::Nack { nack })
-                            if nack.subscription_id != request.subscription.id =>
-                        {
-                            Err(smelt_event_bus::EventBusError::new(
-                                "nack subscription_id does not match this connection",
-                            ))
-                        }
-                        Ok(SubscribeControlMessage::Nack { nack }) => event_hub.runtime().nack(
-                            &identity.plugin_id,
-                            &nack,
-                            crate::event_hub::now_ms(),
-                        ),
-                        Err(error) => {
-                            write_event_protocol_error(&mut conn, error);
-                            break 'connection;
-                        }
-                    };
-                    if let Err(error) = result {
-                        write_event_protocol_error(&mut conn, error);
-                        break 'connection;
-                    }
-                    if request.subscription.delivery == DeliveryClass::Durable
-                        && let Err(error) = event_hub.runtime().dispatch_durable(
-                            &identity.plugin_id,
-                            &request.subscription.id,
-                            smelt_event_bus::DEFAULT_DURABLE_LOAD_BATCH,
-                        )
+        let Some(mail) = mailbox.next() else {
+            break;
+        };
+        match mail {
+            ConnectionMail::Control(control) => {
+                let result = match control {
+                    Ok(SubscribeControlMessage::Ack { ack })
+                        if ack.subscription_id != request.subscription.id =>
                     {
+                        Err(smelt_event_bus::EventBusError::new(
+                            "ack subscription_id does not match this connection",
+                        ))
+                    }
+                    Ok(SubscribeControlMessage::Ack { ack }) => {
+                        event_hub.runtime().ack(&identity.plugin_id, &ack)
+                    }
+                    Ok(SubscribeControlMessage::Nack { nack })
+                        if nack.subscription_id != request.subscription.id =>
+                    {
+                        Err(smelt_event_bus::EventBusError::new(
+                            "nack subscription_id does not match this connection",
+                        ))
+                    }
+                    Ok(SubscribeControlMessage::Nack { nack }) => event_hub.runtime().nack(
+                        &identity.plugin_id,
+                        &nack,
+                        crate::event_hub::now_ms(),
+                    ),
+                    Err(error) => {
                         write_event_protocol_error(&mut conn, error);
                         break 'connection;
                     }
+                };
+                if let Err(error) = result {
+                    write_event_protocol_error(&mut conn, error);
+                    break 'connection;
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break 'connection,
+                if request.subscription.delivery == DeliveryClass::Durable
+                    && let Err(error) = event_hub.runtime().dispatch_durable(
+                        &identity.plugin_id,
+                        &request.subscription.id,
+                        smelt_event_bus::DEFAULT_DURABLE_LOAD_BATCH,
+                    )
+                {
+                    write_event_protocol_error(&mut conn, error);
+                    break 'connection;
+                }
             }
-        }
-
-        match subscription.try_recv() {
-            Ok(Delivery::Lag {
+            ConnectionMail::Delivery(Delivery::Lag {
                 dropped,
                 resume_after,
             }) => {
-                subscription.discard_pending();
                 if write_event_protocol_value(
                     &mut conn,
                     SubscribeMessage::<serde_json::Value>::Lag {
@@ -385,8 +530,9 @@ pub(crate) fn handle_event_subscribe(
                         break 'connection;
                     }
                 }
+                let _ = resume_tx.send(());
             }
-            Ok(delivery) => {
+            ConnectionMail::Delivery(delivery) => {
                 if write_event_protocol_value(
                     &mut conn,
                     event_hub::delivery_to_subscribe_message(delivery),
@@ -396,18 +542,17 @@ pub(crate) fn handle_event_subscribe(
                     break;
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
     }
 
+    drop(resume_tx);
+    mailbox.stop();
     let _ = conn.shutdown(Shutdown::Both);
-    let _ = reader_worker.join();
     let _ = event_hub
         .runtime()
         .unsubscribe(&identity.plugin_id, &request.subscription.id);
+    let _ = reader_worker.join();
+    let _ = forwarder.join();
     if let Err(error) = event_hub.runtime().flush_cursors() {
         eprintln!("[event-hub] disconnect cursor flush failed: {error}");
     }

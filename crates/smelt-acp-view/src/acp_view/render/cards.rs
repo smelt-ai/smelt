@@ -45,25 +45,21 @@ impl AcpView {
                 let name = card.options[pix].name.clone();
                 let option_id = card.options[pix].option_id.clone();
                 let tool_call_id = tool_call_id.clone();
-                // 主按钮改胶囊 + hover 时轻微上浮带阴影——批准是这张卡最想让人点的
-                // 动作，得比其余选项更有「弹一下」的手感，不只是纯色块换个透明度。
                 buttons = buttons.child(
                     h_flex().w_full().min_w_0().child(
                         div()
                             .id(format!("acp-perm-primary-{option_id}"))
-                            .relative()
                             .h(px(36.))
                             .px_4()
                             .flex()
                             .items_center()
                             .rounded_full()
-                            .bg(gpui::rgb(ui_theme::green()))
-                            .text_color(gpui::rgb(ui_theme::on_accent()))
+                            .bg(gpui::rgb(ui_theme::action_fill()))
+                            .text_color(gpui::rgb(ui_theme::action_on()))
                             .text_sm()
                             .font_semibold()
                             .cursor_pointer()
-                            .shadow_sm()
-                            .hover(|d| d.opacity(0.9).shadow_md().top(px(-1.)))
+                            .hover(|d| d.opacity(0.88))
                             .child(format!("{name} ⌘⏎"))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.pick_permission(&tool_call_id, &option_id, cx);
@@ -300,8 +296,8 @@ impl AcpView {
                 .gap_3()
                 .rounded(ui_theme::card_radius())
                 .border_1()
-                .border_color(gpui::rgb(ui_theme::accent()))
-                .bg(ui_theme::tint(ui_theme::accent(), 0x14))
+                .border_color(ui_theme::card_stroke())
+                .bg(ui_theme::glass_card())
                 .child(
                     h_flex()
                         .w_full()
@@ -345,12 +341,13 @@ impl AcpView {
                                     .id(("acp-elicit-url", fix))
                                     .px_3()
                                     .py_2()
-                                    .rounded_lg()
-                                    .bg(gpui::rgb(ui_theme::blue()))
-                                    .text_color(gpui::white())
+                                    .rounded_full()
+                                    .bg(gpui::rgb(ui_theme::action_fill()))
+                                    .text_color(gpui::rgb(ui_theme::action_on()))
                                     .text_sm()
+                                    .font_semibold()
                                     .cursor_pointer()
-                                    .hover(|d| d.opacity(0.85))
+                                    .hover(|d| d.opacity(0.88))
                                     .child("打开并继续")
                                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                                         cx.open_url(&url);

@@ -4,6 +4,24 @@ use super::*;
 
 const USER_MESSAGE_ACTION_GROUP: &str = "acp-user-message-actions";
 
+/// 用户消息气泡。
+///
+/// gpui-component 的 markdown 列表块（ol/ul）内部用 `w_full()`/`flex_1()`
+/// 排布「序号 + 正文」。气泡收缩到内容大小（只有 max_w，没有 width）时，短列表
+/// 会被测成只有序号那么宽，正文被 `overflow_hidden()` 裁掉。最小宽度给正文留位置。
+fn user_message_bubble(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .max_w(gpui::relative(0.72))
+        .min_w(gpui::px(160.))
+        .px_4()
+        .py_2p5()
+        .rounded(ui_theme::bubble_radius())
+        .bg(ui_theme::overlay(0x14))
+        .hover(|bubble| bubble.bg(ui_theme::overlay(0x1c)))
+        .text_sm()
+}
+
 struct SubagentCard<'a> {
     index: usize,
     id: &'a str,
@@ -24,6 +42,7 @@ impl AcpView {
     pub(super) fn render_message_list(
         &self,
         animate_ambient: bool,
+        clear_capsule: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let current_turn_active = self.has_active_turn();
@@ -209,22 +228,7 @@ impl AcpView {
                                 )
                             })
                             .child(
-                                div()
-                                    .id(("acp-user-message", i))
-                                    .max_w(gpui::relative(0.72))
-                                // gpui-component 的 markdown 列表块（ol/ul）内部用
-                                // `w_full()`/`flex_1()` 排布"序号 + 正文"。这个气泡
-                                // 是收缩到内容大小（只有 max_w，没有 width）的 flex
-                                // item，短列表内容会被误测成只有序号那么宽，正文被
-                                // `overflow_hidden()` 悄悄裁掉——只剩"1." "2." 悬浮。
-                                // 兜个最小宽度，给列表正文留出可见空间。
-                                    .min_w(gpui::px(160.))
-                                    .px_4()
-                                    .py_2p5()
-                                    .rounded(px(20.))
-                                    .bg(ui_theme::overlay(0x14))
-                                    .hover(|bubble| bubble.bg(ui_theme::overlay(0x1c)))
-                                    .text_sm()
+                                user_message_bubble(("acp-user-message", i))
                                     .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                         ("acp-user-md", i),
                                         cached_entry_markdown(
@@ -320,18 +324,7 @@ impl AcpView {
                                 },
                             )
                             .child(
-                                div()
-                                    .id(("acp-user-images-message", i))
-                                    .max_w(gpui::relative(0.8))
-                                    // 同上：避免短的有序/无序列表被收缩到只剩序号宽度、
-                                    // 正文被裁没。
-                                    .min_w(gpui::px(160.))
-                                    .px_3()
-                                    .py_3()
-                                    .rounded(px(20.))
-                                    .bg(ui_theme::overlay(0x14))
-                                    .hover(|bubble| bubble.bg(ui_theme::overlay(0x1c)))
-                                    .text_sm()
+                                user_message_bubble(("acp-user-images-message", i))
                                     .child(content.child(image_strip))
                                     .context_menu(move |menu, window, cx| {
                                         selected_text_context_menu(
@@ -800,84 +793,87 @@ impl AcpView {
                                         // adapter 把工具输出包在 markdown 围栏里（```console…```），
                                         // 当纯文本渲染会把 ``` 直接显示出来。剥掉再展示。
                                         let body = strip_code_fence(text);
-                                        let lines: Vec<&str> = body.lines().collect();
-                                        let total = lines.len();
-                                        let key = id.to_string();
-                                        let expanded = this.expanded_tools.contains(&key);
-                                        // 默认只出前 8 行：以前是 max_h + overflow_hidden，
-                                        // 内容被硬切掉且没有任何展开入口，等于看不到全部。
-                                        let shown =
-                                            if expanded || total <= TOOL_OUTPUT_PREVIEW_LINES {
+                                        // 自由格式工具可能本来就是 markdown（`##`/`**`/列表）。
+                                        // 控制台输出、文件内容走等宽行视口，星号和井号都是正文。
+                                        if matches!(kind, ToolKind::Other) {
+                                            let lines: Vec<&str> = body.lines().collect();
+                                            let total = lines.len();
+                                            let key = id.to_string();
+                                            let expanded = this.expanded_tools.contains(&key);
+                                            let shown = if expanded
+                                                || total <= TOOL_OUTPUT_PREVIEW_LINES
+                                            {
                                                 body.to_string()
                                             } else {
                                                 lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
                                             };
-                                        let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
-                                        // 真正的控制台输出（bash stdout、文件内容……）保持等宽纯文本，
-                                        // 星号、井号都是内容本身，不能被当 markdown 解析。其他
-                                        // 自由格式工具输出可能本来就是按 markdown 写的
-                                        // （`##`/`**`/列表），`Other` 工具要保留这种格式。
-                                        let body_el: gpui::AnyElement =
-                                            if matches!(kind, ToolKind::Other) {
-                                                smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                                    ("acp-tool-output-md", i * 100 + part_ix),
-                                                    shown,
-                                                )
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .into_any_element()
-                                            } else {
-                                                selectable_plain_text(
-                                                    ("acp-tool-output-text", i * 100 + part_ix),
-                                                    &shown,
-                                                )
-                                                    .text_xs()
-                                                    .text_color(muted)
-                                                    .font_family(smelt_core::font_config::font_family())
-                                                    .into_any_element()
-                                            };
-                                        card.child(
-                                            v_flex()
-                                                .pl_5()
-                                                .pt_1()
-                                                .pb_1()
-                                                .gap_1()
-                                                .child(body_el)
-                                                .when(need_toggle, |d| {
-                                                    let key = key.clone();
-                                                    d.child(
-                                                    div()
-                                                        .id(("acp-tool-toggle", i * 100 + part_ix))
-                                                        .text_xs()
-                                                        .text_color(faint)
-                                                        .cursor_pointer()
-                                                        .hover(|d| d.opacity(0.8))
-                                                        .child(if expanded {
-                                                            "收起".to_string()
-                                                        } else {
-                                                            format!("展开全部 {total} 行")
-                                                        })
-                                                        .on_mouse_down(
-                                                            gpui::MouseButton::Left,
-                                                            cx.listener(
-                                                                move |this, _ev, _window, cx| {
-                                                                    if !this
-                                                                        .expanded_tools
-                                                                        .remove(&key)
-                                                                    {
-                                                                        this.expanded_tools
-                                                                            .insert(key.clone());
-                                                                    }
-                                                                    this.list_state
-                                                                        .remeasure_items(i..i.saturating_add(1));
-                                                                    cx.stop_propagation();
-                                                                    cx.notify();
-                                                                },
-                                                            ),
-                                                        ),
-                                                )
-                                                }),
-                                        )
+                                            let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
+                                            let body_el = smelt_ui::markdown_mermaid::markdown_view_clickable(
+                                                ("acp-tool-output-md", i * 100 + part_ix),
+                                                shown,
+                                            )
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .into_any_element();
+                                            card.child(
+                                                v_flex()
+                                                    .pl_5()
+                                                    .pt_1()
+                                                    .pb_1()
+                                                    .gap_1()
+                                                    .child(body_el)
+                                                    .when(need_toggle, |d| {
+                                                        let key = key.clone();
+                                                        d.child(
+                                                            div()
+                                                                .id((
+                                                                    "acp-tool-toggle",
+                                                                    i * 100 + part_ix,
+                                                                ))
+                                                                .text_xs()
+                                                                .text_color(faint)
+                                                                .cursor_pointer()
+                                                                .hover(|d| d.opacity(0.8))
+                                                                .child(if expanded {
+                                                                    "收起".to_string()
+                                                                } else {
+                                                                    format!("展开全部 {total} 行")
+                                                                })
+                                                                .on_mouse_down(
+                                                                    gpui::MouseButton::Left,
+                                                                    cx.listener(
+                                                                        move |this, _ev, _window, cx| {
+                                                                            if !this
+                                                                                .expanded_tools
+                                                                                .remove(&key)
+                                                                            {
+                                                                                this.expanded_tools
+                                                                                    .insert(key.clone());
+                                                                            }
+                                                                            this.list_state
+                                                                                .remeasure_items(
+                                                                                    i..i.saturating_add(1),
+                                                                                );
+                                                                            cx.stop_propagation();
+                                                                            cx.notify();
+                                                                        },
+                                                                    ),
+                                                                ),
+                                                        )
+                                                    }),
+                                            )
+                                        } else {
+                                            card.child(this.render_plain_tool_log(
+                                                PlainToolLog {
+                                                    entry_ix: i,
+                                                    part_ix,
+                                                    body,
+                                                    tool_id: id,
+                                                    muted,
+                                                },
+                                                cx,
+                                            ))
+                                        }
                                     }
                                     ToolOutputPart::Image(_) => {
                                         let decoded = this
@@ -904,17 +900,16 @@ impl AcpView {
                                     ToolOutputPart::Terminal { output, .. }
                                         if !output.trim().is_empty() =>
                                     {
-                                        card.child(
-                                            v_flex().pl_5().pt_1().pb_1().child(
-                                                selectable_plain_text(
-                                                    ("acp-tool-output-terminal", i * 100 + part_ix),
-                                                    output,
-                                                )
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .font_family(smelt_core::font_config::font_family()),
-                                            ),
-                                        )
+                                        card.child(this.render_plain_tool_log(
+                                            PlainToolLog {
+                                                entry_ix: i,
+                                                part_ix,
+                                                body: output,
+                                                tool_id: id,
+                                                muted,
+                                            },
+                                            cx,
+                                        ))
                                     }
                                     ToolOutputPart::Terminal { .. } => card,
                                 };
@@ -925,6 +920,25 @@ impl AcpView {
                         }
                         card.into_any_element()
                         }
+                    }
+                    AcpEntry::TaskNote(note) => {
+                        let mut block = v_flex().w_full().gap_1().py_1().child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(note.summary()),
+                        );
+                        if !note.output_tail.trim().is_empty() {
+                            block = block.child(
+                                div().w_full().child(
+                                    selectable_plain_text(("acp-task-note", i), &note.output_tail)
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .font_family(smelt_core::font_config::font_family()),
+                                ),
+                            );
+                        }
+                        block.into_any_element()
                     }
                     AcpEntry::Divider(label) => h_flex()
                         .w_full()
@@ -1047,10 +1061,17 @@ impl AcpView {
                         _ => 16.,
                     }
                 };
+                // 没有顶栏时，第一条让开标题胶囊；滚上去仍会钻到它底下。
+                let top = if clear_capsule && i == 0 {
+                    ui_theme::CHROME_ISLAND_CLEARANCE_PX
+                } else {
+                    0.
+                };
                 h_flex()
                     .w_full()
                     .justify_center()
                     .px_4()
+                    .pt(px(top))
                     .pb(px(bottom))
                     .overflow_hidden()
                     .child(
@@ -1064,8 +1085,7 @@ impl AcpView {
         })
         .w_full()
         .flex_1()
-        .min_h_0()
-        .pt_4();
+        .min_h_0();
         list.into_any_element()
     }
 
@@ -1090,7 +1110,7 @@ impl AcpView {
             .items_center()
             .child(ambient_spinner(
                 ("acp-working-spinner", entry_ix),
-                gpui::rgb(ui_theme::blue()).into(),
+                gpui::rgb(ui_theme::text_muted()).into(),
                 animate_ambient,
             ))
             .child(
@@ -1133,11 +1153,7 @@ impl AcpView {
         let group_key = group.first;
         let group_end = group.end;
         let group_label = process_group_header_label(&self.entries, group);
-        let group_accent_u32 = if group.active {
-            ui_theme::blue()
-        } else {
-            ui_theme::text_muted()
-        };
+        let group_accent_u32 = ui_theme::text_muted();
         let group_accent = gpui::rgb(group_accent_u32);
         h_flex()
             .id(("acp-process-group", group.first))
@@ -1739,6 +1755,138 @@ impl AcpView {
             })
             .into_any_element()
     }
+
+    /// 控制台和文件内容。短的整段可选；长的默认前几行，展开后是固定高度的行视口。
+    /// 视口里只构建看得到的行，全文留在复制按钮上。
+    fn render_plain_tool_log(&self, log: PlainToolLog<'_>, cx: &Context<Self>) -> gpui::AnyElement {
+        let PlainToolLog {
+            entry_ix,
+            part_ix,
+            body,
+            tool_id,
+            muted,
+        } = log;
+        let preview = tool_log_preview(body);
+        let expanded = self.expanded_tools.contains(tool_id);
+        let mode = tool_log_mode(preview.total, expanded);
+        let font = smelt_core::font_config::font_family();
+        let body_el = match mode {
+            ToolLogMode::Inline => {
+                selectable_plain_text(format!("acp-tool-log-text-{tool_id}-{part_ix}"), body)
+                    .text_xs()
+                    .text_color(muted)
+                    .font_family(font)
+                    .into_any_element()
+            }
+            ToolLogMode::Preview => selectable_plain_text(
+                format!("acp-tool-log-text-{tool_id}-{part_ix}"),
+                &preview.shown,
+            )
+            .text_xs()
+            .text_color(muted)
+            .font_family(font)
+            .into_any_element(),
+            ToolLogMode::Viewport => {
+                let lines = std::rc::Rc::new(split_log_lines(body));
+                let widest = widest_log_line_index(&lines);
+                let height = tool_log_viewport_height(lines.len());
+                let row_lines = lines.clone();
+                let row_font = smelt_core::font_config::font_family();
+                let list = uniform_list(
+                    format!("acp-tool-log-{tool_id}-{part_ix}"),
+                    lines.len(),
+                    move |range, _window, _app| {
+                        let font = row_font.clone();
+                        range
+                            .map(|index| {
+                                div()
+                                    .h(px(TOOL_LOG_LINE_HEIGHT_PX))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(12.))
+                                    .line_height(px(TOOL_LOG_LINE_HEIGHT_PX))
+                                    .text_color(muted)
+                                    .font_family(font.clone())
+                                    .child(row_lines[index].clone())
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .with_width_from_item(Some(widest))
+                .size_full();
+                div()
+                    .id(format!("acp-tool-log-box-{tool_id}-{part_ix}"))
+                    .debug_selector({
+                        let marker = format!("ACP_TOOL_LOG_{tool_id}_{part_ix}");
+                        move || marker
+                    })
+                    .h(px(height))
+                    .w_full()
+                    .overflow_hidden()
+                    .child(list)
+                    .into_any_element()
+            }
+        };
+        let total = preview.total;
+        let copy_text = body.to_string();
+        v_flex()
+            .pl_5()
+            .pt_1()
+            .pb_1()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .child(body_el)
+            .when(mode != ToolLogMode::Inline, |block| {
+                let key = tool_id.to_string();
+                block.child(
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            div()
+                                .id(("acp-tool-toggle", entry_ix * 100 + part_ix))
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::text_faint()))
+                                .cursor_pointer()
+                                .hover(|row| row.opacity(0.8))
+                                .child(if expanded {
+                                    "收起".to_string()
+                                } else {
+                                    format!("展开全部 {total} 行")
+                                })
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        if !this.expanded_tools.remove(&key) {
+                                            this.expanded_tools.insert(key.clone());
+                                        }
+                                        this.list_state
+                                            .remeasure_items(entry_ix..entry_ix.saturating_add(1));
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                        .child(
+                            Clipboard::new(format!("acp-tool-log-copy-{tool_id}-{part_ix}"))
+                                .value(copy_text)
+                                .tooltip("复制全部"),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+/// 控制台、文件内容这类纯文本日志。短输出整段画出，长输出走行视口。
+struct PlainToolLog<'a> {
+    entry_ix: usize,
+    part_ix: usize,
+    body: &'a str,
+    tool_id: &'a str,
+    muted: gpui::Hsla,
 }
 
 /// hover 预览的渲染入参。工具输出的展示要素（原始 parts + 两份渲染缓存 + 配色）
@@ -1801,22 +1949,37 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
             }
             ToolOutputPart::Text(text) if !text.trim().is_empty() => {
                 let body = strip_code_fence(text);
+                let preview = tool_log_preview(body);
+                let total = preview.total;
+                let truncated = preview.truncated();
+                let shown = if truncated {
+                    preview.shown
+                } else {
+                    body.to_string()
+                };
                 let body_el: gpui::AnyElement = if matches!(kind, ToolKind::Other) {
                     smelt_ui::markdown_mermaid::markdown_view_clickable(
                         ("acp-tool-pop-md", entry_ix * 100 + part_ix),
-                        body.to_string(),
+                        shown,
                     )
                     .text_xs()
                     .text_color(muted)
                     .into_any_element()
                 } else {
-                    selectable_plain_text(("acp-tool-pop-text", entry_ix * 100 + part_ix), body)
+                    selectable_plain_text(("acp-tool-pop-text", entry_ix * 100 + part_ix), &shown)
                         .text_xs()
                         .text_color(muted)
                         .font_family(smelt_core::font_config::font_family())
                         .into_any_element()
                 };
-                col.child(body_el)
+                col.child(body_el).when(truncated, |col| {
+                    col.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("共 {total} 行")),
+                    )
+                })
             }
             ToolOutputPart::Image(_) => {
                 match images
@@ -1830,12 +1993,28 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                 }
             }
             ToolOutputPart::Text(_) => col,
-            ToolOutputPart::Terminal { output, .. } if !output.trim().is_empty() => col.child(
-                selectable_plain_text(("acp-tool-pop-terminal", entry_ix * 100 + part_ix), output)
+            ToolOutputPart::Terminal { output, .. } if !output.trim().is_empty() => {
+                let preview = tool_log_preview(output);
+                let total = preview.total;
+                let truncated = preview.truncated();
+                col.child(
+                    selectable_plain_text(
+                        ("acp-tool-pop-terminal", entry_ix * 100 + part_ix),
+                        &preview.shown,
+                    )
                     .text_xs()
                     .text_color(muted)
                     .font_family(smelt_core::font_config::font_family()),
-            ),
+                )
+                .when(truncated, |col| {
+                    col.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("共 {total} 行")),
+                    )
+                })
+            }
             ToolOutputPart::Terminal { .. } => col,
         };
     }

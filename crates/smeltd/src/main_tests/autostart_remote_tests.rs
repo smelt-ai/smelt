@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn config(enabled: bool) -> smelt_core::remote_config::RemoteConfig {
     smelt_core::remote_config::RemoteConfig {
@@ -164,4 +165,102 @@ fn old_disconnect_does_not_remove_the_new_connection_instance() {
         },
     );
     assert!(snapshot_iroh_connections(&connections, next_generation).is_empty());
+}
+
+#[test]
+fn addr_in_use_retries_once_when_the_holder_exits() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("0.2")
+        .spawn()
+        .expect("spawn sleep");
+    let holder = child.id() as i32;
+    let calls = AtomicUsize::new(0);
+    let started = std::time::Instant::now();
+    let result = retry_gateway_after_holder_exit(holder, Duration::from_secs(5), || {
+        let nth = calls.fetch_add(1, Ordering::SeqCst);
+        if nth == 0 {
+            Err(GatewayFailure {
+                addr_in_use: true,
+                message: "绑定失败".into(),
+            })
+        } else {
+            Ok("up")
+        }
+    });
+    let elapsed = started.elapsed();
+    let _ = child.wait();
+    assert_eq!(result.expect("第二次应成功"), "up");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "应等到持有者退出，实际 {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "持有者 0.2 秒就退出，实际等了 {elapsed:?}"
+    );
+}
+
+#[test]
+fn addr_in_use_does_not_wait_when_the_holder_is_init() {
+    let calls = AtomicUsize::new(0);
+    let started = std::time::Instant::now();
+    let error = retry_gateway_after_holder_exit(
+        1,
+        Duration::from_secs(5),
+        || -> Result<(), GatewayFailure> {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(GatewayFailure {
+                addr_in_use: true,
+                message: "绑定失败".into(),
+            })
+        },
+    )
+    .expect_err("init 不是可等的持有者");
+    let elapsed = started.elapsed();
+    assert!(error.addr_in_use, "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(elapsed < Duration::from_millis(200), "{elapsed:?}");
+}
+
+#[test]
+fn other_gateway_errors_do_not_wait_for_the_holder() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let holder = child.id() as i32;
+    let started = std::time::Instant::now();
+    let error = retry_gateway_after_holder_exit(
+        holder,
+        Duration::from_secs(5),
+        || -> Result<(), GatewayFailure> {
+            Err(GatewayFailure {
+                addr_in_use: false,
+                message: "权限不足".into(),
+            })
+        },
+    )
+    .expect_err("非占用错误应原样返回");
+    unsafe { libc::kill(holder, libc::SIGKILL) };
+    let _ = child.wait();
+    assert!(!error.addr_in_use, "{error}");
+    assert!(started.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
+fn occupied_port_fails_without_waiting() {
+    let _lock = lock_remote_gateway_tests();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("占用一个端口");
+    let port = listener.local_addr().expect("local addr").port();
+    let state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
+    let started = std::time::Instant::now();
+    let error = start_remote_gateway(&state, "127.0.0.1", port, false).expect_err("端口已被占用");
+    let elapsed = started.elapsed();
+    drop(listener);
+    assert!(error.addr_in_use, "{error}");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "固定端口被占用应立刻失败，实际 {elapsed:?}"
+    );
 }

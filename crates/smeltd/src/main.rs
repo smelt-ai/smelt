@@ -1298,12 +1298,17 @@ fn handle_automation_command(
         Ok(applied)
     })();
     let response = match result {
-        Ok(applied) => serde_json::json!({
-            "ok": true,
-            "revision": applied.snapshot.revision,
-            "automations": webhook::annotate_snapshot(applied.snapshot),
-            "result": applied.result,
-        }),
+        Ok(applied) => {
+            if applied.changed {
+                automation_runtime::nudge_automation_driver();
+            }
+            serde_json::json!({
+                "ok": true,
+                "revision": applied.snapshot.revision,
+                "automations": webhook::annotate_snapshot(applied.snapshot),
+                "result": applied.result,
+            })
+        }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = writeln!(conn, "{response}");
@@ -1334,21 +1339,26 @@ fn handle_event_publish(
         Ok(applied)
     })();
     let response = match result {
-        Ok(applied) => serde_json::json!({
-            "ok": true,
-            "event_id": applied.published.event_id,
-            "topic": applied.published.topic,
-            "matched": applied.published.runs.len() + applied.published.already_recorded,
-            "accepted": applied.published.runs.len(),
-            "duplicate": applied.published.runs.is_empty()
-                && applied.published.already_recorded > 0,
-            "runs": applied.published.runs.iter().map(|run| serde_json::json!({
-                "id": run.id,
-                "automation_id": run.automation_id,
-                "status": run.status,
-            })).collect::<Vec<_>>(),
-            "revision": applied.snapshot.revision,
-        }),
+        Ok(applied) => {
+            if !applied.published.runs.is_empty() {
+                automation_runtime::nudge_automation_driver();
+            }
+            serde_json::json!({
+                "ok": true,
+                "event_id": applied.published.event_id,
+                "topic": applied.published.topic,
+                "matched": applied.published.runs.len() + applied.published.already_recorded,
+                "accepted": applied.published.runs.len(),
+                "duplicate": applied.published.runs.is_empty()
+                    && applied.published.already_recorded > 0,
+                "runs": applied.published.runs.iter().map(|run| serde_json::json!({
+                    "id": run.id,
+                    "automation_id": run.automation_id,
+                    "status": run.status,
+                })).collect::<Vec<_>>(),
+                "revision": applied.snapshot.revision,
+            })
+        }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = writeln!(conn, "{response}");
@@ -3131,7 +3141,10 @@ fn resume_hosted_acp_handoff_item(
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),
         prompt_in_flight: AtomicBool::new(prompt_in_flight),
+        automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        unaccepted_prompt: Mutex::new(None),
+        provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),
         host_snapshot_revision: AtomicU64::new(host_snapshot_revision),
         handle: Mutex::new(None),
@@ -3689,7 +3702,10 @@ pub(crate) fn resume_from_value(
             connection_generation: AtomicU64::new(0),
             turn_completion: Mutex::new(()),
             prompt_in_flight: AtomicBool::new(recover_running_turn),
+            automation_watch: Mutex::new(None),
             pending_prompts: Mutex::new(VecDeque::new()),
+            unaccepted_prompt: Mutex::new(None),
+            provider_hold: AtomicBool::new(false),
             hosted_handle: Mutex::new(None),
             host_snapshot_revision: AtomicU64::new(0),
             handle: Mutex::new(None),

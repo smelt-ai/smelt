@@ -3652,20 +3652,7 @@ impl Render for Workspace {
         }
         let tool_panel_el = (tool_panel_motion.mounted && !self.tool_panel_promoted())
             .then(|| self.render_tool_panel(window, cx));
-        // 左侧让位宽度（stage.rs / tool_panel.rs 的 corner_guard 语义，改由调用方
-        // 算好宽度传进去）：sidebar 收起时舞台/展开的 Tool Panel rail 会变成
-        // 贴着窗口最左边那块，头栏要让出红绿灯 + 悬浮「切换左侧栏」按钮的宽度。
-        // 全屏时红绿灯被 macOS 隐藏、切换按钮也移到 left(18px)（见 sidebar-toggle
-        // 那里的注释），让位宽度跟着缩小：128px（非全屏，红绿灯 ~78px + 按钮
-        // 92+24=116px 再加余量）→ 48px（全屏，按钮 18+24=42px 相对卡片左边缘
-        // 9px 只剩 33px，加 15px 余量）。
-        let left_guard = if self.sidebar_open {
-            px(0.)
-        } else if window.is_fullscreen() {
-            px(48.)
-        } else {
-            px(128.)
-        };
+        let left_guard = self.chrome_left_guard(window);
 
         let stage_content: AnyElement = match self.active_tab() {
             WorkspaceRoute::Plugin { .. } => self.render_workspace_surface(window, cx),
@@ -3816,14 +3803,19 @@ impl Render for Workspace {
             )
             .into_any_element();
         // 舞台分栏：实底矩形。交通灯让位交给右侧共用顶栏的 left_guard。
+        // 停靠右栏的宽度同时留给顶栏：标题胶囊按舞台列居中，不漂到分栏上。
+        let docked_panel_w = if tool_panel_el.is_some() {
+            (tool_panel_motion.progress * self.tool_panel_w).max(1.)
+        } else {
+            0.
+        };
         let stage_card = workspace_frame::card(stage_surface).child(stage);
 
         // Stage + Tool Panel 仍使用自己的 h_resizable；外层左侧栏改为固定像素 flex，
         // 窗口尺寸变化只交给右侧区吸收，不再按比例改写侧栏的视觉宽度。
         let stage_and_tool_panel: AnyElement = if let Some(tool_panel) = tool_panel_el {
-            let tool_panel_w = self.tool_panel_w;
             let progress = tool_panel_motion.progress;
-            let panel_w = (progress * tool_panel_w).max(1.);
+            let panel_w = docked_panel_w;
             let min_w = if tool_panel_motion.animating {
                 px(1.)
             } else {
@@ -3872,13 +3864,18 @@ impl Render for Workspace {
         // 主体，左侧会话栏不受影响；宽度铺到窗口最右边。
         let right_region: AnyElement = stage_and_tool_panel;
 
-        let shared_chrome = self.render_shared_right_chrome(left_guard, cx);
+        // 胶囊和开关绝对定位盖在内容上，不占一行。中间内容贴到窗口顶。
+        let shared_chrome = self.render_shared_right_chrome(
+            left_guard,
+            px(docked_panel_w),
+            window.is_fullscreen(),
+            cx,
+        );
         let right_column = div()
             .size_full()
-            .flex()
-            .flex_col()
-            .child(shared_chrome)
-            .child(div().flex_1().min_h_0().child(right_region));
+            .relative()
+            .child(right_region)
+            .child(shared_chrome.absolute().top_0().left_0().right_0());
         let workspace_columns = fixed_sidebar_columns(
             px(sidebar_w),
             sidebar_min_w,
@@ -5026,6 +5023,7 @@ fn main() {
                                     ws.navigate_to_automation_run(
                                         automation_id.clone(),
                                         run_id.clone(),
+                                        window,
                                         cx,
                                     );
                                 }
@@ -5061,10 +5059,11 @@ fn main() {
                                 automation_id,
                                 run_id,
                             } => {
-                                let _ = ws.update(cx, |ws, cx| {
+                                let _ = ws.update_in(cx, |ws, window, cx| {
                                     ws.navigate_to_automation_run(
                                         automation_id.clone(),
                                         run_id.clone(),
+                                        window,
                                         cx,
                                     );
                                 });

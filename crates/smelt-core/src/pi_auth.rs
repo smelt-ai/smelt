@@ -16,7 +16,7 @@
 //! 把用户正在做的授权掐掉是不可接受的。
 
 use std::io::{BufRead, BufReader, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// 受管运行时里的登录入口，相对 pi-agent 根目录。
 const AUTH_SCRIPT: &str = "src/auth-main.ts";
@@ -251,22 +251,38 @@ fn run_once<T>(
     // 那时读循环停在 read 上，永远走不到超时检查。
     let child = Arc::new(Mutex::new(child));
     let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = Arc::new((Mutex::new(false), Condvar::new()));
     let watchdog = std::thread::spawn({
         let child = Arc::clone(&child);
         let timed_out = Arc::clone(&timed_out);
         let finished = Arc::clone(&finished);
         move || {
+            let (lock, wake) = &*finished;
             let deadline = std::time::Instant::now() + ONE_SHOT_TIMEOUT;
-            while std::time::Instant::now() < deadline {
-                if finished.load(std::sync::atomic::Ordering::SeqCst) {
+            let mut done = lock.lock().unwrap_or_else(|error| error.into_inner());
+            loop {
+                if *done {
                     return;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (guard, status) = wake
+                    .wait_timeout(done, deadline.saturating_duration_since(now))
+                    .unwrap_or_else(|error| error.into_inner());
+                done = guard;
+                if *done {
+                    return;
+                }
+                if status.timed_out() {
+                    break;
+                }
             }
-            if finished.load(std::sync::atomic::Ordering::SeqCst) {
+            if *done {
                 return;
             }
+            drop(done);
             timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Ok(mut child) = child.lock() {
                 let _ = child.kill();
@@ -287,7 +303,12 @@ fn run_once<T>(
             None => {}
         }
     }
-    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let (lock, wake) = &*finished;
+        let mut done = lock.lock().unwrap_or_else(|error| error.into_inner());
+        *done = true;
+        wake.notify_one();
+    }
     let _ = watchdog.join();
     let mut child = match child.lock() {
         Ok(child) => child,

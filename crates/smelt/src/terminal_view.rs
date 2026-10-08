@@ -121,6 +121,7 @@ fn line_px() -> f32 {
 const CELL_W_RATIO: f32 = 0.6;
 /// 终端内容的每侧内边距（避免文字贴边被裁）。canvas 覆盖层保持满尺寸，
 /// 只把网格原点按此偏移，故鼠标/IME 坐标一致，网格可用区 = 尺寸 − 2×PAD。
+/// 顶边不按标题胶囊整行下移：状态行的字在左右两边，胶囊只盖住中间空档。
 const PAD_X: f32 = 12.0;
 const PAD_Y: f32 = 8.0;
 /// Shift+PageUp/Down 每次滚动的行数。
@@ -901,6 +902,15 @@ impl TerminalView {
         (row, col)
     }
 
+    /// 胶囊让出的顶缝不是格子。点在网格原点之上时不把这一下算成第 0 行。
+    fn cell_in_grid(&self, pos: Point<Pixels>, window: &mut Window) -> Option<(usize, usize)> {
+        let (_, oy) = self.grid_origin.get();
+        if f32::from(pos.y) < oy {
+            return None;
+        }
+        Some(self.pos_to_cell(pos, window))
+    }
+
     /// 窗口像素 x 落在其网格单元的左半还是右半：选区端点的 Side。alacritty 用它
     /// 决定端点格是否纳入选区（同格同侧 = 空选区），于是单击/同格微抖不会误选出
     /// 一格——否则 mouse_up 会把这次点击当成拖选，不再转发给开了鼠标上报的 TUI。
@@ -1456,7 +1466,9 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    let cell = this.pos_to_cell(ev.position, window);
+                    let Some(cell) = this.cell_in_grid(ev.position, window) else {
+                        return;
+                    };
                     // Cmd+点击打开链接
                     if ev.modifiers.platform
                         && let Some(url) = this.url_at(cell) {
@@ -1547,8 +1559,7 @@ impl Render for TerminalView {
                         }
                         cx.notify();
                     }
-                } else {
-                    let cell = this.pos_to_cell(ev.position, window);
+                } else if let Some(cell) = this.cell_in_grid(ev.position, window) {
                     // 全开 MOUSE_MOTION 时无键悬停也上报（button 35）
                     if this.terminal.mouse_mode() && !ev.modifiers.shift {
                         this.terminal.mouse_motion(cell.0, cell.1);
@@ -1563,12 +1574,15 @@ impl Render for TerminalView {
                         this.hover_url = hl;
                         cx.notify();
                     }
+                } else if this.hover_url.take().is_some() {
+                    cx.notify();
                 }
             }))
             // 按/松 Cmd 时（鼠标不动也）即时更新链接高亮/手型
             .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, window, cx| {
                 let hl = if ev.modifiers.platform {
-                    this.link_range_at(this.pos_to_cell(window.mouse_position(), window))
+                    this.cell_in_grid(window.mouse_position(), window)
+                        .and_then(|cell| this.link_range_at(cell))
                 } else {
                     None
                 };
@@ -1582,7 +1596,9 @@ impl Render for TerminalView {
                 MouseButton::Middle,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    let cell = this.pos_to_cell(ev.position, window);
+                    let Some(cell) = this.cell_in_grid(ev.position, window) else {
+                        return;
+                    };
                     if !ev.modifiers.shift && this.terminal.mouse_button(1, true, cell.0, cell.1) {
                         return;
                     }
@@ -1609,8 +1625,9 @@ impl Render for TerminalView {
                     if ev.modifiers.shift {
                         return;
                     }
-                    if this.terminal.mouse_mode() {
-                        let cell = this.pos_to_cell(ev.position, window);
+                    if this.terminal.mouse_mode()
+                        && let Some(cell) = this.cell_in_grid(ev.position, window)
+                    {
                         this.terminal.mouse_button(2, true, cell.0, cell.1);
                     }
                 }),

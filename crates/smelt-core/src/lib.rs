@@ -50,6 +50,7 @@ pub mod pi_model_settings;
 pub mod pi_plugin_catalog;
 pub mod pi_rpc;
 pub mod plugin_enablement;
+pub mod process_wait;
 pub mod project_catalog;
 pub mod provider_api;
 pub mod provider_quota;

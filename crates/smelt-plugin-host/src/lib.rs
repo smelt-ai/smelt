@@ -1560,28 +1560,41 @@ fn set_cloexec_io(fd: i32, enabled: bool) -> io::Result<()> {
 
 fn terminate_child(child: &mut std::process::Child, grace: Duration) {
     let process_group = child.id();
-    let mut leader_reaped = child.try_wait().ok().flatten().is_some();
     let Ok(process_group) = i32::try_from(process_group) else {
-        if !leader_reaped {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        let _ = child.kill();
+        let _ = child.wait();
         return;
     };
-    signal_process_group(process_group, libc::SIGTERM);
-    let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        if !leader_reaped {
-            leader_reaped = child.try_wait().ok().flatten().is_some();
-        }
-        if !process_group_exists(process_group) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(20));
+    if process_group <= 1 {
+        return;
     }
-    signal_process_group(process_group, libc::SIGKILL);
-    if !leader_reaped {
+    signal_process_group(process_group, libc::SIGTERM);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = thread::Builder::new()
+        .name("smelt-plugin-reap".to_string())
+        .spawn(move || {
+            let _ = tx.send(reap_leader(process_group));
+        });
+    if started.is_err() {
+        signal_process_group(process_group, libc::SIGKILL);
         let _ = child.wait();
+        return;
+    }
+    let began = Instant::now();
+    let leader_done = match rx.recv_timeout(grace) {
+        Ok(_) => true,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => false,
+    };
+    if leader_done {
+        let remaining = grace.saturating_sub(began.elapsed());
+        wait_until_group_gone(process_group, remaining);
+    }
+    if process_group_exists(process_group) {
+        signal_process_group(process_group, libc::SIGKILL);
+    }
+    if !leader_done {
+        let _ = rx.recv();
     }
 }
 
@@ -1601,6 +1614,283 @@ fn process_group_exists(process_group: i32) -> bool {
         return true;
     }
     io::Error::last_os_error().kind() == io::ErrorKind::PermissionDenied
+}
+
+/// 阻塞到直属组长被收回。组已经没了、或者这个 pid 不是我们的孩子，都算收完。
+fn reap_leader(pid: i32) -> bool {
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid {
+            return true;
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// 组长已经退出时，组里剩下的人还要等到宽限结束。有内核退出事件就等事件，
+/// 枚举不到人就把剩下的时间一次睡完再查。
+fn wait_until_group_gone(pgid: i32, timeout: Duration) -> bool {
+    if !process_group_exists(pgid) {
+        return true;
+    }
+    let deadline = Instant::now() + timeout;
+    let mut reported_dead = BTreeSet::new();
+    let mut blind_wait_used = false;
+    loop {
+        if !process_group_exists(pgid) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let remaining = deadline - now;
+        let watch: Vec<i32> = group_members(pgid)
+            .into_iter()
+            .filter(|pid| *pid > 1 && !reported_dead.contains(pid))
+            .collect();
+        if watch.is_empty() {
+            if blind_wait_used {
+                return !process_group_exists(pgid);
+            }
+            blind_wait_used = true;
+            thread::park_timeout(remaining);
+            continue;
+        }
+        match wait_any_member(&watch, remaining) {
+            Some(pid) => {
+                reported_dead.insert(pid);
+            }
+            None => return !process_group_exists(pgid),
+        }
+    }
+}
+
+fn group_members(pgid: i32) -> Vec<i32> {
+    if pgid <= 1 {
+        return Vec::new();
+    }
+    group_members_os(pgid)
+}
+
+#[cfg(target_os = "macos")]
+fn group_members_os(pgid: i32) -> Vec<i32> {
+    let mut count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    count = count.saturating_add(64);
+    let mut pids = vec![0i32; count as usize];
+    let bytes = (pids.len() * std::mem::size_of::<i32>()) as libc::c_int;
+    let read = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if read <= 0 {
+        return Vec::new();
+    }
+    let read = (read as usize).min(pids.len());
+    let mut members = Vec::new();
+    for &pid in &pids[..read] {
+        if pid > 1 && member_group(pid) == Some(pgid) {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(target_os = "macos")]
+fn member_group(pid: i32) -> Option<i32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (read == size).then_some(info.pbi_pgid as i32)
+}
+
+#[cfg(target_os = "linux")]
+fn group_members_os(pgid: i32) -> Vec<i32> {
+    let mut members = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return members;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if pid <= 1 {
+            continue;
+        }
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((_, after)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        if after
+            .split_whitespace()
+            .nth(2)
+            .and_then(|value| value.parse::<i32>().ok())
+            == Some(pgid)
+        {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn group_members_os(_pgid: i32) -> Vec<i32> {
+    Vec::new()
+}
+
+fn wait_any_member(pids: &[i32], timeout: Duration) -> Option<i32> {
+    if pids.is_empty() {
+        return None;
+    }
+    wait_any_member_os(pids, timeout)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_any_member_os(pids: &[i32], timeout: Duration) -> Option<i32> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        thread::park_timeout(timeout);
+        return None;
+    }
+    let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+    let mut changes = Vec::with_capacity(pids.len());
+    for &pid in pids {
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        event.ident = pid as usize;
+        event.filter = libc::EVFILT_PROC;
+        event.flags = libc::EV_ADD | libc::EV_ONESHOT;
+        event.fflags = libc::NOTE_EXIT;
+        event.udata = pid as *mut libc::c_void;
+        changes.push(event);
+    }
+    let mut events = vec![unsafe { std::mem::zeroed::<libc::kevent>() }; changes.len().max(1)];
+    let deadline = Instant::now() + timeout;
+    let mut registering = true;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let remaining = deadline - now;
+        let timespec = libc::timespec {
+            tv_sec: remaining.as_secs() as libc::time_t,
+            tv_nsec: remaining.subsec_nanos() as libc::c_long,
+        };
+        let fired = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                if registering {
+                    changes.as_ptr()
+                } else {
+                    std::ptr::null()
+                },
+                if registering {
+                    changes.len() as libc::c_int
+                } else {
+                    0
+                },
+                events.as_mut_ptr(),
+                events.len() as libc::c_int,
+                &timespec,
+            )
+        };
+        registering = false;
+        if fired < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                registering = true;
+                continue;
+            }
+            return None;
+        }
+        if fired == 0 {
+            return None;
+        }
+        for event in events.iter().take(fired as usize) {
+            let pid = event.udata as i32;
+            if event.flags & libc::EV_ERROR != 0 {
+                if event.data == libc::ESRCH as isize {
+                    return Some(pid);
+                }
+                continue;
+            }
+            return Some(pid);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_any_member_os(pids: &[i32], timeout: Duration) -> Option<i32> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut watched = Vec::new();
+    for &pid in pids {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as libc::c_int };
+        if fd < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return Some(pid);
+            }
+            continue;
+        }
+        watched.push((pid, unsafe { OwnedFd::from_raw_fd(fd) }));
+    }
+    if watched.is_empty() {
+        thread::park_timeout(timeout);
+        return None;
+    }
+    let mut fds: Vec<libc::pollfd> = watched
+        .iter()
+        .map(|(_, fd)| libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let deadline = Instant::now() + timeout;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let millis = (deadline - now).as_millis().min(i32::MAX as u128) as libc::c_int;
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+        if ready < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return None;
+        }
+        if ready == 0 {
+            return None;
+        }
+        for (index, (pid, _)) in watched.iter().enumerate() {
+            if fds[index].revents != 0 {
+                return Some(*pid);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn wait_any_member_os(_pids: &[i32], timeout: Duration) -> Option<i32> {
+    thread::park_timeout(timeout);
+    None
 }
 
 #[cfg(test)]
@@ -2286,5 +2576,77 @@ mod tests {
             Some(selected)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn spawn_group(script: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+
+        Command::new("sh")
+            .args(["-c", script])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn")
+    }
+
+    /// 子进程自己退出（TERM 就能杀掉）时，要在宽限用完之前收回。
+    #[test]
+    fn child_exit_ends_the_grace_early() {
+        let mut child = spawn_group("exec sleep 30");
+        let pid = child.id() as i32;
+        let started = Instant::now();
+        terminate_child(&mut child, Duration::from_secs(5));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "进程退出后应马上收回，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(!process_group_exists(pid));
+        if let Ok(None) = child.try_wait() {
+            panic!("子进程还在跑");
+        }
+    }
+
+    /// 忽略 TERM 的子进程，宽限到了用 KILL 收回，不能一直睡到它自己结束。
+    /// 先等它自己写完 ready：否则 TERM 会打在还没执行 trap 的 shell 上。
+    #[test]
+    fn child_that_ignores_term_is_reaped_when_grace_ends() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; echo ready; exec sleep 30"])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let stdout = child.stdout.take().expect("stdout");
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).expect("ready");
+        assert_eq!(line, "ready\n");
+        let pid = child.id() as i32;
+        let started = Instant::now();
+        terminate_child(&mut child, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "TERM 的宽限要给满，实际 {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "宽限后应杀掉并收回，实际 {elapsed:?}"
+        );
+        assert!(!process_group_exists(pid));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        if let Ok(None) = child.try_wait() {
+            panic!("子进程还在跑");
+        }
     }
 }

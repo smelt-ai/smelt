@@ -619,11 +619,9 @@ impl Workspace {
         use crate::ui_theme;
 
         let Some(root) = self.active_project_root(cx) else {
-            let header = self.tool_panel_header("变更", cx);
             return v_flex()
                 .flex_1()
                 .min_h_0()
-                .child(header)
                 .child(
                     div()
                         .flex_1()

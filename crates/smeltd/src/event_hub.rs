@@ -5,6 +5,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::Duration,
@@ -32,7 +33,8 @@ use super::{
 };
 
 const MAILBOX_CAPACITY: usize = 256;
-const OUTBOX_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DISPATCH_BACKOFF_START: Duration = Duration::from_millis(250);
+const DISPATCH_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 pub(crate) type EventHubHandle = Arc<DaemonEventHub>;
 
@@ -112,6 +114,7 @@ fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_jso
 
 struct DurableDispatcher {
     stop: Arc<AtomicBool>,
+    wake: mpsc::Sender<()>,
     thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -206,34 +209,25 @@ impl DaemonEventHub {
 
         let dispatcher = store.as_ref().map(|store| {
             let stop = Arc::new(AtomicBool::new(false));
+            let (wake, wake_rx) = mpsc::channel();
+            store.set_durable_notify(wake.clone());
+            hub.set_work_notify(wake.clone());
             let worker_stop = Arc::clone(&stop);
             let worker_store = Arc::clone(store);
             let worker_hub = Arc::clone(&hub);
             let worker_peer_messages = Arc::clone(&peer_messages);
             let worker = thread::spawn(move || {
-                while !worker_stop.load(Ordering::Acquire) {
-                    if let Err(error) = persist_pending_peer_messages(
-                        Some(&worker_store),
-                        &worker_hub,
-                        &worker_peer_messages,
-                        false,
-                    ) {
-                        eprintln!("[event-hub] peer message fact persistence failed: {error}");
-                    }
-                    if let Err(error) = dispatch_outbox_once(&worker_store, &worker_hub) {
-                        eprintln!("[event-hub] durable outbox dispatch failed: {error}");
-                    }
-                    if let Err(error) = worker_hub.pump_durable_subscribers() {
-                        eprintln!("[event-hub] durable subscriber pump failed: {error}");
-                    }
-                    if let Err(error) = worker_hub.flush_cursors() {
-                        eprintln!("[event-hub] durable cursor flush failed: {error}");
-                    }
-                    thread::sleep(OUTBOX_POLL_INTERVAL);
-                }
+                durable_dispatch_loop(
+                    worker_stop,
+                    wake_rx,
+                    worker_store,
+                    worker_hub,
+                    worker_peer_messages,
+                );
             });
             DurableDispatcher {
                 stop,
+                wake,
                 thread: Mutex::new(Some(worker)),
             }
         });
@@ -793,6 +787,7 @@ impl Drop for DaemonEventHub {
     fn drop(&mut self) {
         if let Some(dispatcher) = &self.dispatcher {
             dispatcher.stop.store(true, Ordering::Release);
+            let _ = dispatcher.wake.send(());
             if let Ok(mut worker) = dispatcher.thread.lock()
                 && let Some(worker) = worker.take()
             {
@@ -830,6 +825,84 @@ fn register_snapshot_providers(
         )?;
     }
     Ok(())
+}
+
+/// 这一轮把已经到期的重试交了出去，才立刻再跑。
+/// 交不出、失败、或者下一次重试还在未来，都要停下来等。
+fn due_retry_delivered(failed: bool, pumped: usize, next_retry: Option<Duration>) -> bool {
+    !failed && pumped > 0 && next_retry == Some(Duration::ZERO)
+}
+
+fn durable_dispatch_loop(
+    stop: Arc<AtomicBool>,
+    wake: mpsc::Receiver<()>,
+    store: Arc<smelt_store::Store>,
+    hub: Arc<EventHub>,
+    peer_messages: Arc<
+        Mutex<BTreeMap<(String, smelt_plugin_api::CommandId), PeerMessageLedgerEntry>>,
+    >,
+) {
+    let mut backoff = DISPATCH_BACKOFF_START;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let mut failed = false;
+        if let Err(error) = persist_pending_peer_messages(Some(&store), &hub, &peer_messages, false)
+        {
+            eprintln!("[event-hub] peer message fact persistence failed: {error}");
+            failed = true;
+        }
+        loop {
+            match dispatch_outbox_once(&store, &hub) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("[event-hub] durable outbox dispatch failed: {error}");
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        let pumped = match hub.pump_durable_subscribers() {
+            Ok(count) => count,
+            Err(error) => {
+                eprintln!("[event-hub] durable subscriber pump failed: {error}");
+                failed = true;
+                0
+            }
+        };
+        if let Err(error) = hub.flush_cursors() {
+            eprintln!("[event-hub] durable cursor flush failed: {error}");
+            failed = true;
+        }
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let next_retry = hub.next_durable_retry_delay();
+        // 到期的重试这一轮真的交出去了，马上再看下一条。
+        // 邮箱满了交不出（pumped == 0）就等下一次确认来叫醒，不能空转。
+        if due_retry_delivered(failed, pumped, next_retry) {
+            continue;
+        }
+        let wait = if failed {
+            let current = backoff;
+            backoff = backoff.saturating_mul(2).min(DISPATCH_BACKOFF_CAP);
+            Some(current)
+        } else {
+            backoff = DISPATCH_BACKOFF_START;
+            next_retry.filter(|delay| !delay.is_zero())
+        };
+        match wait {
+            None => {
+                let _ = wake.recv();
+            }
+            Some(delay) => {
+                let _ = wake.recv_timeout(delay);
+            }
+        }
+        while wake.try_recv().is_ok() {}
+    }
 }
 
 fn dispatch_outbox_once(store: &smelt_store::Store, hub: &EventHub) -> Result<usize, String> {
@@ -981,6 +1054,22 @@ mod tests {
                 "delivered_at_ms": 1,
             }),
         }
+    }
+
+    #[test]
+    fn full_mailbox_does_not_spin_on_a_due_retry() {
+        assert!(
+            !due_retry_delivered(false, 0, Some(Duration::ZERO)),
+            "邮箱满了交不出时，到期也不能空转"
+        );
+        assert!(due_retry_delivered(false, 1, Some(Duration::ZERO)));
+        assert!(!due_retry_delivered(true, 1, Some(Duration::ZERO)));
+        assert!(!due_retry_delivered(
+            false,
+            1,
+            Some(Duration::from_millis(250))
+        ));
+        assert!(!due_retry_delivered(false, 1, None));
     }
 
     fn wait_for(timeout: Duration, mut condition: impl FnMut() -> bool) {

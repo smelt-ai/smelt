@@ -722,6 +722,8 @@ pub const DSH_CLI_VERSION: &str = "0.1.0-rc.8";
 /// 但**不能没有上限**——没有上限时"网络连不上"和"正在下载"在界面上是同一个状态
 /// （永远转圈），用户只能去杀进程。这正是用户报的"卡住"。
 pub(super) const PLUGIN_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// SIGKILL 之后再给收尸线程的时间。到点还堵在 `wait` 上就留下它，不再另开一条。
+const PLUGIN_REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 起子进程并等它结束，超时就连同它拉起的整棵进程树一起杀掉。
 ///
@@ -761,11 +763,21 @@ fn run_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => Err(format!("等待子进程失败：{error}")),
-        Err(_) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("等待子进程失败：收尸线程已退出".to_string())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             #[cfg(unix)]
             unsafe {
                 // setsid 之后进程组 id 等于子进程 pid，负号表示整组。
                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+            // 同一条 wait_with_output 把 stdout、stderr 和退出状态一起收回。
+            // 杀掉之后先等它。进程卡在杀不掉的状态时，这条线程继续是唯一的
+            // wait，函数返回，这次安装不再往下做。
+            match rx.recv_timeout(PLUGIN_REAP_GRACE) {
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => drop(rx),
             }
             Err(format!(
                 "操作超过 {} 分钟仍未完成，已中止。常见原因是访问 npm registry 的网络不通：\
@@ -1512,6 +1524,47 @@ To run any Node command, first set a default version using `volta install node`"
         assert!(super::toolchain_hint("").is_none());
     }
 
+    /// 到点杀掉之后，函数返回前这个进程必须已经被同一条 wait 收走。
+    /// 还是僵尸的话，下一次安装会撞上它没放开的锁。
+    #[test]
+    fn timed_out_plugin_command_is_reaped_before_returning() {
+        let pidfile = std::env::temp_dir().join(format!(
+            "smelt-dsh-reap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            &format!("echo $$ > '{}'; exec sleep 30", pidfile.display()),
+        ]);
+        let started = std::time::Instant::now();
+        let error = super::run_with_timeout(command, std::time::Duration::from_millis(200))
+            .expect_err("睡眠命令必须在截止时被中止");
+        assert!(error.contains("已中止"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "收尸不该再干等一整段命令，实际 {:?}",
+            started.elapsed()
+        );
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("子进程应先写下自己的 pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        let _ = std::fs::remove_file(&pidfile);
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(waited, -1, "返回时进程必须已经收走，waitpid 得到 {waited}");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
     /// 安装必须有上限。没有上限时"网络连不上"和"正在下载"在界面上是同一个状态，
     /// 用户只能去杀进程——这正是本次修复要消灭的"卡住"。
     #[test]
@@ -1874,5 +1927,37 @@ mod model_capability_live_tests {
             !report.models.is_empty(),
             "a reachable listing endpoint must advertise at least one model"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod timeout_tests {
+    #[test]
+    fn timed_out_command_is_reaped_before_return() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("pid");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("echo $$ > '{}'; exec sleep 30", pid_path.display()));
+        let started = std::time::Instant::now();
+        let error = super::run_with_timeout(command, std::time::Duration::from_millis(200))
+            .expect_err("应当超时");
+        let elapsed = started.elapsed();
+        let pid: i32 = std::fs::read_to_string(&pid_path)
+            .expect("子进程应已写下 pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        let probe = unsafe { libc::kill(-pid, 0) };
+        let os_error = std::io::Error::last_os_error();
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        assert!(error.contains("已中止"), "{error}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{elapsed:?} {error}"
+        );
+        assert_eq!(probe, -1, "返回时进程组应已不在");
+        assert_eq!(os_error.raw_os_error(), Some(libc::ESRCH));
     }
 }

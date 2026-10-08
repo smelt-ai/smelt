@@ -27,44 +27,45 @@ export function keepsForegroundTimeout(timeoutSeconds: number | undefined): bool
 }
 
 /**
- * 长时间命令从一开始就由宿主创建。这里只观察最多 `promoteAfterMs`：
- * 结束了就带回输出，还在跑或这一轮被取消就交回任务 id。不在 Pi 里持有进程。
+ * 长时间命令从一开始就由宿主创建。这里只守到 `promoteAfterMs`：
+ * 结束了就带回输出，还在跑、读失败或这一轮被取消就交回任务 id。不在 Pi 里持有进程。
+ * `release` 告诉宿主工具有没有拿走结果：拿走了就不再通知，没拿走则由宿主补一次。
  */
 export async function watchHostCommand(input: {
 	promoteAfterMs?: number;
 	signal?: AbortSignal;
 	start: () => Promise<{ ok: boolean; id?: string; error?: string }>;
-	snapshot: (id: string) => Promise<HostCommandSnapshot>;
+	until: (id: string, timeoutMs: number) => Promise<HostCommandSnapshot>;
+	release?: (id: string, consumed: boolean) => Promise<void>;
 }): Promise<ManagedBashResult> {
 	const started = await input.start();
 	if (!started.ok || !started.id) {
 		return { promoted: false, exitCode: 1, output: started.error || "无法启动命令" };
 	}
 	const id = started.id;
-	const deadline = Date.now() + (input.promoteAfterMs ?? AUTO_BACKGROUND_SECONDS * 1000);
-	while (Date.now() < deadline) {
+	let consumed = false;
+	try {
 		if (input.signal?.aborted) return { promoted: true, id };
-		const snapshot = await input.snapshot(id);
-		if (!snapshot.ok) return { promoted: false, exitCode: 1, output: snapshot.error || "无法读取任务状态" };
+		const timeoutMs = Math.max(0, input.promoteAfterMs ?? AUTO_BACKGROUND_SECONDS * 1000);
+		const snapshot = await input.until(id, timeoutMs);
+		// 等的过程中被取消，或没读到输出。交给宿主补一次。
+		if (input.signal?.aborted || !snapshot.ok) return { promoted: true, id };
 		if (snapshot.status && snapshot.status !== "running") {
+			consumed = true;
 			return {
 				promoted: false,
 				exitCode: snapshot.exitCode ?? null,
 				output: snapshot.output ?? "",
 			};
 		}
-		await delay(50, input.signal);
-		if (input.signal?.aborted) return { promoted: true, id };
+		return { promoted: true, id };
+	} finally {
+		if (input.release) {
+			try {
+				await input.release(id, consumed);
+			} catch {
+				// 释放失败时宿主会在监听断开后补发，不挡住已经拿到的工具结果。
+			}
+		}
 	}
-	return { promoted: true, id };
-}
-
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal?.addEventListener("abort", () => {
-			clearTimeout(timer);
-			resolve();
-		}, { once: true });
-	});
 }

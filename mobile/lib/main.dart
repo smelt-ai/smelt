@@ -2464,6 +2464,7 @@ class _SessionPageState extends State<SessionPage> {
           output: output,
         ),
       AcpEntryDivider(label: final label) => _buildDivider(label),
+      final AcpEntryTaskNote note => _buildTaskNote(note),
       AcpEntryUnknown() => const SizedBox.shrink(),
     };
   }
@@ -2521,6 +2522,30 @@ class _SessionPageState extends State<SessionPage> {
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildTaskNote(AcpEntryTaskNote note) {
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            note.summary,
+            style: TextStyle(color: muted, fontSize: 12),
+          ),
+          if (note.outputTail.trim().isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: SelectableText(
+                note.outputTail,
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+            ),
+        ],
       ),
     );
   }

@@ -40,15 +40,6 @@ pub(super) enum AutomationTemplateGlyph {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AutomationTemplateTint {
-    Blue,
-    Purple,
-    Green,
-    Yellow,
-    Accent,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct AutomationTemplate {
     pub id: &'static str,
     pub name: &'static str,
@@ -56,7 +47,6 @@ pub(super) struct AutomationTemplate {
     pub prompt: &'static str,
     pub category: AutomationTemplateCategory,
     pub glyph: AutomationTemplateGlyph,
-    pub tint: AutomationTemplateTint,
     pub schedule: AutomationSchedule,
 }
 
@@ -68,7 +58,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "用简短条目汇总：今天最重要的三件事、未完成待办、仓库或会话里需要你看的变化。不要写成散文。",
         category: AutomationTemplateCategory::Work,
         glyph: AutomationTemplateGlyph::Sun,
-        tint: AutomationTemplateTint::Blue,
         schedule: AutomationSchedule::Daily {
             hour: 7,
             minute: 30,
@@ -81,7 +70,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "回顾本周：做成了什么、卡在哪里、下周只保留三条优先级。用条目，不要套话。",
         category: AutomationTemplateCategory::Work,
         glyph: AutomationTemplateGlyph::Calendar,
-        tint: AutomationTemplateTint::Purple,
         schedule: AutomationSchedule::Weekly {
             days: SCHEDULE_DAY_FRI,
             hour: 16,
@@ -95,7 +83,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "根据当前工作区和待办，排出今天可执行的时间块。每块写目标和完成标准，先快赢再深水区。",
         category: AutomationTemplateCategory::Work,
         glyph: AutomationTemplateGlyph::LayoutDashboard,
-        tint: AutomationTemplateTint::Green,
         schedule: AutomationSchedule::Daily {
             hour: 8,
             minute: 30,
@@ -108,7 +95,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "从最近的对话、变更和备注里提取可执行待办，去重、合并相似项，按今天/本周/以后分组。",
         category: AutomationTemplateCategory::Work,
         glyph: AutomationTemplateGlyph::Inbox,
-        tint: AutomationTemplateTint::Accent,
         schedule: AutomationSchedule::Daily {
             hour: 17,
             minute: 0,
@@ -121,7 +107,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "检查待审的合并请求和本地未提交变更。标出风险文件、测试缺口，以及你建议先看的顺序。",
         category: AutomationTemplateCategory::Engineering,
         glyph: AutomationTemplateGlyph::File,
-        tint: AutomationTemplateTint::Blue,
         schedule: AutomationSchedule::Daily { hour: 9, minute: 0 },
     },
     AutomationTemplate {
@@ -131,7 +116,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "检查依赖是否过期或有已知高风险问题。只报告需要处理的项，并给出最小修复建议。",
         category: AutomationTemplateCategory::Engineering,
         glyph: AutomationTemplateGlyph::TriangleAlert,
-        tint: AutomationTemplateTint::Yellow,
         schedule: AutomationSchedule::Weekly {
             days: SCHEDULE_DAY_MON,
             hour: 9,
@@ -145,7 +129,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "汇总关注对象本周的产品、定价和公开动态。每条写清来源、变化、对我们的含义。",
         category: AutomationTemplateCategory::Research,
         glyph: AutomationTemplateGlyph::Globe,
-        tint: AutomationTemplateTint::Yellow,
         schedule: AutomationSchedule::Weekly {
             days: SCHEDULE_DAY_MON,
             hour: 9,
@@ -159,7 +142,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "汇总过去一天里和当前工作相关的模型、框架、工具发布。每条说明影响和是否值得跟进。",
         category: AutomationTemplateCategory::Research,
         glyph: AutomationTemplateGlyph::Cpu,
-        tint: AutomationTemplateTint::Blue,
         schedule: AutomationSchedule::Daily { hour: 8, minute: 0 },
     },
     AutomationTemplate {
@@ -169,7 +151,6 @@ const BUILTIN: &[AutomationTemplate] = &[
         prompt: "挑选本周最值得看的一篇研究或技术文章，用白话讲方法和结论，以及能不能用在我们的工作里。",
         category: AutomationTemplateCategory::Research,
         glyph: AutomationTemplateGlyph::BookOpen,
-        tint: AutomationTemplateTint::Purple,
         schedule: AutomationSchedule::Weekly {
             days: SCHEDULE_DAY_WED,
             hour: 9,

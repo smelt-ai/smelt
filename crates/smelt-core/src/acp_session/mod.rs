@@ -31,6 +31,7 @@ use crate::daemon_state::DaemonPhase;
 mod apply;
 pub use apply::{
     ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
+    queue_composer_restore,
 };
 use apply::{pending_action_phase, resume_running};
 
@@ -639,9 +640,12 @@ pub struct ConversationSnapshot {
     #[serde(default)]
     pub composer_restore_revision: u64,
     /// 与 `composer_restore_revision` 配套、尚未被客户端确认写入输入框的原文。
-    /// 确认后只清文本而保留 revision 水位，避免迟到确认误伤后续恢复。
+    /// 确认后清掉文本和图片，保留 revision 水位，避免迟到确认误伤后续恢复。
     #[serde(default)]
     pub composer_restore_texts: Vec<String>,
+    /// 同一版还原里的图片。只有图没有字时也在。
+    #[serde(default)]
+    pub composer_restore_images: Vec<crate::acp_chat::AcpImage>,
     /// 当前回合开始的 Unix 毫秒时间戳；None = 当前没有运行中的回合。
     pub turn_started_at_ms: Option<u64>,
     /// 每个已发出 prompt 的回合耗时。`user_index` 是该回合用户消息在完整
@@ -739,6 +743,8 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     composer_restore_texts: Vec<String>,
     #[serde(default)]
+    composer_restore_images: Vec<crate::acp_chat::AcpImage>,
+    #[serde(default)]
     turn_started_at_ms: Option<u64>,
     #[serde(default)]
     turn_timings: Vec<TurnTiming>,
@@ -797,6 +803,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             queued_follow_up: de.queued_follow_up,
             composer_restore_revision: de.composer_restore_revision,
             composer_restore_texts: de.composer_restore_texts,
+            composer_restore_images: de.composer_restore_images,
             turn_started_at_ms: de.turn_started_at_ms,
             turn_timings: de.turn_timings,
             completed_unread: de.completed_unread,
@@ -852,6 +859,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             queued_follow_up: snap.queued_follow_up,
             composer_restore_revision: snap.composer_restore_revision,
             composer_restore_texts: snap.composer_restore_texts,
+            composer_restore_images: snap.composer_restore_images,
             turn_started_at_ms: snap.turn_started_at_ms,
             turn_timings: snap.turn_timings,
             completed_unread: snap.completed_unread,
@@ -998,6 +1006,7 @@ pub struct AcpSessionState {
     pub queued_follow_up: Vec<String>,
     pub composer_restore_revision: u64,
     pub composer_restore_texts: Vec<String>,
+    pub composer_restore_images: Vec<crate::acp_chat::AcpImage>,
     pub turn_started_at_ms: Option<u64>,
     pub turn_timings: Vec<TurnTiming>,
     /// 已被取消的工具调用 id。部分 adapter 会在 `TurnEnded(Cancelled)` 之后
@@ -1060,6 +1069,7 @@ impl Default for AcpSessionState {
             queued_follow_up: Vec::new(),
             composer_restore_revision: 0,
             composer_restore_texts: Vec::new(),
+            composer_restore_images: Vec::new(),
             turn_started_at_ms: None,
             turn_timings: Vec::new(),
             cancelled_tool_call_ids: BTreeSet::new(),
@@ -1152,6 +1162,7 @@ impl AcpSessionState {
             queued_follow_up: snap.queued_follow_up,
             composer_restore_revision: snap.composer_restore_revision,
             composer_restore_texts: snap.composer_restore_texts,
+            composer_restore_images: snap.composer_restore_images,
             turn_started_at_ms: snap.turn_started_at_ms,
             turn_timings: snap.turn_timings,
             cancelled_tool_call_ids: BTreeSet::new(),
@@ -1217,6 +1228,7 @@ impl AcpSessionState {
             queued_follow_up,
             composer_restore_revision,
             composer_restore_texts,
+            composer_restore_images,
             turn_started_at_ms,
             turn_timings,
             completed_unread,
@@ -1304,6 +1316,7 @@ impl AcpSessionState {
         self.queued_follow_up = queued_follow_up;
         self.composer_restore_revision = composer_restore_revision;
         self.composer_restore_texts = composer_restore_texts;
+        self.composer_restore_images = composer_restore_images;
         self.turn_started_at_ms = turn_started_at_ms;
         self.turn_timings = turn_timings;
         self.completed_unread = completed_unread;
@@ -1440,6 +1453,7 @@ impl AcpSessionState {
             queued_follow_up: self.queued_follow_up.clone(),
             composer_restore_revision: self.composer_restore_revision,
             composer_restore_texts: self.composer_restore_texts.clone(),
+            composer_restore_images: self.composer_restore_images.clone(),
             turn_started_at_ms: self.turn_started_at_ms,
             turn_timings: self.turn_timings.clone(),
             completed_unread: self.completed_unread,
@@ -1771,6 +1785,31 @@ pub fn note_prompt_sent_with_delivery(
         started_at_ms,
         ended_at_ms: None,
     });
+}
+
+const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";
+
+/// Pi 还在跑，这条消息要等它结束。界面若已经空闲，把转圈拉回来，好接住后续输出。
+/// 用户刚按过停止时不拉回来：停止就是要界面立刻停。
+pub fn note_provider_still_running(state: &mut AcpSessionState) {
+    state.status_line = Some(PROVIDER_STILL_RUNNING_STATUS.to_string());
+    if state.cancel_requested
+        || state
+            .cancelled_turn_seq
+            .is_some_and(|seq| seq == state.turn_seq)
+    {
+        return;
+    }
+    if matches!(state.phase, DaemonPhase::Idle) && state.turn_started_at_ms.is_none() {
+        state.phase = DaemonPhase::Thinking;
+        state.turn_started_at_ms = Some(unix_time_ms());
+    }
+}
+
+pub fn clear_provider_queue_status(state: &mut AcpSessionState) {
+    if state.status_line.as_deref() == Some(PROVIDER_STILL_RUNNING_STATUS) {
+        state.status_line = None;
+    }
 }
 
 /// 记录用户已向当前 ACP turn 发出了 session/cancel。实际的终态仍由

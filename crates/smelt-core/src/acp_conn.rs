@@ -363,9 +363,8 @@ pub enum ConversationEvent {
     Plan(Plan),
     /// Pi 后台任务的全量快照。输出是尾部，不随每个字节落盘。
     BackgroundTasks(Vec<crate::acp_session::BackgroundTaskView>),
-    /// 后台任务结束通知。只携带原文。开不开回合由 daemon 的
-    /// `prompt_in_flight` 决定，和用户 prompt 走同一道闸门。
-    BackgroundNotice(String),
+    /// 后台任务结束。归约写成状态行，不开回合，也不当成用户说的话。
+    BackgroundNotice(crate::acp_chat::TaskNote),
     /// 模型状态：当前名 + 可选列表。来自会话配置项里 category=Model 的那条
     /// select；建会话时给一次，切换或 agent 侧改动时通过 ConfigOptionUpdate 再给。
     /// 取不到就一直是 None，UI 不假装知道。
@@ -435,10 +434,11 @@ pub enum ConversationEvent {
         follow_up: Vec<String>,
     },
     /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
-    /// 发送 `AcknowledgeComposerRestore`，服务端清文本但保留 revision 水位。
+    /// 发送 `AcknowledgeComposerRestore`，服务端清掉文本和图片，但保留 revision 水位。
     ComposerRestore {
         revision: u64,
         texts: Vec<String>,
+        images: Vec<PromptImage>,
     },
     /// agent 的选择题 / 表单（AskUserQuestion 类）：UI 渲染字段，凭 responder 回填。
     Elicitation {
@@ -448,6 +448,13 @@ pub enum ConversationEvent {
         /// 同 `Permission::raw_request_line`。
         raw_request_line: Option<String>,
     },
+    /// Pi 收下了这条 prompt（预检成功）。回显从这里开始，不再在送出时提前记入会话。
+    PromptAccepted,
+    /// Pi 没收下。常见原因是上一轮还在跑。这不是回合结束，也不能写成「回合失败」。
+    PromptNotAccepted,
+    /// Pi 现在能接受一条不带 streamingBehavior 的 prompt。
+    /// 只有这条信号才打开 Pi 会话的发送闸门；界面上的回合结束不算。
+    ProviderIdle,
     /// 一轮 prompt 结束（含被取消）。
     TurnEnded(StopReason),
     /// 一轮 prompt 以 JSON-RPC 错误收场（agent 明确回了 error，而不是断线）。
@@ -472,9 +479,9 @@ pub enum ConversationEvent {
 }
 
 impl ConversationEvent {
-    /// 这条事件是否结束了当前回合。回合结束要放开「settling gate」才能再发
-    /// prompt——判定写在事件上，免得每个消费点各写一份 `matches!` 然后漏掉
-    /// 新增的结束方式（`TurnFailed` 就是这么被漏过一次的）。
+    /// 这条事件是否结束了界面上的当前回合。
+    ///
+    /// Pi 能不能再收一条 prompt 是另一件事，看 `ProviderIdle`，不要拿这里放行。
     pub fn ends_turn(&self) -> bool {
         matches!(
             self,
@@ -873,37 +880,98 @@ pub fn shutdown_and_wait(handle: ConversationHandle, timeout: std::time::Duratio
 /// 证明方式取决于亲缘关系（调用方不用选，运行时按 `waitpid` 结果自动分流——
 /// 同一个会话交接前是亲生、交接后是收养，关系是动态的）：
 /// - 直接子进程：`waitpid`（精确，还能收走僵尸）+ 组缺席双重确认；
-/// - 收养进程（handoff 后前任已退）：`waitpid` 永报 ECHILD，改用信号探针。
-///   这是非亲生组死亡唯一可用的原语（macOS 无 pidfd，组成员无法枚举；
-///   Linux pidfd 也只管单个 pid）。调用方应在 prove 之前先发过 SIGKILL：
-///   刚杀完就地轮询，pid 复用需要整组先死再重建同号组，不可能在该窗口内
-///   完成，探得缺席即原组已死。D-state 等杀不死的只会探得仍在，超时返回
-///   false（与 waitpid 路径同语义）。
+/// - 收养进程（handoff 后前任已退）：`waitpid` 永报 ECHILD，改用信号探针，
+///   组员退出用内核事件等（macOS `kqueue`，Linux `pidfd`）。调用方应在 prove
+///   之前先发过 SIGKILL：刚杀完就地等，pid 复用需要整组先死再重建同号组，
+///   不可能在该窗口内完成，探得缺席即原组已死。D-state 等杀不死的只会探得
+///   仍在，超时返回 false（与 waitpid 路径同语义）。
 ///
 /// 组缺席之外还查 leader 本人：若该 pid 活着却已不在自编号组里（重设过 pgid
 /// 的非 leader），光看组会误判已死。双条件缺一不可。
 pub fn prove_process_group_dead(pid: i32, timeout: Duration) -> bool {
+    prove_process_group_dead_inner(pid, timeout, true)
+}
+
+/// 和 [`prove_process_group_dead`] 一样查组是否已经空了，但绝不 `waitpid`。
+///
+/// 给「上一次等待还占着这个 pid」的重试用。僵尸对 `kill(pid, 0)` 仍算活着，
+/// 组长还没被原来的 wait 收走时，这里返回 false。原来的 wait 返回之后，
+/// 下一次才能看到这个号已经不在。
+pub fn prove_process_group_dead_without_reaping(pid: i32, timeout: Duration) -> bool {
+    prove_process_group_dead_inner(pid, timeout, false)
+}
+
+fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool) -> bool {
     if pid <= 1 {
         return true;
     }
-    // 一次性亲缘判定：ECHILD=收养/已收走。此后不再复核——亲缘关系不会中途改变。
-    let ours = !matches!(waitpid_child(pid, libc::WNOHANG), Waitpid::NotOurChild);
     let deadline = Instant::now() + timeout;
+    // 允许收尸时才做亲缘判定：ECHILD=收养/已收走。此后不再复核。
+    // 不允许收尸时，连这一次 WNOHANG 也不发，避免和还堵在 wait 上的那条线程抢。
+    let ours = if reap_child {
+        loop {
+            match waitpid_child(pid, libc::WNOHANG) {
+                Waitpid::Interrupted => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                }
+                Waitpid::NotOurChild => break false,
+                Waitpid::Reaped | Waitpid::StillRunning => break true,
+            }
+        }
+    } else {
+        false
+    };
+    let mut reported_dead = BTreeSet::new();
+    let mut blind_wait_used = false;
     loop {
-        // 收养组没有 waitpid 可问：信号探针即证明（见函数注释）。
-        let child_gone = !ours
-            || matches!(
-                waitpid_child(pid, libc::WNOHANG),
-                Waitpid::Reaped | Waitpid::NotOurChild
-            );
+        let child_gone = if ours {
+            match waitpid_child(pid, libc::WNOHANG) {
+                Waitpid::Reaped | Waitpid::NotOurChild => true,
+                Waitpid::StillRunning | Waitpid::Interrupted => false,
+            }
+        } else {
+            true
+        };
         if child_gone && process_group_absent(pid) && process_absent(pid) {
             return true;
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return false;
         }
-        // 等的是内核事实，不是应用层锁。waitpid 没有超时参数。
-        std::thread::sleep(Duration::from_millis(5));
+        let remaining = deadline - now;
+        let mut watch = Vec::new();
+        if ours && !child_gone {
+            watch.push(pid);
+        }
+        for member in process_group_members(pid) {
+            if member > 1 && !reported_dead.contains(&member) {
+                watch.push(member);
+            }
+        }
+        watch.sort_unstable();
+        watch.dedup();
+        if watch.is_empty() {
+            // 能看的 pid 都已经报过退出，组探针却还说人在（多半是还没被收走的僵尸）。
+            // 把剩下的截止时间一次睡完再查，不再隔几毫秒问。
+            if blind_wait_used {
+                return false;
+            }
+            blind_wait_used = true;
+            std::thread::park_timeout(remaining);
+            continue;
+        }
+        match crate::process_wait::wait_until_any_exit(&watch, remaining) {
+            Some(exited) => {
+                reported_dead.insert(exited);
+                if ours && exited == pid {
+                    let _ = waitpid_child(pid, libc::WNOHANG);
+                }
+            }
+            None => return false,
+        }
     }
 }
 
@@ -1018,6 +1086,83 @@ fn process_group_absent(pgid: i32) -> bool {
     }
     let sent = unsafe { libc::kill(-pgid, 0) };
     sent != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// 这个进程组里现在还挂着哪些 pid。用来等组员退出，而不是隔几毫秒问组还在不在。
+/// 枚举失败就返回空：调用方会把剩余截止时间一次睡完再查。
+fn process_group_members(pgid: i32) -> Vec<i32> {
+    if pgid <= 1 {
+        return Vec::new();
+    }
+    process_group_members_os(pgid)
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_members_os(pgid: i32) -> Vec<i32> {
+    let mut count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    count = count.saturating_add(64);
+    let mut pids = vec![0i32; count as usize];
+    let bytes = (pids.len() * std::mem::size_of::<i32>()) as libc::c_int;
+    let read = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if read <= 0 {
+        return Vec::new();
+    }
+    let read = (read as usize).min(pids.len());
+    let mut members = Vec::new();
+    for &pid in &pids[..read] {
+        if pid > 1 && process_group_id(pid) == Some(pgid) {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_id(pid: i32) -> Option<i32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (read == size).then_some(info.pbi_pgid as i32)
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_members_os(pgid: i32) -> Vec<i32> {
+    let mut members = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return members;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if pid > 1 && linux_process_group(pid) == Some(pgid) {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_group(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(2)?.parse().ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_group_members_os(_pgid: i32) -> Vec<i32> {
+    Vec::new()
 }
 
 /// 根据启动规格选择 provider 原生驱动。Pi 走自己的 JSONL RPC；其余 agent 才
@@ -1324,28 +1469,17 @@ impl AcpChildGuard {
         let _ = self.child.kill();
     }
 
-    /// 用 `waitpid` 确认直属子进程已经退出。`Child::status()` 要等 `SIGCHLD`
-    /// 投递才会再查一次；信号被掩码挡住或通知丢失时，僵尸会一直占着。
+    /// 用 `waitpid` 确认直属子进程已经退出。`Child::try_status()` 只是问一句
+    /// 「现在死了没有」；信号被掩码挡住时，隔 10ms 再杀一次也等不来结果。
+    /// 先标上已收，避免这个 Child 析构时再进来一次。杀一次，然后堵住等到
+    /// `waitpid` 把直属子进程收回。
     fn reap_now(&mut self) {
         if self.reaped {
             return;
         }
-        self.kill_tree();
-        loop {
-            match self.child.try_status() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    self.kill_tree();
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break,
-                Err(_) => {
-                    self.kill_tree();
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
         self.reaped = true;
+        self.kill_tree();
+        let _ = crate::process_wait::reap_direct_child(self.pid);
     }
 
     fn kill_and_reap(&mut self) {
@@ -2660,6 +2794,9 @@ fn push_aligned_tail(
                 }
                 push_missing_tool(entry, replay, events);
             }
+            crate::acp_chat::AcpEntry::TaskNote(note) => {
+                events.push(ConversationEvent::BackgroundNotice(note.clone()));
+            }
             _ => {}
         }
     }
@@ -2677,6 +2814,9 @@ fn push_snapshot_entry(
         crate::acp_chat::AcpEntry::ToolCall { .. } => push_missing_tool(entry, replay, events),
         crate::acp_chat::AcpEntry::User(_) | crate::acp_chat::AcpEntry::UserWithImages { .. } => {
             push_user_entry(entry, events);
+        }
+        crate::acp_chat::AcpEntry::TaskNote(note) => {
+            events.push(ConversationEvent::BackgroundNotice(note.clone()));
         }
         crate::acp_chat::AcpEntry::Divider(_) => {}
     }
@@ -6685,6 +6825,65 @@ mod process_reap_tests {
         );
     }
 
+    /// 亲生进程自己退出时，要在长截止之前被等到，并收走。
+    #[test]
+    fn own_child_exit_is_proven_before_a_long_deadline() {
+        let child = Command::new("sh")
+            .args(["-c", "sleep 0.2"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let started = std::time::Instant::now();
+        assert!(
+            prove_process_group_dead(pid, Duration::from_secs(5)),
+            "进程退出后应马上证明组已空"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "不应干等到截止，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(!process_exists(pid));
+        let _ = child.wait_with_output();
+    }
+
+    /// 还在跑的亲生进程，短截止内不能被说成已死，也不能被误杀。
+    #[test]
+    fn running_child_is_not_proven_dead_before_the_deadline() {
+        let (child, pid) = spawn_sleep();
+        let started = std::time::Instant::now();
+        assert!(!prove_process_group_dead(pid, Duration::from_millis(200)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(process_exists(pid));
+        assert!(kill_and_reap_process_group(pid, Duration::from_secs(2)));
+        let _ = child.wait_with_output();
+    }
+
+    /// 观察用的证明不能把还没被原来的 wait 收走的僵尸抢走。
+    /// 抢走的话，这里会返回 true，随后 `child.wait()` 得到 ECHILD。
+    #[test]
+    fn prove_without_reaping_leaves_the_zombie_for_its_waiter() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.2"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        assert!(
+            crate::process_wait::wait_until_exit(pid, Duration::from_secs(2)),
+            "应先看到退出，并且不收尸"
+        );
+        let started = std::time::Instant::now();
+        assert!(
+            !super::prove_process_group_dead_without_reaping(pid, Duration::from_millis(200)),
+            "僵尸对 kill 仍算在，不能当成已经收走"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let status = child.wait().expect("原来的 wait 必须还能收走这个僵尸");
+        assert!(status.success());
+    }
+
     /// 启动时间单调：后 spawn 的更大；死进程读不出。
     #[test]
     fn process_start_time_orders_births_and_rejects_the_dead() {
@@ -6842,6 +7041,9 @@ mod prompt_failure_tests {
         assert!(ConversationEvent::TurnFailed("x".into()).ends_turn());
         assert!(!ConversationEvent::Fatal("x".into()).ends_turn());
         assert!(!ConversationEvent::Status("x".into()).ends_turn());
+        assert!(!ConversationEvent::PromptAccepted.ends_turn());
+        assert!(!ConversationEvent::PromptNotAccepted.ends_turn());
+        assert!(!ConversationEvent::ProviderIdle.ends_turn());
     }
 }
 

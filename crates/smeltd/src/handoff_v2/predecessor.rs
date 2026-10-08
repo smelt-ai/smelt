@@ -24,7 +24,9 @@ use alacritty_terminal::term::TermMode;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::MutexGuard;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 /// 已 stage 的交接载荷：fd_roles/fds/grids 三组同序一一对应。
 /// fds 是发送方原件号（保持 CLOEXEC），`SCM_RIGHTS` 发 dup 份。
@@ -272,9 +274,9 @@ pub(crate) fn run_transaction(
         crate::dlog(&format!("handoff: COMMIT 后扶正暂存二进制失败：{error}"));
     }
 
-    // 先停 sidecars（让端口），再停插件（杀 bun 子进程防孤儿），调用方随后
-    // 回 ok + exit。网关自启有 AddrInUse 重试，撞上"predecessor 退出中"的
-    // 毫秒窗口会自愈；此处失败也不回滚（已无可回滚之处），只留痕。
+    // 先停 sidecars（让出端口），再停插件（杀 bun 子进程防孤儿），调用方随后
+    // 回 ok + exit。自启若发现端口仍被占用且前任还是父进程，会等前任退出
+    // 后再绑一次。此处失败也不回滚（已无可回滚之处），只留痕。
     //
     // 双 accept 窗口（COMMIT→exit 间两边同时 accept，新连接可能落到 dying
     // 进程）是刻意接受的：关 listen 叫不醒阻塞中的 accept（close 不唤醒、
@@ -391,35 +393,35 @@ fn set_cloexec(fd: RawFd, cloexec: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 回滚杀 successor：TERM → 2s → KILL，父进程 waitpid 回收（无僵尸）。
-/// 已退出（ECHILD）是正常情况，不是错误。
+/// 回滚杀 successor：先让唯一的 `waitpid` 就位，再 TERM，两秒后 KILL。
+/// 已经退出的不再发信号，避免 pid 被系统拿去复用后打到别人。
+/// 第二次截止仍未收回时，等的那条线程继续是这个 pid 唯一的 `waitpid`，
+/// 这里不能再 `child.wait()`。
 fn kill_successor(child: &mut std::process::Child) {
     match child.try_wait() {
-        Ok(Some(_)) => return,
+        Ok(Some(_)) | Err(_) => return,
         Ok(None) => {}
-        Err(_) => return,
     }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
+    let pid = child.id() as i32;
+    let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&killed);
+    let _ = smelt_core::process_wait::wait_for_pid(
+        pid,
+        Duration::from_secs(2),
+        move || unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        },
+        move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
             }
-            Err(_) => return,
-        }
+        },
+        Duration::from_secs(2),
+    );
+    if killed.load(std::sync::atomic::Ordering::SeqCst) {
+        crate::dlog("handoff: successor TERM 超时，已 SIGKILL");
     }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGKILL);
-    }
-    let _ = child.wait();
-    crate::dlog("handoff: successor TERM 超时，已 SIGKILL");
 }
 
 #[cfg(test)]
@@ -436,6 +438,30 @@ mod tests {
             Some(&"fp-abc".to_string())
         );
         assert_eq!(env.len(), 2);
+    }
+
+    #[test]
+    fn kill_successor_reaps_a_child_that_ignores_term() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap \"\" TERM; exec sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let started = Instant::now();
+        kill_successor(&mut child);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "TERM 两秒后应杀掉并收回，实际 {:?}",
+            started.elapsed()
+        );
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 
     #[test]

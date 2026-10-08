@@ -14,7 +14,7 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) const BUN_VERSION: &str = "1.4.0";
@@ -438,26 +438,23 @@ fn run_pi_install(
     // transaction lock and the referenced Bun generation alive until it exits.
     manager.inherit_into(&mut command);
     bun_runtime.inherit_into(&mut command);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("无法启动 Pi 运行时依赖安装：{error}"))?;
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => return Err(format!("Pi 运行时依赖安装失败（{status}）")),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Pi 运行时依赖安装超时（15 分钟）".to_string());
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("等待 Pi 运行时依赖安装失败：{error}"));
-            }
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&timed_out);
+    match crate::process_wait::wait_child_for(child, TIMEOUT, move |pid| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
         }
+    }) {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) if timed_out.load(std::sync::atomic::Ordering::SeqCst) => {
+            Err("Pi 运行时依赖安装超时（15 分钟）".to_string())
+        }
+        Ok(status) => Err(format!("Pi 运行时依赖安装失败（{status}）")),
+        Err(error) => Err(format!("等待 Pi 运行时依赖安装失败：{error}")),
     }
 }
 

@@ -130,7 +130,9 @@ fn push_handoff_turns(entries: &[AcpEntry], turns: &mut Vec<HandoffTurn>) {
                 });
                 push_handoff_turns(children, turns);
             }
-            AcpEntry::Divider(_) | AcpEntry::Assistant { thought: false, .. } => {}
+            AcpEntry::Divider(_)
+            | AcpEntry::TaskNote(_)
+            | AcpEntry::Assistant { thought: false, .. } => {}
         }
     }
 }

@@ -191,6 +191,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         queued_follow_up: Vec::new(),
         composer_restore_revision: 0,
         composer_restore_texts: Vec::new(),
+        composer_restore_images: Vec::new(),
         turn_started_at_ms: None,
         turn_timings: Vec::new(),
         completed_unread: false,

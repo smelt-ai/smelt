@@ -1605,19 +1605,41 @@ fn streaming_updates_keep_awaiting_approval_while_a_card_is_pending() {
 }
 
 #[test]
-fn background_notice_does_not_open_a_turn_by_itself() {
+fn background_notice_is_a_status_line_and_not_a_user_turn() {
     let mut state = fresh_state();
     state.phase = DaemonPhase::Idle;
     state.awaiting_user_echo = true;
+    let note = crate::acp_chat::TaskNote {
+        id: "bg-1".into(),
+        title: "编译".into(),
+        status: "failed".into(),
+        exit_code: Some(1),
+        output_tail: "error: boom".into(),
+    };
     let outcome = apply_event(
         &mut state,
-        ConversationEvent::BackgroundNotice("后台任务 bg-1 已结束".into()),
+        ConversationEvent::BackgroundNotice(note.clone()),
     );
-    assert!(!outcome.should_persist);
+    assert!(outcome.should_persist);
     assert!(state.awaiting_user_echo);
     assert!(matches!(state.phase, DaemonPhase::Idle));
     assert!(state.turn_started_at_ms.is_none());
-    assert!(state.entries.is_empty());
+    assert_eq!(state.turn_seq, 0);
+    match state.entries.last() {
+        Some(AcpEntry::TaskNote(saved)) => {
+            assert_eq!(saved, &note);
+            assert!(saved.summary().contains("退出码 1"));
+            assert!(saved.summary().contains("失败"));
+        }
+        other => panic!("结束说明必须是状态行，不能是用户气泡：{other:?}"),
+    }
+    assert!(
+        state
+            .entries
+            .iter()
+            .all(|entry| !matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+    );
+    assert!(crate::acp_chat::auto_title(&state.entries).is_none());
 }
 
 /// 回合失败 != 会话结束。曾经 `session/prompt` 的错误响应会一路拖垮连接，
@@ -2340,6 +2362,7 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
         ConversationEvent::ComposerRestore {
             revision: 1,
             texts: vec!["换方向".into(), "总结".into()],
+            images: Vec::new(),
         },
     );
     let snap = state.to_snapshot(false);
@@ -2364,6 +2387,7 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
         ConversationEvent::ComposerRestore {
             revision: 1,
             texts: vec!["旧草稿".into()],
+            images: Vec::new(),
         },
     );
 
@@ -2377,6 +2401,7 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
         ConversationEvent::ComposerRestore {
             revision: 2,
             texts: vec!["新草稿".into()],
+            images: Vec::new(),
         },
     );
     assert!(
@@ -2385,6 +2410,23 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
     );
     assert_eq!(state.composer_restore_revision, 2);
     assert_eq!(state.composer_restore_texts, ["新草稿"]);
+
+    let image = crate::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    };
+    apply_event(
+        &mut state,
+        ConversationEvent::ComposerRestore {
+            revision: 3,
+            texts: Vec::new(),
+            images: vec![image.clone()],
+        },
+    );
+    assert_eq!(state.composer_restore_images, vec![image]);
+    assert!(acknowledge_composer_restore(&mut state, 3));
+    assert!(state.composer_restore_images.is_empty());
+    assert_eq!(state.composer_restore_revision, 3);
 }
 
 #[test]
@@ -2453,6 +2495,7 @@ fn withdrawing_steering_does_not_leave_a_user_bubble() {
         ConversationEvent::ComposerRestore {
             revision: 1,
             texts: vec!["打算".into()],
+            images: Vec::new(),
         },
     );
 

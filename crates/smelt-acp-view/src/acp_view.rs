@@ -11,10 +11,10 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Render, ScrollHandle, StatefulInteractiveElement, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
-    list as virtual_list, point, px, size,
+    FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment,
+    ListHorizontalSizingBehavior, ListState, ParentElement, PathBuilder, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowHandle,
+    WindowOptions, canvas, div, list as virtual_list, point, px, size, uniform_list,
 };
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -353,6 +353,11 @@ fn usage_warn_color(pct: u32) -> Option<u32> {
     }
 }
 
+/// 用量环的颜色。没到警告线就是弱灰，不拿强调蓝当装饰。
+fn usage_meter_color(pct: u32) -> u32 {
+    usage_warn_color(pct).unwrap_or(ui_theme::text_faint())
+}
+
 /// 会话面板要先露配置。模型一长，必须收进二级，否则贴底的菜单只看得见模型。
 fn composer_should_nest_models(
     extra_config_count: usize,
@@ -508,6 +513,7 @@ struct ComposerRestoreConsume {
     last_revision: u64,
     skip_next: bool,
     restore_texts: Option<Vec<String>>,
+    restore_images: Option<Vec<AcpImage>>,
     discarded_revision: Option<u64>,
 }
 
@@ -516,6 +522,7 @@ fn consume_composer_restore(
     last_revision: u64,
     incoming_revision: u64,
     incoming_texts: Vec<String>,
+    incoming_images: Vec<AcpImage>,
     skip_next: bool,
 ) -> ComposerRestoreConsume {
     if incoming_revision <= last_revision {
@@ -523,6 +530,7 @@ fn consume_composer_restore(
             last_revision,
             skip_next,
             restore_texts: None,
+            restore_images: None,
             discarded_revision: None,
         };
     }
@@ -531,6 +539,7 @@ fn consume_composer_restore(
             last_revision: incoming_revision,
             skip_next: false,
             restore_texts: None,
+            restore_images: None,
             discarded_revision: Some(incoming_revision),
         };
     }
@@ -538,6 +547,7 @@ fn consume_composer_restore(
         last_revision: incoming_revision,
         skip_next: false,
         restore_texts: (!incoming_texts.is_empty()).then_some(incoming_texts),
+        restore_images: (!incoming_images.is_empty()).then_some(incoming_images),
         discarded_revision: None,
     }
 }
@@ -1382,6 +1392,7 @@ pub struct AcpView {
     queued_follow_up: Vec<String>,
     last_composer_restore_revision: u64,
     pending_composer_restore: Option<Vec<String>>,
+    pending_composer_restore_images: Option<Vec<AcpImage>>,
     /// `pending_composer_restore` 中来自 daemon 的最新 revision。文本真正写入
     /// Textarea 后才确认；本地“立即发送”产生的 leftovers 没有 revision。
     pending_composer_restore_revision: Option<u64>,
@@ -1779,6 +1790,7 @@ impl AcpView {
             queued_follow_up: Vec::new(),
             last_composer_restore_revision: 0,
             pending_composer_restore: None,
+            pending_composer_restore_images: None,
             pending_composer_restore_revision: None,
             pending_composer_restore_ack: None,
             skip_next_composer_restore: false,
@@ -2712,6 +2724,7 @@ impl AcpView {
                     }
                 }
                 AcpEntry::ToolCall { title, .. } => format!("🔧 {title}"),
+                AcpEntry::TaskNote(note) => note.summary(),
                 AcpEntry::Divider(_) => continue,
             };
             if !line.trim().is_empty() {
@@ -3465,11 +3478,27 @@ impl AcpView {
 
     fn apply_pending_composer_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.try_acknowledge_composer_restore();
-        let Some(texts) = self.pending_composer_restore.take() else {
+        let texts = self.pending_composer_restore.take().unwrap_or_default();
+        let images = self
+            .pending_composer_restore_images
+            .take()
+            .unwrap_or_default();
+        if texts.is_empty() && images.is_empty() {
             return;
-        };
+        }
         let revision = self.pending_composer_restore_revision.take();
+        if !images.is_empty() {
+            self.pending_images
+                .extend(images.iter().filter_map(decode_acp_image));
+        }
         if texts.is_empty() {
+            if let Some(revision) = revision {
+                self.pending_composer_restore_ack = Some(
+                    self.pending_composer_restore_ack
+                        .map_or(revision, |pending| pending.max(revision)),
+                );
+                self.try_acknowledge_composer_restore();
+            }
             return;
         }
         let Some(input) = self.input.clone() else {
@@ -3682,15 +3711,25 @@ impl AcpView {
             self.last_composer_restore_revision,
             restore_revision,
             snap.composer_restore_texts,
+            snap.composer_restore_images,
             skip_restore,
         );
         self.last_composer_restore_revision = restore.last_revision;
         self.skip_next_composer_restore = restore.skip_next;
+        let has_restore = restore.restore_texts.is_some() || restore.restore_images.is_some();
         if let Some(texts) = restore.restore_texts {
             match &mut self.pending_composer_restore {
                 Some(pending) => pending.extend(texts),
                 None => self.pending_composer_restore = Some(texts),
             }
+        }
+        if let Some(images) = restore.restore_images {
+            match &mut self.pending_composer_restore_images {
+                Some(pending) => pending.extend(images),
+                None => self.pending_composer_restore_images = Some(images),
+            }
+        }
+        if has_restore {
             self.pending_composer_restore_revision = Some(
                 self.pending_composer_restore_revision
                     .map_or(restore_revision, |pending| pending.max(restore_revision)),
@@ -4164,92 +4203,98 @@ impl AcpView {
             .count();
         // 正在跑的算当前步；全完成就是 n / n。
         let current = (done + in_progress).min(total);
-        let (summary, summary_color) = if done == total {
-            (
-                format!("{total} / {total} · 完成"),
-                gpui::rgb(ui_theme::green()),
-            )
+        let summary = if done == total {
+            format!("{total} / {total} · 完成")
         } else if in_progress > 0 {
-            (
-                format!("{current} / {total}"),
-                gpui::rgb(ui_theme::accent()),
-            )
+            format!("{current} / {total}")
         } else {
-            (
-                format!("{done} / {total}"),
-                gpui::rgb(ui_theme::text_muted()),
-            )
+            format!("{done} / {total}")
         };
+        let summary_color = gpui::rgb(if done == total {
+            ui_theme::text()
+        } else {
+            ui_theme::text_muted()
+        });
         let current_step = plan_current_step(plan).unwrap_or("等待下一步").to_string();
         let progress = (done as f32 + in_progress as f32 * 0.5) / total as f32;
 
         let mut bar = gpui_component::v_flex()
+            .w_full()
             .border_b_1()
-            .border_color(gpui::rgb(ui_theme::border_dim()))
-            .bg(gpui::rgb(ui_theme::bg_status()))
+            .border_color(ui_theme::hairline())
             .child(
-                h_flex()
-                    .id("acp-plan-toggle")
-                    .px_4()
-                    .py_2()
-                    .gap_2p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(ui_theme::overlay(0x14)))
-                    .active(|d| d.opacity(0.88))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.plan_collapsed = !this.plan_collapsed;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .w(px(10.))
-                            .text_xs()
-                            .text_color(gpui::rgb(ui_theme::text_muted()))
-                            .child(if self.plan_collapsed { "▸" } else { "▾" }),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(gpui::rgb(ui_theme::text_mid()))
-                            .child("任务进度"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(gpui::rgb(ui_theme::text_bright()))
-                            .child(current_step),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .font_family(smelt_core::font_config::font_family())
-                            .text_color(summary_color)
-                            .child(summary),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(120.))
-                            .h(px(5.))
-                            .rounded_full()
-                            .bg(gpui::rgb(ui_theme::border_dim()))
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .w(gpui::relative(progress.clamp(0., 1.)))
-                                    .h_full()
-                                    .bg(gpui::rgb(ui_theme::accent())),
-                            ),
-                    ),
+                h_flex().w_full().justify_center().child(
+                    h_flex()
+                        .id("acp-plan-toggle")
+                        .w_full()
+                        .max_w(ui_theme::conversation_max_width())
+                        .px_4()
+                        .py_2()
+                        .gap_2p5()
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(ui_theme::overlay(0x14)))
+                        .active(|d| d.opacity(0.88))
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.plan_collapsed = !this.plan_collapsed;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .w(px(10.))
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::text_muted()))
+                                .child(if self.plan_collapsed { "▸" } else { "▾" }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .child("任务进度"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(gpui::rgb(ui_theme::text_bright()))
+                                .child(current_step),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_family(smelt_core::font_config::font_family())
+                                .text_color(summary_color)
+                                .child(summary),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(120.))
+                                .h(px(5.))
+                                .rounded_full()
+                                .bg(gpui::rgb(ui_theme::border_dim()))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .w(gpui::relative(progress.clamp(0., 1.)))
+                                        .h_full()
+                                        .bg(gpui::rgb(ui_theme::text_muted())),
+                                ),
+                        ),
+                ),
             );
         if !self.plan_collapsed {
-            let mut steps = gpui_component::v_flex().px_4().pb_3().gap_0p5();
+            let mut steps = gpui_component::v_flex()
+                .w_full()
+                .max_w(ui_theme::conversation_max_width())
+                .mx_auto()
+                .px_4()
+                .pb_3()
+                .gap_0p5();
             for entry in &plan.entries {
                 let row = h_flex().gap_2p5().items_center().py_0p5();
                 let row = match entry.status {
@@ -4257,14 +4302,9 @@ impl AcpView {
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .size(px(15.))
-                                .rounded_sm()
-                                .bg(gpui::rgb(ui_theme::green()))
-                                .flex()
-                                .items_center()
-                                .justify_center()
+                                .w(px(15.))
                                 .text_xs()
-                                .text_color(gpui::rgb(ui_theme::on_accent()))
+                                .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .child("✓"),
                         )
                         .child(
@@ -4281,7 +4321,7 @@ impl AcpView {
                                 .size(px(15.))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(gpui::rgb(ui_theme::accent()))
+                                .border_color(ui_theme::card_stroke())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -4289,7 +4329,7 @@ impl AcpView {
                                     div()
                                         .size(px(7.))
                                         .rounded_xs()
-                                        .bg(gpui::rgb(ui_theme::accent())),
+                                        .bg(gpui::rgb(ui_theme::text_muted())),
                                 ),
                         )
                         .child(
@@ -4300,14 +4340,14 @@ impl AcpView {
                                     div()
                                         .text_sm()
                                         .font_medium()
-                                        .text_color(gpui::rgb(ui_theme::text_bright()))
+                                        .text_color(gpui::rgb(ui_theme::text()))
                                         .child(entry.content.clone()),
                                 )
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(gpui::rgb(ui_theme::accent()))
-                                        .child("· 进行中"),
+                                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                                        .child("进行中"),
                                 ),
                         ),
                     // Pending 与协议未来的新状态都按「待做」渲染。
@@ -4392,10 +4432,11 @@ impl AcpView {
                 let id = task.id.clone();
                 let expanded = self.expanded_background_tasks.contains(&task.id);
                 let status_color = match task.status {
-                    BackgroundTaskStatus::Running => ui_theme::accent(),
-                    BackgroundTaskStatus::Completed => ui_theme::green(),
+                    BackgroundTaskStatus::Running => ui_theme::blue(),
+                    BackgroundTaskStatus::Completed | BackgroundTaskStatus::Stopped => {
+                        ui_theme::text_muted()
+                    }
                     BackgroundTaskStatus::Failed => ui_theme::red(),
-                    BackgroundTaskStatus::Stopped => ui_theme::text_muted(),
                     BackgroundTaskStatus::TimedOut => ui_theme::yellow(),
                 };
                 let mut row = gpui_component::v_flex()
@@ -4887,6 +4928,86 @@ fn fork_banner_text(origin: &AcpForkOrigin, current_agent: ConversationAgentKind
 
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
+/// 展开后的日志视口一次露出的行数。卡片高度到此为止，外面的消息列表
+/// 不会被撑到和全文一样高。
+const TOOL_LOG_VIEWPORT_LINES: usize = 16;
+/// 日志行是等宽纯文本，行高固定，虚拟列表才能按行切片。
+const TOOL_LOG_LINE_HEIGHT_PX: f32 = 18.;
+
+/// 长日志在卡片里的三种画法。短输出整段画出；长输出默认只给预览；
+/// 展开后换成固定高度的行视口，而不是把全文排成一块富文本。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolLogMode {
+    Inline,
+    Preview,
+    Viewport,
+}
+
+fn tool_log_mode(line_count: usize, expanded: bool) -> ToolLogMode {
+    if line_count <= TOOL_OUTPUT_PREVIEW_LINES {
+        ToolLogMode::Inline
+    } else if expanded {
+        ToolLogMode::Viewport
+    } else {
+        ToolLogMode::Preview
+    }
+}
+
+/// 视口高度只覆盖能同时看见的行。行数更少时收缩，避免短日志下面空一大块。
+fn tool_log_viewport_height(line_count: usize) -> f32 {
+    let rows = line_count.clamp(1, TOOL_LOG_VIEWPORT_LINES);
+    rows as f32 * TOOL_LOG_LINE_HEIGHT_PX
+}
+
+/// 用字符宽度挑最宽的一行，交给虚拟列表测量横向滚动范围。
+/// 宽字符按两列估算，避免一行汉字被一行更长的英文盖过。
+fn log_line_columns(line: &str) -> usize {
+    line.chars()
+        .map(|ch| if (ch as u32) >= 0x1100 { 2 } else { 1 })
+        .sum()
+}
+
+fn widest_log_line_index(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, line)| log_line_columns(line))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn split_log_lines(body: &str) -> Vec<String> {
+    body.lines()
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect()
+}
+
+struct ToolLogPreview {
+    shown: String,
+    total: usize,
+}
+
+impl ToolLogPreview {
+    fn truncated(&self) -> bool {
+        self.total > TOOL_OUTPUT_PREVIEW_LINES
+    }
+}
+
+/// 只保留前几行用来预览。计数会扫过全文，但不会把每一行都做成字符串。
+fn tool_log_preview(body: &str) -> ToolLogPreview {
+    let mut shown = String::new();
+    let mut total = 0usize;
+    for line in body.lines() {
+        if total < TOOL_OUTPUT_PREVIEW_LINES {
+            if total > 0 {
+                shown.push('\n');
+            }
+            shown.push_str(line.trim_end_matches('\r'));
+        }
+        total += 1;
+    }
+    ToolLogPreview { shown, total }
+}
 
 /// 工具调用的输出不自动抢占对话空间；需要细节时由用户展开卡片。
 fn tool_card_default_expanded() -> bool {
@@ -5666,6 +5787,7 @@ fn build_conversation_layout_with_timings(
                 Some(*ix) != final_ix
                     && !is_completion_entry(&entries[*ix])
                     && !is_collaboration_entry(&entries[*ix])
+                    && !matches!(entries[*ix], AcpEntry::TaskNote(_))
             })
             .collect();
         if let Some(&first) = process_indices.first() {
