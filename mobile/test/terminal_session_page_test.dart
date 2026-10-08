@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/pages/terminal_session_page.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
@@ -90,7 +91,6 @@ void main() {
     final terminalView = tester.widget<TerminalView>(find.byType(TerminalView));
     expect(terminalView.autofocus, isFalse);
     expect(terminalView.hardwareKeyboardOnly, isTrue);
-    expect(terminalView.onTapUp, isNotNull);
     expect(terminalView.scrollController, isNotNull);
     expect(terminalView.focusNode?.hasFocus, isFalse);
     expect(find.byIcon(Icons.keyboard_outlined), findsOneWidget);
@@ -112,7 +112,9 @@ void main() {
     );
 
     await tester.pumpWidget(
-      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
     );
     stream.connect();
     stream.emit(
@@ -228,84 +230,83 @@ void main() {
   testWidgets('snapshot replays at the negotiated mobile geometry', (
     tester,
   ) async {
-      final stream = _FakeTerminalStream();
-      const session = SessionSummary(
-        id: 'terminal-1',
-        kind: SessionKind.terminal,
-        title: 'Shell',
-        phase: 'running',
-        agent: 'terminal',
-      );
-      await tester.pumpWidget(
-        MaterialApp(
-          home: TerminalSessionPage(session: session, stream: stream),
-        ),
-      );
-      expect(stream.geometries, isNotEmpty);
+    final stream = _FakeTerminalStream();
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
+    );
+    expect(stream.geometries, isNotEmpty);
 
-      stream.connect();
-      // 通道接通、attach 未发：快捷键栏先上屏，行数在 attach 之前就落定。
-      stream.emit(const TerminalConnectedEvent(writeEnabled: true));
-      await tester.pump();
-      final mobileGeometry = stream.geometries.last;
-      final geometryUpdatesAtAttach = stream.geometries.length;
+    stream.connect();
+    // 通道接通、attach 未发：快捷键栏先上屏，行数在 attach 之前就落定。
+    stream.emit(const TerminalConnectedEvent(writeEnabled: true));
+    await tester.pump();
+    final mobileGeometry = stream.geometries.last;
+    final geometryUpdatesAtAttach = stream.geometries.length;
 
-      final replay = Uint8List.fromList(
-        utf8.encode(
-          '\x1b[?1049l\x1b[H\x1b[2J\x1b[3J\x1b[?7l'
-          '${List.generate(90, (index) => 'desktop-$index\x1b[K\r\n').join()}'
-          'LATEST',
-        ),
-      );
-      stream.emit(
-        TerminalReadyEvent(
-          cols: mobileGeometry.cols,
-          rows: mobileGeometry.rows,
-          replayBytes: replay.length,
-          writeEnabled: true,
-        ),
-      );
-      stream.emit(TerminalDataEvent(replay));
-      await tester.pump();
+    final replay = Uint8List.fromList(
+      utf8.encode(
+        '\x1b[?1049l\x1b[H\x1b[2J\x1b[3J\x1b[?7l'
+        '${List.generate(90, (index) => 'desktop-$index\x1b[K\r\n').join()}'
+        'LATEST',
+      ),
+    );
+    stream.emit(
+      TerminalReadyEvent(
+        cols: mobileGeometry.cols,
+        rows: mobileGeometry.rows,
+        replayBytes: replay.length,
+        writeEnabled: true,
+      ),
+    );
+    stream.emit(TerminalDataEvent(replay));
+    await tester.pump();
 
-      var view = tester.widget<TerminalView>(find.byType(TerminalView));
-      expect(view.autoResize, isFalse);
-      expect(
-        (view.terminal.viewWidth, view.terminal.viewHeight),
-        (mobileGeometry.cols, mobileGeometry.rows),
-      );
-      expect(view.terminal.buffer.getText(), contains('LATEST'));
+    var view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.autoResize, isFalse);
+    expect(
+      (view.terminal.viewWidth, view.terminal.viewHeight),
+      (mobileGeometry.cols, mobileGeometry.rows),
+    );
+    expect(view.terminal.buffer.getText(), contains('LATEST'));
 
-      stream.emit(const TerminalReplayCompleteEvent());
-      await tester.pump();
-      await tester.pump();
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pump();
+    await tester.pump();
 
-      view = tester.widget<TerminalView>(find.byType(TerminalView));
-      expect(view.autoResize, isTrue);
-      // 行列在 attach 之前就落定了，回放结束不能再改一次。改一次就是一次 PTY
-      // resize：不切备用屏的 CLI 收到 SIGWINCH 会把整段对话重印一遍，实测一次
-      // 就是 560KB / 8 秒的流，手机上就是「每次进来对话又滚很久」。
-      expect(view.terminal.viewWidth, mobileGeometry.cols);
-      expect(view.terminal.viewHeight, mobileGeometry.rows);
-      expect(
-        stream.geometries.skip(geometryUpdatesAtAttach),
-        everyElement(mobileGeometry),
-        reason: 'attach 之后量到的几何必须和 attach 时一致（相同值会被 service 丢掉）',
-      );
-      expect(view.terminal.buffer.getText(), contains('LATEST'));
-      expect(view.scrollController!.position.maxScrollExtent, greaterThan(0));
+    view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.autoResize, isTrue);
+    // 行列在 attach 之前就落定了，回放结束不能再改一次。改一次就是一次 PTY
+    // resize：不切备用屏的 CLI 收到 SIGWINCH 会把整段对话重印一遍，实测一次
+    // 就是 560KB / 8 秒的流，手机上就是「每次进来对话又滚很久」。
+    expect(view.terminal.viewWidth, mobileGeometry.cols);
+    expect(view.terminal.viewHeight, mobileGeometry.rows);
+    expect(
+      stream.geometries.skip(geometryUpdatesAtAttach),
+      everyElement(mobileGeometry),
+      reason: 'attach 之后量到的几何必须和 attach 时一致（相同值会被 service 丢掉）',
+    );
+    expect(view.terminal.buffer.getText(), contains('LATEST'));
+    expect(view.scrollController!.position.maxScrollExtent, greaterThan(0));
 
-      final live = utf8.encode('\r\nLIVE-\u7aef');
-      stream.emit(
-        TerminalDataEvent(Uint8List.fromList(live.sublist(0, live.length - 1))),
-      );
-      stream.emit(
-        TerminalDataEvent(Uint8List.fromList(live.sublist(live.length - 1))),
-      );
-      await tester.pump();
-      expect(view.terminal.buffer.getText(), contains('LIVE-\u7aef'));
-    },
-  );
+    final live = utf8.encode('\r\nLIVE-\u7aef');
+    stream.emit(
+      TerminalDataEvent(Uint8List.fromList(live.sublist(0, live.length - 1))),
+    );
+    stream.emit(
+      TerminalDataEvent(Uint8List.fromList(live.sublist(live.length - 1))),
+    );
+    await tester.pump();
+    expect(view.terminal.buffer.getText(), contains('LIVE-\u7aef'));
+  });
 
   testWidgets(
     'software keyboard preserves PTY geometry and terminal scrolling',
@@ -451,70 +452,69 @@ void main() {
     },
   );
 
-  testWidgets(
-    '快捷键栏出现后，全屏 TUI 仍然正好铺满视口',
-    (tester) async {
-      final stream = _FakeTerminalStream();
-      const session = SessionSummary(
-        id: 'terminal-1',
-        kind: SessionKind.terminal,
-        title: 'Shell',
-        phase: 'running',
-        agent: 'terminal',
-      );
-      await tester.pumpWidget(
-        MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
-      );
+  testWidgets('快捷键栏出现后，全屏 TUI 仍然正好铺满视口', (tester) async {
+    final stream = _FakeTerminalStream();
+    const session = SessionSummary(
+      id: 'terminal-1',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
+    );
 
-      // 首次测量发生在浏览模式：那时还不知道能不能写，快捷键栏没上屏。
-      final attached = stream.geometries.last;
+    // 首次测量发生在浏览模式：那时还不知道能不能写，快捷键栏没上屏。
+    final attached = stream.geometries.last;
 
-      stream.connect();
-      final replay = Uint8List.fromList(
-        utf8.encode(
-          // 全屏 TUI（alt buffer）：没有回滚，行数恒等于视口行数。
-          '\x1b[?1049h\x1b[H\x1b[2J'
-          '${List.generate(attached.rows, (i) => 'tui-$i\r\n').join()}',
-        ),
-      );
-      stream.emit(
-        TerminalReadyEvent(
-          cols: attached.cols,
-          rows: attached.rows,
-          replayBytes: replay.length,
-          // 可写 => 快捷键栏上屏 => 终端视口当场变矮。
-          writeEnabled: true,
-        ),
-      );
-      stream.emit(TerminalDataEvent(replay));
-      // 回放期间要先过一帧：这一帧里快捷键栏已经上屏，终端却还锁着尺寸。
-      await tester.pump();
-      expect(find.byType(TerminalShortcutBar), findsOneWidget);
+    stream.connect();
+    final replay = Uint8List.fromList(
+      utf8.encode(
+        // 全屏 TUI（alt buffer）：没有回滚，行数恒等于视口行数。
+        '\x1b[?1049h\x1b[H\x1b[2J'
+        '${List.generate(attached.rows, (i) => 'tui-$i\r\n').join()}',
+      ),
+    );
+    stream.emit(
+      TerminalReadyEvent(
+        cols: attached.cols,
+        rows: attached.rows,
+        replayBytes: replay.length,
+        // 可写 => 快捷键栏上屏 => 终端视口当场变矮。
+        writeEnabled: true,
+      ),
+    );
+    stream.emit(TerminalDataEvent(replay));
+    // 回放期间要先过一帧：这一帧里快捷键栏已经上屏，终端却还锁着尺寸。
+    await tester.pump();
+    expect(find.byType(TerminalShortcutBar), findsOneWidget);
 
-      stream.emit(const TerminalReplayCompleteEvent());
-      await tester.pump();
-      await tester.pump();
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pump();
+    await tester.pump();
 
-      final view = tester.widget<TerminalView>(find.byType(TerminalView));
-      expect(view.autoResize, isTrue);
-      // alt buffer 高过视口就会长出滚动量，手势被外层 Scrollable 吃掉，
-      // TUI 内部再也滚不动。
-      expect(view.scrollController!.position.maxScrollExtent, 0);
-      expect(view.terminal.viewHeight, lessThan(attached.rows));
-      expect(stream.geometries.last.rows, view.terminal.viewHeight);
+    final view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.autoResize, isTrue);
+    // alt buffer 高过视口就会长出滚动量，手势被外层 Scrollable 吃掉，
+    // TUI 内部再也滚不动。
+    expect(view.scrollController!.position.maxScrollExtent, 0);
+    expect(view.terminal.viewHeight, lessThan(attached.rows));
+    expect(stream.geometries.last.rows, view.terminal.viewHeight);
 
-      // 视口没有滚动量，拖拽才会落到外层的 InfiniteScrollView，被翻译成方向键
-      // 交给 TUI——这就是「在 TUI 内部滚动」。
-      stream.sentInput.clear();
-      await tester.drag(find.byType(TerminalView), const Offset(0, -120));
-      await tester.pumpAndSettle();
-      expect(stream.sentInput, isNotEmpty);
-      expect(stream.sentInput.every((data) => data == '\x1b[B'), isTrue);
+    // 视口没有滚动量，拖拽才会落到外层的 InfiniteScrollView，被翻译成方向键
+    // 交给 TUI——这就是「在 TUI 内部滚动」。
+    stream.sentInput.clear();
+    await tester.drag(find.byType(TerminalView), const Offset(0, -120));
+    await tester.pumpAndSettle();
+    expect(stream.sentInput, isNotEmpty);
+    expect(stream.sentInput.every((data) => data == '\x1b[B'), isTrue);
 
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox.shrink());
-    },
-  );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('a repaint that clears the scrollback survives the next reflow', (
     tester,
@@ -528,7 +528,9 @@ void main() {
       agent: 'terminal',
     );
     await tester.pumpWidget(
-      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
     );
     expect(stream.geometries, isNotEmpty);
     final mobileGeometry = stream.geometries.last;
@@ -551,14 +553,14 @@ void main() {
     stream.emit(
       TerminalDataEvent(
         Uint8List.fromList(
-          utf8.encode(
-            List.generate(600, (index) => 'OLD-$index\r\n').join(),
-          ),
+          utf8.encode(List.generate(600, (index) => 'OLD-$index\r\n').join()),
         ),
       ),
     );
     stream.emit(
-      TerminalDataEvent(Uint8List.fromList(utf8.encode('\x1b[H\x1b[2J\x1b[3J'))),
+      TerminalDataEvent(
+        Uint8List.fromList(utf8.encode('\x1b[H\x1b[2J\x1b[3J')),
+      ),
     );
     stream.emit(
       TerminalDataEvent(
@@ -597,6 +599,7 @@ void main() {
           body: TerminalShortcutBar(
             onKey: (key, {shift = false, alt = false, ctrl = false}) =>
                 keys.add('$key shift=$shift alt=$alt ctrl=$ctrl'),
+            onPaste: () {},
           ),
         ),
       ),
@@ -615,9 +618,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('shortcut bar exposes Shift+Tab and Shift+Enter', (
-    tester,
-  ) async {
+  testWidgets('shortcut bar exposes Shift+Tab and Shift+Enter', (tester) async {
     final keys = <String>[];
     await tester.pumpWidget(
       MaterialApp(
@@ -625,6 +626,7 @@ void main() {
           body: TerminalShortcutBar(
             onKey: (key, {shift = false, alt = false, ctrl = false}) =>
                 keys.add('$key shift=$shift'),
+            onPaste: () {},
           ),
         ),
       ),
@@ -641,61 +643,60 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-testWidgets(
-    'Shift+Tab 跟随对端的 kitty keyboard 模式切换编码',
-    (tester) async {
-      final stream = _FakeTerminalStream();
-      const session = SessionSummary(
-        id: 'terminal-kitty',
-        kind: SessionKind.terminal,
-        title: 'Shell',
-        phase: 'running',
-        agent: 'terminal',
-      );
-      await tester.pumpWidget(
-        MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
-      );
-      stream.connect();
-      stream.emit(
-        const TerminalReadyEvent(
-          cols: 40,
-          rows: 20,
-          replayBytes: 0,
-          writeEnabled: true,
-        ),
-      );
-      stream.emit(const TerminalReplayCompleteEvent());
-      await tester.pump();
-      await tester.pump();
+  testWidgets('Shift+Tab 跟随对端的 kitty keyboard 模式切换编码', (tester) async {
+    final stream = _FakeTerminalStream();
+    const session = SessionSummary(
+      id: 'terminal-kitty',
+      kind: SessionKind.terminal,
+      title: 'Shell',
+      phase: 'running',
+      agent: 'terminal',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
+    );
+    stream.connect();
+    stream.emit(
+      const TerminalReadyEvent(
+        cols: 40,
+        rows: 20,
+        replayBytes: 0,
+        writeEnabled: true,
+      ),
+    );
+    stream.emit(const TerminalReplayCompleteEvent());
+    await tester.pump();
+    await tester.pump();
 
-      // 打开软键盘，快捷键栏才会出现。
-      await tester.tap(find.byIcon(Icons.keyboard_outlined));
-      await tester.pump();
-      await tester.pump();
+    // 打开软键盘，快捷键栏才会出现。
+    await tester.tap(find.byIcon(Icons.keyboard_outlined));
+    await tester.pump();
+    await tester.pump();
 
-      // 对端还没开 kitty：走传统 backtab。
-      await tester.tap(find.text('⇧Tab'));
-      expect(stream.sentInput.last, '\x1b[Z');
+    // 对端还没开 kitty：走传统 backtab。
+    await tester.tap(find.text('⇧Tab'));
+    expect(stream.sentInput.last, '\x1b[Z');
 
-      // Claude Code v2.1 起启动时会发这条开启 kitty keyboard protocol。
-      stream.emit(TerminalDataEvent(Uint8List.fromList(utf8.encode('\x1b[>1u'))));
-      await tester.pump();
+    // Claude Code v2.1 起启动时会发这条开启 kitty keyboard protocol。
+    stream.emit(TerminalDataEvent(Uint8List.fromList(utf8.encode('\x1b[>1u'))));
+    await tester.pump();
 
-      // 同一个按钮，编码必须跟着变——否则应用收不到（kitty 下 legacy 被抑制）。
-      await tester.tap(find.text('⇧Tab'));
-      expect(stream.sentInput.last, '\x1b[9;2u');
+    // 同一个按钮，编码必须跟着变——否则应用收不到（kitty 下 legacy 被抑制）。
+    await tester.tap(find.text('⇧Tab'));
+    expect(stream.sentInput.last, '\x1b[9;2u');
 
-      await tester.tap(find.text('⇧↵'));
-      expect(stream.sentInput.last, '\x1b[13;2u');
+    await tester.tap(find.text('⇧↵'));
+    expect(stream.sentInput.last, '\x1b[13;2u');
 
-      // ^C 现在也走同一条路。kitty 开着也不能变成 CSI u——readline 读的是 0x03。
-      await tester.tap(find.text('^C'));
-      expect(stream.sentInput.last, '\x03');
+    // ^C 现在也走同一条路。kitty 开着也不能变成 CSI u——readline 读的是 0x03。
+    await tester.tap(find.text('^C'));
+    expect(stream.sentInput.last, '\x03');
 
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox.shrink());
-    },
-  );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('terminal adopts the theme sent by the connected device', (
     tester,
@@ -709,7 +710,9 @@ testWidgets(
       agent: 'terminal',
     );
     await tester.pumpWidget(
-      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
     );
 
     // 连上之前只能用兜底深色（= PC 出厂主题）。
@@ -762,7 +765,9 @@ testWidgets(
     );
 
     await tester.pumpWidget(
-      MaterialApp(home: TerminalSessionPage(session: session, stream: stream)),
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
     );
     stream.connect();
     stream.emit(
@@ -799,11 +804,7 @@ testWidgets(
     // 会这么走一遭，那不是用户要看更老的内容。
     controller.jumpTo(0);
     await tester.pump();
-    expect(
-      stream.loadMoreCalls,
-      0,
-      reason: '没人碰屏幕的时候把偏移送到顶部，不该触发整帧重取',
-    );
+    expect(stream.loadMoreCalls, 0, reason: '没人碰屏幕的时候把偏移送到顶部，不该触发整帧重取');
 
     controller.jumpTo(controller.position.maxScrollExtent);
     await tester.pumpAndSettle();
@@ -872,4 +873,283 @@ testWidgets(
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('copy output puts the terminal text on the clipboard', (
+    tester,
+  ) async {
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+
+    final stream = _FakeTerminalStream();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: _session, stream: stream),
+      ),
+    );
+    await _ready(tester, stream);
+    stream.emit(
+      TerminalDataEvent(Uint8List.fromList(utf8.encode('hello-from-cli\r\n'))),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Copy output'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+
+    expect(copied, 'hello-from-cli');
+    expect(find.text('Copied'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('tapping a url opens it and does not show the keyboard', (
+    tester,
+  ) async {
+    final opened = <Uri>[];
+    final stream = _FakeTerminalStream();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(
+          session: _session,
+          stream: stream,
+          openLink: (uri) async {
+            opened.add(uri);
+            return true;
+          },
+        ),
+      ),
+    );
+    await _ready(tester, stream);
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(
+          utf8.encode('https://example.com/notes\r\nnot-a-link\r\n'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await _tapCell(tester, const CellOffset(0, 0));
+    expect(opened, [Uri.parse('https://example.com/notes')]);
+    expect(find.byIcon(Icons.keyboard_outlined), findsOneWidget);
+
+    await _tapCell(tester, const CellOffset(0, 1));
+    expect(opened, hasLength(1));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('long press selects a word and offers copy', (tester) async {
+    final stream = _FakeTerminalStream();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: _session, stream: stream),
+      ),
+    );
+    await _ready(tester, stream);
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(utf8.encode('https://example.com/notes')),
+      ),
+    );
+    await tester.pump();
+
+    await tester.longPressAt(await _cellGlobal(tester, const CellOffset(4, 0)));
+    await tester.pump();
+
+    expect(find.text('Copy'), findsOneWidget);
+    expect(find.text('Select all'), findsOneWidget);
+    expect(find.text('Open'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Open follows the selection while a long press drags', (
+    tester,
+  ) async {
+    final opened = <Uri>[];
+    final stream = _FakeTerminalStream();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(
+          session: _session,
+          stream: stream,
+          openLink: (uri) async {
+            opened.add(uri);
+            return true;
+          },
+        ),
+      ),
+    );
+    await _ready(tester, stream);
+    stream.emit(
+      TerminalDataEvent(
+        Uint8List.fromList(utf8.encode('see https://example.com/notes')),
+      ),
+    );
+    await tester.pump();
+
+    final gesture = await tester.startGesture(
+      await _cellGlobal(tester, const CellOffset(8, 0)),
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+    expect(find.text('Open'), findsOneWidget);
+
+    // 拖到前面的普通词：选区变成 `see https://...`，不再是一个链接。
+    await gesture.moveTo(await _cellGlobal(tester, const CellOffset(0, 0)));
+    await tester.pump();
+    expect(find.text('Copy'), findsOneWidget);
+    expect(find.text('Open'), findsNothing);
+
+    // 再拖回链接上，Open 要回来，点了打开的是链接本身。
+    await gesture.moveTo(await _cellGlobal(tester, const CellOffset(10, 0)));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(find.text('Open'), findsOneWidget);
+    await tester.tap(find.text('Open'));
+    await tester.pump();
+    expect(opened, [Uri.parse('https://example.com/notes')]);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'a link tap in a mouse-tracking TUI opens it and is not a click',
+    (tester) async {
+      final opened = <Uri>[];
+      final stream = _FakeTerminalStream();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TerminalSessionPage(
+            session: _session,
+            stream: stream,
+            openLink: (uri) async {
+              opened.add(uri);
+              return true;
+            },
+          ),
+        ),
+      );
+      await _ready(tester, stream);
+      stream.emit(
+        TerminalDataEvent(
+          Uint8List.fromList(
+            utf8.encode('\x1b[?1000h\x1b[?1006hhttps://example.com/notes'),
+          ),
+        ),
+      );
+      await tester.pump();
+      stream.sentInput.clear();
+
+      await _tapCell(tester, const CellOffset(0, 0));
+      // 链接被认领：打开链接，TUI 收不到这次点击，一次点按只做一件事。
+      expect(opened, [Uri.parse('https://example.com/notes')]);
+      expect(stream.sentInput, isEmpty);
+
+      // 不在链接上的点击照常报给 TUI。xterm 抬手后挂着双击判定计时器，等它过期。
+      await tester.pump(kDoubleTapTimeout);
+      await _tapCell(tester, const CellOffset(0, 2));
+      expect(stream.sentInput, isNotEmpty);
+      expect(opened, hasLength(1));
+      await tester.pump(kDoubleTapTimeout);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets('paste button and ^V send clipboard text to the PTY', (
+    tester,
+  ) async {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.getData') {
+          return {'text': 'hello\nworld'};
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+
+    final stream = _FakeTerminalStream();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: _session, stream: stream),
+      ),
+    );
+    await _ready(tester, stream);
+
+    await tester.tap(find.byIcon(Icons.content_paste));
+    await tester.pump();
+    expect(stream.sentInput, ['hello\rworld']);
+
+    stream.sentInput.clear();
+    stream.emit(
+      TerminalDataEvent(Uint8List.fromList(utf8.encode('\x1b[?2004h'))),
+    );
+    await tester.pump();
+    await tester.tap(find.text('^V'));
+    await tester.pump();
+    expect(stream.sentInput, ['\x1b[200~hello\nworld\x1b[201~']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+}
+
+const _session = SessionSummary(
+  id: 'terminal-1',
+  kind: SessionKind.terminal,
+  title: 'Shell',
+  phase: 'running',
+  agent: 'terminal',
+);
+
+Future<void> _ready(WidgetTester tester, _FakeTerminalStream stream) async {
+  stream.connect();
+  stream.emit(
+    const TerminalReadyEvent(
+      cols: 40,
+      rows: 20,
+      replayBytes: 0,
+      writeEnabled: true,
+    ),
+  );
+  stream.emit(const TerminalReplayCompleteEvent());
+  await tester.pump();
+  await tester.pump();
+}
+
+Future<Offset> _cellGlobal(WidgetTester tester, CellOffset cell) async {
+  final state = tester.state<TerminalViewState>(find.byType(TerminalView));
+  final render = state.renderTerminal;
+  final size = render.cellSize;
+  return render.localToGlobal(
+    render.getOffset(cell) + Offset(size.width / 2, size.height / 2),
+  );
+}
+
+Future<void> _tapCell(WidgetTester tester, CellOffset cell) async {
+  await tester.tapAt(await _cellGlobal(tester, cell));
+  await tester.pump();
 }
