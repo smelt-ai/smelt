@@ -1278,10 +1278,6 @@ pub(crate) fn refresh(cx: &App) {
             |state| state.is_enabled(plugin_id),
         )
     };
-    // 脚本插件的运行时可能还没就位（首次启动正在下载受管 bun）。这时它的进程起不来，
-    // tab 摆在那里点开只有空白——跟插件被停用是同一种状态，就按同一条路径隐藏。
-    // 运行时下载完成后守护会重启插件集，GUI 这边下一次 refresh 自然把 tab 补回来。
-    let bun = smelt_core::managed_runtime::managed_bun_path_if_ready();
     let mut tabs = Vec::new();
     let mut surfaces = Vec::new();
     let mut agents = Vec::new();
@@ -1309,10 +1305,6 @@ pub(crate) fn refresh(cx: &App) {
         agents.extend(package_agents);
         assets.extend(package_assets);
         if !is_enabled(&plugin_id) {
-            continue;
-        }
-        if let Err(error) = package.runtime_available(bun.as_deref()) {
-            eprintln!("[plugin-ui] {plugin_id} 暂不可用：{error}");
             continue;
         }
         session_actions.extend(discover_package_session_actions(&package));
@@ -1918,7 +1910,8 @@ impl Workspace {
         let Some(tab) = workspace_surface_by_key(&key) else {
             return missing_panel("这个插件已经不在了");
         };
-        self.render_plugin_webview(tab, window, cx)
+        // 舞台插件的原生 WebView 画在 GPUI 之上，要自己让开标题胶囊。
+        self.render_plugin_webview(tab, px(ui_theme::CHROME_ISLAND_CLEARANCE_PX), window, cx)
     }
 
     /// 渲染插件面板：GPUI 只占位并同步矩形，内容全部由插件的网页负责。
@@ -1931,12 +1924,14 @@ impl Workspace {
         let Some(tab) = tab(slot) else {
             return missing_panel("这个插件已经不在了");
         };
-        self.render_plugin_webview(tab, window, cx)
+        // 工具栏里的插件页签已经在 34px 页签下面，不再让开舞台胶囊。
+        self.render_plugin_webview(tab, px(0.), window, cx)
     }
 
     fn render_plugin_webview(
         &mut self,
         tab: PluginTab,
+        top_inset: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1951,7 +1946,10 @@ impl Workspace {
                 // WebView 加载有可见延迟，而且页面背景是透明的，需要这层垫底。
                 div()
                     .absolute()
-                    .inset_0()
+                    .top(top_inset)
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1991,7 +1989,10 @@ impl Workspace {
                     },
                 )
                 .absolute()
-                .size_full(),
+                .top(top_inset)
+                .left_0()
+                .right_0()
+                .bottom_0(),
             )
             .into_any_element()
     }

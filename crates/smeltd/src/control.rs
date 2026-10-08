@@ -474,11 +474,15 @@ fn apply_automation(
     let applied = owner
         .apply(command, chrono::Local::now())
         .map_err(control_error_for_automation)?;
-    if applied.changed
+    let changed = applied.changed;
+    if changed
         && let Err(error) = event_hub
             .publish_automations(&super::webhook::annotate_snapshot(applied.snapshot.clone()))
     {
         eprintln!("[control] 发布自动化投影失败: {error}");
+    }
+    if changed {
+        crate::automation_runtime::nudge_automation_driver();
     }
     Ok(redact_automation_credentials(applied.snapshot))
 }
@@ -493,11 +497,15 @@ fn run_automation_once(
     let applied = owner
         .run_once(automation_id.to_string(), chrono::Local::now())
         .map_err(control_error_for_automation)?;
-    if applied.changed
+    let changed = applied.changed;
+    if changed
         && let Err(error) = event_hub
             .publish_automations(&super::webhook::annotate_snapshot(applied.snapshot.clone()))
     {
         eprintln!("[control] 发布自动化投影失败: {error}");
+    }
+    if changed {
+        crate::automation_runtime::nudge_automation_driver();
     }
     Ok(applied.result)
 }

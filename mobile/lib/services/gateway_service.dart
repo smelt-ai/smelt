@@ -1998,6 +1998,8 @@ int _estimateSnapshotBytes(AcpSnapshot snapshot) {
             ) +
             192,
       AcpEntryDivider(label: final label) => label.length * 2 + 32,
+      final AcpEntryTaskNote note =>
+        note.summary.length * 2 + note.outputTail.length * 2 + 32,
       AcpEntryUnknown() => 16,
     };
   }

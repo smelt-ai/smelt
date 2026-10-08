@@ -92,12 +92,22 @@ pub fn candidates(
     match trigger.kind {
         Kind::Slash => {
             // These Smelt commands are handled locally rather than sent as prompts.
+            let builtins = [
+                ("shake", "纯规则 0-token 无损修剪历史冗余与思考链"),
+                ("handoff", "生成结构化交接报告并压缩上下文"),
+                ("compact", "压缩历史对话上下文"),
+            ];
             let mut matches: Vec<(String, String)> = commands
                 .iter()
                 .filter(|(name, _)| !name.eq_ignore_ascii_case("clear"))
                 .cloned()
                 .collect();
             matches.push(("clear".to_string(), "新建一条独立对话".to_string()));
+            for (name, desc) in builtins {
+                if !matches.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
+                    matches.push((name.to_string(), desc.to_string()));
+                }
+            }
             matches.retain(|(name, _)| needle.is_empty() || name.to_lowercase().contains(needle));
             matches.sort_by_key(|(name, _)| match_rank(name, needle));
             matches
@@ -359,8 +369,28 @@ mod tests {
         assert_eq!(items[0].insert, "/clear ");
         assert_eq!(items[0].hint, "新建一条独立对话");
 
-        // agent 若也提供 clear，本地说明优先，且不重复出现。
-        let commands = vec![("clear".to_string(), "agent 自己的说明".to_string())];
+        let slash_all = candidates(&detect_trigger("/").unwrap(), &[], &[]);
+        assert!(
+            slash_all
+                .iter()
+                .any(|item| item.label == "/shake" && item.hint.contains("无损修剪"))
+        );
+        assert!(
+            slash_all
+                .iter()
+                .any(|item| item.label == "/handoff" && item.hint.contains("交接报告"))
+        );
+        assert!(
+            slash_all
+                .iter()
+                .any(|item| item.label == "/compact" && item.hint.contains("压缩历史对话"))
+        );
+
+        // agent 若也提供同名命令，本地说明优先，且不重复出现。
+        let commands = vec![
+            ("clear".to_string(), "agent 自己的说明".to_string()),
+            ("shake".to_string(), "agent shake".to_string()),
+        ];
         let items = candidates(&detect_trigger("/").unwrap(), &[], &commands);
         assert_eq!(
             items.iter().filter(|item| item.label == "/clear").count(),
@@ -373,6 +403,18 @@ mod tests {
                 .unwrap()
                 .hint,
             "新建一条独立对话"
+        );
+        assert_eq!(
+            items.iter().filter(|item| item.label == "/shake").count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "/shake")
+                .unwrap()
+                .hint,
+            "agent shake"
         );
     }
 

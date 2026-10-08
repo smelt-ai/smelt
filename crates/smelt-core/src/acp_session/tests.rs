@@ -12,6 +12,34 @@ fn fresh_state() -> AcpSessionState {
 }
 
 #[test]
+fn background_task_updates_replace_the_list_without_persisting_or_clearing_echo() {
+    let mut state = fresh_state();
+    state.awaiting_user_echo = true;
+    let tasks = vec![BackgroundTaskView {
+        id: "bg-1".into(),
+        title: "测试".into(),
+        command: "npm test".into(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        output: "running".into(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+    }];
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::BackgroundTasks(tasks.clone()),
+    );
+    assert!(!outcome.should_persist);
+    assert!(state.awaiting_user_echo);
+    assert_eq!(state.background_tasks, tasks);
+    assert_eq!(state.to_snapshot(false).background_tasks, tasks);
+
+    let outcome = apply_event(&mut state, ConversationEvent::BackgroundTasks(Vec::new()));
+    assert!(!outcome.should_persist);
+    assert!(state.background_tasks.is_empty());
+}
+
+#[test]
 fn protocol_title_overrides_prompt_fallback_and_clear_restores_it() {
     let mut state = fresh_state();
     note_prompt_sent(&mut state, "帮我排查登录接口为什么超时".into(), Vec::new());
@@ -869,48 +897,105 @@ fn delivery_identity_follows_turn_end_and_handoff_snapshot() {
 }
 
 #[test]
-fn snapshot_wire_keeps_legacy_phase_names() {
-    let mut starting = AcpSessionState::default();
-    assert_eq!(starting.phase, DaemonPhase::Connecting);
-    let value = serde_json::to_value(starting.to_snapshot(true)).unwrap();
-    assert_eq!(value["phase"], "Starting");
+fn missing_turn_outcome_is_not_success() {
+    assert!(AcpTurnOutcome::Succeeded.is_success());
+    assert!(!AcpTurnOutcome::Cancelled.is_success());
+    assert!(!AcpTurnOutcome::Failed.is_success());
+    assert!(!AcpTurnOutcome::MaxTokens.is_success());
+    assert!(!AcpTurnOutcome::MaxTurnRequests.is_success());
+    assert!(!AcpTurnOutcome::Refused.is_success());
+}
 
+#[test]
+fn idle_session_keeps_history_out_of_the_open_turn() {
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    state.entries = vec![
+        AcpEntry::User("以前".into()),
+        AcpEntry::Assistant {
+            text: "好".into(),
+            thought: false,
+        },
+    ];
+    let (start, end) = state.open_turn_range();
+    assert_eq!((start, end), (2, 2));
+    let live = SessionLive::from_state(&state);
+    assert_eq!(live.history_len, Some(2));
+    assert!(live.open_turn.is_empty());
+
+    state.phase = DaemonPhase::Thinking;
+    state.turn_started_at_ms = Some(1);
+    state.entries.push(AcpEntry::User("现在".into()));
+    let snapshot = state.to_snapshot_range(false, state.open_turn_range().0, state.entries.len());
+    assert_eq!(snapshot.entries.len(), 1);
+    assert!(matches!(snapshot.entries[0], AcpEntry::User(ref text) if text == "现在"));
+}
+
+#[test]
+fn snapshot_phase_round_trips_daemon_phase() {
+    for phase in [
+        DaemonPhase::Connecting,
+        DaemonPhase::Thinking,
+        DaemonPhase::ExecutingTool,
+        DaemonPhase::AwaitingApproval,
+        DaemonPhase::WaitingForUser,
+        DaemonPhase::Succeeded,
+        DaemonPhase::Failed,
+        DaemonPhase::Idle,
+        DaemonPhase::Dead,
+    ] {
+        let mut state = AcpSessionState::default();
+        state.phase = phase;
+        if phase == DaemonPhase::Dead {
+            state.end_reason = "超时".into();
+        }
+        let value = serde_json::to_value(state.to_snapshot(true)).unwrap();
+        let parsed: ConversationSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.phase, phase, "{phase:?} 不能在快照往返后改名");
+        if phase == DaemonPhase::Dead {
+            assert_eq!(parsed.end_reason, "超时");
+        }
+    }
+
+    let mut executing = AcpSessionState::default();
+    executing.phase = DaemonPhase::ExecutingTool;
+    let wire = serde_json::to_value(executing.to_snapshot(true)).unwrap();
+    assert_eq!(wire["phase"], "executing_tool");
+
+    let mut ended = AcpSessionState::default();
     force_end(
-        &mut starting,
+        &mut ended,
         AcpEndKind::TransportDisconnected,
         "连接意外中断",
     );
-    let ended = serde_json::to_value(starting.to_snapshot(true)).unwrap();
-    assert_eq!(ended["phase"]["Ended"], "连接意外中断");
+    let ended_wire = serde_json::to_value(ended.to_snapshot(true)).unwrap();
+    assert_eq!(ended_wire["phase"], "dead");
+    assert_eq!(ended_wire["end_reason"], "连接意外中断");
 
-    let parsed: ConversationSnapshot = serde_json::from_value(serde_json::json!({
+    let legacy = serde_json::json!({
         "entries": [],
-        "phase": {"Ended": "超时"},
         "pending_elicitation": null,
         "supports_image": true,
         "available_commands": [],
         "config_options": [],
         "completed_unread": false,
         "should_persist": true,
-    }))
-    .unwrap();
-    assert_eq!(parsed.phase, DaemonPhase::Dead);
-    assert_eq!(parsed.end_reason, "超时");
-    assert_eq!(parsed.tool_debug, None);
-    assert_eq!(parsed.runtime_debug, None);
-
-    let choice: ConversationSnapshot = serde_json::from_value(serde_json::json!({
-        "entries": [],
-        "phase": "AwaitingChoice",
-        "pending_elicitation": null,
-        "supports_image": true,
-        "available_commands": [],
-        "config_options": [],
-        "completed_unread": false,
-        "should_persist": true,
-    }))
-    .unwrap();
-    assert_eq!(choice.phase, DaemonPhase::WaitingForUser);
+    });
+    let mut current = legacy.clone();
+    current["phase"] = serde_json::json!("idle");
+    let parsed: ConversationSnapshot = serde_json::from_value(current).unwrap();
+    assert!(matches!(parsed.phase, DaemonPhase::Idle));
+    for wire in ["Starting", "Idle", "Running", "AwaitingChoice"] {
+        let mut value = legacy.clone();
+        value["phase"] = serde_json::json!(wire);
+        assert!(
+            serde_json::from_value::<ConversationSnapshot>(value).is_err(),
+            "{wire} 不能再进快照"
+        );
+    }
+    let mut ended = legacy;
+    ended["phase"] = serde_json::json!({"Ended": "握手超时"});
+    assert!(serde_json::from_value::<ConversationSnapshot>(ended).is_err());
 }
 
 #[test]
@@ -967,7 +1052,10 @@ fn runtime_debug_event_round_trips_through_authoritative_snapshots() {
         model_call: None,
     };
 
-    let outcome = apply_event(&mut state, ConversationEvent::RuntimeDebug(debug.clone()));
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::RuntimeDebug(Box::new(debug.clone())),
+    );
     assert!(
         !outcome.should_persist,
         "大体积审计事件不应单独触发流式落盘"
@@ -1514,6 +1602,44 @@ fn streaming_updates_keep_awaiting_approval_while_a_card_is_pending() {
 
     select_permission(&mut s, "tool-1", "allow");
     assert!(matches!(s.phase, DaemonPhase::Thinking));
+}
+
+#[test]
+fn background_notice_is_a_status_line_and_not_a_user_turn() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Idle;
+    state.awaiting_user_echo = true;
+    let note = crate::acp_chat::TaskNote {
+        id: "bg-1".into(),
+        title: "编译".into(),
+        status: "failed".into(),
+        exit_code: Some(1),
+        output_tail: "error: boom".into(),
+    };
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::BackgroundNotice(note.clone()),
+    );
+    assert!(outcome.should_persist);
+    assert!(state.awaiting_user_echo);
+    assert!(matches!(state.phase, DaemonPhase::Idle));
+    assert!(state.turn_started_at_ms.is_none());
+    assert_eq!(state.turn_seq, 0);
+    match state.entries.last() {
+        Some(AcpEntry::TaskNote(saved)) => {
+            assert_eq!(saved, &note);
+            assert!(saved.summary().contains("退出码 1"));
+            assert!(saved.summary().contains("失败"));
+        }
+        other => panic!("结束说明必须是状态行，不能是用户气泡：{other:?}"),
+    }
+    assert!(
+        state
+            .entries
+            .iter()
+            .all(|entry| !matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+    );
+    assert!(crate::acp_chat::auto_title(&state.entries).is_none());
 }
 
 /// 回合失败 != 会话结束。曾经 `session/prompt` 的错误响应会一路拖垮连接，
@@ -2236,6 +2362,7 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
         ConversationEvent::ComposerRestore {
             revision: 1,
             texts: vec!["换方向".into(), "总结".into()],
+            images: Vec::new(),
         },
     );
     let snap = state.to_snapshot(false);
@@ -2260,6 +2387,7 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
         ConversationEvent::ComposerRestore {
             revision: 1,
             texts: vec!["旧草稿".into()],
+            images: Vec::new(),
         },
     );
 
@@ -2273,6 +2401,7 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
         ConversationEvent::ComposerRestore {
             revision: 2,
             texts: vec!["新草稿".into()],
+            images: Vec::new(),
         },
     );
     assert!(
@@ -2281,6 +2410,23 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
     );
     assert_eq!(state.composer_restore_revision, 2);
     assert_eq!(state.composer_restore_texts, ["新草稿"]);
+
+    let image = crate::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    };
+    apply_event(
+        &mut state,
+        ConversationEvent::ComposerRestore {
+            revision: 3,
+            texts: Vec::new(),
+            images: vec![image.clone()],
+        },
+    );
+    assert_eq!(state.composer_restore_images, vec![image]);
+    assert!(acknowledge_composer_restore(&mut state, 3));
+    assert!(state.composer_restore_images.is_empty());
+    assert_eq!(state.composer_restore_revision, 3);
 }
 
 #[test]
@@ -2349,6 +2495,7 @@ fn withdrawing_steering_does_not_leave_a_user_bubble() {
         ConversationEvent::ComposerRestore {
             revision: 1,
             texts: vec!["打算".into()],
+            images: Vec::new(),
         },
     );
 

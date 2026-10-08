@@ -41,6 +41,14 @@ void main() {
     expect(theme.foreground, const Color(0xff24292e));
     expect(theme.cursor, const Color(0xff0969da));
     expect(theme.selection, const Color(0xffadd6ff));
+    final displayed = SmeltTerminalTheme.forDisplay(theme);
+    expect(
+      displayed.selection,
+      const Color(
+        0xffadd6ff,
+      ).withValues(alpha: SmeltTerminalTheme.selectionOverlayAlpha),
+    );
+    expect(displayed.background, theme.background);
     expect(theme.black, const Color(0xff3f4654));
     expect(theme.brightWhite, const Color(0xff1a1b26));
     expect(theme.searchHitBackground, const Color(0xffffe9a8));

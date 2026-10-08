@@ -565,6 +565,7 @@ pub struct EventHub {
     ephemeral_sequence: AtomicU64,
     metrics: Metrics,
     writer: Option<DurableWriter>,
+    work_notify: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl EventHub {
@@ -585,6 +586,45 @@ impl EventHub {
             ephemeral_sequence: AtomicU64::new(0),
             metrics: Metrics::default(),
             writer,
+            work_notify: Mutex::new(None),
+        }
+    }
+
+    pub fn set_work_notify(&self, sender: mpsc::Sender<()>) {
+        if let Ok(mut slot) = self.work_notify.lock() {
+            *slot = Some(sender);
+        }
+    }
+
+    fn poke_work(&self) {
+        let Ok(slot) = self.work_notify.lock() else {
+            return;
+        };
+        if let Some(sender) = slot.as_ref() {
+            let _ = sender.send(());
+        }
+    }
+
+    /// 最近一次还没到的 durable 重试还要等多久。
+    /// 已经到期是 `Some(0)`，没有在等的重试是 `None`。
+    pub fn next_durable_retry_delay(&self) -> Option<Duration> {
+        let subscribers = self.subscribers.lock().ok()?;
+        let now = now_unix_ms();
+        let mut earliest: Option<u64> = None;
+        for subscriber in subscribers.values() {
+            let Some(retry) = &subscriber.retry else {
+                continue;
+            };
+            earliest = Some(match earliest {
+                Some(at) => at.min(retry.next_attempt_at_ms),
+                None => retry.next_attempt_at_ms,
+            });
+        }
+        let earliest = earliest?;
+        if now >= earliest {
+            Some(Duration::ZERO)
+        } else {
+            Some(Duration::from_millis(earliest.saturating_sub(now)))
         }
     }
 
@@ -947,7 +987,9 @@ impl EventHub {
             .published_wire_bytes
             .fetch_add(stored.wire_bytes.len() as u64, Ordering::Relaxed);
         match descriptor.delivery {
-            DeliveryClass::Durable => self.notify_durable_subscribers()?,
+            DeliveryClass::Durable => {
+                self.notify_durable_subscribers().map(|_| ())?;
+            }
             DeliveryClass::Ephemeral => self.deliver_ephemeral(&stored)?,
         }
         Ok(stored)
@@ -982,7 +1024,7 @@ impl EventHub {
         self.metrics
             .published_wire_bytes
             .fetch_add(event.wire_bytes.len() as u64, Ordering::Relaxed);
-        self.notify_durable_subscribers()
+        self.notify_durable_subscribers().map(|_| ())
     }
 
     pub fn flush_durable(&self) -> Result<(), EventBusError> {
@@ -1184,7 +1226,7 @@ impl EventHub {
         result
     }
 
-    fn notify_durable_subscribers(&self) -> Result<(), EventBusError> {
+    fn notify_durable_subscribers(&self) -> Result<usize, EventBusError> {
         let subscriptions = self
             .subscribers
             .lock()
@@ -1193,14 +1235,20 @@ impl EventHub {
             .filter(|(_, subscriber)| subscriber.delivery == DeliveryClass::Durable)
             .map(|((plugin_id, subscription_id), _)| (plugin_id.clone(), subscription_id.clone()))
             .collect::<Vec<_>>();
+        let mut delivered: usize = 0;
         for (plugin_id, subscription_id) in subscriptions {
-            self.dispatch_durable(&plugin_id, &subscription_id, DEFAULT_DURABLE_LOAD_BATCH)?;
+            delivered = delivered.saturating_add(self.dispatch_durable(
+                &plugin_id,
+                &subscription_id,
+                DEFAULT_DURABLE_LOAD_BATCH,
+            )?);
         }
-        Ok(())
+        Ok(delivered)
     }
 
     /// Retries durable delivery independently of new publishes or client acknowledgements.
-    pub fn pump_durable_subscribers(&self) -> Result<(), EventBusError> {
+    /// 返回这一轮实际交出去的条数。邮箱满了交不出时是 0，调用方应等下一次确认，不要空转。
+    pub fn pump_durable_subscribers(&self) -> Result<usize, EventBusError> {
         self.notify_durable_subscribers()
     }
 
@@ -1302,6 +1350,8 @@ impl EventHub {
             .entry((plugin_id.clone(), ack.subscription_id.clone()))
             .or_default();
         *cursor = (*cursor).max(contiguous);
+        drop(cursors);
+        self.poke_work();
         Ok(())
     }
 
@@ -1368,6 +1418,7 @@ impl EventHub {
                     .expect("validated inflight event");
                 subscriber.scan_watermark = subscriber.ack_watermark;
                 subscriber.retry = Some(retry);
+                self.poke_work();
                 return Ok(());
             }
             DeadLetter {

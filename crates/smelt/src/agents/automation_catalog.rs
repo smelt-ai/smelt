@@ -3,8 +3,7 @@
 //! 版式跟 Grok Bot 自动化页：顶栏分段 + 已有任务表 + 模板画廊。
 
 use super::automation_templates::{
-    AutomationTemplate, AutomationTemplateCategory, AutomationTemplateGlyph,
-    AutomationTemplateTint, filtered_templates,
+    AutomationTemplate, AutomationTemplateCategory, AutomationTemplateGlyph, filtered_templates,
 };
 use super::*;
 
@@ -15,15 +14,13 @@ impl Workspace {
     pub(super) fn render_automations_catalog_header(
         &self,
         entity: Entity<Workspace>,
+        left_guard: Pixels,
     ) -> AnyElement {
         let tab = self.automation_surface.catalog_tab;
         let tasks_entity = entity.clone();
         let runs_entity = entity.clone();
         let add_entity = entity;
-        automation_catalog_column()
-            .py_4()
-            .flex()
-            .items_center()
+        product_page_chrome(left_guard)
             .justify_between()
             .gap_3()
             .child(
@@ -34,7 +31,7 @@ impl Workspace {
                     .rounded_full()
                     .bg(rgb(crate::ui_theme::bg_card()))
                     .border_1()
-                    .border_color(rgb(crate::ui_theme::border_mid()))
+                    .border_color(crate::ui_theme::card_stroke())
                     .child(catalog_tab_pill(
                         "automations-tab-tasks",
                         "自动化任务",
@@ -156,9 +153,10 @@ impl Workspace {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .children(runs.into_iter().enumerate().map(|(index, run)| {
-                        self.render_catalog_run_row(index, run, entity.clone(), cx)
-                    }))
+                    .children(
+                        runs.into_iter()
+                            .map(|run| self.render_catalog_run_row(run, entity.clone(), cx)),
+                    )
                     .into_any_element()
             })
     }
@@ -240,7 +238,6 @@ impl Workspace {
             automation.name.clone()
         };
         let schedule = automation.trigger.summary();
-        let tint = automation_accent_color(&automation.id);
         let open_id = automation.id.clone();
         let open_entity = entity.clone();
         let menu =
@@ -263,7 +260,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(automation_glyph_mark(IconName::Cpu, tint, 28.))
+                    .child(neutral_icon_mark(IconName::Cpu, 28.))
                     .child(
                         div()
                             .flex_1()
@@ -289,28 +286,21 @@ impl Workspace {
                     ),
             )
             .child(
-                div()
-                    .w(px(168.))
-                    .flex_shrink_0()
+                automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                     .text_xs()
                     .text_color(rgb(crate::ui_theme::text_muted()))
                     .truncate()
                     .child(schedule),
             )
             .child(
-                div()
-                    .w(px(96.))
-                    .flex_shrink_0()
+                automation_fixed_col(AUTOMATION_COL_NEXT)
                     .text_xs()
                     .text_color(rgb(crate::ui_theme::text_muted()))
                     .truncate()
                     .child(next_run),
             )
             .child(
-                div()
-                    .w(px(108.))
-                    .flex_shrink_0()
-                    .child(automation_status_cell(status)),
+                automation_fixed_col(AUTOMATION_COL_STATUS).child(automation_status_cell(status)),
             )
             .child(
                 div()
@@ -329,10 +319,9 @@ impl Workspace {
 
     fn render_catalog_run_row(
         &self,
-        index: usize,
         run: smelt_core::automation::AutomationRun,
         entity: Entity<Workspace>,
-        cx: &App,
+        _cx: &App,
     ) -> AnyElement {
         let at = run.finished_at.unwrap_or(run.created_at);
         let source = run_source_label(run.source);
@@ -347,12 +336,10 @@ impl Workspace {
             .as_deref()
             .filter(|_| run.status == smelt_core::automation::AutomationRunStatus::Failed)
             .map(compact_instructions);
-        let open_entity = entity.clone();
-        let run_id = run.id.clone();
-        let view_entity = entity;
-        let view_session_id = run.session_id;
+        let open_entity = entity;
+        let run_id = run.id;
         div()
-            .id(("automation-catalog-run", index))
+            .id(format!("automation-catalog-run-{run_id}"))
             .w_full()
             .px_4()
             .py_3()
@@ -362,53 +349,17 @@ impl Workspace {
             .cursor_pointer()
             .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_medium()
-                            .text_color(cx.theme().foreground)
-                            .truncate()
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .truncate()
-                            .child(format!("{source} · {status} · {}", format_unix_local(at))),
-                    )
-                    .children(error.map(|error| {
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().danger)
-                            .truncate()
-                            .child(error)
-                    })),
+                automation_run_lines(
+                    name,
+                    format!("{source} · {status} · {}", format_unix_local(at)),
+                    error,
+                )
+                .flex_1(),
             )
-            .children(view_session_id.map(|session_id| {
-                Button::new(format!("automation-catalog-run-view-{run_id}"))
-                    .ghost()
-                    .small()
-                    .icon(IconName::Eye)
-                    .tooltip("查看运行")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        let session_id = session_id.clone();
-                        view_entity.update(cx, |workspace, cx| {
-                            workspace.open_automation_run_session(&session_id, window, cx)
-                        });
-                    })
-            }))
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 let run_id = run_id.clone();
                 open_entity.update(cx, |workspace, cx| {
-                    workspace.open_catalog_automation_run(run_id, cx)
+                    workspace.open_catalog_automation_run(run_id, window, cx)
                 });
             })
             .into_any_element()
@@ -503,6 +454,15 @@ fn automation_catalog_column() -> Div {
     div().w_full().max_w(px(CATALOG_MAX_WIDTH)).mx_auto().px_6()
 }
 
+const AUTOMATION_COL_SCHEDULE: f32 = 168.;
+const AUTOMATION_COL_NEXT: f32 = 96.;
+const AUTOMATION_COL_STATUS: f32 = 108.;
+const AUTOMATION_COL_MENU: f32 = 32.;
+
+fn automation_fixed_col(width: f32) -> Div {
+    div().w(px(width)).flex_shrink_0()
+}
+
 fn catalog_tab_pill(
     id: impl Into<ElementId>,
     label: &'static str,
@@ -551,30 +511,24 @@ fn automation_table_header() -> AnyElement {
                 .child("自动化任务"),
         )
         .child(
-            div()
-                .w(px(168.))
-                .flex_shrink_0()
+            automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child("日程"),
         )
         .child(
-            div()
-                .w(px(96.))
-                .flex_shrink_0()
+            automation_fixed_col(AUTOMATION_COL_NEXT)
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child("下次运行"),
         )
         .child(
-            div()
-                .w(px(108.))
-                .flex_shrink_0()
+            automation_fixed_col(AUTOMATION_COL_STATUS)
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child("状态"),
         )
-        .child(div().w(px(32.)).flex_shrink_0())
+        .child(automation_fixed_col(AUTOMATION_COL_MENU))
         .into_any_element()
 }
 
@@ -587,11 +541,11 @@ fn render_automation_row_menu(
 ) -> AnyElement {
     let run_id = automation_id.to_string();
     let toggle_id = automation_id.to_string();
-    let history_id = automation_id.to_string();
+    let task_id = automation_id.to_string();
     let delete_id = automation_id.to_string();
     let run_entity = entity.clone();
     let toggle_entity = entity.clone();
-    let history_entity = entity.clone();
+    let task_entity = entity.clone();
     let delete_entity = entity.clone();
     let cancel_entity = entity;
     Button::new(format!("automation-row-more-{automation_id}"))
@@ -624,13 +578,13 @@ fn render_automation_row_menu(
                         }),
                 );
             }
-            let history_entity = history_entity.clone();
-            let history_id = history_id.clone();
+            let task_entity = task_entity.clone();
+            let task_id = task_id.clone();
             menu = menu.item(PopupMenuItem::new("查看运行").icon(IconName::Eye).on_click(
                 move |_, _, cx| {
-                    let id = history_id.clone();
-                    history_entity.update(cx, |workspace, cx| {
-                        workspace.open_catalog_automation_history(id, cx);
+                    let id = task_id.clone();
+                    task_entity.update(cx, |workspace, cx| {
+                        workspace.open_catalog_automation_task(id, cx);
                     });
                 },
             ));
@@ -665,7 +619,6 @@ fn render_automation_row_menu(
 fn render_template_card(template: &AutomationTemplate, entity: Entity<Workspace>) -> AnyElement {
     let id = template.id;
     let add_entity = entity;
-    let tint = template_tint_color(template.tint);
     agent_surface_card()
         .id(format!("automation-template-{id}"))
         .h_full()
@@ -681,11 +634,7 @@ fn render_template_card(template: &AutomationTemplate, entity: Entity<Workspace>
                 .items_start()
                 .justify_between()
                 .gap_2()
-                .child(automation_glyph_mark(
-                    template_icon(template.glyph),
-                    tint,
-                    32.,
-                ))
+                .child(neutral_icon_mark(template_icon(template.glyph), 32.))
                 .child(
                     Button::new(format!("automation-template-add-{id}"))
                         .ghost()
@@ -738,39 +687,26 @@ fn render_template_card(template: &AutomationTemplate, entity: Entity<Workspace>
         .into_any_element()
 }
 
-fn automation_glyph_mark(icon: IconName, tint: u32, size: f32) -> AnyElement {
-    div()
-        .size(px(size))
-        .rounded(px(8.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(crate::ui_theme::tint(tint, 0x28))
-        .child(
-            Icon::new(icon)
-                .size(px((size * 0.5).round()))
-                .text_color(rgb(tint)),
-        )
-        .into_any_element()
-}
-
 fn automation_status_cell(status: AutomationRowStatus) -> AnyElement {
-    let color = match status {
-        AutomationRowStatus::Active => crate::ui_theme::green(),
-        AutomationRowStatus::Running => crate::ui_theme::blue(),
-        AutomationRowStatus::Paused => crate::ui_theme::text_faint(),
+    let dot = match status {
+        AutomationRowStatus::Running => Some(crate::ui_theme::blue()),
         AutomationRowStatus::AgentMissing | AutomationRowStatus::Unavailable => {
-            crate::ui_theme::red()
+            Some(crate::ui_theme::red())
         }
+        AutomationRowStatus::Paused => Some(crate::ui_theme::text_faint()),
+        AutomationRowStatus::Active => None,
     };
-    let label = automation_row_status_label(status);
     div()
         .flex()
         .items_center()
-        .gap_1()
-        .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
-        .child(div().text_xs().text_color(rgb(color)).child(label))
+        .gap_1p5()
+        .children(dot.map(|color| div().size(px(6.)).rounded_full().bg(rgb(color))))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .child(automation_row_status_label(status)),
+        )
         .into_any_element()
 }
 
@@ -785,25 +721,5 @@ fn template_icon(glyph: AutomationTemplateGlyph) -> IconName {
         AutomationTemplateGlyph::BookOpen => IconName::BookOpen,
         AutomationTemplateGlyph::LayoutDashboard => IconName::LayoutDashboard,
         AutomationTemplateGlyph::TriangleAlert => IconName::TriangleAlert,
-    }
-}
-
-fn template_tint_color(tint: AutomationTemplateTint) -> u32 {
-    match tint {
-        AutomationTemplateTint::Blue => crate::ui_theme::blue(),
-        AutomationTemplateTint::Purple => crate::ui_theme::purple(),
-        AutomationTemplateTint::Green => crate::ui_theme::green(),
-        AutomationTemplateTint::Yellow => crate::ui_theme::yellow(),
-        AutomationTemplateTint::Accent => crate::ui_theme::accent(),
-    }
-}
-
-fn automation_accent_color(id: &str) -> u32 {
-    match id.bytes().fold(0u8, |acc, byte| acc.wrapping_add(byte)) % 5 {
-        0 => crate::ui_theme::blue(),
-        1 => crate::ui_theme::purple(),
-        2 => crate::ui_theme::green(),
-        3 => crate::ui_theme::yellow(),
-        _ => crate::ui_theme::accent(),
     }
 }

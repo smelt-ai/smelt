@@ -304,7 +304,8 @@ fn promote_staged_handoff_executable(
 }
 
 fn finalize_staged_handoff_executable() {
-    let came_from_handoff = std::env::var_os("SMELTD_HANDOFF").is_some();
+    let came_from_handoff = std::env::var_os("SMELTD_HANDOFF").is_some()
+        || std::env::var_os("SMELTD_HANDOFF_SOCK").is_some();
     let Ok(current) = std::env::current_exe() else {
         return;
     };
@@ -405,6 +406,10 @@ fn session_host_executable_from(
     };
     if path_has_inode(&current, dev, ino) {
         return Ok(current);
+    }
+    let stable = current.with_file_name("smeltd");
+    if stable.is_file() && path_has_inode(&stable, dev, ino) {
+        return Ok(stable);
     }
     Err(std::io::Error::other(format!(
         "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
@@ -1293,12 +1298,17 @@ fn handle_automation_command(
         Ok(applied)
     })();
     let response = match result {
-        Ok(applied) => serde_json::json!({
-            "ok": true,
-            "revision": applied.snapshot.revision,
-            "automations": webhook::annotate_snapshot(applied.snapshot),
-            "result": applied.result,
-        }),
+        Ok(applied) => {
+            if applied.changed {
+                automation_runtime::nudge_automation_driver();
+            }
+            serde_json::json!({
+                "ok": true,
+                "revision": applied.snapshot.revision,
+                "automations": webhook::annotate_snapshot(applied.snapshot),
+                "result": applied.result,
+            })
+        }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = writeln!(conn, "{response}");
@@ -1329,21 +1339,26 @@ fn handle_event_publish(
         Ok(applied)
     })();
     let response = match result {
-        Ok(applied) => serde_json::json!({
-            "ok": true,
-            "event_id": applied.published.event_id,
-            "topic": applied.published.topic,
-            "matched": applied.published.runs.len() + applied.published.already_recorded,
-            "accepted": applied.published.runs.len(),
-            "duplicate": applied.published.runs.is_empty()
-                && applied.published.already_recorded > 0,
-            "runs": applied.published.runs.iter().map(|run| serde_json::json!({
-                "id": run.id,
-                "automation_id": run.automation_id,
-                "status": run.status,
-            })).collect::<Vec<_>>(),
-            "revision": applied.snapshot.revision,
-        }),
+        Ok(applied) => {
+            if !applied.published.runs.is_empty() {
+                automation_runtime::nudge_automation_driver();
+            }
+            serde_json::json!({
+                "ok": true,
+                "event_id": applied.published.event_id,
+                "topic": applied.published.topic,
+                "matched": applied.published.runs.len() + applied.published.already_recorded,
+                "accepted": applied.published.runs.len(),
+                "duplicate": applied.published.runs.is_empty()
+                    && applied.published.already_recorded > 0,
+                "runs": applied.published.runs.iter().map(|run| serde_json::json!({
+                    "id": run.id,
+                    "automation_id": run.automation_id,
+                    "status": run.status,
+                })).collect::<Vec<_>>(),
+                "revision": applied.snapshot.revision,
+            })
+        }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = writeln!(conn, "{response}");
@@ -2011,7 +2026,54 @@ fn new_sessions() -> Sessions {
     Arc::new(TerminalRegistry::new())
 }
 
+/// 卸掉继承来的信号掩码。`posix_spawn` 复制的是调用线程的掩码，不是进程默认值。
+#[cfg(unix)]
+fn clear_inherited_signal_mask() {
+    unsafe {
+        let mut empty = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn clear_inherited_signal_mask() {}
+
+#[cfg(all(test, unix))]
+#[test]
+fn startup_clears_inherited_sigchld_mask() {
+    unsafe {
+        let mut blocked = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGCHLD);
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()),
+            0
+        );
+        let mut current = std::mem::zeroed();
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current),
+            0
+        );
+        assert_eq!(libc::sigismember(&current, libc::SIGCHLD), 1);
+    }
+    clear_inherited_signal_mask();
+    unsafe {
+        let mut current = std::mem::zeroed();
+        assert_eq!(
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current),
+            0
+        );
+        assert_eq!(libc::sigismember(&current, libc::SIGCHLD), 0);
+    }
+}
+
 fn main() {
+    // GUI 从 libdispatch 工作线程 posix_spawn 本进程时，会把那套「屏蔽 SIGCHLD」
+    // 的线程掩码遗传进来。async-process 靠 SIGCHLD 回收子进程；掩码不清掉，
+    // Pi 退出后 status() 永远等不到通知，会话就停在「正在启动」。
+    // 必须赶在任何 thread::spawn / 再拉起 session host 之前做，新建线程才会复制空掩码。
+    clear_inherited_signal_mask();
     // Grok/CI 会给进程打 NO_COLOR=1。必须在任何线程/子进程之前卸掉，否则
     // 交互式 PTY（agy 等）会继承关色开关，整屏只剩默认灰白。
     smelt_core::tty_color::clear_process();
@@ -2336,8 +2398,8 @@ fn wait_for_predecessor_exit(sock: &UnixStream, timeout: Duration) {
 ///   从 `current_exe()` 派生，必须跟主进程同版。
 /// - ACP/peer 忙：不自判，直接发 upgrade op 让 handler 回 busy（单一数据源），
 ///   等下一轮。
-/// 发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
-/// COMMIT 后本进程 exit，线程随之死，无需清理。
+///   发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
+///   COMMIT 后本进程 exit，线程随之死，无需清理。
 fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
     let Some(pinned) = daemon_fingerprint else {
         return;
@@ -2471,46 +2533,38 @@ fn run_serve_loop(
         Arc::clone(&iroh_connections),
     );
 
-    // 受管 bun 跟 helper 一样是版本单元：锁定版本变了由守护代用户下载并清旧目录，
-    // 不堵 accept 循环。ACP 启动路径会再 ensure 一次（同目录锁串行）。
-    // 受管 bun 既是 ACP 适配器的运行时，也是脚本插件的运行时。首次下载完成时插件集
-    // 可能已经按"没有 bun"起过一轮了，所以下完要把它重新拉起来。
-    std::thread::spawn(|| {
-        let had_bun = smelt_core::managed_runtime::managed_bun_path_if_ready().is_some();
-        match smelt_core::managed_runtime::sync_managed_bun(&|message| {
-            smelt_core::app_log::info("bun", message)
-        }) {
-            Ok(runtime) => {
-                smelt_core::app_log::info(
-                    "bun",
-                    &format!("受管 bun 已就绪：{}", runtime.path.display()),
-                );
-                if !had_bun {
-                    plugin_runtime::reload_for_runtime_change();
+    // 先钉死插件集身份，再异步准备受管 Bun。插件 supervisor 只消费同步成功
+    // 返回的 runtime + lease，不再通过全局 current 指针猜测可用性。同步失败使用
+    // 有上限退避持续重试，不会把一次瞬时错误变成守护进程生命周期内的永久故障。
+    // handoff 时 Bun 就绪后仍需等 predecessor EOF，避免两套用户插件并存。
+    plugin_runtime::prepare(daemon_fingerprint.clone());
+    std::thread::spawn(move || {
+        let mut attempt = 0_u32;
+        let runtime = loop {
+            match smelt_core::managed_runtime::sync_managed_bun(&|message| {
+                smelt_core::app_log::info("bun", message)
+            }) {
+                Ok(runtime) => break runtime,
+                Err(error) => {
+                    attempt = attempt.saturating_add(1);
+                    let delay = plugin_runtime::bootstrap_retry_delay(attempt);
+                    smelt_core::app_log::warn(
+                        "bun",
+                        &format!("同步受管 bun 失败：{error}；{} 秒后重试", delay.as_secs()),
+                    );
+                    thread::sleep(delay);
                 }
             }
-            Err(error) => {
-                smelt_core::app_log::warn("bun", &format!("同步受管 bun 失败：{error}"));
-            }
+        };
+        smelt_core::app_log::info(
+            "bun",
+            &format!("受管 bun 已就绪：{}", runtime.path.display()),
+        );
+        if let Some(sock) = handoff_sock {
+            wait_for_predecessor_exit(&sock, Duration::from_secs(10));
         }
+        plugin_runtime::start(runtime);
     });
-
-    // 插件启动：正常启动立即起；交接过来则等 predecessor EOF（=老插件已停
-    // +老进程已退）再起，避免新旧两套 user 插件同时在线。终端/ACP 不等——
-    // 它们已经恢复，accept 立刻开始服务。
-    match handoff_sock {
-        None => plugin_runtime::start(daemon_fingerprint.clone()),
-        Some(sock) => {
-            let fingerprint = daemon_fingerprint.clone();
-            std::thread::Builder::new()
-                .name("smelt-handoff-plugin-wait".into())
-                .spawn(move || {
-                    wait_for_predecessor_exit(&sock, Duration::from_secs(10));
-                    plugin_runtime::start(fingerprint);
-                })
-                .ok();
-        }
-    }
 
     // headless 空闲自升级：没有观看连接时磁盘新了没人触发 upgrade，这里兜底。
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
@@ -3020,6 +3074,11 @@ fn cleanup_hosted_acp_processes(
     }
 }
 
+/// 握手还没完成的宿主没有可保留的回合。换代时收养它，旧进程里已经卡住的等待会活过升级。
+fn hosted_handoff_keeps_process(phase: smelt_core::daemon_state::DaemonPhase) -> bool {
+    !matches!(phase, smelt_core::daemon_state::DaemonPhase::Connecting)
+}
+
 fn resume_hosted_acp_handoff_item(
     validated: ValidatedHostedAcpHandoff,
     acp_sessions: &AcpSessions,
@@ -3054,6 +3113,7 @@ fn resume_hosted_acp_handoff_item(
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
         return;
     }
+    let keep_host = hosted_handoff_keeps_process(reduced.phase);
     let prompt_in_flight = reduced.turn_started_at_ms.is_some()
         || matches!(
             reduced.phase,
@@ -3081,7 +3141,10 @@ fn resume_hosted_acp_handoff_item(
         connection_generation: AtomicU64::new(0),
         turn_completion: Mutex::new(()),
         prompt_in_flight: AtomicBool::new(prompt_in_flight),
+        automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        unaccepted_prompt: Mutex::new(None),
+        provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),
         host_snapshot_revision: AtomicU64::new(host_snapshot_revision),
         handle: Mutex::new(None),
@@ -3111,6 +3174,40 @@ fn resume_hosted_acp_handoff_item(
         eprintln!("[acp] 拒绝宿主 handoff 会话 {id}：{error}");
         acp_sessions.remove_if_same(&id, &slot);
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
+        return;
+    }
+
+    if !keep_host {
+        let resume_id = slot
+            .value
+            .reduced
+            .lock()
+            .unwrap()
+            .history_session_id
+            .clone();
+        let launch = slot
+            .value
+            .launch_spec
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("交接条目刚写入启动规格");
+        cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
+        // 临时环境故意不进交接记录（凭据不跨 exec）。分叉切点也只活在旧宿主里。
+        // 重开只用交接里已经有的启动规格和 history id，和冷启动同一份持久状态。
+        dlog(&format!(
+            "handoff: ACP session host {id} 仍在握手，丢弃旧宿主并重新拉起"
+        ));
+        acp_relaunch(
+            &slot,
+            &id,
+            launch,
+            resume_id,
+            None,
+            None,
+            Arc::clone(acp_sessions),
+            event_hub,
+        );
         return;
     }
 
@@ -3564,6 +3661,13 @@ pub(crate) fn resume_from_value(
             .conversation_state
             .as_ref()
             .and_then(|state| state.agent_session.clone());
+        let reload_history = snapshot.history_omitted;
+        let open_turn = if snapshot.history_omitted {
+            snapshot.entries.clone()
+        } else {
+            Vec::new()
+        };
+        let reload_cwd = cwd.clone();
         let reduced = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
         // `from_snapshot` 会收尾已结束回合中永远不会补到的工具终态。必须在
         // 这一步之后再决定是否恢复活跃 RPC；否则 `Idle + Pending tool` 已经
@@ -3598,7 +3702,10 @@ pub(crate) fn resume_from_value(
             connection_generation: AtomicU64::new(0),
             turn_completion: Mutex::new(()),
             prompt_in_flight: AtomicBool::new(recover_running_turn),
+            automation_watch: Mutex::new(None),
             pending_prompts: Mutex::new(VecDeque::new()),
+            unaccepted_prompt: Mutex::new(None),
+            provider_hold: AtomicBool::new(false),
             hosted_handle: Mutex::new(None),
             host_snapshot_revision: AtomicU64::new(0),
             handle: Mutex::new(None),
@@ -3658,6 +3765,9 @@ pub(crate) fn resume_from_value(
                     supports_image,
                     pending_raw_line,
                     recover_running_turn,
+                    reload_history,
+                    cwd: reload_cwd.map(std::path::PathBuf::from),
+                    open_turn,
                 },
             );
             let event_rx = handle.event_rx.clone();
@@ -3805,8 +3915,8 @@ fn handle_upgrade(
     listen_fd: RawFd,
 ) {
     let mut c = conn;
-    // 可选 `"exe":"/path/to/smeltd"`：spawn 指定二进制做 successor（暂存
-    // `.next` 由事务内先扶正到正式路径再 spawn）；未传则 spawn current_exe。
+    // 可选 `"exe":"/path/to/smeltd"`：spawn 指定二进制做 successor。暂存
+    // `.next` 原样 exec，COMMIT 之后才扶正到正式路径。未传则 spawn current_exe。
     let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let path = std::path::PathBuf::from(p);
         if !path.is_file() {

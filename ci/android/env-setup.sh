@@ -176,9 +176,9 @@ setup_rust() {
       continue
     fi
     [[ "$CHECK_ONLY" == 1 ]] && die "缺少 Rust target ${target}（--check 模式不安装）"
-    info "安装 Rust target $target（$REQUIRED_RUST）"
+    info "安装 Rust target ${target}（${REQUIRED_RUST}）"
     "$rustup_bin" target add "$target" --toolchain "$REQUIRED_RUST" \
-      || die "安装 Rust target $target 失败"
+      || die "安装 Rust target ${target} 失败"
   done
 }
 

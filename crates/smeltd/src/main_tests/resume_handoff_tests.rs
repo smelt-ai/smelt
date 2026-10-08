@@ -773,6 +773,70 @@ fn handoff_launch_prefers_structured_spec_over_legacy_cmd() {
 }
 
 #[test]
+fn connecting_hosted_handoff_does_not_keep_the_process() {
+    use smelt_core::daemon_state::DaemonPhase;
+    use std::os::unix::io::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+
+    assert!(hosted_handoff_keeps_process(DaemonPhase::Idle));
+    assert!(hosted_handoff_keeps_process(DaemonPhase::Thinking));
+
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn stand-in host");
+    let host_pid = child.id() as i32;
+    // 不 wait，避免和 cleanup 的 waitpid 抢同一个 child。
+    std::mem::forget(child);
+    let (kept, handed) = UnixStream::pair().expect("socketpair");
+    let host_fd = handed.into_raw_fd();
+    let mut snapshot = sample_snapshot("hist-connecting");
+    snapshot.phase = DaemonPhase::Connecting;
+    snapshot.history_session_id = Some("hist-connecting".into());
+    let sessions = new_test_acp_sessions();
+    resume_hosted_acp_handoff_item(
+        ValidatedHostedAcpHandoff {
+            id: "acp-connecting".into(),
+            owned: OwnedHostedAcpHandoff {
+                host_pid,
+                host_fd,
+                provider_pid: None,
+            },
+            snapshot,
+            host_snapshot_revision: 1,
+            cwd: None,
+            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("/usr/bin/true"),
+            runtime_spec_fingerprint: None,
+            agent_mcp: false,
+            agent_token: String::new(),
+            agent_needs_transcript_check: false,
+            conversation_binding: None,
+        },
+        &sessions,
+        &no_subs(),
+        std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+    );
+    assert_eq!(
+        unsafe { libc::kill(host_pid, 0) },
+        -1,
+        "握手中的旧宿主必须被关掉，不能收养"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    if let Some(slot) = sessions.get("acp-connecting") {
+        let _ = retire_acp_runtime(&slot.value);
+    }
+    drop(kept);
+}
+
+#[test]
 fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
     let mut snapshot = sample_snapshot("sid-hosted");
     snapshot.phase = smelt_core::daemon_state::DaemonPhase::AwaitingApproval;

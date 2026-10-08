@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	formatSkillsForPrompt,
 	type ExtensionAPI,
@@ -5,6 +6,8 @@ import {
 	type Skill,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
+import { runHandoffCompaction } from "./handoff-compaction.ts";
+import { shakeMessages } from "./shake.ts";
 
 export const SMELT_CONTEXT_USAGE_WIDGET = "smelt-context-usage";
 export const SMELT_RUNTIME_DEBUG_WIDGET = "smelt-runtime-debug";
@@ -586,12 +589,27 @@ export function captureProviderResponse(
 	};
 }
 
+/** 每次调用都保存完整请求。窗口再大，内存会按回合数叠上去。 */
+export const MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS = 4;
+/** 每次压缩都保存被摘要的原文。只留最近几次。 */
+export const MAX_RETAINED_RUNTIME_DEBUG_COMPACTIONS = 4;
+
 export function appendRuntimeDebugModelCall(
 	calls: RuntimeDebugModelCall[],
 	call: RuntimeDebugModelCall,
 ): RuntimeDebugModelCall[] {
 	calls.push(call);
+	const overflow = calls.length - MAX_RETAINED_RUNTIME_DEBUG_MODEL_CALLS;
+	if (overflow > 0) calls.splice(0, overflow);
 	return calls;
+}
+
+export function retainRuntimeDebugCompactions(
+	compactions: RuntimeDebugCompaction[],
+): { compactions: RuntimeDebugCompaction[]; omitted: number } {
+	const overflow = compactions.length - MAX_RETAINED_RUNTIME_DEBUG_COMPACTIONS;
+	if (overflow <= 0) return { compactions, omitted: 0 };
+	return { compactions: compactions.slice(overflow), omitted: overflow };
 }
 
 function updateRuntimeDebugModelCall(
@@ -716,6 +734,12 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 		let compactionsOmitted = 0;
 		let runtimeDebugDirty = false;
 
+		const rememberCompactions = (next: RuntimeDebugCompaction[]) => {
+			const retained = retainRuntimeDebugCompactions(next);
+			compactionsOmitted += retained.omitted;
+			compactions = retained.compactions;
+		};
+
 		const flushRuntimeDebug = (ctx: ExtensionContext) => {
 			if (!runtimeDebugDirty) return;
 			publishRuntimeDebug(
@@ -730,7 +754,11 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 			runtimeDebugDirty = false;
 		};
 
-		const publishFrom = (ctx: ExtensionContext, systemPrompt: string) => {
+		const publishFrom = (
+			ctx: ExtensionContext,
+			systemPrompt: string,
+			activeMessages?: ContextUsageParts["messages"],
+		) => {
 			let tools: ContextUsageTool[] = [];
 			try {
 				const active = new Set(pi.getActiveTools());
@@ -755,7 +783,7 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					contextFiles: lastOptions.contextFiles,
 					skills: lastOptions.skills,
 					tools,
-					messages: messagesFromSession(ctx),
+					messages: activeMessages ?? messagesFromSession(ctx),
 				}),
 			);
 		};
@@ -781,8 +809,16 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 			};
 			publishFrom(ctx, event.systemPrompt);
 		});
-		pi.on("context", (_event, ctx) => {
-			publishFrom(ctx, ctx.getSystemPrompt());
+		pi.on("context", (event, ctx) => {
+			const shakeResult = shakeMessages(event.messages);
+			let effectiveMessages: ContextUsageParts["messages"] = event.messages;
+			if (shakeResult.shakenCount > 0) {
+				effectiveMessages = shakeResult.messages;
+			}
+			publishFrom(ctx, ctx.getSystemPrompt(), effectiveMessages);
+			if (shakeResult.shakenCount > 0) {
+				return { messages: shakeResult.messages };
+			}
 		});
 		pi.on("context_with_system", (event, ctx) => {
 			if (pendingModelCallSequence !== undefined) {
@@ -791,6 +827,7 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 			}
 			modelCallSequence += 1;
 			const sequence = modelCallSequence;
+			const modelCallsBefore = modelCalls.length;
 			modelCalls = appendRuntimeDebugModelCall(
 				modelCalls,
 				capturePiContext(
@@ -811,6 +848,7 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					activeCompactionSequence,
 				),
 			);
+			modelCallsOmitted += modelCallsBefore + 1 - modelCalls.length;
 			pendingModelCallSequence = sequence;
 			runtimeDebugDirty = true;
 		});
@@ -890,20 +928,32 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 			flushRuntimeDebug(ctx);
 		});
 
-		pi.on("session_before_compact", (event, ctx) => {
+		pi.on("session_before_compact", async (event, ctx) => {
 			compactionSequence += 1;
 			activeCompactionSequence = compactionSequence;
-			compactions = upsertRuntimeDebugCompaction(
-				compactions,
-				buildCompactionStartTrace(
-					compactionSequence,
-					currentPiTurn(ctx),
-					event.reason,
-					event.willRetry,
-					event.preparation,
+			rememberCompactions(
+				upsertRuntimeDebugCompaction(
+					compactions,
+					buildCompactionStartTrace(
+						compactionSequence,
+						currentPiTurn(ctx),
+						event.reason,
+						event.willRetry,
+						event.preparation,
+					),
 				),
 			);
 			runtimeDebugDirty = true;
+
+			const compactionResult = await runHandoffCompaction(
+				event.preparation,
+				ctx,
+				event.customInstructions,
+				event.signal,
+			);
+			if (compactionResult) {
+				return { compaction: compactionResult };
+			}
 		});
 
 		pi.on("session_compact", (event, ctx) => {
@@ -941,7 +991,7 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					? { previousSummary: existing.previousSummary }
 					: {}),
 			};
-			compactions = upsertRuntimeDebugCompaction(compactions, trace);
+			rememberCompactions(upsertRuntimeDebugCompaction(compactions, trace));
 			activeCompactionSequence = undefined;
 			runtimeDebugDirty = true;
 			if (event.reason === "manual") flushRuntimeDebug(ctx);
@@ -984,10 +1034,79 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					? { turnPrefixMessageCount: existing.turnPrefixMessageCount }
 					: {}),
 			};
-			compactions = upsertRuntimeDebugCompaction(compactions, trace);
+			rememberCompactions(upsertRuntimeDebugCompaction(compactions, trace));
 			activeCompactionSequence = undefined;
 			runtimeDebugDirty = true;
 			if (event.reason === "manual") flushRuntimeDebug(ctx);
+		});
+
+		const executeShake = (ctx: ExtensionContext): string => {
+			const branchMessages = ctx.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "message")
+				.map((entry) => (entry as { message: AgentMessage }).message);
+			const result = shakeMessages(branchMessages);
+			const notifyText =
+				result.shakenCount > 0
+					? `Shake completed: pruned ${result.shakenCount} item(s) (${result.prunedToolCalls.length} tool calls, ${result.prunedThinkingCount} thinking blocks), saved ~${result.savedTokens} tokens.`
+					: "Shake completed: context is already optimal (0 redundant items found).";
+			if (ctx.hasUI) {
+				ctx.ui.notify(notifyText, "info");
+			}
+			publishFrom(ctx, ctx.getSystemPrompt(), result.messages);
+			return notifyText;
+		};
+
+		const executeHandoff = (ctx: ExtensionContext, customInstructions?: string) => {
+			if (ctx.hasUI) {
+				ctx.ui.notify("Starting structured handoff compaction...", "info");
+			}
+			ctx.compact({
+				customInstructions,
+				onComplete: () => {
+					if (ctx.hasUI) {
+						ctx.ui.notify("Handoff compaction completed.", "info");
+					}
+				},
+				onError: (error) => {
+					if (ctx.hasUI) {
+						ctx.ui.notify(`Handoff compaction failed: ${error.message}`, "error");
+					}
+				},
+			});
+		};
+
+		if (typeof pi.registerCommand === "function") {
+			pi.registerCommand("shake", {
+				description:
+					"Prune stale reads, superseded edits, empty search results, and thinking traces (0-token cost)",
+				handler: async (_args, ctx) => {
+					executeShake(ctx);
+				},
+			});
+
+			pi.registerCommand("handoff", {
+				description:
+					"Trigger structured handoff compaction with project progress summary",
+				handler: async (args, ctx) => {
+					const instructions = args.trim() || undefined;
+					executeHandoff(ctx, instructions);
+				},
+			});
+		}
+
+		pi.on("input", async (event, ctx) => {
+			const trimmed = event.text.trim();
+			if (trimmed === "/shake") {
+				executeShake(ctx);
+				return { action: "handled" };
+			}
+			if (trimmed === "/handoff" || trimmed.startsWith("/handoff ")) {
+				const instructions = trimmed.slice(8).trim() || undefined;
+				executeHandoff(ctx, instructions);
+				return { action: "handled" };
+			}
+			return { action: "continue" };
 		});
 	};
 }

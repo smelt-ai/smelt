@@ -104,7 +104,7 @@ impl HostedConversationHandle {
     ) -> std::io::Result<Self> {
         let reader = control.try_clone()?;
         let provider_pid = Arc::new(AtomicI32::new(initial_provider_pid.unwrap_or(0)));
-        let snapshot_rx = start_snapshot_reader(reader, Arc::clone(&provider_pid))?;
+        let snapshot_rx = start_snapshot_reader(reader, Arc::clone(&provider_pid), pid)?;
         Ok(Self {
             pid,
             control: Mutex::new(Some(control)),
@@ -171,31 +171,51 @@ impl HostedConversationHandle {
         }
 
         // host 收到 EOF 后会先让其 ACP connection 正常收尾。它内部的 provider
-        // shutdown 最坏还包含一次 kill+reap 宽限，因此这里至少给两倍窗口。
-        let deadline = Instant::now() + grace + grace + Duration::from_millis(250);
-        loop {
-            match waitpid_nonblocking(self.pid) {
-                HostWait::Exited | HostWait::NotOurChild => return true,
-                HostWait::Running if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(5));
+        // shutdown 最坏还包含一次 kill+reap 宽限，因此这里至少给两倍再加 250ms。
+        // 到点还没退出，再读当时的 provider pid 并杀掉那一组，同时杀掉 host 组。
+        // 等的线程独占这个 pid 的 waitpid；干净退出不会去动 provider。
+        // 杀过之后还要证明组已经空了。证明只用非阻塞 waitpid，因为阻塞的那条
+        // 已经返回，不会再有第二条堵在同一个 pid 上。
+        let provider = Arc::clone(&self.provider_pid);
+        let host_pid = self.pid;
+        let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&killed);
+        let reaped = smelt_core::process_wait::wait_for_pid(
+            host_pid,
+            grace + grace + Duration::from_millis(250),
+            || {},
+            move || {
+                flag.store(true, Ordering::SeqCst);
+                let provider_pid = provider.load(Ordering::SeqCst);
+                if provider_pid > 1 {
+                    unsafe {
+                        libc::kill(-provider_pid, libc::SIGKILL);
+                    }
                 }
-                HostWait::Running => break,
-            }
+                if host_pid > 1 {
+                    unsafe {
+                        libc::kill(-host_pid, libc::SIGKILL);
+                    }
+                }
+            },
+            grace,
+        );
+        // 宿主被 SIGKILL 时不会跑 Drop，任务目录里的进程组要在这里收。
+        // 干净退出时宿主自己已经收过，再扫一次对不上启动时间就不会动手。
+        if host_pid > 0 {
+            smelt_core::background_tasks::reap_orphaned_task_groups(host_pid as u32);
         }
-
-        // host 本身异常卡住时，provider 是它的独立进程组，不能只杀 host 组。
-        if let Some(provider_pid) = self.provider_pid() {
-            unsafe {
-                libc::kill(-provider_pid, libc::SIGKILL);
-            }
+        if !killed.load(Ordering::SeqCst) || !reaped {
+            return reaped;
         }
-        smelt_core::acp_conn::kill_and_reap_process_group(self.pid, grace)
+        smelt_core::acp_conn::prove_process_group_dead(host_pid, grace)
     }
 }
 
 fn start_snapshot_reader(
     stream: UnixStream,
     provider_pid: Arc<AtomicI32>,
+    host_pid: i32,
 ) -> std::io::Result<smol::channel::Receiver<HostedSnapshotEnvelope>> {
     let (tx, rx) = smol::channel::unbounded();
     thread::Builder::new()
@@ -206,7 +226,15 @@ fn start_snapshot_reader(
             loop {
                 line.clear();
                 match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        // 读端关掉才说明这条连接没了。解析失败不走这里：宿主还活着。
+                        if host_pid > 0 {
+                            smelt_core::background_tasks::reap_orphaned_task_groups(
+                                host_pid as u32,
+                            );
+                        }
+                        break;
+                    }
                     Ok(_) => {}
                 }
                 let parsed = match serde_json::from_str::<HostedSnapshotLine>(line.trim()) {
@@ -241,29 +269,6 @@ fn start_snapshot_reader(
             }
         })?;
     Ok(rx)
-}
-
-enum HostWait {
-    Running,
-    Exited,
-    NotOurChild,
-}
-
-fn waitpid_nonblocking(pid: i32) -> HostWait {
-    loop {
-        let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
-        if waited == pid {
-            return HostWait::Exited;
-        }
-        if waited == 0 {
-            return HostWait::Running;
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::EINTR) => continue,
-            Some(libc::ECHILD) => return HostWait::NotOurChild,
-            _ => return HostWait::Running,
-        }
-    }
 }
 
 pub(crate) fn is_session_host_process() -> bool {
@@ -401,7 +406,7 @@ mod tests {
     #[test]
     fn unparsable_snapshot_line_disconnects_the_mirror() {
         let (host_side, daemon_side) = UnixStream::pair().unwrap();
-        let rx = start_snapshot_reader(daemon_side, Arc::new(AtomicI32::new(0))).unwrap();
+        let rx = start_snapshot_reader(daemon_side, Arc::new(AtomicI32::new(0)), 0).unwrap();
 
         let mut host_side = host_side;
         // schema 对不上的一行（新版 host 发了旧版 daemon 不认识的变体）。

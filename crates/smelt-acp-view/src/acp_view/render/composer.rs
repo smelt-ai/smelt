@@ -155,8 +155,8 @@ impl AcpView {
                 ui_theme::yellow()
             } else {
                 usage_pct
-                    .and_then(usage_warn_color)
-                    .unwrap_or(ui_theme::accent())
+                    .map(usage_meter_color)
+                    .unwrap_or(ui_theme::text_faint())
             };
             let extra_configs: Vec<_> = config_options
                 .into_iter()
@@ -179,7 +179,7 @@ impl AcpView {
                 Button::new("acp-model-pill")
                     .ghost()
                     .small()
-                    .rounded(ButtonRounded::Size(px(16.)))
+                    .rounded(ButtonRounded::Size(px(9999.)))
                     .dropdown_caret(true)
                     .label(model_label)
                     .text_color(gpui::rgb(if next_turn_notice.is_some() {
@@ -347,7 +347,7 @@ impl AcpView {
                 div()
                     .h(px(24.))
                     .px_2()
-                    .rounded(px(16.))
+                    .rounded_full()
                     .flex()
                     .items_center()
                     .text_sm()
@@ -364,7 +364,7 @@ impl AcpView {
                 Button::new("acp-skills-pill")
                     .ghost()
                     .small()
-                    .rounded(ButtonRounded::Size(px(16.)))
+                    .rounded(ButtonRounded::Size(px(9999.)))
                     .dropdown_caret(true)
                     .label(format!("技能 {count}"))
                     .text_color(gpui::rgb(ui_theme::text_mid()))
@@ -863,24 +863,42 @@ impl AcpView {
                         )
                         // 主操作始终一个：跑着是停止，空闲才是发送。排队仍走 Enter。
                         .when(self.is_visibly_running(), |row| {
+                            let in_cancel = self.cancel_requested_at.is_some() || self.restarting;
+                            let label = if self.restarting {
+                                "正在重启"
+                            } else if in_cancel {
+                                "强制停止"
+                            } else {
+                                "停止"
+                            };
+                            let bg_color = if in_cancel {
+                                ui_theme::tint(ui_theme::red(), 0x50)
+                            } else {
+                                ui_theme::tint(ui_theme::red(), 0x28)
+                            };
                             row.child(
                                 div()
                                     .id("acp-stop")
                                     .flex_shrink_0()
-                                    .h(px(32.))
-                                    .px_3()
-                                    .rounded(ui_theme::row_radius())
-                                    .bg(ui_theme::tint(ui_theme::red(), 0x28))
+                                    .size(px(32.))
+                                    .rounded_full()
+                                    .bg(bg_color)
                                     .flex()
                                     .items_center()
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(gpui::rgb(ui_theme::red()))
+                                    .justify_center()
                                     .cursor_pointer()
                                     .hover(|d| d.opacity(0.85))
-                                    .child("停止")
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                                    })
+                                    .child(
+                                        div()
+                                            .size(px(10.))
+                                            .rounded(px(2.))
+                                            .bg(gpui::rgb(ui_theme::red())),
+                                    )
                                     .on_click(
-                                        cx.listener(|this, _ev, _window, _cx| this.cancel_turn()),
+                                        cx.listener(|this, _ev, _window, cx| this.on_stop_button_click(cx)),
                                     ),
                             )
                         })
@@ -888,7 +906,7 @@ impl AcpView {
                             let can_send =
                                 self.input_has_draft || !self.pending_images.is_empty();
                             row.child(
-                                // Grok 式发送：圆钮 + 上箭头。有内容才亮强调蓝，空着是灰底。
+                                // 圆钮 + 上箭头。有内容才是主操作色，空着是灰底。
                                 div()
                                     .id("acp-send")
                                     .flex_shrink_0()
@@ -900,8 +918,8 @@ impl AcpView {
                                     .text_sm()
                                     .font_semibold()
                                     .when(can_send, |d| {
-                                        d.bg(gpui::rgb(ui_theme::accent()))
-                                            .text_color(gpui::rgb(ui_theme::on_accent()))
+                                        d.bg(gpui::rgb(ui_theme::action_fill()))
+                                            .text_color(gpui::rgb(ui_theme::action_on()))
                                             .cursor_pointer()
                                             .hover(|d| d.opacity(0.88))
                                     })
@@ -941,7 +959,7 @@ impl AcpView {
         let t = cx.theme();
         let muted = t.muted_foreground;
         let pct = usage_percent(used, size);
-        let fill = usage_warn_color(pct).unwrap_or(ui_theme::accent());
+        let fill = usage_meter_color(pct);
         let header_tokens = if size == 0 {
             format!("{} Tokens", compact_token_count(used))
         } else {

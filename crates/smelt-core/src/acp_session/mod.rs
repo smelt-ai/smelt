@@ -31,44 +31,11 @@ use crate::daemon_state::DaemonPhase;
 mod apply;
 pub use apply::{
     ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
+    queue_composer_restore,
 };
 use apply::{pending_action_phase, resume_running};
 
 // ===================== wire 快照类型（无 agent_client_protocol 依赖） =====================
-
-/// ACP 快照线上仍用这组历史变体名（`Starting` / `Running` / `Ended`…），
-/// 内存里立刻转成 [`DaemonPhase`]。混升期间 GUI 与 smeltd 必须能互读。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-enum AcpPhaseWire {
-    Starting,
-    Idle,
-    Running,
-    AwaitingApproval,
-    AwaitingChoice,
-    Ended(String),
-}
-
-fn daemon_phase_from_wire(phase: AcpPhaseWire) -> (DaemonPhase, String) {
-    match phase {
-        AcpPhaseWire::Starting => (DaemonPhase::Connecting, String::new()),
-        AcpPhaseWire::Idle => (DaemonPhase::Idle, String::new()),
-        AcpPhaseWire::Running => (DaemonPhase::Thinking, String::new()),
-        AcpPhaseWire::AwaitingApproval => (DaemonPhase::AwaitingApproval, String::new()),
-        AcpPhaseWire::AwaitingChoice => (DaemonPhase::WaitingForUser, String::new()),
-        AcpPhaseWire::Ended(reason) => (DaemonPhase::Dead, reason),
-    }
-}
-
-fn daemon_phase_to_wire(phase: DaemonPhase, end_reason: &str) -> AcpPhaseWire {
-    match phase {
-        DaemonPhase::Connecting => AcpPhaseWire::Starting,
-        DaemonPhase::Idle | DaemonPhase::Succeeded => AcpPhaseWire::Idle,
-        DaemonPhase::Thinking | DaemonPhase::ExecutingTool => AcpPhaseWire::Running,
-        DaemonPhase::AwaitingApproval => AcpPhaseWire::AwaitingApproval,
-        DaemonPhase::WaitingForUser => AcpPhaseWire::AwaitingChoice,
-        DaemonPhase::Dead | DaemonPhase::Failed => AcpPhaseWire::Ended(end_reason.to_string()),
-    }
-}
 
 /// ACP 连接结束的稳定分类。展示文案留在 `end_reason`，控制流只能依据
 /// 这里的结构化原因，避免改文案或本地化后悄悄改变重连/失败语义。
@@ -130,6 +97,11 @@ impl AcpTurnOutcome {
             StopReason::Refusal => Self::Refused,
             _ => Self::Failed,
         }
+    }
+
+    /// 只有协议明确给出的成功才是成功。调用方对 `None` 不能再补成成功。
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Succeeded)
     }
 
     /// 需要作为失败提醒展示的稳定文案。用户主动取消是正常控制动作，不产生
@@ -287,6 +259,82 @@ pub(super) fn plan_view_from_acp(p: &Plan) -> PlanView {
             })
             .collect(),
     }
+}
+
+/// Pi 后台任务的展示态。每次 widget 推送都是全量覆盖，输出只保留尾部。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTaskView {
+    pub id: String,
+    pub title: String,
+    pub command: String,
+    pub status: BackgroundTaskStatus,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub output: String,
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundTaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+    #[serde(rename = "timed_out")]
+    TimedOut,
+}
+
+impl BackgroundTaskStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "进行中",
+            Self::Completed => "完成",
+            Self::Failed => "失败",
+            Self::Stopped => "已停止",
+            Self::TimedOut => "超时",
+        }
+    }
+}
+
+const BACKGROUND_TASK_OUTPUT_CAP: usize = 8_000;
+const BACKGROUND_TASK_LIMIT: usize = 12;
+
+/// 解析 `smelt-background-tasks` widget 的一行 JSON。
+/// `tasks` 缺失时返回 None，调用方保留上一份；空数组表示清空。
+pub fn parse_background_task_widget(line: &str) -> Option<Vec<BackgroundTaskView>> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let tasks = value.get("tasks")?.as_array()?;
+    let mut parsed = Vec::new();
+    for task in tasks {
+        let Ok(mut view) = serde_json::from_value::<BackgroundTaskView>(task.clone()) else {
+            continue;
+        };
+        if view.id.is_empty() || view.command.is_empty() {
+            continue;
+        }
+        view.output = cap_task_output(view.output);
+        parsed.push(view);
+    }
+    if parsed.len() > BACKGROUND_TASK_LIMIT {
+        parsed.drain(0..parsed.len() - BACKGROUND_TASK_LIMIT);
+    }
+    Some(parsed)
+}
+
+fn cap_task_output(text: String) -> String {
+    if text.len() <= BACKGROUND_TASK_OUTPUT_CAP {
+        return text;
+    }
+    let mut start = text.len() - BACKGROUND_TASK_OUTPUT_CAP;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
 }
 
 /// 一次用户 prompt 对应的回合计时。旧快照没有这个字段。
@@ -562,6 +610,9 @@ pub struct ConversationSnapshot {
     #[serde(default)]
     pub usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     pub plan: Option<PlanView>,
+    /// Pi 后台任务。旧快照缺省为空；空列表表示当前没有任务。
+    #[serde(default)]
+    pub background_tasks: Vec<BackgroundTaskView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     /// 宿主级会话输入状态。旧 daemon / 独立 session host 不提供时为 None，客户端
@@ -589,9 +640,12 @@ pub struct ConversationSnapshot {
     #[serde(default)]
     pub composer_restore_revision: u64,
     /// 与 `composer_restore_revision` 配套、尚未被客户端确认写入输入框的原文。
-    /// 确认后只清文本而保留 revision 水位，避免迟到确认误伤后续恢复。
+    /// 确认后清掉文本和图片，保留 revision 水位，避免迟到确认误伤后续恢复。
     #[serde(default)]
     pub composer_restore_texts: Vec<String>,
+    /// 同一版还原里的图片。只有图没有字时也在。
+    #[serde(default)]
+    pub composer_restore_images: Vec<crate::acp_chat::AcpImage>,
     /// 当前回合开始的 Unix 毫秒时间戳；None = 当前没有运行中的回合。
     pub turn_started_at_ms: Option<u64>,
     /// 每个已发出 prompt 的回合耗时。`user_index` 是该回合用户消息在完整
@@ -602,7 +656,7 @@ pub struct ConversationSnapshot {
     /// 边沿，只是现在从服务端算，客户端不用自己维护。具体结果必须结合
     /// `turn_outcome`，不能把取消/拒绝一律解释成成功。
     pub completed_unread: bool,
-    /// 最近一次 `TurnEnded` 的真实结果。旧快照缺失时为 None，兼容解释为成功。
+    /// 最近一次 `TurnEnded` 的结果。`None` 表示还没有回合结果，不是成功。
     pub turn_outcome: Option<AcpTurnOutcome>,
     /// 这份快照值不值得触发一次落盘。**不是**"数据有没有变"（每次推送数据
     /// 都变了），是旧版 `apply_event` 里 `skip_persist` 那条线的服务端版本：
@@ -611,6 +665,14 @@ pub struct ConversationSnapshot {
     /// 了，那时候存一次就够。客户端拿这个字段决定要不要 `cx.emit(Changed)`，
     /// 不用自己在两次快照之间做增量判断。
     pub should_persist: bool,
+    /// 活状态已经生效，但历史正文读失败。空表示这帧的历史可用。
+    /// 客户端不能因为这个字段把相位退回启动中。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_error: Option<String>,
+    /// 交接文件故意没带已提交正文。恢复后向 agent `session/load` 重放。
+    /// 旧交接文件没有这个字段，仍按其中的 `entries` 恢复。
+    #[serde(default)]
+    pub history_omitted: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -630,7 +692,7 @@ struct ConversationSnapshotDe {
     tool_debug: Option<BTreeMap<String, ToolCallDebug>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_debug: Option<RuntimeDebug>,
-    phase: AcpPhaseWire,
+    phase: SnapshotPhase,
     #[serde(default)]
     end_reason: String,
     #[serde(default)]
@@ -658,6 +720,8 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     plan: Option<PlanView>,
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTaskView>,
     model: Option<ModelState>,
     config_options: Vec<SessionConfigState>,
     #[serde(default)]
@@ -679,6 +743,8 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     composer_restore_texts: Vec<String>,
     #[serde(default)]
+    composer_restore_images: Vec<crate::acp_chat::AcpImage>,
+    #[serde(default)]
     turn_started_at_ms: Option<u64>,
     #[serde(default)]
     turn_timings: Vec<TurnTiming>,
@@ -686,16 +752,14 @@ struct ConversationSnapshotDe {
     #[serde(default)]
     turn_outcome: Option<AcpTurnOutcome>,
     should_persist: bool,
+    #[serde(default)]
+    history_error: Option<String>,
+    #[serde(default)]
+    history_omitted: bool,
 }
 
 impl From<ConversationSnapshotDe> for ConversationSnapshot {
     fn from(de: ConversationSnapshotDe) -> Self {
-        let (phase, ended_reason) = daemon_phase_from_wire(de.phase);
-        let end_reason = if ended_reason.is_empty() {
-            de.end_reason
-        } else {
-            ended_reason
-        };
         Self {
             entries_offset: de.entries_offset,
             entries_total: de.entries_total,
@@ -705,8 +769,12 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             entries: de.entries,
             tool_debug: de.tool_debug,
             runtime_debug: de.runtime_debug,
-            phase,
-            end_reason,
+            phase: de.phase.phase,
+            end_reason: if de.end_reason.is_empty() {
+                de.phase.ended_reason
+            } else {
+                de.end_reason
+            },
             end_kind: de.end_kind,
             accepted_delivery_ids: de.accepted_delivery_ids,
             active_delivery_id: de.active_delivery_id,
@@ -723,6 +791,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             usage_cost: de.usage_cost,
             usage_breakdown: de.usage_breakdown,
             plan: de.plan,
+            background_tasks: de.background_tasks,
             model: de.model,
             config_options: de.config_options,
             conversation_state: de.conversation_state,
@@ -734,11 +803,14 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             queued_follow_up: de.queued_follow_up,
             composer_restore_revision: de.composer_restore_revision,
             composer_restore_texts: de.composer_restore_texts,
+            composer_restore_images: de.composer_restore_images,
             turn_started_at_ms: de.turn_started_at_ms,
             turn_timings: de.turn_timings,
             completed_unread: de.completed_unread,
             turn_outcome: de.turn_outcome,
             should_persist: de.should_persist,
+            history_error: de.history_error,
+            history_omitted: de.history_omitted,
         }
     }
 }
@@ -754,7 +826,10 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             entries: snap.entries,
             tool_debug: snap.tool_debug,
             runtime_debug: snap.runtime_debug,
-            phase: daemon_phase_to_wire(snap.phase, &snap.end_reason),
+            phase: SnapshotPhase {
+                phase: snap.phase,
+                ended_reason: String::new(),
+            },
             end_reason: snap.end_reason,
             end_kind: snap.end_kind,
             accepted_delivery_ids: snap.accepted_delivery_ids,
@@ -772,6 +847,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             usage_cost: snap.usage_cost,
             usage_breakdown: snap.usage_breakdown,
             plan: snap.plan,
+            background_tasks: snap.background_tasks,
             model: snap.model,
             config_options: snap.config_options,
             conversation_state: snap.conversation_state,
@@ -783,12 +859,62 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             queued_follow_up: snap.queued_follow_up,
             composer_restore_revision: snap.composer_restore_revision,
             composer_restore_texts: snap.composer_restore_texts,
+            composer_restore_images: snap.composer_restore_images,
             turn_started_at_ms: snap.turn_started_at_ms,
             turn_timings: snap.turn_timings,
             completed_unread: snap.completed_unread,
             turn_outcome: snap.turn_outcome,
             should_persist: snap.should_persist,
+            history_error: snap.history_error,
+            history_omitted: snap.history_omitted,
         }
+    }
+}
+
+/// 快照相位只认 [`DaemonPhase`] 的 snake_case。旧名字（`Idle`、`Starting`、
+/// `Running`、`Ended`）不再读入。
+struct SnapshotPhase {
+    phase: DaemonPhase,
+    ended_reason: String,
+}
+
+fn snapshot_phase_from_value(value: &serde_json::Value) -> Result<SnapshotPhase, String> {
+    match value {
+        serde_json::Value::String(name) => {
+            snapshot_phase_from_name(name).map(|phase| SnapshotPhase {
+                phase,
+                ended_reason: String::new(),
+            })
+        }
+        _ => Err(format!("无法识别的相位：{value}")),
+    }
+}
+
+fn snapshot_phase_from_name(name: &str) -> Result<DaemonPhase, String> {
+    match name {
+        "connecting" => Ok(DaemonPhase::Connecting),
+        "thinking" => Ok(DaemonPhase::Thinking),
+        "executing_tool" => Ok(DaemonPhase::ExecutingTool),
+        "awaiting_approval" => Ok(DaemonPhase::AwaitingApproval),
+        "waiting_for_user" => Ok(DaemonPhase::WaitingForUser),
+        "succeeded" => Ok(DaemonPhase::Succeeded),
+        "failed" => Ok(DaemonPhase::Failed),
+        "idle" => Ok(DaemonPhase::Idle),
+        "dead" => Ok(DaemonPhase::Dead),
+        _ => Err(format!("无法识别的相位：{name}")),
+    }
+}
+
+impl serde::Serialize for SnapshotPhase {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.phase.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SnapshotPhase {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        snapshot_phase_from_value(&serde_json::Value::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -867,6 +993,7 @@ pub struct AcpSessionState {
     pub usage_cost: Option<f64>,
     pub usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     pub plan: Option<PlanView>,
+    pub background_tasks: Vec<BackgroundTaskView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     pub supports_compaction: bool,
@@ -879,6 +1006,7 @@ pub struct AcpSessionState {
     pub queued_follow_up: Vec<String>,
     pub composer_restore_revision: u64,
     pub composer_restore_texts: Vec<String>,
+    pub composer_restore_images: Vec<crate::acp_chat::AcpImage>,
     pub turn_started_at_ms: Option<u64>,
     pub turn_timings: Vec<TurnTiming>,
     /// 已被取消的工具调用 id。部分 adapter 会在 `TurnEnded(Cancelled)` 之后
@@ -929,6 +1057,7 @@ impl Default for AcpSessionState {
             usage_cost: None,
             usage_breakdown: None,
             plan: None,
+            background_tasks: Vec::new(),
             model: None,
             config_options: Vec::new(),
             supports_compaction: false,
@@ -940,6 +1069,7 @@ impl Default for AcpSessionState {
             queued_follow_up: Vec::new(),
             composer_restore_revision: 0,
             composer_restore_texts: Vec::new(),
+            composer_restore_images: Vec::new(),
             turn_started_at_ms: None,
             turn_timings: Vec::new(),
             cancelled_tool_call_ids: BTreeSet::new(),
@@ -1020,6 +1150,7 @@ impl AcpSessionState {
             usage_cost: snap.usage_cost,
             usage_breakdown: snap.usage_breakdown,
             plan: snap.plan,
+            background_tasks: snap.background_tasks,
             model: snap.model,
             config_options: snap.config_options,
             supports_compaction: snap.supports_compaction,
@@ -1031,6 +1162,7 @@ impl AcpSessionState {
             queued_follow_up: snap.queued_follow_up,
             composer_restore_revision: snap.composer_restore_revision,
             composer_restore_texts: snap.composer_restore_texts,
+            composer_restore_images: snap.composer_restore_images,
             turn_started_at_ms: snap.turn_started_at_ms,
             turn_timings: snap.turn_timings,
             cancelled_tool_call_ids: BTreeSet::new(),
@@ -1084,6 +1216,7 @@ impl AcpSessionState {
             usage_cost,
             usage_breakdown,
             plan,
+            background_tasks,
             model,
             config_options,
             conversation_state: _,
@@ -1095,11 +1228,14 @@ impl AcpSessionState {
             queued_follow_up,
             composer_restore_revision,
             composer_restore_texts,
+            composer_restore_images,
             turn_started_at_ms,
             turn_timings,
             completed_unread,
             turn_outcome,
             should_persist: _,
+            history_error: _,
+            history_omitted: _,
         } = snap;
 
         if entries_offset > self.entries.len() {
@@ -1168,6 +1304,7 @@ impl AcpSessionState {
         self.usage_cost = usage_cost;
         self.usage_breakdown = usage_breakdown;
         self.plan = plan;
+        self.background_tasks = background_tasks;
         self.model = model;
         self.config_options = config_options;
         self.supports_compaction = supports_compaction;
@@ -1179,6 +1316,7 @@ impl AcpSessionState {
         self.queued_follow_up = queued_follow_up;
         self.composer_restore_revision = composer_restore_revision;
         self.composer_restore_texts = composer_restore_texts;
+        self.composer_restore_images = composer_restore_images;
         self.turn_started_at_ms = turn_started_at_ms;
         self.turn_timings = turn_timings;
         self.completed_unread = completed_unread;
@@ -1212,6 +1350,35 @@ impl AcpSessionState {
     /// `should_persist` 不是从 `self` 能算出来的——它是"这次变化是怎么发生的"
     /// 这个上下文信息，调用方（smeltd 的事件循环）从 `apply_event` 的返回值
     /// 里拿，这里只负责原样塞进快照，见该字段注释。
+    /// 已落进会话文件的历史终点，以及还没写完的这一轮。
+    /// 空闲且没有进行中的工具时，这一轮是空的。
+    pub fn open_turn_range(&self) -> (usize, usize) {
+        let active = self.turn_started_at_ms.is_some()
+            || matches!(
+                self.phase,
+                DaemonPhase::Thinking
+                    | DaemonPhase::ExecutingTool
+                    | DaemonPhase::AwaitingApproval
+                    | DaemonPhase::WaitingForUser
+            )
+            || crate::acp_chat::has_unfinished_tool_call(&self.entries);
+        if !active {
+            return (self.entries.len(), self.entries.len());
+        }
+        let start = self
+            .entries
+            .iter()
+            .rposition(|entry| {
+                matches!(
+                    entry,
+                    crate::acp_chat::AcpEntry::User(_)
+                        | crate::acp_chat::AcpEntry::UserWithImages { .. }
+                )
+            })
+            .unwrap_or(0);
+        (start, self.entries.len())
+    }
+
     pub fn to_snapshot(&self, should_persist: bool) -> ConversationSnapshot {
         self.to_snapshot_since(should_persist, 0)
     }
@@ -1274,6 +1441,7 @@ impl AcpSessionState {
             usage_cost: self.usage_cost,
             usage_breakdown: self.usage_breakdown.clone(),
             plan: self.plan.clone(),
+            background_tasks: self.background_tasks.clone(),
             model: self.model.clone(),
             config_options: self.config_options.clone(),
             conversation_state: None,
@@ -1285,13 +1453,117 @@ impl AcpSessionState {
             queued_follow_up: self.queued_follow_up.clone(),
             composer_restore_revision: self.composer_restore_revision,
             composer_restore_texts: self.composer_restore_texts.clone(),
+            composer_restore_images: self.composer_restore_images.clone(),
             turn_started_at_ms: self.turn_started_at_ms,
             turn_timings: self.turn_timings.clone(),
             completed_unread: self.completed_unread,
             turn_outcome: self.turn_outcome,
             should_persist,
+            history_error: None,
+            history_omitted: false,
         }
     }
+}
+
+/// 会话的活状态。不含历史正文。窗口靠它离开「正在启动」；
+/// 历史读失败不能把相位退回去。
+#[derive(Clone, Debug)]
+pub struct SessionLive {
+    pub phase: DaemonPhase,
+    pub end_reason: String,
+    pub end_kind: AcpEndKind,
+    pub acp_session_id: Option<String>,
+    pub history_session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub status_line: Option<String>,
+    /// 已提交历史的长度。`None` 表示这帧仍把历史放在快照 `entries` 里（旧守护）。
+    pub history_len: Option<usize>,
+    /// 还没写进会话文件的这一轮：用户刚发出的消息、半句话、进行中的工具。
+    pub open_turn: Vec<crate::acp_chat::AcpEntry>,
+}
+
+impl SessionLive {
+    pub fn from_snapshot(snap: &ConversationSnapshot) -> Self {
+        Self {
+            phase: snap.phase,
+            end_reason: snap.end_reason.clone(),
+            end_kind: snap.end_kind,
+            acp_session_id: snap.acp_session_id.clone(),
+            history_session_id: snap.history_session_id.clone(),
+            session_title: snap.session_title.clone(),
+            status_line: snap.status_line.clone(),
+            history_len: None,
+            open_turn: Vec::new(),
+        }
+    }
+
+    pub fn from_state(state: &AcpSessionState) -> Self {
+        let (history_len, end) = state.open_turn_range();
+        let mut live = Self::from_snapshot(&state.to_snapshot(false));
+        live.history_len = Some(history_len);
+        live.open_turn = state.entries[history_len..end].to_vec();
+        live
+    }
+
+    /// 从 `live` 对象或快照对象里取出活状态。相位只认当前 snake_case。
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        let phase_value = value.get("phase").ok_or_else(|| "缺少相位".to_string())?;
+        let decoded = snapshot_phase_from_value(phase_value)?;
+        let stored_reason = value
+            .get("end_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let end_reason = if stored_reason.is_empty() {
+            decoded.ended_reason
+        } else {
+            stored_reason.to_string()
+        };
+        let end_kind = value
+            .get("end_kind")
+            .and_then(|kind| serde_json::from_value(kind.clone()).ok())
+            .unwrap_or_default();
+        Ok(Self {
+            phase: decoded.phase,
+            end_reason,
+            end_kind,
+            acp_session_id: json_string(value, "acp_session_id"),
+            history_session_id: json_string(value, "history_session_id"),
+            session_title: json_string(value, "session_title"),
+            status_line: json_string(value, "status_line"),
+            history_len: value
+                .get("history_len")
+                .and_then(serde_json::Value::as_u64)
+                .map(|len| len as usize),
+            open_turn: value
+                .get("open_turn")
+                .and_then(|entries| serde_json::from_value(entries.clone()).ok())
+                .unwrap_or_default(),
+        })
+    }
+}
+
+impl serde::Serialize for SessionLive {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("SessionLive", 9)?;
+        state.serialize_field("phase", &self.phase)?;
+        state.serialize_field("end_reason", &self.end_reason)?;
+        state.serialize_field("end_kind", &self.end_kind)?;
+        state.serialize_field("acp_session_id", &self.acp_session_id)?;
+        state.serialize_field("history_session_id", &self.history_session_id)?;
+        state.serialize_field("session_title", &self.session_title)?;
+        state.serialize_field("status_line", &self.status_line)?;
+        state.serialize_field("history_len", &self.history_len)?;
+        state.serialize_field("open_turn", &self.open_turn)?;
+        state.end()
+    }
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// daemon 镜像只需把 host 快照重新投影给 GUI，不会在本地把字段翻译回 ACP
@@ -1513,6 +1785,31 @@ pub fn note_prompt_sent_with_delivery(
         started_at_ms,
         ended_at_ms: None,
     });
+}
+
+const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";
+
+/// Pi 还在跑，这条消息要等它结束。界面若已经空闲，把转圈拉回来，好接住后续输出。
+/// 用户刚按过停止时不拉回来：停止就是要界面立刻停。
+pub fn note_provider_still_running(state: &mut AcpSessionState) {
+    state.status_line = Some(PROVIDER_STILL_RUNNING_STATUS.to_string());
+    if state.cancel_requested
+        || state
+            .cancelled_turn_seq
+            .is_some_and(|seq| seq == state.turn_seq)
+    {
+        return;
+    }
+    if matches!(state.phase, DaemonPhase::Idle) && state.turn_started_at_ms.is_none() {
+        state.phase = DaemonPhase::Thinking;
+        state.turn_started_at_ms = Some(unix_time_ms());
+    }
+}
+
+pub fn clear_provider_queue_status(state: &mut AcpSessionState) {
+    if state.status_line.as_deref() == Some(PROVIDER_STILL_RUNNING_STATUS) {
+        state.status_line = None;
+    }
 }
 
 /// 记录用户已向当前 ACP turn 发出了 session/cancel。实际的终态仍由

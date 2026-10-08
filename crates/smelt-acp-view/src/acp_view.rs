@@ -11,10 +11,10 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState,
-    ParentElement, PathBuilder, Render, ScrollHandle, StatefulInteractiveElement, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div,
-    list as virtual_list, point, px, size,
+    FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment,
+    ListHorizontalSizingBehavior, ListState, ParentElement, PathBuilder, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowHandle,
+    WindowOptions, canvas, div, list as virtual_list, point, px, size, uniform_list,
 };
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -33,9 +33,10 @@ use smelt_core::acp_client::{
 };
 use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
-    AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, ConversationSnapshot,
-    ElicitFieldKindView, PendingElicitation, PendingPermission, PermissionOptionKindView,
-    PlanEntryStatusView, PlanView, RuntimeDebug, ToolCallDebug,
+    AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
+    BackgroundTaskView, ConversationSnapshot, ElicitFieldKindView, PendingElicitation,
+    PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView, RuntimeDebug,
+    ToolCallDebug,
 };
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
@@ -352,6 +353,11 @@ fn usage_warn_color(pct: u32) -> Option<u32> {
     }
 }
 
+/// 用量环的颜色。没到警告线就是弱灰，不拿强调蓝当装饰。
+fn usage_meter_color(pct: u32) -> u32 {
+    usage_warn_color(pct).unwrap_or(ui_theme::text_faint())
+}
+
 /// 会话面板要先露配置。模型一长，必须收进二级，否则贴底的菜单只看得见模型。
 fn composer_should_nest_models(
     extra_config_count: usize,
@@ -507,6 +513,7 @@ struct ComposerRestoreConsume {
     last_revision: u64,
     skip_next: bool,
     restore_texts: Option<Vec<String>>,
+    restore_images: Option<Vec<AcpImage>>,
     discarded_revision: Option<u64>,
 }
 
@@ -515,6 +522,7 @@ fn consume_composer_restore(
     last_revision: u64,
     incoming_revision: u64,
     incoming_texts: Vec<String>,
+    incoming_images: Vec<AcpImage>,
     skip_next: bool,
 ) -> ComposerRestoreConsume {
     if incoming_revision <= last_revision {
@@ -522,6 +530,7 @@ fn consume_composer_restore(
             last_revision,
             skip_next,
             restore_texts: None,
+            restore_images: None,
             discarded_revision: None,
         };
     }
@@ -530,6 +539,7 @@ fn consume_composer_restore(
             last_revision: incoming_revision,
             skip_next: false,
             restore_texts: None,
+            restore_images: None,
             discarded_revision: Some(incoming_revision),
         };
     }
@@ -537,6 +547,7 @@ fn consume_composer_restore(
         last_revision: incoming_revision,
         skip_next: false,
         restore_texts: (!incoming_texts.is_empty()).then_some(incoming_texts),
+        restore_images: (!incoming_images.is_empty()).then_some(incoming_images),
         discarded_revision: None,
     }
 }
@@ -1269,6 +1280,10 @@ pub struct AcpView {
     completed_delivery_id: Option<String>,
     /// 启动阶段的进度文案（下载运行时等），Starting 横幅显示。
     status_line: Option<String>,
+    /// 活状态已生效，历史正文读失败。页面不能因此回到启动中。
+    history_error: Option<String>,
+    /// 第一帧只带未完成的这一轮时，自动向守护要一页已提交历史。
+    history_backfill_started: bool,
     /// None = 已结束的占位视图（重开后才建；Ended 态没有输入框）。
     input: Option<Entity<TextareaState>>,
     /// 输入框是否已有文字草稿；空会话引导随草稿隐藏，清空后再出现。
@@ -1377,6 +1392,7 @@ pub struct AcpView {
     queued_follow_up: Vec<String>,
     last_composer_restore_revision: u64,
     pending_composer_restore: Option<Vec<String>>,
+    pending_composer_restore_images: Option<Vec<AcpImage>>,
     /// `pending_composer_restore` 中来自 daemon 的最新 revision。文本真正写入
     /// Textarea 后才确认；本地“立即发送”产生的 leftovers 没有 revision。
     pending_composer_restore_revision: Option<u64>,
@@ -1394,6 +1410,12 @@ pub struct AcpView {
     plan: Option<PlanView>,
     /// PLAN 条折叠态（默认展开，跟设计稿一致）。
     plan_collapsed: bool,
+    /// Pi 后台任务的最新快照。空表示没有任务。
+    background_tasks: Vec<BackgroundTaskView>,
+    /// 后台任务条默认收起，避免挡住消息。
+    background_tasks_collapsed: bool,
+    /// 用户展开了输出的后台任务 id。
+    expanded_background_tasks: std::collections::HashSet<String>,
     /// 用户手动展开的过程/分析摘要（key = entries 索引）。过程组外的思考、
     /// 以及过程组里对用户说的中间正文共用这份状态；只属于当前视图。
     expanded_thoughts: std::collections::HashSet<usize>,
@@ -1443,6 +1465,8 @@ pub struct AcpView {
     /// 还没确认死透"的过渡态，两者可能重叠（发出 acp_restart 到收到新一份
     /// Connecting 快照之间有个网络往返）。
     restarting: bool,
+    /// 用户点击「停止」的时间戳：用于在 UI 上呈现取消状态并支持二次点击「强制停止」。
+    cancel_requested_at: Option<std::time::Instant>,
     /// 「强制重启」失败时的提示文案（连不上 smeltd、会话已不存在等）；下次
     /// 操作前一直显示，成功后清空。只属于本地展示状态，不落盘。
     restart_error: Option<String>,
@@ -1611,7 +1635,7 @@ impl AcpView {
             && !request.prompt.trim().is_empty()
             && let Some(input) = this.input.clone()
         {
-            let prompt = request.prompt.clone();
+            let prompt = request.prompt;
             input.update(cx, |state, cx| state.set_value(&prompt, window, cx));
         }
         // 首包图片解码成待发图片，Idle 时随首包一起发出去。
@@ -1709,6 +1733,8 @@ impl AcpView {
             elicitation_inputs: Default::default(),
             elicitation_input_subscriptions: Default::default(),
             status_line: None,
+            history_error: None,
+            history_backfill_started: false,
             phase: DaemonPhase::Dead,
             end_reason: reason,
             end_kind: AcpEndKind::Unknown,
@@ -1764,6 +1790,7 @@ impl AcpView {
             queued_follow_up: Vec::new(),
             last_composer_restore_revision: 0,
             pending_composer_restore: None,
+            pending_composer_restore_images: None,
             pending_composer_restore_revision: None,
             pending_composer_restore_ack: None,
             skip_next_composer_restore: false,
@@ -1772,6 +1799,9 @@ impl AcpView {
             // 计划是导航摘要，不应该在打开会话时占据整块消息区；需要细节时
             // 由用户主动展开，保持第一眼聚焦在目标和结果上。
             plan_collapsed: true,
+            background_tasks: Vec::new(),
+            background_tasks_collapsed: true,
+            expanded_background_tasks: std::collections::HashSet::new(),
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
             expanded_tool_runs: std::collections::HashSet::new(),
@@ -1791,6 +1821,7 @@ impl AcpView {
             awaiting_initial_history_snapshot: true,
             viewing_history: false,
             restarting: false,
+            cancel_requested_at: None,
             restart_error: None,
             pending_initial_prompt: None,
             pending_initial_config: Vec::new(),
@@ -1856,6 +1887,8 @@ impl AcpView {
         self.elicitation_inputs.clear();
         self.elicitation_input_subscriptions.clear();
         self.plan = None; // 计划是回合态，新会话不该带着上一段的进度条
+        self.background_tasks.clear();
+        self.expanded_background_tasks.clear();
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
         self.pending_config_values.clear();
@@ -2082,8 +2115,8 @@ impl AcpView {
             self.elicitation_input_subscriptions
                 .retain(|ix, _| text_fields.iter().any(|(field_ix, ..)| field_ix == ix));
             for (ix, secret, title, value) in text_fields {
-                if !self.elicitation_inputs.contains_key(&ix) {
-                    let input = cx.new(|cx| {
+                self.elicitation_inputs.entry(ix).or_insert_with(|| {
+                    cx.new(|cx| {
                         let mut state = InputState::new(window, cx)
                             .placeholder(&title)
                             .default_value(value);
@@ -2091,9 +2124,8 @@ impl AcpView {
                             state = state.masked(true);
                         }
                         state
-                    });
-                    self.elicitation_inputs.insert(ix, input);
-                }
+                    })
+                });
                 if !self.elicitation_input_subscriptions.contains_key(&ix) {
                     let input = self.elicitation_inputs[&ix].clone();
                     let subscription = cx.subscribe_in(
@@ -2172,6 +2204,7 @@ impl AcpView {
         let stream_generation = self.snapshot_stream_generation;
         self.last_snapshot_revision = 0;
         self.handle = Some(handle);
+        self.history_backfill_started = false;
         if !self.is_fresh_conversation_start() {
             self.tick_starting(cx);
         }
@@ -2208,7 +2241,10 @@ impl AcpView {
                 view.history_loading = false;
                 match result {
                     Ok(snapshot) => view.prepend_history_page(snapshot, cx),
-                    Err(error) => eprintln!("[workspace] ACP 历史分页失败：{error}"),
+                    Err(error) => {
+                        view.history_error = Some(format!("历史读不出来：{error}"));
+                        eprintln!("[workspace] ACP 历史分页失败：{error}");
+                    }
                 }
             });
         })
@@ -2434,8 +2470,23 @@ impl AcpView {
 
     /// 停止当前 turn（session/cancel）。agent 会以 Cancelled 收尾，相位随 TurnEnded 回 Idle。
     fn cancel_turn(&mut self) {
+        self.cancel_requested_at = Some(std::time::Instant::now());
         if let Some(h) = &self.handle {
             let _ = h.action_tx.try_send(AcpUserAction::Cancel);
+        }
+    }
+
+    /// 用户点击输入框右侧「停止」按钮：
+    /// 第一次点击发起温和取消；如果在取消过程中用户再次点击，则触发「强制重启」强杀底层进程组作为终极兜底。
+    pub fn on_stop_button_click(&mut self, cx: &mut Context<Self>) {
+        if self.restarting {
+            return;
+        }
+        if self.cancel_requested_at.is_some() {
+            self.force_restart(cx);
+        } else {
+            self.cancel_turn();
+            cx.notify();
         }
     }
 
@@ -2461,6 +2512,7 @@ impl AcpView {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.restarting = false;
+                view.cancel_requested_at = None;
                 if let Err(err) = result {
                     view.restart_error = Some(err);
                 }
@@ -2672,6 +2724,7 @@ impl AcpView {
                     }
                 }
                 AcpEntry::ToolCall { title, .. } => format!("🔧 {title}"),
+                AcpEntry::TaskNote(note) => note.summary(),
                 AcpEntry::Divider(_) => continue,
             };
             if !line.trim().is_empty() {
@@ -3425,11 +3478,27 @@ impl AcpView {
 
     fn apply_pending_composer_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.try_acknowledge_composer_restore();
-        let Some(texts) = self.pending_composer_restore.take() else {
+        let texts = self.pending_composer_restore.take().unwrap_or_default();
+        let images = self
+            .pending_composer_restore_images
+            .take()
+            .unwrap_or_default();
+        if texts.is_empty() && images.is_empty() {
             return;
-        };
+        }
         let revision = self.pending_composer_restore_revision.take();
+        if !images.is_empty() {
+            self.pending_images
+                .extend(images.iter().filter_map(decode_acp_image));
+        }
         if texts.is_empty() {
+            if let Some(revision) = revision {
+                self.pending_composer_restore_ack = Some(
+                    self.pending_composer_restore_ack
+                        .map_or(revision, |pending| pending.max(revision)),
+                );
+                self.try_acknowledge_composer_restore();
+            }
             return;
         }
         let Some(input) = self.input.clone() else {
@@ -3566,6 +3635,10 @@ impl AcpView {
         if new_entries_len > 0 {
             self.awaiting_initial_history_snapshot = false;
         }
+        if self.loaded_entries_offset > 0 && !self.history_backfill_started {
+            self.history_backfill_started = true;
+            self.load_older_history(cx);
+        }
         let snapshot_phase = snap.phase;
         self.phase = snap.phase;
         self.end_reason = snap.end_reason;
@@ -3590,6 +3663,7 @@ impl AcpView {
         }
         let previous_status_line = self.status_line.clone();
         self.status_line = snap.status_line;
+        self.history_error = snap.history_error;
         if config_update_failure_is_new(
             previous_status_line.as_deref(),
             self.status_line.as_deref(),
@@ -3637,15 +3711,25 @@ impl AcpView {
             self.last_composer_restore_revision,
             restore_revision,
             snap.composer_restore_texts,
+            snap.composer_restore_images,
             skip_restore,
         );
         self.last_composer_restore_revision = restore.last_revision;
         self.skip_next_composer_restore = restore.skip_next;
+        let has_restore = restore.restore_texts.is_some() || restore.restore_images.is_some();
         if let Some(texts) = restore.restore_texts {
             match &mut self.pending_composer_restore {
                 Some(pending) => pending.extend(texts),
                 None => self.pending_composer_restore = Some(texts),
             }
+        }
+        if let Some(images) = restore.restore_images {
+            match &mut self.pending_composer_restore_images {
+                Some(pending) => pending.extend(images),
+                None => self.pending_composer_restore_images = Some(images),
+            }
+        }
+        if has_restore {
             self.pending_composer_restore_revision = Some(
                 self.pending_composer_restore_revision
                     .map_or(restore_revision, |pending| pending.max(restore_revision)),
@@ -3659,6 +3743,7 @@ impl AcpView {
             self.try_acknowledge_composer_restore();
         }
         self.plan = snap.plan;
+        self.background_tasks = snap.background_tasks;
         self.model = snap.model;
         self.config_options = snap.config_options;
         reconcile_pending_config_values(
@@ -3689,7 +3774,7 @@ impl AcpView {
         // 完成边沿以 TurnEnded 为准：回合明确成功、无人等待即可。未完成工具
         // 只影响展示，迟到终态按 tool id 回写，不再挡住 CompletedTurn。
         let waiting_on_user = !self.permissions.is_empty() || self.elicitation.is_some();
-        let succeeded = matches!(self.turn_outcome, Some(AcpTurnOutcome::Succeeded) | None);
+        let succeeded = self.turn_outcome.is_some_and(AcpTurnOutcome::is_success);
         let completed = snap.completed_unread
             && !self.was_completed_unread
             && !waiting_on_user
@@ -3747,6 +3832,7 @@ impl AcpView {
         }
 
         if matches!(self.phase, DaemonPhase::Idle) {
+            self.cancel_requested_at = None;
             let initial_config = std::mem::take(&mut self.pending_initial_config);
             self.queue_config_values(initial_config);
             if let Some(prompt) = self.pending_initial_prompt.take() {
@@ -4117,92 +4203,98 @@ impl AcpView {
             .count();
         // 正在跑的算当前步；全完成就是 n / n。
         let current = (done + in_progress).min(total);
-        let (summary, summary_color) = if done == total {
-            (
-                format!("{total} / {total} · 完成"),
-                gpui::rgb(ui_theme::green()),
-            )
+        let summary = if done == total {
+            format!("{total} / {total} · 完成")
         } else if in_progress > 0 {
-            (
-                format!("{current} / {total}"),
-                gpui::rgb(ui_theme::accent()),
-            )
+            format!("{current} / {total}")
         } else {
-            (
-                format!("{done} / {total}"),
-                gpui::rgb(ui_theme::text_muted()),
-            )
+            format!("{done} / {total}")
         };
+        let summary_color = gpui::rgb(if done == total {
+            ui_theme::text()
+        } else {
+            ui_theme::text_muted()
+        });
         let current_step = plan_current_step(plan).unwrap_or("等待下一步").to_string();
         let progress = (done as f32 + in_progress as f32 * 0.5) / total as f32;
 
         let mut bar = gpui_component::v_flex()
+            .w_full()
             .border_b_1()
-            .border_color(gpui::rgb(ui_theme::border_dim()))
-            .bg(gpui::rgb(ui_theme::bg_status()))
+            .border_color(ui_theme::hairline())
             .child(
-                h_flex()
-                    .id("acp-plan-toggle")
-                    .px_4()
-                    .py_2()
-                    .gap_2p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(ui_theme::overlay(0x14)))
-                    .active(|d| d.opacity(0.88))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.plan_collapsed = !this.plan_collapsed;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .w(px(10.))
-                            .text_xs()
-                            .text_color(gpui::rgb(ui_theme::text_muted()))
-                            .child(if self.plan_collapsed { "▸" } else { "▾" }),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(gpui::rgb(ui_theme::text_mid()))
-                            .child("任务进度"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(gpui::rgb(ui_theme::text_bright()))
-                            .child(current_step),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .font_family(smelt_core::font_config::font_family())
-                            .text_color(summary_color)
-                            .child(summary),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(120.))
-                            .h(px(5.))
-                            .rounded_full()
-                            .bg(gpui::rgb(ui_theme::border_dim()))
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .w(gpui::relative(progress.clamp(0., 1.)))
-                                    .h_full()
-                                    .bg(gpui::rgb(ui_theme::accent())),
-                            ),
-                    ),
+                h_flex().w_full().justify_center().child(
+                    h_flex()
+                        .id("acp-plan-toggle")
+                        .w_full()
+                        .max_w(ui_theme::conversation_max_width())
+                        .px_4()
+                        .py_2()
+                        .gap_2p5()
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(ui_theme::overlay(0x14)))
+                        .active(|d| d.opacity(0.88))
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.plan_collapsed = !this.plan_collapsed;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .w(px(10.))
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::text_muted()))
+                                .child(if self.plan_collapsed { "▸" } else { "▾" }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(gpui::rgb(ui_theme::text_mid()))
+                                .child("任务进度"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(gpui::rgb(ui_theme::text_bright()))
+                                .child(current_step),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_family(smelt_core::font_config::font_family())
+                                .text_color(summary_color)
+                                .child(summary),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(120.))
+                                .h(px(5.))
+                                .rounded_full()
+                                .bg(gpui::rgb(ui_theme::border_dim()))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .w(gpui::relative(progress.clamp(0., 1.)))
+                                        .h_full()
+                                        .bg(gpui::rgb(ui_theme::text_muted())),
+                                ),
+                        ),
+                ),
             );
         if !self.plan_collapsed {
-            let mut steps = gpui_component::v_flex().px_4().pb_3().gap_0p5();
+            let mut steps = gpui_component::v_flex()
+                .w_full()
+                .max_w(ui_theme::conversation_max_width())
+                .mx_auto()
+                .px_4()
+                .pb_3()
+                .gap_0p5();
             for entry in &plan.entries {
                 let row = h_flex().gap_2p5().items_center().py_0p5();
                 let row = match entry.status {
@@ -4210,14 +4302,9 @@ impl AcpView {
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .size(px(15.))
-                                .rounded_sm()
-                                .bg(gpui::rgb(ui_theme::green()))
-                                .flex()
-                                .items_center()
-                                .justify_center()
+                                .w(px(15.))
                                 .text_xs()
-                                .text_color(gpui::rgb(ui_theme::on_accent()))
+                                .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .child("✓"),
                         )
                         .child(
@@ -4234,7 +4321,7 @@ impl AcpView {
                                 .size(px(15.))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(gpui::rgb(ui_theme::accent()))
+                                .border_color(ui_theme::card_stroke())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -4242,7 +4329,7 @@ impl AcpView {
                                     div()
                                         .size(px(7.))
                                         .rounded_xs()
-                                        .bg(gpui::rgb(ui_theme::accent())),
+                                        .bg(gpui::rgb(ui_theme::text_muted())),
                                 ),
                         )
                         .child(
@@ -4253,14 +4340,14 @@ impl AcpView {
                                     div()
                                         .text_sm()
                                         .font_medium()
-                                        .text_color(gpui::rgb(ui_theme::text_bright()))
+                                        .text_color(gpui::rgb(ui_theme::text()))
                                         .child(entry.content.clone()),
                                 )
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(gpui::rgb(ui_theme::accent()))
-                                        .child("· 进行中"),
+                                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                                        .child("进行中"),
                                 ),
                         ),
                     // Pending 与协议未来的新状态都按「待做」渲染。
@@ -4283,6 +4370,139 @@ impl AcpView {
                 steps = steps.child(row);
             }
             bar = bar.child(steps);
+        }
+        Some(bar.into_any_element())
+    }
+
+    /// 后台任务条只表示仍在跑的进程。结束后的记录留在对话正文里。
+    fn render_background_task_bar(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let running = running_background_tasks(&self.background_tasks);
+        if running.is_empty() {
+            return None;
+        }
+        let summary = background_task_summary(running.len());
+        let mut bar = gpui_component::v_flex()
+            .border_b_1()
+            .border_color(gpui::rgb(ui_theme::border_dim()))
+            .bg(gpui::rgb(ui_theme::bg_status()))
+            .child(
+                h_flex()
+                    .id("acp-background-task-toggle")
+                    .px_4()
+                    .py_2()
+                    .gap_2p5()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|row| row.bg(ui_theme::overlay(0x14)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.background_tasks_collapsed = !this.background_tasks_collapsed;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .text_xs()
+                            .text_color(gpui::rgb(ui_theme::text_muted()))
+                            .child(if self.background_tasks_collapsed {
+                                "▸"
+                            } else {
+                                "▾"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .child("后台任务"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(gpui::rgb(ui_theme::text_bright()))
+                            .child(summary),
+                    ),
+            );
+        if !self.background_tasks_collapsed {
+            let mut rows = gpui_component::v_flex().px_4().pb_3().gap_1();
+            for (index, task) in running.iter().enumerate() {
+                let id = task.id.clone();
+                let expanded = self.expanded_background_tasks.contains(&task.id);
+                let status_color = match task.status {
+                    BackgroundTaskStatus::Running => ui_theme::blue(),
+                    BackgroundTaskStatus::Completed | BackgroundTaskStatus::Stopped => {
+                        ui_theme::text_muted()
+                    }
+                    BackgroundTaskStatus::Failed => ui_theme::red(),
+                    BackgroundTaskStatus::TimedOut => ui_theme::yellow(),
+                };
+                let mut row = gpui_component::v_flex()
+                    .id(("acp-background-task", index))
+                    .gap_1()
+                    .py_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        if !this.expanded_background_tasks.remove(&id) {
+                            this.expanded_background_tasks.insert(id.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(gpui::rgb(status_color))
+                                    .child(task.status.label()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_family(smelt_core::font_config::font_family())
+                                    .text_color(gpui::rgb(ui_theme::text_faint()))
+                                    .child(task.id.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(gpui::rgb(ui_theme::text_bright()))
+                                    .child(task.title.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .pl(px(4.))
+                            .text_xs()
+                            .truncate()
+                            .font_family(smelt_core::font_config::font_family())
+                            .text_color(gpui::rgb(ui_theme::text_muted()))
+                            .child(task.command.clone()),
+                    );
+                if expanded && !task.output.is_empty() {
+                    let mut output = gpui_component::v_flex()
+                        .pl(px(4.))
+                        .gap_0()
+                        .font_family(smelt_core::font_config::font_family())
+                        .text_xs()
+                        .text_color(gpui::rgb(ui_theme::text_mid()));
+                    for line in background_task_output_lines(&task.output) {
+                        output = output.child(div().truncate().child(line.to_string()));
+                    }
+                    row = row.child(output);
+                }
+                rows = rows.child(row);
+            }
+            bar = bar.child(rows);
         }
         Some(bar.into_any_element())
     }
@@ -4329,6 +4549,24 @@ impl AcpView {
             cx.notify();
         }
     }
+}
+
+fn running_background_tasks(tasks: &[BackgroundTaskView]) -> Vec<&BackgroundTaskView> {
+    tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskStatus::Running)
+        .collect()
+}
+
+fn background_task_summary(running: usize) -> String {
+    format!("{running} 个进行中")
+}
+
+fn background_task_output_lines(output: &str) -> Vec<&str> {
+    const MAX_LINES: usize = 8;
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].to_vec()
 }
 
 /// 折叠计划也要告诉用户“现在具体在做什么”，不能只剩一个 2/4。没有显式
@@ -4690,6 +4928,86 @@ fn fork_banner_text(origin: &AcpForkOrigin, current_agent: ConversationAgentKind
 
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 8;
+/// 展开后的日志视口一次露出的行数。卡片高度到此为止，外面的消息列表
+/// 不会被撑到和全文一样高。
+const TOOL_LOG_VIEWPORT_LINES: usize = 16;
+/// 日志行是等宽纯文本，行高固定，虚拟列表才能按行切片。
+const TOOL_LOG_LINE_HEIGHT_PX: f32 = 18.;
+
+/// 长日志在卡片里的三种画法。短输出整段画出；长输出默认只给预览；
+/// 展开后换成固定高度的行视口，而不是把全文排成一块富文本。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolLogMode {
+    Inline,
+    Preview,
+    Viewport,
+}
+
+fn tool_log_mode(line_count: usize, expanded: bool) -> ToolLogMode {
+    if line_count <= TOOL_OUTPUT_PREVIEW_LINES {
+        ToolLogMode::Inline
+    } else if expanded {
+        ToolLogMode::Viewport
+    } else {
+        ToolLogMode::Preview
+    }
+}
+
+/// 视口高度只覆盖能同时看见的行。行数更少时收缩，避免短日志下面空一大块。
+fn tool_log_viewport_height(line_count: usize) -> f32 {
+    let rows = line_count.clamp(1, TOOL_LOG_VIEWPORT_LINES);
+    rows as f32 * TOOL_LOG_LINE_HEIGHT_PX
+}
+
+/// 用字符宽度挑最宽的一行，交给虚拟列表测量横向滚动范围。
+/// 宽字符按两列估算，避免一行汉字被一行更长的英文盖过。
+fn log_line_columns(line: &str) -> usize {
+    line.chars()
+        .map(|ch| if (ch as u32) >= 0x1100 { 2 } else { 1 })
+        .sum()
+}
+
+fn widest_log_line_index(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, line)| log_line_columns(line))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn split_log_lines(body: &str) -> Vec<String> {
+    body.lines()
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect()
+}
+
+struct ToolLogPreview {
+    shown: String,
+    total: usize,
+}
+
+impl ToolLogPreview {
+    fn truncated(&self) -> bool {
+        self.total > TOOL_OUTPUT_PREVIEW_LINES
+    }
+}
+
+/// 只保留前几行用来预览。计数会扫过全文，但不会把每一行都做成字符串。
+fn tool_log_preview(body: &str) -> ToolLogPreview {
+    let mut shown = String::new();
+    let mut total = 0usize;
+    for line in body.lines() {
+        if total < TOOL_OUTPUT_PREVIEW_LINES {
+            if total > 0 {
+                shown.push('\n');
+            }
+            shown.push_str(line.trim_end_matches('\r'));
+        }
+        total += 1;
+    }
+    ToolLogPreview { shown, total }
+}
 
 /// 工具调用的输出不自动抢占对话空间；需要细节时由用户展开卡片。
 fn tool_card_default_expanded() -> bool {
@@ -5469,6 +5787,7 @@ fn build_conversation_layout_with_timings(
                 Some(*ix) != final_ix
                     && !is_completion_entry(&entries[*ix])
                     && !is_collaboration_entry(&entries[*ix])
+                    && !matches!(entries[*ix], AcpEntry::TaskNote(_))
             })
             .collect();
         if let Some(&first) = process_indices.first() {

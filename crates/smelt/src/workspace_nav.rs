@@ -88,9 +88,10 @@ impl AgentsView {
     }
 }
 
-/// 自动化面内页。列表是根；编辑器 / 历史 / Run 详情 / 运行现场是钻取，不落盘。
+/// 自动化面内页。列表是根，编辑器是唯一一层钻取，不落盘。
 ///
-/// 返回层级：Live 和 Run 回到 History，History 回到 Editor，Editor 回到 List。
+/// 运行记录不另开一页：它留在编辑器里。选中哪一次运行是编辑器上的选中态，
+/// 不是再往下压一层。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AutomationsView {
     #[default]
@@ -98,85 +99,25 @@ pub(crate) enum AutomationsView {
     Editor {
         automation_id: String,
     },
-    History {
-        automation_id: String,
-    },
-    Run {
-        automation_id: String,
-        run_id: String,
-    },
-    Live {
-        automation_id: String,
-        run_id: String,
-    },
 }
 
 impl AutomationsView {
     pub(crate) fn automation_id(&self) -> Option<&str> {
         match self {
             Self::List => None,
-            Self::Editor { automation_id }
-            | Self::History { automation_id }
-            | Self::Run { automation_id, .. }
-            | Self::Live { automation_id, .. } => Some(automation_id.as_str()),
+            Self::Editor { automation_id } => Some(automation_id.as_str()),
         }
     }
 
     pub(crate) fn editor_id(&self) -> Option<&str> {
         match self {
             Self::Editor { automation_id } => Some(automation_id.as_str()),
-            _ => None,
+            Self::List => None,
         }
-    }
-
-    pub(crate) fn is_history(&self) -> bool {
-        matches!(self, Self::History { .. })
-    }
-
-    pub(crate) fn run_id(&self) -> Option<&str> {
-        match self {
-            Self::Run { run_id, .. } | Self::Live { run_id, .. } => Some(run_id.as_str()),
-            Self::List | Self::Editor { .. } | Self::History { .. } => None,
-        }
-    }
-
-    pub(crate) fn is_live(&self) -> bool {
-        matches!(self, Self::Live { .. })
     }
 
     pub(crate) fn open_editor(&mut self, automation_id: String) {
         *self = Self::Editor { automation_id };
-    }
-
-    pub(crate) fn open_history(&mut self, automation_id: String) {
-        *self = Self::History { automation_id };
-    }
-
-    pub(crate) fn open_run(&mut self, automation_id: String, run_id: String) {
-        *self = Self::Run {
-            automation_id,
-            run_id,
-        };
-    }
-
-    pub(crate) fn open_live(&mut self, automation_id: String, run_id: String) {
-        *self = Self::Live {
-            automation_id,
-            run_id,
-        };
-    }
-
-    pub(crate) fn back(&mut self) {
-        *self = match self {
-            Self::List => Self::List,
-            Self::Editor { .. } => Self::List,
-            Self::History { automation_id } => Self::Editor {
-                automation_id: automation_id.clone(),
-            },
-            Self::Run { automation_id, .. } | Self::Live { automation_id, .. } => Self::History {
-                automation_id: automation_id.clone(),
-            },
-        };
     }
 
     pub(crate) fn pop_to_root(&mut self) {
@@ -374,50 +315,35 @@ mod tests {
     }
 
     #[test]
-    fn automations_editor_history_and_run_back_in_order() {
+    fn automations_editor_is_one_level_above_the_list() {
         let mut view = AutomationsView::List;
         view.open_editor("auto-1".into());
         assert_eq!(view.editor_id(), Some("auto-1"));
+        assert_eq!(view.automation_id(), Some("auto-1"));
 
-        view.open_history("auto-1".into());
-        view.open_run("auto-1".into(), "run-1".into());
-        view.back();
-        assert_eq!(
-            view,
-            AutomationsView::History {
-                automation_id: "auto-1".into()
-            }
-        );
-
-        view.open_live("auto-1".into(), "run-2".into());
-        view.back();
-        assert_eq!(
-            view,
-            AutomationsView::History {
-                automation_id: "auto-1".into()
-            }
-        );
-        view.back();
+        view.open_editor("auto-1".into());
         assert_eq!(
             view,
             AutomationsView::Editor {
                 automation_id: "auto-1".into()
             }
         );
-        view.back();
+
+        view.pop_to_root();
         assert_eq!(view, AutomationsView::List);
+        assert!(view.editor_id().is_none());
+        assert!(view.automation_id().is_none());
     }
 
     #[test]
     fn sidebar_pop_to_root_clears_drill_in_on_the_active_face_only() {
         let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents, None);
         nav.agents_mut().open_editor("agent-1".into());
-        nav.automations_mut()
-            .open_live("auto-1".into(), "run-1".into());
+        nav.automations_mut().open_editor("auto-1".into());
 
         nav.pop_active_to_root();
         assert_eq!(nav.agents(), &AgentsView::Catalog);
-        assert!(nav.automations().is_live());
+        assert_eq!(nav.automations().editor_id(), Some("auto-1"));
 
         nav.set_active(WorkspaceRoute::Automations);
         nav.pop_active_to_root();

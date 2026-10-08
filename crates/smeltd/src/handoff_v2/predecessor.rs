@@ -24,7 +24,9 @@ use alacritty_terminal::term::TermMode;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::MutexGuard;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 /// 已 stage 的交接载荷：fd_roles/fds/grids 三组同序一一对应。
 /// fds 是发送方原件号（保持 CLOEXEC），`SCM_RIGHTS` 发 dup 份。
@@ -207,12 +209,9 @@ pub(crate) fn run_transaction(
         ));
     }
 
-    // 暂存二进制先扶正再 spawn：rename 不影响运行中进程（握旧 inode），
-    // successor 从生下来名字就是对的；GUI 事后 rename 有 NotFound 容忍。
-    let target = match promote_staged_executable(exe) {
-        Ok(target) => target,
-        Err(error) => return rollback(format!("扶正暂存二进制失败：{error}")),
-    };
+    // 提交前 spawn 调用方给的路径。暂存的 smeltd.next 先不扶正：rename 会让
+    // 正在跑的 smeltd 路径指向新映像，回滚后会话宿主会因 inode 不符而拒绝启动。
+    let target = exe.to_path_buf();
     let fingerprint = match smelt_plugin_host::executable_fingerprint(&target) {
         Ok(fingerprint) => fingerprint,
         Err(error) => return rollback(format!("计算候选守护指纹失败：{error}")),
@@ -269,9 +268,15 @@ pub(crate) fn run_transaction(
     }
 
     // ---- 不可逆段开始：successor 已在服务 ----
-    // 先停 sidecars（让端口），再停插件（杀 bun 子进程防孤儿），调用方随后
-    // 回 ok + exit。网关自启有 AddrInUse 重试，撞上"predecessor 退出中"的
-    // 毫秒窗口会自愈；此处失败也不回滚（已无可回滚之处），只留痕。
+    // 现在才把 smeltd.next 扶正。successor 已从暂存路径 exec，握着同一 inode；
+    // 旧进程即将退出，不再用这条路径拉会话宿主。
+    if let Err(error) = promote_staged_executable(exe) {
+        crate::dlog(&format!("handoff: COMMIT 后扶正暂存二进制失败：{error}"));
+    }
+
+    // 先停 sidecars（让出端口），再停插件（杀 bun 子进程防孤儿），调用方随后
+    // 回 ok + exit。自启若发现端口仍被占用且前任还是父进程，会等前任退出
+    // 后再绑一次。此处失败也不回滚（已无可回滚之处），只留痕。
     //
     // 双 accept 窗口（COMMIT→exit 间两边同时 accept，新连接可能落到 dying
     // 进程）是刻意接受的：关 listen 叫不醒阻塞中的 accept（close 不唤醒、
@@ -388,35 +393,35 @@ fn set_cloexec(fd: RawFd, cloexec: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 回滚杀 successor：TERM → 2s → KILL，父进程 waitpid 回收（无僵尸）。
-/// 已退出（ECHILD）是正常情况，不是错误。
+/// 回滚杀 successor：先让唯一的 `waitpid` 就位，再 TERM，两秒后 KILL。
+/// 已经退出的不再发信号，避免 pid 被系统拿去复用后打到别人。
+/// 第二次截止仍未收回时，等的那条线程继续是这个 pid 唯一的 `waitpid`，
+/// 这里不能再 `child.wait()`。
 fn kill_successor(child: &mut std::process::Child) {
     match child.try_wait() {
-        Ok(Some(_)) => return,
+        Ok(Some(_)) | Err(_) => return,
         Ok(None) => {}
-        Err(_) => return,
     }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
+    let pid = child.id() as i32;
+    let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&killed);
+    let _ = smelt_core::process_wait::wait_for_pid(
+        pid,
+        Duration::from_secs(2),
+        move || unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        },
+        move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
             }
-            Err(_) => return,
-        }
+        },
+        Duration::from_secs(2),
+    );
+    if killed.load(std::sync::atomic::Ordering::SeqCst) {
+        crate::dlog("handoff: successor TERM 超时，已 SIGKILL");
     }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGKILL);
-    }
-    let _ = child.wait();
-    crate::dlog("handoff: successor TERM 超时，已 SIGKILL");
 }
 
 #[cfg(test)]
@@ -436,24 +441,53 @@ mod tests {
     }
 
     #[test]
-    fn staged_executable_is_promoted_before_spawn() {
+    fn kill_successor_reaps_a_child_that_ignores_term() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap \"\" TERM; exec sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let started = Instant::now();
+        kill_successor(&mut child);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "TERM 两秒后应杀掉并收回，实际 {:?}",
+            started.elapsed()
+        );
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[test]
+    fn staged_executable_stays_until_commit_promotes_it() {
         let root = std::env::temp_dir().join(format!(
             "smeltd-promote-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let staged = root.join("smeltd.install.123.next");
+        let live = root.join("smeltd");
+        let staged = root.join("smeltd.next");
+        std::fs::write(&live, b"running").unwrap();
         std::fs::write(&staged, b"candidate").unwrap();
 
+        // spawn 用暂存路径，正在跑的正式文件保持原映像。
+        assert_eq!(staged, root.join("smeltd.next"));
+        assert_eq!(std::fs::read(&live).unwrap(), b"running");
+
         let target = promote_staged_executable(&staged).unwrap();
-        assert_eq!(target, root.join("smeltd"));
-        assert!(target.is_file());
+        assert_eq!(target, live);
+        assert_eq!(std::fs::read(&live).unwrap(), b"candidate");
         assert!(!staged.exists());
 
         // 非暂存原样返回，不碰文件系统。
-        let plain = root.join("smeltd");
-        assert_eq!(promote_staged_executable(&plain).unwrap(), plain);
+        assert_eq!(promote_staged_executable(&live).unwrap(), live);
         std::fs::remove_dir_all(root).unwrap();
     }
 

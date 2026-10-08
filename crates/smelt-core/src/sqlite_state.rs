@@ -333,7 +333,7 @@ mod tests {
             .unwrap();
 
         let quarantined =
-            quarantine_json_with_root(Some(path.clone()), "update-state.corrupt", Some(&root))
+            quarantine_json_with_root(Some(path), "update-state.corrupt", Some(&root))
                 .unwrap()
                 .expect("坏 payload 应被隔离");
         assert!(quarantined.starts_with("sqlite:quarantine/"));
@@ -370,8 +370,7 @@ mod tests {
         symlink(&target, &path).unwrap();
 
         assert!(
-            quarantine_json_with_root(Some(path.clone()), "update-state.corrupt", Some(&root),)
-                .is_err()
+            quarantine_json_with_root(Some(path), "update-state.corrupt", Some(&root),).is_err()
         );
         let store =
             smelt_store::Store::open_or_create(root.join(smelt_store::DATABASE_FILE_NAME)).unwrap();

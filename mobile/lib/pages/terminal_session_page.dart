@@ -4,12 +4,15 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 
 import '../services/gateway_service.dart';
 import '../services/terminal_prefs_store.dart';
 import '../services/terminal_stream_service.dart';
 import '../theme/terminal_theme_wire.dart';
+import '../utils/terminal_links.dart';
+import '../utils/terminal_paste.dart';
 import '../utils/xterm_input_filter.dart';
 import '../widgets/pending_action_badge.dart';
 import '../theme/smelt_theme.dart';
@@ -21,6 +24,7 @@ class TerminalSessionPage extends StatefulWidget {
     this.stream,
     this.onShowPendingActions,
     this.prefsStore,
+    this.openLink,
   });
 
   final SessionSummary session;
@@ -28,6 +32,9 @@ class TerminalSessionPage extends StatefulWidget {
 
   /// 测试注入用；默认落到应用支持目录下的一个 json。
   final TerminalPrefsStore? prefsStore;
+
+  /// 测试注入。默认用系统浏览器打开 http(s)。
+  final Future<bool> Function(Uri uri)? openLink;
 
   /// 点全局待办徽标时调用。终端会话尤其需要：盯着一个 shell 跑的时候，别的
   /// 会话在等审批同样得看得见。
@@ -41,6 +48,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     with WidgetsBindingObserver {
   late final TerminalStreamClient _stream;
   late Terminal _terminal;
+  late final TerminalController _terminalController;
+  final TerminalLinkIndex _links = TerminalLinkIndex();
   late GlobalKey<TerminalViewState> _terminalViewKey;
   late Sink<List<int>> _byteSink;
   late XtermInputFilter _inputFilter;
@@ -75,11 +84,18 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   /// 视图已经离开最新输出（用户往上翻了，或者刚补完历史落在中间）。实时输出仍在
   /// 底部推进，得给用户一个回得去的出口。
   bool _awayFromTail = false;
+  bool _hasSelection = false;
+
+  /// 当前选区正好是一个可打开的 http(s) 链接时的目标。随选区变化同步更新，
+  /// 选区栏的 Open 按钮只认这个字段，不在点击时重新取选区。
+  String? _selectionOpenTarget;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _terminalController = TerminalController();
+    _terminalController.addListener(_onSelectionChanged);
     _stream =
         widget.stream ??
         TerminalStreamService(
@@ -108,11 +124,14 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   }
 
   Terminal _newTerminal({int cols = 80, int rows = 24}) {
-    final terminal = Terminal(
+    late final Terminal terminal;
+    terminal = Terminal(
       // 和 attach 时声明的 scrollback 上限同源：daemon 发多了，超出的部分解码完
       // 就会被这个环形缓冲丢掉。
       maxLines: kMaxTerminalScrollbackLines,
       onOutput: _stream.sendInput,
+      onPrivateOSC: (code, args) => _links.onOsc(terminal, code, args),
+      wordSeparators: cliWordSeparators,
     );
     // A daemon snapshot contains cursor-addressed output for the dimensions in
     // terminalReady. Establish that grid before any replay byte is decoded.
@@ -177,6 +196,9 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         setState(() => _writeEnabled = event.writeEnabled);
       case TerminalReadyEvent():
         _closeSoftwareKeyboard();
+        // 快照换了一整帧，旧缓冲上的 OSC 8 锚点和选区都不再指向这帧。
+        _links.clear();
+        _terminalController.clearSelection();
         _terminal = _newTerminal(cols: event.cols, rows: event.rows);
         _terminalViewKey = GlobalKey<TerminalViewState>();
         _resetDecoder();
@@ -460,6 +482,11 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         actions: [
           if (widget.onShowPendingActions case final show?)
             PendingActionBadge(onPressed: show),
+          IconButton(
+            tooltip: _hasSelection ? 'Copy selection' : 'Copy output',
+            onPressed: _copyOutput,
+            icon: const Icon(Icons.copy_outlined),
+          ),
           _buildFontSizeButton(),
           IconButton(
             tooltip: !_writeEnabled
@@ -506,13 +533,36 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                       bottom: 12,
                       child: _BackToTailButton(onPressed: _jumpToTail),
                     ),
+                  // 浮在终端上面，不能进 Column：多出来的高度会改行数，
+                  // 主屏 CLI 会因此重印整段对话。
+                  if (_hasSelection)
+                    Positioned(
+                      left: 12,
+                      right: 72,
+                      bottom: 12,
+                      height: 48,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: _TerminalSelectionBar(
+                          onCopy: _copyOutput,
+                          onSelectAll: _selectAll,
+                          onOpen: switch (_selectionOpenTarget) {
+                            final url? => () => unawaited(
+                              _openExternalLink(url),
+                            ),
+                            null => null,
+                          },
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
             // 快捷键栏只要能写就常驻：最高频的动作是「看着 agent 跑、按 ^C 打断」，
             // 那时并不需要软键盘。挂在键盘上会逼用户先唤起键盘遮掉半屏，而且键盘
             // 开合还会连带改变终端视口高度，白白触发一轮 cols/rows 重算。
-            if (_writeEnabled) TerminalShortcutBar(onKey: _sendKey),
+            if (_writeEnabled)
+              TerminalShortcutBar(onKey: _sendKey, onPaste: _pasteClipboard),
           ],
         ),
       ),
@@ -523,6 +573,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     return TerminalView(
       _terminal,
       key: _terminalViewKey,
+      controller: _terminalController,
       focusNode: _terminalFocusNode,
       scrollController: _terminalScrollController,
       autofocus: false,
@@ -531,9 +582,9 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       autoResize: !_terminalGeometryLocked && !_replayGeometryLocked,
       deleteDetection: true,
       simulateScroll: true,
-      onTapUp: (_, _) => _enableSoftwareKeyboard(),
+      claimTap: _claimLinkTap,
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      theme: _theme,
+      theme: SmeltTerminalTheme.forDisplay(_theme),
       textStyle: TerminalStyle(
         fontSize: _prefs.fontSize,
         height: 1.15,
@@ -542,10 +593,110 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     );
   }
 
+  /// 长按拖动会连续改选区但不会经过「无选区」，所以每次通知都要重算。
+  void _onSelectionChanged() {
+    if (!mounted) return;
+    final selection = _terminalController.selection;
+    final hasSelection = selection != null;
+    final openTarget = selection == null
+        ? null
+        : openableHttpUrl(_terminal.buffer.getText(selection));
+    if (hasSelection == _hasSelection && openTarget == _selectionOpenTarget) {
+      return;
+    }
+    setState(() {
+      _hasSelection = hasSelection;
+      _selectionOpenTarget = openTarget;
+    });
+  }
+
+  /// 按下在链接上就把这次点按认领走：xterm 不再弹键盘、不把它当鼠标
+  /// 点击发给 TUI，单击完成才打开；变成长按选词就什么都不做。
+  VoidCallback? _claimLinkTap(CellOffset cell) {
+    // 有选区时这一点是在取消选区，留给 xterm。
+    if (_terminalController.selection != null) return null;
+    final url = _links.targetAt(_terminal, cell);
+    if (url == null) return null;
+    return () => unawaited(_openExternalLink(url));
+  }
+
+  Future<void> _copyOutput() async {
+    final selection = _terminalController.selection;
+    final text = terminalClipboardText(_terminal, selection);
+    if (text.trim().isEmpty) {
+      _showMessage('Nothing to copy');
+      return;
+    }
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+    } catch (_) {
+      if (mounted) _showMessage('Could not copy');
+      return;
+    }
+    if (!mounted) return;
+    HapticFeedback.selectionClick();
+    if (selection != null) _terminalController.clearSelection();
+    _showMessage('Copied');
+  }
+
+  void _selectAll() {
+    final buffer = _terminal.buffer;
+    if (buffer.height <= 0) return;
+    _terminalController.setSelection(
+      buffer.createAnchor(0, 0),
+      buffer.createAnchor(buffer.viewWidth, buffer.height - 1),
+      mode: SelectionMode.line,
+    );
+  }
+
+  Future<void> _openExternalLink(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || openableHttpUrl(url) == null) return;
+    final opener = widget.openLink ?? _launchExternal;
+    try {
+      final opened = await opener(uri);
+      if (!opened && mounted) _showMessage('Could not open link');
+    } catch (_) {
+      if (mounted) _showMessage('Could not open link');
+    }
+  }
+
+  Future<bool> _launchExternal(Uri uri) {
+    return launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   /// 快捷键栏统一出口。编码交给终端本身，它知道对端有没有开 kitty keyboard
   /// protocol（决定 Shift+Tab 发 `ESC[Z` 还是 `ESC[9;2u`）和 application
   /// cursor 模式（决定方向键发 CSI 还是 SS3），也和蓝牙键盘走的是同一条路径，
   /// 两边不会各编各的。`onOutput` 已经接到守护，所以这里不用再自己发。
+  Future<void> _pasteClipboard() async {
+    if (!_writeEnabled) return;
+    final String? text;
+    try {
+      text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    } catch (_) {
+      if (mounted) _showMessage('Could not paste');
+      return;
+    }
+    if (!mounted || !_writeEnabled) return;
+    if (text == null || text.isEmpty) {
+      _showMessage('Nothing to paste');
+      return;
+    }
+    HapticFeedback.selectionClick();
+    // 不走 keyInput(Ctrl+V)：那是 0x16，shell 和 TUI 都不会把它当粘贴。
+    _stream.sendInput(
+      encodeTerminalPaste(text, bracketed: _terminal.bracketedPasteMode),
+    );
+  }
+
   void _sendKey(
     TerminalKey key, {
     bool shift = false,
@@ -644,6 +795,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
 
   @override
   void dispose() {
+    _terminalController.removeListener(_onSelectionChanged);
     WidgetsBinding.instance.removeObserver(this);
     _terminalViewKey.currentState?.closeKeyboard();
     _terminalFocusNode.dispose();
@@ -654,6 +806,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     unawaited(_eventSubscription.cancel());
     unawaited(_stateSubscription.cancel());
     unawaited(_stream.dispose());
+    _terminalController.dispose();
+    _links.clear();
     super.dispose();
   }
 }
@@ -726,10 +880,17 @@ class _BackToTailButton extends StatelessWidget {
 /// 快捷键栏。键位顺序按 agent 场景排：最左边是打断/切模式这类高频键，方向键
 /// 居中，翻页在最右——横向滚动时右侧先被截掉，低频的放那边。
 class TerminalShortcutBar extends StatelessWidget {
-  const TerminalShortcutBar({super.key, required this.onKey});
+  const TerminalShortcutBar({
+    super.key,
+    required this.onKey,
+    required this.onPaste,
+  });
 
   /// 所有键都走这里：编码由终端按其当前模式决定。
   final TerminalKeyHandler onKey;
+
+  /// 剪贴板粘贴。手机上没有 Cmd/Ctrl+V 可按，按钮和 ^V 都走这条。
+  final VoidCallback onPaste;
 
   @override
   Widget build(BuildContext context) {
@@ -740,6 +901,12 @@ class TerminalShortcutBar extends StatelessWidget {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
         children: [
+          _TerminalIconKey(
+            icon: Icons.content_paste,
+            tooltip: 'Paste',
+            onPressed: onPaste,
+          ),
+          _TerminalTextKey(label: '^V', tooltip: 'Paste', onPressed: onPaste),
           _TerminalTextKey(
             label: 'Esc',
             onPressed: () => onKey(TerminalKey.escape),
@@ -817,6 +984,59 @@ class _TerminalTextKey extends StatelessWidget {
     final button = TextButton(onPressed: onPressed, child: Text(label));
     final message = tooltip;
     return message == null ? button : Tooltip(message: message, child: button);
+  }
+}
+
+class _TerminalSelectionBar extends StatelessWidget {
+  const _TerminalSelectionBar({
+    required this.onCopy,
+    required this.onSelectAll,
+    this.onOpen,
+  });
+
+  final VoidCallback onCopy;
+  final VoidCallback onSelectAll;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: colors.inverseSurface,
+      elevation: 4,
+      borderRadius: BorderRadius.circular(22),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _SelectionAction(label: 'Copy', onPressed: onCopy),
+            _SelectionAction(label: 'Select all', onPressed: onSelectAll),
+            if (onOpen != null)
+              _SelectionAction(label: 'Open', onPressed: onOpen!),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SelectionAction extends StatelessWidget {
+  const _SelectionAction({required this.label, required this.onPressed});
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        foregroundColor: Theme.of(context).colorScheme.onInverseSurface,
+        visualDensity: VisualDensity.compact,
+      ),
+      child: Text(label),
+    );
   }
 }
 

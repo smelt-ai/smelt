@@ -1789,6 +1789,15 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if config.base_url.is_empty()
+            && let Err(error) =
+                smelt_core::pi_model_settings::clear_pi_provider_base_url(&config.provider)
+        {
+            self.pi_model_editor_error = Some(error.clone());
+            crate::status_item::notify_error(error);
+            cx.notify();
+            return;
+        }
 
         self.pi_model_editor = None;
         self.pi_model_editor_error = None;
@@ -2280,13 +2289,8 @@ impl Workspace {
             models,
         };
 
-        if let Some(prev) = &draft.previous_id
-            && prev != &id
-        {
-            let _ = smelt_core::pi_model_settings::remove_pi_custom_provider(prev);
-        }
-
-        if let Err(error) = smelt_core::pi_model_settings::save_pi_custom_provider(
+        if let Err(error) = smelt_core::pi_model_settings::save_pi_custom_provider_replacing(
+            draft.previous_id.as_deref(),
             &provider,
             draft.api_key.as_deref(),
             draft.set_default,

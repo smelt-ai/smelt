@@ -411,7 +411,7 @@ mod tests {
         // 最小合法快照（与 manifest 测试同一形状；bridge 只搬运不解读）。
         serde_json::from_value(serde_json::json!({
             "entries": [],
-            "phase": "Idle",
+            "phase": "idle",
             "pending_elicitation": null,
             "status_line": null,
             "acp_session_id": "acp-sess-1",

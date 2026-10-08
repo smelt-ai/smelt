@@ -2,7 +2,7 @@
   "name": "@smelt-ai/pi-agent",
   "version": "0.4.6",
   "private": true,
-  "description": "Smelt-managed Pi RPC runtime with built-in interaction, permission, and usage telemetry extensions",
+  "description": "Smelt-managed Pi RPC runtime with built-in interaction, subagent, permission, and usage telemetry extensions",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {

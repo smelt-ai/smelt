@@ -16,11 +16,39 @@ use crate::acp_conn::{
 use crate::daemon_state::DaemonPhase;
 
 pub fn acknowledge_composer_restore(state: &mut AcpSessionState, revision: u64) -> bool {
-    if revision != state.composer_restore_revision || state.composer_restore_texts.is_empty() {
+    if revision != state.composer_restore_revision {
+        return false;
+    }
+    if state.composer_restore_texts.is_empty() && state.composer_restore_images.is_empty() {
         return false;
     }
     state.composer_restore_texts.clear();
+    state.composer_restore_images.clear();
     true
+}
+
+/// 把没被收下的草稿还回输入框。文本和图片是同一份，revision 单调增加。
+/// 只有图、没有字也要还回去。
+pub fn queue_composer_restore(
+    state: &mut AcpSessionState,
+    texts: Vec<String>,
+    images: Vec<crate::acp_chat::AcpImage>,
+) {
+    let texts: Vec<_> = texts
+        .into_iter()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect();
+    let images: Vec<_> = images
+        .into_iter()
+        .filter(|image| !image.data_b64.is_empty())
+        .collect();
+    if texts.is_empty() && images.is_empty() {
+        return;
+    }
+    state.composer_restore_revision = state.composer_restore_revision.saturating_add(1);
+    state.composer_restore_texts = texts;
+    state.composer_restore_images = images;
 }
 
 /// `apply_event` 的旁路效果——旧版直接在 GPUI `Context` 上做（`cx.notify()`/
@@ -120,13 +148,18 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
                 skip_persist = false;
             }
         }
-        ConversationEvent::ComposerRestore { revision, texts } => {
+        ConversationEvent::ComposerRestore {
+            revision,
+            texts,
+            images,
+        } => {
             state.queued_steering.clear();
             state.queued_steering_images.clear();
             state.queued_follow_up.clear();
             if revision > state.composer_restore_revision {
                 state.composer_restore_revision = revision;
                 state.composer_restore_texts = texts;
+                state.composer_restore_images = images;
             }
         }
         ConversationEvent::Status(msg) => state.status_line = Some(msg),
@@ -165,7 +198,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             raw_input,
         } => apply_tool_debug(state, id, name, raw_input),
         ConversationEvent::RuntimeDebug(debug) => {
-            state.runtime_debug = debug;
+            state.runtime_debug = *debug;
             outcome.runtime_debug_changed = true;
         }
         ConversationEvent::ToolStarted { id, title, kind } => {
@@ -189,6 +222,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::Model(model) => state.model = Some(model),
         ConversationEvent::ConfigOptions(options) => state.config_options = options,
         ConversationEvent::Plan(plan) => apply_plan(state, plan),
+        ConversationEvent::BackgroundTasks(tasks) => state.background_tasks = tasks,
         ConversationEvent::Permission {
             question,
             tool_call_id,
@@ -221,6 +255,17 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             responder,
             raw_request_line,
         ),
+        ConversationEvent::BackgroundNotice(note) => {
+            // 状态行不是一轮对话。相位、回合序号和用户回显都保持原样。
+            outcome.entries_offset = Some(state.entries.len());
+            state.entries.push(AcpEntry::TaskNote(note));
+        }
+        ConversationEvent::PromptAccepted
+        | ConversationEvent::PromptNotAccepted
+        | ConversationEvent::ProviderIdle => {
+            // 发送闸门由 daemon 处理。归约不改投影，否则会和回显各记一份。
+            skip_persist = true;
+        }
         ConversationEvent::TurnEnded(reason) => outcome.entries_offset = finish_turn(state, reason),
         ConversationEvent::TurnFailed(msg) => apply_turn_failed(state, &mut outcome, msg),
         ConversationEvent::Rewound { truncate_from } => {
@@ -248,10 +293,10 @@ fn apply_prompt_queue(
     let old_images = std::mem::take(&mut state.queued_steering_images);
     let consumed = consumed_steering_count(&old, &steering);
     let first_new = state.entries.len();
-    for i in 0..consumed {
+    for (i, text) in old.iter().enumerate().take(consumed) {
         super::note_mid_turn_input(
             state,
-            old[i].clone(),
+            text.clone(),
             old_images.get(i).cloned().unwrap_or_default(),
         );
     }
@@ -281,6 +326,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
         ConversationEvent::AgentChunk { .. }
             | ConversationEvent::TerminalOutput { .. }
             | ConversationEvent::Plan(_)
+            | ConversationEvent::BackgroundTasks(_)
             | ConversationEvent::Model(_)
             | ConversationEvent::ConfigOptions(_)
             | ConversationEvent::Usage { .. }
@@ -306,6 +352,11 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
             | ConversationEvent::Plan(_)
+            | ConversationEvent::BackgroundTasks(_)
+            | ConversationEvent::BackgroundNotice(_)
+            | ConversationEvent::PromptAccepted
+            | ConversationEvent::PromptNotAccepted
+            | ConversationEvent::ProviderIdle
             | ConversationEvent::Model(_)
             | ConversationEvent::ConfigOptions(_)
             | ConversationEvent::SessionTitle(_)
@@ -1144,12 +1195,22 @@ fn finish_turn_with(state: &mut AcpSessionState, outcome: AcpTurnOutcome) -> Opt
     let tool_offset = cancelled
         .then(|| finish_cancelled_turn_tools(state))
         .flatten();
+    let turn_open = state.turn_started_at_ms.is_some()
+        || matches!(
+            state.phase,
+            DaemonPhase::Thinking
+                | DaemonPhase::AwaitingApproval
+                | DaemonPhase::WaitingForUser
+                | DaemonPhase::ExecutingTool
+        );
     state.permissions.clear();
     state.elicitation = None;
     state.phase = DaemonPhase::Idle;
     state.end_reason.clear();
     state.completed_delivery_id = state.active_delivery_id.take();
-    state.completed_unread = true;
+    if turn_open {
+        state.completed_unread = true;
+    }
     state.turn_outcome = Some(outcome);
     let ended_at_ms = super::unix_time_ms();
     if let Some(timing) = state.turn_timings.last_mut()

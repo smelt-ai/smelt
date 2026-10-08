@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt, channel::mpsc};
 
@@ -336,7 +336,7 @@ pub enum ConversationEvent {
         raw_input: Option<serde_json::Value>,
     },
     /// 受管运行时明确上报的本轮 system prompt 与可用工具定义。
-    RuntimeDebug(crate::acp_session::RuntimeDebug),
+    RuntimeDebug(Box<crate::acp_session::RuntimeDebug>),
     /// Provider-neutral tool lifecycle used by native drivers such as Codex app-server.
     ToolStarted {
         id: String,
@@ -361,6 +361,10 @@ pub enum ConversationEvent {
     /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
     /// UI 渲染成消息流上方的可折叠 PLAN 条。
     Plan(Plan),
+    /// Pi 后台任务的全量快照。输出是尾部，不随每个字节落盘。
+    BackgroundTasks(Vec<crate::acp_session::BackgroundTaskView>),
+    /// 后台任务结束。归约写成状态行，不开回合，也不当成用户说的话。
+    BackgroundNotice(crate::acp_chat::TaskNote),
     /// 模型状态：当前名 + 可选列表。来自会话配置项里 category=Model 的那条
     /// select；建会话时给一次，切换或 agent 侧改动时通过 ConfigOptionUpdate 再给。
     /// 取不到就一直是 None，UI 不假装知道。
@@ -430,10 +434,11 @@ pub enum ConversationEvent {
         follow_up: Vec<String>,
     },
     /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
-    /// 发送 `AcknowledgeComposerRestore`，服务端清文本但保留 revision 水位。
+    /// 发送 `AcknowledgeComposerRestore`，服务端清掉文本和图片，但保留 revision 水位。
     ComposerRestore {
         revision: u64,
         texts: Vec<String>,
+        images: Vec<PromptImage>,
     },
     /// agent 的选择题 / 表单（AskUserQuestion 类）：UI 渲染字段，凭 responder 回填。
     Elicitation {
@@ -443,6 +448,13 @@ pub enum ConversationEvent {
         /// 同 `Permission::raw_request_line`。
         raw_request_line: Option<String>,
     },
+    /// Pi 收下了这条 prompt（预检成功）。回显从这里开始，不再在送出时提前记入会话。
+    PromptAccepted,
+    /// Pi 没收下。常见原因是上一轮还在跑。这不是回合结束，也不能写成「回合失败」。
+    PromptNotAccepted,
+    /// Pi 现在能接受一条不带 streamingBehavior 的 prompt。
+    /// 只有这条信号才打开 Pi 会话的发送闸门；界面上的回合结束不算。
+    ProviderIdle,
     /// 一轮 prompt 结束（含被取消）。
     TurnEnded(StopReason),
     /// 一轮 prompt 以 JSON-RPC 错误收场（agent 明确回了 error，而不是断线）。
@@ -467,9 +479,9 @@ pub enum ConversationEvent {
 }
 
 impl ConversationEvent {
-    /// 这条事件是否结束了当前回合。回合结束要放开「settling gate」才能再发
-    /// prompt——判定写在事件上，免得每个消费点各写一份 `matches!` 然后漏掉
-    /// 新增的结束方式（`TurnFailed` 就是这么被漏过一次的）。
+    /// 这条事件是否结束了界面上的当前回合。
+    ///
+    /// Pi 能不能再收一条 prompt 是另一件事，看 `ProviderIdle`，不要拿这里放行。
     pub fn ends_turn(&self) -> bool {
         matches!(
             self,
@@ -487,8 +499,8 @@ pub enum ReadyKind {
     /// 前后投递回放通知；投影由 `HistoryReplayStarted` 提前清空，Ready 本身
     /// 不得再修改消息。
     ResumedWithReplay,
-    /// smeltd 无缝升级继承 agent stdio fd：连接和完整内存快照都还在，不重放
-    /// 历史。普通冷恢复不走这条，只能通过 `session/load` 重建投影。
+    /// smeltd 无缝升级继承 agent stdio fd，且这次没有重放历史。
+    /// 投影保持交接时的样子：旧文件里的正文还在；新文件加载失败时只剩未完成的一轮。
     ResumedKeepHistory,
 }
 
@@ -868,37 +880,98 @@ pub fn shutdown_and_wait(handle: ConversationHandle, timeout: std::time::Duratio
 /// 证明方式取决于亲缘关系（调用方不用选，运行时按 `waitpid` 结果自动分流——
 /// 同一个会话交接前是亲生、交接后是收养，关系是动态的）：
 /// - 直接子进程：`waitpid`（精确，还能收走僵尸）+ 组缺席双重确认；
-/// - 收养进程（handoff 后前任已退）：`waitpid` 永报 ECHILD，改用信号探针。
-///   这是非亲生组死亡唯一可用的原语（macOS 无 pidfd，组成员无法枚举；
-///   Linux pidfd 也只管单个 pid）。调用方应在 prove 之前先发过 SIGKILL：
-///   刚杀完就地轮询，pid 复用需要整组先死再重建同号组，不可能在该窗口内
-///   完成，探得缺席即原组已死。D-state 等杀不死的只会探得仍在，超时返回
-///   false（与 waitpid 路径同语义）。
+/// - 收养进程（handoff 后前任已退）：`waitpid` 永报 ECHILD，改用信号探针，
+///   组员退出用内核事件等（macOS `kqueue`，Linux `pidfd`）。调用方应在 prove
+///   之前先发过 SIGKILL：刚杀完就地等，pid 复用需要整组先死再重建同号组，
+///   不可能在该窗口内完成，探得缺席即原组已死。D-state 等杀不死的只会探得
+///   仍在，超时返回 false（与 waitpid 路径同语义）。
 ///
 /// 组缺席之外还查 leader 本人：若该 pid 活着却已不在自编号组里（重设过 pgid
 /// 的非 leader），光看组会误判已死。双条件缺一不可。
 pub fn prove_process_group_dead(pid: i32, timeout: Duration) -> bool {
+    prove_process_group_dead_inner(pid, timeout, true)
+}
+
+/// 和 [`prove_process_group_dead`] 一样查组是否已经空了，但绝不 `waitpid`。
+///
+/// 给「上一次等待还占着这个 pid」的重试用。僵尸对 `kill(pid, 0)` 仍算活着，
+/// 组长还没被原来的 wait 收走时，这里返回 false。原来的 wait 返回之后，
+/// 下一次才能看到这个号已经不在。
+pub fn prove_process_group_dead_without_reaping(pid: i32, timeout: Duration) -> bool {
+    prove_process_group_dead_inner(pid, timeout, false)
+}
+
+fn prove_process_group_dead_inner(pid: i32, timeout: Duration, reap_child: bool) -> bool {
     if pid <= 1 {
         return true;
     }
-    // 一次性亲缘判定：ECHILD=收养/已收走。此后不再复核——亲缘关系不会中途改变。
-    let ours = !matches!(waitpid_child(pid, libc::WNOHANG), Waitpid::NotOurChild);
     let deadline = Instant::now() + timeout;
+    // 允许收尸时才做亲缘判定：ECHILD=收养/已收走。此后不再复核。
+    // 不允许收尸时，连这一次 WNOHANG 也不发，避免和还堵在 wait 上的那条线程抢。
+    let ours = if reap_child {
+        loop {
+            match waitpid_child(pid, libc::WNOHANG) {
+                Waitpid::Interrupted => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                }
+                Waitpid::NotOurChild => break false,
+                Waitpid::Reaped | Waitpid::StillRunning => break true,
+            }
+        }
+    } else {
+        false
+    };
+    let mut reported_dead = BTreeSet::new();
+    let mut blind_wait_used = false;
     loop {
-        // 收养组没有 waitpid 可问：信号探针即证明（见函数注释）。
-        let child_gone = !ours
-            || matches!(
-                waitpid_child(pid, libc::WNOHANG),
-                Waitpid::Reaped | Waitpid::NotOurChild
-            );
+        let child_gone = if ours {
+            match waitpid_child(pid, libc::WNOHANG) {
+                Waitpid::Reaped | Waitpid::NotOurChild => true,
+                Waitpid::StillRunning | Waitpid::Interrupted => false,
+            }
+        } else {
+            true
+        };
         if child_gone && process_group_absent(pid) && process_absent(pid) {
             return true;
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return false;
         }
-        // 等的是内核事实，不是应用层锁。waitpid 没有超时参数。
-        std::thread::sleep(Duration::from_millis(5));
+        let remaining = deadline - now;
+        let mut watch = Vec::new();
+        if ours && !child_gone {
+            watch.push(pid);
+        }
+        for member in process_group_members(pid) {
+            if member > 1 && !reported_dead.contains(&member) {
+                watch.push(member);
+            }
+        }
+        watch.sort_unstable();
+        watch.dedup();
+        if watch.is_empty() {
+            // 能看的 pid 都已经报过退出，组探针却还说人在（多半是还没被收走的僵尸）。
+            // 把剩下的截止时间一次睡完再查，不再隔几毫秒问。
+            if blind_wait_used {
+                return false;
+            }
+            blind_wait_used = true;
+            std::thread::park_timeout(remaining);
+            continue;
+        }
+        match crate::process_wait::wait_until_any_exit(&watch, remaining) {
+            Some(exited) => {
+                reported_dead.insert(exited);
+                if ours && exited == pid {
+                    let _ = waitpid_child(pid, libc::WNOHANG);
+                }
+            }
+            None => return false,
+        }
     }
 }
 
@@ -1015,6 +1088,83 @@ fn process_group_absent(pgid: i32) -> bool {
     sent != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+/// 这个进程组里现在还挂着哪些 pid。用来等组员退出，而不是隔几毫秒问组还在不在。
+/// 枚举失败就返回空：调用方会把剩余截止时间一次睡完再查。
+fn process_group_members(pgid: i32) -> Vec<i32> {
+    if pgid <= 1 {
+        return Vec::new();
+    }
+    process_group_members_os(pgid)
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_members_os(pgid: i32) -> Vec<i32> {
+    let mut count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    count = count.saturating_add(64);
+    let mut pids = vec![0i32; count as usize];
+    let bytes = (pids.len() * std::mem::size_of::<i32>()) as libc::c_int;
+    let read = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if read <= 0 {
+        return Vec::new();
+    }
+    let read = (read as usize).min(pids.len());
+    let mut members = Vec::new();
+    for &pid in &pids[..read] {
+        if pid > 1 && process_group_id(pid) == Some(pgid) {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_id(pid: i32) -> Option<i32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (read == size).then_some(info.pbi_pgid as i32)
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_members_os(pgid: i32) -> Vec<i32> {
+    let mut members = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return members;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if pid > 1 && linux_process_group(pid) == Some(pgid) {
+            members.push(pid);
+        }
+    }
+    members
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_group(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(2)?.parse().ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_group_members_os(_pgid: i32) -> Vec<i32> {
+    Vec::new()
+}
+
 /// 根据启动规格选择 provider 原生驱动。Pi 走自己的 JSONL RPC；其余 agent 才
 /// 进入 ACP。返回的统一句柄只承载 Smelt 内部命令/事件，不代表底层 wire 协议。
 pub fn spawn_agent_runtime(
@@ -1101,11 +1251,13 @@ pub fn spawn_acp(
                     cmd_tx: cmd_tx_for_thread,
                     event_tx: event_tx.clone(),
                 },
-                stderr_tail.clone(),
-                stdio_for_thread,
-                spawn_gate,
-                in_flight_rpc_for_thread,
-                shutdown_requested_for_thread,
+                ConnectionSync {
+                    stderr_tail: stderr_tail.clone(),
+                    stdio_out: stdio_for_thread,
+                    spawn_gate,
+                    in_flight_rpc: in_flight_rpc_for_thread,
+                    shutdown_requested: shutdown_requested_for_thread,
+                },
             ));
             if let Err(e) = result {
                 let tail = stderr_tail.lock().unwrap().join("\n");
@@ -1317,34 +1469,27 @@ impl AcpChildGuard {
         let _ = self.child.kill();
     }
 
-    async fn kill_and_reap(&mut self) {
-        self.kill_tree();
-        if self.child.status().await.is_ok() {
-            self.reaped = true;
+    /// 用 `waitpid` 确认直属子进程已经退出。`Child::try_status()` 只是问一句
+    /// 「现在死了没有」；信号被掩码挡住时，隔 10ms 再杀一次也等不来结果。
+    /// 先标上已收，避免这个 Child 析构时再进来一次。杀一次，然后堵住等到
+    /// `waitpid` 把直属子进程收回。
+    fn reap_now(&mut self) {
+        if self.reaped {
+            return;
         }
+        self.reaped = true;
+        self.kill_tree();
+        let _ = crate::process_wait::reap_direct_child(self.pid);
+    }
+
+    fn kill_and_reap(&mut self) {
+        self.reap_now();
     }
 }
 
 impl Drop for AcpChildGuard {
     fn drop(&mut self) {
-        if self.reaped {
-            return;
-        }
-        self.kill_tree();
-        loop {
-            match self.child.try_status() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    self.kill_tree();
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break,
-                Err(_) => {
-                    self.kill_tree();
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
+        self.reap_now();
     }
 }
 
@@ -1517,6 +1662,11 @@ pub struct ResumedSession {
     pub supports_image: bool,
     pub pending_raw_line: Option<String>,
     pub recover_running_turn: bool,
+    /// 交接文件没有已提交正文。接上后用 `session/load` 重放 agent 会话。
+    /// 只在加载成功之后才清空投影，失败则留下交接里的未完成一轮。
+    pub reload_history: bool,
+    pub cwd: Option<std::path::PathBuf>,
+    pub open_turn: Vec<crate::acp_chat::AcpEntry>,
 }
 
 fn acp_err(message: impl Into<String>) -> agent_client_protocol::Error {
@@ -1550,18 +1700,29 @@ fn resolve_terminal_command(command: &str) -> String {
     resolve_in_path(command, &extended_search_path()).unwrap_or_else(|| command.to_string())
 }
 
+struct ConnectionSync {
+    stderr_tail: Arc<Mutex<Vec<String>>>,
+    stdio_out: Arc<Mutex<Option<AcpStdio>>>,
+    spawn_gate: Option<Arc<RwLock<()>>>,
+    in_flight_rpc: Arc<AtomicUsize>,
+    shutdown_requested: Arc<AtomicBool>,
+}
+
 /// 连接主体：spawn agent 子进程 → initialize → newSession → 双源 loop
 /// （UI 指令 / agent 更新流）。返回 Ok 表示用户主动 Shutdown。
 async fn run_connection(
     launch: &ConversationLaunch,
     managed_bun: Option<crate::managed_runtime::ManagedBunRuntime>,
     channels: AcpChannels,
-    stderr_tail: Arc<Mutex<Vec<String>>>,
-    stdio_out: Arc<Mutex<Option<AcpStdio>>>,
-    spawn_gate: Option<Arc<RwLock<()>>>,
-    in_flight_rpc: Arc<AtomicUsize>,
-    shutdown_requested: Arc<AtomicBool>,
+    sync: ConnectionSync,
 ) -> Result<(), agent_client_protocol::Error> {
+    let ConnectionSync {
+        stderr_tail,
+        stdio_out,
+        spawn_gate,
+        in_flight_rpc,
+        shutdown_requested,
+    } = sync;
     let agent = build_agent(
         &launch.launch,
         &launch.ephemeral_env,
@@ -1979,7 +2140,7 @@ async fn run_connection(
             .await
         })
         .await;
-    child_guard.kill_and_reap().await;
+    child_guard.kill_and_reap();
     drop(managed_bun);
     if handshake_watchdog.timed_out() {
         return Err(agent_client_protocol::Error::internal_error().data(format!(
@@ -2050,7 +2211,7 @@ pub fn list_acp_sessions(
             })
             .await
             .map_err(|error| format!("ACP session/list 失败：{error}"));
-        child_guard.kill_and_reap().await;
+        child_guard.kill_and_reap();
         drop(managed_bun);
         result
     })
@@ -2370,11 +2531,63 @@ async fn run_resumed_connection(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
-            // 跳过 initialize/newSession/resume/load：agent 早就跟上一个进程
-            // 完成过握手了，这里只是换了个"读它输出的人"。2.1 把
-            // attach_session 收成 crate 私有，无缝升级只能自己挂动态路由。
-            // modes/config_options 留空——只影响"切模型"下拉暂时是空的，下次
-            // agent 发 ConfigOptionUpdate 会自动补上，不影响对话本身。
+            // 这条连接早就跟旧进程握过手，不再 initialize。交接文件没带已提交
+            // 正文时，向仍活着的 agent 发 session/load，让它把会话文件重放出来。
+            // 2.1 的 load 会在请求发出前装好路由，响应返回时，响应前的重放已经
+            // 在会话队列里。只有这一步成功才清空投影；失败就留下未完成的一轮。
+            if resumed.reload_history
+                && let Some(cwd) = resumed.cwd.clone()
+            {
+                let load_request = LoadSessionRequest::new(session_id.clone(), cwd);
+                match wait_for_acp_request(
+                    connection
+                        .load_session_from(load_request)
+                        .block_task()
+                        .start_session(),
+                    "session/load",
+                )
+                .await
+                {
+                    Ok(restored) => {
+                        let (mut session, loaded) = restored.into_parts();
+                        let _ = channels
+                            .event_tx
+                            .try_send(ConversationEvent::HistoryReplayStarted);
+                        let mut replay = ReplayCursor::default();
+                        drain_loaded_replay(&mut session, &channels.event_tx, &mut replay).await?;
+                        for event in
+                            unflushed_open_turn_events(&resumed.open_turn, &replay)
+                        {
+                            let _ = channels.event_tx.try_send(event);
+                        }
+                        let _ = channels
+                            .event_tx
+                            .try_send(ConversationEvent::HistoryReplayFinished);
+                        publish_session_surface(
+                            loaded.config_options.as_deref(),
+                            loaded.modes.as_ref(),
+                            &channels.event_tx,
+                        );
+                        return drive_session(
+                            session,
+                            channels,
+                            ReadyKind::ResumedWithReplay,
+                            resumed.supports_image,
+                            in_flight_rpc,
+                            resumed.recover_running_turn,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        crate::app_log::info(
+                            "acp",
+                            &format!("直接交接重放历史失败，保留未完成的这一轮：{error}"),
+                        );
+                    }
+                }
+            }
+            // 不重放时自己挂动态路由。2.1 把 attach_session 收成 crate 私有。
+            // 加载失败时 modes/config_options 先空着，下次 ConfigOptionUpdate 会补上。
             let session = attach_inherited_session(&connection, session_id)?;
             drive_session(
                 session,
@@ -2387,6 +2600,404 @@ async fn run_resumed_connection(
             .await
         })
         .await
+}
+
+/// 把 `session/load` 响应前已经入队的重放翻译进投影，并记下当前这一轮的形状。
+///
+/// 只取已经就绪的更新。`poll_once` 拿不到就停，不会把还没到的消息从队列里丢掉。
+async fn drain_loaded_replay<S: SessionDrive>(
+    session: &mut S,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    replay: &mut ReplayCursor,
+) -> Result<(), agent_client_protocol::Error> {
+    loop {
+        let ready = {
+            let read = session.read_update();
+            futures::pin_mut!(read);
+            smol::future::poll_once(read).await
+        };
+        match ready {
+            Some(update) => {
+                let update = update?;
+                observe_replay(&update, replay);
+                translate_update(update, event_tx).await?;
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+/// `session/load` 重放里，最后一条用户消息之后的内容。用来判断交接里的
+/// 未完成一轮有哪些已经在会话文件里，避免再贴一份。
+#[derive(Default)]
+struct ReplayCursor {
+    saw_user: bool,
+    in_user: bool,
+    last_user: String,
+    after_user: Vec<ReplaySegment>,
+    tool_ids: BTreeSet<String>,
+}
+
+enum ReplaySegment {
+    Assistant { thought: bool, text: String },
+    Tool,
+}
+
+impl ReplayCursor {
+    fn note_user(&mut self, text: &str) {
+        if !self.in_user {
+            self.last_user.clear();
+            self.after_user.clear();
+            self.in_user = true;
+            self.saw_user = true;
+        }
+        self.last_user.push_str(text);
+    }
+
+    fn note_assistant(&mut self, thought: bool, text: &str) {
+        self.in_user = false;
+        if text.is_empty() {
+            return;
+        }
+        match self.after_user.last_mut() {
+            Some(ReplaySegment::Assistant {
+                thought: same,
+                text: buf,
+            }) if *same == thought => buf.push_str(text),
+            _ => self.after_user.push(ReplaySegment::Assistant {
+                thought,
+                text: text.to_string(),
+            }),
+        }
+    }
+
+    fn note_tool(&mut self, id: &str) {
+        self.in_user = false;
+        if id.is_empty() || !self.tool_ids.insert(id.to_string()) {
+            return;
+        }
+        self.after_user.push(ReplaySegment::Tool);
+    }
+}
+
+fn observe_replay(message: &SessionMessage, replay: &mut ReplayCursor) {
+    let SessionMessage::SessionMessage(dispatch) = message else {
+        return;
+    };
+    let Ok(untyped) = dispatch.to_untyped_message() else {
+        return;
+    };
+    if untyped.method() != "session/update" {
+        return;
+    }
+    let params = untyped.params();
+    let Some(update) = params.get("update") else {
+        return;
+    };
+    if replay_update_is_nested(params, update) {
+        return;
+    }
+    match update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("user_message_chunk") => replay.note_user(update_text(update)),
+        Some("agent_message_chunk") => replay.note_assistant(false, update_text(update)),
+        Some("agent_thought_chunk") => replay.note_assistant(true, update_text(update)),
+        Some("tool_call" | "tool_call_update") => replay.note_tool(update_tool_id(update)),
+        _ => {}
+    }
+}
+
+fn replay_update_is_nested(params: &serde_json::Value, update: &serde_json::Value) -> bool {
+    meta_has_parent(params.get("_meta")) || meta_has_parent(update.get("_meta"))
+}
+
+fn meta_has_parent(meta: Option<&serde_json::Value>) -> bool {
+    parent_tool_id_from_meta(meta.and_then(serde_json::Value::as_object)).is_some()
+}
+
+fn update_text(update: &serde_json::Value) -> &str {
+    update
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+fn update_tool_id(update: &serde_json::Value) -> &str {
+    update
+        .get("toolCallId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+/// 交接里未完成的这一轮，减去会话文件已经重放过的部分。
+///
+/// 用户消息已经在重放里就不再发。助手正文只补文件里还没有的后缀。
+/// 文件里没有的工具按交接时的卡片补回去。
+fn unflushed_open_turn_events(
+    open_turn: &[crate::acp_chat::AcpEntry],
+    replay: &ReplayCursor,
+) -> Vec<ConversationEvent> {
+    let Some(user) = open_turn.first() else {
+        return Vec::new();
+    };
+    let user_text = match user {
+        crate::acp_chat::AcpEntry::User(text) => text.as_str(),
+        crate::acp_chat::AcpEntry::UserWithImages { text, .. } => text.as_str(),
+        _ => {
+            let mut events = Vec::new();
+            push_aligned_tail(open_turn, replay, &mut events);
+            return events;
+        }
+    };
+    let mut events = Vec::new();
+    if !(replay.saw_user && replay.last_user == user_text) {
+        push_user_entry(user, &mut events);
+        for entry in &open_turn[1..] {
+            push_snapshot_entry(entry, replay, &mut events);
+        }
+        return events;
+    }
+    push_aligned_tail(&open_turn[1..], replay, &mut events);
+    events
+}
+
+fn push_aligned_tail(
+    tail: &[crate::acp_chat::AcpEntry],
+    replay: &ReplayCursor,
+    events: &mut Vec<ConversationEvent>,
+) {
+    let mut segments = replay.after_user.iter().peekable();
+    for entry in tail {
+        match entry {
+            crate::acp_chat::AcpEntry::Assistant { text, thought } => {
+                let suffix = match segments.peek() {
+                    Some(ReplaySegment::Assistant {
+                        thought: replayed_thought,
+                        text: replayed,
+                    }) if replayed_thought == thought => {
+                        let replayed = (*replayed).clone();
+                        segments.next();
+                        assistant_suffix(text, &replayed)
+                    }
+                    _ => Some(text.clone()),
+                };
+                if let Some(suffix) = suffix {
+                    push_assistant(*thought, suffix, events);
+                }
+            }
+            crate::acp_chat::AcpEntry::ToolCall { .. } => {
+                if matches!(segments.peek(), Some(ReplaySegment::Tool)) {
+                    segments.next();
+                }
+                push_missing_tool(entry, replay, events);
+            }
+            crate::acp_chat::AcpEntry::TaskNote(note) => {
+                events.push(ConversationEvent::BackgroundNotice(note.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_snapshot_entry(
+    entry: &crate::acp_chat::AcpEntry,
+    replay: &ReplayCursor,
+    events: &mut Vec<ConversationEvent>,
+) {
+    match entry {
+        crate::acp_chat::AcpEntry::Assistant { text, thought } => {
+            push_assistant(*thought, text.clone(), events);
+        }
+        crate::acp_chat::AcpEntry::ToolCall { .. } => push_missing_tool(entry, replay, events),
+        crate::acp_chat::AcpEntry::User(_) | crate::acp_chat::AcpEntry::UserWithImages { .. } => {
+            push_user_entry(entry, events);
+        }
+        crate::acp_chat::AcpEntry::TaskNote(note) => {
+            events.push(ConversationEvent::BackgroundNotice(note.clone()));
+        }
+        crate::acp_chat::AcpEntry::Divider(_) => {}
+    }
+}
+
+fn push_user_entry(entry: &crate::acp_chat::AcpEntry, events: &mut Vec<ConversationEvent>) {
+    match entry {
+        crate::acp_chat::AcpEntry::User(text) => {
+            if !text.is_empty() {
+                events.push(ConversationEvent::UserChunk(text.clone()));
+            }
+        }
+        crate::acp_chat::AcpEntry::UserWithImages { text, images } => {
+            if !text.is_empty() {
+                events.push(ConversationEvent::UserChunk(text.clone()));
+            }
+            for image in images {
+                events.push(ConversationEvent::UserImage(image.clone()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_assistant(thought: bool, text: String, events: &mut Vec<ConversationEvent>) {
+    if text.is_empty() {
+        return;
+    }
+    events.push(ConversationEvent::AgentChunk {
+        thought,
+        text,
+        parent_id: None,
+    });
+}
+
+fn push_missing_tool(
+    entry: &crate::acp_chat::AcpEntry,
+    replay: &ReplayCursor,
+    events: &mut Vec<ConversationEvent>,
+) {
+    let crate::acp_chat::AcpEntry::ToolCall {
+        id,
+        title,
+        kind,
+        status,
+        output,
+        children,
+    } = entry
+    else {
+        return;
+    };
+    if replay.tool_ids.contains(id) {
+        return;
+    }
+    events.push(ConversationEvent::ToolStarted {
+        id: id.clone(),
+        title: title.clone(),
+        kind: *kind,
+    });
+    events.push(ConversationEvent::ToolFinished {
+        id: id.clone(),
+        status: *status,
+        output: output.clone(),
+    });
+    if !children.is_empty() {
+        events.push(ConversationEvent::ToolChildren {
+            id: id.clone(),
+            children: children.clone(),
+            debug: BTreeMap::new(),
+        });
+    }
+}
+
+/// 快照里的助手正文减去文件已经写过的前缀。对不上时保留快照全文，半句不能丢。
+fn assistant_suffix(snapshot: &str, replayed: &str) -> Option<String> {
+    if let Some(suffix) = snapshot.strip_prefix(replayed) {
+        return (!suffix.is_empty()).then(|| suffix.to_string());
+    }
+    if replayed.starts_with(snapshot) {
+        return None;
+    }
+    Some(snapshot.to_string())
+}
+
+#[cfg(test)]
+mod open_turn_replay_tests {
+    use super::*;
+
+    fn user_turn(user: &str, assistant: &str) -> Vec<crate::acp_chat::AcpEntry> {
+        vec![
+            crate::acp_chat::AcpEntry::User(user.into()),
+            crate::acp_chat::AcpEntry::Assistant {
+                text: assistant.into(),
+                thought: false,
+            },
+        ]
+    }
+
+    fn replay_of(user: &str, assistant: &str) -> ReplayCursor {
+        let mut replay = ReplayCursor::default();
+        replay.note_user(user);
+        if !assistant.is_empty() {
+            replay.note_assistant(false, assistant);
+        }
+        replay
+    }
+
+    #[test]
+    fn flushed_prefix_keeps_only_the_unwritten_suffix() {
+        let events = unflushed_open_turn_events(
+            &user_turn("现在", "Hello wor"),
+            &replay_of("现在", "Hello"),
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ConversationEvent::AgentChunk { thought: false, text, parent_id: None }
+                if text == " wor"
+        ));
+    }
+
+    #[test]
+    fn fully_flushed_assistant_is_not_sent_again() {
+        let events =
+            unflushed_open_turn_events(&user_turn("现在", "Hello"), &replay_of("现在", "Hello"));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn missing_user_message_is_sent_with_the_whole_turn() {
+        let events =
+            unflushed_open_turn_events(&user_turn("现在", "半句"), &ReplayCursor::default());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ConversationEvent::UserChunk(text) if text == "现在"));
+        assert!(matches!(
+            &events[1],
+            ConversationEvent::AgentChunk { text, .. } if text == "半句"
+        ));
+    }
+
+    #[test]
+    fn tool_missing_from_replay_is_restored_from_the_snapshot() {
+        let open_turn = vec![
+            crate::acp_chat::AcpEntry::User("现在".into()),
+            crate::acp_chat::AcpEntry::tool_call(
+                "tc-1",
+                "读文件",
+                crate::acp_chat::ToolKind::Read,
+                crate::acp_chat::ToolCallStatus::InProgress,
+                vec![crate::acp_chat::ToolOutputPart::Text("一部分".into())],
+            ),
+        ];
+        let events = unflushed_open_turn_events(&open_turn, &replay_of("现在", ""));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::ToolStarted { id, .. } if id == "tc-1"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::ToolFinished { id, output, .. }
+                if id == "tc-1" && output.len() == 1
+        )));
+    }
+
+    #[test]
+    fn tool_already_replayed_is_not_emitted_again() {
+        let open_turn = vec![
+            crate::acp_chat::AcpEntry::User("现在".into()),
+            crate::acp_chat::AcpEntry::tool_call(
+                "tc-1",
+                "读文件",
+                crate::acp_chat::ToolKind::Read,
+                crate::acp_chat::ToolCallStatus::InProgress,
+                Vec::new(),
+            ),
+        ];
+        let mut replay = replay_of("现在", "");
+        replay.note_tool("tc-1");
+        let events = unflushed_open_turn_events(&open_turn, &replay);
+        assert!(events.is_empty());
+    }
 }
 
 /// 已建立会话的最小读写面：官方 `ActiveSession` 和无缝升级的自建路由共用。
@@ -2436,21 +3047,16 @@ impl HandleDispatchFrom<Agent> for InheritedSessionHandler {
     ) -> Result<Handled<Dispatch>, agent_client_protocol::Error> {
         MatchDispatchFrom::new(message, &cx)
             .if_dispatch_from(Agent, async |message: Dispatch| {
-                if message.has_field("sessionId") {
-                    if let Ok(untyped) = message.to_untyped_message() {
-                        if let Some(value) = untyped.params().get("sessionId") {
-                            if let Ok(session_id) =
-                                serde_json::from_value::<SessionId>(value.clone())
-                            {
-                                if session_id == self.session_id {
-                                    self.update_tx
-                                        .unbounded_send(SessionMessage::SessionMessage(message))
-                                        .map_err(|_| acp_err("session channel closed"))?;
-                                    return Ok(Handled::Yes);
-                                }
-                            }
-                        }
-                    }
+                if message.has_field("sessionId")
+                    && let Ok(untyped) = message.to_untyped_message()
+                    && let Some(value) = untyped.params().get("sessionId")
+                    && let Ok(session_id) = serde_json::from_value::<SessionId>(value.clone())
+                    && session_id == self.session_id
+                {
+                    self.update_tx
+                        .unbounded_send(SessionMessage::SessionMessage(message))
+                        .map_err(|_| acp_err("session channel closed"))?;
+                    return Ok(Handled::Yes);
                 }
                 Ok(Handled::No {
                     message,
@@ -2492,15 +3098,11 @@ impl SessionDrive for InheritedSession {
         &self.connection
     }
 
-    fn read_update(
-        &mut self,
-    ) -> impl Future<Output = Result<SessionMessage, agent_client_protocol::Error>> + Send {
-        async move {
-            self.update_rx
-                .next()
-                .await
-                .ok_or_else(|| acp_err("session channel closed unexpectedly"))
-        }
+    async fn read_update(&mut self) -> Result<SessionMessage, agent_client_protocol::Error> {
+        self.update_rx
+            .next()
+            .await
+            .ok_or_else(|| acp_err("session channel closed unexpectedly"))
     }
 }
 
@@ -2533,13 +3135,13 @@ async fn drive_session<S: SessionDrive>(
         // 「cmd 分支也要 &mut session」的借用冲突。
         enum Next {
             Cmd(Option<ConversationCommand>),
-            Update(Result<SessionMessage, agent_client_protocol::Error>),
+            Update(Box<Result<SessionMessage, agent_client_protocol::Error>>),
         }
         let next = {
             let read = session.read_update();
             smol::future::race(
                 async { Next::Cmd(channels.cmd_rx.recv().await.ok()) },
-                async move { Next::Update(read.await) },
+                async move { Next::Update(Box::new(read.await)) },
             )
             .await
         };
@@ -2670,7 +3272,7 @@ async fn drive_session<S: SessionDrive>(
                 }
             }
             Next::Update(update) => {
-                let update = update?;
+                let update = (*update)?;
                 let completes_prompt = matches!(&update, SessionMessage::StopReason(_));
                 translate_update(update, &channels.event_tx).await?;
                 if completes_prompt {
@@ -4865,6 +5467,26 @@ mod runtime_tests {
     }
 
     #[test]
+    fn bun_and_bunx_rewrites_are_deterministic_and_preserve_argument_order() {
+        assert_eq!(
+            rewrite_runtime_command_with_bun("bunx pkg@1 --flag", "/managed/bun").as_deref(),
+            Some("/managed/bun x pkg@1 --flag")
+        );
+        assert_eq!(
+            rewrite_runtime_command_with_bun("bunx --bun pkg@1 --flag", "/managed/bun").as_deref(),
+            Some("/managed/bun x --bun pkg@1 --flag")
+        );
+        assert_eq!(
+            rewrite_runtime_command_with_bun("bun --version", "/managed/bun").as_deref(),
+            Some("/managed/bun --version")
+        );
+        assert_eq!(
+            rewrite_runtime_command_with_bun("node app.js", "/managed/bun"),
+            None
+        );
+    }
+
+    #[test]
     fn runtime_rewrite_preserves_legacy_env_prefixes_before_bunx() {
         let out = rewrite_runtime_command_with_bun(
             "CLAUDE_CONFIG_DIR=~/.claude bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0",
@@ -6203,6 +6825,65 @@ mod process_reap_tests {
         );
     }
 
+    /// 亲生进程自己退出时，要在长截止之前被等到，并收走。
+    #[test]
+    fn own_child_exit_is_proven_before_a_long_deadline() {
+        let child = Command::new("sh")
+            .args(["-c", "sleep 0.2"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let started = std::time::Instant::now();
+        assert!(
+            prove_process_group_dead(pid, Duration::from_secs(5)),
+            "进程退出后应马上证明组已空"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "不应干等到截止，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(!process_exists(pid));
+        let _ = child.wait_with_output();
+    }
+
+    /// 还在跑的亲生进程，短截止内不能被说成已死，也不能被误杀。
+    #[test]
+    fn running_child_is_not_proven_dead_before_the_deadline() {
+        let (child, pid) = spawn_sleep();
+        let started = std::time::Instant::now();
+        assert!(!prove_process_group_dead(pid, Duration::from_millis(200)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(process_exists(pid));
+        assert!(kill_and_reap_process_group(pid, Duration::from_secs(2)));
+        let _ = child.wait_with_output();
+    }
+
+    /// 观察用的证明不能把还没被原来的 wait 收走的僵尸抢走。
+    /// 抢走的话，这里会返回 true，随后 `child.wait()` 得到 ECHILD。
+    #[test]
+    fn prove_without_reaping_leaves_the_zombie_for_its_waiter() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 0.2"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        assert!(
+            crate::process_wait::wait_until_exit(pid, Duration::from_secs(2)),
+            "应先看到退出，并且不收尸"
+        );
+        let started = std::time::Instant::now();
+        assert!(
+            !super::prove_process_group_dead_without_reaping(pid, Duration::from_millis(200)),
+            "僵尸对 kill 仍算在，不能当成已经收走"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let status = child.wait().expect("原来的 wait 必须还能收走这个僵尸");
+        assert!(status.success());
+    }
+
     /// 启动时间单调：后 spawn 的更大；死进程读不出。
     #[test]
     fn process_start_time_orders_births_and_rejects_the_dead() {
@@ -6360,6 +7041,9 @@ mod prompt_failure_tests {
         assert!(ConversationEvent::TurnFailed("x".into()).ends_turn());
         assert!(!ConversationEvent::Fatal("x".into()).ends_turn());
         assert!(!ConversationEvent::Status("x".into()).ends_turn());
+        assert!(!ConversationEvent::PromptAccepted.ends_turn());
+        assert!(!ConversationEvent::PromptNotAccepted.ends_turn());
+        assert!(!ConversationEvent::ProviderIdle.ends_turn());
     }
 }
 

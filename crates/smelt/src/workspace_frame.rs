@@ -27,11 +27,6 @@ pub(crate) fn card(surface: Hsla) -> Div {
         .bg(surface)
 }
 
-/// 外壳第一行共用的表面。头栏跟分栏主体同一块实底，不再单独刷色或切圆角。
-pub(crate) fn top_bar() -> Div {
-    div()
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TitlebarMouseAction {
     MoveWindow,
@@ -46,16 +41,19 @@ fn titlebar_mouse_action(click_count: usize) -> TitlebarMouseAction {
     }
 }
 
-/// 卡片头上的拖窗口区域：浮层不再整条抢点击之后，拖拽绑在各栏自己的头上。
-pub(crate) fn with_window_drag(el: Div) -> Div {
+fn titlebar_mouse_down(event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
+    // 拖窗口的那一下停在标题区。胶囊和侧栏安全条都浮在内容上，不能再落到终端或消息。
+    cx.stop_propagation();
+    match titlebar_mouse_action(event.click_count) {
+        TitlebarMouseAction::MoveWindow => window.start_window_move(),
+        TitlebarMouseAction::DoubleClick => window.titlebar_double_click(),
+    }
+}
+
+/// 卡片头和标题胶囊共用的拖窗口。单击移动，双击缩放，并拦住这一下。
+pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
     el.window_control_area(WindowControlArea::Drag)
-        .on_mouse_down(
-            MouseButton::Left,
-            |event, window, _| match titlebar_mouse_action(event.click_count) {
-                TitlebarMouseAction::MoveWindow => window.start_window_move(),
-                TitlebarMouseAction::DoubleClick => window.titlebar_double_click(),
-            },
-        )
+        .on_mouse_down(MouseButton::Left, titlebar_mouse_down)
 }
 
 /// 会话内容区共用的背景图层：始终覆盖容器，裁切方式和终端保持一致。

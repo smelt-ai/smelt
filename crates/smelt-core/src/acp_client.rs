@@ -87,6 +87,7 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
         "fork_id": &launch.fork_id,
         "fork_cut": &launch.fork_cut,
         "tail_limit": ACP_INITIAL_TAIL_LIMIT,
+        "omit_history": true,
         "conversation_binding": &launch.conversation_binding,
     });
     if let Some(agent_session) = &launch.agent_session {
@@ -178,6 +179,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         usage_cost: None,
         usage_breakdown: None,
         plan: None,
+        background_tasks: Vec::new(),
         model: None,
         config_options: Vec::new(),
         conversation_state: None,
@@ -189,6 +191,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         queued_follow_up: Vec::new(),
         composer_restore_revision: 0,
         composer_restore_texts: Vec::new(),
+        composer_restore_images: Vec::new(),
         turn_started_at_ms: None,
         turn_timings: Vec::new(),
         completed_unread: false,
@@ -196,7 +199,108 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         // 连接终态（连不上 smeltd / 握手失败 / 断线）值得存盘，跟旧版 Fatal
         // 事件一样不在"跳过持久化"的名单里。
         should_persist: true,
+        history_error: None,
+        history_omitted: false,
     }
+}
+
+fn snapshot_from_live(
+    live: crate::acp_session::SessionLive,
+    entries_offset: usize,
+    history_error: Option<String>,
+) -> ConversationSnapshot {
+    let mut snapshot = fallback_snapshot(&live.end_reason, entries_offset);
+    snapshot.phase = live.phase;
+    snapshot.end_kind = live.end_kind;
+    snapshot.acp_session_id = live.acp_session_id;
+    snapshot.history_session_id = live.history_session_id;
+    snapshot.session_title = live.session_title;
+    snapshot.status_line = live.status_line;
+    snapshot.history_error = history_error;
+    snapshot.should_persist = false;
+    if let Some(history_len) = live.history_len {
+        snapshot.entries_offset = history_len;
+        snapshot.entries = live.open_turn;
+        snapshot.entries_total = history_len.saturating_add(snapshot.entries.len());
+    }
+    if !matches!(snapshot.phase, DaemonPhase::Dead | DaemonPhase::Failed) {
+        snapshot.end_kind = AcpEndKind::Unknown;
+    }
+    snapshot
+}
+
+/// 一行控制连接上的消息。活状态（`live`，或快照里的相位）先生效。
+/// 历史正文读失败不能把页面留在「正在启动」。
+enum SnapshotFrame {
+    Ignore,
+    Snapshot(ConversationSnapshot),
+    Unreadable(ConversationSnapshot),
+}
+
+fn apply_live_frame(
+    mut snapshot: ConversationSnapshot,
+    live: Option<&serde_json::Value>,
+) -> ConversationSnapshot {
+    let Some(live) = live.and_then(|live| crate::acp_session::SessionLive::from_json(live).ok())
+    else {
+        return snapshot;
+    };
+    let Some(history_len) = live.history_len else {
+        return snapshot;
+    };
+    snapshot.phase = live.phase;
+    snapshot.end_reason = live.end_reason;
+    snapshot.end_kind = live.end_kind;
+    snapshot.acp_session_id = live.acp_session_id;
+    snapshot.history_session_id = live.history_session_id;
+    if live.session_title.is_some() {
+        snapshot.session_title = live.session_title;
+    }
+    if live.status_line.is_some() {
+        snapshot.status_line = live.status_line;
+    }
+    snapshot.entries_offset = history_len;
+    snapshot.entries = live.open_turn;
+    snapshot.entries_total = history_len.saturating_add(snapshot.entries.len());
+    snapshot
+}
+
+fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return SnapshotFrame::Ignore;
+    };
+    let live = value
+        .get("live")
+        .and_then(|live| crate::acp_session::SessionLive::from_json(live).ok())
+        .or_else(|| {
+            value
+                .get("snapshot")
+                .and_then(|snapshot| crate::acp_session::SessionLive::from_json(snapshot).ok())
+        });
+    if let Some(snapshot) = value.get("snapshot") {
+        return match serde_json::from_value::<ConversationSnapshot>(snapshot.clone()) {
+            Ok(snapshot) => SnapshotFrame::Snapshot(apply_live_frame(snapshot, value.get("live"))),
+            Err(error) => {
+                if let Some(live) = live {
+                    return SnapshotFrame::Snapshot(snapshot_from_live(
+                        live,
+                        entries_offset,
+                        Some(format!("历史读不出来：{error}")),
+                    ));
+                }
+                let mut terminal = fallback_snapshot(
+                    &format!("会话快照无法解析，启动等待已结束：{error}"),
+                    entries_offset,
+                );
+                terminal.end_kind = AcpEndKind::Unknown;
+                SnapshotFrame::Unreadable(terminal)
+            }
+        };
+    }
+    if let Some(live) = live {
+        return SnapshotFrame::Snapshot(snapshot_from_live(live, entries_offset, None));
+    }
+    SnapshotFrame::Ignore
 }
 
 fn snapshot_after_stream_disconnect(
@@ -331,21 +435,20 @@ pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientH
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-                    continue;
-                };
-                let Some(snap_v) = v.get("snapshot") else {
-                    continue;
-                };
-                let Ok(snap) = serde_json::from_value::<ConversationSnapshot>(snap_v.clone())
-                else {
-                    continue;
-                };
-                known_entries_end = snap.entries_offset.saturating_add(snap.entries.len());
-                known_session_title = snap.session_title.clone();
-                last_phase = Some(snap.phase);
-                if snapshot_tx.try_send(snap).is_err() {
-                    return; // 接收端（GUI 视图）没了
+                match read_snapshot_frame(&line, known_entries_end) {
+                    SnapshotFrame::Ignore => continue,
+                    SnapshotFrame::Unreadable(terminal) => {
+                        let _ = snapshot_tx.try_send(terminal);
+                        return;
+                    }
+                    SnapshotFrame::Snapshot(snap) => {
+                        known_entries_end = snap.entries_offset.saturating_add(snap.entries.len());
+                        known_session_title = snap.session_title.clone();
+                        last_phase = Some(snap.phase);
+                        if snapshot_tx.try_send(snap).is_err() {
+                            return; // 接收端（GUI 视图）没了
+                        }
+                    }
                 }
             }
             if let Some(disconnected) =
@@ -436,7 +539,8 @@ pub fn restart_acp_session(id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACP_INITIAL_TAIL_LIMIT, ConversationClientLaunch, acp_open_request, acp_snapshot_request,
+        ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, SnapshotFrame,
+        acp_open_request, acp_snapshot_request, read_snapshot_frame,
         snapshot_after_stream_disconnect, spawn_acp_session_kill,
     };
     use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
@@ -571,6 +675,54 @@ mod tests {
         assert_eq!(
             req["agent_session"]["agent"]["contribution_id"],
             "quant-agent"
+        );
+    }
+
+    #[test]
+    fn broken_history_keeps_the_live_phase() {
+        let line = serde_json::json!({
+            "snapshot": {
+                "phase": "idle",
+                "acp_session_id": "agent-1",
+                "entries": "not-a-list",
+            }
+        })
+        .to_string();
+        let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(&line, 4) else {
+            panic!("历史坏了也必须留下活状态，不能停在正在启动");
+        };
+        assert!(matches!(
+            snapshot.phase,
+            crate::daemon_state::DaemonPhase::Idle
+        ));
+        assert_eq!(snapshot.acp_session_id.as_deref(), Some("agent-1"));
+        assert_eq!(snapshot.entries_offset, 4);
+        assert!(snapshot.entries.is_empty());
+        assert!(snapshot.history_error.unwrap().contains("历史读不出来"));
+        assert_eq!(snapshot.end_kind, AcpEndKind::Unknown);
+    }
+
+    #[test]
+    fn unreadable_snapshot_phase_ends_startup_wait() {
+        let mut snapshot = crate::acp_session::AcpSessionState::default().to_snapshot(false);
+        snapshot.phase = crate::daemon_state::DaemonPhase::Idle;
+        let mut frame = serde_json::json!({ "snapshot": snapshot });
+        frame["snapshot"]["phase"] = serde_json::json!("not-a-phase");
+
+        let SnapshotFrame::Unreadable(terminal) = read_snapshot_frame(&frame.to_string(), 12)
+        else {
+            panic!("旧相位名不能再被悄悄丢掉，否则页面会停在正在启动");
+        };
+        assert!(matches!(
+            terminal.phase,
+            crate::daemon_state::DaemonPhase::Dead
+        ));
+        assert_eq!(terminal.end_kind, AcpEndKind::Unknown);
+        assert_eq!(terminal.entries_offset, 12);
+        assert!(
+            terminal.end_reason.contains("not-a-phase"),
+            "失败原因要带上读不懂的相位，实际是：{}",
+            terminal.end_reason
         );
     }
 

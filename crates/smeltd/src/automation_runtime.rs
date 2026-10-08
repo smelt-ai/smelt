@@ -1,9 +1,12 @@
 //! Daemon-owned automation scheduler and AutomationRun lifecycle.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use chrono::Local;
 use smelt_core::acp_session::{AcpTurnOutcome, AcpUserAction};
@@ -25,8 +28,10 @@ use super::{
     push_acp_snapshot_since,
 };
 
-const RECONCILE_INTERVAL: Duration = Duration::from_millis(200);
-const SCHEDULE_INTERVAL: Duration = Duration::from_secs(1);
+/// 该做的事这一轮没做成（库还锁着、确认已经超时却没改状态）时，隔这一段再试。
+/// 不是空闲轮询：没事做就一直等到下一次真正的截止或外部叫醒。
+const DUE_BACKOFF: Duration = Duration::from_secs(1);
+const DELIVERY_ACK_TIMEOUT_SECS: i64 = 5;
 const MAX_DELIVERY_ATTEMPTS: u32 = 5;
 const MAX_DELIVERY_RETRY_SECONDS: i64 = 30;
 
@@ -39,28 +44,29 @@ pub(crate) fn spawn(
     came_from_handoff: bool,
 ) {
     std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("[automation-runtime] 无法创建 Tokio runtime: {error}");
-                return;
-            }
-        };
-        runtime.block_on(async move {
-            let mut driver = Driver::new(
-                automations,
-                sessions,
-                acp_sessions,
-                remote_sessions,
-                event_hub,
-            );
-            driver.recover_active_runs(came_from_handoff);
-            driver.run().await;
-        });
+        let mut driver = Driver::new(
+            automations,
+            sessions,
+            acp_sessions,
+            remote_sessions,
+            event_hub,
+        );
+        // 测试直接构造 Driver，不能在 new 里换掉正在跑的守护的唤醒端。
+        if let Ok(mut slot) = AUTOMATION_NUDGE.lock() {
+            *slot = Some(driver.shell_tx.clone());
+        }
+        driver.recover_active_runs(came_from_handoff);
+        driver.run();
     });
+}
+
+pub(crate) fn nudge_automation_driver() {
+    let Ok(slot) = AUTOMATION_NUDGE.lock() else {
+        return;
+    };
+    if let Some(sender) = slot.as_ref() {
+        let _ = sender.send(DriverWake::Nudge);
+    }
 }
 
 struct ShellOutcome {
@@ -68,20 +74,25 @@ struct ShellOutcome {
     result: Result<std::process::Output, String>,
 }
 
+enum DriverWake {
+    Shell(ShellOutcome),
+    Nudge,
+}
+
+static AUTOMATION_NUDGE: Mutex<Option<Sender<DriverWake>>> = Mutex::new(None);
+
 struct Driver {
     automations: AutomationStore,
     sessions: Sessions,
     acp_sessions: AcpSessions,
     remote_sessions: RemoteSessions,
     event_hub: EventHubHandle,
-    last_reconcile: Instant,
-    last_schedule: Instant,
     timezone_fingerprint: String,
     last_error: Option<String>,
     shell_inflight: HashSet<String>,
     shell_pgids: HashMap<String, i32>,
-    shell_tx: Sender<ShellOutcome>,
-    shell_rx: Receiver<ShellOutcome>,
+    shell_tx: Sender<DriverWake>,
+    shell_rx: Receiver<DriverWake>,
 }
 
 impl Driver {
@@ -92,7 +103,6 @@ impl Driver {
         remote_sessions: RemoteSessions,
         event_hub: EventHubHandle,
     ) -> Self {
-        let now = Instant::now();
         let (shell_tx, shell_rx) = mpsc::channel();
         Self {
             automations,
@@ -100,8 +110,6 @@ impl Driver {
             acp_sessions,
             remote_sessions,
             event_hub,
-            last_reconcile: now.checked_sub(RECONCILE_INTERVAL).unwrap_or(now),
-            last_schedule: now.checked_sub(SCHEDULE_INTERVAL).unwrap_or(now),
             timezone_fingerprint: local_timezone_fingerprint(),
             last_error: None,
             shell_inflight: HashSet::new(),
@@ -111,26 +119,94 @@ impl Driver {
         }
     }
 
-    async fn run(&mut self) {
+    fn run(&mut self) {
         loop {
             self.collect_shell_results();
             self.cancel_shell_runs();
-            let now = Instant::now();
-            if now.duration_since(self.last_schedule) >= SCHEDULE_INTERVAL {
-                self.recover_locked_store();
-                self.refresh_timezone_if_changed();
-                self.claim_due_runs();
-                self.last_schedule = now;
+            self.recover_locked_store();
+            self.refresh_timezone_if_changed();
+            self.claim_due_runs();
+            self.reconcile_runs();
+            self.launch_unbound_runs();
+            self.dispatch_queued_runs();
+            self.release_terminal_sessions();
+            let woke = match self.next_wait() {
+                Some(delay) => self.shell_rx.recv_timeout(delay),
+                None => match self.shell_rx.recv() {
+                    Ok(wake) => Ok(wake),
+                    Err(_) => Err(RecvTimeoutError::Disconnected),
+                },
+            };
+            match woke {
+                Ok(DriverWake::Shell(outcome)) => self.complete_shell_run(outcome),
+                Ok(DriverWake::Nudge) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
-            if now.duration_since(self.last_reconcile) >= RECONCILE_INTERVAL {
-                self.reconcile_runs();
-                self.launch_unbound_runs();
-                self.dispatch_queued_runs();
-                self.release_terminal_sessions();
-                self.last_reconcile = now;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// 下一次该醒的时刻。`None` 表示没有截止，一直等到壳结束或外部叫醒。
+    ///
+    /// 时区变化跟着这次醒来一起看。没有任务、也没有人改自动化时，不每秒起来问一次。
+    /// 已经过点的时间不把等待压成 0：这一轮刚刚处理过，再立刻转一圈只会空转。
+    fn next_wait(&self) -> Option<Duration> {
+        let now = Local::now().timestamp();
+        let snapshot = self.automations.lock().unwrap().snapshot();
+        let enabled = snapshot
+            .automations
+            .iter()
+            .filter(|automation| automation.enabled)
+            .map(|automation| automation.id.as_str())
+            .collect::<HashSet<_>>();
+        let mut soonest: Option<i64> = None;
+        let mut consider = |at: i64| {
+            if at > now {
+                soonest = Some(soonest.map_or(at, |best| best.min(at)));
+            }
+        };
+        let mut stuck = snapshot.store_error.is_some();
+        for state in &snapshot.states {
+            let Some(at) = state.next_run_at else {
+                continue;
+            };
+            if !enabled.contains(state.automation_id.as_str()) {
+                continue;
+            }
+            if at <= now {
+                stuck = true;
+            } else {
+                consider(at);
+            }
+        }
+        for run in &snapshot.runs {
+            match run.status {
+                AutomationRunStatus::Queued => {
+                    let Some(attempted) = run.delivery_attempt_at else {
+                        continue;
+                    };
+                    consider(
+                        attempted
+                            .saturating_add(delivery_retry_delay_seconds(run.delivery_attempts)),
+                    );
+                }
+                AutomationRunStatus::Dispatching => {
+                    let Some(attempted) = run.delivery_attempt_at else {
+                        continue;
+                    };
+                    let due = attempted.saturating_add(DELIVERY_ACK_TIMEOUT_SECS);
+                    if due <= now {
+                        stuck = true;
+                    } else {
+                        consider(due);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if stuck {
+            consider(now.saturating_add(DUE_BACKOFF.as_secs() as i64));
+        }
+        soonest.map(|at| Duration::from_secs(at.saturating_sub(now) as u64))
     }
 
     fn recover_active_runs(&mut self, came_from_handoff: bool) {
@@ -354,6 +430,7 @@ impl Driver {
             }),
             agent_session: None,
             pending_agent_preset: None,
+            omit_history: false,
         };
         let remote = RemoteAcpSession {
             id: session_id.to_string(),
@@ -524,9 +601,9 @@ impl Driver {
                 };
                 self.mark_run_status(&run, status, projection.provider_session_id);
             } else if run.status == AutomationRunStatus::Dispatching
-                && run
-                    .delivery_attempt_at
-                    .is_some_and(|attempted| Local::now().timestamp() - attempted >= 5)
+                && run.delivery_attempt_at.is_some_and(|attempted| {
+                    Local::now().timestamp() - attempted >= DELIVERY_ACK_TIMEOUT_SECS
+                })
             {
                 let result = defer_or_fail_delivery(
                     &mut self.automations.lock().unwrap(),
@@ -729,7 +806,7 @@ impl Driver {
                 let result = child
                     .wait_with_output()
                     .map_err(|error| format!("命令等待失败: {error}"));
-                let _ = tx.send(ShellOutcome { run_id, result });
+                let _ = tx.send(DriverWake::Shell(ShellOutcome { run_id, result }));
             })
         {
             self.shell_inflight.remove(&run.id);
@@ -775,8 +852,22 @@ impl Driver {
     }
 
     fn collect_shell_results(&mut self) {
-        while let Ok(outcome) = self.shell_rx.try_recv() {
-            self.complete_shell_run(outcome);
+        while let Ok(wake) = self.shell_rx.try_recv() {
+            if let DriverWake::Shell(outcome) = wake {
+                self.complete_shell_run(outcome);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn wait_for_wake(&mut self, limit: Duration) -> bool {
+        match self.shell_rx.recv_timeout(limit) {
+            Ok(DriverWake::Shell(outcome)) => {
+                self.complete_shell_run(outcome);
+                true
+            }
+            Ok(DriverWake::Nudge) => true,
+            Err(_) => false,
         }
     }
 
@@ -1189,6 +1280,108 @@ mod lifecycle_tests {
             new_event_hub(),
         );
         (driver, automations, run)
+    }
+
+    fn driver_for(owner: AutomationOwner) -> Driver {
+        Driver::new(
+            Arc::new(Mutex::new(owner)),
+            new_sessions(),
+            new_test_acp_sessions(),
+            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
+            new_event_hub(),
+        )
+    }
+
+    fn scheduled_owner(minutes: u32) -> AutomationOwner {
+        let mut owner = AutomationOwner::in_memory();
+        owner
+            .apply(
+                AutomationCommand::Upsert {
+                    automation: Box::new(Automation {
+                        id: "later".into(),
+                        name: "Later".into(),
+                        enabled: true,
+                        workspace_dir: Some("/tmp".into()),
+                        trigger: AutomationTrigger::schedule(AutomationSchedule::EveryMinutes {
+                            minutes,
+                        }),
+                        action: smelt_core::automation::AutomationAction::Agent {
+                            agent_definition_id: "agent-1".into(),
+                            prompt: None,
+                        },
+                        sinks: Vec::new(),
+                    }),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        owner
+    }
+
+    #[test]
+    fn idle_schedule_has_no_deadline() {
+        let driver = driver_for(AutomationOwner::in_memory());
+        assert_eq!(
+            driver.next_wait(),
+            None,
+            "没有截止时要一直等叫醒，不能隔一秒起来看"
+        );
+    }
+
+    #[test]
+    fn distant_schedule_is_not_capped_to_one_second() {
+        let owner = scheduled_owner(30);
+        let due = owner
+            .snapshot()
+            .state_for("later")
+            .and_then(|state| state.next_run_at)
+            .expect("启用的日程要有下次运行时刻");
+        let driver = driver_for(owner);
+        let wait = driver.next_wait().expect("未来的日程就是截止");
+        assert!(
+            wait > Duration::from_secs(60),
+            "30 分钟后的日程不能被压成一秒内醒来，实际 {wait:?}，时刻 {due}"
+        );
+        assert!(wait <= Duration::from_secs(30 * 60));
+
+        let mut owner = scheduled_owner(30);
+        owner
+            .apply(
+                AutomationCommand::SetEnabled {
+                    automation_id: "later".into(),
+                    enabled: false,
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let driver = driver_for(owner);
+        assert_eq!(driver.next_wait(), None, "停用的日程不是截止");
+    }
+
+    #[test]
+    fn shell_completion_wakes_the_driver() {
+        let mut driver = Driver::new(
+            Arc::new(Mutex::new(AutomationOwner::in_memory())),
+            new_sessions(),
+            new_test_acp_sessions(),
+            Arc::new(Mutex::new(RemoteCatalogState::in_memory())),
+            new_event_hub(),
+        );
+        let tx = driver.shell_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = tx.send(DriverWake::Shell(ShellOutcome {
+                run_id: "missing-run".into(),
+                result: Err("不存在".into()),
+            }));
+        });
+        let started = Instant::now();
+        assert!(driver.wait_for_wake(Duration::from_secs(5)));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "壳结束应马上叫醒调度，实际 {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

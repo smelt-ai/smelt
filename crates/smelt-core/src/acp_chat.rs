@@ -37,6 +37,88 @@ pub enum AcpEntry {
     },
     /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
     Divider(String),
+    /// 后台任务结束。这是状态，不是用户说的话，不能回退，也不能当会话标题。
+    TaskNote(TaskNote),
+}
+
+/// Pi 会话里这条自定义消息的类型。重放时认它，避免把结果画成用户或助手的话。
+pub const SMELT_BACKGROUND_TASK_CUSTOM_TYPE: &str = "smelt.background_task";
+
+/// 一条后台任务的结束说明。人看到的是状态行；模型另走自定义消息。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskNote {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub output_tail: String,
+}
+
+impl TaskNote {
+    /// 一行说明：任务、状态、退出码。输出尾部另外显示，不写进这句话。
+    pub fn summary(&self) -> String {
+        let status = match self.status.as_str() {
+            "completed" => "完成",
+            "failed" => "失败",
+            "timed_out" => "超时",
+            "stopped" => "已停止",
+            "running" => "进行中",
+            other => other,
+        };
+        let code = self
+            .exit_code
+            .map(|code| format!("，退出码 {code}"))
+            .unwrap_or_default();
+        if self.title.is_empty() {
+            format!("后台任务 {} 已结束，状态 {status}{code}", self.id)
+        } else {
+            format!(
+                "后台任务 {}（{}）已结束，状态 {status}{code}",
+                self.id, self.title
+            )
+        }
+    }
+}
+
+/// 从 Pi 的自定义消息还原状态行。类型不对或没有任务 id 时返回 None。
+pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote> {
+    if message
+        .get("customType")
+        .and_then(serde_json::Value::as_str)
+        != Some(SMELT_BACKGROUND_TASK_CUSTOM_TYPE)
+    {
+        return None;
+    }
+    let details = message.get("details")?;
+    let id = details
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    Some(TaskNote {
+        id: id.to_string(),
+        title: details
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        status: details
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        exit_code: details
+            .get("exitCode")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
+        output_tail: details
+            .get("outputTail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 /// Agent 尚未通过通用 ACP 上报标题时，从首条用户消息生成稳定兜底。桌面侧栏、

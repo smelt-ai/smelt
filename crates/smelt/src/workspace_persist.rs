@@ -377,7 +377,7 @@ pub(crate) fn workspace_database_path() -> Option<PathBuf> {
 /// 工作区存档的读取结果。读失败绝不能当成「没有会话」，否则 GUI 会按新 App
 /// 启动，首帧 `save_state` 再把空快照写进已经存在的库。
 pub(crate) enum WorkspaceLoad {
-    Loaded(WsState),
+    Loaded(Box<WsState>),
     Missing,
     Failed(String),
 }
@@ -411,7 +411,7 @@ fn load_ws_state_from_store(store: &smelt_store::Store) -> WorkspaceLoad {
                 }
             };
             match serde_json::from_slice(&raw) {
-                Ok(state) => WorkspaceLoad::Loaded(state),
+                Ok(state) => WorkspaceLoad::Loaded(Box::new(state)),
                 Err(error) => WorkspaceLoad::Failed(format!("workspace 快照解析失败: {error}")),
             }
         }

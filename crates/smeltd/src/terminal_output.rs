@@ -17,6 +17,8 @@ use std::thread;
 const TERMINAL_OUTPUT_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// 优雅关闭的冲刷上限。客户端不读时不能无限占住写线程与 fd。
+// 冲刷关闭只被同文件单测调用。bin 目标不编译 tests，所以这里单独放开死代码检查。
+#[cfg_attr(not(test), allow(dead_code))]
 const GRACEFUL_CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// 单 attachment 的有界输出邮箱。队列大小按字节限制而不是按消息数限制，避免一条
@@ -104,6 +106,7 @@ impl OutputMailbox {
     }
 
     /// 封口但不丢数据：写线程把剩下的 chunk 写完后自然收尾并 shutdown socket。
+    #[cfg_attr(not(test), allow(dead_code))]
     fn finish(&self) {
         let mut state = self.state.lock().unwrap();
         if state.closed || state.finishing {
@@ -198,6 +201,7 @@ impl OutputAttachment {
     /// 于是按后者重连，把刚删掉的会话原地复活。
     ///
     /// 冲刷有界：客户端不消费时，看门狗到点强制关闭，不会让写线程和 fd 永久挂住。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn close_after_flush(self) {
         self.mailbox.finish();
         let Ok(shutdown) = self.shutdown.try_clone() else {

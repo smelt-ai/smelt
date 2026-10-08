@@ -1,7 +1,7 @@
 //! 收养子进程的退出监控：fork-exec 交接后，被交接的子进程重定父到
 //! launchd，新守护不再是父进程、不能 waitpid。用能观察非亲生进程的原语
-//! 精确感知退出：kqueue `EVFILT_PROC`（macOS）/ pidfd（Linux）/
-//! kill 轮询（其它）。
+//! 精确感知退出：kqueue `EVFILT_PROC`（Apple 与 BSD）/ pidfd（Linux）。
+//! 产品只在这两类系统上编译。没有退出事件的平台不拿轮询顶上。
 //!
 //! 为什么不用 PTY EOF 代替：EOF 只代表 slave 全关，后台后代持有 PTY 时
 //! shell 早退会留僵尸（见 `TerminalChild` 的注释）。监控器给出精确的退出
@@ -130,7 +130,17 @@ impl ChildMonitor {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "visionos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+))]
 mod backend {
     use super::MonitorInner;
     use std::collections::HashSet;
@@ -175,9 +185,9 @@ mod backend {
                 libc::kevent(
                     _kq.as_raw_fd(),
                     changes.as_ptr(),
-                    changes.len() as libc::c_int,
+                    changes.len() as _,
                     events.as_mut_ptr(),
-                    events.len() as libc::c_int,
+                    events.len() as _,
                     std::ptr::null(),
                 )
             };
@@ -266,36 +276,21 @@ mod backend {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-mod backend {
-    use super::MonitorInner;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    pub fn spawn_watcher(pids: Vec<i32>, inner: Arc<MonitorInner>) {
-        std::thread::Builder::new()
-            .name("smeltd-adopted-reaper".into())
-            .spawn(move || {
-                let mut pending: Vec<i32> = pids;
-                while !pending.is_empty() {
-                    pending.retain(|pid| {
-                        // kill(pid, 0)：ESRCH=已死；0/EPERM=活着。
-                        let alive = unsafe { libc::kill(*pid, 0) == 0 }
-                            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-                        if alive {
-                            return true;
-                        }
-                        inner.mark_exited(*pid);
-                        false
-                    });
-                    if !pending.is_empty() {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                }
-            })
-            .ok();
-    }
-}
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "visionos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+    target_os = "linux",
+)))]
+compile_error!(
+    "收养进程的退出只能用 kqueue 或 pidfd 观察。产品只在 macOS 和 Linux 上编译，不为其它系统留轮询。"
+);
 
 #[cfg(test)]
 mod tests {

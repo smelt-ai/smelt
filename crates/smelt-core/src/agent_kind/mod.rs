@@ -1224,8 +1224,8 @@ mod history_source_tests {
 }
 
 pub fn default_acp_cmd() -> String {
-    // bunx 由 smelt 解析到受管 bun（~/.smelt/runtime；启动时由 Smelt 代用户同步锁定
-    // 版本，见 acp_conn.rs 的 spawn_managed_bun_sync）；
+    // bunx 由 ACP 解析器重写到受管 Bun generation；后台 bootstrap 与 ACP prepare
+    // 共用 generation store，进程持有 lease 并把 FD 继承给 adapter child；
     // 适配器锁版本——方言适配与回归测试都对着这个版本做，升级是主动行为。
     // 启动层会优先将本机 `claude` 注入 CLAUDE_CODE_EXECUTABLE；没装才使用 SDK
     // 携带的原生二进制，避免本机 CLI 与适配器运行时版本脱节。

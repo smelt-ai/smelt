@@ -2,10 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
 	SMELT_AGENT_PLUGIN_ARGS_ENV,
 	consumePluginArgs,
+	getConsumedPluginArgs,
 } from "../src/plugin-args.ts";
 
 describe("agent plugin selection", () => {
-	test("becomes Pi argv and is not inherited by tools", () => {
+	test("becomes Pi argv and can be inherited by isolated subagents", () => {
 		const environment: Record<string, string | undefined> = {
 			[SMELT_AGENT_PLUGIN_ARGS_ENV]: JSON.stringify([
 				"--no-skills",
@@ -31,6 +32,14 @@ describe("agent plugin selection", () => {
 			"/Users/me/.pi/agent/extensions/hook.ts",
 		]);
 		expect(environment[SMELT_AGENT_PLUGIN_ARGS_ENV]).toBeUndefined();
+		expect(getConsumedPluginArgs()).toEqual([
+			"--no-skills",
+			"--no-extensions",
+			"--skill",
+			"/Users/me/.pi/agent/skills/my skill",
+			"-e",
+			"/Users/me/.pi/agent/extensions/hook.ts",
+		]);
 	});
 
 	test("an empty selection still disables discovery", () => {
@@ -60,6 +69,7 @@ describe("agent plugin selection", () => {
 			expect(consumePluginArgs(environment, argv)).toBe(false);
 			expect(argv).toEqual(["bun", "src/main.ts"]);
 			expect(environment[SMELT_AGENT_PLUGIN_ARGS_ENV]).toBeUndefined();
+			expect(getConsumedPluginArgs()).toEqual([]);
 		}
 	});
 

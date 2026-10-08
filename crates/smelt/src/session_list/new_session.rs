@@ -141,15 +141,14 @@ fn conversation_options(cx: &App) -> Vec<AcpAgentOption> {
 
 /// 对话动作在桌面怎么起：从 option id 反查当前 GUI 配置。启动规格永远现查，
 /// 不缓存进菜单项——用户在设置里改完命令/环境变量，下一次新建就该生效。
-fn conversation_launch(
-    option_id: &str,
-    cx: &App,
-) -> Option<(
+type ConversationLaunchChoice = (
     ConversationAgentKind,
     Option<ConversationLaunchSpec>,
     Option<String>,
     Option<AgentDefinition>,
-)> {
+);
+
+fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchChoice> {
     let config = cx.global::<crate::settings::AgentHostState>();
     if let Some(definition_id) =
         smelt_core::session_control::agent_definition_id_from_option_id(option_id)

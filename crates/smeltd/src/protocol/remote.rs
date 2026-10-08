@@ -62,8 +62,12 @@ pub(super) fn handle_remote_start(
                 })
             );
         }
-        Err(e) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": e }));
+        Err(error) => {
+            let _ = writeln!(
+                c,
+                "{}",
+                serde_json::json!({ "ok": false, "err": error.to_string() })
+            );
         }
     }
 }

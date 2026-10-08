@@ -372,11 +372,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 文件 / 变更 / 技能 / 历史。只出 tab 条，外层 34px 铬由共用顶栏包。
+    /// 文件 / 变更 / 技能 / 历史。这一条就是交通灯带，不再在它下面另垫标题。
     pub(crate) fn render_tool_panel_tabs(
         &mut self,
         active_tab: ToolPanelTab,
         stage_rail: bool,
+        left_guard: Pixels,
         cx: &mut Context<Self>,
     ) -> Div {
         // 内置面板来自注册表，插件面板追在后面；两者在这一层同等。
@@ -395,8 +396,7 @@ impl Workspace {
         let tab = |t: ToolPanelTab, badge: usize| {
             let mut b = Tab::new()
                 .label(t.label())
-                // Tab 自己是交互控件，只拦住它的命中区域；不要再由包住整行的
-                // 容器拦截，否则 Tab 后面的空白标题栏也收不到双击。
+                // 页签拦住自己的点击。这一行其余空白走下面的拖窗口。
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
             if badge > 0 {
                 b = b.suffix(
@@ -437,46 +437,29 @@ impl Workspace {
             tab_bar = tab_bar.child(tab(*entry, badge));
         }
 
-        div()
-            .w_full()
-            .h(px(34.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .pl_4()
-            .border_b_1()
-            .border_color(ui_theme::hairline())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .child(tab_bar),
-            )
-    }
-
-    /// 面板统一头：36px，标题 + 自定义右侧内容。窗口开关在浮层，不在这里重复画。
-    pub(crate) fn tool_panel_header(&self, title: &'static str, _cx: &mut Context<Self>) -> Div {
-        div()
-            .h(px(36.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_3()
-            // 面板头不再刷一块 bg_bar：那是工具栏叠工具栏的旧层次。
-            // 用弱分隔切开标题和内容即可。
-            .border_b_1()
-            .border_color(ui_theme::hairline())
-            .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(rgb(ui_theme::text_muted()))
-                    .child(title),
-            )
+        crate::workspace_frame::with_window_drag(
+            div()
+                .w_full()
+                .h(crate::workspace_frame::TOP_BAR_HEIGHT)
+                .flex_none()
+                .flex()
+                .items_center()
+                // 铺满舞台且侧栏收起时，页签从交通灯右边开始。停靠右栏时 left_guard 是 0。
+                .pl(left_guard + px(16.))
+                // 窗口开关浮在这一行右上角，tab 收到开关左边。
+                .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
+                .border_b_1()
+                .border_color(ui_theme::hairline())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(tab_bar),
+                ),
+        )
     }
 
     /// 停靠右栏：tab 在抽屉顶，内容在下面。窗口顶栏不放这些 tab。
@@ -485,7 +468,7 @@ impl Workspace {
         // 成本高（改动树、diff），动画那 ~180ms 里逐帧全量重建会掉帧。打开
         // 动画期间先渲染轻量骨架占位，动画结束帧再挂真实内容；关闭动画保留
         // 真实内容，避免面板滑出前内容提前消失。
-        let tabs = self.render_tool_panel_tabs(self.tool_panel_tab, false, cx);
+        let tabs = self.render_tool_panel_tabs(self.tool_panel_tab, false, px(0.), cx);
         let opening = self.tool_panel_transition.is_opening();
         let body: AnyElement = if opening {
             div().flex_1().min_h_0().into_any_element()
@@ -507,7 +490,7 @@ impl Workspace {
     /// Tool Panel 全屏：tab 仍在抽屉内容顶，不进共用窗口顶栏。
     pub(crate) fn render_tool_panel_stage(
         &mut self,
-        _left_guard: Pixels,
+        left_guard: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -517,7 +500,7 @@ impl Workspace {
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(self.render_tool_panel_tabs(tab, true, cx))
+            .child(self.render_tool_panel_tabs(tab, true, left_guard, cx))
             .child(self.render_tool_panel_content(tab, window, cx))
             .into_any_element()
     }

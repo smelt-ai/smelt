@@ -271,7 +271,6 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                 let workspace = cx.entity();
                 let list = list.clone();
                 let selected_path_for_list = selected_path.clone();
-                let history_agent_ids = history_agent_ids.clone();
                 let row_count = visible_indices.len();
                 uniform_list("session-list", row_count, move |range, _window, _app| {
                     range

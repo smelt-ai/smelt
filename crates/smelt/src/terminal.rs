@@ -1820,7 +1820,7 @@ fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> 
     }
 }
 
-/// 新守护是否已经用 version 握手接替了旧进程。pid / started_at 在 exec 后都会变。
+/// 新守护是否已经用 version 握手接替了旧进程。pid / started_at 在交接后都会变。
 fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) -> bool {
     let Some(now) = now else {
         return false;
@@ -1838,16 +1838,20 @@ fn is_successor_daemon(before: Option<&DaemonInfo>, now: Option<&DaemonInfo>) ->
     )
 }
 
-fn wait_for_successor_daemon(before: Option<DaemonInfo>) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if is_successor_daemon(before.as_ref(), daemon_info().as_ref()) {
-            return true;
+/// 旧守护写完升级回执就会退出，并关掉这条连接。
+/// 读到 EOF、对端重置，都是它已经走了。到 `timeout` 还没关，返回 false。
+fn read_until_peer_closes(reader: &mut BufReader<UnixStream>, timeout: Duration) -> bool {
+    let _ = reader.get_ref().set_read_timeout(Some(timeout));
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(_) => true,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::TimedOut
+                || error.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+            false
         }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(20));
+        Err(_) => true,
     }
 }
 
@@ -1917,7 +1921,8 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     //   失败的显式回执）＝守护是新版本、只是这次没成功，同样是 Failed，不能引导
     //   用户去做「版本过旧只能硬重启」这种更破坏性的操作。
     let mut resp = String::new();
-    match BufReader::new(s).read_line(&mut resp) {
+    let mut reader = BufReader::new(s);
+    match reader.read_line(&mut resp) {
         Ok(0) => return UpgradeOutcome::Unsupported,
         Ok(_) => {}
         Err(_) => return UpgradeOutcome::Failed,
@@ -1933,7 +1938,12 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     if !acked {
         return UpgradeOutcome::Failed;
     }
-    if wait_for_successor_daemon(predecessor) {
+    // 回执已经到手。接班进程在 COMMIT 前就拿着监听 fd，旧进程退出时关掉这条连接。
+    // 等到那个 EOF 再问一次版本，pid 就是新的。中间不再隔几十毫秒连一次。
+    if !read_until_peer_closes(&mut reader, Duration::from_secs(10)) {
+        return UpgradeOutcome::Failed;
+    }
+    if is_successor_daemon(predecessor.as_ref(), daemon_info().as_ref()) {
         UpgradeOutcome::Upgraded
     } else {
         UpgradeOutcome::Failed
@@ -2073,6 +2083,33 @@ where
         .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
+            let pending = staged_daemon_path();
+            if pending.is_file() {
+                match upgrade_daemon_exe(Some(&pending)) {
+                    UpgradeOutcome::Upgraded => {
+                        eprintln!("✅ 守护进程已无缝升级到最新版本");
+                    }
+                    UpgradeOutcome::Busy => {
+                        eprintln!("⏸ 守护进程忙碌中，新版本已暂存，将在空闲时自升级");
+                    }
+                    UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {
+                        eprintln!("ℹ️ 守护进程无需或无法直接无缝升级（已暂存，下次启动生效）");
+                    }
+                }
+            } else if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
+                let managed = managed_daemon_path();
+                if managed.is_file() {
+                    match upgrade_daemon_exe(Some(&managed)) {
+                        UpgradeOutcome::Upgraded => {
+                            eprintln!("✅ 守护进程已无缝升级到最新版本");
+                        }
+                        UpgradeOutcome::Busy => {
+                            eprintln!("⏸ 守护进程忙碌中，新版本已暂存，将在空闲时自升级");
+                        }
+                        UpgradeOutcome::Unsupported | UpgradeOutcome::Failed => {}
+                    }
+                }
+            }
             eprintln!(
                 "✅ 已安装 {}（守护交接与插件映射与在线更新相同）",
                 target.display()
@@ -2231,42 +2268,26 @@ fn process_is_alive(pid: u32) -> bool {
 /// shutdown 对老守护不生效的情况——`lsof -t` 直接按 socket 文件反查 pid，不经过
 /// 应用层协议，多老的守护都杀得掉。
 ///
-/// `lsof` 在 macOS 上偶发长时间无响应：用 spawn + 轮询 wait，超时就 kill 掉 lsof，
-/// 避免「重启守护」整条链路跟着卡死。
+/// `lsof` 在 macOS 上偶发长时间无响应。stdout 必须有人读，否则管道写满后它
+/// 自己也不会退出。两秒还没结束就杀掉，半截输出不当成 pid。
 fn force_kill_socket_owner(path: &std::path::Path) {
-    let mut child = match std::process::Command::new("lsof")
+    let child = match std::process::Command::new("lsof")
         .arg("-t")
         .arg(path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(c) => c,
+        Ok(child) => child,
         Err(_) => {
             let _ = std::fs::remove_file(path);
             return;
         }
     };
-    // 最多等 ~2s
-    let mut done = false;
-    for _ in 0..20 {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                done = true;
-                break;
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(100)),
-            Err(_) => break,
-        }
-    }
-    if !done {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-    if let Ok(out) = child.wait_with_output() {
-        for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+    if let Ok(Some(output)) =
+        smelt_core::process_wait::wait_child_stdout(child, Duration::from_secs(2))
+    {
+        for pid in String::from_utf8_lossy(&output).split_whitespace() {
             let _ = std::process::Command::new("kill")
                 .arg("-9")
                 .arg(pid)
@@ -4337,6 +4358,38 @@ mod successor_daemon_tests {
         assert!(!is_successor_daemon(Some(&old), Some(&old)));
         assert!(!is_successor_daemon(Some(&old), None));
         assert!(is_successor_daemon(None, Some(&old)));
+    }
+
+    #[test]
+    fn peer_close_is_observed_before_the_deadline() {
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let mut reader = BufReader::new(ours);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            drop(theirs);
+        });
+        let started = Instant::now();
+        assert!(read_until_peer_closes(&mut reader, Duration::from_secs(5)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "对端关掉连接后应马上返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn open_peer_waits_out_the_deadline() {
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let mut reader = BufReader::new(ours);
+        let started = Instant::now();
+        assert!(!read_until_peer_closes(
+            &mut reader,
+            Duration::from_millis(200)
+        ));
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(150), "实际 {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "实际 {elapsed:?}");
+        drop(theirs);
     }
 }
 

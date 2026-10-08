@@ -567,12 +567,12 @@ fn skill_paths_from_plugin_args(args: &[String]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut index = 0;
     while index < args.len() {
-        if args[index] == PiPluginKind::Skill.load_flag() {
-            if let Some(path) = args.get(index + 1) {
-                paths.push(PathBuf::from(path));
-                index += 2;
-                continue;
-            }
+        if args[index] == PiPluginKind::Skill.load_flag()
+            && let Some(path) = args.get(index + 1)
+        {
+            paths.push(PathBuf::from(path));
+            index += 2;
+            continue;
         }
         index += 1;
     }

@@ -125,6 +125,7 @@ async fn post_hook(
                 if let Err(error) = state.event_hub.publish_automations(&snapshot) {
                     eprintln!("[webhook] 发布自动化投影失败: {error}");
                 }
+                crate::automation_runtime::nudge_automation_driver();
             }
             let run = applied.result.run();
             cors(

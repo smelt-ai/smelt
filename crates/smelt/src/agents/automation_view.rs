@@ -1,5 +1,6 @@
-//! 自动化目录、编辑器、Run 历史和详情。
+//! 自动化目录和编辑器。
 //!
+//! 运行记录留在编辑器左侧。选中一次运行后，右侧是详情；有会话时这块详情就是现场。
 //! 只组 UI。触发器/Run 的写入在 `workspace.rs`。
 use super::*;
 
@@ -43,72 +44,44 @@ impl Workspace {
     pub(super) fn render_automation_drill_header(
         &self,
         title: impl Into<SharedString>,
-        subtitle: impl Into<SharedString>,
         entity: Entity<Workspace>,
+        left_guard: Pixels,
     ) -> AnyElement {
         let back_entity = entity;
-        let subtitle = subtitle.into();
-        div()
-            .flex_shrink_0()
-            .px_5()
-            .py_4()
-            .flex()
-            .items_start()
+        product_page_chrome(left_guard)
             .gap_2()
-            .child(
-                Button::new("automation-drill-back")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ArrowLeft)
-                    .tooltip("返回")
-                    .on_click(move |_, _, cx| {
-                        back_entity.update(cx, |workspace, cx| {
-                            if workspace.nav.automations().is_history()
-                                || workspace.nav.automations().run_id().is_some()
-                            {
-                                workspace.close_automation_run_history(cx);
-                            } else {
-                                workspace.close_automation_editor(cx);
-                            }
-                        });
-                    }),
-            )
+            .child(product_back_button(
+                "automation-drill-back",
+                move |_, _, cx| {
+                    back_entity.update(cx, |workspace, cx| workspace.close_automation_editor(cx));
+                },
+            ))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .text_color(rgb(crate::ui_theme::text_bright()))
-                            .child(title.into()),
-                    )
-                    .when(!subtitle.as_str().is_empty(), |col| {
-                        col.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(crate::ui_theme::text_muted()))
-                                .child(subtitle),
-                        )
-                    }),
+                    .min_w_0()
+                    .text_lg()
+                    .font_semibold()
+                    .text_color(rgb(crate::ui_theme::text_bright()))
+                    .truncate()
+                    .child(title.into()),
             )
             .into_any_element()
     }
 
-    pub(super) fn render_automation_run_history(
+    /// 编辑器左侧的运行列表。任务行回到表单，运行行在右侧打开详情。
+    fn render_automation_run_column(
         &self,
-        _name: String,
-        runs: Vec<smelt_core::automation::AutomationRun>,
+        runs: &[smelt_core::automation::AutomationRun],
+        show_task: bool,
         entity: Entity<Workspace>,
-        cx: &App,
+        _cx: &App,
     ) -> AnyElement {
-        let count = runs.len();
+        let selected_run_id = self.automation_surface.selected_run_id.clone();
+        let task_selected = selected_run_id.is_none();
+        let task_entity = entity.clone();
         let rows = runs
-            .into_iter()
-            .enumerate()
-            .map(|(index, run)| {
+            .iter()
+            .map(|run| {
                 let at = run.finished_at.unwrap_or(run.created_at);
                 let source = run_source_label(run.source);
                 let status = run_status_label(run.status);
@@ -119,114 +92,95 @@ impl Workspace {
                     .map(compact_instructions);
                 let open_entity = entity.clone();
                 let run_id = run.id.clone();
-                let view_entity = entity.clone();
-                let view_session_id = run.session_id;
+                let selected = selected_run_id.as_deref() == Some(run.id.as_str());
                 div()
-                    .id(("automation-history-run", index))
+                    .id(format!("automation-editor-run-{run_id}"))
                     .w_full()
-                    .px_3()
-                    .py_3()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(rgb(crate::ui_theme::border()))
-                    .bg(rgb(crate::ui_theme::bg_card()))
-                    .flex()
-                    .items_center()
-                    .gap_3()
+                    .px_2()
+                    .py_2()
+                    .rounded(crate::ui_theme::row_radius())
                     .cursor_pointer()
-                    .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                    .when(selected, |row| row.bg(rgb(crate::ui_theme::bg_selected())))
+                    .when(!selected, |row| {
+                        row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                    })
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .text_color(cx.theme().foreground)
-                                    .child(format!("{source} · {status}")),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format_unix_local(at)),
-                            )
-                            .children(error.map(|error| {
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().danger)
-                                    .truncate()
-                                    .child(error)
-                            })),
+                        automation_run_lines(
+                            format!("{source} · {status}"),
+                            format_unix_local(at),
+                            error,
+                        )
+                        .w_full(),
                     )
-                    .children(view_session_id.map(|session_id| {
-                        Button::new(format!("automation-history-view-{run_id}"))
-                            .ghost()
-                            .small()
-                            .icon(IconName::Eye)
-                            .tooltip("查看运行")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, window, cx| {
-                                let session_id = session_id.clone();
-                                view_entity.update(cx, |workspace, cx| {
-                                    workspace.open_automation_run_session(&session_id, window, cx)
-                                });
-                            })
-                    }))
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         let run_id = run_id.clone();
                         open_entity.update(cx, |workspace, cx| {
-                            workspace.open_automation_run_detail(run_id, cx)
+                            workspace.select_automation_run(run_id, window, cx)
                         });
                     })
                     .into_any_element()
             })
             .collect::<Vec<_>>();
         div()
-            .id("automation-run-history-scroll")
-            .flex_1()
-            .w_full()
-            .min_w_0()
+            .id("automation-run-column")
+            .w(px(280.))
+            .flex_shrink_0()
+            .h_full()
             .min_h_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(crate::ui_theme::hairline())
             .overflow_y_scroll()
+            .p_2()
+            .gap_1()
+            .when(show_task, |column| {
+                column.child(
+                    div()
+                        .id("automation-run-column-task")
+                        .w_full()
+                        .px_2()
+                        .py_2()
+                        .rounded(crate::ui_theme::row_radius())
+                        .cursor_pointer()
+                        .when(task_selected, |row| {
+                            row.bg(rgb(crate::ui_theme::bg_selected()))
+                        })
+                        .when(!task_selected, |row| {
+                            row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .child("任务"),
+                        )
+                        .on_click(move |_, _, cx| {
+                            task_entity
+                                .update(cx, |workspace, cx| workspace.show_automation_task(cx));
+                        }),
+                )
+            })
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(780.))
-                    .mx_auto()
-                    .px_5()
-                    .py_6()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .children((count == 0).then(|| {
-                        div()
-                            .text_sm()
-                            .text_color(rgb(crate::ui_theme::text_muted()))
-                            .child("暂无运行记录")
-                    }))
-                    .children(rows),
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::text_faint()))
+                    .child("运行记录"),
             )
+            .children(rows)
             .into_any_element()
     }
 
     pub(super) fn render_automation_run_detail(
         &self,
         run: smelt_core::automation::AutomationRun,
-        entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let back_entity = entity.clone();
-        let cancel_entity = entity.clone();
-        let view_entity = entity;
         let run_id = run.id.clone();
-        let can_cancel = run.status.is_active();
-        let view_session_id = run.session_id.clone();
-        let automation_name = run.context.automation_name;
         let source = run_source_label(run.source);
         let status = run_status_label(run.status);
         let agent_name = run
@@ -310,98 +264,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                Button::new("automation-run-detail-back")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::ArrowLeft)
-                                    .tooltip("返回运行历史")
-                                    .on_click(move |_, _, cx| {
-                                        back_entity.update(cx, |workspace, cx| {
-                                            workspace.close_automation_run_detail(cx)
-                                        });
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .text_base()
-                                            .font_semibold()
-                                            .text_color(cx.theme().foreground)
-                                            .truncate()
-                                            .child(automation_name),
-                                    )
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .truncate()
-                                            .child(format!("{source} · {status}")),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .children(view_session_id.map(|session_id| {
-                                Button::new("automation-run-detail-session")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Eye)
-                                    .label("查看运行")
-                                    .on_click(move |_, window, cx| {
-                                        let session_id = session_id.clone();
-                                        view_entity.update(cx, |workspace, cx| {
-                                            workspace.open_automation_run_session(
-                                                &session_id,
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    })
-                            }))
-                            .when(can_cancel, |actions| {
-                                let run_id = run_id.clone();
-                                actions.child(
-                                    Button::new("automation-run-detail-cancel")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::CircleX)
-                                        .label("停止")
-                                        .on_click(move |_, _, cx| {
-                                            let run_id = run_id.clone();
-                                            cancel_entity.update(cx, |workspace, cx| {
-                                                workspace.cancel_automation_run(run_id, cx)
-                                            });
-                                        }),
-                                )
-                            }),
-                    ),
-            )
             .child(
                 div()
                     .flex()
@@ -583,7 +445,6 @@ impl Workspace {
         );
         let trigger_field = render_trigger_entries(editor, entity.clone(), cx);
         let test_entity = entity.clone();
-        let history_entity = entity.clone();
         let delete_entity = entity.clone();
         let toggle_entity = entity.clone();
         let saving = editor.saving_revision.is_some();
@@ -594,18 +455,8 @@ impl Workspace {
             .iter()
             .find(|automation| automation.id == editor.automation_id);
         let enabled = stored.map(|automation| automation.enabled).unwrap_or(true);
-        let run_count = config.automation_runs_for(&editor.automation_id).len();
-        let latest_run = config.latest_automation_run(&editor.automation_id);
-        let history_id = editor.automation_id.clone();
         let delete_id = editor.automation_id.clone();
         let toggle_id = editor.automation_id.clone();
-        let history_summary = latest_run.map(|run| {
-            format!(
-                "共 {run_count} 次 · 最近一次 {} {}",
-                format_unix_local(run.finished_at.unwrap_or(run.created_at)),
-                run_status_label(run.status)
-            )
-        });
         let is_agent = editor.action_kind == settings::AutomationActionKindId::Agent;
         let is_webhook = editor
             .entries
@@ -639,23 +490,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                div()
-                                    .size(px(44.))
-                                    .rounded(px(12.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .border_1()
-                                    .border_color(crate::ui_theme::card_stroke())
-                                    .bg(rgb(crate::ui_theme::bg_card()))
-                                    .child(
-                                        Icon::new(IconName::Cpu)
-                                            .size(px(18.))
-                                            .text_color(rgb(crate::ui_theme::text_muted())),
-                                    ),
-                            )
+                            .child(neutral_icon_mark(IconName::Cpu, 32.))
                             .child(
                                 automation_form_row().flex_1().min_w_0().child(
                                     Input::new(&editor.name)
@@ -780,55 +615,24 @@ impl Workspace {
                                 )
                             }),
                     )
-                    .child(render_notification_field(editor, entity.clone(), cx))
-                    .when(!editor.is_new && run_count > 0, |column| {
-                        column.child(
-                            automation_form_row()
-                                .id("automation-editor-history")
-                                .cursor_pointer()
-                                .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_sm()
-                                        .text_color(rgb(crate::ui_theme::text_bright()))
-                                        .child("运行记录"),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(crate::ui_theme::text_faint()))
-                                        .child(
-                                            history_summary
-                                                .unwrap_or_else(|| format!("共 {run_count} 次")),
-                                        ),
-                                )
-                                .on_click(move |_, _, cx| {
-                                    let id = history_id.clone();
-                                    history_entity.update(cx, |workspace, cx| {
-                                        workspace.open_automation_run_history(id, cx)
-                                    });
-                                }),
-                        )
-                    }),
+                    .child(render_notification_field(editor, entity, cx)),
             )
             .into_any_element()
     }
 
-    pub(super) fn render_automation_conversation_pane(
+    /// 选中运行的右侧详情。有现场时这里就是对话，否则是这次运行的记录。
+    fn render_automation_run_pane(
         &self,
         run: smelt_core::automation::AutomationRun,
-        view: Entity<acp_view::AcpView>,
+        live_view: Option<Entity<acp_view::AcpView>>,
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let back_entity = entity.clone();
-        let cancel_entity = entity;
         let can_cancel = run.status.is_active();
         let source = run_source_label(run.source);
         let status = run_status_label(run.status);
         let run_id = run.id.clone();
-        let automation_name = run.context.automation_name;
+        let cancel_entity = entity;
         div()
             .flex_1()
             .min_w_0()
@@ -846,42 +650,19 @@ impl Workspace {
                     .border_b_1()
                     .border_color(rgb(crate::ui_theme::border()))
                     .child(
-                        Button::new("automation-conversation-back")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowLeft)
-                            .tooltip("返回运行历史")
-                            .on_click(move |_, _, cx| {
-                                back_entity.update(cx, |workspace, cx| {
-                                    workspace.close_automation_run_detail(cx)
-                                });
-                            }),
-                    )
-                    .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .text_color(cx.theme().foreground)
-                                    .truncate()
-                                    .child(automation_name),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{source} · {status}")),
-                            ),
+                            .text_sm()
+                            .font_medium()
+                            .text_color(cx.theme().foreground)
+                            .truncate()
+                            .child(format!("{source} · {status}")),
                     )
-                    .when(can_cancel, |actions| {
-                        actions.child(
-                            Button::new("automation-conversation-cancel")
+                    .when(can_cancel, |bar| {
+                        let run_id = run_id.clone();
+                        bar.child(
+                            Button::new("automation-run-pane-cancel")
                                 .ghost()
                                 .small()
                                 .icon(IconName::CircleX)
@@ -895,7 +676,23 @@ impl Workspace {
                         )
                     }),
             )
-            .child(self.render_product_conversation_view(view, cx))
+            .child(match live_view {
+                Some(view) => self.render_product_conversation_view(view, cx),
+                None => div()
+                    .id("automation-run-detail-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(720.))
+                            .px_5()
+                            .py_5()
+                            .child(self.render_automation_run_detail(run, cx)),
+                    )
+                    .into_any_element(),
+            })
             .into_any_element()
     }
 
@@ -911,164 +708,171 @@ impl Workspace {
             .clone()
             .or_else(|| config.persistence_error.clone())
             .or_else(|| config.automation_store_error.clone());
-        let run_still_exists =
-            |run_id: &str| config.automation_runs.iter().any(|run| run.id == run_id);
-        let history_still_exists = |automation_id: &str| {
-            config
+        let store_ready = !config.automation_store_id.is_empty();
+        if let Some(automation_id) = self.nav.automations().editor_id().map(str::to_string) {
+            let automation_exists = config
                 .automations
                 .iter()
-                .any(|automation| automation.id == automation_id)
-                || config
-                    .automation_runs
-                    .iter()
-                    .any(|run| run.automation_id == automation_id)
-        };
-        match self.nav.automations().clone() {
-            AutomationsView::Run { run_id, .. } | AutomationsView::Live { run_id, .. }
-                if !config.automation_store_id.is_empty() && !run_still_exists(&run_id) =>
-            {
-                self.nav.automations_mut().back();
-            }
-            AutomationsView::History { automation_id } if !history_still_exists(&automation_id) => {
-                self.nav.automations_mut().back();
-            }
-            AutomationsView::Editor { automation_id }
-                if self
-                    .automation_surface
-                    .editor
-                    .as_ref()
-                    .is_none_or(|editor| {
-                        !editor.is_new || editor.automation_id != automation_id
-                    })
-                    && config
-                        .automations
-                        .iter()
-                        .all(|automation| automation.id != automation_id) =>
-            {
-                self.nav.automations_mut().pop_to_root();
-                self.automation_surface.editor = None;
-            }
-            _ => {}
-        }
-        if let Some(editor_id) = self.nav.automations().editor_id().map(str::to_string)
-            && self
+                .any(|automation| automation.id == automation_id);
+            let runs_exist = config
+                .automation_runs
+                .iter()
+                .any(|run| run.automation_id == automation_id);
+            let new_draft = self
                 .automation_surface
                 .editor
                 .as_ref()
-                .is_none_or(|editor| editor.automation_id != editor_id)
-        {
-            self.open_automation_editor(editor_id, window, cx);
-        }
-        let selected_run = self.nav.automations().run_id().and_then(|run_id| {
-            config
-                .automation_runs
-                .iter()
-                .find(|run| run.id == run_id)
-                .cloned()
-        });
-        let automations = config.automations.clone();
-        let entity = cx.entity();
-        let live_view = selected_run.as_ref().and_then(|run| {
-            if !self.nav.automations().is_live() {
-                return None;
+                .is_some_and(|editor| editor.is_new && editor.automation_id == automation_id);
+            if store_ready && !automation_exists && !runs_exist && !new_draft {
+                self.nav.automations_mut().pop_to_root();
+                self.automation_surface.editor = None;
+                self.automation_surface.selected_run_id = None;
+                self.automation_surface.live_view = None;
+                self.automation_surface.live_sub = None;
+            } else if store_ready
+                && self
+                    .automation_surface
+                    .selected_run_id
+                    .as_ref()
+                    .is_some_and(|run_id| {
+                        !config
+                            .automation_runs
+                            .iter()
+                            .any(|run| run.id == *run_id && run.automation_id == automation_id)
+                    })
+            {
+                self.automation_surface.selected_run_id = None;
+                self.automation_surface.live_view = None;
+                self.automation_surface.live_sub = None;
             }
+            if self.nav.automations().editor_id() == Some(automation_id.as_str())
+                && automation_exists
+                && self
+                    .automation_surface
+                    .editor
+                    .as_ref()
+                    .is_none_or(|editor| editor.automation_id != automation_id)
+            {
+                self.open_automation_editor(automation_id, window, cx);
+            }
+        }
+
+        let entity = cx.entity();
+        let left_guard = self.chrome_left_guard(window);
+        let Some(automation_id) = self.nav.automations().editor_id().map(str::to_string) else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .bg(rgb(crate::ui_theme::bg_stage()))
+                .child(self.render_automations_catalog_header(entity.clone(), left_guard))
+                .child(self.render_automations_catalog(error, entity, cx))
+                .into_any_element();
+        };
+
+        let runs = config
+            .automation_runs_for(&automation_id)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_run = self
+            .automation_surface
+            .selected_run_id
+            .as_ref()
+            .and_then(|run_id| runs.iter().find(|run| run.id == *run_id))
+            .cloned();
+        let live_view = selected_run.as_ref().and_then(|run| {
             let session_id = run.session_id.as_deref()?;
             self.automation_surface
                 .live_view
                 .as_ref()
                 .and_then(|view| (view.read(cx).session_id() == session_id).then(|| view.clone()))
         });
-
-        if let (Some(run), Some(view)) = (selected_run.clone(), live_view) {
-            return self.render_automation_conversation_pane(run, view, entity, cx);
-        }
-        if let Some(run) = selected_run {
-            return div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .bg(rgb(crate::ui_theme::bg_stage()))
-                .child(
-                    div()
-                        .id("automation-run-detail-scroll")
-                        .flex_1()
-                        .w_full()
-                        .min_w_0()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(780.))
-                                .mx_auto()
-                                .px_5()
-                                .py_6()
-                                .child(self.render_automation_run_detail(run, entity, cx)),
-                        ),
-                )
-                .into_any_element();
-        }
-
-        let (header, body) = if self.nav.automations().is_history() {
-            let id = self.nav.automations().automation_id().unwrap_or_default();
-            let name = automations
-                .iter()
-                .find(|automation| automation.id == id)
-                .map(|automation| automation.name.clone())
-                .filter(|name| !name.trim().is_empty())
-                .or_else(|| {
-                    config
-                        .automation_runs
-                        .iter()
-                        .find(|run| run.automation_id == id)
-                        .map(|run| run.context.automation_name.clone())
-                })
-                .unwrap_or_else(|| "未命名自动化".to_string());
-            let runs = config
-                .automation_runs_for(id)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            let subtitle = if runs.is_empty() {
-                "暂无运行记录".to_string()
-            } else {
-                format!("显示最近 {} 次运行。选择记录可查看输入和结果。", runs.len())
-            };
-            (
-                self.render_automation_drill_header(name.clone(), subtitle, entity.clone()),
-                self.render_automation_run_history(name, runs, entity, cx),
-            )
-        } else if let Some(editor) = self.automation_surface.editor.as_ref().filter(|editor| {
-            self.nav.automations().editor_id() == Some(editor.automation_id.as_str())
-        }) {
-            let title = if editor.is_new {
-                "新建自动化".to_string()
-            } else {
-                let value = editor.name.read(cx).value();
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    "未命名自动化".to_string()
+        let show_task = self
+            .automation_surface
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.automation_id == automation_id);
+        let title = self
+            .automation_surface
+            .editor
+            .as_ref()
+            .filter(|editor| editor.automation_id == automation_id)
+            .map(|editor| {
+                if editor.is_new {
+                    "新建自动化".to_string()
                 } else {
-                    trimmed.to_string()
+                    let trimmed = editor.name.read(cx).value();
+                    let trimmed = trimmed.trim();
+                    if trimmed.is_empty() {
+                        "未命名自动化".to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
                 }
-            };
-            (
-                self.render_automation_drill_header(title, "", entity.clone()),
-                self.render_automation_editor(editor, entity, cx),
-            )
+            })
+            .or_else(|| {
+                config
+                    .automations
+                    .iter()
+                    .find(|automation| automation.id == automation_id)
+                    .map(|automation| automation.name.clone())
+                    .filter(|name| !name.trim().is_empty())
+            })
+            .or_else(|| {
+                runs.first()
+                    .map(|run| run.context.automation_name.clone())
+                    .filter(|name| !name.trim().is_empty())
+            })
+            .unwrap_or_else(|| "未命名自动化".to_string());
+        let header = self.render_automation_drill_header(title, entity.clone(), left_guard);
+        let body = if runs.is_empty() {
+            if let Some(editor) = self
+                .automation_surface
+                .editor
+                .as_ref()
+                .filter(|editor| editor.automation_id == automation_id)
+            {
+                self.render_automation_editor(editor, entity, cx)
+            } else {
+                div()
+                    .flex_1()
+                    .p_5()
+                    .text_sm()
+                    .text_color(rgb(crate::ui_theme::text_muted()))
+                    .child("这条自动化已经不在了。")
+                    .into_any_element()
+            }
         } else {
-            return div()
+            let column = self.render_automation_run_column(&runs, show_task, entity.clone(), cx);
+            let detail = if let Some(run) = selected_run {
+                self.render_automation_run_pane(run, live_view, entity, cx)
+            } else if let Some(editor) = self
+                .automation_surface
+                .editor
+                .as_ref()
+                .filter(|editor| editor.automation_id == automation_id)
+            {
+                self.render_automation_editor(editor, entity, cx)
+            } else {
+                div()
+                    .flex_1()
+                    .p_5()
+                    .text_sm()
+                    .text_color(rgb(crate::ui_theme::text_muted()))
+                    .child("选择一次运行。")
+                    .into_any_element()
+            };
+            div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
-                .flex_col()
-                .bg(rgb(crate::ui_theme::bg_stage()))
-                .child(self.render_automations_catalog_header(entity.clone()))
-                .child(self.render_automations_catalog(error, entity, cx))
-                .into_any_element();
+                .child(column)
+                .child(detail)
+                .into_any_element()
         };
 
         div()

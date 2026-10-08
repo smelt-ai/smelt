@@ -32,7 +32,7 @@ impl Workspace {
                 }
             })
             .child(Icon::new(icon).size(px(16.)).text_color(rgb(if selected {
-                crate::ui_theme::accent()
+                crate::ui_theme::text_mid()
             } else {
                 crate::ui_theme::text_muted()
             })))
@@ -133,7 +133,7 @@ impl Workspace {
             .collect();
         let groups = group_agent_conversations(&agents, &conversations);
         let mut rows = Vec::new();
-        for (group_ix, group) in groups.iter().enumerate() {
+        for group in &groups {
             let collapsed =
                 !group.agent_id.is_empty() && self.collapsed_agents.contains(&group.agent_id);
             let group_active = group.session_ixes.iter().any(|&ix| {
@@ -153,7 +153,7 @@ impl Workspace {
             let start_entity = entity.clone();
             rows.push(
                 div()
-                    .id(("agent-conv-header", group_ix))
+                    .id(format!("agent-conv-header-{}", group.agent_id))
                     .group(AGENT_CONV_HEADER_GROUP)
                     .h(px(32.))
                     .px_2()
@@ -205,7 +205,7 @@ impl Workspace {
                     .when(group_status != AgentStatus::Idle, |header| {
                         header.child(
                             div()
-                                .id(("agent-conv-status-dot", group_ix))
+                                .id(format!("agent-conv-status-dot-{}", group.agent_id))
                                 .flex_shrink_0()
                                 .size(px(6.))
                                 .rounded_full()
@@ -248,23 +248,26 @@ impl Workspace {
                                             cx.stop_propagation()
                                         })
                                         .child(
-                                            Button::new(("agent-conv-new", group_ix))
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(IconName::Plus)
-                                                .on_click({
-                                                    let start_id = start_id.clone();
-                                                    let start_entity = start_entity.clone();
-                                                    move |_, window, cx| {
-                                                        cx.stop_propagation();
-                                                        let id = start_id.clone();
-                                                        start_entity.update(cx, |workspace, cx| {
-                                                            workspace.start_agent_conversation(
-                                                                id, window, cx,
-                                                            )
-                                                        });
-                                                    }
-                                                }),
+                                            Button::new(format!(
+                                                "agent-conv-new-{}",
+                                                group.agent_id
+                                            ))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::Plus)
+                                            .on_click({
+                                                let start_id = start_id.clone();
+                                                let start_entity = start_entity.clone();
+                                                move |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    let id = start_id.clone();
+                                                    start_entity.update(cx, |workspace, cx| {
+                                                        workspace.start_agent_conversation(
+                                                            id, window, cx,
+                                                        )
+                                                    });
+                                                }
+                                            }),
                                         ),
                                 )
                             }),
@@ -319,7 +322,7 @@ impl Workspace {
                 let rename_entity = entity.clone();
                 body = body.child(
                     div()
-                        .id(("product-conversation", ix))
+                        .id(format!("product-conversation-{sid}"))
                         .group("product-conv-row")
                         .h(px(32.))
                         .px_2()
@@ -336,7 +339,7 @@ impl Workspace {
                             }
                         })
                         .child(conversation_status_icon(
-                            ix,
+                            &sid,
                             status,
                             animate_running,
                             session.acp_kind(cx),
@@ -372,7 +375,7 @@ impl Workspace {
                                 .group_hover("product-conv-row", |s| s.opacity(1.0))
                                 .child(
                                     div()
-                                        .id(("close-product-conversation", ix))
+                                        .id(format!("close-product-conversation-{sid}"))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -454,6 +457,7 @@ impl Workspace {
         count: usize,
         entity: Entity<Workspace>,
         _cx: &App,
+        left_guard: Pixels,
     ) -> AnyElement {
         let add_entity = entity.clone();
         let engines = agent_engine_kinds();
@@ -503,6 +507,7 @@ impl Workspace {
                 .child(render_agent_settings_entry(entity))
                 .child(add_button)
                 .into_any_element(),
+            left_guard,
         )
     }
 
@@ -510,26 +515,14 @@ impl Workspace {
         &self,
         name: &str,
         entity: Entity<Workspace>,
+        left_guard: Pixels,
     ) -> AnyElement {
         let back_entity = entity;
-        div()
-            .flex_shrink_0()
-            .px_5()
-            .py_4()
-            .flex()
-            .items_start()
+        product_page_chrome(left_guard)
             .gap_2()
-            .child(
-                Button::new("agent-editor-back")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ArrowLeft)
-                    .tooltip("返回目录")
-                    .on_click(move |_, _, cx| {
-                        back_entity
-                            .update(cx, |workspace, cx| workspace.close_agent_definition(cx));
-                    }),
-            )
+            .child(product_back_button("agent-editor-back", move |_, _, cx| {
+                back_entity.update(cx, |workspace, cx| workspace.close_agent_definition(cx));
+            }))
             .child(
                 div()
                     .flex()
@@ -576,16 +569,17 @@ impl Workspace {
                     .flex_col()
                     .gap_3()
                     .children(error.map(render_agent_error))
-                    .children(agents.iter().enumerate().map(|(index, agent)| {
-                        self.render_agent_catalog_row(index, agent, entity.clone(), cx)
-                    })),
+                    .children(
+                        agents
+                            .iter()
+                            .map(|agent| self.render_agent_catalog_row(agent, entity.clone(), cx)),
+                    ),
             )
             .into_any_element()
     }
 
     pub(super) fn render_agent_catalog_row(
         &self,
-        index: usize,
         agent: &settings::AgentDefinition,
         entity: Entity<Workspace>,
         cx: &App,
@@ -606,19 +600,14 @@ impl Workspace {
             .len();
         let summary = agent_prompt_summary(&agent.prompt);
         div()
-            .id(("agent-row", index))
+            .id(format!("agent-row-{id}"))
+            .group("agent-catalog-row")
             .w_full()
-            .px_4()
-            .py_3()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(rgb(crate::ui_theme::border_mid()))
-            .bg(rgb(crate::ui_theme::bg_card()))
+            .px_3()
+            .py_2()
+            .rounded(crate::ui_theme::row_radius())
             .cursor_pointer()
-            .hover(|row| {
-                row.bg(rgb(crate::ui_theme::bg_hover()))
-                    .border_color(rgb(crate::ui_theme::border_loud()))
-            })
+            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
             .flex()
             .items_center()
             .gap_3()
@@ -661,17 +650,23 @@ impl Workspace {
                     })),
             )
             .child(
-                Button::new(format!("agent-row-talk-{index}"))
-                    .primary()
-                    .small()
-                    .label("新对话")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        let id = talk_id.clone();
-                        talk_entity.update(cx, |workspace, cx| {
-                            workspace.start_agent_conversation(id, window, cx)
-                        });
-                    }),
+                div()
+                    .flex_shrink_0()
+                    .opacity(0.)
+                    .group_hover("agent-catalog-row", |slot| slot.opacity(1.))
+                    .child(
+                        Button::new(format!("agent-row-talk-{id}"))
+                            .ghost()
+                            .small()
+                            .label("新对话")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, window, cx| {
+                                let id = talk_id.clone();
+                                talk_entity.update(cx, |workspace, cx| {
+                                    workspace.start_agent_conversation(id, window, cx)
+                                });
+                            }),
+                    ),
             )
             .on_click(move |_, window, cx| {
                 let id = open_id.clone();
@@ -1003,20 +998,21 @@ impl Workspace {
             self.agent_surface.editor = None;
         }
 
+        let left_guard = self.chrome_left_guard(window);
         let (header, body) = if let Some(editor_id) = editor_id {
             let selected = agents.iter().find(|agent| agent.id == editor_id).cloned();
             match (selected, self.agent_surface.editor.as_ref()) {
                 (Some(agent), Some(editor)) => (
-                    self.render_agent_editor_header(&agent.name, entity.clone()),
+                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard),
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
-                    self.render_agents_header(agents.len(), entity.clone(), cx),
+                    self.render_agents_header(agents.len(), entity.clone(), cx, left_guard),
                     self.render_agent_catalog(&agents, entity, cx),
                 ),
             }
         } else {
-            let header = self.render_agents_header(agents.len(), entity.clone(), cx);
+            let header = self.render_agents_header(agents.len(), entity.clone(), cx, left_guard);
             let body = if agents.is_empty() {
                 self.render_agents_empty(entity, cx)
             } else {
@@ -1032,13 +1028,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(rgb(crate::ui_theme::bg_stage()))
-            .child(
-                div()
-                    .bg(rgb(crate::ui_theme::bg_stage()))
-                    .border_b_1()
-                    .border_color(rgb(crate::ui_theme::border()))
-                    .child(header),
-            )
+            .child(header)
             .child(body)
             .into_any_element()
     }

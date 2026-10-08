@@ -26,6 +26,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                     should_persist,
                     include_runtime_debug,
                     tool_debug_generation_sent,
+                    true,
                 ))
             },
         ),
@@ -179,7 +180,7 @@ fn restore_with_local_entries_is_strict_from_the_first_attempt() {
 }
 
 #[test]
-fn reopening_live_session_returns_requested_tail_without_relaunch() {
+fn reopening_live_session_neither_relaunches_nor_trims_history() {
     let mut reduced = AcpSessionState::default();
     for index in 0..5 {
         reduced
@@ -236,9 +237,10 @@ fn reopening_live_session_returns_requested_tail_without_relaunch() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["snapshot"]["entries_offset"], 3);
+    // tail_limit 只是旧客户端还在发的字段：窗口按页另取历史，首帧不再裁。
+    assert_eq!(response["snapshot"]["entries_offset"], 0);
     assert_eq!(response["snapshot"]["entries_total"], 5);
-    assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 5);
     assert_eq!(
         response["snapshot"]["conversation_state"]["binding"]["plugin_id"],
         "com.example.current"
@@ -412,6 +414,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
             0,
             "acp-action",
             "acp-test",
+            true,
         )
         .unwrap(),
     );
@@ -1129,6 +1132,427 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
     ));
 }
 
+fn attach_prompt_handle(
+    session: &AcpSession,
+) -> smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand> {
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+    cmd_rx
+}
+
+#[test]
+fn background_notice_while_idle_is_a_status_line() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-bg-idle", || {
+        make_acp_session_value("acp-bg-idle", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+
+    smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::BackgroundNotice(task_note()),
+    );
+
+    assert!(cmd_rx.try_recv().is_err(), "结束说明不能变成一条 prompt");
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_none());
+    let state = slot.value.reduced.lock().unwrap();
+    assert!(state.turn_started_at_ms.is_none());
+    assert!(matches!(state.phase, DaemonPhase::Idle));
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::TaskNote(note)) if note.id == "bg-1" && note.exit_code == Some(1)
+    ));
+}
+
+#[test]
+fn background_notice_during_a_turn_does_not_queue_a_prompt() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-bg-busy", || {
+        make_acp_session_value("acp-bg-busy", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+
+    smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::BackgroundNotice(task_note()),
+    );
+
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    let state = slot.value.reduced.lock().unwrap();
+    assert_eq!(state.turn_started_at_ms, Some(1));
+    assert!(matches!(state.phase, DaemonPhase::Thinking));
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::TaskNote(note)) if note.exit_code == Some(1)
+    ));
+}
+
+fn task_note() -> smelt_core::acp_chat::TaskNote {
+    smelt_core::acp_chat::TaskNote {
+        id: "bg-1".into(),
+        title: "编译".into(),
+        status: "failed".into(),
+        exit_code: Some(1),
+        output_tail: "error: boom".into(),
+    }
+}
+
+#[test]
+fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-cancel-gate", || {
+        let session = make_acp_session_value("acp-pi-cancel-gate", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    slot.value
+        .pending_prompts
+        .lock()
+        .unwrap()
+        .push_back(QueuedAcpPrompt {
+            text: "下一句".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+            origin: AcpPromptOrigin::User,
+        });
+    let subscribers = new_event_hub();
+
+    settle_acp_turn_locked(&slot.value, true, false, false, &subscribers);
+    assert!(cmd_rx.try_recv().is_err());
+    assert_eq!(slot.value.pending_prompts.lock().unwrap().len(), 1);
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "下一句");
+        }
+        _ => panic!("provider idle must release exactly one prompt"),
+    }
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    let state = slot.value.reduced.lock().unwrap();
+    assert!(state.entries.is_empty());
+    assert!(state.turn_started_at_ms.is_none());
+    drop(state);
+    let unaccepted = slot.value.unaccepted_prompt.lock().unwrap();
+    assert_eq!(
+        unaccepted.as_ref().map(|prompt| prompt.text.as_str()),
+        Some("下一句")
+    );
+}
+
+#[test]
+fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-refuse", || {
+        let session = make_acp_session_value("acp-pi-refuse", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    let subscribers = new_event_hub();
+    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+
+    send_acp_prompt_reserved(
+        &slot.value,
+        "再问一句".into(),
+        Vec::new(),
+        None,
+        AcpPromptOrigin::User,
+        &subscribers,
+    )
+    .unwrap();
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(smelt_core::acp_conn::ConversationCommand::Prompt { .. })
+    ));
+    assert!(slot.value.reduced.lock().unwrap().entries.is_empty());
+    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_some());
+
+    requeue_unaccepted_prompt(&slot.value);
+    smelt_core::acp_session::note_provider_still_running(&mut slot.value.reduced.lock().unwrap());
+    assert_eq!(slot.value.pending_prompts.lock().unwrap().len(), 1);
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_none());
+    {
+        let state = slot.value.reduced.lock().unwrap();
+        assert!(matches!(state.phase, DaemonPhase::Thinking));
+        assert!(state.entries.is_empty());
+        assert_eq!(
+            state.status_line.as_deref(),
+            Some("已排队，这一轮结束后再发")
+        );
+    }
+    settle_acp_turn_locked(&slot.value, false, false, false, &subscribers);
+    assert!(cmd_rx.try_recv().is_err());
+
+    smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::TurnEnded(
+            agent_client_protocol::schema::v1::StopReason::EndTurn,
+        ),
+    );
+    settle_acp_turn_locked(&slot.value, true, false, true, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "再问一句");
+        }
+        _ => panic!("idle provider must send the refused prompt once"),
+    }
+    assert!(
+        !slot.value.reduced.lock().unwrap().entries.iter().any(
+            |entry| matches!(entry, AcpEntry::Assistant { text, .. } if text.contains("回合失败"))
+        ),
+        "拒绝不能写成回合失败"
+    );
+}
+
+#[test]
+fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-refuse-idle", || {
+        let session = make_acp_session_value("acp-pi-refuse-idle", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "再问一句".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+
+    requeue_unaccepted_prompt(&slot.value);
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "再问一句");
+        }
+        _ => panic!("same-batch idle must flush the refused prompt"),
+    }
+    assert!(matches!(
+        slot.value.reduced.lock().unwrap().phase,
+        DaemonPhase::Idle
+    ));
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "一条还没被收下的 prompt 不能被下一次空闲信号再发一遍"
+    );
+}
+
+#[test]
+fn pi_prompt_is_echoed_only_after_it_is_accepted() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-accept", || {
+        let session = make_acp_session_value("acp-pi-accept", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "卡住了吗".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    slot.value.reduced.lock().unwrap().status_line = Some("已排队，这一轮结束后再发".to_string());
+
+    assert!(accept_unaccepted_prompt(&slot.value));
+    let state = slot.value.reduced.lock().unwrap();
+    assert!(matches!(
+        state.entries.last(),
+        Some(AcpEntry::User(text)) if text == "卡住了吗"
+    ));
+    assert!(matches!(state.phase, DaemonPhase::Thinking));
+    assert!(state.status_line.is_none());
+    assert!(state.turn_started_at_ms.is_some());
+}
+
+#[test]
+fn real_prompt_failure_returns_the_text_instead_of_retrying() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-fail", || {
+        let session = make_acp_session_value("acp-pi-fail", AcpSessionState::default());
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "再试一次".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+
+    restore_unaccepted_to_composer(&slot.value);
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_none());
+    assert_eq!(
+        slot.value.reduced.lock().unwrap().composer_restore_texts,
+        ["再试一次".to_string()]
+    );
+}
+
+#[test]
+fn cancel_before_accept_restores_the_images_with_the_text() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-cancel-images", || {
+        make_acp_session_value("acp-pi-cancel-images", AcpSessionState::default())
+    });
+    let image = smelt_core::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    };
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "看这张".to_string(),
+        images: vec![image.clone()],
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    park_unaccepted_after_cancel(&slot.value);
+    {
+        let state = slot.value.reduced.lock().unwrap();
+        assert_eq!(state.composer_restore_texts, ["看这张".to_string()]);
+        assert_eq!(state.composer_restore_images, vec![image.clone()]);
+    }
+
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "   ".to_string(),
+        images: vec![image.clone()],
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    park_unaccepted_after_cancel(&slot.value);
+    let state = slot.value.reduced.lock().unwrap();
+    assert!(state.composer_restore_texts.is_empty());
+    assert_eq!(state.composer_restore_images, vec![image]);
+    assert!(state.composer_restore_revision >= 2);
+}
+
+#[test]
+fn real_prompt_failure_restores_the_images_with_the_text() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-fail-images", || {
+        let session = make_acp_session_value("acp-pi-fail-images", AcpSessionState::default());
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let image = smelt_core::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    };
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "再试一次".to_string(),
+        images: vec![image.clone()],
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    restore_unaccepted_to_composer(&slot.value);
+    let state = slot.value.reduced.lock().unwrap();
+    assert_eq!(state.composer_restore_texts, ["再试一次".to_string()]);
+    assert_eq!(state.composer_restore_images, vec![image]);
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn cancel_before_accept_restores_user_text() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-cancel-unaccepted", || {
+        make_acp_session_value("acp-pi-cancel-unaccepted", AcpSessionState::default())
+    });
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "用户刚发的".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    park_unaccepted_after_cancel(&slot.value);
+    assert_eq!(
+        slot.value.reduced.lock().unwrap().composer_restore_texts,
+        ["用户刚发的".to_string()]
+    );
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-hold", || {
+        let session = make_acp_session_value("acp-pi-hold", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        text: "再问一句".to_string(),
+        images: Vec::new(),
+        delivery_id: None,
+        origin: AcpPromptOrigin::User,
+    });
+    let subscribers = new_event_hub();
+
+    requeue_unaccepted_prompt(&slot.value);
+    remember_provider_hold(&slot.value);
+    assert!(matches!(
+        slot.value.reduced.lock().unwrap().phase,
+        DaemonPhase::Thinking
+    ));
+    settle_acp_turn_locked(&slot.value, false, false, false, &subscribers);
+    assert!(cmd_rx.try_recv().is_err());
+
+    release_provider_hold(&slot.value);
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "再问一句");
+        }
+        _ => panic!("占位转圈收回后，空闲信号要放出这条消息"),
+    }
+    assert!(matches!(
+        slot.value.reduced.lock().unwrap().phase,
+        DaemonPhase::Idle
+    ));
+    assert!(slot.value.reduced.lock().unwrap().status_line.is_none());
+}
+
 #[test]
 fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     let acp_sessions = new_test_acp_sessions();
@@ -1189,6 +1613,136 @@ fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     );
 }
 
+fn pi_launch() -> smelt_core::agent_kind::ConversationLaunchSpec {
+    smelt_core::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
+}
+
+#[test]
+fn pi_session_commands_are_not_steered_during_a_turn() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-pi-slash", || {
+        let session = make_acp_session_value("acp-pi-slash", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: true,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: "/reload".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &subscribers,
+    )
+    .unwrap();
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::FollowUp {
+            text: "/handoff 关注测试".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &subscribers,
+    )
+    .unwrap();
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "/reload");
+        }
+        _ => panic!("reload must stay a prompt so the driver can reject it"),
+    }
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Compact {
+            custom_instructions,
+        } => {
+            assert_eq!(custom_instructions.as_deref(), Some("关注测试"));
+        }
+        _ => panic!("handoff must be native compact"),
+    }
+    assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
+    assert_eq!(
+        slot.value
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .in_flight_rpc
+            .load(Ordering::SeqCst),
+        3
+    );
+    let state = slot.value.reduced.lock().unwrap();
+    assert_eq!(state.turn_started_at_ms, Some(1));
+    assert!(state.queued_steering.is_empty());
+    assert!(state.entries.is_empty());
+}
+
+#[test]
+fn non_pi_slash_text_is_still_steered() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let (slot, _) = acp_sessions.reserve_with("acp-claude-slash", || {
+        let session = make_acp_session_value("acp-claude-slash", reduced);
+        *session.launch_spec.lock().unwrap() =
+            Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
+        session
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: "/reload".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &new_event_hub(),
+    )
+    .unwrap();
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Steer { text, .. } => {
+            assert_eq!(text, "/reload");
+        }
+        _ => panic!("non-pi slash text is ordinary input"),
+    }
+}
+
 #[test]
 fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
     let mut reduced = AcpSessionState::default();
@@ -1225,6 +1779,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
             text: "prompt B".to_string(),
             images: Vec::new(),
             delivery_id: None,
+            origin: AcpPromptOrigin::User,
         });
     let subscribers = new_event_hub();
     let (late_started_tx, late_started_rx) = std::sync::mpsc::channel();
@@ -1255,7 +1810,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         }
         late_started_tx.send(()).unwrap();
         let _turn_completion = late_session.turn_completion.lock().unwrap();
-        settle_acp_turn_locked(&late_session, false, false, &late_subscribers);
+        settle_acp_turn_locked(&late_session, false, false, false, &late_subscribers);
         late_done_tx.send(()).unwrap();
     });
     let prompt_session = Arc::clone(&session);
@@ -1285,7 +1840,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         "新 prompt 也必须等 watchdog 完整派发下一回合后才能取得 gate"
     );
 
-    settle_acp_turn_locked(&session, false, false, &subscribers);
+    settle_acp_turn_locked(&session, false, false, false, &subscribers);
     drop(turn_completion);
     late_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     let _ = prompt_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -1340,10 +1895,11 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
             text: "send now".to_string(),
             images: Vec::new(),
             delivery_id: None,
+            origin: AcpPromptOrigin::User,
         });
     let subscribers = new_event_hub();
 
-    settle_acp_turn_locked(&session, true, false, &subscribers);
+    settle_acp_turn_locked(&session, true, false, false, &subscribers);
     match cmd_rx.try_recv().unwrap() {
         smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
             assert_eq!(text, "send now");
@@ -1864,7 +2420,8 @@ fn kill_removes_session_and_closes_connections() {
 
     let (c_server, c_client) = UnixStream::pair().unwrap();
     slot.value.out.lock().unwrap().client = Some(
-        acp_snapshot_link_for_slot(&slot, c_server, Vec::new(), 0, "acp-3", "acp-test").unwrap(),
+        acp_snapshot_link_for_slot(&slot, c_server, Vec::new(), 0, "acp-3", "acp-test", true)
+            .unwrap(),
     );
 
     let (server, client) = UnixStream::pair().unwrap();
@@ -2182,6 +2739,82 @@ fn open_then_handoff_keeps_one_stable_registry_slot() {
 }
 
 #[test]
+fn handoff_snapshot_keeps_the_open_turn_and_omits_debug_sidecars() {
+    let acp_sessions = new_test_acp_sessions();
+    let (stdin_fd_owner, _stdin_peer) = UnixStream::pair().unwrap();
+    let (stdout_fd_owner, _stdout_peer) = UnixStream::pair().unwrap();
+    let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    let mut reduced = AcpSessionState::default();
+    // 已提交的正文留在 agent 自己的会话文件里，交接只带还没写完的这一轮。
+    reduced.entries.push(AcpEntry::User("以前的话".into()));
+    reduced.entries.push(AcpEntry::User("继续这条对话".into()));
+    reduced.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    reduced.tool_debug.insert(
+        "call-1".into(),
+        smelt_core::acp_session::ToolCallDebug {
+            name: Some("read".into()),
+            raw_input: Some(serde_json::json!({"path": "/tmp/secret"})),
+        },
+    );
+    reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        system_prompt: Some("完整系统提示".into()),
+        model_calls: vec![smelt_core::acp_session::RuntimeDebugModelCall {
+            sequence: 1,
+            source: "pi_context_with_system".into(),
+            payload: serde_json::json!({"messages": [{"role": "user", "content": "hello"}]}),
+            ..smelt_core::acp_session::RuntimeDebugModelCall::default()
+        }],
+        ..smelt_core::acp_session::RuntimeDebug::default()
+    };
+    acp_sessions.reserve_with("acp-debug-handoff", || {
+        let sess = make_acp_session_value("acp-debug-handoff", reduced);
+        *sess.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+            cmd_tx,
+            event_rx,
+            stdio: Arc::new(Mutex::new(Some(smelt_core::acp_conn::AcpStdio {
+                pid: std::process::id() as i32,
+                stdin_fd: stdin_fd_owner.as_raw_fd(),
+                stdout_fd: stdout_fd_owner.as_raw_fd(),
+            }))),
+            in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supports_mid_turn_input: false,
+            supports_compaction: false,
+            supports_native_queue: false,
+            supports_rewind: false,
+        });
+        sess
+    });
+
+    let (items, _) = collect_acp_handoff_typed(&acp_sessions);
+    let crate::handoff_v2::manifest::AcpHandoff::Direct { snapshot, .. } = &items[0] else {
+        panic!("应为 direct 形态");
+    };
+    assert!(
+        matches!(&snapshot.entries[..], [AcpEntry::User(text)] if text == "继续这条对话"),
+        "交接必须带走还没写完的这一轮，且不带已提交的正文"
+    );
+    assert!(snapshot.history_omitted);
+    assert!(snapshot.runtime_debug.is_none());
+    assert!(snapshot.tool_debug.is_none());
+    let wire = serde_json::to_value(snapshot).unwrap();
+    assert!(wire.get("runtime_debug").is_none());
+    assert!(wire.get("tool_debug").is_none());
+
+    let live = acp_sessions.get("acp-debug-handoff").unwrap();
+    let live = live.value.reduced.lock().unwrap();
+    assert_eq!(
+        live.runtime_debug.system_prompt.as_deref(),
+        Some("完整系统提示")
+    );
+    assert!(live.tool_debug.contains_key("call-1"));
+}
+
+#[test]
 fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
     let acp_sessions = new_test_acp_sessions();
 
@@ -2404,7 +3037,12 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     let mut completed = AcpSessionState::default();
     completed.phase = DaemonPhase::Idle;
     completed.completed_unread = true;
-    assert_eq!(compute_acp_daemon_phase(&completed), Phase::Succeeded);
+    assert_eq!(
+        compute_acp_daemon_phase(&completed),
+        Phase::Idle,
+        "没有回合结果不是成功"
+    );
+    completed.turn_outcome = Some(AcpTurnOutcome::Succeeded);
 
     completed.entries.push(AcpEntry::ToolCall {
         id: "late-tool".into(),

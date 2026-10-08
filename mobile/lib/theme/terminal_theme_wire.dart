@@ -46,6 +46,39 @@ class SmeltTerminalTheme {
     searchHitForeground: Color(0xffd8d8d8),
   );
 
+  /// xterm 把选区矩形画在字形上面，而且用的是不透明色。PC 浅色主题的选区色
+  /// `#add6ff` 会把字整个盖住。渲染前把 alpha 压下来，字才能透出来。
+  /// 线协议里的色值不动，只影响画到屏幕上的那一份。
+  static const double selectionOverlayAlpha = 0.32;
+
+  static TerminalTheme forDisplay(TerminalTheme theme) {
+    return TerminalTheme(
+      cursor: theme.cursor,
+      selection: theme.selection.withValues(alpha: selectionOverlayAlpha),
+      foreground: theme.foreground,
+      background: theme.background,
+      black: theme.black,
+      red: theme.red,
+      green: theme.green,
+      yellow: theme.yellow,
+      blue: theme.blue,
+      magenta: theme.magenta,
+      cyan: theme.cyan,
+      white: theme.white,
+      brightBlack: theme.brightBlack,
+      brightRed: theme.brightRed,
+      brightGreen: theme.brightGreen,
+      brightYellow: theme.brightYellow,
+      brightBlue: theme.brightBlue,
+      brightMagenta: theme.brightMagenta,
+      brightCyan: theme.brightCyan,
+      brightWhite: theme.brightWhite,
+      searchHitBackground: theme.searchHitBackground,
+      searchHitBackgroundCurrent: theme.searchHitBackgroundCurrent,
+      searchHitForeground: theme.searchHitForeground,
+    );
+  }
+
   /// 解析 `terminalReady.theme`。缺字段、色值写坏、色板不足 16 色都逐项回退到
   /// [fallbackDark] 的对应色位——一个坏字段不该让整屏没颜色。
   static TerminalTheme fromWire(Map<String, dynamic> json) {

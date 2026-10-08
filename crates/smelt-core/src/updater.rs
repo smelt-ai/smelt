@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use sha2::{Digest, Sha256};
@@ -189,7 +189,6 @@ pub struct InstallerTicket {
 }
 
 const INSTALLER_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
-const INSTALLER_PARENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 判断 manifest 是否指向一个本机没有记录过的发布包。
 ///
@@ -478,38 +477,85 @@ pub fn acquire_app_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
 }
 
 #[cfg(unix)]
+enum ExclusiveLockWait {
+    TimedOut,
+    Failed(anyhow::Error),
+}
+
+/// 在拥有这个文件的线程上阻塞 `flock`。到点只丢掉接收端：锁由那条线程在
+/// `flock` 返回后自己放开，别的线程不能关这个 fd。
+#[cfg(unix)]
+fn wait_exclusive_flock(
+    file: File,
+    timeout: Duration,
+    context: &str,
+) -> Result<File, ExclusiveLockWait> {
+    if timeout.is_zero() {
+        return Err(ExclusiveLockWait::TimedOut);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::thread::Builder::new()
+        .name("smelt-flock".to_string())
+        .spawn(move || {
+            let error = loop {
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                    break None;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                break Some(error);
+            };
+            let _ = tx.send((file, error));
+        });
+    if started.is_err() {
+        return Err(ExclusiveLockWait::Failed(anyhow::anyhow!(
+            "{context}：无法启动等待线程"
+        )));
+    }
+    match rx.recv_timeout(timeout) {
+        Ok((file, None)) => Ok(file),
+        Ok((_file, Some(error))) => Err(ExclusiveLockWait::Failed(
+            anyhow::Error::from(error).context(context.to_string()),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ExclusiveLockWait::TimedOut),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ExclusiveLockWait::Failed(
+            anyhow::anyhow!("{context}：等待线程在拿到锁之前退出"),
+        )),
+    }
+}
+
+#[cfg(unix)]
 fn acquire_installer_runtime_lease_at(
     dir: &Path,
     timeout: Duration,
 ) -> anyhow::Result<AppRuntimeLease> {
+    let started = Instant::now();
     let launch_gate = open_app_lock_at(dir, APP_LAUNCH_GATE_FILE)?;
-    let runtime = open_app_lock_at(dir, APP_RUNTIME_LOCK_FILE)?;
-    let started = std::time::Instant::now();
-    loop {
-        if try_flock(
-            &launch_gate,
-            libc::LOCK_EX,
-            "获取 App launch gate 独占锁失败",
-        )? {
-            break;
-        }
-        if started.elapsed() >= timeout {
-            anyhow::bail!("等待 App launch gate 超时，未提交 App 更新");
-        }
-        std::thread::sleep(INSTALLER_PARENT_POLL_INTERVAL);
-    }
+    let launch_gate =
+        match wait_exclusive_flock(launch_gate, timeout, "获取 App launch gate 独占锁失败") {
+            Ok(file) => file,
+            Err(ExclusiveLockWait::TimedOut) => {
+                anyhow::bail!("等待 App launch gate 超时，未提交 App 更新");
+            }
+            Err(ExclusiveLockWait::Failed(error)) => return Err(error),
+        };
     // 从这里起新 GUI 无法进入；只需等待已经持有 runtime lease 的 GUI 全部退出。
-    loop {
-        if try_flock(&runtime, libc::LOCK_EX, "获取 App runtime 独占锁失败")? {
-            return Ok(AppRuntimeLease {
-                _runtime_file: runtime,
-                _launch_gate_file: Some(launch_gate),
-            });
-        }
-        if started.elapsed() >= timeout {
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        anyhow::bail!("等待其它 Smelt GUI 退出超时，未提交 App 更新");
+    }
+    let runtime = open_app_lock_at(dir, APP_RUNTIME_LOCK_FILE)?;
+    match wait_exclusive_flock(runtime, remaining, "获取 App runtime 独占锁失败") {
+        Ok(runtime) => Ok(AppRuntimeLease {
+            _runtime_file: runtime,
+            _launch_gate_file: Some(launch_gate),
+        }),
+        Err(ExclusiveLockWait::TimedOut) => {
             anyhow::bail!("等待其它 Smelt GUI 退出超时，未提交 App 更新");
         }
-        std::thread::sleep(INSTALLER_PARENT_POLL_INTERVAL);
+        Err(ExclusiveLockWait::Failed(error)) => Err(error),
     }
 }
 
@@ -1906,7 +1952,7 @@ fn finalize_pending_update_at(
                 "updater",
                 &format!("待安装更新校验已失效，作废后重新下载：{error:#}"),
             );
-            abandon_pending_update_locked(&state_path, &mut state, &pending, &app_bundle, None)?;
+            abandon_pending_update_locked(&state_path, &mut state, &pending, app_bundle, None)?;
             return Ok(FinalizeOutcome::Invalidated);
         }
     };
@@ -1919,32 +1965,32 @@ fn finalize_pending_update_at(
     state.staged = Some(pending.clone());
     save_update_state_locked(&state_path, &state)?;
 
-    let swap = swap_path(&app_bundle, &pending.id)?;
-    remove_registered_swap(&app_bundle, &swap)?;
+    let swap = swap_path(app_bundle, &pending.id)?;
+    remove_registered_swap(app_bundle, &swap)?;
     if let Err(error) = copy_app_bundle(&pending.staged_app, &swap) {
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(error);
     }
     let copied_fingerprint = match validate_app_bundle_against(&swap, app_bundle) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
-            let _ = remove_registered_swap(&app_bundle, &swap);
+            let _ = remove_registered_swap(app_bundle, &swap);
             return Err(error).context("复制到安装目录后的 App 校验失败");
         }
     };
     if copied_fingerprint != fingerprint {
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         anyhow::bail!("复制到安装目录后的 App 指纹发生变化");
     }
 
     match prepare(&swap) {
         Ok(InstallPreparation::Proceed) => {}
         Ok(InstallPreparation::RetryLater) => {
-            remove_registered_swap(&app_bundle, &swap)?;
+            remove_registered_swap(app_bundle, &swap)?;
             return Ok(FinalizeOutcome::RetryLater);
         }
         Err(error) => {
-            let _ = remove_registered_swap(&app_bundle, &swap);
+            let _ = remove_registered_swap(app_bundle, &swap);
             return Err(error);
         }
     }
@@ -1953,11 +1999,11 @@ fn finalize_pending_update_at(
     pending.swap_app = Some(swap.clone());
     state.staged = Some(pending.clone());
     if let Err(error) = save_update_state_locked(&state_path, &state) {
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(error);
     }
 
-    if let Err(error) = swap_app_bundles(&app_bundle, &swap) {
+    if let Err(error) = swap_app_bundles(app_bundle, &swap) {
         pending.phase = StagedUpdatePhase::Ready;
         pending.swap_app = None;
         state.staged = Some(pending);
@@ -1968,7 +2014,7 @@ fn finalize_pending_update_at(
                 "App 原子交换失败，且恢复 Ready 状态写入失败；已保留交换现场：{persist_error:#}"
             ));
         }
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(error);
     }
 
@@ -1977,7 +2023,7 @@ fn finalize_pending_update_at(
     state.staged = None;
     state.cleanup_app = Some(swap.clone());
     if let Err(commit_error) = save_update_state_locked(&state_path, &state) {
-        if let Err(rollback_error) = swap_app_bundles(&app_bundle, &swap) {
+        if let Err(rollback_error) = swap_app_bundles(app_bundle, &swap) {
             return Err(commit_error).context(format!(
                 "更新状态提交失败，且 App 原子回滚也失败：{rollback_error:#}"
             ));
@@ -1994,7 +2040,7 @@ fn finalize_pending_update_at(
                 "App 已原子回滚，但恢复 Ready 状态写入失败；已保留交换现场：{persist_error:#}"
             ));
         }
-        let _ = remove_registered_swap(&app_bundle, &swap);
+        let _ = remove_registered_swap(app_bundle, &swap);
         return Err(commit_error);
     }
 
@@ -2871,7 +2917,7 @@ mod tests {
         assert!(unrelated.is_dir());
         assert_eq!(
             load_update_state_locked(&state_path).unwrap().cleanup_app,
-            Some(unrelated.clone())
+            Some(unrelated)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
