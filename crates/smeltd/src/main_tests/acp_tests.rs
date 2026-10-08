@@ -180,7 +180,7 @@ fn restore_with_local_entries_is_strict_from_the_first_attempt() {
 }
 
 #[test]
-fn reopening_live_session_returns_requested_tail_without_relaunch() {
+fn reopening_live_session_neither_relaunches_nor_trims_history() {
     let mut reduced = AcpSessionState::default();
     for index in 0..5 {
         reduced
@@ -237,9 +237,10 @@ fn reopening_live_session_returns_requested_tail_without_relaunch() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["snapshot"]["entries_offset"], 3);
+    // tail_limit 只是旧客户端还在发的字段：窗口按页另取历史，首帧不再裁。
+    assert_eq!(response["snapshot"]["entries_offset"], 0);
     assert_eq!(response["snapshot"]["entries_total"], 5);
-    assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 5);
     assert_eq!(
         response["snapshot"]["conversation_state"]["binding"]["plugin_id"],
         "com.example.current"
@@ -2738,14 +2739,18 @@ fn open_then_handoff_keeps_one_stable_registry_slot() {
 }
 
 #[test]
-fn handoff_snapshot_keeps_the_conversation_and_omits_debug_sidecars() {
+fn handoff_snapshot_keeps_the_open_turn_and_omits_debug_sidecars() {
     let acp_sessions = new_test_acp_sessions();
     let (stdin_fd_owner, _stdin_peer) = UnixStream::pair().unwrap();
     let (stdout_fd_owner, _stdout_peer) = UnixStream::pair().unwrap();
     let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
     let mut reduced = AcpSessionState::default();
+    // 已提交的正文留在 agent 自己的会话文件里，交接只带还没写完的这一轮。
+    reduced.entries.push(AcpEntry::User("以前的话".into()));
     reduced.entries.push(AcpEntry::User("继续这条对话".into()));
+    reduced.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
     reduced.tool_debug.insert(
         "call-1".into(),
         smelt_core::acp_session::ToolCallDebug {
@@ -2791,8 +2796,9 @@ fn handoff_snapshot_keeps_the_conversation_and_omits_debug_sidecars() {
     };
     assert!(
         matches!(&snapshot.entries[..], [AcpEntry::User(text)] if text == "继续这条对话"),
-        "交接必须带走对话本身"
+        "交接必须带走还没写完的这一轮，且不带已提交的正文"
     );
+    assert!(snapshot.history_omitted);
     assert!(snapshot.runtime_debug.is_none());
     assert!(snapshot.tool_debug.is_none());
     let wire = serde_json::to_value(snapshot).unwrap();
