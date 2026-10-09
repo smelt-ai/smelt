@@ -31,6 +31,7 @@ pub mod control_api;
 pub mod control_client;
 pub mod conversation;
 pub mod copilot_quota;
+pub mod daemon_image;
 pub mod daemon_protocol;
 pub mod daemon_state;
 pub mod dsh_auto_models;

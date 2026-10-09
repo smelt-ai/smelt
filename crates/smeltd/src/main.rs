@@ -280,158 +280,123 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
-fn is_staged_daemon_executable(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("smeltd") && name.ends_with(".next"))
-}
-
-/// 从暂存文件接过 handoff 的新映像已经成功通过了一次 `exec`。在启动任何线程、
-/// 消费交接文件之前，把它原子提升为正式路径；随后 main 会再做一次不涉及会话快照的
-/// 轻量 `exec`，让 macOS 的进程名也成为 `smeltd`。
-///
-/// 普通手工运行 `.next` 不得触发安装，只有携带 `SMELTD_HANDOFF` 的升级映像才允许。
-fn promote_staged_handoff_executable(
-    current: &std::path::Path,
-    came_from_handoff: bool,
-) -> std::io::Result<Option<std::path::PathBuf>> {
-    if !came_from_handoff || !is_staged_daemon_executable(current) {
-        return Ok(None);
-    }
-    let stable = current.with_file_name("smeltd");
-    std::fs::rename(current, &stable)?;
-    Ok(Some(stable))
-}
-
-fn finalize_staged_handoff_executable() {
-    let came_from_handoff = std::env::var_os("SMELTD_HANDOFF").is_some()
-        || std::env::var_os("SMELTD_HANDOFF_SOCK").is_some();
-    let Ok(current) = std::env::current_exe() else {
-        return;
-    };
-    let stable = match promote_staged_handoff_executable(&current, came_from_handoff) {
-        Ok(Some(stable)) => stable,
-        Ok(None) => return,
-        Err(error) => {
-            eprintln!(
-                "smeltd 暂存映像提升到正式路径失败（{}）：{error}",
-                current.display()
-            );
-            return;
-        }
-    };
-
-    // 此时没有业务线程，SMELTD_HANDOFF、插件指纹与上一映像继承的 fd 都保持原样。
-    // 第二次 exec 只校正 executable path / 进程显示名，不重新生成或消费 handoff。
-    use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new(&stable).exec();
-    // 同一 inode 刚刚已从暂存路径成功 exec，正常不会走到这里。失败时继续当前映像，
-    // daemon 仍可恢复会话；daemon_executable_from_current 会回退到正式路径。
-    eprintln!(
-        "smeltd 从正式路径重新 exec 失败（{}）：{error}",
-        stable.display()
-    );
-}
-
-/// 返回 `current_exe()` 这条路径现在指向的文件。参数化一层是为了覆盖 macOS 上
-/// `current_exe()` 在文件被 rename 后仍返回旧启动路径的行为。
-///
-/// 路径还在不等于映像还是启动时那一份：原地替换（rename 覆盖 `smeltd`）后路径
-/// 仍在，inode 已经换了。会话宿主不能走这里，必须用 [`session_host_executable`]。
-fn daemon_executable_from_current(
-    current: std::path::PathBuf,
-) -> std::io::Result<std::path::PathBuf> {
-    // 路径没了（rename 掉 smeltd.next、删掉历史硬链、测试误伤）时，回退到同目录的
-    // 正式 `smeltd`，不能把「文件不存在」抛给调用方。
-    if current.is_file() {
-        return Ok(current);
-    }
-
-    let stable = current.with_file_name("smeltd");
-    if stable.is_file() {
-        return Ok(stable);
-    }
-
-    Err(std::io::Error::new(
-        ErrorKind::NotFound,
-        format!(
-            "守护可执行文件不存在：{}（稳定路径：{}）",
-            current.display(),
-            stable.display()
-        ),
-    ))
-}
-
-fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
-    daemon_executable_from_current(std::env::current_exe()?)
-}
-
-/// 启动时 `current_exe()` 的 inode。安装协议保证这条路径在进程活着时不会被换成
-/// 另一份文件；spawn 前再对一次，对不上就拒绝启动，而不是去跑目录里的新文件。
-struct PinnedDaemonInode {
+/// 启动时钉住的那份普通文件。会话宿主只 exec 这条路径，不再回头看启动名现在指向谁。
+struct PinnedDaemonImage {
+    path: std::path::PathBuf,
     dev: u64,
     ino: u64,
 }
 
-static PINNED_DAEMON_INODE: OnceLock<PinnedDaemonInode> = OnceLock::new();
+static PINNED_DAEMON_IMAGE: OnceLock<PinnedDaemonImage> = OnceLock::new();
 
-fn pin_running_daemon_image() {
-    let Ok(path) = std::env::current_exe() else {
-        return;
-    };
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return;
-    };
-    use std::os::unix::fs::MetadataExt;
-    let _ = PINNED_DAEMON_INODE.set(PinnedDaemonInode {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    });
+fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
+    PINNED_DAEMON_IMAGE
+        .get()
+        .map(|pinned| pinned.path.clone())
+        .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))
 }
 
+/// 钉住本次 exec 真正映射的普通文件。
+///
+/// `current_exe()` 经常是启动时用的那条路径。若有人从符号链接 `smeltd` 拉起，
+/// 这里只顺着链接读一次，打开目标文件（`O_NOFOLLOW`，不再二次解析）。
+/// 之后启动名被拨到别的映像，也不改变已经钉住的路径。
+fn pin_running_daemon_image() {
+    let Ok(path) = std::env::current_exe() else {
+        eprintln!("smeltd 无法读取当前可执行路径，会话宿主将拒绝启动");
+        return;
+    };
+    let Some(pinned) = open_mapped_image(&path) else {
+        eprintln!(
+            "smeltd 没有钉住守护映像（{}），会话宿主将拒绝启动",
+            path.display()
+        );
+        return;
+    };
+    let _ = PINNED_DAEMON_IMAGE.set(pinned);
+}
+
+fn open_mapped_image(current: &std::path::Path) -> Option<PinnedDaemonImage> {
+    if let Some(pinned) = open_regular_nofollow(current) {
+        return Some(pinned);
+    }
+    let target = std::fs::read_link(current).ok()?;
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        current.parent()?.join(target)
+    };
+    open_regular_nofollow(&resolved)
+}
+
+fn open_regular_nofollow(path: &std::path::Path) -> Option<PinnedDaemonImage> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    Some(PinnedDaemonImage {
+        path: path.to_path_buf(),
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+/// 不跟随符号链接。钉住的必须是那个普通文件本身；路径变成链接就当成映像已经换了。
 fn path_has_inode(path: &std::path::Path, dev: u64, ino: u64) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
+    if !meta.is_file() {
+        return false;
+    }
     use std::os::unix::fs::MetadataExt;
     meta.dev() == dev && meta.ino() == ino
 }
 
 fn session_host_executable_from(
-    current: std::path::PathBuf,
+    pinned_path: &std::path::Path,
     pinned: Option<(u64, u64)>,
 ) -> std::io::Result<std::path::PathBuf> {
     let Some((dev, ino)) = pinned else {
-        return Ok(current);
+        return Err(std::io::Error::other("没有钉住守护映像"));
     };
-    if path_has_inode(&current, dev, ino) {
-        return Ok(current);
-    }
-    let stable = current.with_file_name("smeltd");
-    if stable.is_file() && path_has_inode(&stable, dev, ino) {
-        return Ok(stable);
+    if path_has_inode(pinned_path, dev, ino) {
+        return Ok(pinned_path.to_path_buf());
     }
     Err(std::io::Error::other(format!(
         "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
-        current.display()
+        pinned_path.display()
     )))
 }
 
-/// 会话宿主必须和本进程是同一个 inode。路径被换掉时直接失败，不能 exec 新文件，
-/// 也不能另拷一份再跑——那份拷贝的 `current_exe()` 和签名都不再是正在映射的映像。
+/// 会话宿主必须和本进程是同一个 inode。钉住的文件被换掉时直接失败。
+/// 不能改去 exec 启动名现在指向的文件，也不能另拷一份再跑。
 fn session_host_executable() -> std::io::Result<std::path::PathBuf> {
-    let current = daemon_executable_path()?;
-    let pinned = PINNED_DAEMON_INODE
+    let pinned = PINNED_DAEMON_IMAGE
         .get()
-        .map(|pinned| (pinned.dev, pinned.ino));
-    session_host_executable_from(current, pinned)
+        .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))?;
+    session_host_executable_from(&pinned.path, Some((pinned.dev, pinned.ino)))
 }
 
-/// 已 stage、尚未应用到运行中守护的候选映像。daemon 在跑时安装只写这个文件，
-/// 不覆盖正在 exec 的 `smeltd`，所以 `current_exe()` 派生的 ACP host 永远跟主进程同版。
+/// 已经写好、还没切到运行中守护的下一份映像。只认 `smeltd.pending` 这根链接，
+/// 不认会被覆盖的 `smeltd.next`。正在跑的就是这份文件时，不当成候选。
 fn staged_successor_executable(running: &std::path::Path) -> Option<std::path::PathBuf> {
-    let next = running.with_file_name("smeltd.next");
-    (next.is_file() && next != running).then_some(next)
+    let pending = smelt_core::daemon_image::pending_image(running.parent()?)?;
+    (!same_device_inode(running, &pending)).then_some(pending)
+}
+
+fn same_device_inode(left: &std::path::Path, right: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 /// 进程指纹钉死（启动时调一次）：env 传过来的优先（handoff successor 的候选
@@ -2080,14 +2045,13 @@ fn main() {
     // 独立 ACP 会话宿主只跑一条私有控制连接，不能初始化 SQLite、绑定全局
     // smeltd.sock 或启动菜单/远程服务。尽量早分流也避免每个会话宿主各起一套
     // app_log tee 后台线程。
+    // 会话宿主和主进程都要钉住自己映射的那份文件。钉晚了，启动名若已被拨走，
+    // 再去解析 `current_exe()` 就会拿到下一份映像。
+    pin_running_daemon_image();
     if acp_runtime_host::is_session_host_process() {
         acp_runtime_host::run_session_host();
         return;
     }
-    // 在线升级先 exec 已验证存在的暂存映像；候选映像一旦真的启动，就在任何线程和
-    // 状态初始化之前把自身提升到正式路径，再以正式名继续同一份 handoff。
-    finalize_staged_handoff_executable();
-    pin_running_daemon_image();
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
     // 先装 panic hook，再记一条启动事件——守护本身没有终端可看，崩溃/异常全靠这份
@@ -2388,14 +2352,14 @@ fn wait_for_predecessor_exit(sock: &UnixStream, timeout: Duration) {
     }
 }
 
-/// headless 空闲自升级：没人看时，把已 stage 的 `smeltd.next` 应用到运行中的守护。
+/// headless 空闲自升级：没人看时，把 `smeltd.pending` 指向的新映像应用到运行中的守护。
 /// 每 60s 看一次（与 GUI 的 watch 同频，首轮延迟 60s，把先手让给 GUI）。
 /// 门控：
 /// - 指纹未知（None）不升：证明不了自己旧，别乱动。
 /// - 有活着的观看连接（桌面 event subscribe / 终端 open·watch / ACP open·watch）
 ///   不升：GUI 活着，它有空闲门控（agent 忙不闪终端），让它拥有升级时机。
-/// - 只 exec `smeltd.next`。正在跑的 `smeltd` 在升级完成前不准被替换，ACP host
-///   从 `current_exe()` 派生，必须跟主进程同版。
+/// - 只 exec pending 指向的那份不可变映像。启动名在提交前不动，会话宿主继续
+///   exec 本进程钉住的文件。
 /// - ACP/peer 忙：不自判，直接发 upgrade op 让 handler 回 busy（单一数据源），
 ///   等下一轮。
 ///   发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
@@ -3915,33 +3879,6 @@ fn handle_upgrade(
     listen_fd: RawFd,
 ) {
     let mut c = conn;
-    // 可选 `"exe":"/path/to/smeltd"`：spawn 指定二进制做 successor。暂存
-    // `.next` 原样 exec，COMMIT 之后才扶正到正式路径。未传则 spawn current_exe。
-    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        let path = std::path::PathBuf::from(p);
-        if !path.is_file() {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) })
-            );
-            return;
-        }
-        path
-    } else {
-        match daemon_executable_path() {
-            Ok(p) => p,
-            Err(_) => {
-                let _ = writeln!(
-                    c,
-                    "{}",
-                    serde_json::json!({ "ok": false, "err": "current_exe 失败" })
-                );
-                return;
-            }
-        }
-    };
-
     // 从收集任何会话列表/快照之前就冻结全部真实 spawn，并一直持有到 exec 成功
     // （不返回）或失败回滚结束。这样快照里不会漏掉已经 fork、但尚未把 pid/fd
     // 发布到 ConversationHandle.stdio 的 ACP 子进程。
@@ -3983,6 +3920,34 @@ fn handle_upgrade(
         );
         return;
     }
+
+    // busy 是可重试的瞬时状态，先于映像校验报告。
+    // 可选 `"exe"`：spawn 指定的不可变映像做 successor。启动名要等 COMMIT 之后
+    // 再拨过去。未传则 spawn 本进程钉住的那份文件。
+    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        let path = std::path::PathBuf::from(p);
+        if !path.is_file() {
+            let _ = writeln!(
+                c,
+                "{}",
+                serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) })
+            );
+            return;
+        }
+        path
+    } else {
+        match daemon_executable_path() {
+            Ok(p) => p,
+            Err(error) => {
+                let _ = writeln!(
+                    c,
+                    "{}",
+                    serde_json::json!({ "ok": false, "err": format!("找不到当前守护映像：{error}") })
+                );
+                return;
+            }
+        }
+    };
 
     // 交接 v2：快照→typed manifest→spawn successor→传 manifest/fd/grid→
     // READY→COMMIT。COMMIT 发出前任何失败都回滚（reply false，原地继续服务）；

@@ -654,9 +654,9 @@ fn sock_path() -> std::path::PathBuf {
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
 /// 避免 macOS 对签名文件覆盖时 SIGKILL smeltd → 会话全灭 → 对话被「重新初始化」。
 ///
-/// **硬约束**：smeltd 进程的 `current_exe` 必须是 `~/.smelt/bin/smeltd`，绝不能是
-/// `Smelt.app/Contents/MacOS/smeltd`。否则用户用 Finder 拖 DMG 覆盖 App 时内核会
-/// 干掉守护，所有 Claude/Grok PTY 死掉，GUI 重开只能 spawn 新进程 → 对话「重新初始化」。
+/// **硬约束**：正在跑的 smeltd 必须映射 `~/.smelt/bin/` 里的一份映像，绝不能映射
+/// `Smelt.app` 里的那份。否则用户用 Finder 拖 DMG 覆盖 App 时内核会干掉守护。
+/// `smeltd` 这个名字只是指向当前映像的符号链接。
 fn managed_daemon_dir() -> std::path::PathBuf {
     smelt_paths::smelt_home()
         .unwrap_or_else(|| "/tmp/.smelt".into())
@@ -664,11 +664,7 @@ fn managed_daemon_dir() -> std::path::PathBuf {
 }
 
 pub fn managed_daemon_path() -> std::path::PathBuf {
-    managed_daemon_dir().join("smeltd")
-}
-
-fn staged_daemon_path() -> std::path::PathBuf {
-    managed_daemon_dir().join("smeltd.next")
+    managed_daemon_dir().join(smelt_core::daemon_image::LAUNCH_NAME)
 }
 
 /// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
@@ -688,8 +684,8 @@ fn same_daemon_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-/// 进程是否已住在 managed 目录（正式名 smeltd 或交接中的 smeltd.next 都算）。
-/// rename next→smeltd 后 macOS 上 current_exe 可能仍报旧路径名，不能只比文件名。
+/// 进程是否已住在 managed 目录。映像文件名是 `smeltd-<指纹>`，启动名是旁边的链接。
+/// 不能只认文件名 `smeltd`：交接后的进程报的是映像自己的路径。
 fn exe_is_managed(exe: &std::path::Path) -> bool {
     let managed = managed_daemon_path();
     if same_daemon_path(exe, &managed) {
@@ -699,7 +695,7 @@ fn exe_is_managed(exe: &std::path::Path) -> bool {
     if exe.starts_with(&dir) {
         return true;
     }
-    // current_exe 仍写 smeltd.next 但文件已 rename：比 inode
+    // 启动名已经拨走，进程仍报着原来的路径：比 inode。
     if let (Ok(em), Ok(mm)) = (std::fs::metadata(exe), std::fs::metadata(&managed)) {
         #[cfg(unix)]
         {
@@ -1180,32 +1176,28 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// 守护没在跑时把 `src` 装到正式路径 `~/.smelt/bin/smeltd`。
-/// 先写 `smeltd.next` 再 rename，避免半截文件。
-/// 文件仍被进程映射时，不 rename，只留下 `smeltd.next`。
+/// 守护没在跑时发布一份不可变映像，并把启动名拨过去。
+/// 启动名这个目录项仍被进程映射时，只挂 `smeltd.pending`，不拨链接。
 fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
+        let image = smelt_core::daemon_image::publish_image(&dir, src)?;
         if managed.is_file() && path_is_live_executable(&managed) {
-            stage_managed_daemon_update(src)?;
+            smelt_core::daemon_image::retarget_pending_symlink(&dir, &image)?;
             eprintln!(
-                "[workspace] {} 仍被进程映射，不覆盖，已暂存 smeltd.next",
+                "[workspace] {} 仍被进程映射，不改启动名，已挂上 smeltd.pending",
                 managed.display()
             );
             return Ok(managed);
         }
-        let staged = staged_daemon_path();
-        stage_daemon_binary(src, &staged)?;
-        // Unix rename 会原子替换目标；先 remove 会制造一个路径不存在的窗口，
-        // 此时若硬重启恰好发生，新守护将无文件可执行。
-        std::fs::rename(&staged, &managed)?;
+        smelt_core::daemon_image::retarget_launch_after_commit(&image)?;
         eprintln!(
             "[workspace] 已同步守护 {} → {}",
             src.display(),
-            managed.display()
+            image.display()
         );
     }
     if managed.is_file() {
@@ -1218,62 +1210,31 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     }
 }
 
-/// 守护在跑时只把新映像写到 `smeltd.next`，绝不覆盖正在 exec 的 `smeltd`。
-/// ACP host 从 `current_exe()` 派生，那条路径必须始终是运行中的映像。
+/// 守护在跑时只发布新映像并挂上 `smeltd.pending`。启动名留到交接提交之后再拨。
 fn stage_managed_daemon_update(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
-    let staged = staged_daemon_path();
-    stage_daemon_binary(src, &staged)?;
+    stage_daemon_update_in(&dir, src)
+}
+
+/// `dir` 由调用方给。测试必须用临时目录，不能写真实的 `managed_daemon_path()`。
+fn stage_daemon_update_in(
+    dir: &std::path::Path,
+    src: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let image = smelt_core::daemon_image::publish_image(dir, src)?;
+    smelt_core::daemon_image::retarget_pending_symlink(dir, &image)?;
     eprintln!(
         "[workspace] 已暂存守护更新 {} → {}",
         src.display(),
-        staged.display()
+        image.display()
     );
-    Ok(staged)
+    Ok(image)
 }
 
 fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
-    let staged = staged_daemon_path();
-    if staged.is_file() {
-        return Some(staged);
-    }
-    bundled_daemon_path()
-}
-
-fn stage_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    if same_daemon_path(src, dest) {
-        return Ok(());
-    }
-    let _ = std::fs::remove_file(dest);
-    std::fs::copy(src, dest)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(dest)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(dest, perms)?;
-    }
-    Ok(())
-}
-
-/// 完成暂存映像到正式路径的安装。新版 smeltd 会在 handoff 启动最早期自行完成
-/// `next -> smeltd` 并以正式路径继续 exec；旧版仍由 GUI 在确认升级后执行 rename。
-fn finish_staged_managed_install(
-    staged: &std::path::Path,
-    managed: &std::path::Path,
-) -> std::io::Result<()> {
-    if staged == managed {
-        return Ok(());
-    }
-    if managed.is_file() && path_is_live_executable(managed) {
-        return Ok(());
-    }
-    match std::fs::rename(staged, managed) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && managed.is_file() => Ok(()),
-        Err(error) => Err(error),
-    }
+    smelt_core::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
 }
 
 fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
@@ -1285,11 +1246,10 @@ fn try_handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
     handoff_daemon_to_managed_once(src)
 }
 
-/// 把正在跑的守护用一次 handoff 迁到 `~/.smelt/bin/smeltd`（会话 PTY 保留）。
+/// 把正在跑的守护用一次 handoff 迁到 `~/.smelt/bin` 里的一份新映像（会话 PTY 保留）。
 ///
-/// 若目标路径正是当前 running 的文件，先落到 `smeltd.next`。新映像确认自己已通过
-/// exec 后会在启动任何线程前自行 rename，并以正式路径做一次轻量 exec；这一步不重复
-/// 会话快照。旧映像不支持自行提升时，仍由本函数在确认 handoff 后完成 rename。
+/// 无论现在跑的是不是 managed 路径，都先发布不可变映像再 exec 那份文件。
+/// 启动名要等升级成功才拨；失败时链接保持原样，候选留在 `smeltd.pending`。
 ///
 /// 一次尝试：Busy 原样返回，由 GUI 在回合结束后再发一次 upgrade。
 fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
@@ -1300,29 +1260,22 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         return UpgradeOutcome::Failed;
     }
 
-    // 正在跑的是否已在 managed 路径上（覆盖同路径必须用 .next）。
-    let running_on_managed = match probe_daemon_detail() {
-        DaemonProbe::Running {
-            exe_path: Some(ref p),
-            ..
-        } => exe_is_managed(std::path::Path::new(p)),
-        _ => false,
+    let image = match smelt_core::daemon_image::publish_image(&dir, src) {
+        Ok(image) => image,
+        Err(e) => {
+            eprintln!("[workspace] 发布守护映像失败：{e}");
+            return UpgradeOutcome::Failed;
+        }
     };
-
-    let target = if running_on_managed {
-        dir.join("smeltd.next")
-    } else {
-        managed.clone()
-    };
-    if let Err(e) = stage_daemon_binary(src, &target) {
-        eprintln!("[workspace] 暂存守护失败（{}）：{e}", target.display());
+    if let Err(e) = smelt_core::daemon_image::retarget_pending_symlink(&dir, &image) {
+        eprintln!("[workspace] 挂上 smeltd.pending 失败：{e}");
         return UpgradeOutcome::Failed;
     }
 
-    let outcome = upgrade_daemon_exe(Some(&target));
+    let outcome = upgrade_daemon_exe(Some(&image));
     match outcome {
         UpgradeOutcome::Upgraded => {
-            if let Err(e) = finish_staged_managed_install(&target, &managed) {
+            if let Err(e) = smelt_core::daemon_image::retarget_launch_after_commit(&image) {
                 eprintln!(
                     "[workspace] 完成 managed 安装失败：{e}（目标：{}）",
                     managed.display()
@@ -1333,11 +1286,10 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         }
         UpgradeOutcome::Busy => UpgradeOutcome::Busy,
         other => {
-            // 失败时把候选留在 smeltd.next。不能扶正到正在跑的 smeltd：
-            // ACP host 从那条路径派生，覆盖它就是混版本。
+            // 失败时启动名不动。候选留在 pending，下次再 exec 同一份映像。
             eprintln!(
                 "[workspace] handoff 到 managed 失败（{other:?}），候选：{}",
-                target.display()
+                image.display()
             );
             other
         }
@@ -1496,9 +1448,9 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
                     let _ = stage_managed_daemon_update(&bundled);
                 }
             } else if content_differs {
-                // 守护已在 managed（含版本旧）：只把新映像写到 smeltd.next，**不
-                // 覆盖正在跑的 smeltd，也不 exec**。连接路径偷偷换代正是「用着用着
-                // 终端全卡」的根源。真正的换代交给 GUI 空闲升级或用户手动点升级。
+                // 守护已在 managed（含版本旧）：只发布新映像并挂 pending，**不拨
+                // 启动名，也不 exec**。连接路径偷偷换代正是「用着用着终端全卡」的
+                // 根源。真正的换代交给 GUI 空闲升级或用户手动点升级。
                 let _ = stage_managed_daemon_update(&bundled);
             }
             Ok(managed_daemon_path())
@@ -1588,7 +1540,10 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         use std::process::Stdio;
         let exe = std::env::current_exe().ok();
         let in_app_bundle = exe.as_ref().is_some_and(|e| path_inside_app_bundle(e));
-        let mut cmd = std::process::Command::new(&daemon);
+        // exec 不可变映像本身，不要 exec 启动名。否则 current_exe 停在链接上，
+        // 链接一拨，会话宿主就会看到另一份文件。
+        let spawn_at = std::fs::canonicalize(&daemon).unwrap_or_else(|_| daemon.clone());
+        let mut cmd = std::process::Command::new(&spawn_at);
         smelt_paths::export_to(&mut cmd);
         smelt_core::tty_color::clear_command(&mut cmd);
         cmd.process_group(0)
@@ -1601,7 +1556,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
         // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
         // SMELTD_PLUGIN_DAEMON_FINGERPRINT 传指纹同一机制）。
-        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&daemon) {
+        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&spawn_at) {
             cmd.env("SMELTD_PLUGIN_DAEMON_FINGERPRINT", fingerprint);
         }
         match cmd.spawn() {
@@ -1609,12 +1564,12 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
                 eprintln!(
                     "[workspace] 已拉起 smeltd pid={} ({}) menubar={}",
                     child.id(),
-                    daemon.display(),
+                    spawn_at.display(),
                     in_app_bundle
                 );
                 None
             }
-            Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", daemon.display())),
+            Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", spawn_at.display())),
         }
     };
 
@@ -1961,8 +1916,8 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
 /// 安装时对运行中守护的处置决策。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InstallCommitAction {
-    /// 守护已在 managed 路径：只把候选二进制写到 `smeltd.next`，不覆盖正在跑的
-    /// `smeltd`，不 handoff。版本升级交给空闲无缝升级；安装永不因此阻塞。
+    /// 守护已在 managed 路径：只发布新映像并挂 pending，不拨启动名，不 handoff。
+    /// 版本升级交给空闲无缝升级；安装永不因此阻塞。
     StageDiskOnly,
     /// 守护仍在 .app 里（或路径未知）：必须 handoff 迁出，否则换 App 会 SIGKILL 它。
     RelocateHandoff,
@@ -2082,10 +2037,15 @@ where
         .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
-            let pending = staged_daemon_path();
-            if pending.is_file() {
+            let dir = managed_daemon_dir();
+            if let Some(pending) = smelt_core::daemon_image::pending_image(&dir) {
                 match upgrade_daemon_exe(Some(&pending)) {
                     UpgradeOutcome::Upgraded => {
+                        if let Err(error) =
+                            smelt_core::daemon_image::retarget_launch_after_commit(&pending)
+                        {
+                            eprintln!("[workspace] 升级后改写启动名失败：{error}");
+                        }
                         eprintln!("✅ 守护进程已无缝升级到最新版本");
                     }
                     UpgradeOutcome::Busy => {
@@ -2095,11 +2055,20 @@ where
                         eprintln!("ℹ️ 守护进程无需或无法直接无缝升级（已暂存，下次启动生效）");
                     }
                 }
-            } else if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
-                let managed = managed_daemon_path();
-                if managed.is_file() {
-                    match upgrade_daemon_exe(Some(&managed)) {
+            } else if let DaemonProbe::Running { exe_path, .. } = probe_daemon_detail()
+                && let Ok(image) = std::fs::canonicalize(managed_daemon_path())
+            {
+                let already = exe_path
+                    .as_deref()
+                    .is_some_and(|exe| same_daemon_path(std::path::Path::new(exe), &image));
+                if !already {
+                    match upgrade_daemon_exe(Some(&image)) {
                         UpgradeOutcome::Upgraded => {
+                            if let Err(error) =
+                                smelt_core::daemon_image::retarget_launch_after_commit(&image)
+                            {
+                                eprintln!("[workspace] 升级后改写启动名失败：{error}");
+                            }
                             eprintln!("✅ 守护进程已无缝升级到最新版本");
                         }
                         UpgradeOutcome::Busy => {
@@ -4386,7 +4355,7 @@ mod successor_daemon_tests {
 mod install_commit_tests {
     use super::*;
 
-    /// 核心回归：守护已在 managed 路径时安装只写 smeltd.next，不 handoff——
+    /// 核心回归：守护已在 managed 路径时安装只发布新映像，不 handoff——
     /// 此前无条件 handoff，ACP 忙就 exit 75 半安装（映射写了、App 没换）。
     #[test]
     fn managed_daemon_stages_disk_only() {
@@ -4395,8 +4364,9 @@ mod install_commit_tests {
             install_commit_action_for_running_daemon(Some(&managed)),
             InstallCommitAction::StageDiskOnly
         );
-        // next 暂存态仍在 managed 目录内：同样不得在安装时 handoff。
-        let staged = managed_daemon_dir().join("smeltd.next");
+        // 不可变映像仍在 managed 目录内：同样不得在安装时 handoff。
+        let staged = managed_daemon_dir()
+            .join("smeltd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         assert_eq!(
             install_commit_action_for_running_daemon(Some(&staged)),
             InstallCommitAction::StageDiskOnly
@@ -4469,32 +4439,35 @@ mod install_commit_tests {
     }
 
     #[test]
-    fn staging_an_update_does_not_replace_the_live_managed_binary() {
-        let dir = managed_daemon_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let live = managed_daemon_path();
-        let staged = staged_daemon_path();
-        std::fs::write(&live, b"running-image").unwrap();
-        let src = std::env::temp_dir().join(format!(
-            "smelt-stage-src-{}-{}",
+    fn staging_an_update_does_not_replace_the_live_launch_file() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!(
+            "smelt-stage-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let launch = dir.join("smeltd");
+        std::fs::write(&launch, b"running-image").unwrap();
+        let launch_inode = std::fs::metadata(&launch).unwrap().ino();
+        let src = dir.join("src");
         std::fs::write(&src, b"pending-image").unwrap();
 
-        let dest = stage_managed_daemon_update(&src).unwrap();
-        assert_eq!(dest, staged);
-        assert_eq!(std::fs::read(&live).unwrap(), b"running-image");
-        assert_eq!(std::fs::read(&staged).unwrap(), b"pending-image");
+        let dest = stage_daemon_update_in(&dir, &src).unwrap();
+        assert_eq!(std::fs::read(&launch).unwrap(), b"running-image");
+        assert_eq!(std::fs::metadata(&launch).unwrap().ino(), launch_inode);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"pending-image");
         assert_eq!(
-            pending_upgrade_exe().as_deref(),
-            Some(staged.as_path()),
-            "空闲升级必须 exec smeltd.next，不能再 exec 正在跑的旧文件"
+            smelt_core::daemon_image::pending_image(&dir).as_deref(),
+            Some(std::fs::canonicalize(&dest).unwrap().as_path()),
+            "空闲升级必须 exec 新映像，不能再 exec 正在跑的旧文件"
         );
 
-        let _ = std::fs::remove_file(&src);
-        let _ = std::fs::remove_file(&staged);
-        let _ = std::fs::remove_file(&live);
+        let image_inode = std::fs::metadata(&dest).unwrap().ino();
+        let again = stage_daemon_update_in(&dir, &src).unwrap();
+        assert_eq!(again, dest);
+        assert_eq!(std::fs::metadata(&again).unwrap().ino(), image_inode);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -4737,33 +4710,6 @@ mod managed_daemon_ensure_tests {
         assert_eq!(result.unwrap(), managed);
         assert_eq!(calls.get(), 1, "文件消失后不能继续盲信 ensure 缓存");
         let _ = std::fs::remove_file(managed);
-    }
-
-    #[test]
-    fn daemon_promoted_staging_file_is_a_completed_install() {
-        let root = managed_test_file("daemon-promoted-staging");
-        let staged = root.join("smeltd.next");
-        let managed = root.join("smeltd");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&managed, b"new daemon image").unwrap();
-
-        finish_staged_managed_install(&staged, &managed)
-            .expect("daemon 已自行提升到正式路径时 GUI 不应再报 rename 失败");
-        assert_eq!(std::fs::read(&managed).unwrap(), b"new daemon image");
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn missing_staging_and_managed_files_is_not_a_completed_install() {
-        let root = managed_test_file("missing-staging-and-managed");
-        let staged = root.join("smeltd.next");
-        let managed = root.join("smeltd");
-
-        assert!(
-            finish_staged_managed_install(&staged, &managed).is_err(),
-            "两个路径都不存在时不能把真实安装丢失误判成 daemon 已自行提升"
-        );
     }
 
     #[test]

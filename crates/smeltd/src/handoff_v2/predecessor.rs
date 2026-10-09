@@ -209,8 +209,8 @@ pub(crate) fn run_transaction(
         ));
     }
 
-    // 提交前 spawn 调用方给的路径。暂存的 smeltd.next 先不扶正：rename 会让
-    // 正在跑的 smeltd 路径指向新映像，回滚后会话宿主会因 inode 不符而拒绝启动。
+    // 提交前 spawn 调用方给的映像路径。启动名先不动：拨早了，回滚之后下一次冷启动
+    // 会跑到这次没提交成功的映像上。
     let target = exe.to_path_buf();
     let fingerprint = match smelt_plugin_host::executable_fingerprint(&target) {
         Ok(fingerprint) => fingerprint,
@@ -268,10 +268,10 @@ pub(crate) fn run_transaction(
     }
 
     // ---- 不可逆段开始：successor 已在服务 ----
-    // 现在才把 smeltd.next 扶正。successor 已从暂存路径 exec，握着同一 inode；
-    // 旧进程即将退出，不再用这条路径拉会话宿主。
-    if let Err(error) = promote_staged_executable(exe) {
-        crate::dlog(&format!("handoff: COMMIT 后扶正暂存二进制失败：{error}"));
+    // 现在才把启动名拨到 successor 正在映射的那份映像。旧进程钉住的是自己的文件，
+    // 不靠这条链接拉会话宿主。拨失败只记日志：successor 已经在服务，不能回滚。
+    if let Err(error) = smelt_core::daemon_image::retarget_launch_after_commit(exe) {
+        crate::dlog(&format!("handoff: COMMIT 后改写启动名失败：{error}"));
     }
 
     // 先停 sidecars（让出端口），再停插件（杀 bun 子进程防孤儿），调用方随后
@@ -331,21 +331,6 @@ pub(crate) fn successor_env(sock_fd: RawFd, fingerprint: &str) -> Vec<(String, S
             fingerprint.to_string(),
         ),
     ]
-}
-
-/// 暂存二进制（`smeltd*.next`）扶正到正式路径。非暂存原样返回。
-fn promote_staged_executable(exe: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    if !crate::is_staged_daemon_executable(exe) {
-        return Ok(exe.to_path_buf());
-    }
-    let target = exe.with_file_name("smeltd");
-    std::fs::rename(exe, &target)?;
-    crate::dlog(&format!(
-        "handoff: 暂存二进制已扶正 {} → {}",
-        exe.display(),
-        target.display()
-    ));
-    Ok(target)
 }
 
 fn spawn_successor(
@@ -465,29 +450,35 @@ mod tests {
     }
 
     #[test]
-    fn staged_executable_stays_until_commit_promotes_it() {
+    fn commit_flips_the_launch_symlink_and_keeps_both_images() {
+        use std::os::unix::fs::MetadataExt;
         let root = std::env::temp_dir().join(format!(
             "smeltd-promote-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let live = root.join("smeltd");
-        let staged = root.join("smeltd.next");
-        std::fs::write(&live, b"running").unwrap();
-        std::fs::write(&staged, b"candidate").unwrap();
+        let old_src = root.join("old-src");
+        let new_src = root.join("new-src");
+        std::fs::write(&old_src, b"running").unwrap();
+        std::fs::write(&new_src, b"candidate").unwrap();
+        let old_image = smelt_core::daemon_image::publish_image(&root, &old_src).unwrap();
+        let new_image = smelt_core::daemon_image::publish_image(&root, &new_src).unwrap();
+        let old_inode = std::fs::metadata(&old_image).unwrap().ino();
+        smelt_core::daemon_image::retarget_launch_symlink(&root, &old_image).unwrap();
 
-        // spawn 用暂存路径，正在跑的正式文件保持原映像。
-        assert_eq!(staged, root.join("smeltd.next"));
-        assert_eq!(std::fs::read(&live).unwrap(), b"running");
+        let linked = smelt_core::daemon_image::retarget_launch_after_commit(&new_image).unwrap();
 
-        let target = promote_staged_executable(&staged).unwrap();
-        assert_eq!(target, live);
-        assert_eq!(std::fs::read(&live).unwrap(), b"candidate");
-        assert!(!staged.exists());
-
-        // 非暂存原样返回，不碰文件系统。
-        assert_eq!(promote_staged_executable(&live).unwrap(), live);
+        assert_eq!(linked, new_image);
+        assert_eq!(
+            std::fs::read_link(root.join("smeltd")).unwrap(),
+            new_image.file_name().unwrap()
+        );
+        assert_eq!(std::fs::read(&old_image).unwrap(), b"running");
+        assert_eq!(std::fs::read(&new_image).unwrap(), b"candidate");
+        assert_eq!(std::fs::metadata(&old_image).unwrap().ino(), old_inode);
+        assert!(new_image.is_file());
+        assert!(smelt_core::daemon_image::pending_image(&root).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

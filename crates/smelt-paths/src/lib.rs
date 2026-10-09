@@ -7,8 +7,9 @@
 //!
 //! 因此这里同时提供两道防线：
 //! 1. `SMELT_HOME` 显式重定向，供集成测试与多实例调试使用；
-//! 2. 测试二进制自动落进程专属沙箱——即使用例忘记设环境变量，也**物理上**够不到
-//!    真实数据。防线 2 不可绕过是刻意的：靠"记得设变量"约束不住新增用例。
+//! 2. 测试二进制自动落进程专属沙箱。指向真实 `~/.smelt` 的 `SMELT_HOME` 不能把
+//!    测试放出去——那正是这套沙箱要拦的事故。指向别处的路径（临时目录、父进程
+//!    导出的沙箱）仍然生效。子进程不是测试二进制，必须靠 `export_to` 把沙箱传下去。
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use std::sync::OnceLock;
 
 /// 数据根目录，默认 `~/.smelt`。
 ///
-/// 只有在既没设 `SMELT_HOME`、又不是测试二进制时才会落到真实 home。
+/// 测试二进制里，指向真实 home 的 `SMELT_HOME` 会被沙箱盖住。其它显式路径优先。
 pub fn smelt_home() -> Option<PathBuf> {
     resolve(
         std::env::var_os("SMELT_HOME"),
@@ -25,19 +26,25 @@ pub fn smelt_home() -> Option<PathBuf> {
     )
 }
 
-/// 纯函数形式，便于用例覆盖三条分支而不去动进程级环境变量。
+/// 纯函数形式，便于用例覆盖分支而不去动进程级环境变量。
 fn resolve(
     explicit: Option<OsString>,
     sandbox: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(explicit));
-    }
+    let real = home.as_ref().map(|home| home.join(".smelt"));
+    let explicit = explicit
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     if let Some(sandbox) = sandbox {
+        if let Some(explicit) = explicit
+            && real.as_ref().is_none_or(|real| &explicit != real)
+        {
+            return Some(explicit);
+        }
         return Some(sandbox);
     }
-    home.map(|home| home.join(".smelt"))
+    explicit.or(real)
 }
 
 /// 当前进程是不是 cargo 构建出来的测试二进制。
@@ -104,6 +111,18 @@ mod tests {
             Some(PathBuf::from("/Users/someone")),
         );
         assert_eq!(resolved, Some(PathBuf::from("/Users/someone/.smelt")));
+    }
+
+    #[test]
+    fn real_home_override_does_not_escape_the_sandbox() {
+        let home = PathBuf::from("/Users/someone");
+        let real = home.join(".smelt");
+        let resolved = resolve(
+            Some(real.as_os_str().to_os_string()),
+            Some(PathBuf::from("/tmp/sandbox")),
+            Some(home),
+        );
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/sandbox")));
     }
 
     #[test]

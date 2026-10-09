@@ -43,8 +43,7 @@ fi
 SRC="${1:-}"
 MANAGED_DIR="${HOME}/.smelt/bin"
 MANAGED="${MANAGED_DIR}/smeltd"
-# 每次安装使用独立暂存名，避免和在线更新或另一条手动安装争用 smeltd.next。
-NEXT="${MANAGED_DIR}/smeltd.install.$$.next"
+PENDING="${MANAGED_DIR}/smeltd.pending"
 PENDING_MARKER="${MANAGED}.install-pending"
 SOCK="${HOME}/.smelt/smeltd.sock"
 
@@ -84,17 +83,90 @@ sync_plugin_set_for_candidate() {
   "$sync_bin" --packages "$packages" --smelt-root "$smelt_root" --daemon "$daemon"
 }
 
+# 映像按内容指纹写一次，之后不再改这个文件。启动名只是同目录里的符号链接。
+publish_image() {
+  local src="$1"
+  local hash image tmp existing
+  hash="$(shasum -a 256 "$src" | awk '{print $1}')"
+  if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "✗ 无法计算映像指纹" >&2
+    exit 1
+  fi
+  image="${MANAGED_DIR}/smeltd-${hash}"
+  if [[ -e "$image" || -L "$image" ]]; then
+    if [[ -L "$image" || ! -f "$image" ]]; then
+      echo "✗ 映像路径不是普通文件：$image" >&2
+      exit 1
+    fi
+    existing="$(shasum -a 256 "$image" | awk '{print $1}')"
+    if [[ "$existing" != "$hash" ]]; then
+      echo "✗ 映像名与内容不一致，拒绝覆盖：$image" >&2
+      exit 1
+    fi
+  else
+    tmp="${MANAGED_DIR}/.smeltd-${hash}.partial.$$"
+    cp "$src" "$tmp"
+    chmod 755 "$tmp"
+    if ln "$tmp" "$image" 2>/dev/null; then
+      rm -f -- "$tmp"
+    else
+      rm -f -- "$tmp"
+      if [[ ! -f "$image" || -L "$image" ]]; then
+        echo "✗ 写入映像失败：$image" >&2
+        exit 1
+      fi
+      existing="$(shasum -a 256 "$image" | awk '{print $1}')"
+      if [[ "$existing" != "$hash" ]]; then
+        echo "✗ 映像名与内容不一致，拒绝覆盖：$image" >&2
+        exit 1
+      fi
+    fi
+  fi
+  printf '%s\n' "$image"
+}
+
+link_relative() {
+  local name="$1" target="$2"
+  local tmp="${MANAGED_DIR}/.${name}.link.$$"
+  ln -s "$target" "$tmp"
+  mv -f "$tmp" "${MANAGED_DIR}/${name}"
+}
+
+path_is_mapped() {
+  python3 - "$1" <<'PY'
+import ctypes, ctypes.util, os, sys
+path = sys.argv[1]
+if not os.path.lexists(path):
+    sys.exit(1)
+lib = ctypes.CDLL(ctypes.util.find_library("c") or "/usr/lib/libSystem.B.dylib")
+fn = getattr(lib, "proc_listpidspath", None)
+if fn is None:
+    sys.exit(1)
+fn.argtypes = [
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p,
+    ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int,
+]
+fn.restype = ctypes.c_int
+encoded = os.fsencode(path)
+hint = fn(1, 0, encoded, 0, None, 0)
+if hint <= 0:
+    sys.exit(1)
+buf = ctypes.create_string_buffer(hint)
+sys.exit(0 if fn(1, 0, encoded, 0, buf, hint) > 0 else 1)
+PY
+}
+
 mkdir -p "$MANAGED_DIR"
-cp -f "$SRC" "$NEXT"
-chmod 755 "$NEXT"
+IMAGE="$(publish_image "$SRC")"
+IMAGE_NAME="$(basename "$IMAGE")"
 
 # exec 新守护之前必须先写好 daemon-sets 映射。make install 会先 handoff、后
 # 启动 GUI；若映射还不存在，smeltd 启动时会认为没有 bundled 插件。
-sync_plugin_set_for_candidate "$SRC" "$NEXT"
+sync_plugin_set_for_candidate "$SRC" "$IMAGE"
 
 if [[ "$BACKGROUND_ON_BUSY" == true ]]; then
   marker_tmp="${PENDING_MARKER}.$$.tmp"
-  printf '%s\n' "$NEXT" > "$marker_tmp"
+  printf '%s\n' "$IMAGE" > "$marker_tmp"
   mv -f "$marker_tmp" "$PENDING_MARKER"
 fi
 
@@ -110,59 +182,33 @@ except Exception:
 sys.exit(0)
 PY
 then
-  # 套接字连不上不等于进程已经退出。文件仍被映射就不要覆盖。
-  claim_status=0
-  python3 - "$NEXT" "$MANAGED" <<'PY' || claim_status=$?
-import ctypes, ctypes.util, os, sys
-
-next_path, managed = sys.argv[1], sys.argv[2]
-
-def mapped(path: str) -> bool:
-    if not os.path.exists(path):
-        return False
-    lib = ctypes.CDLL(ctypes.util.find_library("c") or "/usr/lib/libSystem.B.dylib")
-    fn = getattr(lib, "proc_listpidspath", None)
-    if fn is None:
-        return False
-    fn.argtypes = [
-        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p,
-        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int,
-    ]
-    fn.restype = ctypes.c_int
-    encoded = os.fsencode(path)
-    hint = fn(1, 0, encoded, 0, None, 0)
-    if hint <= 0:
-        return False
-    buf = ctypes.create_string_buffer(hint)
-    return fn(1, 0, encoded, 0, buf, hint) > 0
-
-if mapped(managed):
-    sys.exit(75)
-os.replace(next_path, managed)
-PY
-  if [[ "$claim_status" -eq 75 ]]; then
-    cp -f "$NEXT" "${MANAGED_DIR}/smeltd.next"
-    echo "· 守护仍被映射，未覆盖 ${MANAGED}，已暂存 ${MANAGED_DIR}/smeltd.next" >&2
+  # 套接字连不上不等于进程已经退出。启动名仍被映射就只挂 pending，不拨链接。
+  if path_is_mapped "$MANAGED"; then
+    link_relative smeltd.pending "$IMAGE_NAME"
+    echo "· 守护仍被映射，不改启动名，已挂上 ${PENDING}" >&2
     exit 0
   fi
-  if [[ "$claim_status" -ne 0 ]]; then
-    echo "✗ 写入 ${MANAGED} 失败（status=${claim_status}）" >&2
-    exit "$claim_status"
+  link_relative smeltd "$IMAGE_NAME"
+  if [[ -L "$PENDING" ]]; then
+    rm -f -- "$PENDING"
   fi
   if [[ "$BACKGROUND_ON_BUSY" == true ]]; then
     rm -f -- "$PENDING_MARKER"
   fi
-  echo "· 守护未运行，已写入 $MANAGED"
+  echo "· 守护未运行，启动名已指向 $IMAGE_NAME"
   exit 0
 fi
 
-# 发 upgrade 到独立暂存文件
-python3 - "$SOCK" "$NEXT" "$WAIT_FOR_IDLE" "$BACKGROUND_ON_BUSY" <<'PY'
+# 先挂上 pending，再 exec 这份不可变映像。忙的时候留下链接，空闲升级还能找到它。
+link_relative smeltd.pending "$IMAGE_NAME"
+
+python3 - "$SOCK" "$IMAGE" "$WAIT_FOR_IDLE" "$BACKGROUND_ON_BUSY" "$IMAGE_NAME" <<'PY'
 import json, socket, sys, time, os
 
-sock_path, next_path = sys.argv[1], sys.argv[2]
+sock_path, image_path = sys.argv[1], sys.argv[2]
 wait_for_idle = sys.argv[3] == "true"
 background_on_busy = sys.argv[4] == "true"
+image_name = sys.argv[5]
 managed = os.path.expanduser("~/.smelt/bin/smeltd")
 pending_marker = managed + ".install-pending"
 detached = False
@@ -170,7 +216,7 @@ detached = False
 if background_on_busy:
     marker_tmp = pending_marker + f".{os.getpid()}.tmp"
     with open(marker_tmp, "w", encoding="utf-8") as marker:
-        marker.write(next_path + "\n")
+        marker.write(image_path + "\n")
         marker.flush()
         os.fsync(marker.fileno())
     os.replace(marker_tmp, pending_marker)
@@ -226,16 +272,12 @@ next_wait_note_at = 0.0
 while True:
     if detached:
         try:
-            if open(pending_marker, encoding="utf-8").read().strip() != next_path:
-                try:
-                    os.unlink(next_path)
-                except FileNotFoundError:
-                    pass
+            if open(pending_marker, encoding="utf-8").read().strip() != image_path:
                 print("· 安装 handoff 已被更新的构建取代，停止旧重试", flush=True)
                 sys.exit(0)
         except FileNotFoundError:
             sys.exit(0)
-    result, blockers = upgrade(next_path)
+    result, blockers = upgrade(image_path)
     if result == "ok":
         break
     if result == "busy":
@@ -252,13 +294,9 @@ while True:
             os.dup2(log.fileno(), 2)
             detached = True
             wait_for_idle = True
-            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 后台等待 ACP 安全边界：{next_path}")
+            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 后台等待 ACP 安全边界：{image_path}")
             continue
         if not wait_for_idle:
-            try:
-                os.unlink(next_path)
-            except FileNotFoundError:
-                pass
             detail = f"（{len(blockers)} 个会话）" if blockers else ""
             print(f"⏸ ACP 会话仍在运行{detail}，未替换 App，以保护当前会话。", file=sys.stderr)
             print("  请在当前回合结束后重新执行 make install；需要前台等待时加 --wait。", file=sys.stderr)
@@ -274,10 +312,10 @@ while True:
             next_wait_note_at = now + 20
         time.sleep(2)
         continue
-    print(f"✗ upgrade({os.path.basename(next_path)}) 失败", file=sys.stderr)
+    print(f"✗ upgrade({os.path.basename(image_path)}) 失败", file=sys.stderr)
     if background_on_busy:
         try:
-            if open(pending_marker, encoding="utf-8").read().strip() == next_path:
+            if open(pending_marker, encoding="utf-8").read().strip() == image_path:
                 os.unlink(pending_marker)
         except FileNotFoundError:
             pass
@@ -309,48 +347,28 @@ if not ok:
     print("✗ handoff 后守护未就绪", file=sys.stderr)
     sys.exit(1)
 
-# 新版 daemon 会在初始化前自行 next → managed，并以正式路径继续同一份 handoff。
-# 旧版候选没有这段启动收尾：脚本仍替它 rename，再补一次 upgrade 校正进程名。
+# 提交已经完成。只把启动名拨到这份映像，不挪动映像文件本身。
 if background_on_busy:
     try:
-        if open(pending_marker, encoding="utf-8").read().strip() != next_path:
-            print("· handoff 成功前任务已被新构建取代，保留当前 daemon，不再覆盖 managed")
+        if open(pending_marker, encoding="utf-8").read().strip() != image_path:
+            print("· handoff 成功前任务已被新构建取代，保留当前 daemon，不再改启动名")
             sys.exit(0)
     except FileNotFoundError:
         sys.exit(0)
-try:
-    current = version()
-except Exception:
-    current = {}
-current_exe = current.get("exe") or ""
-running_stable = os.path.abspath(current_exe) == os.path.abspath(managed)
-if os.path.exists(next_path):
-    os.replace(next_path, managed)
-elif not (running_stable and os.path.isfile(managed)):
-    print("✗ handoff 后暂存文件与正式运行映像均不存在", file=sys.stderr)
-    sys.exit(1)
+managed_dir = os.path.dirname(managed)
+link_tmp = os.path.join(managed_dir, f".smeltd.link.{os.getpid()}")
+os.symlink(image_name, link_tmp)
+os.replace(link_tmp, managed)
+pending = os.path.join(managed_dir, "smeltd.pending")
+if os.path.islink(pending):
+    os.unlink(pending)
 if background_on_busy:
     try:
         os.unlink(pending_marker)
     except FileNotFoundError:
         pass
-if not running_stable:
-    result, _ = upgrade(managed)
-    if result != "ok":
-        # 已在 managed inode 上跑，可接受
-        print(f"⚠ 二次 upgrade 到 managed 未 ack，文件已在 {managed}")
-    else:
-        for _ in range(15):
-            time.sleep(0.15)
-            try:
-                v = version()
-                exe = v.get("exe") or ""
-                if exe.endswith("/.smelt/bin/smeltd") or exe.endswith("/smelt/bin/smeltd"):
-                    break
-            except Exception:
-                pass
 
-print(f"✅ 守护已交接 → {managed}")
+print(f"✅ 守护已交接 → {managed}（{image_name}）")
 try:
     print(json.dumps(version(), ensure_ascii=False))
 except Exception:
