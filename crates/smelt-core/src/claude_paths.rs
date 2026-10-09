@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn project_dir_replaces_slashes_and_dots() {
         assert_eq!(
-            project_dir("/Users/c.chen/dev/smelt"),
-            "-Users-c-chen-dev-smelt"
+            project_dir("/workspace/alice.smith/dev/project"),
+            "-workspace-alice-smith-dev-project"
         );
     }
 }

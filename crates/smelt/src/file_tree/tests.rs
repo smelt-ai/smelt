@@ -3,32 +3,32 @@ use super::{SearchHit, build_search_tree, search_project};
 
 #[test]
 fn breadcrumb_segments_split_path_under_workspace_root() {
-    let roots = vec!["/Users/c.chen/nio/smelt".into()];
+    let roots = vec!["/workspace/project".into()];
     assert_eq!(
         breadcrumb_segments(
-            "/Users/c.chen/nio/smelt/crates/smelt-core/tests/fake_llm.py",
+            "/workspace/project/crates/smelt-core/tests/fake_llm.py",
             &roots
         ),
         vec![
             BreadcrumbSeg {
-                label: "smelt".into(),
-                path: "/Users/c.chen/nio/smelt".into(),
+                label: "project".into(),
+                path: "/workspace/project".into(),
             },
             BreadcrumbSeg {
                 label: "crates".into(),
-                path: "/Users/c.chen/nio/smelt/crates".into(),
+                path: "/workspace/project/crates".into(),
             },
             BreadcrumbSeg {
                 label: "smelt-core".into(),
-                path: "/Users/c.chen/nio/smelt/crates/smelt-core".into(),
+                path: "/workspace/project/crates/smelt-core".into(),
             },
             BreadcrumbSeg {
                 label: "tests".into(),
-                path: "/Users/c.chen/nio/smelt/crates/smelt-core/tests".into(),
+                path: "/workspace/project/crates/smelt-core/tests".into(),
             },
             BreadcrumbSeg {
                 label: "fake_llm.py".into(),
-                path: "/Users/c.chen/nio/smelt/crates/smelt-core/tests/fake_llm.py".into(),
+                path: "/workspace/project/crates/smelt-core/tests/fake_llm.py".into(),
             },
         ]
     );

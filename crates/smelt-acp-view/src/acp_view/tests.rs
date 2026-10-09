@@ -48,7 +48,7 @@ use smelt_ui::ui_theme;
 #[test]
 fn cleanshot_external_png_is_treated_as_an_image_attachment() {
     let path = std::path::PathBuf::from(
-        "/Users/c.chen/Library/Application Support/CleanShot/media/example/screenshot.PNG",
+        "/Users/shared/Library/Application Support/CleanShot/media/example/screenshot.PNG",
     );
     let entries = vec![
         ClipboardEntry::ExternalPaths(ExternalPaths(vec![path.clone()].into())),
@@ -60,7 +60,7 @@ fn cleanshot_external_png_is_treated_as_an_image_attachment() {
 
 #[test]
 fn external_non_image_file_is_left_for_normal_text_paste() {
-    let path = std::path::PathBuf::from("/Users/c.chen/nio/smelt/README.md");
+    let path = std::path::PathBuf::from("/workspace/project/README.md");
     let entries = vec![
         ClipboardEntry::ExternalPaths(ExternalPaths(vec![path].into())),
         ClipboardEntry::String(gpui::ClipboardString::new("README.md".into())),

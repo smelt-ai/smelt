@@ -38,7 +38,7 @@ diff scope 切换（工作区 / 暂存）、hunk 跳转。
 
 ### 1.4 多仓库识别：发现模型选错了（核心问题）
 
-案例：`/Users/zehua.wang/Desktop/work/maglev-config-model`——父仓 + 13 个 submodule，
+案例：`/Users/someone/Desktop/work/maglev-config-model`——父仓 + 13 个 submodule，
 多数在 `.gitmodules` 里配了 `ignore = all`，部分尚未初始化。但问题不限于 submodule。
 
 **现有模型**：唯一数据源是父仓的 `git status`，发现 gitlink 后递归进去把子仓文件

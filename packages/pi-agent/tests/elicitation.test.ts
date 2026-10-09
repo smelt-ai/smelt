@@ -70,7 +70,7 @@ async function loadFactories(preceding: ExtensionFactory[] = []) {
 				eventBus,
 				runtime,
 				index < preceding.length
-					? "/Users/c.chen/.pi/agent/extensions/smelt_ask_user.ts"
+					? "/mock/home/.pi/agent/extensions/smelt_ask_user.ts"
 					: inlinePath(input, index),
 			),
 		),

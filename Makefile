@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install clean fmt fmt-check lint lint-sh test sdk-check pi-agent-check check-all
+.PHONY: help build run icon dist dist-build install clean fmt fmt-check lint lint-sh lint-paths test sdk-check pi-agent-check check-all
 
 build run install: SHELL := /bin/bash
 
@@ -34,6 +34,17 @@ lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法
 	fi
 	@echo "✓ shell 脚本变量引用检查通过"
 
+lint-paths: ## 检查源码中硬编码的开发者本机绝对路径（/Users/<personal>）
+	@# 单测与源码禁止硬编码个人用户主目录。虚拟路径请使用 /workspace/... 或 /Users/{me,test,mock,example,shared}。
+	@out=$$(git grep -nE '/Users/[a-zA-Z0-9._-]+' -- \
+		':(exclude)node_modules' ':(exclude)vendor' ':(exclude)dist' ':(exclude)target' \
+		| grep -vE '/Users/(me|test|example|someone|shared|ci|mock|x|a|中文)(/|"|'"'"')' || true); \
+	if [ -n "$$out" ]; then \
+		echo "✗ 发现源码中硬编码了个人本机主目录路径，请改用通用虚拟路径（/workspace/... 或 /Users/me/...）："; \
+		echo "$$out"; exit 1; \
+	fi
+	@echo "✓ 本地绝对路径合规检查通过"
+
 test: ## 运行全工作区单元测试（nextest：smeltd handoff 不能同进程跑）
 	@cargo nextest --version >/dev/null 2>&1 || { \
 		echo "✗ 需要 cargo-nextest（与 CI 同一运行器）。安装：cargo install cargo-nextest --locked"; exit 1; }
@@ -54,7 +65,7 @@ pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
 
-check-all: fmt-check lint lint-sh test sdk-check pi-agent-check ## 完整检查 (格式 + Clippy + shell + Rust/TS 测试)
+check-all: fmt-check lint lint-sh lint-paths test sdk-check pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
 build: ## 编译 release 二进制（GUI + 守护 + helpers）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
