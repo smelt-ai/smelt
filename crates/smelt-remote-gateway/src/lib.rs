@@ -15,6 +15,8 @@
 //! 依赖带进 `smelt-core`。见 docs/remote-ops-roadmap.md（Phase 1/2）、
 //! docs/collaboration.md（安全底线）。
 
+mod mobile_image;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -1638,6 +1640,9 @@ enum AcpWsRequest {
     Subscribe { params: SubscribeParams },
     #[serde(rename = "loadHistory")]
     LoadHistory { params: LoadHistoryParams },
+    /// 快照里的大图只有缩略图，点开看时按引用取原图。
+    #[serde(rename = "loadImage")]
+    LoadImage { params: LoadImageParams },
     /// 输入栏的「技能」入口：按需问一次，不跟着快照推。
     #[serde(rename = "listSessionSkills")]
     ListSessionSkills { params: SessionActionParams },
@@ -2137,6 +2142,14 @@ struct ElicitationTextParams {
 }
 
 #[derive(serde::Deserialize)]
+struct LoadImageParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    entry: u64,
+    digest: String,
+}
+
+#[derive(serde::Deserialize)]
 struct SessionActionParams {
     #[serde(rename = "sessionId")]
     session_id: String,
@@ -2473,6 +2486,10 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         };
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(response.into())).await;
                     }
+                    AcpWsRequest::LoadImage { params } => {
+                        let response = load_original_image(&params).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(response.to_string().into())).await;
+                    }
                     AcpWsRequest::Unsubscribe => {
                         if let Some((_, stop_tx, handle)) = current_subscription.take() {
                             let _ = stop_tx.send(true);
@@ -2767,9 +2784,13 @@ async fn acp_watch_loop(
                     Ok(0) => break, // EOF
                     Ok(_) => {
                         let trimmed = line.trim();
-                        if !trimmed.is_empty()
-                            && tx.send(tag_snapshot_line(trimmed, &session_id)).await.is_err()
-                        {
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let Ok(projected) = mobile_snapshot_line(trimmed, &session_id).await else {
+                            break;
+                        };
+                        if tx.send(projected).await.is_err() {
                             break;
                         }
                     }
@@ -2825,6 +2846,60 @@ async fn read_acp_history(
     before_offset: usize,
     limit: usize,
 ) -> Result<String, String> {
+    let line = read_acp_snapshot_line(session_id, before_offset, limit).await?;
+    mobile_snapshot_line(&line, session_id)
+        .await
+        .map_err(|error| format!("snapshot projection failed: {error}"))
+}
+
+/// 缩略图要解码、缩放、编码大图，放到阻塞线程池，别占住 WebSocket 的异步线程。
+async fn mobile_snapshot_line(
+    line: &str,
+    session_id: &str,
+) -> Result<String, tokio::task::JoinError> {
+    let line = line.to_string();
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || mobile_image::mobile_snapshot_line(&line, &session_id))
+        .await
+}
+
+async fn load_original_image(params: &LoadImageParams) -> serde_json::Value {
+    let mut response = serde_json::json!({
+        "type": "image",
+        "sessionId": params.session_id,
+        "entry": params.entry,
+        "digest": params.digest,
+    });
+    let Ok(before) = usize::try_from(params.entry + 1) else {
+        response["error"] = "image not found".into();
+        return response;
+    };
+    let found = match read_acp_snapshot_line(&params.session_id, before, 1).await {
+        Ok(line) => {
+            let (entry, digest) = (params.entry, params.digest.clone());
+            tokio::task::spawn_blocking(move || mobile_image::original_image(&line, entry, &digest))
+                .await
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error),
+    };
+    match found {
+        Ok(Some(image)) => {
+            response["mime"] = image.mime.into();
+            response["data_b64"] = image.data_b64.into();
+        }
+        // 条目被回退或压缩改写过，引用对不上了。
+        Ok(None) => response["error"] = "image no longer in this session".into(),
+        Err(error) => response["error"] = error.into(),
+    }
+    response
+}
+
+async fn read_acp_snapshot_line(
+    session_id: &str,
+    before_offset: usize,
+    limit: usize,
+) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
     let stream = tokio::net::UnixStream::connect(sock_path())
@@ -2847,24 +2922,12 @@ async fn read_acp_history(
         .await
         .map_err(|_| "read timeout".to_string())?
         .map_err(|e| format!("read failed: {e}"))?;
-    if response.trim().is_empty() {
+    let response = response.trim();
+    if response.is_empty() {
         Err("session not found".to_string())
     } else {
-        Ok(tag_snapshot_line(response.trim(), session_id))
+        Ok(response.to_string())
     }
-}
-
-fn tag_snapshot_line(line: &str, session_id: &str) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return line.to_string();
-    };
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "sessionId".to_string(),
-            serde_json::Value::String(session_id.to_string()),
-        );
-    }
-    value.to_string()
 }
 
 async fn send_acp_action(session_id: &str, action: serde_json::Value) -> Result<(), String> {

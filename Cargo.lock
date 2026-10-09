@@ -9281,9 +9281,12 @@ name = "smelt-remote-gateway"
 version = "0.9.0"
 dependencies = [
  "axum",
+ "base64",
  "futures",
+ "image",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smelt-core",
  "smelt-paths",
  "tokio",

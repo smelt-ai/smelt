@@ -400,16 +400,58 @@ class AcpEntryUserWithImages extends AcpEntry {
 
 class AcpImageData {
   final String mimeType;
-  final String base64;
 
-  const AcpImageData({required this.mimeType, required this.base64});
+  /// 大图在快照里只是缩略图（解不开的格式可能为空），原图要按 [original] 取。
+  final String base64;
+  final AcpImageOriginal? original;
+
+  const AcpImageData({
+    required this.mimeType,
+    required this.base64,
+    this.original,
+  });
 
   factory AcpImageData.fromJson(Map<String, dynamic> json) => AcpImageData(
     mimeType: json['mime'] as String? ?? 'image/png',
     base64: json['data_b64'] as String? ?? '',
+    original: switch (json['original']) {
+      final Map<String, dynamic> original => AcpImageOriginal.fromJson(
+        original,
+      ),
+      _ => null,
+    },
   );
 
-  Map<String, String> toJson() => {'mime': mimeType, 'data_b64': base64};
+  Map<String, dynamic> toJson() => {
+    'mime': mimeType,
+    'data_b64': base64,
+    if (original case final original?) 'original': original.toJson(),
+  };
+}
+
+/// 网关给的原图引用：会话里第几条消息，加原图摘要（消息被改写过就对不上）。
+class AcpImageOriginal {
+  final int entry;
+  final String digest;
+
+  const AcpImageOriginal({required this.entry, required this.digest});
+
+  factory AcpImageOriginal.fromJson(Map<String, dynamic> json) =>
+      AcpImageOriginal(
+        entry: (json['entry'] as num?)?.toInt() ?? 0,
+        digest: json['digest'] as String? ?? '',
+      );
+
+  Map<String, dynamic> toJson() => {'entry': entry, 'digest': digest};
+
+  @override
+  bool operator ==(Object other) =>
+      other is AcpImageOriginal &&
+      other.entry == entry &&
+      other.digest == digest;
+
+  @override
+  int get hashCode => Object.hash(entry, digest);
 }
 
 class AcpEntryAssistant extends AcpEntry {
@@ -582,10 +624,8 @@ dynamic _toolOutputToJson(ToolOutputPart output) => switch (output) {
     {
       'Diff': {'path': path, 'old_text': oldText, 'new_text': newText},
     },
-  ToolOutputImage(base64: final base64, mimeType: final mimeType) => {
-    // 线格式由 Rust 的 `AcpImage` 决定（mime / data_b64），别再自造一套键名。
-    'Image': {'mime': mimeType, 'data_b64': base64},
-  },
+  // 线格式由 Rust 的 `AcpImage` 决定（mime / data_b64），别再自造一套键名。
+  ToolOutputImage(image: final image) => {'Image': image.toJson()},
 };
 
 /// 工具类型
@@ -673,10 +713,9 @@ sealed class ToolOutputPart {
       );
     }
     if (json.containsKey('Image')) {
-      final image = AcpImageData.fromJson(
-        json['Image'] as Map<String, dynamic>,
+      return ToolOutputImage(
+        image: AcpImageData.fromJson(json['Image'] as Map<String, dynamic>),
       );
-      return ToolOutputImage(base64: image.base64, mimeType: image.mimeType);
     }
 
     return ToolOutputText(text: json.toString());
@@ -701,9 +740,8 @@ class ToolOutputDiff extends ToolOutputPart {
 }
 
 class ToolOutputImage extends ToolOutputPart {
-  final String base64;
-  final String mimeType;
-  const ToolOutputImage({required this.base64, this.mimeType = 'image/png'});
+  final AcpImageData image;
+  const ToolOutputImage({required this.image});
 }
 
 /// 待处理权限请求

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/models/acp_snapshot.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/session_cache_store.dart';
 
@@ -314,6 +315,76 @@ void main() {
     expect(errors, hasLength(1));
 
     await errorSub.cancel();
+    await server.close(force: true);
+  });
+
+  test('loads original images on demand and fails them on disconnect', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final socketReady = Completer<WebSocket>();
+    final requests = <Map<String, dynamic>>[];
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] != 'loadImage') return;
+        final params = message['params'] as Map<String, dynamic>;
+        requests.add(params);
+        if (params['digest'] == 'gone') return; // 不回应，等断线
+        socket.add(
+          jsonEncode({
+            'type': 'image',
+            'sessionId': params['sessionId'],
+            'entry': params['entry'],
+            'digest': params['digest'],
+            if (params['digest'] == 'ok') ...{
+              'mime': 'image/png',
+              'data_b64': 'b3JpZ2luYWw=',
+            } else
+              'error': 'image no longer in this session',
+          }),
+        );
+      });
+      socketReady.complete(socket);
+    });
+
+    final service = GatewayService();
+    await service.connect('http://127.0.0.1:${server.port}', 'token');
+    final socket = await socketReady.future;
+    await _waitFor(() => service.state == WsState.connected);
+
+    const ok = AcpImageOriginal(entry: 4, digest: 'ok');
+    final first = service.loadImage('acp-1', ok);
+    final duplicate = service.loadImage('acp-1', ok);
+    final image = await first;
+    expect(await duplicate, same(image));
+    expect(image.base64, 'b3JpZ2luYWw=');
+    expect(requests, hasLength(1));
+    expect(requests.single, {'sessionId': 'acp-1', 'entry': 4, 'digest': 'ok'});
+
+    await expectLater(
+      service.loadImage(
+        'acp-1',
+        const AcpImageOriginal(entry: 4, digest: 'stale'),
+      ),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('no longer'),
+        ),
+      ),
+    );
+
+    final orphan = service.loadImage(
+      'acp-1',
+      const AcpImageOriginal(entry: 5, digest: 'gone'),
+    );
+    await _waitFor(() => requests.length == 3);
+    await socket.close();
+    await expectLater(orphan, throwsA(isA<StateError>()));
+
+    service.disconnect();
     await server.close(force: true);
   });
 

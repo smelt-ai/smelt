@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/models/acp_snapshot.dart';
 
@@ -453,5 +455,46 @@ void main() {
       expect(model.currentProvider, isNull);
       expect(model.options.length, 1);
     });
+  });
+
+  test('thumbnail images keep their original reference through the cache', () {
+    final snapshot = AcpSnapshot.fromJson({
+      'snapshot': {
+        'entries_offset': 7,
+        'entries': [
+          {
+            'ToolCall': {
+              'id': 'read-1',
+              'title': 'screenshot.png',
+              'kind': 'read',
+              'status': 'completed',
+              'output': [
+                {
+                  'Image': {
+                    'mime': 'image/jpeg',
+                    'data_b64': 'dGh1bWI=',
+                    'original': {'entry': 7, 'digest': 'abc'},
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        'phase': 'idle',
+      },
+    });
+
+    final cached = AcpSnapshot.fromJson(
+      jsonDecode(jsonEncode(snapshot.toJson())) as Map<String, dynamic>,
+    );
+    final tool = cached.entries.single as AcpEntryToolCall;
+    final image = (tool.output.single as ToolOutputImage).image;
+    expect(image.mimeType, 'image/jpeg');
+    expect(image.base64, 'dGh1bWI=');
+    expect(image.original, const AcpImageOriginal(entry: 7, digest: 'abc'));
+    expect(
+      AcpImageData(mimeType: 'image/png', base64: 'eA==').toJson(),
+      {'mime': 'image/png', 'data_b64': 'eA=='},
+    );
   });
 }

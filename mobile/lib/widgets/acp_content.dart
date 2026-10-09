@@ -47,17 +47,23 @@ class AcpMarkdown extends StatelessWidget {
   }
 }
 
+/// 按网关给的引用取原图。
+typedef AcpImageLoader =
+    Future<AcpImageData> Function(AcpImageOriginal original);
+
 class AcpImageThumbnail extends StatefulWidget {
-  const AcpImageThumbnail({super.key, required this.image});
+  const AcpImageThumbnail({super.key, required this.image, this.loadOriginal});
 
   final AcpImageData image;
+
+  /// 图片带原图引用时，点开大图用它取原图；没给就只放大缩略图。
+  final AcpImageLoader? loadOriginal;
 
   @override
   State<AcpImageThumbnail> createState() => _AcpImageThumbnailState();
 }
 
 class _AcpImageThumbnailState extends State<AcpImageThumbnail> {
-  Uint8List? _bytes;
   MemoryImage? _provider;
 
   @override
@@ -73,63 +79,175 @@ class _AcpImageThumbnailState extends State<AcpImageThumbnail> {
   }
 
   void _updateImage() {
-    _bytes = _decodeImage(widget.image.base64);
-    _provider = _bytes == null ? null : MemoryImage(_bytes!);
+    // 网关解不开的格式只给引用、不给缩略图。
+    final bytes = widget.image.base64.isEmpty
+        ? null
+        : _decodeImage(widget.image.base64);
+    _provider = bytes == null ? null : MemoryImage(bytes);
+  }
+
+  AcpImageLoader? get _originalLoader {
+    final original = widget.image.original;
+    final load = widget.loadOriginal;
+    if (original == null || load == null) return null;
+    return (_) => load(original);
   }
 
   @override
   Widget build(BuildContext context) {
     final provider = _provider;
-    if (provider == null) {
+    final loadOriginal = _originalLoader;
+    if (provider == null && loadOriginal == null) {
       return const SizedBox(
         width: 88,
         height: 64,
         child: Center(child: Icon(Icons.broken_image_outlined)),
       );
     }
+    const placeholder = SizedBox(
+      width: 112,
+      height: 88,
+      child: Center(child: Icon(Icons.image_outlined)),
+    );
     return InkWell(
       onTap: () => showDialog<void>(
         context: context,
-        builder: (context) => Dialog.fullscreen(
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: InteractiveViewer(
-                  minScale: 0.5,
-                  maxScale: 5,
-                  child: Center(
-                    child: Image(image: provider, gaplessPlayback: true),
-                  ),
-                ),
-              ),
-              Positioned(
-                top: 12,
-                right: 12,
-                child: IconButton.filledTonal(
-                  tooltip: 'Close image',
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close),
-                ),
-              ),
-            ],
-          ),
+        builder: (context) => _AcpImageViewer(
+          preview: provider,
+          original: widget.image.original,
+          loadOriginal: loadOriginal,
         ),
       ),
       borderRadius: BorderRadius.circular(6),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(6),
-        child: Image(
-          image: provider,
-          width: 112,
-          height: 88,
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (_, _, _) => const SizedBox(
-            width: 112,
-            height: 88,
-            child: Center(child: Icon(Icons.broken_image_outlined)),
+        child: provider == null
+            ? placeholder
+            : Image(
+                image: provider,
+                width: 112,
+                height: 88,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (_, _, _) => const SizedBox(
+                  width: 112,
+                  height: 88,
+                  child: Center(child: Icon(Icons.broken_image_outlined)),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+/// 全屏看图。有原图引用时先放大缩略图，原图到了再换上。
+class _AcpImageViewer extends StatefulWidget {
+  const _AcpImageViewer({
+    required this.preview,
+    required this.original,
+    required this.loadOriginal,
+  });
+
+  final ImageProvider? preview;
+  final AcpImageOriginal? original;
+  final AcpImageLoader? loadOriginal;
+
+  @override
+  State<_AcpImageViewer> createState() => _AcpImageViewerState();
+}
+
+class _AcpImageViewerState extends State<_AcpImageViewer> {
+  ImageProvider? _full;
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final load = widget.loadOriginal;
+    final original = widget.original;
+    if (load == null || original == null) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final image = await load(original);
+      final bytes = _decodeImage(image.base64);
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        if (bytes == null) {
+          _error = '图片无法解码';
+        } else {
+          _full = MemoryImage(bytes);
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '原图加载失败：$error';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = _full ?? widget.preview;
+    return Dialog.fullscreen(
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: shown == null
+                ? const Center(child: Icon(Icons.image_outlined, size: 48))
+                : InteractiveViewer(
+                    minScale: 0.5,
+                    maxScale: 5,
+                    child: Center(
+                      child: Image(image: shown, gaplessPlayback: true),
+                    ),
+                  ),
           ),
-        ),
+          if (_loading)
+            const Positioned.fill(
+              child: IgnorePointer(
+                child: Center(child: CircularProgressIndicator()),
+              ),
+            ),
+          if (_error case final error?)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 32,
+              child: Material(
+                color: Theme.of(context).colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(error)),
+                      TextButton(onPressed: _load, child: const Text('重试')),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Positioned(
+            top: 12,
+            right: 12,
+            child: IconButton.filledTonal(
+              tooltip: 'Close image',
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -320,12 +438,14 @@ class AcpToolCallCard extends StatelessWidget {
     required this.kind,
     required this.status,
     required this.output,
+    this.loadImage,
   });
 
   final String title;
   final ToolKind kind;
   final ToolCallStatus status;
   final List<ToolOutputPart> output;
+  final AcpImageLoader? loadImage;
 
   @override
   Widget build(BuildContext context) {
@@ -362,7 +482,7 @@ class AcpToolCallCard extends StatelessWidget {
             .map(
               (part) => Padding(
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: _ToolOutputView(part: part),
+                child: _ToolOutputView(part: part, loadImage: loadImage),
               ),
             )
             .toList(),
@@ -397,8 +517,9 @@ class _ToolStatusIcon extends StatelessWidget {
 }
 
 class _ToolOutputView extends StatefulWidget {
-  const _ToolOutputView({required this.part});
+  const _ToolOutputView({required this.part, this.loadImage});
   final ToolOutputPart part;
+  final AcpImageLoader? loadImage;
 
   @override
   State<_ToolOutputView> createState() => _ToolOutputViewState();
@@ -417,10 +538,10 @@ class _ToolOutputViewState extends State<_ToolOutputView> {
         newText: final newText,
       ) =>
         _buildDiff(context, path, oldText ?? '', newText),
-      ToolOutputImage(base64: final data, mimeType: final mime) =>
-        AcpImageThumbnail(
-          image: AcpImageData(mimeType: mime, base64: data),
-        ),
+      ToolOutputImage(image: final image) => AcpImageThumbnail(
+        image: image,
+        loadOriginal: widget.loadImage,
+      ),
     };
   }
 

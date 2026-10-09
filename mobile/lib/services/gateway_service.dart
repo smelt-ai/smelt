@@ -775,6 +775,10 @@ class GatewayService {
   static const int _tailProbeOffset = 0x7fffffff;
   final LinkedHashMap<String, AcpSnapshot> _snapshotCache = LinkedHashMap();
   final Set<String> _historyLoads = {};
+
+  /// 点开大图时按引用取原图。同一张图并发点只发一次。
+  final Map<String, Completer<AcpImageData>> _imageLoads = {};
+  static const Duration _imageLoadTimeout = Duration(seconds: 60);
   final Set<String> _cachedSnapshotIds = {};
   final Map<String, Timer> _snapshotCacheTimers = {};
   String? _cacheNamespace;
@@ -1281,6 +1285,44 @@ class GatewayService {
     return true;
   }
 
+  /// 取快照里大图的原图（快照只带缩略图）。连接断开或超时都会失败。
+  Future<AcpImageData> loadImage(String sessionId, AcpImageOriginal original) {
+    final key = _imageLoadKey(sessionId, original.entry, original.digest);
+    final pending = _imageLoads[key];
+    if (pending != null) return pending.future;
+    if (_state != WsState.connected) {
+      return Future.error(StateError('未连接桌面端'));
+    }
+    final completer = Completer<AcpImageData>();
+    _imageLoads[key] = completer;
+    _send({
+      'method': 'loadImage',
+      'params': {
+        'sessionId': sessionId,
+        'entry': original.entry,
+        'digest': original.digest,
+      },
+    });
+    return completer.future.timeout(
+      _imageLoadTimeout,
+      onTimeout: () {
+        _imageLoads.remove(key);
+        throw TimeoutException('图片加载超时');
+      },
+    );
+  }
+
+  static String _imageLoadKey(String sessionId, int entry, String digest) =>
+      '$sessionId\n$entry\n$digest';
+
+  void _failImageLoads(Object error) {
+    final pending = _imageLoads.values.toList();
+    _imageLoads.clear();
+    for (final completer in pending) {
+      completer.completeError(error);
+    }
+  }
+
   /// 取某个会话的待批详情，不占用订阅槽。
   ///
   /// 指挥台要在"不进会话"的前提下渲染审批卡，需要 pending permission 的选项和
@@ -1483,6 +1525,8 @@ class GatewayService {
       _metricsTimer?.cancel();
       _metricsTimer = null;
       _updateMetrics(const ConnectionMetrics());
+      // 旧连接上的请求不会再有回应。
+      _failImageLoads(StateError('与桌面端的连接已断开'));
     }
     _state = newState;
     _stateController.add(newState);
@@ -1762,6 +1806,28 @@ class GatewayService {
             sessionId: json['sessionId'] as String?,
           );
 
+        case 'image':
+          final key = _imageLoadKey(
+            json['sessionId'] as String? ?? '',
+            (json['entry'] as num?)?.toInt() ?? -1,
+            json['digest'] as String? ?? '',
+          );
+          final completer = _imageLoads.remove(key);
+          if (completer == null) break;
+          final data = json['data_b64'] as String?;
+          if (data == null || data.isEmpty) {
+            completer.completeError(
+              StateError(json['error'] as String? ?? '图片加载失败'),
+            );
+          } else {
+            completer.complete(
+              AcpImageData(
+                mimeType: json['mime'] as String? ?? 'image/png',
+                base64: data,
+              ),
+            );
+          }
+
         case 'attention':
           final item = json['item'];
           if (item is Map<String, dynamic>) {
@@ -2014,7 +2080,7 @@ int _estimateOutputBytes(ToolOutputPart part) => switch (part) {
     newText: final newText,
   ) =>
     (path.length + (oldText?.length ?? 0) + newText.length) * 2 + 64,
-  ToolOutputImage(base64: final base64) => base64.length + 64,
+  ToolOutputImage(image: final image) => image.base64.length + 64,
 };
 
 /// 全局单例

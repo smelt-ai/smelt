@@ -2462,6 +2462,7 @@ class _SessionPageState extends State<SessionPage> {
           kind: kind,
           status: status,
           output: output,
+          loadImage: _loadOriginalImage,
         ),
       AcpEntryDivider(label: final label) => _buildDivider(label),
       final AcpEntryTaskNote note => _buildTaskNote(note),
@@ -2490,6 +2491,9 @@ class _SessionPageState extends State<SessionPage> {
     return false;
   }
 
+  Future<AcpImageData> _loadOriginalImage(AcpImageOriginal original) =>
+      gatewayService.loadImage(widget.session.id, original);
+
   Widget _buildUserMessage(
     String text, {
     List<AcpImageData> images = const [],
@@ -2516,7 +2520,12 @@ class _SessionPageState extends State<SessionPage> {
                 spacing: 8,
                 runSpacing: 8,
                 children: images
-                    .map((image) => AcpImageThumbnail(image: image))
+                    .map(
+                      (image) => AcpImageThumbnail(
+                        image: image,
+                        loadOriginal: _loadOriginalImage,
+                      ),
+                    )
                     .toList(),
               ),
             ],
