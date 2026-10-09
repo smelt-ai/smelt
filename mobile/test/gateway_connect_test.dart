@@ -564,6 +564,75 @@ void main() {
     await server.close(force: true);
   });
 
+  test('a late pong behind a large transfer does not drop an iroh link', () async {
+    // 回归点：一份大快照经 relay 传几十秒，pong 排在它后面迟到。字节一直在
+    // 到就只是慢；以前会被判死、重连、重新要快照，永远加载不完。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var openCount = 0;
+    var pingCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      openCount++;
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'ping') pingCount++;
+      });
+    });
+
+    Duration? inboundIdle = Duration.zero;
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 100),
+      irohTunnelOpener: (_, _) async => server.port,
+      irohInboundIdleProbe: () async => inboundIdle,
+    );
+    await service.connect(
+      'smelt+iroh://k7d3ffb1c9a24e5f?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
+    await _waitFor(() => service.state == WsState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(service.state, WsState.connected);
+    expect(openCount, 1);
+    expect(pingCount, 1, reason: '上一个 ping 没回之前不再发新的');
+
+    // 字节也停了：这才是真的失去响应。
+    inboundIdle = const Duration(seconds: 1);
+    await _waitFor(() => openCount >= 2);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
+  test('without tunnel evidence an overdue pong still drops the link', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var openCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      openCount++;
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((_) {});
+    });
+
+    // 直连不看隧道；探针就算说「刚收到过」也不能拿来给直连续命。
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 100),
+      irohInboundIdleProbe: () async => Duration.zero,
+    );
+    await service.connect('http://127.0.0.1:${server.port}', 'tok');
+    await _waitFor(() => openCount >= 2);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
   test('an unsupported ping does not trip the liveness timeout', () async {
     // 老桌面端不认识 ping，回 `invalid request`。那不是掉线，不该被判死。
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

@@ -351,6 +351,10 @@ Future<void> main() async {
     };
     return IrohPathSample(kind: kind, rttMs: status.rttMs);
   };
+  gatewayService.irohInboundIdleProbe = () async {
+    final idleMs = await irohTunnelInboundIdleMs();
+    return idleMs == null ? null : Duration(milliseconds: idleMs);
+  };
   runApp(const SmeltApp());
 }
 

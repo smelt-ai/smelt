@@ -27,6 +27,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw);
 
   @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
   IrohPathStatus dco_decode_iroh_path_status(dynamic raw);
 
   @protected
@@ -34,6 +37,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -53,6 +59,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
   IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer);
 
   @protected
@@ -62,6 +71,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IrohPathStatus? sse_decode_opt_box_autoadd_iroh_path_status(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -91,6 +103,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  int cst_encode_box_autoadd_u_32(int raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return cst_encode_u_32(raw);
+  }
+
+  @protected
   JSAny cst_encode_iroh_path_status(IrohPathStatus raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return [cst_encode_String(raw.kind), cst_encode_u_32(raw.rttMs)].jsify()!;
@@ -106,6 +124,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   JSAny? cst_encode_opt_box_autoadd_iroh_path_status(IrohPathStatus? raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw == null ? null : cst_encode_box_autoadd_iroh_path_status(raw);
+  }
+
+  @protected
+  int? cst_encode_opt_box_autoadd_u_32(int? raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return raw == null ? null : cst_encode_box_autoadd_u_32(raw);
   }
 
   @protected
@@ -127,6 +151,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_iroh_path_status(
     IrohPathStatus self,
     SseSerializer serializer,
@@ -143,6 +170,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     IrohPathStatus? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
@@ -168,6 +198,10 @@ class RustLibWire implements BaseWire {
   void wire__crate__api_iroh__init_app(NativePortType port_) =>
       wasmModule.wire__crate__api_iroh__init_app(port_);
 
+  void wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(
+    NativePortType port_,
+  ) => wasmModule.wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(port_);
+
   void wire__crate__api_iroh__iroh_tunnel_path_status(NativePortType port_) =>
       wasmModule.wire__crate__api_iroh__iroh_tunnel_path_status(port_);
 
@@ -192,6 +226,10 @@ external RustLibWasmModule get wasmModule;
 @anonymous
 extension type RustLibWasmModule._(JSObject _) implements JSObject {
   external void wire__crate__api_iroh__init_app(NativePortType port_);
+
+  external void wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(
+    NativePortType port_,
+  );
 
   external void wire__crate__api_iroh__iroh_tunnel_path_status(
     NativePortType port_,

@@ -29,6 +29,13 @@ Future<void> irohTunnelStop() =>
 Future<IrohPathStatus?> irohTunnelPathStatus() =>
     RustLib.instance.api.crateApiIrohIrohTunnelPathStatus();
 
+/// 距离隧道最近一次收到桌面数据过了多少毫秒。没有隧道或还没收到过数据时为 None。
+///
+/// 心跳 pong 和业务数据排在同一条有序流里，大消息传输期间 pong 会迟到；
+/// 只要字节还在到，连接就是活的。
+Future<int?> irohTunnelInboundIdleMs() =>
+    RustLib.instance.api.crateApiIrohIrohTunnelInboundIdleMs();
+
 /// iroh 当前选中的实际传输路径和 QUIC RTT。
 class IrohPathStatus {
   /// `lan`、`p2p` 或 `relay`。
