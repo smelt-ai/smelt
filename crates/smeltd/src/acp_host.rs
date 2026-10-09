@@ -2298,6 +2298,23 @@ pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &E
     }
 }
 
+pub(crate) fn try_rename_running_acp_session(sessions: &AcpSessions, id: &str, title: &str) {
+    let Some(slot) = sessions.get(id) else {
+        return;
+    };
+    let _ = sessions.with_current(id, &slot, |sess| {
+        let handle = sess.handle.lock().unwrap();
+        let Some(handle) = handle.as_ref() else {
+            return;
+        };
+        let _ = handle
+            .cmd_tx
+            .try_send(smelt_core::acp_conn::ConversationCommand::SetSessionTitle(
+                title.to_string(),
+            ));
+    });
+}
+
 /// Clears a completed delivery from the daemon's deduplication ledger. It is
 pub(crate) fn apply_acp_user_action(
     sess: &AcpSession,

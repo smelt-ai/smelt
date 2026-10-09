@@ -146,6 +146,9 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::RemoteRenameResume => {
             handle_remote_rename_resume(conn, &v, &remote_sessions, &event_hub)
         }
+        DaemonOperation::ConversationRename => {
+            handle_conversation_rename(conn, &v, &acp_sessions, &remote_sessions, &event_hub)
+        }
         DaemonOperation::Kill => handle_kill(conn, &v, &sessions, &remote_sessions, &event_hub),
         DaemonOperation::Upgrade => {
             handle_upgrade(conn, &v, &sessions, &acp_sessions, &event_hub, listen_fd)

@@ -2392,6 +2392,8 @@ struct Workspace {
 
     /// 用户给工作台起的名字；缺省用 contribution 声明的 title。
     workspace_surface_titles: HashMap<String, String>,
+    /// 已见过的远程目录标题。目录标题变了才覆盖侧栏，避免把本地改名冲掉。
+    catalog_titles: HashMap<String, String>,
     /// 右键 ContextMenu 没有进入 gpui-component 的全局 popup 注册表，
     /// 因而由 Workspace 自己持有一个有界的临时遮挡 lease。
     context_menu_suppressed: bool,
@@ -2884,6 +2886,13 @@ impl std::ops::DerefMut for Workspace {
     }
 }
 
+fn conversation_session_id(session: &Session, cx: &App) -> Option<String> {
+    match &session.kind {
+        SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
+        SessionKind::Term { .. } => None,
+    }
+}
+
 impl Workspace {
     /// Files 既可能展开到舞台，也可能停靠在 Tool Panel；两种状态都视为文件视图可见。
     fn files_view_visible(&self) -> bool {
@@ -2999,6 +3008,7 @@ impl Workspace {
                 .as_ref()
                 .map(|state| state.workspace_surface_titles.clone())
                 .unwrap_or_default(),
+            catalog_titles: HashMap::new(),
             context_menu_suppressed: false,
             context_menu_generation: 0,
             dir_cache: HashMap::new(),
@@ -3303,6 +3313,56 @@ impl Workspace {
         self.reconcile_remote_terminal_sessions(term_records, window, cx);
     }
 
+    /// 远程目录里的对话标题变了，就写进已经投影出来的侧栏行。
+    ///
+    /// 第一次见到某场对话只记下目录标题，不覆盖本地名。之后目录标题变了才是
+    /// 控制面改名，这时才替换。
+    fn apply_remote_conversation_titles(
+        &mut self,
+        records: &[smelt_core::session_control::RemoteAcpSession],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut changed = false;
+        for record in records {
+            let title = record.title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            let title = title.to_string();
+            match self.catalog_titles.get(&record.id).map(String::as_str) {
+                Some(seen) if seen == title => continue,
+                Some(_) => {}
+                None => {
+                    let differs = self.sessions.iter().any(|session| {
+                        conversation_session_id(session, cx).as_deref() == Some(record.id.as_str())
+                            && session.custom_title.as_deref() != Some(title.as_str())
+                            && session.custom_title.is_some()
+                    });
+                    self.catalog_titles.insert(record.id.clone(), title.clone());
+                    if !differs {
+                        continue;
+                    }
+                }
+            }
+            let Some(ix) = self.sessions.iter().position(|session| {
+                conversation_session_id(session, cx).as_deref() == Some(record.id.as_str())
+            }) else {
+                self.catalog_titles.insert(record.id.clone(), title);
+                continue;
+            };
+            if self.sessions[ix].custom_title.as_deref() != Some(title.as_str()) {
+                self.sessions[ix].custom_title = Some(title.clone());
+                if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
+                    let view = view.clone();
+                    view.update(cx, |view, _| view.rename_session(Some(title.clone())));
+                }
+                changed = true;
+            }
+            self.catalog_titles.insert(record.id.clone(), title);
+        }
+        changed
+    }
+
     fn reconcile_remote_sessions(
         &mut self,
         records: Vec<smelt_core::session_control::RemoteAcpSession>,
@@ -3347,6 +3407,10 @@ impl Workspace {
         // 把同一场对话再投影一份，两个视图抢同一个 smeltd 会话。
         let pending = crate::pending_restore_session_ids(&self.restore_pending);
         let mut changed = false;
+        let titled = records
+            .iter()
+            .map(|(record, _)| record.clone())
+            .collect::<Vec<_>>();
         for (record, agent) in records {
             if existing.contains(&record.id) || pending.contains(&record.id) {
                 continue;
@@ -3360,6 +3424,9 @@ impl Workspace {
                 continue;
             }
             self.project_remote_acp_session(record, agent, window, cx);
+            changed = true;
+        }
+        if self.apply_remote_conversation_titles(&titled, cx) {
             changed = true;
         }
         if changed {

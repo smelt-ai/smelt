@@ -60,7 +60,7 @@ smelt {version}
 
 用法：
   smelt                         启动图形界面
-  smelt agent list|get|create|update|delete|chat|plugins
+  smelt agent list|get|create|update|delete|chat|conversations|conversation-rename|plugins
   smelt automation list|get|create|update|enable|disable|run|delete
   smelt settings get
   smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
@@ -76,6 +76,8 @@ smelt {version}
   smelt automation update <id> [--name ...] [--prompt ...] [--every-hours N]
   smelt automation enable|disable|run|delete <id>
   smelt agent chat <id>              用该定义开一场对话（需要 smeltd）
+  smelt agent conversations          列出产品对话（需要 smeltd）
+  smelt agent conversation-rename <session_id> --title <标题>
   smelt agent plugins                列出可绑到智能体的 Pi 插件
 
 stdout 为 JSON。
@@ -137,6 +139,23 @@ fn run_agent(args: &[String]) -> i32 {
             };
             match smelt_core::session_control::create_agent_conversation(id) {
                 Ok(created) => print_ok(&created),
+                Err(error) => fail(&error),
+            }
+        }
+        Some("conversations") => match smelt_core::session_control::list_agent_conversations() {
+            Ok(conversations) => print_ok(&serde_json::json!({ "conversations": conversations })),
+            Err(error) => fail(&error),
+        },
+        Some("conversation-rename") => {
+            let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
+                return usage("smelt agent conversation-rename <session_id> --title <标题>");
+            };
+            let title = match conversation_title_flag(&args[2..]) {
+                Ok(title) => title,
+                Err(message) => return usage(&message),
+            };
+            match smelt_core::session_control::rename_agent_conversation(id, &title) {
+                Ok(renamed) => print_ok(&renamed),
                 Err(error) => fail(&error),
             }
         }
@@ -611,6 +630,27 @@ struct Flags {
     plugins_set: bool,
     folders_set: bool,
     links_set: bool,
+}
+
+fn conversation_title_flag(args: &[String]) -> Result<String, String> {
+    let mut title = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--title" => {
+                title = Some(
+                    args.get(index + 1)
+                        .cloned()
+                        .ok_or_else(|| "--title 需要一个值".to_string())?,
+                );
+                index += 2;
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+    }
+    title
+        .filter(|title| !title.trim().is_empty())
+        .ok_or_else(|| "smelt agent conversation-rename <session_id> --title <标题>".to_string())
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, String> {

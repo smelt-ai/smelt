@@ -16,10 +16,12 @@ smelt agent create --name "名称" --prompt "长期工作方式" --plugin skill:
 smelt agent update <id> --prompt "新的工作方式"
 smelt agent get <id>
 smelt agent chat <id>
+smelt agent conversations
+smelt agent conversation-rename <session_id> --title "新标题"
 smelt agent delete <id>
 ```
 
-`--plugin` / `--folder` / `--link` 在 update 时是整份替换。只改 prompt 时不要带它们。`chat` 需要 smeltd 在跑，对话会出现在桌面「对话」栏。
+`--plugin` / `--folder` / `--link` 在 update 时是整份替换。只改 prompt 时不要带它们。`chat` 需要 smeltd 在跑，对话会出现在桌面「对话」栏。返回的 `session_id` 用来重命名这场对话，不要拿智能体 id 去改标题。`conversations` 列出当前产品对话。
 
 ```sh
 smelt automation list
