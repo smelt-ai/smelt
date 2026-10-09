@@ -179,7 +179,7 @@ pub(super) fn provider_quota_row(
                 .iter()
                 .map(|window| window.used_percent)
                 .fold(0.0_f64, f64::max);
-            let mut hint = quota
+            let hint = quota
                 .windows
                 .iter()
                 .map(|window| {
@@ -192,11 +192,6 @@ pub(super) fn provider_quota_row(
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            if let Some(error) = &status.error {
-                hint.push_str(&format!(
-                    " {label} 额度刷新失败，仍显示上次成功结果：{error}。"
-                ));
-            }
             Some(ProviderQuotaRow {
                 text: format!("{}%", worst_used.round() as u32),
                 color: quota_color(worst_used),
@@ -204,7 +199,7 @@ pub(super) fn provider_quota_row(
             })
         }
         crate::provider_quota::ProviderQuotaData::Copilot(quota) => {
-            let (text, mut hint, used_percent) = if let Some(limit) = quota.limit {
+            let (text, hint, used_percent) = if let Some(limit) = quota.limit {
                 let used = quota.used.unwrap_or((limit - quota.remaining).max(0.0));
                 let used_percent = (used / limit.max(1.0) * 100.0).clamp(0.0, 100.0);
                 let used_pct = used_percent.round() as u32;
@@ -229,11 +224,6 @@ pub(super) fn provider_quota_row(
                     0.0,
                 )
             };
-            if let Some(error) = &status.error {
-                hint.push_str(&format!(
-                    " {label} 额度刷新失败，仍显示上次成功结果：{error}。"
-                ));
-            }
             Some(ProviderQuotaRow {
                 text,
                 color: quota_color(used_percent),
@@ -273,7 +263,7 @@ mod tests {
                 ],
             })),
             checked_at_ms: 1,
-            error: Some("offline".to_string()),
+            error: None,
         };
 
         let row = provider_quota_row(ConversationAgentKind::Claude, &status).unwrap();
@@ -281,7 +271,6 @@ mod tests {
         assert_eq!(row.text, "91%");
         assert_eq!(row.color, ui_theme::red());
         assert!(row.hint.contains("Claude 5h 窗口已用 76%"));
-        assert!(row.hint.contains("仍显示上次成功结果：offline"));
     }
 
     #[test]

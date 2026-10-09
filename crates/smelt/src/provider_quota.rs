@@ -335,11 +335,8 @@ impl ProviderQuotaState {
     fn apply(&mut self, result: ProviderQuotaFetchResult) {
         let checked_at_ms = unix_time_ms();
         for (provider, outcome) in result.0 {
-            let previous = self.statuses.remove(&provider);
-            self.statuses.insert(
-                provider,
-                apply_quota_result(previous, outcome, checked_at_ms),
-            );
+            self.statuses
+                .insert(provider, apply_quota_result(outcome, checked_at_ms));
         }
         self.refreshing.clear();
         self.manual_refreshing.clear();
@@ -417,7 +414,6 @@ fn cache_from_snapshot(snapshot: smelt_store::QuotaCacheSnapshot) -> Option<Quot
 }
 
 fn apply_quota_result(
-    previous: Option<QuotaStatus>,
     result: anyhow::Result<Option<ProviderQuotaData>>,
     checked_at_ms: u64,
 ) -> QuotaStatus {
@@ -427,8 +423,10 @@ fn apply_quota_result(
             checked_at_ms,
             error: None,
         },
+        // 失败即失效：不沿用上一次的成功结果（凭据丢失、换号时旧数字是错的），
+        // 侧栏不显示这一项，缓存里也随之去掉。
         Err(error) => QuotaStatus {
-            quota: previous.and_then(|status| status.quota),
+            quota: None,
             checked_at_ms,
             error: Some(error.to_string()),
         },
@@ -750,8 +748,10 @@ mod tests {
         );
     }
 
+    /// 刷新失败就是失效：不拿上一次的成功结果冒充当前额度（凭据丢了、账号换了时
+    /// 旧数字是错的），也不显示这一项。
     #[test]
-    fn failed_refresh_keeps_the_previous_successful_quota() {
+    fn failed_refresh_drops_the_previous_quota() {
         let mut state = ProviderQuotaState::default();
         let quota = ProviderQuotaData::Windows(ProviderQuota {
             windows: vec![smelt_core::provider_quota::ProviderQuotaWindow {
@@ -763,7 +763,7 @@ mod tests {
         });
         state.apply(ProviderQuotaFetchResult::one(
             ConversationAgentKind::Codex,
-            Ok(Some(quota.clone())),
+            Ok(Some(quota)),
         ));
 
         state.apply(ProviderQuotaFetchResult::one(
@@ -772,8 +772,12 @@ mod tests {
         ));
 
         let status = state.status(ConversationAgentKind::Codex).unwrap();
-        assert_eq!(status.quota, Some(quota));
+        assert_eq!(status.quota, None);
         assert_eq!(status.error.as_deref(), Some("offline"));
+        assert!(
+            state.to_cache().providers.get("codex").is_none(),
+            "失效的额度不能留在缓存里，下次启动又显示出来"
+        );
     }
 
     #[test]

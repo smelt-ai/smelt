@@ -39,7 +39,7 @@ pub struct CopilotQuota {
 pub struct CopilotQuotaStatus {
     pub quota: Option<CopilotQuota>,
     pub checked_at_ms: u64,
-    /// 最近一次刷新失败原因；有 quota 时表示当前展示的是上一次成功结果。
+    /// 最近一次刷新失败原因。失败即失效，此时 quota 为空、侧栏不显示。
     #[serde(default)]
     pub error: Option<String>,
 }
