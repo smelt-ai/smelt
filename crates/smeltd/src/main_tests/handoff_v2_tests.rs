@@ -594,7 +594,7 @@ fn import_loopback_restores_hosted_acp_mid_turn() {
     let mut running = AcpSessionState::default();
     running.phase = DaemonPhase::Thinking;
     running.turn_started_at_ms = Some(1);
-    running.entries.push(AcpEntry::ToolCall {
+    running.entries_mut().push(AcpEntry::ToolCall {
         id: "t-drill".into(),
         title: "Read".into(),
         kind: ToolKind::Read,
@@ -660,7 +660,7 @@ fn import_loopback_restores_hosted_acp_mid_turn() {
         assert_eq!(reduced.phase, DaemonPhase::Thinking);
         assert_eq!(reduced.turn_started_at_ms, Some(1));
         assert!(
-            smelt_core::acp_chat::has_unfinished_tool_call(&reduced.entries),
+            smelt_core::acp_chat::has_unfinished_tool_call(reduced.entries()),
             "未完成 tool 必须带过去"
         );
     }

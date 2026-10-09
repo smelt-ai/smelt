@@ -320,7 +320,7 @@ pub(crate) fn known_acp_resume_id(
     reduced: &smelt_core::acp_session::AcpSessionState,
 ) -> Option<String> {
     normalize_resume_id(reduced.history_session_id.clone()).or_else(|| {
-        (!reduced.entries.is_empty())
+        (!reduced.entries().is_empty())
             .then(|| normalize_resume_id(reduced.acp_session_id.clone()))
             .flatten()
     })
@@ -402,7 +402,7 @@ pub(crate) fn compute_acp_daemon_phase(
 ) -> Phase {
     use smelt_core::acp_chat::has_unfinished_tool_call;
     use smelt_core::daemon_state::DaemonPhase;
-    let executing_tool = !reduced.replaying_history && has_unfinished_tool_call(&reduced.entries);
+    let executing_tool = !reduced.replaying_history && has_unfinished_tool_call(reduced.entries());
     match reduced.phase {
         DaemonPhase::Connecting => Phase::Connecting,
         // `TurnEnded` 在 ACP 归约器里落成 Idle + completed_unread，并写上
@@ -903,7 +903,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
     let _output_gate = sess.output_gate.lock().unwrap();
     let from = {
         let reduced = sess.reduced.lock().unwrap();
-        entries_offset.unwrap_or(reduced.entries.len())
+        entries_offset.unwrap_or(reduced.entries().len())
     };
     let out = sess.out.lock().unwrap();
     if let Some(client) = out.client.as_ref() {
@@ -920,7 +920,13 @@ pub(crate) fn push_acp_snapshot_with_runtime_debug_for_test(sess: &AcpSession) {
 }
 
 pub(crate) fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
-    let offset = sess.reduced.lock().unwrap().entries.len().saturating_sub(1);
+    let offset = sess
+        .reduced
+        .lock()
+        .unwrap()
+        .entries()
+        .len()
+        .saturating_sub(1);
     push_acp_snapshot_since(sess, should_persist, Some(offset));
 }
 
@@ -1189,7 +1195,7 @@ pub(crate) fn start_acp_event_drain(
                     }
                     if matches!(&ev, smelt_core::acp_conn::ConversationEvent::PromptAccepted) {
                         if accept_unaccepted_prompt(sess) {
-                            let len = sess.reduced.lock().unwrap().entries.len();
+                            let len = sess.reduced.lock().unwrap().entries().len();
                             offsets.push(Some(len.saturating_sub(1)));
                             should_persist = true;
                             applied = true;
@@ -1552,7 +1558,7 @@ pub(crate) fn acp_relaunch(
                 } else {
                     resume_id.as_deref()
                 },
-                !reduced.entries.is_empty(),
+                !reduced.entries().is_empty(),
             );
             smelt_core::acp_session::reset_for_restart(&mut reduced);
             // `resume_id` 只是这次 session/load 的候选身份，不能在 load 成功前
@@ -2202,7 +2208,12 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
     // 相位不是 Idle 时拒绝，不给“边跑边回退”留出任何竞态窗口。
     let (phase, target, latest_user_index) = {
         let reduced = sess.reduced.lock().unwrap();
-        let latest_user_index = reduced.entries.iter().rposition(|entry| match entry {
+        // 重放期间工作缓冲是草稿，GUI 的下标按已发布正文算，两边对不上；
+        // 截断也不能落在半成品上。等重放收尾再回退。
+        if reduced.replaying_history {
+            return Err("rewind requires history replay to finish");
+        }
+        let latest_user_index = reduced.entries().iter().rposition(|entry| match entry {
             smelt_core::acp_chat::AcpEntry::User(text) => {
                 !smelt_core::acp_chat::is_interrupt_marker(text)
             }
@@ -2213,7 +2224,7 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
         });
         (
             reduced.phase,
-            reduced.entries.get(entry_index).map(|entry| match entry {
+            reduced.entries().get(entry_index).map(|entry| match entry {
                 smelt_core::acp_chat::AcpEntry::User(text) => Some(text.clone()),
                 smelt_core::acp_chat::AcpEntry::UserWithImages { text, .. } => Some(text.clone()),
                 _ => None,
@@ -2238,7 +2249,7 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
     let occurrence = {
         let reduced = sess.reduced.lock().unwrap();
         reduced
-            .entries
+            .entries()
             .iter()
             .take(entry_index)
             .filter(|entry| match entry {
@@ -3361,7 +3372,7 @@ pub(crate) fn handle_acp_watch(
         let _output_gate = sess.output_gate.lock().unwrap();
         let Ok(c) = conn.try_clone() else { return };
         let reduced = sess.reduced.lock().unwrap();
-        let entries_total = reduced.entries.len();
+        let entries_total = reduced.entries().len();
         let current_history_id = reduced
             .history_session_id
             .as_deref()
@@ -3440,7 +3451,7 @@ pub(crate) fn handle_acp_snapshot(
     let Some(snapshot) = acp_sessions.with_current(id, &slot, |session| {
         let _output_gate = session.output_gate.lock().unwrap();
         let reduced = session.reduced.lock().unwrap();
-        let end = before.min(reduced.entries.len());
+        let end = before.min(reduced.entries().len());
         let start = end.saturating_sub(limit);
         let mut snapshot = reduced.to_snapshot_range(false, start, end);
         snapshot.snapshot_revision = session.snapshot_revision.load(Ordering::SeqCst);
@@ -3896,7 +3907,7 @@ pub(crate) fn acp_upgrade_blockers(acp_sessions: &AcpSessions) -> Vec<String> {
                     && reduced.elicitation.is_none();
                 let has_unfinished_tool = !reduced.replaying_history
                     && !idle_without_active_turn
-                    && smelt_core::acp_chat::has_unfinished_tool_call(&reduced.entries);
+                    && smelt_core::acp_chat::has_unfinished_tool_call(reduced.entries());
                 (phase_blocks, has_unfinished_tool)
             };
             let in_flight = slot
@@ -3947,7 +3958,7 @@ mod snapshot_link_tests {
     fn direct_handoff_snapshot_omits_committed_history() {
         let mut state = smelt_core::acp_session::AcpSessionState::default();
         state.phase = smelt_core::daemon_state::DaemonPhase::Idle;
-        state.entries = vec![smelt_core::acp_chat::AcpEntry::User("以前".into())];
+        *state.entries_mut() = vec![smelt_core::acp_chat::AcpEntry::User("以前".into())];
         let snapshot = conversation_snapshot_for_handoff(&state);
         assert!(
             snapshot.entries.is_empty(),
@@ -3957,7 +3968,7 @@ mod snapshot_link_tests {
         state.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
         state.turn_started_at_ms = Some(1);
         state
-            .entries
+            .entries_mut()
             .push(smelt_core::acp_chat::AcpEntry::User("现在".into()));
         let snapshot = conversation_snapshot_for_handoff(&state);
         assert!(snapshot.history_omitted);
@@ -4006,14 +4017,9 @@ mod snapshot_link_tests {
         // 写线程卡在首包上。这段时间里的 mark 必须并成一份，而不是把连接摘掉。
         thread::sleep(Duration::from_millis(50));
         for index in 0..40 {
-            slot.value
-                .reduced
-                .lock()
-                .unwrap()
-                .entries
-                .push(smelt_core::acp_chat::AcpEntry::User(format!(
-                    "marker-{index}"
-                )));
+            slot.value.reduced.lock().unwrap().entries_mut().push(
+                smelt_core::acp_chat::AcpEntry::User(format!("marker-{index}")),
+            );
             push_acp_snapshot_since(&slot.value, true, Some(0));
         }
         {

@@ -2672,7 +2672,7 @@ fn state_has_active_turn(state: &smelt_core::acp_session::AcpSessionState) -> bo
         state.phase,
         state.turn_started_at_ms,
         state.replaying_history,
-        &state.entries,
+        state.entries(),
     )
 }
 

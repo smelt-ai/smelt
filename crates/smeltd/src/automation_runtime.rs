@@ -565,13 +565,13 @@ impl Driver {
                     active: reduced.active_delivery_id.as_deref() == Some(run.id.as_str()),
                     completed: reduced.completed_delivery_id.as_deref() == Some(run.id.as_str()),
                     outcome: reduced.turn_outcome,
-                    output: completed_turn_output(&reduced.entries),
+                    output: completed_turn_output(reduced.entries()),
                     error: (!reduced.end_reason.is_empty()).then(|| reduced.end_reason.clone()),
                     provider_session_id: reduced
                         .history_session_id
                         .clone()
                         .or_else(|| reduced.acp_session_id.clone()),
-                    entries: reduced.entries.clone(),
+                    entries: reduced.entries().to_vec(),
                 }
             };
             if projection.completed {
@@ -1696,7 +1696,7 @@ mod lifecycle_tests {
             reduced.active_delivery_id = None;
             reduced.completed_delivery_id = Some(run.id.clone());
             reduced.turn_outcome = Some(AcpTurnOutcome::Succeeded);
-            reduced.entries = vec![
+            *reduced.entries_mut() = vec![
                 AcpEntry::User("Summarize the project".into()),
                 AcpEntry::Assistant {
                     text: "Report complete".into(),

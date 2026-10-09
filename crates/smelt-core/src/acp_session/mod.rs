@@ -214,7 +214,7 @@ pub struct PendingElicitation {
     pub message: String,
     pub fields: Vec<ElicitFieldView>,
     /// 已选中的 (字段下标 → 选项下标列表)，跟旧版 `ElicitCard.chosen` 同一份
-    /// 语义——GUI 要能画出「已经点了哪些」，不能重连一次就清空選択态。
+    /// 语义——GUI 要能画出「已经点了哪些」，不能重连一次就清空选择态。
     pub chosen: BTreeMap<usize, Vec<usize>>,
     #[serde(default)]
     pub text_values: BTreeMap<usize, String>,
@@ -933,7 +933,7 @@ pub struct LivePermission {
 }
 
 /// 选择题卡片：字段原始形态保留在 `raw_fields`（翻译回
-/// `ElicitationContentValue` 要用），`chosen` 是当前選択态。
+/// `ElicitationContentValue` 要用），`chosen` 是当前选择态。
 pub struct LiveElicitation {
     pub message: String,
     pub raw_fields: Vec<ElicitField>,
@@ -956,7 +956,9 @@ pub struct LiveElicitation {
 /// Thinking / AwaitingApproval / WaitingForUser / Dead；Succeeded、Failed、
 /// ExecutingTool 是守护广播层的投影。
 pub struct AcpSessionState {
-    pub entries: Vec<AcpEntry>,
+    /// 归约器的工作缓冲。重放期间它是从空缓冲重建的草稿，不是会话正文，
+    /// 所以不对外公开：外部一律读 [`Self::entries`]（已发布正文）。
+    entries: Vec<AcpEntry>,
     pub tool_debug: BTreeMap<String, ToolCallDebug>,
     /// 只在内存里递增。快照不带它。连接用它判断这帧要不要再带整张工具参数表。
     pub tool_debug_generation: u64,
@@ -985,8 +987,12 @@ pub struct AcpSessionState {
     pub awaiting_user_echo: bool,
     /// `session/load` 正在重建历史投影。回放通知和实时通知共用同一套 ACP
     /// update，必须在本地记住这段边界，避免历史 assistant/tool 消息把空闲
-    /// 会话误标成 Running。下一次用户 prompt 发出时结束回放态。
+    /// 会话误标成 Running。收到 `HistoryReplayFinished`（或失败重置、中途发新 prompt）时收尾结束。
     pub replaying_history: bool,
+    /// 重放期间 `entries` 是从空缓冲重建的草稿。已经交给窗口的正文留在这里。
+    /// 快照、活帧和历史分页都读它；草稿重建完再一次性换上，中间那帧空缓冲
+    /// 不能被当成「会话现在没有消息」。
+    replay_baseline: Option<Vec<AcpEntry>>,
     pub available_commands: Vec<(String, String)>,
     pub usage: Option<(u64, u64)>,
     pub usage_cached_read: Option<u64>,
@@ -1051,6 +1057,7 @@ impl Default for AcpSessionState {
             supports_image: true,
             awaiting_user_echo: false,
             replaying_history: false,
+            replay_baseline: None,
             available_commands: Vec::new(),
             usage: None,
             usage_cached_read: None,
@@ -1144,6 +1151,7 @@ impl AcpSessionState {
             supports_image: snap.supports_image,
             awaiting_user_echo: false,
             replaying_history: false,
+            replay_baseline: None,
             available_commands: snap.available_commands,
             usage: snap.usage,
             usage_cached_read: snap.usage_cached_read,
@@ -1344,7 +1352,33 @@ impl AcpSessionState {
     pub fn resolved_session_title(&self) -> Option<String> {
         self.protocol_title
             .clone()
-            .or_else(|| crate::acp_chat::auto_title(&self.entries))
+            .or_else(|| crate::acp_chat::auto_title(self.entries()))
+    }
+
+    /// 会话正文：窗口、分页、活帧、回退校验与持久化看到的都是这一份。
+    /// 重放草稿还没换上之前，这里是重放前已发布的那一份。
+    pub fn entries(&self) -> &[AcpEntry] {
+        self.replay_baseline.as_deref().unwrap_or(&self.entries)
+    }
+
+    /// 测试搭场景用：直接改工作缓冲，绕过归约器。正式代码不得启用。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn entries_mut(&mut self) -> &mut Vec<AcpEntry> {
+        &mut self.entries
+    }
+
+    /// 重放草稿已经是完整投影。丢掉上一份正文，之后发布这份草稿。
+    pub fn commit_replay(&mut self) {
+        self.replay_baseline = None;
+        self.replaying_history = false;
+    }
+
+    /// 重放没有形成完整投影。草稿不能当会话，回到开始重放前已发布的正文。
+    pub fn abandon_replay_scratch(&mut self) {
+        if let Some(baseline) = self.replay_baseline.take() {
+            self.entries = baseline;
+        }
+        self.replaying_history = false;
     }
 
     /// `should_persist` 不是从 `self` 能算出来的——它是"这次变化是怎么发生的"
@@ -1353,6 +1387,7 @@ impl AcpSessionState {
     /// 已落进会话文件的历史终点，以及还没写完的这一轮。
     /// 空闲且没有进行中的工具时，这一轮是空的。
     pub fn open_turn_range(&self) -> (usize, usize) {
+        let entries = self.entries();
         let active = self.turn_started_at_ms.is_some()
             || matches!(
                 self.phase,
@@ -1361,12 +1396,11 @@ impl AcpSessionState {
                     | DaemonPhase::AwaitingApproval
                     | DaemonPhase::WaitingForUser
             )
-            || crate::acp_chat::has_unfinished_tool_call(&self.entries);
+            || crate::acp_chat::has_unfinished_tool_call(entries);
         if !active {
-            return (self.entries.len(), self.entries.len());
+            return (entries.len(), entries.len());
         }
-        let start = self
-            .entries
+        let start = entries
             .iter()
             .rposition(|entry| {
                 matches!(
@@ -1376,7 +1410,7 @@ impl AcpSessionState {
                 )
             })
             .unwrap_or(0);
-        (start, self.entries.len())
+        (start, entries.len())
     }
 
     pub fn to_snapshot(&self, should_persist: bool) -> ConversationSnapshot {
@@ -1388,7 +1422,7 @@ impl AcpSessionState {
         should_persist: bool,
         entries_offset: usize,
     ) -> ConversationSnapshot {
-        self.to_snapshot_range(should_persist, entries_offset, self.entries.len())
+        self.to_snapshot_range(should_persist, entries_offset, self.entries().len())
     }
 
     pub fn to_snapshot_range(
@@ -1397,16 +1431,18 @@ impl AcpSessionState {
         entries_offset: usize,
         entries_end: usize,
     ) -> ConversationSnapshot {
-        let entries_total = self.entries.len();
+        let published = self.entries();
+        let entries_total = published.len();
         let entries_end = entries_end.min(entries_total);
         let entries_offset = entries_offset.min(entries_end);
+        let entries = published[entries_offset..entries_end].to_vec();
         ConversationSnapshot {
             entries_offset,
             entries_total,
             snapshot_revision: 0,
             session_title: self.resolved_session_title(),
             replaying_history: self.replaying_history,
-            entries: self.entries[entries_offset..entries_end].to_vec(),
+            entries,
             tool_debug: Some(self.tool_debug.clone()),
             runtime_debug: Some(self.runtime_debug.clone()),
             phase: self.phase,
@@ -1501,7 +1537,7 @@ impl SessionLive {
         let (history_len, end) = state.open_turn_range();
         let mut live = Self::from_snapshot(&state.to_snapshot(false));
         live.history_len = Some(history_len);
-        live.open_turn = state.entries[history_len..end].to_vec();
+        live.open_turn = state.entries()[history_len..end].to_vec();
         live
     }
 
@@ -1681,6 +1717,7 @@ pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<S
 /// 「重新开始」/新建时的相位重置：跟旧版 `AcpView::restart` 里那几行对应（cmd/
 /// spawn 那部分是 smeltd 的事，不在这个纯状态函数里）。
 pub fn reset_for_restart(state: &mut AcpSessionState) {
+    state.abandon_replay_scratch();
     state.permissions.clear();
     state.runtime_debug = RuntimeDebug::default();
     state.elicitation = None;
@@ -1690,7 +1727,6 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.usage_breakdown = None;
     state.completed_unread = false;
     state.turn_outcome = None;
-    state.replaying_history = false;
     state.awaiting_user_echo = false;
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
@@ -1758,7 +1794,13 @@ pub fn note_prompt_sent_with_delivery(
     if state.history_session_id.is_none() {
         state.history_session_id = state.acp_session_id.clone();
     }
-    state.replaying_history = false;
+    // 草稿还是空的，说明重放还没交出新正文，新消息接在上一份已发布正文上。
+    // 草稿里已经有重放出来的条目时，那份草稿就是新投影，不能退回旧正文。
+    if state.entries.is_empty() {
+        state.abandon_replay_scratch();
+    } else {
+        state.commit_replay();
+    }
     state.cancel_requested = false;
     // 上一回合若还有未终态工具，用「下一条已发出」作为收尾信号，而不是睡一轮。
     // 之后到达的 ToolFinished 仍可按 tool id 改写（未取消的条目）。
@@ -1898,7 +1940,7 @@ pub fn set_elicitation_text(state: &mut AcpSessionState, field_ix: usize, value:
 }
 
 /// 提交选择题：把 `chosen` 翻译回 `ElicitationContentValue` 传给 responder。
-/// 跟旧版 `submit_elicitation` 一致；字段没有選択就跳过（agent 那边按 schema
+/// 跟旧版 `submit_elicitation` 一致；字段没有选择就跳过（agent 那边按 schema
 /// 自己决定必填与否，这里不做客户端校验）。
 pub fn submit_elicitation(state: &mut AcpSessionState) {
     let Some(mut card) = state.elicitation.take() else {

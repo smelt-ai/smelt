@@ -675,7 +675,7 @@ fn handoff_dangling_tool_is_not_recovered_as_an_active_turn() {
 
     let restored = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
     assert!(
-        !smelt_core::acp_chat::has_unfinished_tool_call(&restored.entries),
+        !smelt_core::acp_chat::has_unfinished_tool_call(restored.entries()),
         "已结束回合的悬空工具必须在恢复时收尾"
     );
     assert!(
@@ -1057,7 +1057,7 @@ fn acp_session_with_valid_fds_and_session_id_is_recovered() {
         "应该已经起了 resume 连接"
     );
     let reduced = sess.reduced.lock().unwrap();
-    assert_eq!(reduced.entries.len(), 1);
+    assert_eq!(reduced.entries().len(), 1);
     assert_eq!(reduced.acp_session_id.as_deref(), Some("sid-1"));
     assert_eq!(reduced.history_session_id.as_deref(), Some("sid-1"));
 }

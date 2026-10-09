@@ -355,6 +355,100 @@ fn load_replay_rebuilds_legacy_projection_without_duplicates() {
     ));
 }
 
+/// 重放开始时归约器必须清空草稿，避免把协议通知再追加到旧正文上。
+/// 但这份草稿还不是会话：清空那一帧若把 `history_len` 报成 0，桌面长连接
+/// 会把窗口里已经翻出来的历史整段截掉，舞台回到「想让它做什么？」。
+/// 对外发布的正文要停在重放前的那一份，直到重放结束再一次性换上。
+#[test]
+fn history_replay_does_not_publish_the_empty_scratch_buffer() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Idle;
+    state.entries.push(AcpEntry::User("看看这个仓库".into()));
+    state.entries.push(AcpEntry::Assistant {
+        text: "仓库结构如下".into(),
+        thought: false,
+    });
+
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+
+    assert!(state.entries.is_empty(), "归约草稿从空缓冲重建");
+    assert!(state.replaying_history);
+    let live = SessionLive::from_state(&state);
+    assert_eq!(live.history_len, Some(2));
+    assert!(
+        live.open_turn.is_empty(),
+        "空闲会话的活帧不能把已提交正文说成不存在"
+    );
+    let published = state.to_snapshot(false);
+    assert_eq!(published.entries_total, 2);
+    assert_eq!(published.entries.len(), 2);
+    assert!(published.replaying_history);
+
+    apply_event(
+        &mut state,
+        ConversationEvent::UserChunk("看看这个仓库".into()),
+    );
+    assert_eq!(state.entries.len(), 1, "草稿只累积已经重放的条目");
+    assert_eq!(SessionLive::from_state(&state).history_len, Some(2));
+    assert_eq!(state.to_snapshot(false).entries.len(), 2);
+
+    apply_event(
+        &mut state,
+        ConversationEvent::AgentChunk {
+            text: "仓库结构如下".into(),
+            thought: false,
+            parent_id: None,
+        },
+    );
+    apply_event(&mut state, ConversationEvent::HistoryReplayFinished);
+
+    assert!(!state.replaying_history);
+    assert_eq!(state.entries.len(), 2);
+    let done = SessionLive::from_state(&state);
+    assert_eq!(done.history_len, Some(2));
+    assert_eq!(state.to_snapshot(false).entries.len(), 2);
+}
+
+/// 重放开始后、第一条历史还没回来时用户又发了一条。新消息接在仍发布的旧正文上，
+/// 不能落在那份空草稿上把会话截成只有这一条。
+#[test]
+fn prompt_during_empty_replay_appends_to_the_published_transcript() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Idle;
+    state.entries.push(AcpEntry::User("看看这个仓库".into()));
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+
+    note_prompt_sent(&mut state, "继续".into(), Vec::new());
+
+    assert!(!state.replaying_history);
+    assert!(matches!(
+        &state.entries[..],
+        [AcpEntry::User(first), AcpEntry::User(second)]
+            if first == "看看这个仓库" && second == "继续"
+    ));
+    assert_eq!(SessionLive::from_state(&state).history_len, Some(1));
+}
+
+/// 重放失败时草稿是空的或不完整的。失败不能把上一份已发布正文换成这份草稿。
+#[test]
+fn failed_history_replay_keeps_the_transcript_that_was_already_published() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Idle;
+    state.entries.push(AcpEntry::User("看看这个仓库".into()));
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    apply_event(
+        &mut state,
+        ConversationEvent::RestoreFailed(crate::acp_conn::ConversationRestoreFailure::Failed(
+            "session/load 中断".into(),
+        )),
+    );
+
+    assert!(!state.replaying_history);
+    assert!(matches!(state.phase, DaemonPhase::Dead));
+    assert!(matches!(&state.entries[..], [AcpEntry::User(text)] if text == "看看这个仓库"));
+    assert_eq!(SessionLive::from_state(&state).history_len, Some(1));
+}
+
 /// 恢复后用户不再发消息时，`replaying_history` 必须靠显式的结束信号收尾。
 /// 之前只有「下一条 prompt」会复位它，于是一条恢复后就闲置的会话会永远
 /// 挂着「重放中」，把是否有活跃回合、是否在执行工具和 GUI 的列表高度提示

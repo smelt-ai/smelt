@@ -167,7 +167,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::HistoryReplayStarted => {
             apply_history_replay_started(state, &mut outcome)
         }
-        ConversationEvent::HistoryReplayFinished => state.replaying_history = false,
+        ConversationEvent::HistoryReplayFinished => state.commit_replay(),
         ConversationEvent::RestoreFailed(failure) => apply_restore_failed(state, failure),
         ConversationEvent::UserChunk(text) => apply_user_chunk(state, &mut outcome, text),
         ConversationEvent::UserImage(image) => apply_user_image(state, &mut outcome, image),
@@ -366,7 +366,13 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
 
 fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut ApplyOutcome) {
     outcome.entries_offset = Some(0);
-    state.entries.clear();
+    // 草稿必须从空缓冲重建，否则重放会追加到旧正文上。已发布的那份留在
+    // baseline，这一帧不能把 history_len 报成 0。
+    if state.replay_baseline.is_none() {
+        state.replay_baseline = Some(std::mem::take(&mut state.entries));
+    } else {
+        state.entries.clear();
+    }
     state.tool_debug.clear();
     state.note_tool_debug_changed();
     state.replaying_history = true;
@@ -376,8 +382,8 @@ fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut Apply
 }
 
 fn apply_restore_failed(state: &mut AcpSessionState, failure: ConversationRestoreFailure) {
+    state.abandon_replay_scratch();
     super::force_end(state, AcpEndKind::RestoreFailed, failure.to_string());
-    state.replaying_history = false;
 }
 
 fn apply_user_chunk(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, text: String) {
@@ -445,7 +451,7 @@ fn apply_ready(
     }
     state.supports_image = supports_image;
     if !matches!(kind, ReadyKind::ResumedWithReplay) {
-        state.replaying_history = false;
+        state.abandon_replay_scratch();
     }
     match kind {
         ReadyKind::ResumedWithReplay => {}

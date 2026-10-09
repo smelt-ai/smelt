@@ -184,7 +184,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
     let mut reduced = AcpSessionState::default();
     for index in 0..5 {
         reduced
-            .entries
+            .entries_mut()
             .push(AcpEntry::User(format!("message-{index}")));
     }
     reduced.phase = DaemonPhase::Idle;
@@ -457,7 +457,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
         _ => panic!("expected prompt command"),
     }
     assert!(matches!(
-        slot.value.reduced.lock().unwrap().entries.last(),
+        slot.value.reduced.lock().unwrap().entries().last(),
         Some(AcpEntry::User(text)) if text == "from mobile"
     ));
 }
@@ -819,7 +819,7 @@ fn submitted_plugin_input_never_falls_back_to_local_acp() {
 
     assert_eq!(result.unwrap_err().message, "remote rejected");
     assert!(cmd_rx.try_recv().is_err(), "失败时不能偷偷投递给本地 ACP");
-    assert!(session.reduced.lock().unwrap().entries.is_empty());
+    assert!(session.reduced.lock().unwrap().entries().is_empty());
 }
 
 #[test]
@@ -843,7 +843,7 @@ fn automation_run_rejects_freeform_conversation_input() {
         result.unwrap_err().message,
         "automation Run input is daemon-owned"
     );
-    assert!(session.reduced.lock().unwrap().entries.is_empty());
+    assert!(session.reduced.lock().unwrap().entries().is_empty());
 }
 
 #[test]
@@ -1127,7 +1127,7 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
         _ => panic!("expected deferred prompt command"),
     }
     assert!(matches!(
-        slot.value.reduced.lock().unwrap().entries.last(),
+        slot.value.reduced.lock().unwrap().entries().last(),
         Some(AcpEntry::User(text)) if text == "after current turn"
     ));
 }
@@ -1175,7 +1175,7 @@ fn background_notice_while_idle_is_a_status_line() {
     assert!(state.turn_started_at_ms.is_none());
     assert!(matches!(state.phase, DaemonPhase::Idle));
     assert!(matches!(
-        state.entries.last(),
+        state.entries().last(),
         Some(AcpEntry::TaskNote(note)) if note.id == "bg-1" && note.exit_code == Some(1)
     ));
 }
@@ -1205,7 +1205,7 @@ fn background_notice_during_a_turn_does_not_queue_a_prompt() {
     assert_eq!(state.turn_started_at_ms, Some(1));
     assert!(matches!(state.phase, DaemonPhase::Thinking));
     assert!(matches!(
-        state.entries.last(),
+        state.entries().last(),
         Some(AcpEntry::TaskNote(note)) if note.exit_code == Some(1)
     ));
 }
@@ -1259,7 +1259,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     assert!(cmd_rx.try_recv().is_err());
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
     let state = slot.value.reduced.lock().unwrap();
-    assert!(state.entries.is_empty());
+    assert!(state.entries().is_empty());
     assert!(state.turn_started_at_ms.is_none());
     drop(state);
     let unaccepted = slot.value.unaccepted_prompt.lock().unwrap();
@@ -1296,7 +1296,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         cmd_rx.try_recv(),
         Ok(smelt_core::acp_conn::ConversationCommand::Prompt { .. })
     ));
-    assert!(slot.value.reduced.lock().unwrap().entries.is_empty());
+    assert!(slot.value.reduced.lock().unwrap().entries().is_empty());
     assert!(slot.value.unaccepted_prompt.lock().unwrap().is_some());
 
     requeue_unaccepted_prompt(&slot.value);
@@ -1307,7 +1307,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     {
         let state = slot.value.reduced.lock().unwrap();
         assert!(matches!(state.phase, DaemonPhase::Thinking));
-        assert!(state.entries.is_empty());
+        assert!(state.entries().is_empty());
         assert_eq!(
             state.status_line.as_deref(),
             Some("已排队，这一轮结束后再发")
@@ -1330,7 +1330,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         _ => panic!("idle provider must send the refused prompt once"),
     }
     assert!(
-        !slot.value.reduced.lock().unwrap().entries.iter().any(
+        !slot.value.reduced.lock().unwrap().entries().iter().any(
             |entry| matches!(entry, AcpEntry::Assistant { text, .. } if text.contains("回合失败"))
         ),
         "拒绝不能写成回合失败"
@@ -1397,7 +1397,7 @@ fn pi_prompt_is_echoed_only_after_it_is_accepted() {
     assert!(accept_unaccepted_prompt(&slot.value));
     let state = slot.value.reduced.lock().unwrap();
     assert!(matches!(
-        state.entries.last(),
+        state.entries().last(),
         Some(AcpEntry::User(text)) if text == "卡住了吗"
     ));
     assert!(matches!(state.phase, DaemonPhase::Thinking));
@@ -1606,7 +1606,7 @@ fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     assert_eq!(state.queued_steering, ["换个方向"]);
     assert!(
         !state
-            .entries
+            .entries()
             .iter()
             .any(|entry| matches!(entry, AcpEntry::User(text) if text == "换个方向")),
         "待插入不得进会话"
@@ -1694,7 +1694,7 @@ fn pi_session_commands_are_not_steered_during_a_turn() {
     let state = slot.value.reduced.lock().unwrap();
     assert_eq!(state.turn_started_at_ms, Some(1));
     assert!(state.queued_steering.is_empty());
-    assert!(state.entries.is_empty());
+    assert!(state.entries().is_empty());
 }
 
 #[test]
@@ -1748,7 +1748,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
     reduced.completed_unread = true;
-    reduced.entries.push(AcpEntry::ToolCall {
+    reduced.entries_mut().push(AcpEntry::ToolCall {
         id: "shell".into(),
         title: "Reading shell output".into(),
         kind: ToolKind::Execute,
@@ -2038,7 +2038,7 @@ fn watch_on_unknown_session_just_disconnects() {
 #[test]
 fn watch_delivers_initial_snapshot_matching_to_snapshot() {
     let mut reduced = AcpSessionState::default();
-    reduced.entries.push(AcpEntry::User("hi".into()));
+    reduced.entries_mut().push(AcpEntry::User("hi".into()));
     reduced.phase = DaemonPhase::Idle;
     let expected = reduced.to_snapshot(false);
 
@@ -2077,7 +2077,7 @@ fn watch_delivers_initial_snapshot_matching_to_snapshot() {
 #[test]
 fn watch_registration_is_serialized_with_snapshot_push() {
     let mut reduced = AcpSessionState::default();
-    reduced.entries.push(AcpEntry::User("initial".into()));
+    reduced.entries_mut().push(AcpEntry::User("initial".into()));
     reduced.phase = DaemonPhase::Idle;
 
     let acp_sessions = new_test_acp_sessions();
@@ -2119,7 +2119,7 @@ fn watch_registration_is_serialized_with_snapshot_push() {
         }
     }
 
-    reduced_guard.entries.push(AcpEntry::Assistant {
+    reduced_guard.entries_mut().push(AcpEntry::Assistant {
         text: "arrived-during-attach".into(),
         thought: false,
     });
@@ -2146,7 +2146,7 @@ fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
     let mut reduced = AcpSessionState::default();
     for index in 0..5 {
         reduced
-            .entries
+            .entries_mut()
             .push(AcpEntry::User(format!("message-{index}")));
     }
     let acp_sessions = new_test_acp_sessions();
@@ -2322,7 +2322,7 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
 fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
     let mut reduced = AcpSessionState::default();
     for id in ["tool-a", "tool-b"] {
-        reduced.entries.push(AcpEntry::ToolCall {
+        reduced.entries_mut().push(AcpEntry::ToolCall {
             id: id.into(),
             title: id.into(),
             kind: ToolKind::Execute,
@@ -2747,8 +2747,12 @@ fn handoff_snapshot_keeps_the_open_turn_and_omits_debug_sidecars() {
     let (_event_tx, event_rx) = smol::channel::unbounded();
     let mut reduced = AcpSessionState::default();
     // 已提交的正文留在 agent 自己的会话文件里，交接只带还没写完的这一轮。
-    reduced.entries.push(AcpEntry::User("以前的话".into()));
-    reduced.entries.push(AcpEntry::User("继续这条对话".into()));
+    reduced
+        .entries_mut()
+        .push(AcpEntry::User("以前的话".into()));
+    reduced
+        .entries_mut()
+        .push(AcpEntry::User("继续这条对话".into()));
     reduced.phase = smelt_core::daemon_state::DaemonPhase::Thinking;
     reduced.turn_started_at_ms = Some(1);
     reduced.tool_debug.insert(
@@ -2861,7 +2865,7 @@ fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
         .reduced
         .lock()
         .unwrap()
-        .entries
+        .entries_mut()
         .push(AcpEntry::ToolCall {
             id: "active-tool".into(),
             title: "running".into(),
@@ -2992,7 +2996,7 @@ fn upgrade_returns_busy_before_touching_handoff_for_active_acp_turn() {
 fn daemon_phase_distinguishes_executing_tool_from_thinking() {
     let mut running_with_tool = AcpSessionState::default();
     running_with_tool.phase = DaemonPhase::Thinking;
-    running_with_tool.entries.push(AcpEntry::ToolCall {
+    running_with_tool.entries_mut().push(AcpEntry::ToolCall {
         id: "t1".into(),
         title: "Read".into(),
         kind: ToolKind::Read,
@@ -3011,7 +3015,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
 
     let mut idle_with_tool = AcpSessionState::default();
     idle_with_tool.phase = DaemonPhase::Idle;
-    idle_with_tool.entries.push(AcpEntry::ToolCall {
+    idle_with_tool.entries_mut().push(AcpEntry::ToolCall {
         id: "late-tool".into(),
         title: "navigate".into(),
         kind: ToolKind::Fetch,
@@ -3044,7 +3048,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     );
     completed.turn_outcome = Some(AcpTurnOutcome::Succeeded);
 
-    completed.entries.push(AcpEntry::ToolCall {
+    completed.entries_mut().push(AcpEntry::ToolCall {
         id: "late-tool".into(),
         title: "navigate".into(),
         kind: ToolKind::Fetch,
@@ -3452,7 +3456,7 @@ fn acp_session_with_entries_can_fallback_to_runtime_history_id() {
     let mut reduced = smelt_core::acp_session::AcpSessionState::default();
     reduced.acp_session_id = Some("runtime-history".into());
     reduced
-        .entries
+        .entries_mut()
         .push(smelt_core::acp_chat::AcpEntry::User("hello".into()));
 
     assert_eq!(
@@ -3496,13 +3500,13 @@ fn requested_history_id_wins_when_dead_session_is_relaunched() {
 fn rewind_action_gates_on_capability_phase_and_target() {
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
-    reduced.entries.push(AcpEntry::User("first".into()));
-    reduced.entries.push(AcpEntry::Assistant {
+    reduced.entries_mut().push(AcpEntry::User("first".into()));
+    reduced.entries_mut().push(AcpEntry::Assistant {
         text: "answer".into(),
         thought: false,
     });
-    reduced.entries.push(AcpEntry::User("same".into()));
-    reduced.entries.push(AcpEntry::User("same".into()));
+    reduced.entries_mut().push(AcpEntry::User("same".into()));
+    reduced.entries_mut().push(AcpEntry::User("same".into()));
     let session = make_acp_session("acp-rewind-gates", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
@@ -3560,7 +3564,25 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     assert_eq!(rejected.unwrap_err(), "rewind requires an idle session");
     session.reduced.lock().unwrap().phase = DaemonPhase::Idle;
 
-    // 5) 编辑重发只允许最后一条真实用户消息；旧消息应走独立的分叉对话功能。
+    // 5) 历史重放中：草稿还在重建，GUI 的下标是按已发布正文算的，对不上草稿。
+    //    相位虽是 Idle，也必须等重放收尾，不能拿草稿去校验或截断。
+    smelt_core::acp_session::apply_event(
+        &mut session.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::HistoryReplayStarted,
+    );
+    let rejected = apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 3 },
+        &new_event_hub(),
+    );
+    assert_eq!(
+        rejected.unwrap_err(),
+        "rewind requires history replay to finish"
+    );
+    assert!(cmd_rx.try_recv().is_err());
+    session.reduced.lock().unwrap().abandon_replay_scratch();
+
+    // 6) 编辑重发只允许最后一条真实用户消息；旧消息应走独立的分叉对话功能。
     let rejected = apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 0 },
@@ -3572,7 +3594,7 @@ fn rewind_action_gates_on_capability_phase_and_target() {
     );
     assert!(cmd_rx.try_recv().is_err());
 
-    // 6) 合法目标：第 2 条 "same"（下标 3），occurrence 必须算出 1。
+    // 7) 合法目标：第 2 条 "same"（下标 3），occurrence 必须算出 1。
     apply_acp_user_action(
         &session,
         smelt_core::acp_session::AcpUserAction::RewindToMessage { entry_index: 3 },
