@@ -7055,9 +7055,8 @@ mod tests {
         .unwrap();
 
         let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
-        stream
-            .write_all(b"{\"op\":\"wait\",\"id\":\"bg-1\"}\n")
-            .unwrap();
+        let wait = serde_json::json!({"op": "wait", "id": started["id"]});
+        stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         let finished: serde_json::Value = serde_json::from_str(line.trim()).unwrap();

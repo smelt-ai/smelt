@@ -287,7 +287,7 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 			label: "后台输出",
 			description: "按字节偏移读取一个后台任务的日志。用返回的 nextOffset 翻页，单次最多 64 KiB。",
 			parameters: Type.Object({
-				id: Type.String({ description: "任务 id，例如 bg-1" }),
+				id: Type.String({ description: "任务 id，例如 bg-3f9a2c71" }),
 				offset: Type.Optional(Type.Number({ description: "起始字节，默认 0" })),
 				limitBytes: Type.Optional(Type.Number({ description: "本次最多读取的字节数，默认 16384" })),
 			}),

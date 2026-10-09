@@ -99,7 +99,6 @@ struct Inner {
     stop: AtomicBool,
     root: PathBuf,
     socket_path: PathBuf,
-    next_id: AtomicU64,
     mu: Mutex<State>,
     cv: Condvar,
     events: smol::channel::Sender<ConversationEvent>,
@@ -154,7 +153,6 @@ impl BackgroundSupervisor {
             stop: AtomicBool::new(false),
             root,
             socket_path,
-            next_id: AtomicU64::new(1),
             mu: Mutex::new(State {
                 tasks: Vec::new(),
                 last_log_publish: None,
@@ -515,14 +513,7 @@ fn start_task(
     state
         .tasks
         .retain(|task| is_running(task.status) || !task.ui_published || !task.model_delivered);
-    let id = format!("bg-{}", inner.next_id.fetch_add(1, Ordering::Relaxed));
-    let log_path = inner.root.join(format!("{id}.log"));
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|error| format!("无法创建任务日志：{error}"))?;
-    drop(log);
+    let (id, log_path) = create_task_log(&inner.root)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -585,6 +576,30 @@ fn start_task(
         format!("已在后台启动 {id}：{title}"),
         serde_json::json!({"id": id, "status": "running"}),
     ))
+}
+
+/// 分配任务 id 并建好它的日志文件。
+///
+/// id 是随机的，不自增：自增要跨宿主重启不撞号就得持久化计数，而任务本身随宿主
+/// 退出就停了，不值得为它落库。随机 id 让重启前的旧 id 对不上任何新任务，查询时
+/// 明确报「没有这个任务」。8 位十六进制对模型足够短；同一宿主内靠 `create_new`
+/// 兜住极小概率的撞号。
+fn create_task_log(root: &Path) -> Result<(String, PathBuf), String> {
+    for _ in 0..8 {
+        let random = uuid::Uuid::new_v4().simple().to_string();
+        let id = format!("bg-{}", &random[..8]);
+        let log_path = root.join(format!("{id}.log"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&log_path)
+        {
+            Ok(_) => return Ok((id, log_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("无法创建任务日志：{error}")),
+        }
+    }
+    Err("无法分配不重复的任务 id".to_string())
 }
 
 fn output_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String> {
@@ -1866,16 +1881,20 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true);
-        assert_eq!(started["id"], "bg-1");
+        assert!(
+            id.strip_prefix("bg-").is_some_and(|rest| rest.len() == 8),
+            "{started}"
+        );
         assert_eq!(started["status"], "running");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["ok"], true, "{finished}");
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         assert_eq!(finished["tasks"][0]["exitCode"], 0, "{finished}");
         let page = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "output", "id": "bg-1", "offset": 0, "limitBytes": 3}),
+            serde_json::json!({"op": "output", "id": id, "offset": 0, "limitBytes": 3}),
         );
         assert_eq!(page["output"], "rea");
         assert_eq!(page["nextOffset"], 3);
@@ -1889,13 +1908,14 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let stopped = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "stop", "id": "bg-1"}),
+            serde_json::json!({"op": "stop", "id": id}),
         );
         assert_eq!(stopped["ok"], true, "{stopped}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "stopped", "{finished}");
     }
 
@@ -1906,12 +1926,13 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "sleep 30", "title": "会被杀掉"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let pid = supervisor.inner.mu.lock().unwrap().tasks[0]
             .pgid
             .expect("pid");
         unsafe { libc::kill(-pid, libc::SIGKILL) };
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_ne!(finished["tasks"][0]["status"], "running", "{finished}");
     }
 
@@ -1927,6 +1948,7 @@ mod tests {
                 "title": "孙进程握着管道",
             }),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let pgid = supervisor.inner.mu.lock().unwrap().tasks[0]
             .pgid
@@ -1938,7 +1960,7 @@ mod tests {
             }
         }
         let _kill = KillGroup(pgid);
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         let elapsed = started_at.elapsed();
         assert!(elapsed < Duration::from_secs(2), "{elapsed:?} {finished}");
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
@@ -2034,11 +2056,12 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "sleep 30", "title": "还在跑"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let began = Instant::now();
         let snapshot = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "wait", "id": "bg-1"}),
+            serde_json::json!({"op": "wait", "id": id}),
         );
         assert!(began.elapsed() < Duration::from_secs(2), "{snapshot}");
         assert_eq!(snapshot["tasks"][0]["status"], "running", "{snapshot}");
@@ -2051,11 +2074,12 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let began = Instant::now();
         let finished = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "wait", "id": "bg-1", "timeoutMs": 5_000}),
+            serde_json::json!({"op": "wait", "id": id, "timeoutMs": 5_000}),
         );
         assert!(began.elapsed() < Duration::from_secs(2), "{finished}");
         assert_eq!(finished["ok"], true, "{finished}");
@@ -2070,11 +2094,12 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "sleep 30", "title": "还在跑"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let began = Instant::now();
         let snapshot = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "wait", "id": "bg-1", "timeoutMs": 300}),
+            serde_json::json!({"op": "wait", "id": id, "timeoutMs": 300}),
         );
         let elapsed = began.elapsed();
         assert_eq!(snapshot["tasks"][0]["status"], "running", "{snapshot}");
@@ -2097,8 +2122,9 @@ mod tests {
                 "timeoutSeconds": 1,
             }),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "timed_out", "{finished}");
     }
 
@@ -2109,11 +2135,12 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         let notice = outbound.try_recv().expect("完成必须留下状态");
-        assert_eq!(notice["id"], "bg-1");
+        assert_eq!(notice["id"], id.as_str());
         assert_eq!(notice["status"], "completed");
         assert_eq!(notice["exitCode"], 0);
         assert!(
@@ -2138,8 +2165,9 @@ mod tests {
                 "watch": true,
             }),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         assert!(
             outbound.try_recv().is_err(),
@@ -2147,7 +2175,7 @@ mod tests {
         );
         let released = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "unwatch", "id": "bg-1", "consumed": true}),
+            serde_json::json!({"op": "unwatch", "id": id, "consumed": true}),
         );
         assert_eq!(released["ok"], true, "{released}");
         assert!(outbound.try_recv().is_err(), "{released}");
@@ -2165,16 +2193,17 @@ mod tests {
                 "watch": true,
             }),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         let released = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "unwatch", "id": "bg-1", "consumed": false}),
+            serde_json::json!({"op": "unwatch", "id": id, "consumed": false}),
         );
         assert_eq!(released["ok"], true, "{released}");
         let notice = outbound.try_recv().expect("工具没拿走结果时要补一次通知");
-        assert_eq!(notice["id"], "bg-1");
+        assert_eq!(notice["id"], id.as_str());
         assert_eq!(notice["exitCode"], 0);
         assert!(outbound.try_recv().is_err(), "不能通知两次");
     }
@@ -2187,17 +2216,18 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
         let stopped = call(
             supervisor.socket_path(),
-            serde_json::json!({"op": "stop", "id": "bg-1"}),
+            serde_json::json!({"op": "stop", "id": id}),
         );
         assert_eq!(stopped["ok"], true, "{stopped}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "stopped", "{finished}");
         let completion = listen.next();
         assert_eq!(completion["op"], "completion");
-        assert_eq!(completion["id"], "bg-1");
+        assert_eq!(completion["id"], id.as_str());
         assert_eq!(completion["status"], "stopped");
         assert_eq!(completion["wake"], false, "{completion}");
     }
@@ -2210,11 +2240,12 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         let completion = listen.next();
-        assert_eq!(completion["id"], "bg-1");
+        assert_eq!(completion["id"], id.as_str());
         assert_eq!(completion["exitCode"], 0);
         assert_eq!(completion["wake"], true);
         assert!(
@@ -2235,12 +2266,13 @@ mod tests {
             supervisor.socket_path(),
             serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         let completion = second.next();
         assert_eq!(completion["op"], "completion");
-        assert_eq!(completion["id"], "bg-1");
+        assert_eq!(completion["id"], id.as_str());
         assert_eq!(completion["exitCode"], 0);
         assert!(
             second.try_next(Duration::from_millis(500)).is_none(),
@@ -2265,8 +2297,9 @@ mod tests {
                 "watch": true,
             }),
         );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
         assert_eq!(started["ok"], true, "{started}");
-        let finished = until_settled(supervisor.socket_path(), "bg-1");
+        let finished = until_settled(supervisor.socket_path(), &id);
         assert_eq!(finished["tasks"][0]["status"], "completed", "{finished}");
         assert!(
             outbound.try_recv().is_err(),
@@ -2276,7 +2309,7 @@ mod tests {
         drop(listen);
         let notice = recv_outbound(&outbound, Duration::from_secs(2))
             .expect("监听断开后，工具没拿走的结果要补一次状态");
-        assert_eq!(notice["id"], "bg-1");
+        assert_eq!(notice["id"], id.as_str());
         assert_eq!(notice["exitCode"], 0);
         assert!(
             recv_outbound(&outbound, Duration::from_millis(300)).is_none(),
@@ -2284,7 +2317,7 @@ mod tests {
         );
         let mut next = Listen::connect(supervisor.socket_path());
         let completion = next.next();
-        assert_eq!(completion["id"], "bg-1");
+        assert_eq!(completion["id"], id.as_str());
         assert_eq!(completion["wake"], true);
         assert!(
             next.try_next(Duration::from_millis(500)).is_none(),
@@ -2294,6 +2327,26 @@ mod tests {
             outbound.try_recv().is_err(),
             "状态行不能因为下一条连接再出现一次"
         );
+    }
+
+    /// id 不能自增：计数器只活在宿主进程里，宿主重启后会从头再数，模型手里重启前的
+    /// id 就会悄悄指到新宿主的同号任务上。随机 id 让旧 id 对不上任何任务、明确报错。
+    #[test]
+    fn task_ids_do_not_repeat_across_host_instances() {
+        let start = serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"});
+        let (before_restart, _first_events) = supervisor();
+        let (after_restart, _second_events) = supervisor();
+        let old = call(before_restart.socket_path(), start.clone());
+        let new = call(after_restart.socket_path(), start);
+        assert_eq!(old["ok"], true, "{old}");
+        assert_eq!(new["ok"], true, "{new}");
+        assert_ne!(old["id"], new["id"]);
+
+        let stale = call(
+            after_restart.socket_path(),
+            serde_json::json!({"op": "output", "id": old["id"]}),
+        );
+        assert_eq!(stale["ok"], false, "{stale}");
     }
 
     #[test]
