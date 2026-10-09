@@ -26,7 +26,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                     should_persist,
                     include_runtime_debug,
                     tool_debug_generation_sent,
-                    true,
+                    SnapshotProjection::FULL,
                 ))
             },
         ),
@@ -414,7 +414,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
             0,
             "acp-action",
             "acp-test",
-            true,
+            SnapshotProjection::FULL,
         )
         .unwrap(),
     );
@@ -2173,6 +2173,96 @@ fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
 }
 
+fn reduced_with_debug_sidecars() -> AcpSessionState {
+    let mut reduced = AcpSessionState::default();
+    reduced.entries_mut().push(AcpEntry::User("hi".into()));
+    reduced.tool_debug.insert(
+        "tool-1".into(),
+        smelt_core::acp_session::ToolCallDebug::default(),
+    );
+    reduced.tool_debug_generation = 1;
+    reduced.runtime_debug = smelt_core::acp_session::RuntimeDebug {
+        version: 3,
+        source: "pi_runtime_debug".into(),
+        model_calls: vec![smelt_core::acp_session::RuntimeDebugModelCall {
+            sequence: 1,
+            payload: serde_json::json!({"messages": [{"content": "huge"}]}),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    reduced
+}
+
+#[test]
+fn acp_snapshot_without_debug_omits_the_debug_sidecars() {
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-no-debug", || {
+        make_acp_session_value("acp-no-debug", reduced_with_debug_sidecars())
+    });
+    let read = |request: serde_json::Value| {
+        let (server, client) = UnixStream::pair().unwrap();
+        handle_acp_snapshot(server, &request, &acp_sessions);
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()
+    };
+
+    let full = read(serde_json::json!({"id": "acp-no-debug"}));
+    assert!(full["snapshot"].get("runtime_debug").is_some());
+    assert!(full["snapshot"].get("tool_debug").is_some());
+
+    let lean = read(serde_json::json!({"id": "acp-no-debug", "include_debug": false}));
+    assert!(lean["snapshot"].get("runtime_debug").is_none());
+    assert!(lean["snapshot"].get("tool_debug").is_none());
+    assert_eq!(lean["snapshot"]["entries"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn watch_without_debug_never_streams_the_debug_sidecars() {
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-watch-lean", || {
+        make_acp_session_value("acp-watch-lean", reduced_with_debug_sidecars())
+    });
+
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let sessions_for_watch = Arc::clone(&acp_sessions);
+    let watch = thread::spawn(move || {
+        handle_acp_watch(
+            server,
+            reader,
+            &serde_json::json!({"id": "acp-watch-lean", "include_debug": false}),
+            sessions_for_watch,
+        );
+    });
+
+    let mut lines = BufReader::new(client.try_clone().unwrap());
+    let mut initial = String::new();
+    lines.read_line(&mut initial).unwrap();
+    let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+    assert_eq!(initial["snapshot"]["entries"].as_array().unwrap().len(), 1);
+    assert!(initial["snapshot"].get("runtime_debug").is_none());
+    assert!(initial["snapshot"].get("tool_debug").is_none());
+
+    // 模型调用把 runtime debug 和工具参数都改了：桌面控制连接会收到整表，
+    // 不要调试数据的旁观者仍然只能收到正文。
+    slot.value.reduced.lock().unwrap().tool_debug_generation = 2;
+    push_acp_snapshot_with_runtime_debug_for_test(&slot.value);
+    let mut changed = String::new();
+    lines.read_line(&mut changed).unwrap();
+    let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
+    assert!(changed["snapshot"].get("runtime_debug").is_none());
+    assert!(changed["snapshot"].get("tool_debug").is_none());
+
+    drop(lines);
+    drop(client);
+    watch.join().unwrap();
+}
+
 #[test]
 fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
     let sess = make_acp_session("acp-2", AcpSessionState::default());
@@ -2420,8 +2510,16 @@ fn kill_removes_session_and_closes_connections() {
 
     let (c_server, c_client) = UnixStream::pair().unwrap();
     slot.value.out.lock().unwrap().client = Some(
-        acp_snapshot_link_for_slot(&slot, c_server, Vec::new(), 0, "acp-3", "acp-test", true)
-            .unwrap(),
+        acp_snapshot_link_for_slot(
+            &slot,
+            c_server,
+            Vec::new(),
+            0,
+            "acp-3",
+            "acp-test",
+            SnapshotProjection::FULL,
+        )
+        .unwrap(),
     );
 
     let (server, client) = UnixStream::pair().unwrap();

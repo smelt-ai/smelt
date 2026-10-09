@@ -2687,6 +2687,37 @@ async fn dispatch_mobile_action(
 }
 
 /// 后台任务：监听 smeltd 的 acp_watch 推送
+// 手机只渲染正文。daemon 的调试 sidecar 里装着每次模型调用的完整 provider
+// payload，图片会在每次调用里重复一份：一个带十几张截图的会话快照能到 90MB+，
+// 经 relay 传不完，心跳 pong 排在它后面超时，手机断线重连再要一份，死循环。
+fn acp_watch_request(
+    session_id: &str,
+    history_session_id: Option<&str>,
+    known_entries: Option<usize>,
+    snapshot_revision: Option<u64>,
+    tail_limit: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "op": DaemonOperation::AcpWatch,
+        "id": session_id,
+        "history_session_id": history_session_id,
+        "known_entries": known_entries,
+        "snapshot_revision": snapshot_revision,
+        "tail_limit": tail_limit,
+        "include_debug": false,
+    })
+}
+
+fn acp_history_request(session_id: &str, before_offset: usize, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "op": DaemonOperation::AcpSnapshot,
+        "id": session_id,
+        "before": before_offset,
+        "limit": limit,
+        "include_debug": false,
+    })
+}
+
 async fn acp_watch_loop(
     session_id: String,
     history_session_id: Option<String>,
@@ -2703,15 +2734,13 @@ async fn acp_watch_loop(
     };
     let (reader, mut writer) = stream.into_split();
 
-    // 发送 acp_watch 请求
-    let req = serde_json::json!({
-        "op": DaemonOperation::AcpWatch,
-        "id": session_id,
-        "history_session_id": history_session_id,
-        "known_entries": known_entries,
-        "snapshot_revision": snapshot_revision,
-        "tail_limit": tail_limit,
-    });
+    let req = acp_watch_request(
+        &session_id,
+        history_session_id.as_deref(),
+        known_entries,
+        snapshot_revision,
+        tail_limit,
+    );
     let req_line = format!("{req}\n");
     if writer.write_all(req_line.as_bytes()).await.is_err() {
         return;
@@ -2802,12 +2831,7 @@ async fn read_acp_history(
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
     let (reader, mut writer) = stream.into_split();
-    let request = serde_json::json!({
-        "op": DaemonOperation::AcpSnapshot,
-        "id": session_id,
-        "before": before_offset,
-        "limit": limit,
-    });
+    let request = acp_history_request(session_id, before_offset, limit);
     let req_line = format!("{request}\n");
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -2957,6 +2981,20 @@ mod tests {
 
     /// 手机只认 `section` + `target` 两个字段来分组和分派。这两个名字一旦漂了，
     /// 选择器会静默变成空列表——所以把下发的 JSON 形状钉死在测试里。
+    #[test]
+    fn mobile_snapshot_requests_leave_the_debug_sidecars_on_the_desktop() {
+        let watch = acp_watch_request("acp-1", Some("history-1"), Some(3), Some(9), 100);
+        assert_eq!(watch["op"], "acp_watch");
+        assert_eq!(watch["history_session_id"], "history-1");
+        assert_eq!(watch["tail_limit"], 100);
+        assert_eq!(watch["include_debug"], false);
+
+        let history = acp_history_request("acp-1", 40, 100);
+        assert_eq!(history["op"], "acp_snapshot");
+        assert_eq!(history["before"], 40);
+        assert_eq!(history["include_debug"], false);
+    }
+
     #[test]
     fn launch_actions_carry_their_section_and_target() {
         use smelt_core::new_session::{

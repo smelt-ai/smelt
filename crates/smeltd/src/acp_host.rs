@@ -36,6 +36,9 @@ use std::collections::BTreeSet;
 //       写线程还没把上一份写完时，后到的变化并进同一份，不另排一条字节队列。
 //       同 id 只允许一个控制连接，第二次 open 顶掉前一个。
 //   {"op":"acp_watch","id":".."} → 只读镜像，会话必须已存在，可多个并存。
+//     `acp_watch` / `acp_snapshot` 可带 `"include_debug": false`：不要工具参数和
+//     runtime debug sidecar。后者含每次模型调用的完整 provider payload（图片会在
+//     每次调用里重复一份），手机这类只看正文的旁观者不该为它付带宽。
 //   {"op":"acp_kill","id":".."} → 回 {"ok":true}，杀子进程、从表里摘掉、
 //     踢掉所有 client/watcher。
 //
@@ -684,6 +687,23 @@ pub(crate) fn spawn_acp_snapshot_link(
     })
 }
 
+/// 这条快照连接要哪些部分。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SnapshotProjection {
+    /// false 时只带进行中的回合，历史由连接方自己分页读。
+    pub history: bool,
+    /// 工具参数表和 runtime debug sidecar。只给桌面调试面板用。
+    pub debug: bool,
+}
+
+#[cfg(test)]
+impl SnapshotProjection {
+    pub(crate) const FULL: Self = Self {
+        history: true,
+        debug: true,
+    };
+}
+
 pub(crate) fn acp_snapshot_link_for_slot(
     slot: &Arc<AcpSlot<AcpSession>>,
     stream: UnixStream,
@@ -691,7 +711,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
     tool_debug_generation_sent: u64,
     id: &str,
     kind: &'static str,
-    include_history: bool,
+    projection: SnapshotProjection,
 ) -> std::io::Result<AcpSnapshotLink> {
     let encode_slot = Arc::downgrade(slot);
     let detach_slot = Arc::downgrade(slot);
@@ -710,7 +730,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
                     should_persist,
                     include_runtime_debug,
                     tool_debug_generation_sent,
-                    include_history,
+                    projection,
                 ))
             },
         ),
@@ -832,12 +852,17 @@ pub(crate) fn encode_acp_snapshot(
     should_persist: bool,
     include_runtime_debug: bool,
     tool_debug_generation_sent: u64,
-    include_history: bool,
+    projection: SnapshotProjection,
 ) -> EncodedAcpSnapshot {
+    let SnapshotProjection {
+        history: include_history,
+        debug: include_debug,
+    } = projection;
     let (mut snap, live, tool_debug_generation, included_tool_debug) = {
         let reduced = sess.reduced.lock().unwrap();
         let tool_debug_generation = reduced.tool_debug_generation;
-        let included_tool_debug = tool_debug_generation != tool_debug_generation_sent;
+        let included_tool_debug =
+            include_debug && tool_debug_generation != tool_debug_generation_sent;
         let live = if include_history {
             smelt_core::acp_session::SessionLive::from_snapshot(&reduced.to_snapshot(false))
         } else {
@@ -850,7 +875,7 @@ pub(crate) fn encode_acp_snapshot(
             let end = history_len.saturating_add(live.open_turn.len());
             reduced.to_snapshot_range(should_persist, history_len, end)
         };
-        if !include_runtime_debug {
+        if !(include_runtime_debug && include_debug) {
             snapshot.runtime_debug = None;
         }
         if !included_tool_debug {
@@ -3058,7 +3083,10 @@ pub(crate) fn handle_acp_open(
                 tool_debug_generation,
                 &id,
                 "acp-client",
-                !req.omit_history,
+                SnapshotProjection {
+                    history: !req.omit_history,
+                    debug: true,
+                },
             ) else {
                 return;
             };
@@ -3377,6 +3405,7 @@ pub(crate) fn handle_acp_watch(
     if id.is_empty() {
         return;
     }
+    let include_debug = request_includes_debug(v);
     let Some(slot) = acp_sessions.get(&id) else {
         return;
     };
@@ -3413,6 +3442,9 @@ pub(crate) fn handle_acp_watch(
         let mut snapshot = reduced.to_snapshot_since(false, offset);
         snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
         drop(reduced);
+        if !include_debug {
+            omit_debug_sidecars(&mut snapshot);
+        }
         set_conversation_snapshot(sess, &mut snapshot);
         let mut initial = serde_json::json!({ "snapshot": snapshot })
             .to_string()
@@ -3425,7 +3457,10 @@ pub(crate) fn handle_acp_watch(
             tool_debug_generation,
             &id,
             "acp-watcher",
-            true,
+            SnapshotProjection {
+                history: true,
+                debug: include_debug,
+            },
         ) else {
             return;
         };
@@ -3443,6 +3478,16 @@ pub(crate) fn handle_acp_watch(
         .unwrap()
         .watchers
         .retain(|w| w.fd != attached_fd);
+}
+
+/// 请求没写就照旧带调试 sidecar：桌面的调试面板靠它。
+fn request_includes_debug(request: &serde_json::Value) -> bool {
+    request["include_debug"].as_bool().unwrap_or(true)
+}
+
+fn omit_debug_sidecars(snapshot: &mut smelt_core::acp_session::ConversationSnapshot) {
+    snapshot.tool_debug = None;
+    snapshot.runtime_debug = None;
 }
 
 /// One-shot bounded history read used by mobile upward pagination. Unlike `acp_watch`,
@@ -3465,6 +3510,7 @@ pub(crate) fn handle_acp_snapshot(
         .map(|n| n as usize)
         .unwrap_or(100)
         .clamp(1, 500);
+    let include_debug = request_includes_debug(v);
     let Some(snapshot) = acp_sessions.with_current(id, &slot, |session| {
         let _output_gate = session.output_gate.lock().unwrap();
         let reduced = session.reduced.lock().unwrap();
@@ -3473,6 +3519,9 @@ pub(crate) fn handle_acp_snapshot(
         let mut snapshot = reduced.to_snapshot_range(false, start, end);
         snapshot.snapshot_revision = session.snapshot_revision.load(Ordering::SeqCst);
         drop(reduced);
+        if !include_debug {
+            omit_debug_sidecars(&mut snapshot);
+        }
         set_conversation_snapshot(session, &mut snapshot);
         snapshot
     }) else {
@@ -4026,7 +4075,7 @@ mod snapshot_link_tests {
             0,
             "acp-burst",
             "acp-client",
-            true,
+            SnapshotProjection::FULL,
         )
         .unwrap();
         slot.value.out.lock().unwrap().client = Some(link);
