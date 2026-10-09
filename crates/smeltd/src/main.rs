@@ -1983,7 +1983,7 @@ impl Dimensions for DaemonTermSize {
 fn daemon_term_config() -> TermConfig {
     TermConfig {
         scrolling_history: TERM_HISTORY,
-        ..TermConfig::default()
+        ..smelt_core::term_config::emulation_config()
     }
 }
 

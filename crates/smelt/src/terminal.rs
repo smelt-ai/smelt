@@ -8,7 +8,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
@@ -2608,18 +2607,16 @@ pub(crate) use smelt_core::daemon_state::{
 };
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
-/// - kitty_keyboard：默认 false 时 alacritty 会把 `CSI > 1 u` 静默丢掉
-///   （push_keyboard_mode 里直接 return），DISAMBIGUATE_ESC_CODES 永远置不上，
-///   Shift+Enter 也就永远退化成裸 Enter。见 kitty_keyboard_mode / keystroke_to_bytes。
+/// - 解析语义（kitty_keyboard 等）来自 `smelt_core::term_config`，与 smeltd 的权威
+///   Term 同源；GUI 不得在这里单独改解析语义。
 /// - semantic_escape_chars：双击选词的断词字符。默认集合只有半角标点，中文场景下
 ///   全角标点也该断词（双击「数据层：字段」不该整段连选），追加常用全角标点。
 fn term_config() -> Config {
     Config {
-        kitty_keyboard: true,
         semantic_escape_chars: format!(
             "{SEMANTIC_ESCAPE_CHARS}：，。；！？、（）「」『』【】《》“”‘’"
         ),
-        ..Config::default()
+        ..smelt_core::term_config::emulation_config()
     }
 }
 
@@ -2913,21 +2910,13 @@ fn open_request(
     })
 }
 
-/// reattach 快照整段灌进客户端 Term 之后：贴底 + 补鼠标模式位。
+/// reattach 快照整段灌进客户端 Term 之后：贴底，避免停在 history 中间。
 ///
-/// 快照灌完后的 reattach 收尾。
-///
-/// - 贴底：避免停在 history 中间。
-/// - `\x1b[0m`：清 SGR 状态机，降低「快照末半截真彩参数当正文」
-///   （顶行出现 `48;2;…m` 碎片）的概率。
-/// - **不再本地伪造 MOUSE_MODE**：以前补 `1006h/1002h` 只改客户端 Term，
-///   进程侧若未开鼠标，滚轮按 SGR 发出去会被 Ignored →「恢复后滚不动」。
-///   无 mouse 的备用屏改走方向键兜底（见 `scroll_wheel_plan`）。
-fn finalize_reattach_term(term: &mut Term<EventProxy>, parser: &mut Processor) {
+/// 只动视口，**不改任何解析状态**：keyframe 是守护权威 Term 的完整状态（模式、当前
+/// SGR、光标），实时字节是对它的增量；本地再补 `\x1b[0m` 或伪造模式位都会让副本
+/// 偏离真相（以前清 SGR，紧随其后的彩色输出就按默认色画）。
+fn finalize_reattach_term(term: &mut Term<EventProxy>) {
     term.scroll_display(Scroll::Bottom);
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        parser.advance(term, b"\x1b[0m");
-    }));
 }
 
 impl Terminal {
@@ -3056,7 +3045,7 @@ impl Terminal {
             // 每个字节仍然逐一喂给 osc（状态机不断流），只是根据这个字节的绝对位置
             // 决定它触发的通知该进哪个槽，边界处不会解析错位。
             let sink: Mutex<Option<String>> = Mutex::new(None);
-            // reattach 快照是否已整段喂完；越过边界时补一次「贴底 + 鼠标位兜底」。
+            // reattach 快照是否已整段喂完；越过边界时贴底一次。
             let mut replay_finalized = replay_len == 0;
             loop {
                 match reader.read(&mut buf) {
@@ -3109,10 +3098,10 @@ impl Terminal {
                                 start = end;
                             }
                             parser.advance(&mut *term, &buf[start..n]);
-                            // 快照刚灌完：贴底 + 清 SGR。不再为「jolt 半屏」再贴一次。
+                            // 快照刚灌完：贴底。不再为「jolt 半屏」再贴一次。
                             if !replay_finalized && bytes_seen >= replay_len {
                                 replay_finalized = true;
-                                finalize_reattach_term(&mut term, &mut parser);
+                                finalize_reattach_term(&mut term);
                             }
                         }
                         // 喂完这批立刻请求一次重绘（Zed 式：内容生产者驱动重绘）。
@@ -5233,6 +5222,24 @@ mod event_proxy_answers_tests {
             !term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES),
             "TUI 退出后应还原，否则 shell 里 Shift+Enter 会吐出 `[13;2u` 乱码"
         );
+    }
+
+    /// reattach 时 keyframe 是守护权威 Term 的完整状态（含模式与当前 SGR），实时字节
+    /// 是对它的增量。收尾不得再本地改写任何解析状态，否则接下来的输出会按错样式画。
+    #[test]
+    fn reattach_finalize_keeps_keyframe_state() {
+        let (proxy, _probe) = make_proxy();
+        let size = TermSize { rows: 4, cols: 20 };
+        let mut term = Term::new(term_config(), &size, proxy);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[>1u\x1b[31m");
+        let mode_before = *term.mode();
+        let template_before = term.grid().cursor.template.clone();
+
+        finalize_reattach_term(&mut term);
+
+        assert_eq!(*term.mode(), mode_before);
+        assert_eq!(term.grid().cursor.template.fg, template_before.fg);
     }
 }
 

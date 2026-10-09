@@ -64,6 +64,7 @@ pub mod session_metadata;
 pub mod session_title;
 pub mod sqlite_state;
 pub mod subprocess;
+pub mod term_config;
 pub mod term_text;
 pub mod terminal_theme;
 pub mod tty_color;
