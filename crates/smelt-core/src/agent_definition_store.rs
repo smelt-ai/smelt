@@ -409,6 +409,12 @@ impl From<String> for AgentDefinitionError {
     }
 }
 
+impl From<smelt_store::StoreError> for AgentDefinitionError {
+    fn from(error: smelt_store::StoreError) -> Self {
+        Self::Store(error.to_string())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDefinitionCreate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,41 +525,92 @@ pub fn update_agent_definition_on(
     id: &str,
     patch: AgentDefinitionPatch,
 ) -> Result<AgentDefinition, AgentDefinitionError> {
-    let mut definition = get_agent_definition_on(store, id)?;
-    if let Some(name) = patch.name {
-        definition.name = name.trim().to_string();
+    let id = require_id(id)?;
+    modify_agent_definition_on(store, &id, |definition| {
+        if let Some(name) = patch.name {
+            definition.name = name.trim().to_string();
+        }
+        if let Some(prompt) = patch.prompt {
+            definition.prompt = prompt;
+        }
+        if let Some(engine_kind_id) = patch.engine_kind_id {
+            definition.engine_kind_id = normalize_engine_kind(Some(&engine_kind_id))?;
+        }
+        if let Some(plugins) = patch.plugins {
+            definition.plugins = normalize_list(plugins);
+        }
+        if let Some(folders) = patch.context_folders {
+            definition.context_folders = normalize_list(folders);
+        }
+        if let Some(links) = patch.context_links {
+            definition.context_links = normalize_list(links);
+        }
+        if let Some(model_provider) = patch.model_provider {
+            definition.model_provider = model_provider.trim().to_string();
+        }
+        if let Some(model_id) = patch.model_id {
+            definition.model_id = model_id.trim().to_string();
+        }
+        Ok(())
+    })
+}
+
+/// 所有更新都走这里：读-改-写落在同一个 SQLite 写事务里（见
+/// `Store::modify_agent_definition`），GUI 与 smeltd 并发改同一条定义也不会互相覆盖。
+fn modify_agent_definition_on(
+    store: &smelt_store::Store,
+    id: &str,
+    modify: impl FnOnce(&mut AgentDefinition) -> Result<(), AgentDefinitionError>,
+) -> Result<AgentDefinition, AgentDefinitionError> {
+    store
+        .modify_agent_definition(id, |record| {
+            let mut definition = agent_from_record(record.clone());
+            modify(&mut definition)?;
+            *record = record_from_definition(&definition);
+            Ok::<(), AgentDefinitionError>(())
+        })?
+        .map(agent_from_record)
+        .ok_or_else(|| AgentDefinitionError::NotFound(format!("智能体不存在: {id}")))
+}
+
+/// 三方合并：只把 `before → after` 之间真正被改过的字段落到库里当前的行上，
+/// 其余字段保留库里的值（可能刚被 CLI / Control API 改过）。
+fn take_edited_fields(
+    current: &mut AgentDefinition,
+    before: &AgentDefinition,
+    after: &AgentDefinition,
+) {
+    // 穷举解构：AgentDefinition 新增字段时这里编译失败，逼着决定它是否参与合并。
+    let AgentDefinition {
+        id: _,
+        name: _,
+        description: _,
+        engine_kind_id: _,
+        prompt: _,
+        plugins: _,
+        context_folders: _,
+        context_links: _,
+        model_provider: _,
+        model_id: _,
+    } = after;
+    macro_rules! take {
+        ($($field:ident),* $(,)?) => {
+            $(if before.$field != after.$field {
+                current.$field = after.$field.clone();
+            })*
+        };
     }
-    if let Some(prompt) = patch.prompt {
-        definition.prompt = prompt;
-    }
-    if let Some(engine_kind_id) = patch.engine_kind_id {
-        definition.engine_kind_id = normalize_engine_kind(Some(&engine_kind_id))?;
-    }
-    if let Some(plugins) = patch.plugins {
-        definition.plugins = normalize_list(plugins);
-    }
-    if let Some(folders) = patch.context_folders {
-        definition.context_folders = normalize_list(folders);
-    }
-    if let Some(links) = patch.context_links {
-        definition.context_links = normalize_list(links);
-    }
-    if let Some(model_provider) = patch.model_provider {
-        definition.model_provider = model_provider.trim().to_string();
-    }
-    if let Some(model_id) = patch.model_id {
-        definition.model_id = model_id.trim().to_string();
-    }
-    let updated = store
-        .update_agent_definition(&record_from_definition(&definition))
-        .map_err(|error| AgentDefinitionError::Store(error.to_string()))?;
-    if !updated {
-        return Err(AgentDefinitionError::NotFound(format!(
-            "智能体不存在: {}",
-            definition.id
-        )));
-    }
-    Ok(definition)
+    take!(
+        name,
+        description,
+        engine_kind_id,
+        prompt,
+        plugins,
+        context_folders,
+        context_links,
+        model_provider,
+        model_id,
+    );
 }
 
 pub fn delete_agent_definition_on(
@@ -580,6 +637,9 @@ pub fn delete_agent_definition_on(
 }
 
 /// 把 GUI 内存里的定义清单对齐到 SQLite 单行写入，避免 `put_agent_ui_snapshot` 整表覆盖。
+///
+/// `before` 是 GUI 编辑前的副本，可能已落后于库（CLI / Control API 在此期间改过）。
+/// 改动按字段三方合并，不拿旧副本整行回写；被别人删掉的定义报 NotFound，不会复活。
 pub fn sync_agent_definitions_on(
     store: &smelt_store::Store,
     before: &[AgentDefinition],
@@ -594,14 +654,10 @@ pub fn sync_agent_definitions_on(
                     .map_err(|error| AgentDefinitionError::Store(error.to_string()))?;
             }
             Some(previous) if previous != agent => {
-                let updated = store
-                    .update_agent_definition(&record_from_definition(agent))
-                    .map_err(|error| AgentDefinitionError::Store(error.to_string()))?;
-                if !updated {
-                    return Err(AgentDefinitionError::NotFound(format!(
-                        "智能体不存在: {id}"
-                    )));
-                }
+                modify_agent_definition_on(store, &id, |current| {
+                    take_edited_fields(current, previous, agent);
+                    Ok(())
+                })?;
             }
             Some(_) => {}
         }
@@ -613,6 +669,10 @@ pub fn sync_agent_definitions_on(
         delete_agent_definition_on(store, &previous.id)?;
     }
     Ok(())
+}
+
+pub fn list_agent_definitions() -> Result<Vec<AgentDefinition>, AgentDefinitionError> {
+    list_agent_definitions_on(&default_store()?)
 }
 
 pub fn create_agent_definition(
@@ -718,6 +778,69 @@ fn automations_using_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GUI 拿着打开面板时的旧副本改了 prompt；在此期间 CLI / Control API 改了 name。
+    /// GUI 保存只能落下它自己改过的字段，不能用旧副本把 CLI 的修改覆盖回去。
+    #[test]
+    fn gui_sync_merges_onto_concurrent_daemon_update() {
+        let (_dir, store) = open_store();
+        let created = create_agent_definition_on(
+            &store,
+            AgentDefinitionCreate {
+                id: Some("writer".into()),
+                name: "旧名字".into(),
+                engine_kind_id: Some("pi".into()),
+                prompt: "旧 prompt".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let gui_before = vec![created];
+
+        update_agent_definition_on(
+            &store,
+            "writer",
+            AgentDefinitionPatch {
+                name: Some("CLI 改的名字".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut gui_after = gui_before.clone();
+        gui_after[0].prompt = "GUI 改的 prompt".into();
+        sync_agent_definitions_on(&store, &gui_before, &gui_after).unwrap();
+
+        let stored = get_agent_definition_on(&store, "writer").unwrap();
+        assert_eq!(stored.name, "CLI 改的名字");
+        assert_eq!(stored.prompt, "GUI 改的 prompt");
+    }
+
+    /// GUI 打开面板后 CLI 删掉了某个智能体，GUI 再改它：这是真冲突，要报 NotFound
+    /// 让界面重新对齐，不能用旧副本把它悄悄复活。
+    #[test]
+    fn gui_sync_does_not_resurrect_concurrently_deleted_agent() {
+        let (_dir, store) = open_store();
+        let created = create_agent_definition_on(
+            &store,
+            AgentDefinitionCreate {
+                id: Some("gone".into()),
+                name: "要被删的".into(),
+                engine_kind_id: Some("pi".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let gui_before = vec![created];
+        delete_agent_definition_on(&store, "gone").unwrap();
+
+        let mut gui_after = gui_before.clone();
+        gui_after[0].prompt = "改一下".into();
+        let error = sync_agent_definitions_on(&store, &gui_before, &gui_after).unwrap_err();
+
+        assert!(matches!(error, AgentDefinitionError::NotFound(_)));
+        assert!(list_agent_definitions_on(&store).unwrap().is_empty());
+    }
 
     fn definition_with_context(folders: &[&str], links: &[&str]) -> AgentDefinition {
         AgentDefinition {
@@ -1009,7 +1132,7 @@ mod tests {
         );
         assert!(is_workbench_conversation_workspace(&root.join("chat-1")));
         assert!(!is_workbench_conversation_workspace(std::path::Path::new(
-            "/Users/c.chen/nio/smelt"
+            "/workspace/project"
         )));
     }
 

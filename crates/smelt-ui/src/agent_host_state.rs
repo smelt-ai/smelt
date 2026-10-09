@@ -723,18 +723,31 @@ pub fn try_apply_agent_host(f: impl FnOnce(&mut AgentHostState), cx: &mut App) -
         cx.set_global(current);
         return false;
     }
-    if let Err(error) = smelt_core::agent_definition_store::sync_agent_definitions(
+    let synced = smelt_core::agent_definition_store::sync_agent_definitions(
         &current.agents,
         &candidate.agents,
-    ) {
+    );
+    // 定义的真源是 SQLite：同步是按字段合并到库里最新行上的，内存里的 `candidate`
+    // 不含 CLI / Control API 同期的修改。无论成败都从库重读，不让界面停在旧副本上；
+    // 重读本身失败才退回内存副本并报错。
+    let stored_agents = smelt_core::agent_definition_store::list_agent_definitions();
+    let (mut next, saved, error) = match synced {
+        Ok(()) => (candidate, true, None),
+        Err(error) => (current, false, Some(error.to_string())),
+    };
+    let error = match stored_agents {
+        Ok(agents) => {
+            next.agents = agents;
+            error
+        }
+        Err(reload_error) => error.or_else(|| Some(reload_error.to_string())),
+    };
+    if let Some(error) = &error {
         eprintln!("[agent-ui] 保存智能体定义失败: {error}");
-        let mut current = current;
-        current.persistence_error = Some(format!("保存智能体配置失败：{error}"));
-        cx.set_global(current);
-        return false;
+        next.persistence_error = Some(format!("保存智能体配置失败：{error}"));
     }
-    cx.set_global(candidate);
-    true
+    cx.set_global(next);
+    saved
 }
 
 /// 从 SQLite 重新加载定义清单。CLI / Control API 写入后，打开智能体面时对齐内存。

@@ -273,13 +273,13 @@ pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     cx.set_global(settings);
 }
 
-/// 把主题模式落到所有吃颜色的层：gpui-component 部件、自绘 UI 语义色板、终端调色板。
-/// **唯一入口**——三处必须同时切，漏一处就是「面板变浅了但终端还是黑的」这种半吊子。
-/// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`
-/// （启动时还没有窗口，切换时才需要）。
 /// CLI 改过 SQLite 后，打开设置页时把外观重新套上窗口。
 pub fn reload_appearance_from_store(cx: &mut App) {
-    let appearance = load_appearance();
+    install_appearance(load_appearance(), cx);
+}
+
+/// 把一份完整外观套到所有层并重绘。外观的真源是 SQLite，内存里的全局只是它的投影。
+fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
     terminal_view::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
@@ -288,6 +288,10 @@ pub fn reload_appearance_from_store(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// 把主题模式落到所有吃颜色的层：gpui-component 部件、自绘 UI 语义色板、终端调色板。
+/// **唯一入口**——三处必须同时切，漏一处就是「面板变浅了但终端还是黑的」这种半吊子。
+/// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`
+/// （启动时还没有窗口，切换时才需要）。
 pub fn apply_theme_mode(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     crate::ui_theme::set_light(!mode.is_dark());
@@ -375,14 +379,21 @@ pub fn load_appearance() -> Appearance {
     }
 }
 
-/// 写回外观设置；失败由统一存储入口记录，界面主流程继续运行。
-fn save_appearance(a: &Appearance) {
-    persist_appearance(a);
-}
-
-fn persist_appearance(appearance: &Appearance) {
-    if let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() {
-        let _ = store.put_appearance_snapshot(&snapshot_from_appearance(appearance));
+/// 提交一次界面编辑，返回库里提交后的完整外观。
+///
+/// 只落 `before → after` 改过的字段（见 `appearance_settings::commit_edit`）：设置页
+/// 打开期间 CLI / Control API 可能改过别的字段，不能用内存旧副本整份覆盖。
+/// 写库失败时记日志并沿用本地编辑结果，界面主流程继续运行。
+fn commit_appearance(before: &Appearance, after: &Appearance) -> Appearance {
+    match smelt_core::appearance_settings::commit_edit(
+        &snapshot_from_appearance(before),
+        &snapshot_from_appearance(after),
+    ) {
+        Ok(committed) => appearance_from_snapshot(committed),
+        Err(error) => {
+            eprintln!("[storage] 保存外观设置失败: {error}");
+            after.clone()
+        }
     }
 }
 
@@ -854,12 +865,19 @@ pub(crate) fn copy_with_feedback(text: String, btn_id: &'static str, cx: &mut Ap
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
 /// 供只有 `&mut App`（没有 `Context<Self>`）的场景用，比如设置页 SettingField 的 get/set 闭包。
 fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
-    let mut a = cx.global::<Appearance>().clone();
-    f(&mut a);
-    save_appearance(&a);
+    let before = cx.global::<Appearance>().clone();
+    let mut edited = before.clone();
+    f(&mut edited);
+    let committed = commit_appearance(&before, &edited);
+    if snapshot_from_appearance(&committed) != snapshot_from_appearance(&edited) {
+        // 合并带进了别的进程刚提交的字段（主题、字体等），只套底色和字体不够，
+        // 整份重新安装，界面与库保持一致。
+        install_appearance(committed, cx);
+        return;
+    }
     // 用户自选底色要镜像给 PTY 线程（OSC 11 应答）和移动端配色快照，三处同源。
-    apply_bg_color(&a);
-    cx.set_global(a);
+    apply_bg_color(&committed);
+    cx.set_global(committed);
     sync_theme_fonts(cx);
 }
 

@@ -365,8 +365,17 @@ impl Store {
         imp::get_appearance_snapshot(&self.backend)
     }
 
-    pub fn put_appearance_snapshot(&self, snapshot: &AppearanceSnapshot) -> Result<(), StoreError> {
-        imp::put_appearance_snapshot(&self.backend, snapshot)
+    /// 在同一个 IMMEDIATE 事务里读-改-写外观快照，返回提交后的值。
+    ///
+    /// GUI、smeltd（Control API）和 `smelt settings` CLI 是三个进程、三条连接，都会改
+    /// 外观。读和写不在同一把写锁里，后写的一方就会拿旧值把别人刚提交的修改覆盖掉。
+    /// `modify` 返回错误时整笔回滚。
+    pub fn modify_appearance_snapshot<E: From<StoreError>>(
+        &self,
+        missing: impl FnOnce() -> AppearanceSnapshot,
+        modify: impl FnOnce(&mut AppearanceSnapshot) -> Result<(), E>,
+    ) -> Result<AppearanceSnapshot, E> {
+        imp::modify_appearance_snapshot(&self.backend, missing, modify)
     }
 
     pub fn get_workspace_snapshot(&self) -> Result<Option<WorkspaceSnapshot>, StoreError> {
@@ -406,11 +415,17 @@ impl Store {
         imp::insert_agent_definition(&self.backend, record)
     }
 
-    pub fn update_agent_definition(
+    /// 在同一个 IMMEDIATE 事务里读-改-写一条智能体定义，返回提交后的行。
+    ///
+    /// GUI 与 smeltd（Control API / CLI）都会改定义；只提供这一条更新入口，避免任一方
+    /// 拿事务外读到的旧整行回写。行不存在（已被别人删除）返回 `Ok(None)`，不会建行；
+    /// `modify` 不得改 `id`，返回错误时整笔回滚。
+    pub fn modify_agent_definition<E: From<StoreError>>(
         &self,
-        record: &AgentDefinitionRecord,
-    ) -> Result<bool, StoreError> {
-        imp::update_agent_definition(&self.backend, record)
+        id: &str,
+        modify: impl FnOnce(&mut AgentDefinitionRecord) -> Result<(), E>,
+    ) -> Result<Option<AgentDefinitionRecord>, E> {
+        imp::modify_agent_definition(&self.backend, id, modify)
     }
 
     pub fn delete_agent_definition(&self, id: &str) -> Result<bool, StoreError> {
@@ -1286,16 +1301,22 @@ mod imp {
         crate::documents::read_appearance_snapshot(&connection)
     }
 
-    pub(super) fn put_appearance_snapshot(
+    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
         backend: &Backend,
-        snapshot: &super::AppearanceSnapshot,
-    ) -> Result<(), StoreError> {
+        missing: impl FnOnce() -> super::AppearanceSnapshot,
+        modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
+    ) -> Result<super::AppearanceSnapshot, E> {
         let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_appearance_snapshot(&transaction, snapshot)?;
-        transaction.commit()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let mut snapshot =
+            crate::documents::read_appearance_snapshot(&transaction)?.unwrap_or_else(missing);
+        modify(&mut snapshot)?;
+        crate::documents::write_appearance_snapshot(&transaction, &snapshot)?;
+        transaction.commit().map_err(StoreError::from)?;
         secure_sidecar_permissions(&backend.path);
-        Ok(())
+        Ok(snapshot)
     }
 
     pub(super) fn get_workspace_snapshot(
@@ -1374,16 +1395,30 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn update_agent_definition(
+    pub(super) fn modify_agent_definition<E: From<StoreError>>(
         backend: &Backend,
-        record: &super::AgentDefinitionRecord,
-    ) -> Result<bool, StoreError> {
+        id: &str,
+        modify: impl FnOnce(&mut super::AgentDefinitionRecord) -> Result<(), E>,
+    ) -> Result<Option<super::AgentDefinitionRecord>, E> {
         let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = crate::catalog::update_agent_definition(&transaction, record)?;
-        transaction.commit()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let Some(mut record) = crate::catalog::query_agent_definition(&transaction, id)? else {
+            return Ok(None);
+        };
+        modify(&mut record)?;
+        if record.id != id {
+            return Err(StoreError::AgentDefinitionIdChanged {
+                from: id.to_string(),
+                to: record.id,
+            }
+            .into());
+        }
+        crate::catalog::update_agent_definition(&transaction, &record)?;
+        transaction.commit().map_err(StoreError::from)?;
         secure_sidecar_permissions(&backend.path);
-        Ok(changed)
+        Ok(Some(record))
     }
 
     pub(super) fn delete_agent_definition(backend: &Backend, id: &str) -> Result<bool, StoreError> {
@@ -3773,11 +3808,12 @@ mod imp {
     ) -> Result<Option<super::AppearanceSnapshot>, StoreError> {
         unsupported()
     }
-    pub(super) fn put_appearance_snapshot(
+    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
         _backend: &Backend,
-        _snapshot: &super::AppearanceSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
+        _missing: impl FnOnce() -> super::AppearanceSnapshot,
+        _modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
+    ) -> Result<super::AppearanceSnapshot, E> {
+        Err(StoreError::SqliteDisabledOnMobile.into())
     }
     pub(super) fn get_workspace_snapshot(
         _backend: &Backend,
@@ -3823,11 +3859,12 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn update_agent_definition(
+    pub(super) fn modify_agent_definition<E: From<StoreError>>(
         _backend: &Backend,
-        _record: &super::AgentDefinitionRecord,
-    ) -> Result<bool, StoreError> {
-        unsupported()
+        _id: &str,
+        _modify: impl FnOnce(&mut super::AgentDefinitionRecord) -> Result<(), E>,
+    ) -> Result<Option<super::AgentDefinitionRecord>, E> {
+        Err(StoreError::SqliteDisabledOnMobile.into())
     }
     pub(super) fn delete_agent_definition(
         _backend: &Backend,
@@ -6046,9 +6083,20 @@ mod tests {
         assert_eq!(after_prefs.agents[1].id, "agent-2");
         assert!(!after_prefs.cross_agent_enabled);
 
-        let mut renamed = extra;
-        renamed.name = "改名".into();
-        assert!(store.update_agent_definition(&renamed).unwrap());
+        let renamed = store
+            .modify_agent_definition::<StoreError>("agent-2", |record| {
+                record.name = "改名".into();
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "改名");
+        assert!(
+            store
+                .modify_agent_definition::<StoreError>("missing", |_| Ok(()))
+                .unwrap()
+                .is_none()
+        );
         assert!(store.delete_agent_definition("agent-2").unwrap());
         assert!(!store.delete_agent_definition("agent-2").unwrap());
         let after_delete = store.get_agent_ui_snapshot().unwrap().unwrap();

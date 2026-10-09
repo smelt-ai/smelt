@@ -927,27 +927,45 @@ fn query_config_memory(
         .map_err(StoreError::from)
 }
 
+const AGENT_DEFINITION_COLUMNS: &str =
+    "id, name, description, engine_kind_id, prompt, plugins_json,
+     context_folders_json, context_links_json, model_provider, model_id";
+
+fn agent_definition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentDefinitionRecord> {
+    Ok(AgentDefinitionRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        engine_kind_id: row.get(3)?,
+        prompt: row.get(4)?,
+        plugins_json: row.get(5)?,
+        context_folders_json: row.get(6)?,
+        context_links_json: row.get(7)?,
+        model_provider: row.get(8)?,
+        model_id: row.get(9)?,
+    })
+}
+
 fn query_agents(connection: &Connection) -> Result<Vec<AgentDefinitionRecord>, StoreError> {
-    let mut statement = connection.prepare(
-        "SELECT id, name, description, engine_kind_id, prompt, plugins_json,
-                    context_folders_json, context_links_json, model_provider, model_id
-             FROM agent_definition ORDER BY position",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(AgentDefinitionRecord {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            description: row.get(2)?,
-            engine_kind_id: row.get(3)?,
-            prompt: row.get(4)?,
-            plugins_json: row.get(5)?,
-            context_folders_json: row.get(6)?,
-            context_links_json: row.get(7)?,
-            model_provider: row.get(8)?,
-            model_id: row.get(9)?,
-        })
-    })?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {AGENT_DEFINITION_COLUMNS} FROM agent_definition ORDER BY position"
+    ))?;
+    let rows = statement.query_map([], agent_definition_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+}
+
+pub(crate) fn query_agent_definition(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<AgentDefinitionRecord>, StoreError> {
+    connection
+        .query_row(
+            &format!("SELECT {AGENT_DEFINITION_COLUMNS} FROM agent_definition WHERE id = ?1"),
+            [id],
+            agent_definition_from_row,
+        )
+        .optional()
         .map_err(StoreError::from)
 }
 

@@ -59,6 +59,9 @@ pub enum StoreError {
     #[error("legacy source {legacy_source} 的 KV 元数据不完整")]
     IncompleteLegacyMetadata { legacy_source: String },
 
+    #[error("智能体定义的 id 不能在更新中修改: {from} -> {to}")]
+    AgentDefinitionIdChanged { from: String, to: String },
+
     #[error("重复的自动化 id: {id}")]
     DuplicateAutomationId { id: String },
 
