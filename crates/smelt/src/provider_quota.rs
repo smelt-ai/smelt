@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(status.quota, None);
         assert_eq!(status.error.as_deref(), Some("offline"));
         assert!(
-            state.to_cache().providers.get("codex").is_none(),
+            !state.to_cache().providers.contains_key("codex"),
             "失效的额度不能留在缓存里，下次启动又显示出来"
         );
     }
