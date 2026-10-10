@@ -127,5 +127,34 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 	@./target/release/$(BIN) --install-app dist/Smelt.app /Applications/Smelt.app
 	@echo "✅ 安装完成"
 
-clean: ## 清理 dist/ 产物
-	rm -rf dist
+clean: ## 清理 make build / make install 的构建产物（target/ 与 dist/，不卸载已安装的 App）
+	@set -eu; \
+	target_dir="$${CARGO_TARGET_DIR:-target}"; \
+	kb_of() { if [ -e "$$1" ]; then du -sk "$$1" | awk '{print $$1}'; else echo 0; fi; }; \
+	human() { \
+		kb="$$1"; \
+		if [ "$$kb" -ge 1048576 ]; then awk -v k="$$kb" 'BEGIN { printf "%.1f GB", k/1048576 }'; \
+		elif [ "$$kb" -ge 1024 ]; then awk -v k="$$kb" 'BEGIN { printf "%.1f MB", k/1024 }'; \
+		else printf '%s KB' "$$kb"; fi; \
+	}; \
+	before_target=$$(kb_of "$$target_dir"); \
+	before_dist=$$(kb_of dist); \
+	cargo clean; \
+	rm -rf dist; \
+	after_target=$$(kb_of "$$target_dir"); \
+	after_dist=$$(kb_of dist); \
+	freed_target=$$((before_target - after_target)); \
+	freed_dist=$$((before_dist - after_dist)); \
+	if [ "$$freed_target" -lt 0 ]; then freed_target=0; fi; \
+	if [ "$$freed_dist" -lt 0 ]; then freed_dist=0; fi; \
+	freed=$$((freed_target + freed_dist)); \
+	if [ "$$freed" -eq 0 ]; then \
+		echo "没有可清理的构建产物"; \
+	else \
+		parts=""; \
+		if [ "$$freed_target" -gt 0 ]; then parts="target $$(human $$freed_target)"; fi; \
+		if [ "$$freed_dist" -gt 0 ]; then \
+			if [ -n "$$parts" ]; then parts="$${parts}，dist $$(human $$freed_dist)"; else parts="dist $$(human $$freed_dist)"; fi; \
+		fi; \
+		echo "✅ 已清理 $$(human $$freed)（$${parts}）"; \
+	fi
