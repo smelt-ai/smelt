@@ -1,5 +1,10 @@
-use super::view::{BreadcrumbSeg, breadcrumb_segments};
-use super::{SearchHit, build_search_tree, search_project};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::time::Instant;
+
+use super::view::{BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows};
+use super::{DirCache, SearchHit, build_search_tree, search_project};
+use crate::git_panel::GitStatusData;
 
 #[test]
 fn breadcrumb_segments_split_path_under_workspace_root() {
@@ -65,6 +70,101 @@ fn breadcrumb_segments_falls_back_to_filename_outside_roots() {
             label: "scratch.rs".into(),
             path: "/tmp/scratch.rs".into(),
         }]
+    );
+}
+
+fn cached(entries: Vec<(&str, bool)>) -> (Instant, Rc<Vec<(String, bool)>>) {
+    (
+        Instant::now(),
+        Rc::new(
+            entries
+                .into_iter()
+                .map(|(name, is_dir)| (name.to_string(), is_dir))
+                .collect(),
+        ),
+    )
+}
+
+#[test]
+fn file_tree_rows_single_root_keeps_walk_order_without_header() {
+    let mut cache = DirCache::new();
+    cache.insert(
+        "/repo".into(),
+        cached(vec![("a.txt", false), ("src", true)]),
+    );
+    cache.insert("/repo/src".into(), cached(vec![("lib.rs", false)]));
+    let expanded = HashSet::from(["/repo/src".into()]);
+    let mut status = GitStatusData::default();
+    status.files = vec![
+        (" M".into(), "src/lib.rs".into()),
+        ("??".into(), "a.txt".into()),
+    ];
+    let git = HashMap::from([("/repo".into(), (Instant::now(), status))]);
+
+    assert_eq!(
+        collect_file_tree_rows(&["/repo".into()], &expanded, &HashSet::new(), &cache, &git,),
+        vec![
+            FileTreeRow::Entry {
+                depth: 0,
+                name: "a.txt".into(),
+                is_dir: false,
+                path: "/repo/a.txt".into(),
+                expanded: false,
+                git_mark: Some('U'),
+            },
+            FileTreeRow::Entry {
+                depth: 0,
+                name: "src".into(),
+                is_dir: true,
+                path: "/repo/src".into(),
+                expanded: true,
+                git_mark: None,
+            },
+            FileTreeRow::Entry {
+                depth: 1,
+                name: "lib.rs".into(),
+                is_dir: false,
+                path: "/repo/src/lib.rs".into(),
+                expanded: false,
+                git_mark: Some('M'),
+            },
+        ]
+    );
+}
+
+#[test]
+fn file_tree_rows_multi_root_header_collapses_children() {
+    let mut cache = DirCache::new();
+    cache.insert("/a".into(), cached(vec![("a.txt", false)]));
+    cache.insert("/b".into(), cached(vec![("b.txt", false)]));
+    let collapsed = HashSet::from(["/b".into()]);
+
+    assert_eq!(
+        collect_file_tree_rows(
+            &["/a".into(), "/b".into()],
+            &HashSet::new(),
+            &collapsed,
+            &cache,
+            &HashMap::new(),
+        ),
+        vec![
+            FileTreeRow::RootHeader {
+                path: "/a".into(),
+                open: true,
+            },
+            FileTreeRow::Entry {
+                depth: 1,
+                name: "a.txt".into(),
+                is_dir: false,
+                path: "/a/a.txt".into(),
+                expanded: false,
+                git_mark: None,
+            },
+            FileTreeRow::RootHeader {
+                path: "/b".into(),
+                open: false,
+            },
+        ]
     );
 }
 

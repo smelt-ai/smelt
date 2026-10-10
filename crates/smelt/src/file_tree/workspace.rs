@@ -11,7 +11,9 @@ use gpui_component::input::InputEvent;
 
 use crate::Workspace;
 
-use super::view::{editor_language_for_path, is_previewable_image, walk_dir_cached};
+use super::view::{
+    FileTreeRow, collect_file_tree_rows, editor_language_for_path, is_previewable_image,
+};
 use super::*;
 
 // ===================== Workspace 方法 =====================
@@ -136,57 +138,79 @@ impl Workspace {
         let Some(path) = self.file_tree_pending_reveal.clone() else {
             return;
         };
-        let flat = self.file_tree_flat(cx);
-        if let Some(ix) = flat.iter().position(|(_, _, p)| p == &path) {
-            self.file_tree_scroll.scroll_to_item(ix);
+        let rows = self.file_tree_rows(cx);
+        if let Some(ix) = rows
+            .iter()
+            .position(|row| row.path() == Some(path.as_str()))
+        {
+            self.file_tree_scroll
+                .scroll_to_item(ix, ScrollStrategy::Nearest);
             self.file_tree_pending_reveal = None;
             // 不 notify：本帧正在 render，scroll 在 prepaint 生效即可
         }
         let _ = cx;
     }
 
-    /// 当前扁平可见树条目：(is_dir, name, path)。
-    fn file_tree_flat(&self, cx: &App) -> Vec<(bool, String, String)> {
-        let Some(root) = self.active_project_root(cx) else {
-            return Vec::new();
-        };
-        let mut raw: Vec<(usize, String, bool, String, bool)> = Vec::new();
-        walk_dir_cached(&root, &self.dir_cache, &self.expanded, 0, &mut raw);
-        raw.into_iter()
-            .map(|(_, name, is_dir, path, _)| (is_dir, name, path))
-            .collect()
+    /// 当前可见树，下标和虚拟列表一致。
+    fn file_tree_rows(&self, cx: &App) -> Vec<super::view::FileTreeRow> {
+        collect_file_tree_rows(
+            &self.workspace_roots(cx),
+            &self.expanded,
+            &self.collapsed_roots,
+            &self.dir_cache,
+            &self.git_status,
+        )
     }
 
-    /// ↑↓ 移动键盘选中。
+    /// ↑↓ 移动键盘选中。跳过没有路径的加载占位行。
     pub fn file_tree_move_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let flat = self.file_tree_flat(cx);
-        if flat.is_empty() {
+        let rows = self.file_tree_rows(cx);
+        let selectable: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, row)| row.path().map(|_| ix))
+            .collect();
+        if selectable.is_empty() {
             return;
         }
-        let cur = self
-            .file_tree_selected
-            .as_ref()
-            .and_then(|p| flat.iter().position(|(_, _, path)| path == p));
-        let next = match cur {
-            Some(i) => (i as i32 + delta).clamp(0, flat.len() as i32 - 1) as usize,
+        let cur = self.file_tree_selected.as_ref().and_then(|path| {
+            selectable
+                .iter()
+                .position(|&ix| rows[ix].path() == Some(path.as_str()))
+        });
+        let next_sel = match cur {
+            Some(i) => (i as i32 + delta).clamp(0, selectable.len() as i32 - 1) as usize,
             None => {
                 if delta >= 0 {
                     0
                 } else {
-                    flat.len() - 1
+                    selectable.len() - 1
                 }
             }
         };
-        self.file_tree_selected = Some(flat[next].2.clone());
-        self.file_tree_scroll.scroll_to_item(next);
+        let ix = selectable[next_sel];
+        self.file_tree_selected = rows[ix].path().map(str::to_string);
+        self.file_tree_scroll
+            .scroll_to_item(ix, ScrollStrategy::Nearest);
         cx.notify();
     }
 
-    /// ←：目录已展开则收起；否则选中父目录。
+    /// ←：目录已展开则收起；否则选中父目录。根标题行走 collapsed_roots，不进 expanded。
     pub fn file_tree_key_left(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.file_tree_selected.clone() else {
             return;
         };
+        if matches!(
+            self.file_tree_rows(cx)
+                .iter()
+                .find(|row| row.path() == Some(path.as_str())),
+            Some(FileTreeRow::RootHeader { .. })
+        ) {
+            if !self.collapsed_roots.contains(&path) {
+                self.toggle_root_collapsed(path, cx);
+            }
+            return;
+        }
         if self.expanded.contains(&path) {
             self.expanded.remove(&path);
             cx.notify();
@@ -199,7 +223,7 @@ impl Workspace {
             let ps = parent.to_string_lossy().to_string();
             // 父目录在项目根之下（含根的直接子项的父 = root）
             if ps == root || (ps.starts_with(&root) && ps.len() > root.len()) {
-                // 根本身不在 flat 列表里时，选中第一项的兄弟无意义；只选非根父路径
+                // 根本身不在列表里时，选中它没有对应行；只选非根父路径
                 if ps != root {
                     self.file_tree_selected = Some(ps);
                     self.try_flush_file_tree_reveal_path(cx);
@@ -209,54 +233,66 @@ impl Workspace {
         }
     }
 
-    /// →：目录未展开则展开；已展开则进第一个子项；文件则打开。
+    /// →：目录未展开则展开；已展开则进下一个有路径的行；文件则打开。
     pub fn file_tree_key_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.file_tree_selected.clone() else {
             return;
         };
-        let flat = self.file_tree_flat(cx);
-        let Some((is_dir, _, _)) = flat.iter().find(|(_, _, p)| p == &path) else {
+        let rows = self.file_tree_rows(cx);
+        let Some(ix) = rows
+            .iter()
+            .position(|row| row.path() == Some(path.as_str()))
+        else {
             return;
         };
-        if *is_dir {
-            if !self.expanded.contains(&path) {
+        match &rows[ix] {
+            FileTreeRow::RootHeader { open: false, .. } => {
+                self.toggle_root_collapsed(path, cx);
+            }
+            FileTreeRow::Entry { is_dir: true, .. } if !self.expanded.contains(&path) => {
                 self.expanded.insert(path.clone());
                 self.ensure_dir_listing(path, cx);
                 cx.notify();
-            } else if let Some(ix) = flat.iter().position(|(_, _, p)| p == &path)
-                && let Some((_, _, child)) = flat.get(ix + 1)
-            {
-                // 下一行若是更深的子项才进去
-                self.file_tree_selected = Some(child.clone());
-                self.file_tree_scroll.scroll_to_item(ix + 1);
-                cx.notify();
             }
-        } else {
-            self.view_file(path, window, cx);
+            FileTreeRow::Entry { is_dir: false, .. } => self.view_file(path, window, cx),
+            FileTreeRow::RootHeader { open: true, .. } | FileTreeRow::Entry { .. } => {
+                if let Some(child) = rows.get(ix + 1).and_then(|row| row.path()) {
+                    self.file_tree_selected = Some(child.to_string());
+                    self.file_tree_scroll
+                        .scroll_to_item(ix + 1, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
+            }
+            FileTreeRow::Loading { .. } => {}
         }
     }
 
-    /// Enter：目录切换展开；文件打开。
+    /// Enter：目录切换展开；文件打开。根标题行折叠/展开。
     pub fn file_tree_key_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.file_tree_selected.clone() else {
             return;
         };
-        let flat = self.file_tree_flat(cx);
-        let Some((is_dir, _, _)) = flat.iter().find(|(_, _, p)| p == &path) else {
+        let rows = self.file_tree_rows(cx);
+        let Some(row) = rows.iter().find(|row| row.path() == Some(path.as_str())) else {
             return;
         };
-        if *is_dir {
-            self.toggle_expand(path, cx);
-        } else {
-            self.view_file(path, window, cx);
+        match row {
+            FileTreeRow::RootHeader { .. } => self.toggle_root_collapsed(path, cx),
+            FileTreeRow::Entry { is_dir: true, .. } => self.toggle_expand(path, cx),
+            FileTreeRow::Entry { is_dir: false, .. } => self.view_file(path, window, cx),
+            FileTreeRow::Loading { .. } => {}
         }
     }
 
     fn try_flush_file_tree_reveal_path(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.file_tree_selected.clone() {
-            let flat = self.file_tree_flat(cx);
-            if let Some(ix) = flat.iter().position(|(_, _, p)| p == &path) {
-                self.file_tree_scroll.scroll_to_item(ix);
+            let rows = self.file_tree_rows(cx);
+            if let Some(ix) = rows
+                .iter()
+                .position(|row| row.path() == Some(path.as_str()))
+            {
+                self.file_tree_scroll
+                    .scroll_to_item(ix, ScrollStrategy::Nearest);
             }
         }
     }

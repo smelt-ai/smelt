@@ -2513,8 +2513,8 @@ struct Workspace {
     /// 变更列表的滚动位置。列表里混着仓库行、提交框和文件行，高度不一，
     /// 用不了等高虚拟列表，所以是常规滚动容器。
     git_list_scroll: ScrollHandle,
-    /// 文件树列表的滚动句柄（普通滚动，非虚拟滚动——见 file_tree 函数注释）。
-    file_tree_scroll: ScrollHandle,
+    /// 文件树虚拟列表的滚动句柄。行高由文件树自己给定，见 file_tree。
+    file_tree_scroll: VirtualListScrollHandle,
     /// Files / Git 右侧树列正在拖拽时的起点：(鼠标 x，树列宽)。树列不能使用
     /// `ResizableState`：那个组件会在父容器变宽/变窄时保持百分比，违反“只在拖
     /// 自己分隔条时改宽”的约定。这个瞬态状态只驱动固定像素宽度的分隔条。
@@ -3087,7 +3087,7 @@ impl Workspace {
             diff_scroll: VirtualListScrollHandle::new(),
             diff_code_scroll: ScrollHandle::new(),
             git_list_scroll: ScrollHandle::new(),
-            file_tree_scroll: ScrollHandle::new(),
+            file_tree_scroll: VirtualListScrollHandle::new(),
             file_tree_drag_start: None,
             file_filter: None,
             _file_filter_sub: None,
