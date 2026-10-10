@@ -1857,7 +1857,12 @@ class _SessionPageState extends State<SessionPage> {
   /// 这场对话已加载的技能。null = 还没问到（或电脑端不支持），界面就不画入口——
   /// 与桌面一致：技能是 Pi 的概念，别家 agent 上画一个永远空的列表没有意义。
   List<SessionSkill>? _skills;
+
+  /// 电脑接不上这段对话时的原因。非空就别再转圈：没有结果会来。
+  String? _unavailableReason;
   late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
+  late final StreamSubscription<SessionUnavailable>
+  _sessionUnavailableSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<SessionSkills> _sessionSkillsSubscription;
   late final StreamSubscription<MessageSendResult> _messageSendSubscription;
@@ -1882,6 +1887,14 @@ class _SessionPageState extends State<SessionPage> {
     _messageSendSubscription = gatewayService.messageSendStream.listen(
       (result) => unawaited(_handleMessageSendResult(result)),
     );
+    _sessionUnavailableSubscription = gatewayService.sessionUnavailableStream
+        .listen((event) {
+          if (!mounted || event.sessionId != widget.session.id) return;
+          setState(() {
+            _unavailableReason = event.reason;
+            _loading = false;
+          });
+        });
     _connectionStateSubscription = gatewayService.stateStream.listen((state) {
       if (!mounted) return;
       setState(() => _connectionState = state);
@@ -2063,12 +2076,74 @@ class _SessionPageState extends State<SessionPage> {
           _loadingOlder = false;
         }
         _loading = false;
+        _unavailableReason = null;
       });
       if (shouldFollowLatest) {
         _scrollToBottom(animate: !initialLoad);
       }
     });
     gatewayService.subscribe(widget.session.id);
+  }
+
+  void _retrySubscribe() {
+    setState(() {
+      _unavailableReason = null;
+      _loading = _snapshot == null;
+    });
+    gatewayService.subscribe(widget.session.id);
+  }
+
+  Widget _buildUnavailable(String reason) {
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_outlined, color: colors.onSurfaceVariant),
+            const SizedBox(height: 12),
+            Text(
+              reason,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: colors.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonal(
+              onPressed: _retrySubscribe,
+              child: const Text('Try again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildUnavailableBanner(String reason) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: colors.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 4, 4),
+        child: Row(
+          children: [
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 18,
+              color: colors.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                reason,
+                style: TextStyle(color: colors.onSurfaceVariant),
+              ),
+            ),
+            TextButton(onPressed: _retrySubscribe, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
   }
 
   void _scrollToBottom({bool animate = true}) {
@@ -2119,6 +2194,8 @@ class _SessionPageState extends State<SessionPage> {
                   ? gatewayService.retryCurrentConnection
                   : null,
             ),
+            if (_unavailableReason case final reason? when _snapshot != null)
+              _buildUnavailableBanner(reason),
             if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
             if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
             if (_snapshot?.pendingPermissions
@@ -2131,6 +2208,8 @@ class _SessionPageState extends State<SessionPage> {
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
+                  : _unavailableReason != null && _snapshot == null
+                  ? _buildUnavailable(_unavailableReason!)
                   : Stack(
                       children: [
                         Positioned.fill(child: _buildEntryList()),
@@ -2979,6 +3058,7 @@ class _SessionPageState extends State<SessionPage> {
     _connectionStateSubscription.cancel();
     _snapshotSubscription.cancel();
     _sessionSkillsSubscription.cancel();
+    _sessionUnavailableSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     if (gatewayService.subscribedSessionId == widget.session.id) {
       gatewayService.unsubscribe();

@@ -1457,6 +1457,17 @@ impl EventHub {
         Ok(removed)
     }
 
+    /// 当前是否有订阅在听这个 topic。用于「请求只有订阅方能兑现」的场景：
+    /// 没人听就立刻回绝，而不是让请求方空等一个注定不会来的结果。
+    pub fn has_subscriber(&self, topic: &Topic) -> Result<bool, EventBusError> {
+        Ok(self
+            .subscribers
+            .lock()
+            .map_err(|_| EventBusError::new("subscriber registry lock poisoned"))?
+            .values()
+            .any(|subscriber| subscriber.topics.contains(topic)))
+    }
+
     pub fn subscription_cursor(
         &self,
         plugin_id: &PluginId,
@@ -2965,6 +2976,28 @@ mod tests {
             panic!("expected snapshot");
         };
         assert_eq!(snapshot.watermark, 0);
+    }
+
+    #[test]
+    fn has_subscriber_tracks_live_subscriptions_per_topic() {
+        let hub = EventHub::new(registry(DeliveryClass::Ephemeral, None), None);
+        let plugin = PluginId::new("com.example").unwrap();
+        let id = SubscriptionId::new("wake").unwrap();
+        assert!(!hub.has_subscriber(&topic("example.changed")).unwrap());
+        let _subscription = hub
+            .subscribe(
+                plugin.clone(),
+                id.clone(),
+                BTreeSet::from([topic("example.changed")]),
+                DeliveryClass::Ephemeral,
+                &BTreeSet::from([capability("session.read")]),
+                1,
+            )
+            .unwrap();
+        assert!(hub.has_subscriber(&topic("example.changed")).unwrap());
+        assert!(!hub.has_subscriber(&topic("other.changed")).unwrap());
+        hub.unsubscribe(&plugin, &id).unwrap();
+        assert!(!hub.has_subscriber(&topic("example.changed")).unwrap());
     }
 
     #[test]

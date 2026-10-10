@@ -2819,6 +2819,9 @@ struct Workspace {
     /// 主窗口关闭期间点击系统通知时，会话还在异步恢复。先保留稳定 sid，目标装回
     /// 列表后再消费，不能退化成只打开一扇空窗口。
     pending_notification_session_id: Option<String>,
+    /// 手机在冷恢复把对话占位装回列表之前就要看的对话。装回后照常唤醒，
+    /// 恢复跑完仍找不到的就丢掉——daemon 那边会超时告诉手机。
+    pending_conversation_wakes: Vec<String>,
     /// 冷恢复后的「回到上次那段智能体对话」是否已经补位过。
     ///
     /// 一次性闸门。智能体面的子页不落盘，补位只该在恢复完成后做一次；持续做会把
@@ -3035,6 +3038,7 @@ impl Workspace {
             // 存档读失败时绝不能算恢复完毕：那会让空快照被当成「用户关光了所有会话」。
             sessions_restored: pending_sessions.is_empty() && !workspace_state_load_failed,
             pending_notification_session_id: None,
+            pending_conversation_wakes: Vec::new(),
             restored_agent_conversation_route: false,
             workspace_state_load_failed,
             ws_write_queue: WorkspaceSnapshotWriteQueue::default(),
@@ -4876,6 +4880,16 @@ fn main() {
         let current_ws_for_menu_republish = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok(event) = daemon_state_rx.recv().await {
+                // 唤醒要拿窗口去重启对话视图，走 update_in；它不是状态投影，后面不用再看。
+                if let terminal::DaemonStateEvent::ConversationWakeRequested { session_id } = &event {
+                    let workspace = current_ws_for_menu_republish.borrow().clone();
+                    if let Some(ws) = workspace {
+                        let _ = ws.update_in(cx, |ws, window, cx| {
+                            ws.wake_conversation_for_remote(session_id.clone(), window, cx);
+                        });
+                    }
+                    continue;
+                }
                 cx.update(|cx| {
                     match &event {
                         terminal::DaemonStateEvent::Snapshot {
@@ -4918,6 +4932,7 @@ fn main() {
                         terminal::DaemonStateEvent::Update(_) => {}
                         terminal::DaemonStateEvent::Removed { .. } => {}
                         terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
+                        terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {}
                     }
                     match event {
@@ -4967,6 +4982,7 @@ fn main() {
                         terminal::DaemonStateEvent::RemoteSessions(_) => {}
                         terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
+                        terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {
                             DaemonStates::mark_subscription_disconnected(cx);
                         }

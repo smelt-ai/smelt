@@ -2,6 +2,8 @@ use super::*;
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind};
 use smelt_core::acp_session::AcpSessionState;
 use smelt_core::daemon_state::DaemonPhase;
+use smelt_plugin_api::{DeliveryClass, PluginId, SubscriptionId, Topic};
+use std::collections::BTreeSet;
 
 fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
     Arc::new(make_acp_session_value(id, reduced))
@@ -2018,8 +2020,53 @@ fn pi_skills_come_from_the_launch_spec_plugin_args() {
     std::fs::remove_dir_all(&temp).ok();
 }
 
+fn read_watch_unavailable(client: UnixStream) -> String {
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    v["unavailable"]["reason"].as_str().unwrap().to_string()
+}
+
+fn desktop_menu_with_acp(id: &str) -> WorkspaceMenuStore {
+    let menu = new_test_workspace_menu();
+    *menu.lock().unwrap() = WorkspaceMenuSnapshot::current(
+        vec![],
+        vec![smelt_core::workspace_menu::WorkspaceMenuSession {
+            id: id.into(),
+            kind: smelt_core::workspace_menu::WorkspaceMenuSessionKind::Acp,
+            title: "agent chat".into(),
+            custom_title: false,
+            cwd: None,
+            project_root: None,
+            project_title: None,
+            project_order: 0,
+            session_order: 0,
+            leaf_order: 0,
+            agent: Some("pi".into()),
+        }],
+    );
+    menu
+}
+
+fn subscribe_conversation_wake(subscribers: &EventHubHandle) -> smelt_event_bus::Subscription {
+    subscribers
+        .subscribe(
+            PluginId::new("test.desktop").unwrap(),
+            SubscriptionId::new("wake").unwrap(),
+            BTreeSet::from([
+                Topic::new(smelt_plugin_api::CORE_TOPIC_CONVERSATION_WAKE_REQUESTED).unwrap(),
+            ]),
+            DeliveryClass::Ephemeral,
+            &BTreeSet::from([smelt_plugin_api::Capability::new(
+                smelt_plugin_api::CORE_CAPABILITY_CONVERSATION_WAKE,
+            )
+            .unwrap()]),
+        )
+        .unwrap()
+}
+
 #[test]
-fn watch_on_unknown_session_just_disconnects() {
+fn watch_on_unknown_session_reports_unavailable_instead_of_silently_closing() {
     let acp_sessions = new_test_acp_sessions();
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
@@ -2028,11 +2075,91 @@ fn watch_on_unknown_session_just_disconnects() {
         reader,
         &serde_json::json!({"id": "acp-nope"}),
         acp_sessions,
+        &new_test_workspace_menu(),
+        &new_event_hub(),
     );
-    // 没有会话可接：函数直接 return，客户端读到 EOF（不是某行 JSON）。
-    let mut buf = Vec::new();
-    BufReader::new(client).read_to_end(&mut buf).unwrap();
-    assert!(buf.is_empty());
+    // 静默 EOF 会让手机一直转圈：旁观方必须拿到一句明确的「没有」。
+    assert!(!read_watch_unavailable(client).is_empty());
+}
+
+#[test]
+fn watch_on_dormant_desktop_conversation_without_desktop_fails_fast() {
+    let acp_sessions = new_test_acp_sessions();
+    let (server, client) = UnixStream::pair().unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let started = Instant::now();
+    handle_acp_watch(
+        server,
+        reader,
+        &serde_json::json!({"id": "acp-dormant"}),
+        acp_sessions,
+        &desktop_menu_with_acp("acp-dormant"),
+        &new_event_hub(),
+    );
+    assert!(read_watch_unavailable(client).contains("not open"));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "没有桌面端能兑现唤醒时不能空等超时"
+    );
+}
+
+#[test]
+fn watch_on_dormant_desktop_conversation_wakes_desktop_then_attaches() {
+    let acp_sessions = new_test_acp_sessions();
+    let subscribers = new_event_hub();
+    let wake_requests = subscribe_conversation_wake(&subscribers);
+    let menu = desktop_menu_with_acp("acp-dormant");
+
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let sessions_for_watch = Arc::clone(&acp_sessions);
+    let watch = thread::spawn(move || {
+        handle_acp_watch(
+            server,
+            reader,
+            &serde_json::json!({"id": "acp-dormant"}),
+            sessions_for_watch,
+            &menu,
+            &subscribers,
+        );
+    });
+
+    // 扮演桌面端：收到唤醒请求才把会话拉起来（真实路径是 acp_open 占住 slot）。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let request = loop {
+        match wake_requests.try_recv() {
+            Ok(smelt_event_bus::Delivery::Event(event)) => break event,
+            Ok(smelt_event_bus::Delivery::Snapshot(_)) => {}
+            Ok(smelt_event_bus::Delivery::Lag { dropped, .. }) => {
+                panic!("unexpected lag: {dropped}")
+            }
+            Err(_) => {
+                assert!(Instant::now() < deadline, "watch 没有发出唤醒请求");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    };
+    assert_eq!(request.envelope.payload["session_id"], "acp-dormant");
+    let mut reduced = AcpSessionState::default();
+    reduced
+        .entries_mut()
+        .push(AcpEntry::User("restored".into()));
+    acp_sessions.reserve_with("acp-dormant", || {
+        make_acp_session_value("acp-dormant", reduced)
+    });
+
+    let mut lines = BufReader::new(client.try_clone().unwrap());
+    let mut line = String::new();
+    lines.read_line(&mut line).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["snapshot"]["entries"].as_array().unwrap().len(), 1);
+
+    drop(lines);
+    drop(client);
+    watch.join().unwrap();
 }
 
 #[test]
@@ -2053,6 +2180,8 @@ fn watch_delivers_initial_snapshot_matching_to_snapshot() {
             reader,
             &serde_json::json!({"id": "acp-1"}),
             acp_sessions,
+            &new_test_workspace_menu(),
+            &new_event_hub(),
         );
     });
 
@@ -2098,6 +2227,8 @@ fn watch_registration_is_serialized_with_snapshot_push() {
             reader,
             &serde_json::json!({"id": "acp-watch-race"}),
             sessions_for_watch,
+            &new_test_workspace_menu(),
+            &new_event_hub(),
         );
     });
 
@@ -2237,6 +2368,8 @@ fn watch_without_debug_never_streams_the_debug_sidecars() {
             reader,
             &serde_json::json!({"id": "acp-watch-lean", "include_debug": false}),
             sessions_for_watch,
+            &new_test_workspace_menu(),
+            &new_event_hub(),
         );
     });
 

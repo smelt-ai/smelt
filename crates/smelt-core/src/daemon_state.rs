@@ -18,8 +18,9 @@ use smelt_plugin_api::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
     CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_MENU_CHANGED, CoreProjectionEvent,
+    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
+    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED,
+    CORE_TOPIC_WORKSPACE_MENU_CHANGED, ConversationWakeRequested, CoreProjectionEvent,
     CoreSessionPhase, DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, EventClientAuth, EventSource,
     EventSubscribeRequest, FirstPartyClientKind, ProtocolRange, SessionStateChanged,
     SessionStateRemoved, SessionStatesSnapshot, SubscribeErrorCode, SubscribeMessage,
@@ -316,6 +317,9 @@ pub enum DaemonStateEvent {
     WorkspaceMenu(WorkspaceMenuSnapshot),
     /// 自动化投影的完整替换。store_id 进一步保护跨 daemon epoch 的迟到响应。
     Automations(AutomationFile),
+    /// 有人要看一段 daemon 里没在跑的对话，请持有启动规格的桌面端把它拉起来。
+    /// 一次性请求，不是投影：没有快照、不参与水位。
+    ConversationWakeRequested { session_id: String },
     /// 当前这条 subscribe 连接已断开（守护 exec / 崩溃 / socket 没了）。
     /// 不是协议帧，由客户端在 `subscribe_daemon_states_blocking` 返回后注入。
     Disconnected,
@@ -451,6 +455,7 @@ struct SubscriptionShape {
     remote_sessions: bool,
     workspace_menu: bool,
     automations: bool,
+    conversation_wake: bool,
 }
 
 #[derive(Default)]
@@ -524,11 +529,14 @@ impl DaemonStateEventClient {
                 CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
                 CORE_TOPIC_WORKSPACE_MENU_CHANGED,
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
+                // 冷恢复的对话启动规格只在桌面端手里，唤醒请求只能由它兑现。
+                CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
             ],
             SubscriptionShape {
                 remote_sessions: true,
                 workspace_menu: true,
                 automations: true,
+                conversation_wake: true,
             },
         )
     }
@@ -550,6 +558,7 @@ impl DaemonStateEventClient {
                 remote_sessions: true,
                 workspace_menu: true,
                 automations: true,
+                conversation_wake: false,
             },
         )
     }
@@ -793,6 +802,12 @@ impl DaemonStateEventClient {
                     .automation_revisions
                     .accept_update(snapshot.revision)
                     .then_some(DaemonStateEvent::Automations(snapshot)))
+            }
+            CORE_TOPIC_CONVERSATION_WAKE_REQUESTED if self.shape.conversation_wake => {
+                let request: ConversationWakeRequested = decode_payload(payload, topic)?;
+                Ok(Some(DaemonStateEvent::ConversationWakeRequested {
+                    session_id: request.session_id,
+                }))
             }
             _ => Err(DaemonEventClientError::Protocol(format!(
                 "unexpected event topic {topic}"
@@ -1270,11 +1285,17 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 5);
+        assert_eq!(topics.len(), 6);
         assert!(
             topics
                 .iter()
                 .any(|topic| topic == CORE_TOPIC_AUTOMATIONS_CHANGED)
+        );
+        assert!(
+            topics
+                .iter()
+                .any(|topic| topic == CORE_TOPIC_CONVERSATION_WAKE_REQUESTED),
+            "桌面端是冷恢复对话的唯一启动方，必须接唤醒请求"
         );
         assert_ne!(
             first.handshake().request.subscription.id,
@@ -1381,6 +1402,23 @@ mod tests {
                 ))
                 .unwrap(),
             Some(DaemonStateEvent::Automations(snapshot)) if snapshot.revision == 10
+        ));
+    }
+
+    #[test]
+    fn desktop_decodes_conversation_wake_requests() {
+        let wake = || {
+            event_message(
+                CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+                serde_json::json!({ "session_id": "acp-dormant" }),
+            )
+        };
+        let mut desktop = DaemonStateEventClient::desktop();
+        let _ = complete_desktop_snapshot(&mut desktop, 7, vec![]);
+        assert!(matches!(
+            desktop.decode_message(wake()).unwrap(),
+            Some(DaemonStateEvent::ConversationWakeRequested { session_id })
+                if session_id == "acp-dormant"
         ));
     }
 

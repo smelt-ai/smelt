@@ -672,6 +672,14 @@ class ConnectionMetrics {
   });
 }
 
+/// 电脑接不上这段对话：没在跑，桌面端也没能把它拉起来。
+class SessionUnavailable {
+  final String sessionId;
+  final String reason;
+
+  const SessionUnavailable({required this.sessionId, required this.reason});
+}
+
 class MessageSendResult {
   final String requestId;
   final bool ok;
@@ -816,6 +824,8 @@ class GatewayService {
   final _snapshotCacheController = StreamController<String>.broadcast();
   final _attentionController = StreamController<LifecycleAttention>.broadcast();
   final _attentionResolvedController = StreamController<String>.broadcast();
+  final _sessionUnavailableController =
+      StreamController<SessionUnavailable>.broadcast();
   final _errorController = StreamController<String>.broadcast();
   final _metricsController = StreamController<ConnectionMetrics>.broadcast();
   final _messageSendController =
@@ -868,6 +878,10 @@ class GatewayService {
   /// 任一客户端处理完行动项后，由同一 AttentionStore 发出的解决事件。
   Stream<String> get attentionResolvedStream =>
       _attentionResolvedController.stream;
+
+  /// 订阅的对话在电脑上接不上。会话页靠它停下加载圈、说清原因。
+  Stream<SessionUnavailable> get sessionUnavailableStream =>
+      _sessionUnavailableController.stream;
 
   /// 错误流
   Stream<String> get errorStream => _errorController.stream;
@@ -1840,6 +1854,19 @@ class GatewayService {
           // 订阅确认
           break;
 
+        case 'sessionUnavailable':
+          final sessionId = json['sessionId'] as String?;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _sessionUnavailableController.add(
+              SessionUnavailable(
+                sessionId: sessionId,
+                reason:
+                    json['reason'] as String? ??
+                    'This conversation is not running on the computer.',
+              ),
+            );
+          }
+
         case 'unsubscribed':
           // Local state is cleared when sending unsubscribe. A delayed ack for
           // session A must not erase a newer subscription to session B.
@@ -2070,6 +2097,7 @@ class GatewayService {
     _snapshotController.close();
     _attentionController.close();
     _attentionResolvedController.close();
+    _sessionUnavailableController.close();
     _snapshotCacheController.close();
     _errorController.close();
     _metricsController.close();

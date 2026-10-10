@@ -37,6 +37,47 @@ pub(crate) fn prepare_agent_definition_launch(
 }
 
 impl Workspace {
+    /// 手机要看一段 daemon 里没在跑的对话（典型是 daemon 冷重启后桌面只放了占位）。
+    /// 照「用户在桌面点开它」的语义拉起来，但不切舞台、不抢焦点。
+    /// 恢复还没把占位装回列表时先记下，装回后再兑现。
+    pub(crate) fn wake_conversation_for_remote(
+        &mut self,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self
+            .sessions
+            .iter()
+            .find_map(|session| match &session.kind {
+                SessionKind::Conversation(view) if view.read(cx).session_id() == session_id => {
+                    Some(view.clone())
+                }
+                _ => None,
+            });
+        match view {
+            // 一次性闸门在 maybe_auto_resume 里：桌面已经拉起过或拉失败过就不再重试，
+            // 和点开时的行为一致。
+            Some(view) => view.update(cx, |view, cx| view.maybe_auto_resume(window, cx)),
+            None if !self.sessions_restored
+                && !self.pending_conversation_wakes.contains(&session_id) =>
+            {
+                self.pending_conversation_wakes.push(session_id);
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn consume_pending_conversation_wakes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for session_id in std::mem::take(&mut self.pending_conversation_wakes) {
+            self.wake_conversation_for_remote(session_id, window, cx);
+        }
+    }
+
     /// 冷启动：专用 OS 线程里 **先 ensure managed 守护，再 reattach 全部会话**。
     /// 完成后才 `check_daemon_outdated`（不与 restore 并行 upgrade）。
     pub(crate) fn schedule_session_restore(
@@ -233,6 +274,7 @@ impl Workspace {
                         restored += 1;
                     }
                     this.consume_pending_notification_session_jump(window, cx);
+                    this.consume_pending_conversation_wakes(window, cx);
                     cx.notify();
                 })
                 .is_err()
@@ -344,6 +386,7 @@ impl Workspace {
                     this.active_session,
                 );
                 this.consume_pending_notification_session_jump(window, cx);
+                this.consume_pending_conversation_wakes(window, cx);
                 if let Some(Session {
                     kind: SessionKind::Conversation(view),
                     ..

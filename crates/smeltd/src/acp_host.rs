@@ -35,7 +35,8 @@ use std::collections::BTreeSet;
 //       `{"snapshot": ConversationSnapshot}`，之后归约有实质变化再推同形状的行。
 //       写线程还没把上一份写完时，后到的变化并进同一份，不另排一条字节队列。
 //       同 id 只允许一个控制连接，第二次 open 顶掉前一个。
-//   {"op":"acp_watch","id":".."} → 只读镜像，会话必须已存在，可多个并存。
+//   {"op":"acp_watch","id":".."} → 只读镜像，可多个并存。会话没在跑但属于桌面菜单时
+//     先请桌面端唤醒；唤醒不了回一行 `{"unavailable":{"reason":..}}`。
 //     `acp_watch` / `acp_snapshot` 可带 `"include_debug": false`：不要工具参数和
 //     runtime debug sidecar。后者含每次模型调用的完整 provider payload（图片会在
 //     每次调用里重复一份），手机这类只看正文的旁观者不该为它付带宽。
@@ -3393,21 +3394,44 @@ pub(crate) fn create_daemon_acp_session(
     Ok(slot)
 }
 
-/// 只读旁观：会话必须已存在（没有 ACP 版本的「不存在就兜底 spawn」——旁观一个
-/// 没人开过的会话没有意义），不参与 client 顶替，可多个并存。
+/// 只读旁观，不参与 client 顶替，可多个并存。
+///
+/// 会话没在跑时 daemon 自己起不来它：启动规格归桌面端。如果它是桌面菜单里的
+/// 对话（daemon 冷重启后桌面只放了占位），就请桌面端拉起来再接上；拉不起来写一行
+/// `{"unavailable": {"reason": ..}}` 说清楚，绝不静默断开——旁观方分不清「没有」
+/// 和「还没到」，只会一直转圈。
 pub(crate) fn handle_acp_watch(
-    conn: UnixStream,
+    mut conn: UnixStream,
     mut reader: BufReader<UnixStream>,
     v: &serde_json::Value,
     acp_sessions: AcpSessions,
+    workspace_menu: &WorkspaceMenuStore,
+    subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default().to_string();
     if id.is_empty() {
         return;
     }
     let include_debug = request_includes_debug(v);
-    let Some(slot) = acp_sessions.get(&id) else {
-        return;
+    let slot = match acp_sessions.get(&id) {
+        Some(slot) => slot,
+        None => match wake_dormant_conversation(
+            &id,
+            &acp_sessions,
+            workspace_menu,
+            subscribers,
+            ACP_WAKE_TIMEOUT,
+        ) {
+            Ok(slot) => slot,
+            Err(reason) => {
+                let _ = writeln!(
+                    conn,
+                    "{}",
+                    serde_json::json!({ "unavailable": { "reason": reason } })
+                );
+                return;
+            }
+        },
     };
     let lifecycle = slot.lifecycle.lock().unwrap();
     if !acp_sessions.is_current(&id, &slot) {
@@ -3478,6 +3502,48 @@ pub(crate) fn handle_acp_watch(
         .unwrap()
         .watchers
         .retain(|w| w.fd != attached_fd);
+}
+
+/// 桌面端收到唤醒请求后立刻 `acp_open`，slot 在它接上时就已占住；等的只是事件
+/// 投递和 GUI 主线程的一拍。宽裕到覆盖 GUI 刚起、对话占位还在恢复的窗口。
+const ACP_WAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const ACP_WAKE_POLL: Duration = Duration::from_millis(100);
+
+/// 把一段桌面端拥有、当前没在跑的对话拉起来，等到 runtime slot 出现。
+/// 错误串是给手机用户看的理由。
+fn wake_dormant_conversation(
+    id: &str,
+    acp_sessions: &AcpSessions,
+    workspace_menu: &WorkspaceMenuStore,
+    subscribers: &EventHubHandle,
+    timeout: Duration,
+) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    if workspace_menu.lock().unwrap().acp_session(id).is_none() {
+        return Err("This conversation is no longer running.".to_string());
+    }
+    match subscribers.request_conversation_wake(id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(
+                "Smelt is not open on the computer, so this conversation can't be resumed."
+                    .to_string(),
+            );
+        }
+        Err(error) => {
+            eprintln!("[acp] 唤醒对话 {id} 失败：{error}");
+            return Err("Could not ask the computer to resume this conversation.".to_string());
+        }
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(slot) = acp_sessions.get(id) {
+            return Ok(slot);
+        }
+        if Instant::now() >= deadline {
+            return Err("The computer did not resume this conversation in time.".to_string());
+        }
+        thread::sleep(ACP_WAKE_POLL);
+    }
 }
 
 /// 请求没写就照旧带调试 sidecar：桌面的调试面板靠它。

@@ -880,7 +880,10 @@ fn apply_mobile_lifecycle_event(hub: &MobileLifecycleHub, event: DaemonStateEven
             hub.apply_automations(automations);
             false
         }
-        DaemonStateEvent::Disconnected => false,
+        // 网关不订阅唤醒请求：它兑现不了，订阅了反而会让 daemon 误以为桌面端在场。
+        DaemonStateEvent::ConversationWakeRequested { .. } | DaemonStateEvent::Disconnected => {
+            false
+        }
     }
 }
 
@@ -2787,6 +2790,15 @@ async fn acp_watch_loop(
                         if trimmed.is_empty() {
                             continue;
                         }
+                        if let Some(reason) = acp_watch_unavailable_reason(trimmed) {
+                            let message = serde_json::json!({
+                                "type": "sessionUnavailable",
+                                "sessionId": session_id,
+                                "reason": reason,
+                            });
+                            let _ = tx.send(message.to_string()).await;
+                            break;
+                        }
                         let Ok(projected) = mobile_snapshot_line(trimmed, &session_id).await else {
                             break;
                         };
@@ -2799,6 +2811,17 @@ async fn acp_watch_loop(
             }
         }
     }
+}
+
+/// daemon 接不上这段对话（没在跑、桌面端也没把它拉起来）时回的那一行。
+/// 必须原样告诉手机，否则对话页只会一直转圈。
+fn acp_watch_unavailable_reason(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    value
+        .get("unavailable")?
+        .get("reason")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 问一次 daemon：这场对话现在加载了哪些技能。技能要读本机文件系统，只有 daemon
@@ -3041,6 +3064,19 @@ async fn respond_acp_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_watch_unavailable_line_is_recognized_and_snapshots_are_not() {
+        assert_eq!(
+            acp_watch_unavailable_reason(r#"{"unavailable":{"reason":"Smelt is not open"}}"#)
+                .as_deref(),
+            Some("Smelt is not open")
+        );
+        assert_eq!(
+            acp_watch_unavailable_reason(r#"{"snapshot":{"entries":[]}}"#),
+            None
+        );
+    }
 
     /// 手机只认 `section` + `target` 两个字段来分组和分派。这两个名字一旦漂了，
     /// 选择器会静默变成空列表——所以把下发的 JSON 形状钉死在测试里。

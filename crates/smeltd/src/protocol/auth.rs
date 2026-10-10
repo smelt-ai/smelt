@@ -30,10 +30,10 @@
 
 use super::super::*;
 use smelt_plugin_api::{
-    CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
-    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth,
-    FIRST_PARTY_DESKTOP_PLUGIN_ID, FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind,
-    PluginId,
+    CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
+    CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
+    CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth, FIRST_PARTY_DESKTOP_PLUGIN_ID,
+    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, PluginId,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -900,6 +900,8 @@ pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> Authentica
                 CORE_CAPABILITY_REMOTE_SESSIONS_READ,
                 CORE_CAPABILITY_WORKSPACE_READ,
                 CORE_CAPABILITY_AUTOMATION_READ,
+                // 冷恢复对话的启动规格只在桌面端，唤醒请求只投给它。
+                CORE_CAPABILITY_CONVERSATION_WAKE,
             ],
         ),
         FirstPartyClientKind::RemoteGateway => (

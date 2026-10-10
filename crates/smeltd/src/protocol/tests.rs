@@ -7,12 +7,13 @@ use super::auth::{
 use super::*;
 use smelt_plugin_api::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_CAPABILITY_AUTOMATION_READ,
-    CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
-    CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, Capability, DeliveryClass, EVENT_BUS_PROTOCOL_VERSION,
-    FIRST_PARTY_DESKTOP_PLUGIN_ID, FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind,
-    Nack, NackDisposition, PluginId, ProtocolRange, SubscribeControlMessage, SubscribeErrorCode,
-    SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId,
+    CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
+    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
+    CORE_TOPIC_AGENT_MESSAGE_DELIVERED, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
+    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
+    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, Nack, NackDisposition, PluginId,
+    ProtocolRange, SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
+    SubscriptionDeclaration, SubscriptionId,
 };
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
@@ -311,6 +312,7 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
             Capability::new(CORE_CAPABILITY_REMOTE_SESSIONS_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_WORKSPACE_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap(),
+            Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap(),
         ])
     );
 
@@ -334,6 +336,12 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
         gateway
             .capabilities
             .contains(&Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap())
+    );
+    assert!(
+        !gateway
+            .capabilities
+            .contains(&Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap()),
+        "网关兑现不了唤醒请求，不能订阅它，否则 daemon 会误以为有桌面端在场"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
