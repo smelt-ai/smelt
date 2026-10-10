@@ -371,7 +371,7 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
                 materialize_pi_files(staging)?;
                 run_pi_install(&bun_runtime, &manager, staging)?;
                 if !managed_pi_agent_dependencies_installed(staging) {
-                    return Err("Pi 依赖安装完成，但必要的 RPC 补丁或入口不完整".to_string());
+                    return Err("Pi 依赖安装完成，但 RPC 入口不完整".to_string());
                 }
                 Ok(())
             },
@@ -463,25 +463,7 @@ fn managed_pi_agent_dependencies_installed(root: &Path) -> bool {
         root.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/rpc-entry.js");
     let rpc_mode =
         root.join("node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js");
-    rpc_entry.is_file()
-        && fs::read_to_string(rpc_mode)
-            .is_ok_and(|source| pi_rpc_duplicate_rebind_patch_is_applied(&source))
-}
-
-pub(crate) fn pi_rpc_duplicate_rebind_patch_is_applied(source: &str) -> bool {
-    ["new_session", "switch_session", "fork", "clone"]
-        .into_iter()
-        .all(|command| {
-            let marker = format!("case \"{command}\": {{");
-            let Some(start) = source.find(&marker) else {
-                return false;
-            };
-            let after_marker = &source[start + marker.len()..];
-            let end = after_marker
-                .find("\n            case \"")
-                .unwrap_or(after_marker.len());
-            !after_marker[..end].contains("await rebindSession()")
-        })
+    rpc_entry.is_file() && rpc_mode.is_file()
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -572,7 +554,10 @@ mod tests {
         let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/pi-agent");
         let mut expected = vec!["bun.lock".to_string(), "package.json".to_string()];
         collect_runtime_files(&package.join("src"), &package, &mut expected);
-        collect_runtime_files(&package.join("patches"), &package, &mut expected);
+        let patches = package.join("patches");
+        if patches.is_dir() {
+            collect_runtime_files(&patches, &package, &mut expected);
+        }
         expected.sort();
 
         let mut embedded = pi_runtime_files()
@@ -596,28 +581,6 @@ mod tests {
         assert_eq!(manifest["version"], pi_runtime_version());
         let main = include_str!("../../../packages/pi-agent/src/main.ts");
         assert!(main.contains("registerBunOAuthFlows()"));
-    }
-
-    #[test]
-    fn rpc_patch_postcondition_covers_every_session_replacement_handler() {
-        let clean = ["new_session", "switch_session", "fork", "clone"]
-            .into_iter()
-            .map(|name| format!("case \"{name}\": {{\n return success();\n }}\n"))
-            .collect::<String>();
-        assert!(pi_rpc_duplicate_rebind_patch_is_applied(&clean));
-        for name in ["new_session", "switch_session", "fork", "clone"] {
-            let drifted = clean.replacen(
-                &format!("case \"{name}\": {{"),
-                &format!("case \"{name}\": {{\n await rebindSession();"),
-                1,
-            );
-            assert!(!pi_rpc_duplicate_rebind_patch_is_applied(&drifted));
-        }
-        assert!(!pi_rpc_duplicate_rebind_patch_is_applied(&clean.replacen(
-            "case \"clone\": {",
-            "case \"removed\": {",
-            1,
-        )));
     }
 
     #[cfg(target_os = "macos")]

@@ -514,6 +514,7 @@ describe("context usage buckets", () => {
 			},
 		];
 
+		let reloaded = 0;
 		const context = {
 			hasUI: true,
 			ui: {
@@ -528,6 +529,9 @@ describe("context usage buckets", () => {
 				options?.onComplete?.();
 			},
 			getSystemPrompt: () => "system prompt",
+			reload: async () => {
+				reloaded += 1;
+			},
 		} as unknown as ExtensionContext;
 
 		smeltContextUsageExtension(pi);
@@ -535,6 +539,7 @@ describe("context usage buckets", () => {
 		// 1. Verify commands registration
 		expect(commands.has("shake")).toBe(true);
 		expect(commands.has("handoff")).toBe(true);
+		expect(commands.has("reload")).toBe(true);
 
 		// 2. Test shake command execution
 		const shakeCmd = commands.get("shake")!;
@@ -560,5 +565,14 @@ describe("context usage buckets", () => {
 
 		const normalInputRes = await inputHandler!({ text: "hello world" }, context);
 		expect(normalInputRes).toEqual({ action: "continue" });
+
+		// /reload 只走 registerCommand。input 再拦一次会在命令未注册时重复加载。
+		const reloadInputRes = await inputHandler!({ text: "/reload" }, context);
+		expect(reloadInputRes).toEqual({ action: "continue" });
+		expect(reloaded).toBe(0);
+
+		const reloadCmd = commands.get("reload")!;
+		await reloadCmd.handler("", context);
+		expect(reloaded).toBe(1);
 	});
 });

@@ -24,6 +24,7 @@ function bindToolRegistry(
 			description: tool.definition.description,
 			parameters: tool.definition.parameters,
 			promptGuidelines: tool.definition.promptGuidelines,
+			exposure: tool.definition.exposure ?? "direct",
 			sourceInfo: tool.sourceInfo,
 		}));
 }

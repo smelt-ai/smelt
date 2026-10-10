@@ -65,7 +65,7 @@ describe("Pi RPC stdio entry", () => {
 		]);
 	});
 
-	test("binds extensions exactly once after a successful new_session", async () => {
+	test("new_session emits session_start on startup and on each upstream rebind", async () => {
 		const agentDir = await mkdtemp(join(tmpdir(), "smelt-pi-rebind-test-"));
 		tempDirs.push(agentDir);
 		const startsFile = join(agentDir, "session-starts.jsonl");
@@ -117,8 +117,8 @@ describe("Pi RPC stdio entry", () => {
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line) as { reason: string });
-		expect(starts).toHaveLength(2);
-		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
+		// 官方 RPC 在 new_session 里还会再 rebind 一次，所以 startup 之后有两次 new。
+		expect(starts.map((event) => event.reason)).toEqual(["startup", "new", "new"]);
 	});
 });
 

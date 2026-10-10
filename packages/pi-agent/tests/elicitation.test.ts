@@ -87,6 +87,7 @@ async function loadHostExtensions(preceding: ExtensionFactory[] = []) {
 			description: tool.definition.description,
 			parameters: tool.definition.parameters,
 			promptGuidelines: tool.definition.promptGuidelines,
+			exposure: tool.definition.exposure ?? "direct",
 			sourceInfo: tool.sourceInfo,
 		}));
 	await loaded.runner.emit({ type: "session_start", reason: "startup" });

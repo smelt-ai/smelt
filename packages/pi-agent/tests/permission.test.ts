@@ -7,7 +7,7 @@ import {
 
 const builtin = (name: string): ToolIdentity => ({
 	name,
-	sourceInfo: { path: `<builtin:${name}>`, source: "builtin", scope: "temporary", origin: "top-level" },
+	sourceInfo: { path: `builtin:${name}`, source: "builtin", scope: "temporary", origin: "top-level" },
 });
 const extension = (name: string, path: string): ToolIdentity => ({
 	name,

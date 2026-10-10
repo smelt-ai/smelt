@@ -16,11 +16,11 @@ Extension / Tool / Skill 交付。
 - `~/.pi/agent/extensions/`、项目 `.pi/extensions/` 以及 Pi 的 Skill 目录由
   `DefaultResourceLoader` 原生发现；Smelt 内置的 `subagent` 作为 Pi Extension 加载，
   不依赖用户全局安装。
-- Pi 本身不内置 MCP；当前不要把业务能力只放在 ACP/MCP 配置中。
+- Pi 1.1 起内置 MCP、codemode 和 tool search。Smelt 自己的业务能力仍以 Extension、Tool 和 Skill 交付，不只放进 MCP 配置。
 
 ## 运行与安全
 
-发布时入口、Smelt Extensions、依赖补丁、`package.json` 和 `bun.lock` 会嵌入
+发布时入口、Smelt Extensions、`package.json` 和 `bun.lock` 会嵌入
 `smelt-core`。受管 Bun 与 Pi 分别以完整 SHA-256 identity 发布到
 `~/.smelt/runtime/store/bun/<generation-id>/` 和
 `~/.smelt/runtime/store/pi/<generation-id>/`；Pi generation identity 同时绑定 Bun

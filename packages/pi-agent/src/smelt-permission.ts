@@ -17,7 +17,7 @@ export type ToolIdentity = {
 function isActualBuiltin(tool: ToolIdentity): boolean {
 	return (
 		tool.sourceInfo.source === "builtin" &&
-		tool.sourceInfo.path === `<builtin:${tool.name}>`
+		tool.sourceInfo.path === `builtin:${tool.name}`
 	);
 }
 
