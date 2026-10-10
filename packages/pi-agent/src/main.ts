@@ -5,6 +5,7 @@
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { main } from "@earendil-works/pi-coding-agent";
 import { consumeAgentInstructions } from "./agent-instructions.ts";
+import { consumeAgentMemory } from "./agent-memory.ts";
 import { consumePluginArgs } from "./plugin-args.ts";
 import { SMELT_EXTENSION_FACTORIES } from "./runtime-extensions.ts";
 
@@ -12,6 +13,7 @@ import { SMELT_EXTENSION_FACTORIES } from "./runtime-extensions.ts";
 // 否则 token 刷新会按 import.meta.url 再读磁盘；旧运行时目录被回收后就会 ENOENT。
 registerBunOAuthFlows();
 consumeAgentInstructions(process.env, process.argv);
+consumeAgentMemory(process.env);
 consumePluginArgs(process.env, process.argv);
 process.title = "pi-rpc";
 process.env.PI_CODING_AGENT = "true";

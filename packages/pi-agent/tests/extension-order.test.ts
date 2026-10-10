@@ -20,6 +20,7 @@ import {
 	SMELT_ELICITATION_TOOL_NAME,
 	smeltElicitationExtension,
 } from "../src/elicitation.ts";
+import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "../src/memory-extension.ts";
 import smeltPermissionExtension from "../src/smelt-permission.ts";
 import smeltSubagentExtension, { SMELT_SUBAGENT_EXTENSION_NAME } from "../src/subagent/index.ts";
 
@@ -68,6 +69,7 @@ describe("Smelt Pi extension ordering", () => {
 			{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 			{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
 			{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
+			{ name: SMELT_MEMORY_EXTENSION_NAME, factory: smeltMemoryExtension, hidden: true },
 			{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
 		]);
 	});

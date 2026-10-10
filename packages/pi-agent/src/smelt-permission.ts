@@ -3,6 +3,7 @@ import {
 	SMELT_ELICITATION_EXTENSION_PATH,
 	SMELT_ELICITATION_TOOL_NAME,
 } from "./elicitation.ts";
+import { consumeApprovedMemoryWrite } from "./memory-extension.ts";
 
 /** Rust 端据此识别 Smelt 自己的权限请求，不会误吞用户 Extension 的 confirm。 */
 export const SMELT_PERMISSION_TITLE = "smelt.permission.v1";
@@ -66,6 +67,8 @@ export default function smeltPermissionExtension(pi: ExtensionAPI): void {
 			};
 		}
 		if (!toolNeedsSmeltApproval(tool, event.input)) return;
+		// smelt-memory 紧排在前面，已校验过路径、身份和内容；记忆写入照 Claude Code 免审批。
+		if (consumeApprovedMemoryWrite(event.toolCallId)) return;
 
 		const approved = await context.ui.confirm(
 			SMELT_PERMISSION_TITLE,
