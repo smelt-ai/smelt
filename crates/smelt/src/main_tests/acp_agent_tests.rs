@@ -158,7 +158,6 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
         )),
         sid: Some("acp-1".into()),
         refresh_launch_from_settings: false,
-        fork_origin: None,
         conversation_binding: smelt_core::conversation::ConversationBinding::Plugin {
             plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
             route: smelt_plugin_api::PluginInputRouteBinding {

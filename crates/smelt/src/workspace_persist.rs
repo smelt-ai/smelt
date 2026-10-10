@@ -568,7 +568,6 @@ fn snapshot_acp_view(
         history_session_id: view.history_session_id_for_save(),
         sid: Some(view.session_id().to_string()),
         refresh_launch_from_settings: view.refresh_launch_from_settings(),
-        fork_origin: view.fork_origin(),
         conversation_binding: view.conversation_binding_for_save(),
         agent_session: view.agent_session_for_save(),
         config_values: view.config_values_for_save(),

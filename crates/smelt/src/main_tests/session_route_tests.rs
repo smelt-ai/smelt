@@ -413,7 +413,6 @@ fn agent_conversation_binding_round_trips_with_the_conversation() {
         history_session_id: None,
         sid: Some("acp-agent-1".into()),
         refresh_launch_from_settings: true,
-        fork_origin: None,
         conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
         agent_session: None,
         config_values: Vec::new(),

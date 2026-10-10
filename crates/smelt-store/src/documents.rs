@@ -1712,7 +1712,6 @@ fn layout_from_value(value: &Value) -> WorkspaceLayoutNode {
 
 fn acp_from_value(value: &Value) -> WorkspaceAcpRecord {
     let launch = value.get("launch").and_then(Value::as_object);
-    let fork = value.get("fork_origin").and_then(Value::as_object);
     WorkspaceAcpRecord {
         cwd: as_str(value.get("cwd")).map(str::to_string),
         sid: as_str(value.get("sid")).map(str::to_string),
@@ -1729,22 +1728,12 @@ fn acp_from_value(value: &Value) -> WorkspaceAcpRecord {
             .get("refresh_launch_from_settings")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        fork_session_id: fork
-            .and_then(|fork| as_str(fork.get("session_id")))
-            .map(str::to_string),
-        fork_title: fork
-            .and_then(|fork| as_str(fork.get("title")))
-            .map(str::to_string),
-        fork_agent: fork
-            .and_then(|fork| as_str(fork.get("agent")))
-            .map(str::to_string),
-        fork_profile_label: fork
-            .and_then(|fork| as_str(fork.get("profile_label")))
-            .map(str::to_string),
-        fork_from_history: fork
-            .and_then(|fork| fork.get("from_history"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        // 分叉来源不再属于对话。写入时清空旧列，避免下次读回。
+        fork_session_id: None,
+        fork_title: None,
+        fork_agent: None,
+        fork_profile_label: None,
+        fork_from_history: false,
         pending_prompt: as_str(value.get("pending_prompt")).map(str::to_string),
         pending_delivery_id: as_str(value.get("pending_delivery_id")).map(str::to_string),
         agent_definition_id: as_str(value.get("agent_definition_id")).map(str::to_string),
@@ -2259,18 +2248,6 @@ fn acp_to_value(acp: &WorkspaceAcpRecord) -> Value {
         "automation_id": acp.automation_id,
     });
     let object = value.as_object_mut().expect("acp object");
-    if let (Some(session_id), Some(title)) = (&acp.fork_session_id, &acp.fork_title) {
-        object.insert(
-            "fork_origin".into(),
-            json!({
-                "session_id": session_id,
-                "title": title,
-                "agent": acp.fork_agent,
-                "profile_label": acp.fork_profile_label,
-                "from_history": acp.fork_from_history,
-            }),
-        );
-    }
     for (key, raw) in [
         ("config_values", acp.config_values_json.as_deref()),
         (
@@ -2415,11 +2392,6 @@ struct AcpRow {
     history_session_id: Option<String>,
     launch_command: String,
     refresh_launch_from_settings: bool,
-    fork_session_id: Option<String>,
-    fork_title: Option<String>,
-    fork_agent: Option<String>,
-    fork_profile_label: Option<String>,
-    fork_from_history: bool,
     pending_prompt: Option<String>,
     pending_delivery_id: Option<String>,
     agent_definition_id: Option<String>,
@@ -2429,9 +2401,7 @@ struct AcpRow {
 fn read_acp_detail(connection: &Connection, session_id: &str) -> Result<Value, StoreError> {
     let (cwd, row) = connection.query_row(
         "SELECT s.cwd, d.agent, d.profile_id, d.history_session_id, d.launch_command,
-                    d.refresh_launch_from_settings, d.fork_session_id, d.fork_title,
-                    d.fork_agent, d.fork_profile_label, d.fork_from_history,
-                    d.pending_prompt, d.pending_delivery_id,
+                    d.refresh_launch_from_settings, d.pending_prompt, d.pending_delivery_id,
                     d.agent_definition_id, d.automation_id
              FROM acp_detail d JOIN session s ON s.id = d.session_id
              WHERE d.session_id = ?1",
@@ -2445,15 +2415,10 @@ fn read_acp_detail(connection: &Connection, session_id: &str) -> Result<Value, S
                     history_session_id: row.get(3)?,
                     launch_command: row.get(4)?,
                     refresh_launch_from_settings: row.get::<_, i64>(5)? != 0,
-                    fork_session_id: row.get(6)?,
-                    fork_title: row.get(7)?,
-                    fork_agent: row.get(8)?,
-                    fork_profile_label: row.get(9)?,
-                    fork_from_history: row.get::<_, i64>(10)? != 0,
-                    pending_prompt: row.get(11)?,
-                    pending_delivery_id: row.get(12)?,
-                    agent_definition_id: row.get(13)?,
-                    automation_id: row.get(14)?,
+                    pending_prompt: row.get(6)?,
+                    pending_delivery_id: row.get(7)?,
+                    agent_definition_id: row.get(8)?,
+                    automation_id: row.get(9)?,
                 },
             ))
         },
@@ -2468,16 +2433,6 @@ fn read_acp_detail(connection: &Connection, session_id: &str) -> Result<Value, S
     let pending_agent_preset =
         read_json_tree(connection, &scope, "pending_agent_preset")?.unwrap_or(Value::Null);
     let session_title = read_json_tree(connection, &scope, "session_title")?.unwrap_or(Value::Null);
-    let fork_origin = match (row.fork_session_id, row.fork_title) {
-        (Some(origin_session_id), Some(title)) => json!({
-            "session_id": origin_session_id,
-            "title": title,
-            "agent": row.fork_agent,
-            "profile_label": row.fork_profile_label,
-            "from_history": row.fork_from_history,
-        }),
-        _ => Value::Null,
-    };
     Ok(json!({
         "cwd": cwd,
         "launch": {"command": row.launch_command, "env": env},
@@ -2486,7 +2441,6 @@ fn read_acp_detail(connection: &Connection, session_id: &str) -> Result<Value, S
         "history_session_id": row.history_session_id,
         "sid": session_id,
         "refresh_launch_from_settings": row.refresh_launch_from_settings,
-        "fork_origin": fork_origin,
         "conversation_binding": conversation_binding,
         "agent_session": agent_session,
         "config_values": config_values,

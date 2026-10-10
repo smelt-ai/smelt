@@ -1095,7 +1095,6 @@ pub enum AcpViewEvent {
     NewSession(Box<AcpNewSessionRequest>),
     /// Pi 活体对话的新分支：从回答分叉，或从较早的用户消息分叉并预填编辑。
     ForkConversation(Box<AcpHandoffRequest>),
-    NavigateToSession(String),
     /// 回合结束且无人在等（无 pending_permissions / pending_elicitation）的上升沿。
     /// GUI 用它刷新会话展示；投递完成归约由 smeltd 直接观察 ACP 快照完成。
     CompletedTurn {
@@ -1174,22 +1173,13 @@ fn selected_text_context_menu(
     )
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// 分叉动作的输入：只在创建那一下用来找到开着的源会话并继承智能体定义。
+/// 不写入新对话。
+#[derive(Clone, Debug)]
 pub struct AcpForkOrigin {
     pub session_id: String,
-    pub title: String,
-    /// 源会话是哪家 agent（`ConversationAgentKind::id()`）。旧存档没有这个字段 → `None`，
-    /// 一律按「同一家」显示，不会因为缺字段就把老会话标成迁移来的。
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// 源会话的 workspace profile 名（默认 workspace 为 `None`）。只用于显示，
-    /// profile 可能已被删掉，不拿它反查配置。
-    #[serde(default)]
-    pub profile_label: Option<String>,
-    /// 源是历史会话页上的磁盘存档（不是当前开着的 Smelt 会话）。此时
-    /// `session_id` 是源 agent 自己的 session id，Smelt 这边按它找不到会话，
-    /// 顶栏不提供「返回原会话」。
-    #[serde(default)]
+    /// 源是历史会话页上的磁盘存档。此时 `session_id` 是源 agent 自己的 session id，
+    /// 不能拿来继承本机智能体定义。
     pub from_history: bool,
 }
 
@@ -1220,8 +1210,6 @@ pub struct AcpHandoffRequest {
     pub prompt: String,
     /// 随首包一起发出去的图片。空 = 纯文本首包。
     pub images: Vec<smelt_core::acp_chat::AcpImage>,
-    /// 目标 profile 的显示名，跟 `source.profile_label` 一起决定会话标题怎么写。
-    pub profile_label: Option<String>,
     /// 前次 provider 会话 id（controller 续跑上下文）：非空时 ACP 连接用
     /// `session/load` 恢复历史，而不是开全新会话。
     pub resume_session_id: Option<String>,
@@ -1493,8 +1481,6 @@ pub struct AcpView {
     /// 用户选择也需要在重启后恢复，因此不能在 `pending_initial_config` 被消费后
     /// 丢掉。
     restart_config_values: Vec<(String, String)>,
-    /// “在新会话中继续”的来源，只用于导航和解释会话关系。
-    fork_origin: Option<AcpForkOrigin>,
     /// daemon 拥有的通用交互输入路由镜像。插件上下文只存在 route.context 中，
     /// ACP view 不认识任何具体远端平台的字段。
     conversation_binding: smelt_core::conversation::ConversationBinding,
@@ -1653,7 +1639,6 @@ impl AcpView {
         this.restart_config_values = request.config_values.clone();
         this.pending_initial_config = request.config_values;
         this.ephemeral_env = request.ephemeral_env;
-        this.fork_origin = request.source;
         this.conversation_binding = request.conversation_binding;
         this.agent_session = request.agent_session;
         let handle = spawn_acp_client(ConversationClientLaunch {
@@ -1837,7 +1822,6 @@ impl AcpView {
             pending_initial_prompt: None,
             pending_initial_config: Vec::new(),
             restart_config_values: Vec::new(),
-            fork_origin: None,
             conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
             agent_session: None,
             pending_conversation_input: None,
@@ -2557,14 +2541,6 @@ impl AcpView {
         self.agent
     }
 
-    pub fn fork_origin(&self) -> Option<AcpForkOrigin> {
-        self.fork_origin.clone()
-    }
-
-    pub fn set_fork_origin(&mut self, origin: Option<AcpForkOrigin>) {
-        self.fork_origin = origin;
-    }
-
     /// 当前生效的会话配置（含模型），`(config_id, value)` 形式——只在同 agent
     /// 续接时透传。
     fn current_config_values(&self) -> Vec<(String, String)> {
@@ -2985,16 +2961,9 @@ impl AcpView {
         if fork_session_id.trim().is_empty() {
             return None;
         }
-        let title = self
-            .auto_title()
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| "对话".to_string());
         Some(AcpHandoffRequest {
             source: Some(AcpForkOrigin {
                 session_id: self.sid.clone(),
-                title,
-                agent: Some(self.agent.id().to_string()),
-                profile_label: None,
                 from_history: false,
             }),
             cwd: self.cwd.clone(),
@@ -3006,7 +2975,6 @@ impl AcpView {
             ephemeral_env: self.ephemeral_env.clone(),
             prompt,
             images: Vec::new(),
-            profile_label: None,
             resume_session_id: None,
             fork_session_id: Some(fork_session_id),
             fork_cut,
@@ -4858,29 +4826,6 @@ fn progress_has_details(text: &str) -> bool {
             .chars()
             .count()
             > MAX_CHARS
-}
-
-/// 顶栏那条来源横幅的文案。同一家 agent 续接说「继续」，换了 agent 或换了 workspace
-/// 说「迁移」并点名来源——这条会话的上下文是二手的，用户得一眼看见。
-fn fork_banner_text(origin: &AcpForkOrigin, current_agent: ConversationAgentKind) -> String {
-    let source_name = origin.profile_label.clone().or_else(|| {
-        origin
-            .agent
-            .as_deref()
-            .and_then(ConversationAgentKind::from_id)
-            .filter(|kind| *kind != current_agent || origin.profile_label.is_some())
-            .map(|kind| kind.label().to_string())
-    });
-    let scope = if origin.from_history {
-        "历史会话"
-    } else {
-        "会话"
-    };
-    match source_name {
-        Some(name) => format!("从 {name} 的{scope}「{}」迁移而来", origin.title),
-        // 源 agent 未知（旧存档）或就是同一家：保持原来的说法。
-        None => format!("从「{}」继续", origin.title),
-    }
 }
 
 /// 工具输出默认只展开这么多行，其余折叠到「展开全部 N 行」后面。

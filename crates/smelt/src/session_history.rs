@@ -1250,11 +1250,7 @@ fn build_history_handoff_request(
     acp_view::AcpHandoffRequest {
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),
-            title: source.title.clone(),
-            agent: Some(source.agent.id().to_string()),
-            profile_label: source.profile_label.clone(),
-            // 源是磁盘上的历史存档，不是当前开着的某条 Smelt 会话——「返回原会话」
-            // 按 sid 找不到东西，banner 那颗按钮要藏起来。
+            // 源是磁盘上的历史存档，不是当前开着的某条 Smelt 会话。
             from_history: true,
         }),
         cwd: Some(source.cwd.clone()),
@@ -1269,7 +1265,6 @@ fn build_history_handoff_request(
         prompt,
         // 历史迁移是文本交接，不搬图片。
         images: Vec::new(),
-        profile_label: target.profile_label,
         resume_session_id: None,
         fork_session_id: None,
         fork_cut: None,
@@ -1471,10 +1466,10 @@ mod tests {
         };
 
         let request = build_history_handoff_request(&source, &detail, target);
-        let origin = request.source.expect("迁移来的会话必须记得源");
-        assert_eq!(origin.agent.as_deref(), Some("grok"));
+        let origin = request
+            .source
+            .expect("创建时要知道源会话，才能跳过本机定义继承");
         assert_eq!(origin.session_id, "grok-session-1");
-        // 源在磁盘上，不是开着的 Smelt 会话——顶栏不该给「返回原会话」
         assert!(origin.from_history);
         assert!(request.config_values.is_empty());
         assert!(request.prompt.contains("原会话由 Grok 进行"));

@@ -182,7 +182,6 @@ fn acp_archive_cwd_comes_from_acp_meta() {
             history_session_id: None,
             sid: None,
             refresh_launch_from_settings: false,
-            fork_origin: None,
             conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
             agent_session: None,
             config_values: Vec::new(),

@@ -178,7 +178,6 @@ impl Workspace {
                             .and_then(settings::ConversationAgentKind::from_id)
                             .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
                         let refresh_launch_from_settings = saved.refresh_launch_from_settings();
-                        let fork_origin = saved.fork_origin.clone();
                         let conversation_binding = saved.conversation_binding.clone();
                         let agent_session = saved.agent_session.clone();
                         let config_values = if agent_session.is_some() {
@@ -220,7 +219,6 @@ impl Workspace {
                             )
                         });
                         view.update(cx, |view, _cx| {
-                            view.set_fork_origin(fork_origin);
                             view.restore_conversation_binding(conversation_binding);
                             view.restore_agent_session(agent_session);
                             view.restore_config_values(config_values);
@@ -887,20 +885,6 @@ impl Workspace {
                 acp_view::AcpViewEvent::ForkConversation(request) => {
                     this.add_acp_handoff_session(request.as_ref().clone(), window, cx);
                 }
-                acp_view::AcpViewEvent::NavigateToSession(session_id) => {
-                    if let Some(ix) = this
-                        .sessions
-                        .iter()
-                        .position(|session| match &session.kind {
-                            SessionKind::Conversation(view) => {
-                                view.read(cx).session_id() == session_id
-                            }
-                            SessionKind::Term { .. } => false,
-                        })
-                    {
-                        this.activate(ix, window, cx);
-                    }
-                }
                 acp_view::AcpViewEvent::CompletedTurn { .. } => {
                     this.touch_acp_session(_view);
                 }
@@ -995,39 +979,6 @@ impl Workspace {
         )
     }
 
-    /// 交接会话的侧栏标题。同一家 agent 沿用「继续：X」；跨 agent / 跨 workspace
-    /// 迁移则把两端写进标题（「Claude→Codex：X」）——会话列表里一眼看出这条对话
-    /// 换了主人，不然迁移过的会话和原会话长得一模一样。
-    pub(crate) fn handoff_session_title(request: &acp_view::AcpHandoffRequest) -> String {
-        let Some(source) = request.source.as_ref() else {
-            return "继续".to_string();
-        };
-        let source_name = source
-            .profile_label
-            .clone()
-            .or_else(|| {
-                source
-                    .agent
-                    .as_deref()
-                    .and_then(settings::ConversationAgentKind::from_id)
-                    .map(|k| k.short_label().to_string())
-            })
-            .unwrap_or_default();
-        let target_name = request
-            .profile_label
-            .clone()
-            .unwrap_or_else(|| request.agent.short_label().to_string());
-        // 源 agent 未知（旧存档没这个字段）时退回旧文案，不硬凑一个箭头。
-        if source_name.is_empty() || source_name == target_name {
-            return if source.from_history {
-                format!("继续：{}", source.title)
-            } else {
-                format!("分叉：{}", source.title)
-            };
-        }
-        format!("{source_name}→{target_name}：{}", source.title)
-    }
-
     pub(crate) fn add_acp_handoff_session(
         &mut self,
         mut request: acp_view::AcpHandoffRequest,
@@ -1075,10 +1026,7 @@ impl Workspace {
             request.config_values =
                 settings::initial_acp_config_for(request.agent, &request.config_values, cx);
         }
-        let title = Self::handoff_session_title(&request);
         let view = cx.new(|cx| acp_view::AcpView::start_with_handoff(window, cx, request));
-        // 交接名由系统推导，属于会话标题；不能占用只表示用户重命名的覆盖层。
-        view.update(cx, |view, _cx| view.restore_session_title(Some(title)));
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),

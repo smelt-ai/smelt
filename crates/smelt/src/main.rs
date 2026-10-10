@@ -1695,8 +1695,6 @@ struct AcpSaved {
     /// 存档则保留原 launch，避免把旧 profile 覆盖掉。旧存档无此字段 → false。
     #[serde(default)]
     refresh_launch_from_settings: bool,
-    #[serde(default)]
-    fork_origin: Option<acp_view::AcpForkOrigin>,
     /// 通用交互输入路由。agent/profile 只决定 ACP 执行器，不决定用户消息送往哪里。
     #[serde(default)]
     conversation_binding: smelt_core::conversation::ConversationBinding,
@@ -1750,8 +1748,10 @@ struct AcpSavedWire {
     sid: Option<String>,
     #[serde(default)]
     refresh_launch_from_settings: Option<bool>,
-    #[serde(default)]
-    fork_origin: Option<acp_view::AcpForkOrigin>,
+    /// 旧存档记过「这场对话是分出来的」。分叉只是创建动作，结果就是普通对话，
+    /// 这个字段不再进入 `AcpSaved`，下一次保存也不会写回。
+    #[serde(default, rename = "fork_origin")]
+    _legacy_fork_origin: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
     #[serde(default)]
@@ -1794,7 +1794,6 @@ impl<'de> serde::Deserialize<'de> for AcpSaved {
             history_session_id: wire.history_session_id,
             sid: wire.sid,
             refresh_launch_from_settings,
-            fork_origin: wire.fork_origin,
             conversation_binding,
             agent_session: wire.agent_session,
             config_values: wire.config_values,

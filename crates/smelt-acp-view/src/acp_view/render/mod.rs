@@ -428,39 +428,6 @@ impl AcpView {
                         .child(prompt_chips),
                 )
         });
-        let fork_banner = self.fork_origin.clone().map(|origin| {
-            let source_id = origin.session_id.clone();
-            let banner_text = fork_banner_text(&origin, self.agent);
-            let can_return = !origin.from_history;
-            h_flex()
-                .w_full()
-                .px_3()
-                .py_2()
-                .gap_2()
-                .items_center()
-                .border_b_1()
-                .border_color(t.border)
-                .text_xs()
-                .text_color(muted)
-                .child(Icon::new(IconName::SquareTerminal).xsmall())
-                .child(div().flex_1().min_w_0().truncate().child(banner_text))
-                .when(can_return, |row| {
-                    row.child(
-                        div()
-                            .id("acp-return-to-source")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(gpui::rgb(ui_theme::bg_hover())))
-                            .child("返回原会话")
-                            .on_click(cx.listener(move |_this, _ev, _window, cx| {
-                                cx.emit(AcpViewEvent::NavigateToSession(source_id.clone()));
-                            })),
-                    )
-                })
-                .into_any_element()
-        });
         let jump_to_latest = self.viewing_history.then(|| {
             h_flex()
                 .absolute()
@@ -516,10 +483,8 @@ impl AcpView {
                 .into_any_element()
         });
         // 顶上的条已经让开胶囊时，列表第一条不要再让一次。
-        let clear_capsule = history_error_banner.is_none()
-            && banner.is_none()
-            && fork_banner.is_none()
-            && plan_bar.is_none();
+        let clear_capsule =
+            history_error_banner.is_none() && banner.is_none() && plan_bar.is_none();
         // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
         // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
         let list = self.render_message_list(animate_ambient, clear_capsule, cx);
@@ -626,7 +591,6 @@ impl AcpView {
                     .pt(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
                     .children(history_error_banner)
                     .children(banner)
-                    .children(fork_banner)
                     .children(plan_bar)
             }))
             .child(
