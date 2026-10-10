@@ -57,16 +57,23 @@ pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
 }
 
 /// 会话内容区共用的背景图层：始终覆盖容器，裁切方式和终端保持一致。
-/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，主题底色/材质透出，
-/// 避免明亮图片直接铺满压过内容。
-pub(crate) fn background_image_layer(path: &str, opacity: f32) -> Div {
-    div().absolute().inset_0().child(
-        img(std::path::PathBuf::from(path))
-            .absolute()
-            .inset_0()
+/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，主题底色透出。
+/// 透明度为 0 时不读文件。栅格图只画降采样预览，不把原图交给 `img()`。
+pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div {
+    let layer = div().absolute().inset_0();
+    if opacity <= 0.0 {
+        return layer;
+    }
+    let path = std::path::Path::new(path);
+    smelt_ui::image::ensure_file_preview(path, cx);
+    layer.child(
+        div()
             .size_full()
-            .object_fit(ObjectFit::Cover)
-            .opacity(opacity),
+            .opacity(opacity)
+            .child(smelt_ui::image::file_surface(
+                path,
+                smelt_ui::image::FileFit::Cover,
+            )),
     )
 }
 

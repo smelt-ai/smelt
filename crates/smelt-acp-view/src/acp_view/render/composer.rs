@@ -683,6 +683,20 @@ impl AcpView {
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
                     for (ix, im) in self.pending_images.iter().enumerate() {
+                        if smelt_ui::image::cached(im).is_none()
+                            && im.format != gpui::ImageFormat::Svg
+                        {
+                            let fetch_image = im.clone();
+                            cx.spawn(async move |this, cx| {
+                                smelt_ui::image::fetch_async(
+                                    fetch_image,
+                                    cx.background_executor(),
+                                )
+                                .await;
+                                let _ = this.update(cx, |_, cx| cx.notify());
+                            })
+                            .detach();
+                        }
                         let preview_image = im.clone();
                         strip = strip.child(
                             div()
@@ -690,18 +704,20 @@ impl AcpView {
                                 .relative()
                                 .cursor_pointer()
                                 .hover(|d| d.opacity(0.88))
+                                .border_1()
+                                .border_color(t.border)
+                                .rounded_md()
+                                .overflow_hidden()
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                                     let _ = this;
                                     cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));
                                 }))
-                                .child(
-                                    gpui::img(im.clone())
-                                        .h(px(56.))
-                                        .max_w(px(96.))
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(t.border),
-                                )
+                                .child(smelt_ui::image::thumb_element(
+                                    im,
+                                    px(56.),
+                                    px(96.),
+                                    8.0,
+                                ))
                                 .child(
                                     // 右上角小 ×：点掉这张。
                                     div()

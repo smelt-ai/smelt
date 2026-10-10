@@ -952,11 +952,9 @@ impl Workspace {
             .min_h_0()
             .flex()
             .bg(rgb(crate::ui_theme::bg_stage()))
-            .children(
-                background_image.as_deref().map(|path| {
-                    crate::workspace_frame::background_image_layer(path, bg_image_opacity)
-                }),
-            )
+            .children(background_image.as_deref().map(|path| {
+                crate::workspace_frame::background_image_layer(path, bg_image_opacity, cx)
+            }))
             .child(view)
             .into_any_element()
     }

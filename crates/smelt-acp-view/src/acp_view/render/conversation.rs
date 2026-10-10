@@ -2268,16 +2268,8 @@ fn hover_swap_lead(
 /// 在调用点反复出 bug（撑破屏幕、只露顶部、撞 sprite atlas 上限），已发消息、
 /// 工具输出图片统一收敛到这一条路径，不再各写一份。
 fn image_thumb_element(image: &std::sync::Arc<gpui::Image>) -> gpui::AnyElement {
-    match smelt_ui::image::cached(image) {
-        Some(render) => smelt_ui::image::contain_canvas_at_height(render, px(160.), px(280.), 8.0)
-            .into_any_element(),
-        // SVG 或解码未完成：回退原 `img` 渲染（svg 走 gpui 全彩栅格化管线；
-        // 解码完成后切到 contain 路径）。
-        None => gpui::img(image.clone())
-            .h(px(160.))
-            .max_w(px(280.))
-            .into_any_element(),
-    }
+    // 栅格图只画降采样预览。未完成时是占位，不把原图交给 `img()`。
+    smelt_ui::image::thumb_element(image, px(160.), px(280.), 8.0)
 }
 
 /// 后台解码到 `smelt_ui::image` 缓存；解码完成后通知重绘切到 contain 路径。

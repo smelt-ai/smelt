@@ -1328,6 +1328,7 @@ impl Render for TerminalView {
             bg_layer = bg_layer.child(crate::workspace_frame::background_image_layer(
                 path,
                 ap.bg_image_opacity,
+                cx,
             ));
         }
         // 整扇窗口的透明度由原生 NSWindow 统一处理，不能在这里重复叠加，

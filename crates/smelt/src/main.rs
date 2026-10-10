@@ -3771,6 +3771,7 @@ impl Render for Workspace {
                                                 workspace_frame::background_image_layer(
                                                     p,
                                                     bg_image_opacity,
+                                                    cx,
                                                 )
                                             }))
                                             .child(view.clone())

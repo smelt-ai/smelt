@@ -12,12 +12,14 @@
 //! - 绘制用 canvas 手动 contain，不依赖 taffy 的 aspect_ratio 推导（那是历次
 //!   「撑破屏幕 / 只露顶部」的根因）
 //!
-//! 消息流内嵌缩略图、点击大图预览、头像显示都应走这里，不要各自写 `img()` +
-//! 尺寸补丁。`Svg` 不走本路径：gpui 的 `img()` 对 `.svg` 走全彩栅格化管线，本
-//! 模块的降采样用 image crate 不解码 SVG，调用点对 SVG 保留原 `img()` 渲染即可。
+//! 消息流内嵌缩略图、点击大图预览、文件预览、壁纸都应走这里，不要各自写
+//! `img()` + 尺寸补丁。`Svg` 不走降采样：gpui 的 `img()` 对 `.svg` 走全彩栅格化
+//! 管线，本模块的 image crate 不解码 SVG，调用点对 SVG 保留原 `img()` 即可。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use gpui::*;
 use sha2::{Digest, Sha256};
@@ -69,8 +71,9 @@ fn to_image_format(f: gpui::ImageFormat) -> Option<image::ImageFormat> {
     })
 }
 
-/// 同步命中：图片内容 hash 已在缓存时直接返回降采样结果。解码未完成 / 失败
-/// （格式不支持、数据损坏）返回 None，调用点留空、显示占位或回退 `img()`。
+/// 同步命中：图片内容 hash 已在缓存时直接返回降采样结果。解码未完成或失败
+/// （格式不支持、数据损坏）返回 None。栅格缩略图这时只能占位，不能把原图交给
+/// `img()`；见 [`thumb_paint`]。
 pub fn cached(image: &gpui::Image) -> Option<Arc<RenderImage>> {
     let hash = content_hash(&image.bytes);
     image_cache().lock().unwrap().entries.get(&hash).cloned()
@@ -162,6 +165,270 @@ pub fn decode_preview(image: &gpui::Image) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![frame])))
 }
 
+/// 缩略图该画哪一份。栅格图只允许降采样预览；未完成时是占位，调用方不得改画原图。
+#[derive(Clone)]
+pub enum ThumbPaint {
+    /// 长边已收到 [`MAX_PREVIEW_DIM`] 以内的预览。
+    Preview(Arc<RenderImage>),
+    /// 栅格图还在解码。画固定盒子，不要把原图交给 `img()`。
+    Placeholder,
+    /// SVG 没有 image crate 的解码，仍走 gpui 的全彩栅格化。
+    Svg,
+}
+
+/// 栅格缩略图的绘制选择。`img(原图)` 会按文件像素解码并上传 atlas，
+/// 这块贴图不随气泡卸掉，所以未入缓存时只能是占位。
+pub fn thumb_paint(image: &gpui::Image) -> ThumbPaint {
+    if image.format == gpui::ImageFormat::Svg {
+        return ThumbPaint::Svg;
+    }
+    match cached(image) {
+        Some(render) => ThumbPaint::Preview(render),
+        None => ThumbPaint::Placeholder,
+    }
+}
+
+/// 按 [`thumb_paint`] 画出缩略图。高度和最大宽度由调用方给定。
+pub fn thumb_element(
+    image: &Arc<gpui::Image>,
+    height: Pixels,
+    max_width: Pixels,
+    corner_radius: f32,
+) -> AnyElement {
+    match thumb_paint(image) {
+        ThumbPaint::Preview(render) => {
+            contain_canvas_at_height(render, height, max_width, corner_radius).into_any_element()
+        }
+        ThumbPaint::Placeholder => div()
+            .h(height)
+            .w(height.min(max_width))
+            .rounded(px(corner_radius))
+            .bg(rgba(0x00000014))
+            .into_any_element(),
+        ThumbPaint::Svg => img(image.clone())
+            .h(height)
+            .max_w(max_width)
+            .into_any_element(),
+    }
+}
+
+/// 文件铺进盒子的方式。和 `object_fit` 的 contain / cover 相同，像素来自降采样预览。
+#[derive(Clone, Copy)]
+pub enum FileFit {
+    /// 完整放进盒子，留白。文件预览用这个。
+    Contain,
+    /// 铺满盒子，多出来的裁掉。壁纸用这个。
+    Cover,
+}
+
+/// 磁盘上的图该画哪一份。栅格图只允许降采样预览。
+enum FilePaint {
+    Preview(Arc<RenderImage>),
+    /// 还没解码，或者缓存里的预览已被淘汰。
+    Placeholder,
+    Svg,
+    /// 读不到或解不开。同一份文件不再重试。
+    Failed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+enum PathOutcome {
+    Ready(u64),
+    Failed,
+}
+
+struct PathSlot {
+    stamp: Option<FileStamp>,
+    outcome: PathOutcome,
+}
+
+fn path_slots() -> &'static Mutex<HashMap<PathBuf, PathSlot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<PathBuf, PathSlot>>> = OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn path_inflight() -> &'static Mutex<HashSet<PathBuf>> {
+    static IN_FLIGHT_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    IN_FLIGHT_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn format_for_path(path: &Path) -> Option<gpui::ImageFormat> {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())?;
+    Some(match ext.as_str() {
+        "png" => gpui::ImageFormat::Png,
+        "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
+        "webp" => gpui::ImageFormat::Webp,
+        "gif" => gpui::ImageFormat::Gif,
+        "bmp" => gpui::ImageFormat::Bmp,
+        "tif" | "tiff" => gpui::ImageFormat::Tiff,
+        "svg" => gpui::ImageFormat::Svg,
+        _ => return None,
+    })
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    Some(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
+fn remember_path(path: &Path, stamp: Option<FileStamp>, outcome: PathOutcome) {
+    path_slots()
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), PathSlot { stamp, outcome });
+}
+
+fn file_paint(path: &Path) -> FilePaint {
+    if format_for_path(path) == Some(gpui::ImageFormat::Svg) {
+        return FilePaint::Svg;
+    }
+    let stamp = file_stamp(path);
+    let hash = {
+        let slots = path_slots().lock().unwrap();
+        let Some(slot) = slots.get(path) else {
+            return FilePaint::Placeholder;
+        };
+        if slot.stamp != stamp {
+            return FilePaint::Placeholder;
+        }
+        match slot.outcome {
+            PathOutcome::Failed => return FilePaint::Failed,
+            PathOutcome::Ready(hash) => hash,
+        }
+    };
+    match image_cache().lock().unwrap().entries.get(&hash).cloned() {
+        Some(render) => FilePaint::Preview(render),
+        None => FilePaint::Placeholder,
+    }
+}
+
+/// 读文件、降采样、写入和缩略图共用的缓存。认不出或解不开就记失败，不回退 `img()`。
+fn load_file_preview(path: &Path) -> FilePaint {
+    if format_for_path(path) == Some(gpui::ImageFormat::Svg) {
+        return FilePaint::Svg;
+    }
+    let Some(stamp) = file_stamp(path) else {
+        remember_path(path, None, PathOutcome::Failed);
+        return FilePaint::Failed;
+    };
+    let Some(format) = format_for_path(path).filter(|format| *format != gpui::ImageFormat::Svg)
+    else {
+        remember_path(path, Some(stamp), PathOutcome::Failed);
+        return FilePaint::Failed;
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        remember_path(path, Some(stamp), PathOutcome::Failed);
+        return FilePaint::Failed;
+    };
+    let image = gpui::Image::from_bytes(format, bytes);
+    match decode_preview(&image) {
+        Some(render) => {
+            let hash = content_hash(&image.bytes);
+            put(hash, Arc::clone(&render));
+            remember_path(path, Some(stamp), PathOutcome::Ready(hash));
+            FilePaint::Preview(render)
+        }
+        None => {
+            remember_path(path, Some(stamp), PathOutcome::Failed);
+            FilePaint::Failed
+        }
+    }
+}
+
+/// 这一帧要不要再排队解码。已有预览、已经失败、或已有任务在飞时返回 false。
+fn begin_file_fetch(path: &Path) -> bool {
+    if format_for_path(path) == Some(gpui::ImageFormat::Svg) {
+        return false;
+    }
+    let stamp = file_stamp(path);
+    {
+        let slots = path_slots().lock().unwrap();
+        if let Some(slot) = slots.get(path)
+            && slot.stamp == stamp
+        {
+            match slot.outcome {
+                PathOutcome::Failed => return false,
+                PathOutcome::Ready(hash)
+                    if image_cache().lock().unwrap().entries.contains_key(&hash) =>
+                {
+                    return false;
+                }
+                PathOutcome::Ready(_) => {}
+            }
+        }
+    }
+    path_inflight().lock().unwrap().insert(path.to_path_buf())
+}
+
+async fn fetch_file_preview(path: PathBuf, executor: &BackgroundExecutor) -> FilePaint {
+    let paint = executor
+        .spawn({
+            let path = path.clone();
+            async move { load_file_preview(&path) }
+        })
+        .await;
+    path_inflight().lock().unwrap().remove(&path);
+    paint
+}
+
+/// 栅格文件还没有可用预览时，在后台解码，完成后刷新窗口。
+/// 透明度为 0 的壁纸不要调用：那张图不该被读进来。
+pub fn ensure_file_preview(path: &Path, cx: &App) {
+    if !begin_file_fetch(path) {
+        return;
+    }
+    let path = path.to_path_buf();
+    cx.spawn(async move |cx| {
+        let paint = fetch_file_preview(path, cx.background_executor()).await;
+        if matches!(paint, FilePaint::Preview(_)) {
+            cx.refresh();
+        }
+    })
+    .detach();
+}
+
+/// 把文件画进调用方给的盒子。栅格图只用降采样预览；还没好或解不开时是空盒子。
+pub fn file_surface(path: &Path, fit: FileFit) -> AnyElement {
+    match file_paint(path) {
+        FilePaint::Preview(render) => match fit {
+            FileFit::Contain => contain_canvas(Some(render), 0.)
+                .size_full()
+                .into_any_element(),
+            FileFit::Cover => cover_canvas(render).size_full().into_any_element(),
+        },
+        FilePaint::Placeholder | FilePaint::Failed => div().size_full().into_any_element(),
+        FilePaint::Svg => {
+            let image = img(path.to_path_buf()).size_full();
+            match fit {
+                FileFit::Contain => image.object_fit(ObjectFit::Contain).into_any_element(),
+                FileFit::Cover => image.object_fit(ObjectFit::Cover).into_any_element(),
+            }
+        }
+    }
+}
+
+/// cover 时图片相对盒子左上角的位置和尺寸。多出来的部分由绘制时的盒子裁掉。
+fn cover_placement(box_w: f32, box_h: f32, image_w: f32, image_h: f32) -> (f32, f32, f32, f32) {
+    let scale = (box_w / image_w).max(box_h / image_h);
+    let w = image_w * scale;
+    let h = image_h * scale;
+    ((box_w - w) / 2.0, (box_h - h) / 2.0, w, h)
+}
+
 /// contain 绘制：把 render 完整放入 bounds 并居中，不裁剪、不拉伸。
 ///
 /// `contain_canvas` 内部用它，预览层等需要自定义 hitbox 的 canvas 也直接调它，
@@ -200,6 +467,41 @@ pub fn paint_contain(
         0,
         false,
     );
+}
+
+fn paint_cover(bounds: Bounds<Pixels>, window: &mut Window, render: &Arc<RenderImage>) {
+    let img_size = render.size(0);
+    let (iw, ih) = (img_size.width.0 as f32, img_size.height.0 as f32);
+    if iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+    let (x, y, w, h) = cover_placement(
+        bounds.size.width / px(1.),
+        bounds.size.height / px(1.),
+        iw,
+        ih,
+    );
+    let image_bounds = Bounds {
+        origin: point(bounds.origin.x + px(x), bounds.origin.y + px(y)),
+        size: size(px(w), px(h)),
+    };
+    let _ = window.paint_image(
+        bounds,
+        image_bounds,
+        Corners::all(px(0.)),
+        Arc::clone(render),
+        0,
+        false,
+    );
+}
+
+fn cover_canvas(render: Arc<RenderImage>) -> Canvas<()> {
+    canvas(
+        move |_bounds, _window, _cx| {},
+        move |bounds, _prepaint, window, _cx| {
+            paint_cover(bounds, window, &render);
+        },
+    )
 }
 
 /// contain 绘制 canvas：图片完整放入盒子并居中，不裁剪、不拉伸。
@@ -257,7 +559,11 @@ mod tests {
     // 注意：不能用 `use super::*`——image.rs 顶层的 `use gpui::*` 会把 gpui 的
     // `test` 属性宏带进测试模块，遮蔽标准 `#[test]`（gpui 宏会把函数体当测试
     // 上下文深度解析，rustc 直接 SIGBUS）。见 acp_view.rs 测试模块的同一惯例。
-    use super::{MAX_PREVIEW_DIM, contain_width_at_height, content_hash, decode_preview};
+    use super::{
+        FilePaint, MAX_PREVIEW_DIM, ThumbPaint, begin_file_fetch, contain_width_at_height,
+        content_hash, cover_placement, decode_preview, file_paint, load_file_preview, put,
+        thumb_paint,
+    };
     use std::sync::Arc;
 
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
@@ -298,6 +604,35 @@ mod tests {
     }
 
     #[test]
+    fn uncached_raster_thumb_does_not_paint_the_original() {
+        // 尺寸必须和会 `put` 进进程全局缓存的用例不同，否则执行顺序会让这条断言碰到预览。
+        let image = make_image(png_bytes(32, 7000));
+        assert!(
+            matches!(thumb_paint(&image), ThumbPaint::Placeholder),
+            "预览未完成时不能按原图像素绘制"
+        );
+    }
+
+    #[test]
+    fn cached_raster_thumb_is_the_downsampled_preview() {
+        let image = make_image(png_bytes(64, 6000));
+        let render = decode_preview(&image).expect("png 应可解码");
+        put(content_hash(&image.bytes), render);
+        let ThumbPaint::Preview(render) = thumb_paint(&image) else {
+            panic!("入缓存后应画降采样预览");
+        };
+        let size = render.size(0);
+        assert!((size.width.0 as u32) <= MAX_PREVIEW_DIM);
+        assert!((size.height.0 as u32) <= MAX_PREVIEW_DIM);
+    }
+
+    #[test]
+    fn svg_thumb_stays_on_the_vector_path() {
+        let image = gpui::Image::from_bytes(gpui::ImageFormat::Svg, b"<svg/>".to_vec());
+        assert!(matches!(thumb_paint(&image), ThumbPaint::Svg));
+    }
+
+    #[test]
     fn huge_image_is_downsampled() {
         // 超高长截图：高度被压到上限以内，宽度等比缩小。image crate 的 resize
         // 是分步缩小（每步最多减半，保证缩放质量），最终尺寸不精确等于目标，
@@ -312,6 +647,63 @@ mod tests {
     #[test]
     fn invalid_bytes_fail_silently() {
         assert!(decode_preview(&make_image(b"not an image".to_vec())).is_none());
+    }
+
+    #[test]
+    fn uncached_raster_file_does_not_paint_the_original() {
+        let path = write_png("smelt-file-preview-uncached.png", 24, 5000);
+        assert!(
+            matches!(file_paint(&path), FilePaint::Placeholder),
+            "文件预览未完成时不能按原图像素绘制"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cached_raster_file_is_the_downsampled_preview() {
+        let path = write_png("smelt-file-preview-cached.png", 40, 5000);
+        let FilePaint::Preview(render) = load_file_preview(&path) else {
+            panic!("可读的栅格文件应留下降采样预览");
+        };
+        let size = render.size(0);
+        assert!((size.width.0 as u32) <= MAX_PREVIEW_DIM);
+        assert!((size.height.0 as u32) <= MAX_PREVIEW_DIM);
+        assert!((size.height.0 as u32) < 5000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn svg_file_stays_on_the_vector_path() {
+        let path = std::path::Path::new("/tmp/smelt-file-preview.svg");
+        assert!(matches!(file_paint(path), FilePaint::Svg));
+        assert!(!begin_file_fetch(path));
+    }
+
+    #[test]
+    fn failed_raster_file_is_not_fetched_again() {
+        let path = std::env::temp_dir().join("smelt-file-preview-bad.png");
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(matches!(load_file_preview(&path), FilePaint::Failed));
+        assert!(
+            !begin_file_fetch(&path),
+            "同一份解不开的文件不能每帧再读一遍"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cover_crops_the_long_edge() {
+        let (x, y, w, h) = cover_placement(100., 100., 200., 50.);
+        assert!((w - 400.).abs() < 0.01);
+        assert!((h - 100.).abs() < 0.01);
+        assert!((x - -150.).abs() < 0.01);
+        assert!(y.abs() < 0.01);
+    }
+
+    fn write_png(name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, png_bytes(w, h)).unwrap();
+        path
     }
 
     #[test]
