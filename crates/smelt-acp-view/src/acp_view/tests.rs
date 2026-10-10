@@ -1278,6 +1278,52 @@ fn snapshot_gap_resets_to_the_newest_contiguous_suffix() {
 }
 
 #[test]
+fn empty_gap_snapshot_keeps_the_loaded_conversation() {
+    let mut entries = vec![AcpEntry::User("10".into()), AcpEntry::User("11".into())];
+    let mut loaded_offset = 10;
+    let mut entries_total = 12;
+
+    assert_eq!(
+        merge_snapshot_entries(
+            &mut entries,
+            &mut loaded_offset,
+            &mut entries_total,
+            14,
+            14,
+            Vec::new(),
+            false,
+        ),
+        None
+    );
+    assert_eq!(loaded_offset, 10);
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(&entries[0], AcpEntry::User(text) if text == "10"));
+}
+
+#[test]
+fn empty_history_still_replaces_the_loaded_conversation() {
+    let mut entries = vec![AcpEntry::User("10".into())];
+    let mut loaded_offset = 10;
+    let mut entries_total = 11;
+
+    assert_eq!(
+        merge_snapshot_entries(
+            &mut entries,
+            &mut loaded_offset,
+            &mut entries_total,
+            0,
+            0,
+            Vec::new(),
+            false,
+        ),
+        Some(0)
+    );
+    assert!(entries.is_empty());
+    assert_eq!(loaded_offset, 0);
+    assert_eq!(entries_total, 0);
+}
+
+#[test]
 fn state_only_snapshot_does_not_rebuild_loaded_entries() {
     let mut entries = vec![AcpEntry::User("10".into()), AcpEntry::User("11".into())];
     let mut loaded_offset = 10;

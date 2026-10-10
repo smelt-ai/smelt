@@ -1007,7 +1007,11 @@ fn merge_snapshot_entries(
 
     let loaded_end = loaded_offset.saturating_add(entries.len());
     if incoming_total < *loaded_offset {
-        // `session/load` restarted from an empty history while this GUI still held an old tail.
+        // 历史确实从空会话重新开始时才换窗口。总数还在、这一帧却没带正文，
+        // 说明只是对不上，不能把已加载的对话换成空的。
+        if incoming.is_empty() && incoming_total > 0 && !entries.is_empty() {
+            return None;
+        }
         *entries = incoming;
         *loaded_offset = incoming_offset;
         *entries_total = incoming_total;
@@ -1034,8 +1038,11 @@ fn merge_snapshot_entries(
         return Some(0);
     }
     if incoming_offset > loaded_end {
-        // A missed stream update created a gap. Keep the newest contiguous suffix and let upward
-        // pagination fill older entries rather than displaying mismatched local/global indices.
+        // 漏了一段更新。带了新条目时保留最新的连续后缀，更早的内容靠向上翻页补。
+        // 这一帧没有条目时，已加载的对话还在，不能换成空窗口。
+        if incoming.is_empty() {
+            return None;
+        }
         *entries = incoming;
         *loaded_offset = incoming_offset;
         return Some(0);

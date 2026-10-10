@@ -548,6 +548,86 @@ pub struct RuntimeDebug {
     pub model_call: Option<RuntimeDebugModelCall>,
 }
 
+impl RuntimeDebugModelCall {
+    /// 父进程镜像留的账本：序号、模型和时间还在，请求体与响应体不留。
+    fn ledger(&self) -> Self {
+        Self {
+            sequence: self.sequence,
+            turn: self.turn,
+            compaction_sequence: self.compaction_sequence,
+            captured_at_ms: self.captured_at_ms,
+            source: self.source.clone(),
+            payload_source: self.payload_source.clone(),
+            model: self.model.clone(),
+            request_captured_at_ms: self.request_captured_at_ms,
+            response_captured_at_ms: self.response_captured_at_ms,
+            response_metadata: self.response_metadata.clone(),
+            redacted_paths: self.redacted_paths.clone(),
+            pi_context_redacted_paths: self.pi_context_redacted_paths.clone(),
+            request_headers: self.request_headers.clone(),
+            response_redacted_paths: self.response_redacted_paths.clone(),
+            ..Self::default()
+        }
+    }
+}
+
+impl RuntimeDebugCompaction {
+    fn ledger(&self) -> Self {
+        let source_messages_omitted = self
+            .source_messages_omitted
+            .saturating_add(self.source_messages.len());
+        Self {
+            sequence: self.sequence,
+            turn: self.turn,
+            status: self.status.clone(),
+            reason: self.reason.clone(),
+            will_retry: self.will_retry,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            first_kept_entry_id: self.first_kept_entry_id.clone(),
+            tokens_before: self.tokens_before,
+            is_split_turn: self.is_split_turn,
+            previous_summary: self.previous_summary.clone(),
+            summarized_message_count: self.summarized_message_count,
+            turn_prefix_message_count: self.turn_prefix_message_count,
+            source_messages_omitted,
+            summary: self.summary.clone(),
+            usage: self.usage.clone(),
+            from_extension: self.from_extension,
+            aborted: self.aborted,
+            error_message: self.error_message.clone(),
+            request_headers: self.request_headers.clone(),
+            response_metadata: self.response_metadata.clone(),
+            source_messages: Vec::new(),
+        }
+    }
+}
+
+impl RuntimeDebug {
+    /// 去掉会把进程撑大的正文。轨迹窗口要的完整请求只在变更帧上走一遭，不进父镜像。
+    pub fn ledger(&self) -> Self {
+        Self {
+            version: self.version,
+            source: self.source.clone(),
+            system_prompt: None,
+            tools: Vec::new(),
+            model_calls: self
+                .model_calls
+                .iter()
+                .map(RuntimeDebugModelCall::ledger)
+                .collect(),
+            model_calls_omitted: self.model_calls_omitted,
+            compactions: self
+                .compactions
+                .iter()
+                .map(RuntimeDebugCompaction::ledger)
+                .collect(),
+            compactions_omitted: self.compactions_omitted,
+            model_call: None,
+        }
+    }
+}
+
 /// smeltd → GUI 的完整快照：`acp_watch`/`acp_open` 接上时发一份，之后每次
 /// `apply_event` 有实质变化再发一份。entries 使用尾片增量；大体积 runtime debug
 /// sidecar 只在变更帧、显式全量恢复和初始 attach 时携带，避免完整模型历史随每个
@@ -948,6 +1028,18 @@ pub struct LiveElicitation {
     pub raw_request_line: Option<String>,
 }
 
+fn last_user_index(entries: &[AcpEntry]) -> Option<usize> {
+    entries
+        .iter()
+        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+}
+
+/// 一次宿主快照合并的结果。调试正文只活到父进程把这一帧写给已经打开的窗口。
+pub struct HostedSnapshotMerge {
+    pub changed_from: usize,
+    pub runtime_debug: Option<RuntimeDebug>,
+}
+
 /// smeltd 侧一份 ACP 会话的完整活体状态。协议事件走 `apply_event`，用户动作走
 /// `apply_user_action` / `note_*`；连接级结束（所有权冲突、provider 没退出、
 /// 传输断开）走 [`force_end`]。smeltd 不得再直接写 `phase`。
@@ -958,7 +1050,13 @@ pub struct LiveElicitation {
 pub struct AcpSessionState {
     /// 归约器的工作缓冲。重放期间它是从空缓冲重建的草稿，不是会话正文，
     /// 所以不对外公开：外部一律读 [`Self::entries`]（已发布正文）。
+    /// 父进程镜像在合并宿主快照后会丢掉已提交前缀，只留当前回合；
+    /// 这时 `entries[0]` 的绝对下标是 [`Self::entries_base`]。
+    /// 会话宿主的归约从 0 开始。死亡宿主的重启种子可能只是这一截后缀，
+    /// 重放提交后 [`Self::commit_replay`] 把下标清回 0。
     entries: Vec<AcpEntry>,
+    /// `entries` 之前还有这么多条已提交正文不在这个缓冲里。
+    entries_base: usize,
     pub tool_debug: BTreeMap<String, ToolCallDebug>,
     /// 只在内存里递增。快照不带它。连接用它判断这帧要不要再带整张工具参数表。
     pub tool_debug_generation: u64,
@@ -1037,6 +1135,7 @@ impl Default for AcpSessionState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            entries_base: 0,
             tool_debug: BTreeMap::new(),
             tool_debug_generation: 0,
             runtime_debug: RuntimeDebug::default(),
@@ -1130,7 +1229,9 @@ impl AcpSessionState {
             snap.phase
         };
         let mut restored = Self {
+            // `entries` 是从 `entries_offset` 开始的一截。忽略这个下标会把后缀当成全文。
             entries: snap.entries,
+            entries_base: snap.entries_offset,
             tool_debug: snap.tool_debug.unwrap_or_default(),
             tool_debug_generation: 0,
             runtime_debug: snap.runtime_debug.unwrap_or_default(),
@@ -1189,14 +1290,18 @@ impl AcpSessionState {
 
     /// 把独立 ACP session host 发来的 wire 快照合并进 daemon 的只读镜像。
     ///
-    /// session host 才持有真实 JSON-RPC responder 与回合队列；daemon 这份状态只
-    /// 服务于 list/watch/任务对账。因此待审批卡片在这里恢复为 `responder=None`，
-    /// 用户动作必须继续转发给 host，不能在这份镜像上调用 `select_permission` /
-    /// `submit_elicitation`。
+    /// session host 才持有真实 JSON-RPC responder、回合队列和已提交正文。daemon
+    /// 这份状态只服务于 list/watch/任务对账，所以只留下当前回合（空闲时留下
+    /// 刚结束的那一轮，供自动化取输出）。更早的正文向宿主分页要。
+    /// 分页失败也不把整段放回这里：权威正文在宿主和会话文件里。
     ///
-    /// 返回最早变化的 entry 下标。增量快照的前缀若不在本地，说明 daemon 在
-    /// exec/重连窗口漏过了基线；调用方应请求 host 重发 offset=0 的完整快照。
-    pub fn merge_hosted_snapshot(&mut self, snap: ConversationSnapshot) -> Result<usize, String> {
+    /// 待审批卡片在这里恢复为 `responder=None`，用户动作必须继续转发给 host。
+    /// 返回最早变化的绝对 entry 下标，以及本帧完整的调试体（镜像里只留账本）。
+    /// 增量尾巴接不上本地末端时，调用方应请求 host 重发完整快照。
+    pub fn merge_hosted_snapshot(
+        &mut self,
+        snap: ConversationSnapshot,
+    ) -> Result<HostedSnapshotMerge, String> {
         let ConversationSnapshot {
             entries_offset,
             entries_total,
@@ -1246,10 +1351,10 @@ impl AcpSessionState {
             history_omitted: _,
         } = snap;
 
-        if entries_offset > self.entries.len() {
+        let local_end = self.entries_base + self.entries.len();
+        if entries_offset > local_end {
             return Err(format!(
-                "host 快照缺少历史前缀：offset={entries_offset}, local={}",
-                self.entries.len()
+                "host 快照缺少历史前缀：offset={entries_offset}, local={local_end}"
             ));
         }
         let merged_len = entries_offset.saturating_add(entries.len());
@@ -1260,15 +1365,26 @@ impl AcpSessionState {
             ));
         }
 
-        self.entries.truncate(entries_offset);
-        self.entries.extend(entries);
+        let changed_from = entries_offset;
+        if entries_offset < self.entries_base {
+            // 尾巴盖过了已经丢掉的前缀。先整段接上，下面再按回合裁。
+            self.entries_base = entries_offset;
+            self.entries = entries;
+        } else {
+            let local_index = entries_offset - self.entries_base;
+            self.entries.truncate(local_index);
+            self.entries.extend(entries);
+        }
         if let Some(tool_debug) = tool_debug {
             self.tool_debug = tool_debug;
             self.note_tool_debug_changed();
         }
-        if let Some(runtime_debug) = runtime_debug {
-            self.runtime_debug = runtime_debug;
-        }
+        let runtime_debug = if let Some(runtime_debug) = runtime_debug {
+            self.runtime_debug = runtime_debug.ledger();
+            Some(runtime_debug)
+        } else {
+            None
+        };
         self.protocol_title = session_title;
         self.phase = phase;
         self.end_reason = end_reason;
@@ -1329,7 +1445,36 @@ impl AcpSessionState {
         self.turn_timings = turn_timings;
         self.completed_unread = completed_unread;
         self.turn_outcome = turn_outcome;
-        Ok(entries_offset)
+        self.retain_mirror_suffix();
+        Ok(HostedSnapshotMerge {
+            changed_from,
+            runtime_debug,
+        })
+    }
+
+    /// 父镜像不保留已提交前缀。进行中的回合从最后一条用户消息留到末尾；
+    /// 空闲时同样留下刚结束的那一轮，自动化要拿它的输出，恢复判断也才知道这不是空会话。
+    fn retain_mirror_suffix(&mut self) {
+        let active = self.turn_started_at_ms.is_some()
+            || matches!(
+                self.phase,
+                DaemonPhase::Thinking
+                    | DaemonPhase::ExecutingTool
+                    | DaemonPhase::AwaitingApproval
+                    | DaemonPhase::WaitingForUser
+            )
+            || crate::acp_chat::has_unfinished_tool_call(&self.entries);
+        let keep_from = if active {
+            last_user_index(&self.entries).unwrap_or(0)
+        } else {
+            last_user_index(&self.entries).unwrap_or(self.entries.len())
+        };
+        if keep_from == 0 {
+            return;
+        }
+        self.entries.drain(0..keep_from);
+        self.entries.shrink_to_fit();
+        self.entries_base += keep_from;
     }
 
     /// 当前有没有一张卡（权限/选择题）正等着人处理，有就带上它原始请求那行
@@ -1357,8 +1502,25 @@ impl AcpSessionState {
 
     /// 会话正文：窗口、分页、活帧、回退校验与持久化看到的都是这一份。
     /// 重放草稿还没换上之前，这里是重放前已发布的那一份。
+    /// 父镜像裁过前缀时，这只是绝对历史末尾的那一截。
     pub fn entries(&self) -> &[AcpEntry] {
         self.replay_baseline.as_deref().unwrap_or(&self.entries)
+    }
+
+    /// 父镜像丢掉的已提交前缀长度。宿主和同进程会话是 0。
+    pub fn entries_base(&self) -> usize {
+        self.entries_base
+    }
+
+    /// 重启宿主前把整段正文放回父镜像，作为新宿主的种子。下一帧合并会再裁掉。
+    pub fn install_resident_entries(&mut self, entries: Vec<AcpEntry>) {
+        self.entries = entries;
+        self.entries_base = 0;
+    }
+
+    /// 绝对历史长度。父镜像即使只留着当前回合，这个数仍是宿主那边的总长度。
+    pub fn entries_total(&self) -> usize {
+        self.entries_base + self.entries().len()
     }
 
     /// 测试搭场景用：直接改工作缓冲，绕过归约器。正式代码不得启用。
@@ -1367,9 +1529,13 @@ impl AcpSessionState {
         &mut self.entries
     }
 
-    /// 重放草稿已经是完整投影。丢掉上一份正文，之后发布这份草稿。
+    /// 重放草稿是从 0 开始的完整投影。提交时丢掉上一份正文，并把后缀下标清掉。
+    /// 没在重放时调用只清标志。后缀种子的绝对长度要留到真正的重放提交。
     pub fn commit_replay(&mut self) {
-        self.replay_baseline = None;
+        let committing_scratch = self.replay_baseline.take().is_some();
+        if committing_scratch {
+            self.entries_base = 0;
+        }
         self.replaying_history = false;
     }
 
@@ -1388,6 +1554,7 @@ impl AcpSessionState {
     /// 空闲且没有进行中的工具时，这一轮是空的。
     pub fn open_turn_range(&self) -> (usize, usize) {
         let entries = self.entries();
+        let total = self.entries_base + entries.len();
         let active = self.turn_started_at_ms.is_some()
             || matches!(
                 self.phase,
@@ -1398,23 +1565,44 @@ impl AcpSessionState {
             )
             || crate::acp_chat::has_unfinished_tool_call(entries);
         if !active {
-            return (entries.len(), entries.len());
+            return (total, total);
         }
-        let start = entries
-            .iter()
-            .rposition(|entry| {
-                matches!(
-                    entry,
-                    crate::acp_chat::AcpEntry::User(_)
-                        | crate::acp_chat::AcpEntry::UserWithImages { .. }
-                )
-            })
-            .unwrap_or(0);
-        (start, entries.len())
+        let start = last_user_index(entries).unwrap_or(0);
+        (self.entries_base + start, total)
     }
 
     pub fn to_snapshot(&self, should_persist: bool) -> ConversationSnapshot {
         self.to_snapshot_since(should_persist, 0)
+    }
+
+    /// 旁观或历史首帧。活状态始终来自当前镜像。
+    /// `hosted_page` 只用来补 `[offset, entries_base)` 里已经丢掉的正文；
+    /// 镜像里还留着的后缀以这里为准，分页等待期间的流式更新不会被旧页盖住。
+    /// 页的总长度对不上、或没有盖到后缀起点时，退回镜像自己能证明的那一截。
+    pub fn snapshot_with_older_page(
+        &self,
+        offset: usize,
+        hosted_page: Option<&ConversationSnapshot>,
+    ) -> ConversationSnapshot {
+        let mut snapshot = self.to_snapshot_since(false, offset);
+        let Some(page) = hosted_page else {
+            return snapshot;
+        };
+        let base = self.entries_base;
+        let total = self.entries_total();
+        if offset >= base || page.entries_total != total || page.entries_offset > offset {
+            return snapshot;
+        }
+        let start_in_page = offset - page.entries_offset;
+        let base_in_page = base - page.entries_offset;
+        if base_in_page > page.entries.len() || start_in_page > base_in_page {
+            return snapshot;
+        }
+        let mut entries = page.entries[start_in_page..base_in_page].to_vec();
+        entries.append(&mut snapshot.entries);
+        snapshot.entries = entries;
+        snapshot.entries_offset = offset;
+        snapshot
     }
 
     pub fn to_snapshot_since(
@@ -1422,7 +1610,8 @@ impl AcpSessionState {
         should_persist: bool,
         entries_offset: usize,
     ) -> ConversationSnapshot {
-        self.to_snapshot_range(should_persist, entries_offset, self.entries().len())
+        // 终点是绝对长度。父镜像裁过前缀后，本地 `entries.len()` 比这个数小。
+        self.to_snapshot_range(should_persist, entries_offset, self.entries_total())
     }
 
     pub fn to_snapshot_range(
@@ -1432,10 +1621,16 @@ impl AcpSessionState {
         entries_end: usize,
     ) -> ConversationSnapshot {
         let published = self.entries();
-        let entries_total = published.len();
-        let entries_end = entries_end.min(entries_total);
-        let entries_offset = entries_offset.min(entries_end);
-        let entries = published[entries_offset..entries_end].to_vec();
+        let base = self.entries_base;
+        let entries_total = base + published.len();
+        // 调用方传入的是绝对下标。终点落在已丢掉的前缀里时抬到后缀起点，避免下溢。
+        let entries_end = entries_end.clamp(base.min(entries_total), entries_total);
+        let requested = entries_offset.min(entries_end);
+        // 要的起点落在已丢掉的前缀里时，只能从还留着的那一截开始，不能把下标说成 0。
+        let entries_offset = requested.max(base).min(entries_end);
+        let local_start = entries_offset - base;
+        let local_end = entries_end - base;
+        let entries = published[local_start..local_end].to_vec();
         ConversationSnapshot {
             entries_offset,
             entries_total,
@@ -1537,7 +1732,11 @@ impl SessionLive {
         let (history_len, end) = state.open_turn_range();
         let mut live = Self::from_snapshot(&state.to_snapshot(false));
         live.history_len = Some(history_len);
-        live.open_turn = state.entries()[history_len..end].to_vec();
+        let published = state.entries();
+        let base = state.entries_base();
+        let local_start = history_len.saturating_sub(base).min(published.len());
+        let local_end = end.saturating_sub(base).min(published.len());
+        live.open_turn = published[local_start..local_end].to_vec();
         live
     }
 
@@ -2106,6 +2305,13 @@ pub enum AcpUserAction {
     },
     ElicitationSubmit,
     ElicitationDismiss,
+    /// 父进程镜像不再常驻已提交正文。分页向 session host 要绝对下标 `before` 之前的一页。
+    /// 只在主 daemon 与宿主之间使用；GUI 不发这个动作。
+    HistoryPage {
+        request_id: u64,
+        before: usize,
+        limit: usize,
+    },
 }
 
 #[cfg(test)]

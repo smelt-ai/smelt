@@ -229,40 +229,12 @@ fn snapshot_from_live(
     snapshot
 }
 
-/// 一行控制连接上的消息。活状态（`live`，或快照里的相位）先生效。
-/// 历史正文读失败不能把页面留在「正在启动」。
+/// 一行控制连接上的消息。快照读得懂就原样交给窗口；读不懂时退回活状态
+/// （`live`，或快照里还能读出的相位），历史正文坏了也不能把页面留在「正在启动」。
 enum SnapshotFrame {
     Ignore,
     Snapshot(ConversationSnapshot),
     Unreadable(ConversationSnapshot),
-}
-
-fn apply_live_frame(
-    mut snapshot: ConversationSnapshot,
-    live: Option<&serde_json::Value>,
-) -> ConversationSnapshot {
-    let Some(live) = live.and_then(|live| crate::acp_session::SessionLive::from_json(live).ok())
-    else {
-        return snapshot;
-    };
-    let Some(history_len) = live.history_len else {
-        return snapshot;
-    };
-    snapshot.phase = live.phase;
-    snapshot.end_reason = live.end_reason;
-    snapshot.end_kind = live.end_kind;
-    snapshot.acp_session_id = live.acp_session_id;
-    snapshot.history_session_id = live.history_session_id;
-    if live.session_title.is_some() {
-        snapshot.session_title = live.session_title;
-    }
-    if live.status_line.is_some() {
-        snapshot.status_line = live.status_line;
-    }
-    snapshot.entries_offset = history_len;
-    snapshot.entries = live.open_turn;
-    snapshot.entries_total = history_len.saturating_add(snapshot.entries.len());
-    snapshot
 }
 
 fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
@@ -279,7 +251,7 @@ fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
         });
     if let Some(snapshot) = value.get("snapshot") {
         return match serde_json::from_value::<ConversationSnapshot>(snapshot.clone()) {
-            Ok(snapshot) => SnapshotFrame::Snapshot(apply_live_frame(snapshot, value.get("live"))),
+            Ok(snapshot) => SnapshotFrame::Snapshot(snapshot),
             Err(error) => {
                 if let Some(live) = live {
                     return SnapshotFrame::Snapshot(snapshot_from_live(
@@ -700,6 +672,37 @@ mod tests {
         assert!(snapshot.entries.is_empty());
         assert!(snapshot.history_error.unwrap().contains("历史读不出来"));
         assert_eq!(snapshot.end_kind, AcpEndKind::Unknown);
+    }
+
+    #[test]
+    fn frame_keeps_entries_written_as_the_turn_closed() {
+        // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
+        // 不能拿空的当前一轮把它盖掉。
+        let mut state = crate::acp_session::AcpSessionState::default();
+        state
+            .entries_mut()
+            .push(crate::acp_chat::AcpEntry::User("A".into()));
+        state.phase = crate::daemon_state::DaemonPhase::Thinking;
+        state.turn_started_at_ms = Some(1);
+        crate::acp_session::apply_event(
+            &mut state,
+            crate::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
+        );
+        let line = serde_json::json!({
+            "live": crate::acp_session::SessionLive::from_state(&state),
+            "snapshot": state.to_snapshot_range(false, 1, 2),
+        })
+        .to_string();
+
+        let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(&line, 0) else {
+            panic!("读得懂的快照必须交给窗口");
+        };
+        assert_eq!(snapshot.entries_offset, 1);
+        assert_eq!(snapshot.entries_total, 2);
+        assert!(matches!(
+            snapshot.entries.as_slice(),
+            [crate::acp_chat::AcpEntry::Assistant { text, .. }] if text.contains("回合失败")
+        ));
     }
 
     #[test]

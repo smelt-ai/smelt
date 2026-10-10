@@ -20,7 +20,11 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
         id,
         "acp-test",
         Arc::new(
-            move |from, should_persist, include_runtime_debug, tool_debug_generation_sent| {
+            move |from,
+                  should_persist,
+                  include_runtime_debug,
+                  tool_debug_generation_sent,
+                  runtime_debug| {
                 let sess = encode_sess.upgrade()?;
                 Some(encode_acp_snapshot(
                     &sess,
@@ -29,6 +33,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                     include_runtime_debug,
                     tool_debug_generation_sent,
                     SnapshotProjection::FULL,
+                    runtime_debug,
                 ))
             },
         ),
@@ -2584,6 +2589,126 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
         response["snapshot"]["entries"][1]["ToolCall"]["status"],
         "in_progress"
     );
+}
+
+#[test]
+fn window_link_carries_entries_written_as_the_turn_closes() {
+    // 窗口连接只订阅当前一轮。回合失败在同一步里追加报错并收尾，报错已经不在
+    // 当前一轮里；这一帧不带它，窗口会以为漏了更新，把整段对话换成空的。
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-turn-failed", || {
+        make_acp_session_value("acp-turn-failed", AcpSessionState::default())
+    });
+    {
+        let mut reduced = slot.value.reduced.lock().unwrap();
+        reduced.entries_mut().push(AcpEntry::User("A".into()));
+        reduced.phase = DaemonPhase::Thinking;
+        reduced.turn_started_at_ms = Some(1);
+    }
+    let (server, client) = UnixStream::pair().unwrap();
+    slot.value.out.lock().unwrap().client = Some(
+        acp_snapshot_link_for_slot(
+            &slot,
+            server,
+            Vec::new(),
+            0,
+            "acp-turn-failed",
+            "acp-client",
+            SnapshotProjection {
+                history: false,
+                debug: true,
+            },
+        )
+        .unwrap(),
+    );
+
+    let outcome = smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
+    );
+    push_acp_snapshot_since(&slot.value, false, outcome.entries_offset);
+
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(frame["live"]["history_len"], 2);
+    assert!(frame["live"]["open_turn"].as_array().unwrap().is_empty());
+    assert_eq!(frame["snapshot"]["entries_offset"], 1);
+    assert_eq!(frame["snapshot"]["entries_total"], 2);
+    let entries = frame["snapshot"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "这一帧应只带收尾时写下的那条：{line}");
+    assert!(
+        entries[0]
+            .to_string()
+            .contains("回合失败：499 status code (no body)"),
+        "收尾时写下的报错必须随这一帧送到窗口：{line}"
+    );
+}
+
+#[test]
+fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
+    // 主 daemon 的镜像只留最后一轮。收尾时写下的报错同样要从镜像送到窗口。
+    let mut host = AcpSessionState::default();
+    host.entries_mut().extend([
+        AcpEntry::User("早先".into()),
+        AcpEntry::Assistant {
+            text: "好".into(),
+            thought: false,
+        },
+        AcpEntry::User("A".into()),
+    ]);
+    host.phase = DaemonPhase::Thinking;
+    host.turn_started_at_ms = Some(1);
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-hosted-turn-failed", || {
+        make_acp_session_value("acp-hosted-turn-failed", AcpSessionState::default())
+    });
+    slot.value
+        .reduced
+        .lock()
+        .unwrap()
+        .merge_hosted_snapshot(host.to_snapshot(false))
+        .unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    slot.value.out.lock().unwrap().client = Some(
+        acp_snapshot_link_for_slot(
+            &slot,
+            server,
+            Vec::new(),
+            0,
+            "acp-hosted-turn-failed",
+            "acp-client",
+            SnapshotProjection {
+                history: false,
+                debug: true,
+            },
+        )
+        .unwrap(),
+    );
+
+    let outcome = smelt_core::acp_session::apply_event(
+        &mut host,
+        smelt_core::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
+    );
+    let host_frame = host.to_snapshot_since(false, outcome.entries_offset.unwrap());
+    let merged = slot
+        .value
+        .reduced
+        .lock()
+        .unwrap()
+        .merge_hosted_snapshot(host_frame)
+        .unwrap();
+    assert_eq!(slot.value.reduced.lock().unwrap().entries_base(), 2);
+    push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
+
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(frame["snapshot"]["entries_offset"], 3);
+    assert_eq!(frame["snapshot"]["entries_total"], 4);
+    let entries = frame["snapshot"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "镜像这一帧应只带收尾时写下的那条：{line}");
+    assert!(entries[0].to_string().contains("回合失败"), "{line}");
 }
 
 #[test]

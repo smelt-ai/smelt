@@ -6,9 +6,11 @@
 
 use super::*;
 
+use std::collections::HashMap;
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::process::Stdio;
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, AtomicU64};
+use std::sync::mpsc;
 
 const SESSION_HOST_ARG: &str = "--acp-session-host";
 
@@ -34,14 +36,35 @@ struct HostedSnapshotLine {
     provider_pid: Option<i32>,
 }
 
-/// 主 daemon 持有的 session-host 控制句柄。控制 socket 的这一端是 handoff 时
-/// 唯一需要活过 exec 的 fd；reader 使用 dup 出来的 fd，旧线程随 exec 消失后，
-/// 新 daemon 会从控制 fd 再建 reader 并请求一次全量快照。
-pub(crate) struct HostedConversationHandle {
+/// 历史页不是快照。读者必须先认这条，再按快照解析；认错会把镜像拆掉。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct HistoryPageLine {
+    pub(crate) history_page: HistoryPageBody,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct HistoryPageBody {
+    pub(crate) request_id: u64,
+    pub(crate) snapshot: smelt_core::acp_session::ConversationSnapshot,
+}
+
+struct HostInner {
     pid: i32,
     control: Mutex<Option<UnixStream>>,
     snapshot_rx: smol::channel::Receiver<HostedSnapshotEnvelope>,
     provider_pid: Arc<AtomicI32>,
+    history_waiters:
+        Arc<Mutex<HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>>>,
+    next_history_request: AtomicU64,
+}
+
+/// 主 daemon 持有的 session-host 控制句柄。控制 socket 的这一端是 handoff 时
+/// 唯一需要活过 exec 的 fd；reader 使用 dup 出来的 fd，旧线程随 exec 消失后，
+/// 新 daemon 会从控制 fd 再建 reader 并请求一次全量快照。
+/// 克隆只增加内部引用，分页可以在生命周期锁外等回包。
+#[derive(Clone)]
+pub(crate) struct HostedConversationHandle {
+    inner: Arc<HostInner>,
 }
 
 impl HostedConversationHandle {
@@ -104,12 +127,22 @@ impl HostedConversationHandle {
     ) -> std::io::Result<Self> {
         let reader = control.try_clone()?;
         let provider_pid = Arc::new(AtomicI32::new(initial_provider_pid.unwrap_or(0)));
-        let snapshot_rx = start_snapshot_reader(reader, Arc::clone(&provider_pid), pid)?;
-        Ok(Self {
+        let history_waiters = Arc::new(Mutex::new(HashMap::new()));
+        let snapshot_rx = start_snapshot_reader(
+            reader,
+            Arc::clone(&provider_pid),
             pid,
-            control: Mutex::new(Some(control)),
-            snapshot_rx,
-            provider_pid,
+            Arc::clone(&history_waiters),
+        )?;
+        Ok(Self {
+            inner: Arc::new(HostInner {
+                pid,
+                control: Mutex::new(Some(control)),
+                snapshot_rx,
+                provider_pid,
+                history_waiters,
+                next_history_request: AtomicU64::new(0),
+            }),
         })
     }
 
@@ -120,13 +153,120 @@ impl HostedConversationHandle {
         self.send_json(action)
     }
 
+    /// 向宿主要绝对下标 `before` 之前的一页。
+    /// 超时、断线或旧宿主不认识这个动作，都只让这一次失败。
+    /// 父镜像继续只留当前回合，不把整段历史放回常驻内存。
+    pub(crate) fn request_history_page(
+        &self,
+        before: usize,
+        limit: usize,
+    ) -> Result<smelt_core::acp_session::ConversationSnapshot, String> {
+        self.request_history_page_within(before, limit, Duration::from_secs(4))
+    }
+
+    fn request_history_page_within(
+        &self,
+        before: usize,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<smelt_core::acp_session::ConversationSnapshot, String> {
+        let request_id = self
+            .inner
+            .next_history_request
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.inner
+            .history_waiters
+            .lock()
+            .unwrap()
+            .insert(request_id, tx);
+        let action = smelt_core::acp_session::AcpUserAction::HistoryPage {
+            request_id,
+            before,
+            limit,
+        };
+        if let Err(error) = self.send_action(&action) {
+            self.inner
+                .history_waiters
+                .lock()
+                .unwrap()
+                .remove(&request_id);
+            return Err(error.to_string());
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                self.inner
+                    .history_waiters
+                    .lock()
+                    .unwrap()
+                    .remove(&request_id);
+                Err(format!("读取宿主历史失败：{error}"))
+            }
+        }
+    }
+
+    /// 把宿主上 `[start, end)` 的正文按页拼回来。拼不到起点就失败，避免把半截当成全文。
+    pub(crate) fn read_snapshot_covering(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<smelt_core::acp_session::ConversationSnapshot, String> {
+        if end <= start {
+            return Err("历史范围是空的".to_string());
+        }
+        let mut newest: Option<smelt_core::acp_session::ConversationSnapshot> = None;
+        let mut chunks_newest_first: Vec<Vec<smelt_core::acp_chat::AcpEntry>> = Vec::new();
+        let mut before = end;
+        let mut covered = end;
+        let mut total_entries = 0usize;
+        loop {
+            let limit = before.saturating_sub(start).clamp(1, 500);
+            let mut page = self.request_history_page(before, limit)?;
+            if page.entries.is_empty() || page.entries_offset >= before {
+                break;
+            }
+            covered = page.entries_offset;
+            total_entries = total_entries.saturating_add(page.entries.len());
+            chunks_newest_first.push(std::mem::take(&mut page.entries));
+            if newest.is_none() {
+                newest = Some(page);
+            }
+            if covered <= start || total_entries > 20_000 {
+                break;
+            }
+            before = covered;
+        }
+        let mut snapshot = newest.ok_or_else(|| "宿主没有返回历史".to_string())?;
+        if covered > start {
+            return Err(format!("宿主历史没有覆盖到 {start}，只到 {covered}"));
+        }
+        let mut entries = Vec::new();
+        for chunk in chunks_newest_first.into_iter().rev() {
+            entries.extend(chunk);
+        }
+        if covered < start {
+            let drop_n = start - covered;
+            if drop_n >= entries.len() {
+                return Err("宿主历史页对不齐请求的起点".to_string());
+            }
+            entries.drain(0..drop_n);
+            snapshot.entries_offset = start;
+        } else {
+            snapshot.entries_offset = covered;
+        }
+        snapshot.entries = entries;
+        Ok(snapshot)
+    }
+
     pub(crate) fn request_full_snapshot(&self) -> std::io::Result<()> {
         self.send_action(&smelt_core::acp_session::AcpUserAction::Refresh)
     }
 
     fn send_json(&self, value: &impl serde::Serialize) -> std::io::Result<()> {
         let bytes = serde_json::to_vec(value).map_err(std::io::Error::other)?;
-        let mut control = self.control.lock().unwrap();
+        let mut control = self.inner.control.lock().unwrap();
         let Some(control) = control.as_mut() else {
             return Err(std::io::Error::new(
                 ErrorKind::BrokenPipe,
@@ -139,11 +279,12 @@ impl HostedConversationHandle {
     }
 
     pub(crate) fn snapshot_rx(&self) -> smol::channel::Receiver<HostedSnapshotEnvelope> {
-        self.snapshot_rx.clone()
+        self.inner.snapshot_rx.clone()
     }
 
     pub(crate) fn control_fd(&self) -> Option<RawFd> {
-        self.control
+        self.inner
+            .control
             .lock()
             .unwrap()
             .as_ref()
@@ -151,11 +292,11 @@ impl HostedConversationHandle {
     }
 
     pub(crate) fn pid(&self) -> i32 {
-        self.pid
+        self.inner.pid
     }
 
     pub(crate) fn provider_pid(&self) -> Option<i32> {
-        let pid = self.provider_pid.load(Ordering::SeqCst);
+        let pid = self.inner.provider_pid.load(Ordering::SeqCst);
         (pid > 1).then_some(pid)
     }
 
@@ -166,7 +307,7 @@ impl HostedConversationHandle {
     }
 
     pub(crate) fn shutdown_and_wait(self, grace: Duration) -> bool {
-        if let Some(control) = self.control.lock().unwrap().take() {
+        if let Some(control) = self.inner.control.lock().unwrap().take() {
             let _ = control.shutdown(Shutdown::Both);
         }
 
@@ -176,8 +317,8 @@ impl HostedConversationHandle {
         // 等的线程独占这个 pid 的 waitpid；干净退出不会去动 provider。
         // 杀过之后还要证明组已经空了。证明只用非阻塞 waitpid，因为阻塞的那条
         // 已经返回，不会再有第二条堵在同一个 pid 上。
-        let provider = Arc::clone(&self.provider_pid);
-        let host_pid = self.pid;
+        let provider = Arc::clone(&self.inner.provider_pid);
+        let host_pid = self.inner.pid;
         let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&killed);
         let reaped = smelt_core::process_wait::wait_for_pid(
@@ -216,6 +357,9 @@ fn start_snapshot_reader(
     stream: UnixStream,
     provider_pid: Arc<AtomicI32>,
     host_pid: i32,
+    history_waiters: Arc<
+        Mutex<HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>>,
+    >,
 ) -> std::io::Result<smol::channel::Receiver<HostedSnapshotEnvelope>> {
     let (tx, rx) = smol::channel::unbounded();
     thread::Builder::new()
@@ -237,7 +381,29 @@ fn start_snapshot_reader(
                     }
                     Ok(_) => {}
                 }
-                let parsed = match serde_json::from_str::<HostedSnapshotLine>(line.trim()) {
+                let value: serde_json::Value = match serde_json::from_str(line.trim()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        crate::dlog(&format!(
+                            "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
+                            line.len()
+                        ));
+                        break;
+                    }
+                };
+                // 历史页回包没有 `snapshot` 字段。先分流，避免被下面的快照解析当成协议不兼容。
+                if value.get("history_page").is_some() {
+                    if let Ok(page) = serde_json::from_value::<HistoryPageLine>(value)
+                        && let Some(waiter) = history_waiters
+                            .lock()
+                            .unwrap()
+                            .remove(&page.history_page.request_id)
+                    {
+                        let _ = waiter.try_send(page.history_page.snapshot);
+                    }
+                    continue;
+                }
+                let parsed = match serde_json::from_value::<HostedSnapshotLine>(value) {
                     Ok(parsed) => parsed,
                     Err(error) => {
                         // 快照解析失败几乎只有一个原因：host 与主 daemon 不同版本，快照 schema
@@ -406,7 +572,13 @@ mod tests {
     #[test]
     fn unparsable_snapshot_line_disconnects_the_mirror() {
         let (host_side, daemon_side) = UnixStream::pair().unwrap();
-        let rx = start_snapshot_reader(daemon_side, Arc::new(AtomicI32::new(0)), 0).unwrap();
+        let rx = start_snapshot_reader(
+            daemon_side,
+            Arc::new(AtomicI32::new(0)),
+            0,
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+        )
+        .unwrap();
 
         let mut host_side = host_side;
         // schema 对不上的一行（新版 host 发了旧版 daemon 不认识的变体）。
@@ -427,6 +599,87 @@ mod tests {
             ))
             .is_err(),
             "解析不了的快照必须断开镜像，不能静默丢弃"
+        );
+    }
+
+    /// 历史页回包和快照走同一条 socket。它不能被当成坏快照把镜像拆掉。
+    #[test]
+    fn history_page_reply_reaches_the_waiter_without_dropping_the_mirror() {
+        let (handle, mut peer) = HostedConversationHandle::test_stub();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(peer.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let action: smelt_core::acp_session::AcpUserAction =
+                serde_json::from_str(line.trim()).unwrap();
+            let smelt_core::acp_session::AcpUserAction::HistoryPage {
+                request_id,
+                before,
+                limit,
+            } = action
+            else {
+                panic!("父进程应发出历史页动作，实际 {line}");
+            };
+            assert_eq!(before, 10);
+            assert_eq!(limit, 2);
+            let mut snapshot =
+                smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
+            snapshot.entries = vec![smelt_core::acp_chat::AcpEntry::User("old".into())];
+            snapshot.entries_offset = 8;
+            snapshot.entries_total = 10;
+            let reply = serde_json::json!({
+                "history_page": {
+                    "request_id": request_id,
+                    "snapshot": snapshot,
+                }
+            });
+            writeln!(peer, "{reply}").unwrap();
+            // 镜像还在：再写一行坏快照才会拆掉。这里停住，证明历史页本身没有拆连接。
+            thread::sleep(Duration::from_millis(50));
+        });
+
+        let page = handle
+            .request_history_page(10, 2)
+            .expect("历史页应回到等待方");
+        assert_eq!(page.entries_offset, 8);
+        assert_eq!(page.entries_total, 10);
+        assert!(handle.snapshot_rx().is_empty(), "历史页不能进快照合并通道");
+    }
+
+    /// 旧宿主不认识历史页，新宿主也可能这一页超过等待时间。两种都只让这一次失败。
+    /// 不能接着发 Refresh，否则下一帧会把整段历史留在父进程里。
+    #[test]
+    fn history_page_timeout_does_not_request_a_resident_full_copy() {
+        let (handle, peer) = HostedConversationHandle::test_stub();
+        let waiting = thread::spawn(move || {
+            handle.request_history_page_within(10, 2, Duration::from_millis(40))
+        });
+
+        let mut reader = BufReader::new(peer.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let action: smelt_core::acp_session::AcpUserAction =
+            serde_json::from_str(line.trim()).unwrap();
+        assert!(
+            matches!(
+                action,
+                smelt_core::acp_session::AcpUserAction::HistoryPage { .. }
+            ),
+            "第一行应是历史页，实际 {line}"
+        );
+
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut extra = String::new();
+        let second = reader.read_line(&mut extra);
+        assert!(
+            second.is_err(),
+            "超时后不能再要整段快照，实际读到 {extra:?}"
+        );
+        let error = waiting.join().unwrap().expect_err("这一页应失败");
+        assert!(
+            error.contains("读取宿主历史失败"),
+            "失败应留在这一次调用里，实际 {error}"
         );
     }
 }

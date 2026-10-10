@@ -167,7 +167,12 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::HistoryReplayStarted => {
             apply_history_replay_started(state, &mut outcome)
         }
-        ConversationEvent::HistoryReplayFinished => state.commit_replay(),
+        ConversationEvent::HistoryReplayFinished => {
+            state.commit_replay();
+            // 提交换上的是整份正文。和回退一样，只有从 0 重发才能让窗口对齐。
+            // 从新长度发一帧空尾，窗口会把已有对话换成空的。
+            outcome.entries_offset = Some(0);
+        }
         ConversationEvent::RestoreFailed(failure) => apply_restore_failed(state, failure),
         ConversationEvent::UserChunk(text) => apply_user_chunk(state, &mut outcome, text),
         ConversationEvent::UserImage(image) => apply_user_image(state, &mut outcome, image),

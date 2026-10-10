@@ -409,6 +409,40 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
     assert_eq!(state.to_snapshot(false).entries.len(), 2);
 }
 
+/// 重放提交换成了整份正文。快照必须从 0 重发；从新长度发一帧空尾，窗口会把对话清空。
+#[test]
+fn replay_commit_publishes_the_transcript_from_the_start() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Idle;
+    state.entries.push(AcpEntry::User("A".into()));
+    state.entries.push(AcpEntry::Assistant {
+        text: "之前的回复".into(),
+        thought: false,
+    });
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    apply_event(&mut state, ConversationEvent::UserChunk("A".into()));
+    apply_event(
+        &mut state,
+        ConversationEvent::AgentChunk {
+            text: "重放后的回复".into(),
+            thought: false,
+            parent_id: None,
+        },
+    );
+
+    let finished = apply_event(&mut state, ConversationEvent::HistoryReplayFinished);
+
+    assert_eq!(finished.entries_offset, Some(0));
+    let published = state.to_snapshot_since(false, finished.entries_offset.unwrap_or(99));
+    assert_eq!(published.entries_offset, 0);
+    assert_eq!(published.entries_total, 2);
+    assert!(matches!(
+        published.entries.as_slice(),
+        [AcpEntry::User(user), AcpEntry::Assistant { text, .. }]
+            if user == "A" && text == "重放后的回复"
+    ));
+}
+
 /// 重放开始后、第一条历史还没回来时用户又发了一条。新消息接在仍发布的旧正文上，
 /// 不能落在那份空草稿上把会话截成只有这一条。
 #[test]
@@ -2670,13 +2704,15 @@ fn hosted_snapshot_merge_replaces_incremental_tail_and_runtime_state() {
 
     let changed_from = state
         .merge_hosted_snapshot(snapshot)
-        .expect("连续的 host 增量快照应能合并");
+        .expect("连续的 host 增量快照应能合并")
+        .changed_from;
 
     assert_eq!(changed_from, 1);
-    assert_eq!(state.entries.len(), 3);
+    assert_eq!(state.entries_total(), 3);
+    assert_eq!(state.entries_base(), 2);
     assert!(matches!(
-        &state.entries[1],
-        AcpEntry::Assistant { text, thought: false } if text == "new tail"
+        state.entries(),
+        [AcpEntry::User(text)] if text == "next"
     ));
     assert_eq!(state.phase, DaemonPhase::Thinking);
     assert_eq!(state.turn_started_at_ms, Some(123));
@@ -2696,6 +2732,357 @@ fn hosted_snapshot_merge_rejects_a_missing_prefix() {
         state.entries.as_slice(),
         [AcpEntry::User(text)] if text == "only"
     ));
+}
+
+#[test]
+fn hosted_mirror_drops_committed_history_and_keeps_the_open_turn() {
+    let mut state = AcpSessionState {
+        entries: vec![
+            AcpEntry::User("first".into()),
+            AcpEntry::Assistant {
+                text: "done".into(),
+                thought: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let mut snapshot = state.to_snapshot(false);
+    snapshot.entries_offset = 0;
+    snapshot.entries_total = 4;
+    snapshot.entries = vec![
+        AcpEntry::User("first".into()),
+        AcpEntry::Assistant {
+            text: "done".into(),
+            thought: false,
+        },
+        AcpEntry::User("next".into()),
+        AcpEntry::Assistant {
+            text: "streaming".into(),
+            thought: false,
+        },
+    ];
+    snapshot.phase = DaemonPhase::Thinking;
+    snapshot.turn_started_at_ms = Some(50);
+
+    state
+        .merge_hosted_snapshot(snapshot)
+        .expect("完整宿主快照应能合并");
+
+    assert_eq!(state.entries_total(), 4);
+    assert_eq!(state.entries_base(), 2);
+    assert!(matches!(
+        state.entries().first(),
+        Some(AcpEntry::User(text)) if text == "next"
+    ));
+    assert_eq!(state.entries().len(), 2);
+    let (history_len, end) = state.open_turn_range();
+    assert_eq!((history_len, end), (2, 4));
+
+    // 下一帧只改开放回合的尾巴，绝对下标仍然接得上。
+    let mut tail = state.to_snapshot(false);
+    tail.entries_offset = 3;
+    tail.entries_total = 4;
+    tail.entries = vec![AcpEntry::Assistant {
+        text: "streaming more".into(),
+        thought: false,
+    }];
+    tail.phase = DaemonPhase::Thinking;
+    tail.turn_started_at_ms = Some(50);
+    state
+        .merge_hosted_snapshot(tail)
+        .expect("落在保留窗口里的增量应能合并");
+    assert_eq!(state.entries_base(), 2);
+    assert!(matches!(
+        state.entries().last(),
+        Some(AcpEntry::Assistant { text, .. }) if text == "streaming more"
+    ));
+}
+
+#[test]
+fn hosted_mirror_keeps_the_last_turn_when_idle() {
+    let mut state = AcpSessionState::default();
+    let mut snapshot = state.to_snapshot(false);
+    snapshot.phase = DaemonPhase::Idle;
+    snapshot.entries_offset = 0;
+    snapshot.entries_total = 4;
+    snapshot.entries = vec![
+        AcpEntry::User("first".into()),
+        AcpEntry::Assistant {
+            text: "old".into(),
+            thought: false,
+        },
+        AcpEntry::User("latest".into()),
+        AcpEntry::Assistant {
+            text: "answer".into(),
+            thought: false,
+        },
+    ];
+    snapshot.session_title = Some("来自宿主的标题".into());
+
+    state
+        .merge_hosted_snapshot(snapshot)
+        .expect("空闲会话也应合并");
+
+    assert_eq!(state.entries_total(), 4);
+    assert_eq!(state.entries_base(), 2);
+    assert!(
+        !state.entries().is_empty(),
+        "留着上一轮，恢复才知道这不是空会话"
+    );
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("来自宿主的标题")
+    );
+    let live = SessionLive::from_state(&state);
+    assert_eq!(live.history_len, Some(4));
+    assert!(live.open_turn.is_empty());
+
+    // 快照下标是绝对坐标。用本地长度当终点会把这一截发成空的。
+    let snapshot = state.to_snapshot(false);
+    assert_eq!(snapshot.entries_offset, 2);
+    assert_eq!(snapshot.entries_total, 4);
+    assert_eq!(snapshot.entries.len(), 2);
+    let tail = state.to_snapshot_since(false, 3);
+    assert_eq!(tail.entries_offset, 3);
+    assert_eq!(tail.entries_total, 4);
+    assert_eq!(tail.entries.len(), 1);
+}
+
+/// 死亡宿主没法再要全文。种子只能是父镜像留下的这一截，但绝对长度必须还在，
+/// 否则新宿主的第一帧会把父镜像和 GUI 一起截短。重放提交的是从 0 开始的完整投影，
+/// 这时前缀下标必须清掉，避免和草稿长度加两次。
+#[test]
+fn suffix_seed_keeps_absolute_length_until_replay_commits() {
+    let mut snapshot = AcpSessionState::default().to_snapshot(false);
+    snapshot.entries_offset = 2;
+    snapshot.entries_total = 4;
+    snapshot.entries = vec![
+        AcpEntry::User("latest".into()),
+        AcpEntry::Assistant {
+            text: "answer".into(),
+            thought: false,
+        },
+    ];
+
+    let mut state = AcpSessionState::from_snapshot(snapshot);
+    assert_eq!(state.entries_base(), 2);
+    assert_eq!(state.entries_total(), 4);
+    let published = state.to_snapshot(false);
+    assert_eq!(published.entries_offset, 2);
+    assert_eq!(published.entries_total, 4);
+    assert_eq!(published.entries.len(), 2);
+
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    assert_eq!(
+        state.entries_total(),
+        4,
+        "重放完成前发布的仍是后缀，绝对长度不能缩成这一截"
+    );
+    apply_event(&mut state, ConversationEvent::UserChunk("replayed".into()));
+    apply_event(&mut state, ConversationEvent::HistoryReplayFinished);
+
+    assert_eq!(state.entries_base(), 0);
+    assert_eq!(state.entries_total(), 1);
+    assert!(matches!(
+        state.entries().first(),
+        Some(AcpEntry::User(text)) if text == "replayed"
+    ));
+}
+
+/// 重放还没开始就发出的消息，接在后缀后面。不能把这一截当成全文，否则绝对长度会缩短。
+#[test]
+fn prompt_on_a_suffix_seed_keeps_the_absolute_length() {
+    let mut snapshot = AcpSessionState::default().to_snapshot(false);
+    snapshot.entries_offset = 2;
+    snapshot.entries_total = 4;
+    snapshot.entries = vec![
+        AcpEntry::User("latest".into()),
+        AcpEntry::Assistant {
+            text: "answer".into(),
+            thought: false,
+        },
+    ];
+    let mut state = AcpSessionState::from_snapshot(snapshot);
+
+    note_prompt_sent(&mut state, "继续".into(), Vec::new());
+
+    assert_eq!(state.entries_base(), 2);
+    assert_eq!(state.entries_total(), 5);
+    assert!(matches!(
+        state.entries().last(),
+        Some(AcpEntry::User(text)) if text == "继续"
+    ));
+}
+
+#[test]
+fn failed_replay_of_a_suffix_seed_keeps_the_absolute_length() {
+    let mut snapshot = AcpSessionState::default().to_snapshot(false);
+    snapshot.entries_offset = 2;
+    snapshot.entries_total = 4;
+    snapshot.entries = vec![
+        AcpEntry::User("latest".into()),
+        AcpEntry::Assistant {
+            text: "answer".into(),
+            thought: false,
+        },
+    ];
+    let mut state = AcpSessionState::from_snapshot(snapshot);
+
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    apply_event(
+        &mut state,
+        ConversationEvent::RestoreFailed(crate::acp_conn::ConversationRestoreFailure::Failed(
+            "session/load 中断".into(),
+        )),
+    );
+
+    assert_eq!(state.entries_base(), 2);
+    assert_eq!(state.entries_total(), 4);
+    assert!(matches!(
+        state.entries().first(),
+        Some(AcpEntry::User(text)) if text == "latest"
+    ));
+}
+
+/// 旁观首帧向宿主要前缀时，开放回合可能已经又写进了父镜像。
+/// 宿主页只补已经丢掉的前缀，不能把更新的后缀盖回旧文本。
+#[test]
+fn older_page_fills_the_dropped_prefix_without_replacing_the_fresh_suffix() {
+    let mut snapshot = AcpSessionState::default().to_snapshot(false);
+    snapshot.phase = DaemonPhase::Idle;
+    snapshot.entries_offset = 2;
+    snapshot.entries_total = 4;
+    snapshot.entries = vec![
+        AcpEntry::User("latest".into()),
+        AcpEntry::Assistant {
+            text: "fresh".into(),
+            thought: false,
+        },
+    ];
+    let state = AcpSessionState::from_snapshot(snapshot);
+
+    let mut page = state.to_snapshot(false);
+    page.phase = DaemonPhase::Thinking;
+    page.entries_offset = 0;
+    page.entries_total = 4;
+    page.entries = vec![
+        AcpEntry::User("first".into()),
+        AcpEntry::Assistant {
+            text: "old".into(),
+            thought: false,
+        },
+        AcpEntry::User("latest".into()),
+        AcpEntry::Assistant {
+            text: "stale".into(),
+            thought: false,
+        },
+    ];
+
+    let watched = state.snapshot_with_older_page(0, Some(&page));
+    assert_eq!(watched.phase, DaemonPhase::Idle);
+    assert_eq!(watched.entries_offset, 0);
+    assert_eq!(watched.entries_total, 4);
+    assert_eq!(watched.entries.len(), 4);
+    assert!(matches!(
+        watched.entries.first(),
+        Some(AcpEntry::User(text)) if text == "first"
+    ));
+    assert!(matches!(
+        watched.entries.last(),
+        Some(AcpEntry::Assistant { text, .. }) if text == "fresh"
+    ));
+
+    page.entries_total = 5;
+    let fallback = state.snapshot_with_older_page(0, Some(&page));
+    assert_eq!(fallback.entries_offset, 2);
+    assert_eq!(fallback.entries.len(), 2);
+    assert!(matches!(
+        fallback.entries.last(),
+        Some(AcpEntry::Assistant { text, .. }) if text == "fresh"
+    ));
+}
+
+#[test]
+fn hosted_mirror_stores_runtime_debug_ledger_not_payloads() {
+    let mut state = AcpSessionState::default();
+    let mut snapshot = state.to_snapshot(false);
+    snapshot.entries_total = snapshot.entries.len();
+    snapshot.runtime_debug = Some(RuntimeDebug {
+        version: 3,
+        source: "pi".into(),
+        system_prompt: Some("secret system".into()),
+        tools: vec![RuntimeDebugTool {
+            name: "bash".into(),
+            ..RuntimeDebugTool::default()
+        }],
+        model_calls: vec![RuntimeDebugModelCall {
+            sequence: 7,
+            pi_context: serde_json::json!({ "messages": ["huge"] }),
+            payload: serde_json::json!({ "input": "huge" }),
+            response: Some(serde_json::json!({ "output": "huge" })),
+            request_config: RuntimeDebugRequestConfig {
+                system_prompt: "secret".into(),
+                tools: vec![RuntimeDebugTool {
+                    name: "bash".into(),
+                    ..RuntimeDebugTool::default()
+                }],
+            },
+            ..RuntimeDebugModelCall::default()
+        }],
+        compactions: vec![RuntimeDebugCompaction {
+            sequence: 1,
+            status: "done".into(),
+            reason: "auto".into(),
+            summary: Some("short".into()),
+            source_messages: vec![RuntimeDebugCompactionMessage {
+                segment: "s".into(),
+                role: "user".into(),
+                preview: "full text".into(),
+                truncated: false,
+            }],
+            ..RuntimeDebugCompaction::default()
+        }],
+        ..RuntimeDebug::default()
+    });
+
+    let merged = state
+        .merge_hosted_snapshot(snapshot)
+        .expect("带调试体的快照应能合并");
+    let full = merged
+        .runtime_debug
+        .expect("调用方还要把完整调试体写进这一帧");
+    assert_eq!(full.model_calls[0].payload["input"], "huge");
+    assert!(state.runtime_debug.system_prompt.is_none());
+    assert!(state.runtime_debug.tools.is_empty());
+    assert!(state.runtime_debug.model_calls[0].pi_context.is_null());
+    assert!(state.runtime_debug.model_calls[0].payload.is_null());
+    assert!(state.runtime_debug.model_calls[0].response.is_none());
+    assert!(
+        state.runtime_debug.model_calls[0]
+            .request_config
+            .system_prompt
+            .is_empty()
+    );
+    assert!(
+        state.runtime_debug.model_calls[0]
+            .request_config
+            .tools
+            .is_empty()
+    );
+    assert_eq!(state.runtime_debug.model_calls[0].sequence, 7);
+    assert!(
+        state.runtime_debug.compactions[0]
+            .source_messages
+            .is_empty()
+    );
+    assert_eq!(
+        state.runtime_debug.compactions[0].source_messages_omitted,
+        1
+    );
+    assert_eq!(
+        state.runtime_debug.compactions[0].summary.as_deref(),
+        Some("short")
+    );
 }
 
 #[test]

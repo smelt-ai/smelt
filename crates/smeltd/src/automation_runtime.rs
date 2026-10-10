@@ -557,23 +557,34 @@ impl Driver {
                 }
                 continue;
             };
-            let projection = {
+            let (mut projection, entries_base) = {
                 let reduced = slot.value.reduced.lock().unwrap();
-                RunProjection {
-                    phase: reduced.phase,
-                    accepted: reduced.accepted_delivery_ids.contains(&run.id),
-                    active: reduced.active_delivery_id.as_deref() == Some(run.id.as_str()),
-                    completed: reduced.completed_delivery_id.as_deref() == Some(run.id.as_str()),
-                    outcome: reduced.turn_outcome,
-                    output: completed_turn_output(reduced.entries()),
-                    error: (!reduced.end_reason.is_empty()).then(|| reduced.end_reason.clone()),
-                    provider_session_id: reduced
-                        .history_session_id
-                        .clone()
-                        .or_else(|| reduced.acp_session_id.clone()),
-                    entries: reduced.entries().to_vec(),
-                }
+                (
+                    RunProjection {
+                        phase: reduced.phase,
+                        accepted: reduced.accepted_delivery_ids.contains(&run.id),
+                        active: reduced.active_delivery_id.as_deref() == Some(run.id.as_str()),
+                        completed: reduced.completed_delivery_id.as_deref()
+                            == Some(run.id.as_str()),
+                        outcome: reduced.turn_outcome,
+                        output: completed_turn_output(reduced.entries()),
+                        error: (!reduced.end_reason.is_empty()).then(|| reduced.end_reason.clone()),
+                        provider_session_id: reduced
+                            .history_session_id
+                            .clone()
+                            .or_else(|| reduced.acp_session_id.clone()),
+                        entries: reduced.entries().to_vec(),
+                    },
+                    reduced.entries_base(),
+                )
             };
+            // 父镜像只留着上一轮。失败存档要整段时向宿主分页要，要不到就用留下的那一轮。
+            if entries_base > 0
+                && (projection.completed || projection.phase == DaemonPhase::Dead)
+                && let Some(entries) = fetch_hosted_transcript(&slot.value)
+            {
+                projection.entries = entries;
+            }
             if projection.completed {
                 self.finish_from_projection(&run, projection);
                 continue;
@@ -1149,6 +1160,17 @@ fn defer_or_fail_delivery(
         )
     } else {
         owner.defer_run_delivery(run_id, now)
+    }
+}
+
+/// 父镜像裁过前缀时，把宿主上的整段正文按页拼回来。失败则返回 None，调用方用本地留下的那一轮。
+fn fetch_hosted_transcript(session: &crate::acp_host::AcpSession) -> Option<Vec<AcpEntry>> {
+    let host = session.hosted_handle.lock().unwrap().clone()?;
+    let snapshot = host.read_snapshot_covering(0, usize::MAX).ok()?;
+    if snapshot.entries_offset != 0 || snapshot.entries.is_empty() {
+        None
+    } else {
+        Some(snapshot.entries)
     }
 }
 
