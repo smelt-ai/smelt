@@ -70,6 +70,11 @@ function validate(layer: MemoryLayer, root: string, fileName: string, content: s
  */
 export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 	const pendingEdits = new Map<string, PendingEdit>();
+	/**
+	 * 正在写的记忆文件 → 发起的调用。并行批次里所有 tool_call 都先于执行触发，同一文件的
+	 * 第二次写入看到的"原内容"已经过时，回滚会覆盖或删掉前一次的结果，所以直接拒绝。
+	 */
+	const inFlight = new Map<string, string>();
 	let cached: { key: string; snapshot: MemorySnapshot } | undefined;
 	let warnedTruncation = false;
 	let recallPending = false;
@@ -137,6 +142,12 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		const target = resolveMemoryTarget(input.path, context.cwd, roots);
 		if (target.kind === "outside") return;
 		if (target.kind === "invalid") return { block: true, reason: target.reason };
+		if (inFlight.has(target.absolutePath)) {
+			return {
+				block: true,
+				reason: "这个记忆文件已有一次写入正在进行，请等上一步完成后再改，不要并行写同一个记忆文件",
+			};
+		}
 
 		if (event.toolName === "write") {
 			const content = typeof input.content === "string" ? input.content : "";
@@ -157,10 +168,19 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 				previous,
 			});
 		}
+		inFlight.set(target.absolutePath, event.toolCallId);
 		approvedMemoryWrites.add(event.toolCallId);
 	});
 
+	// 被后续处理拦下或中途取消的调用可能没有 tool_result；一轮结束时清掉，免得永远占着。
+	pi.on("agent_end", async () => {
+		inFlight.clear();
+	});
+
 	pi.on("tool_result", async (event, context) => {
+		for (const [path, toolCallId] of inFlight) {
+			if (toolCallId === event.toolCallId) inFlight.delete(path);
+		}
 		if (event.toolName === "read") {
 			const roots = currentMemoryRoots();
 			const path = (event.input as { path?: unknown }).path;

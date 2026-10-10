@@ -205,6 +205,49 @@ describe("smelt-memory extension", () => {
 		expect(readFileSync(file, "utf8")).toBe(validMemory);
 	});
 
+	test("a second write to the same memory file in one parallel batch is refused", async () => {
+		const { agent } = setupRoots();
+		const file = join(agent, "reply-in-chinese.md");
+		const { runner } = await createRunner();
+
+		// 并行批次里两个 tool_call 都先于执行触发：edit 记下的"原内容"是 write 之前的，
+		// 回滚会把 write 刚建的文件删掉。所以第二个直接拒绝。
+		const write = await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "p1",
+			toolName: "write",
+			input: { path: file, content: validMemory },
+		});
+		const edit = await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "p2",
+			toolName: "edit",
+			input: { path: file, edits: [{ oldText: "type: feedback", newText: "type: diary" }] },
+		});
+		expect(write?.block).toBeFalsy();
+		expect(edit?.block).toBe(true);
+		expect(edit?.reason).toContain("等上一步完成");
+
+		// 前一个写完后就能接着改。
+		writeFileSync(file, validMemory);
+		await runner.emitToolResult({
+			type: "tool_result",
+			toolCallId: "p1",
+			toolName: "write",
+			input: { path: file, content: validMemory },
+			content: [{ type: "text", text: "ok" }],
+			details: undefined,
+			isError: false,
+		});
+		const next = await runner.emitToolCall({
+			type: "tool_call",
+			toolCallId: "p3",
+			toolName: "edit",
+			input: { path: file, edits: [{ oldText: "a", newText: "b" }] },
+		});
+		expect(next?.block).toBeFalsy();
+	});
+
 	test("an edit that creates a new invalid file is rolled back by deleting it", async () => {
 		const { agent } = setupRoots();
 		const file = join(agent, "new-rule.md");
