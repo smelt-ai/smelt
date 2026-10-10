@@ -359,8 +359,8 @@ pub fn apply_to_component_theme(cx: &mut gpui::App) {
         let thumb_hover: gpui::Hsla = rgb(p.text_faint).into();
         let border: gpui::Hsla = rgb(p.border_mid).into();
         let base = cx.global_mut::<gpui_base::Theme>();
-        base.resizable.handle = hairline;
-        base.resizable.active_handle = active;
+        base.resizable.handle = Some(hairline);
+        base.resizable.active_handle = Some(active);
         let mode = base.scrollbar.mode();
         let motion = base.scrollbar.motion();
         base.scrollbar = gpui_base::ScrollbarTheme::new()

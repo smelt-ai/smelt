@@ -37,7 +37,7 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 ## Features
 
 - **Workspace**: Multiple projects and tabs with real embedded terminals for interactive programs and full-screen TUIs such as `claude`, `codex`, `copilot`, `pi`, `vim`, and `htop`; split panes, a command palette (`Cmd+K`), and customizable quick launchers
-- **Keep an eye on agents**: Session state comes from agent hooks (`smelt-notify`) and structured protocols (ACP or provider-native). Terminal titles are presentation metadata, while OSC 9/777 notifications and bells are informational only. Badges and system notifications highlight sessions that need attention, without depending on any vendor-specific private format
+- **Keep an eye on agents**: Session state comes from agent hooks (`smelt-notify`) and structured protocols (ACP or provider-native). The session name comes from ACP `session_title` or hook `SessionTitleChanged`, and falls back to the first user prompt; OSC 0/2 is not a session name. OSC 9/777 notifications and bells are informational only. Badges and system notifications highlight sessions that need attention, without depending on any vendor-specific private format
 - **Native agent conversations**: Connect Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, and DSH through ACP or provider-native protocols for structured message streams, tool cards, inline diffs, permission prompts, PLAN progress, and resumable sessions (Pi uses its native JSONL RPC through Smelt's managed Bun runtime; it is not wrapped in ACP)
 - **Persistent agents and automations**: The top-level Agents workspace manages reusable definitions, while Automations independently manages triggers, per-run input, permissions, and run history. Each automation receives a stable daemon-managed workspace under `~/.smelt/workspaces/automations`. Triggers are schedule or an external trigger: schedules cover weekday/daily/interval, while an external trigger is a loopback HTTP URL (`127.0.0.1`) that other programs on the same machine can POST to. The catalog shows “external trigger” without exposing the token. Pi is the first registered engine, and `smeltd` owns scheduled, external-trigger, and manual run lifecycles
 - **Read and edit code**: File tree and search, built-in editor, Git diff view, and Markdown/Mermaid rendering
@@ -71,7 +71,7 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 ## Architecture
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed) / [gpui-component](https://github.com/zzfn/gpui-component) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, axum for the remote gateway, and iroh for P2P tunnels.
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed) (`gpui-pre` 0.3.8) / [gpui-kit](https://github.com/longbridge/gpui-kit) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, axum for the remote gateway, and iroh for P2P tunnels.
 Configuration is stored in `~/.smelt/`.
 
 The workspace contains `smelt` (the main GUI), `smeltd` (a terminal persistence daemon, similar to tmux, launched on demand by the GUI), `gateway` (a standalone executable for developing and debugging the remote gateway), `smelt-notify` (a small status-reporting utility called by supported agent hooks and plugins), and the `smelt-iroh-host` / `smelt-iroh-connect` helpers for developing and debugging P2P tunnels. Most users only interact with `smelt`; the GUI manages `smeltd` as needed.

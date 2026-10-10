@@ -4579,11 +4579,11 @@ impl gpui::AssetSource for SmeltAssets {
                 include_bytes!("../assets/icons/panel-left-filled.svg").as_slice(),
             )));
         }
-        gpui_component_assets::Assets.load(path)
+        gpui_kit_assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        gpui_component_assets::Assets.list(path)
+        gpui_kit_assets::Assets.list(path)
     }
 }
 

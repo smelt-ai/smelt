@@ -35,17 +35,18 @@ uuid = { version = "1", features = ["v4"] }
 futures-util = { version = "0.3", features = ["sink", "async-await"] }
 # ACP 对话粘贴图片：协议要 base64 后的字节（见 acp.rs 的 PromptImage）。
 base64 = "0.22"
-# GPUI + gpui-component（组件库，Apache-2.0）。gpui-component 已改为跟随 Zed
-# 主线，直接依赖保持同一 source，由 Cargo.lock 固定精确 revision，避免解析出
-# 两套不兼容的 GPUI 类型；gpui_platform 开 runtime_shaders 免装完整 Xcode。
-gpui = { git = "https://github.com/zed-industries/zed", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5" }
-gpui-base = { git = "https://github.com/zzfn/gpui-component", rev = "0ba9d922e335185e654a6c0ac643f5f1a1e9370d" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# GPUI 用上游 gpui-kit 钉的 crates.io 快照 gpui-pre =0.3.8（zed@279fe07）。
+# 组件库跟 longbridge/gpui-kit 上游 main，不再用 zzfn fork。两边必须同一套，
+# 不能只改其中一个。gpui_platform 开 runtime_shaders 免装完整 Xcode。
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "ed27c6293b585acc40c10be7138534243bee5841" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 # tree-sitter-languages：文件树打开文件用组件自带的 Editor（CodeEditor 模式），
 # 语法高亮 + 行号 + 搜索都是组件自己做的，不再需要 syntect。
-gpui-component = { git = "https://github.com/zzfn/gpui-component", rev = "0ba9d922e335185e654a6c0ac643f5f1a1e9370d", features = ["tree-sitter-languages"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "ed27c6293b585acc40c10be7138534243bee5841", features = ["tree-sitter-languages"] }
 # 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
-gpui-component-assets = { git = "https://github.com/zzfn/gpui-component", rev = "0ba9d922e335185e654a6c0ac643f5f1a1e9370d" }
+# 上游已把包名从 gpui-component-assets 改成 gpui-kit-assets。
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "ed27c6293b585acc40c10be7138534243bee5841" }
 # 内嵌终端网格仍由 alacritty_terminal 驱动；PTY 子进程已迁到 smeltd。
 libc = "0.2"
 alacritty_terminal = { version = "0.26", default-features = false }
@@ -77,5 +78,5 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 raw-window-handle = "0.6"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
