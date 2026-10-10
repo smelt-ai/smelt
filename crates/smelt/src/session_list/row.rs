@@ -74,7 +74,7 @@ pub(crate) fn session_row_status_label(status: AgentStatus) -> Option<&'static s
 
 /// 侧栏第二行的最近活动时间。采用不会随分钟流逝而过期的本地日历文案：今天和
 /// 昨天保留时分，更早的会话显示日期；旧存档没有时间时明确写“时间未知”。
-pub(super) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> String {
+pub(crate) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> String {
     if timestamp == 0 {
         return "时间未知".to_string();
     }

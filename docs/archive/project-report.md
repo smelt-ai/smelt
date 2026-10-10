@@ -52,8 +52,8 @@ spec 驱动、看板派活这类前置方法，解决的是「开工前把事情
 
 ### 状态感知：走终端协议，不绑死任何一家
 
-主渠道是结构化 hook（smelt-notify）+ ACP 事件；这份历史报告提到的 OSC / BEL fallback
-已废弃，终端标题仅作展示、OSC / BEL 仅作信息通知。
+主渠道是结构化 hook（smelt-notify）+ ACP 事件。这份历史报告后文里的 OSC 推断兜底已经作废：
+OSC 0/2 不是会话名，也不推断状态。OSC 9/777 与 BEL 只作信息通知。不要按后文把 OSC 推断加回来。
 
 会话状态三态着色（要你 / 跑着呢 / 空闲）+ 独立 unread/attention 维度（`agent_status.rs`，未读不占一态），Dock 与菜单栏角标，系统通知（app 在前台自动噤声）。
 

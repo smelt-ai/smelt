@@ -1,85 +1,64 @@
 use super::{
-    AgentConversationInput, agent_conversation_group_status, conversation_icon_color,
-    group_agent_conversations, nested_agent_conversation_title,
+    bound_agent_definition_id, conversation_agent_mark, conversation_icon_color,
+    conversation_row_title, new_conversation_row_label, recent_conversation_order,
 };
 use crate::AgentStatus;
 use gpui::rgb;
 
 #[test]
-fn conversations_nest_under_their_agent_in_definition_order() {
-    let agents = [
-        ("a".to_string(), "量化交易助手".to_string()),
-        ("b".to_string(), "研究助理".to_string()),
-    ];
-    let conversations = [
-        AgentConversationInput::new(0, Some("a"), None),
-        AgentConversationInput::new(1, Some("a"), None),
-        AgentConversationInput::new(2, Some("b"), None),
-        AgentConversationInput::new(3, Some("missing"), None),
-        AgentConversationInput::new(4, None, None),
-    ];
-    let groups = group_agent_conversations(&agents, &conversations);
-    assert_eq!(groups.len(), 3);
-    assert_eq!(groups[0].agent_name, "量化交易助手");
-    assert_eq!(groups[0].session_ixes, vec![0, 1]);
-    assert_eq!(groups[1].agent_name, "研究助理");
-    assert_eq!(groups[1].session_ixes, vec![2]);
-    assert_eq!(groups[2].agent_name, "其他");
-    assert_eq!(groups[2].session_ixes, vec![3, 4]);
-}
-
-#[test]
-fn agents_without_open_conversations_are_omitted() {
-    let agents = [("a".to_string(), "空的".to_string())];
-    let groups = group_agent_conversations(&agents, &[]);
-    assert!(groups.is_empty());
-}
-
-#[test]
-fn cwd_recovers_missing_agent_definition_ownership() {
-    let space = smelt_core::agent_definition_store::agent_space_root("a").unwrap();
-    let agents = [("a".to_string(), "研究助理".to_string())];
-    let conversations = [AgentConversationInput::new(0, None, space.to_str())];
-
-    let groups = group_agent_conversations(&agents, &conversations);
-
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].agent_id, "a");
-    assert_eq!(groups[0].session_ixes, vec![0]);
-}
-
-#[test]
-fn group_status_keeps_the_highest_priority_hidden_conversation_visible() {
+fn conversation_belongs_to_the_bound_agent_not_the_cwd() {
+    assert_eq!(bound_agent_definition_id(Some("a"), None), Some("a"));
+    assert_eq!(bound_agent_definition_id(Some("  a  "), None), Some("a"));
+    assert_eq!(bound_agent_definition_id(Some(""), None), None);
+    assert_eq!(bound_agent_definition_id(None, None), None);
     assert_eq!(
-        agent_conversation_group_status(
-            &[0, 1, 2],
-            &[
-                AgentStatus::Idle,
-                AgentStatus::Running,
-                AgentStatus::NeedsYou,
-            ]
-        ),
-        AgentStatus::NeedsYou
-    );
-    assert_eq!(
-        agent_conversation_group_status(&[0, 1], &[AgentStatus::Idle, AgentStatus::Running]),
-        AgentStatus::Running
+        bound_agent_definition_id(Some("a"), Some("auto-1")),
+        None,
+        "自动化 Run 不是对话"
     );
 }
 
 #[test]
-fn nested_row_title_uses_title_source_not_agent_name_equality() {
+fn recent_conversations_put_the_newest_first() {
+    assert_eq!(recent_conversation_order(&[10, 30, 20]), vec![1, 2, 0]);
     assert_eq!(
-        nested_agent_conversation_title(Some("量化交易助手"), Some("自动标题")),
+        recent_conversation_order(&[5, 5]),
+        vec![0, 1],
+        "同一秒保持原来的顺序"
+    );
+}
+
+#[test]
+fn conversation_mark_uses_the_first_character_or_pi() {
+    assert_eq!(conversation_agent_mark(Some("写作助手")), "写");
+    assert_eq!(conversation_agent_mark(Some("  研究助理")), "研");
+    assert_eq!(conversation_agent_mark(None), "Pi");
+    assert_eq!(conversation_agent_mark(Some("  ")), "Pi");
+}
+
+#[test]
+fn new_conversation_row_names_the_default_and_stays_plain_without_one() {
+    assert_eq!(new_conversation_row_label(None), "新对话");
+    assert_eq!(new_conversation_row_label(Some("  ")), "新对话");
+    assert_eq!(
+        new_conversation_row_label(Some("写作助手")),
+        "新对话 · 写作助手"
+    );
+}
+
+#[test]
+fn conversation_row_title_uses_title_source_not_agent_name_equality() {
+    assert_eq!(
+        conversation_row_title(Some("量化交易助手"), Some("自动标题")),
         "量化交易助手",
         "用户把会话命名成智能体名时不能被自动标题覆盖"
     );
     assert_eq!(
-        nested_agent_conversation_title(None, Some("季度复盘")),
+        conversation_row_title(None, Some("季度复盘")),
         "季度复盘",
         "智能体改名不能影响已经生成的对话标题"
     );
-    assert_eq!(nested_agent_conversation_title(None, None), "新对话");
+    assert_eq!(conversation_row_title(None, None), "新对话");
 }
 
 #[test]
@@ -103,8 +82,8 @@ fn selected_idle_conversation_icon_does_not_look_like_running() {
 #[cfg(test)]
 mod schedule_editor_tests {
     use super::super::{
-        IntervalUnit, ScheduleKind, automation_prompt_hint, clock_input_is_editable,
-        schedule_from_values, webhook_curl_example,
+        IntervalUnit, ScheduleKind, automation_missing_fields, automation_prompt_hint,
+        clock_input_is_editable, interval_title, schedule_from_values, webhook_curl_example,
     };
     use crate::settings;
     use smelt_core::automation::{SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK};
@@ -147,7 +126,7 @@ mod schedule_editor_tests {
         );
         assert_eq!(
             automation_prompt_hint(true),
-            "支持 {{payload}} 和请求字段变量（如 {{text}}）；留空时直接发送请求内容。长期指令请在智能体设置中配置。"
+            "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令请在智能体设置中配置。"
         );
         assert_eq!(settings::AutomationTriggerPresetId::Daily.label(), "每天");
         assert_eq!(
@@ -155,10 +134,56 @@ mod schedule_editor_tests {
             "Webhook"
         );
         assert_eq!(
-            settings::AutomationNotificationPreset::Feishu.label(),
-            "飞书"
+            settings::AutomationNotificationPreset::App.label(),
+            "应用内通知"
         );
-        assert_eq!(settings::AutomationNotificationPreset::Off.label(), "关闭");
+        assert_eq!(
+            settings::AutomationNotificationPreset::Off.label(),
+            "不通知"
+        );
+    }
+
+    #[test]
+    fn interval_title_names_the_actual_interval() {
+        assert_eq!(interval_title(IntervalUnit::Hours, "1"), "每小时");
+        assert_eq!(interval_title(IntervalUnit::Hours, " 6 "), "每隔 6 小时");
+        assert_eq!(interval_title(IntervalUnit::Minutes, "15"), "每隔 15 分钟");
+        assert_eq!(interval_title(IntervalUnit::Hours, ""), "间隔");
+        assert_eq!(interval_title(IntervalUnit::Minutes, "  "), "间隔");
+    }
+
+    #[test]
+    fn automation_form_lists_every_missing_field() {
+        let agent = |prompt: Option<&str>| settings::AutomationAction::Agent {
+            agent_definition_id: "agent-1".into(),
+            prompt: prompt.map(str::to_string),
+        };
+        assert_eq!(
+            automation_missing_fields("", false, false, &agent(None), true),
+            vec!["名称", "触发器"]
+        );
+        assert_eq!(
+            automation_missing_fields("晨报", true, true, &agent(Some("  ")), true),
+            vec!["指令"]
+        );
+        assert!(
+            automation_missing_fields("Hook", true, false, &agent(None), true).is_empty(),
+            "webhook / 事件把收到的内容当指令，可以不写"
+        );
+        assert_eq!(
+            automation_missing_fields("晨报", true, true, &agent(Some("汇总")), false),
+            vec!["智能体"]
+        );
+        assert_eq!(
+            automation_missing_fields(
+                "巡检",
+                true,
+                true,
+                &settings::AutomationAction::shell("", Vec::new()),
+                false
+            ),
+            vec!["命令"]
+        );
     }
 
     fn parse_schedule(
@@ -319,11 +344,13 @@ mod agent_definition_ui_tests {
     use super::super::{
         AutomationRowStatus, agent_conversation_start_error, agent_display_name,
         agent_instructions_footer, agent_prompt_summary, agent_usage_summary,
-        automation_row_status, automation_row_status_label, format_next_run_cell,
-        format_relative_until, identity_name_idle_text, identity_name_should_finish_edit,
+        automation_row_status, automation_row_status_label, format_last_run_cell,
+        format_next_run_cell, format_relative_since, format_relative_until,
+        identity_name_idle_text, identity_name_should_finish_edit,
     };
     use crate::settings::{AgentDefinition, ConversationAgentKind};
     use gpui_component::input::InputEvent;
+    use smelt_core::automation::AutomationRunStatus;
 
     fn definition(name: &str, prompt: &str, engine_kind_id: &str) -> AgentDefinition {
         AgentDefinition {
@@ -435,7 +462,7 @@ mod agent_definition_ui_tests {
         );
         assert_eq!(
             automation_row_status_label(AutomationRowStatus::Active),
-            "已激活"
+            "已启用"
         );
         assert_eq!(
             automation_row_status_label(AutomationRowStatus::Paused),
@@ -456,6 +483,20 @@ mod agent_definition_ui_tests {
         );
         assert_eq!(format_next_run_cell(Some(100 + 3600), false, 100), "—");
         assert_eq!(format_next_run_cell(None, true, 100), "—");
+    }
+
+    #[test]
+    fn last_run_cell_reads_status_then_relative_time() {
+        assert_eq!(format_relative_since(100, 100), "刚刚");
+        assert_eq!(format_relative_since(100, 130), "刚刚");
+        assert_eq!(format_relative_since(100, 100 + 3 * 60), "3 分钟前");
+        assert_eq!(format_relative_since(100, 100 + 5 * 3600), "5 小时前");
+        assert_eq!(format_relative_since(100, 100 + 2 * 86400), "2 天前");
+        assert_eq!(format_last_run_cell(None, 100), "—");
+        assert_eq!(
+            format_last_run_cell(Some((AutomationRunStatus::Failed, 100)), 100 + 3600),
+            "失败 · 1 小时前"
+        );
     }
 
     #[test]

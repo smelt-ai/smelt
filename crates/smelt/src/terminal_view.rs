@@ -476,8 +476,8 @@ impl TerminalView {
             self.refresh_search_highlights();
             cx.notify();
         }
-        // 纯 OSC 标题 / BEL 没有终端网格 damage：标题由 daemon 状态
-        // 订阅合并刷新侧栏，提醒由 AttentionGlobal 投递，都不应重画画布。
+        // 纯 OSC 标题 / BEL 没有终端网格 damage，不重画画布。
+        // 会话名来自 daemon 的 provider 标题或 prompt 兜底，不来自这里的 OSC。
     }
 
     fn invalidate_bell_timer(&mut self) {
@@ -697,11 +697,6 @@ impl TerminalView {
 
     pub fn mark_read(&mut self, cx: &mut Context<Self>) {
         self.clear_attention(cx);
-    }
-
-    /// agent 报告的终端标题（含任务名 + 状态符号）；供侧栏 / 总览显示。
-    pub fn agent_title(&self) -> Option<String> {
-        self.terminal.current_title()
     }
 
     pub fn title(&self) -> &str {

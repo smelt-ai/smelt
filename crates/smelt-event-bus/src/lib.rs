@@ -628,11 +628,6 @@ impl EventHub {
         }
     }
 
-    pub fn with_max_hops(mut self, max_hops: u16) -> Self {
-        self.max_hops = max_hops;
-        self
-    }
-
     pub fn register_snapshot_provider(
         &self,
         kind: SnapshotKind,
@@ -1261,24 +1256,6 @@ impl EventHub {
 
     pub fn supports_durable(&self) -> bool {
         self.store.is_some() && self.writer.is_some()
-    }
-
-    pub fn command_result(
-        &self,
-        plugin_id: &PluginId,
-        command_id: &CommandId,
-    ) -> Result<Option<CommandResult>, EventBusError> {
-        self.store
-            .as_ref()
-            .ok_or_else(|| EventBusError::new("command dedupe requires an EventStore"))?
-            .get_command_result(plugin_id, command_id)
-    }
-
-    pub fn record_command_result(&self, result: &CommandResult) -> Result<bool, EventBusError> {
-        self.store
-            .as_ref()
-            .ok_or_else(|| EventBusError::new("command dedupe requires an EventStore"))?
-            .put_command_result(result)
     }
 
     pub fn metrics(&self) -> EventHubMetrics {

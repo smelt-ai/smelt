@@ -7,12 +7,14 @@
 //! 字段仍声明在 `main.rs` 的 `Workspace` 里。数据修改在 `workspace.rs`，
 //! 智能体页面在 `view.rs`，自动化页面在 `automation_view.rs`。
 
+use std::sync::Mutex;
+
 use chrono::{Local, TimeZone, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, Textarea, TextareaState};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Selectable as _,
@@ -29,6 +31,12 @@ pub(crate) struct AgentsSurface {
     pub(crate) selected_id: Option<String>,
     pub(crate) editor: Option<AgentEditor>,
     pub(crate) error: Option<String>,
+    /// 正在等二次确认删除的智能体。
+    pub(crate) pending_delete: Option<AgentDeleteTarget>,
+    /// 从侧栏「新对话」进来、还没有可对话的智能体。下一次新建走草稿，不是普通创建。
+    pub(crate) arm_conversation_on_create: bool,
+    /// 这次「新对话」新建的草稿。点「开始对话」才设默认；返回则删掉。
+    pub(crate) conversation_draft_id: Option<String>,
 }
 
 impl AgentsSurface {
@@ -37,8 +45,23 @@ impl AgentsSurface {
             selected_id,
             editor: None,
             error: None,
+            pending_delete: None,
+            arm_conversation_on_create: false,
+            conversation_draft_id: None,
         }
     }
+}
+
+pub(crate) struct AgentDeleteTarget {
+    id: String,
+    name: String,
+    conversations: usize,
+}
+
+pub(crate) struct AutomationDeleteTarget {
+    id: String,
+    name: String,
+    runs: usize,
 }
 
 /// 自动化目录根页的分段：任务表 / 全局 Run。
@@ -59,6 +82,8 @@ pub(crate) struct AutomationsSurface {
     pub(crate) template_filter: Option<automation_templates::AutomationTemplateCategory>,
     /// 编辑器里选中的那一次运行。`None` 表示右侧仍是任务表单。
     pub(crate) selected_run_id: Option<String>,
+    /// 正在等二次确认删除的自动化。
+    pub(crate) pending_delete: Option<AutomationDeleteTarget>,
 }
 
 impl Default for AutomationsSurface {
@@ -71,6 +96,7 @@ impl Default for AutomationsSurface {
             catalog_tab: AutomationCatalogTab::Tasks,
             template_filter: None,
             selected_run_id: None,
+            pending_delete: None,
         }
     }
 }
@@ -195,7 +221,6 @@ pub(crate) struct AutomationEditor {
     retained_events: Vec<settings::EventIngress>,
     entries: Vec<TriggerEntryEditor>,
     notification: settings::AutomationNotificationPreset,
-    feishu_chat: Entity<InputState>,
     draft_revision: u64,
     saving_revision: Option<u64>,
     /// 重新生成地址这类后台提交不让顶栏「运行一次」进入 loading 状态。
@@ -246,9 +271,63 @@ fn ensure_agent_conversation_cwd(agent_definition_id: &str) -> Option<String> {
     Some(dir.to_string_lossy().into_owned())
 }
 
-fn ensure_workbench_conversation_cwd() -> Option<String> {
-    let dir = smelt_core::agent_definition_store::ensure_workbench_conversation_workspace()?;
-    Some(dir.to_string_lossy().into_owned())
+/// 侧栏「新对话」的文案。有默认时带上名字，没有就只写动作。
+fn new_conversation_row_label(agent_name: Option<&str>) -> String {
+    match agent_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("新对话 · {name}"),
+        None => "新对话".to_string(),
+    }
+}
+
+struct DefaultConversationCache {
+    loaded: bool,
+    agent_id: Option<String>,
+}
+
+static DEFAULT_CONVERSATION_CACHE: Mutex<DefaultConversationCache> =
+    Mutex::new(DefaultConversationCache {
+        loaded: false,
+        agent_id: None,
+    });
+
+fn with_default_conversation_cache<T>(f: impl FnOnce(&mut DefaultConversationCache) -> T) -> T {
+    let mut guard = DEFAULT_CONVERSATION_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+/// 侧栏默认智能体。第一次读取才碰 SQLite，之后只看这份缓存。
+fn stored_default_conversation_agent() -> Option<String> {
+    with_default_conversation_cache(|cache| {
+        if !cache.loaded {
+            cache.agent_id = smelt_core::default_conversation::load_default_conversation_agent();
+            cache.loaded = true;
+        }
+        cache.agent_id.clone()
+    })
+}
+
+fn set_default_conversation_agent(agent_id: &str) {
+    if let Err(error) = smelt_core::default_conversation::save_default_conversation_agent(agent_id)
+    {
+        eprintln!("[default-conversation] 保存默认智能体失败: {error}");
+    }
+    let agent_id = agent_id.trim().to_string();
+    with_default_conversation_cache(|cache| {
+        cache.loaded = true;
+        cache.agent_id = Some(agent_id);
+    });
+}
+
+fn clear_default_conversation_agent() {
+    if let Err(error) = smelt_core::default_conversation::clear_default_conversation_agent() {
+        eprintln!("[default-conversation] 清除默认智能体失败: {error}");
+    }
+    with_default_conversation_cache(|cache| {
+        cache.loaded = true;
+        cache.agent_id = None;
+    });
 }
 
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。
@@ -258,130 +337,56 @@ fn conversation_icon_color(status: AgentStatus, phase: Option<f32>) -> gpui::Rgb
     Workspace::session_icon_color(status, phase)
 }
 
-/// 对话行的状态图标。语义与项目会话行同一套：三态上色，Running 进入时短暂
-/// 提亮一次，随后回落静态蓝——不让一个长任务永久持有动画 timer。
+/// 这段对话属于哪个智能体：只看创建时写下的绑定。
 ///
-/// 选中态不再单独染色：状态色本身就是这一行要传达的信息，被选中压过去就等于
-/// 「选中的那条永远看不出在不在跑」。选中与否已经由整行底色表达。
-fn conversation_status_icon(
-    session_id: &str,
-    status: AgentStatus,
-    animate_running: bool,
-    engine: Option<settings::ConversationAgentKind>,
-) -> AnyElement {
-    let color = move |phase: Option<f32>| conversation_icon_color(status, phase);
-    let icon = move || match engine {
-        Some(kind) => Icon::empty().path(kind.icon_asset()),
-        None => Icon::new(IconName::Inbox),
-    };
-    if animate_running && status == AgentStatus::Running {
-        return smelt_ui::motion::ambient_animation(
-            format!("product-conv-glow-{session_id}"),
-            crate::session_list::SESSION_GLOW_PERIOD,
-            true,
-            move |phase| icon().size(px(17.)).text_color(color(Some(phase))),
-        )
-        .into_any_element();
+/// 项目里选智能体开的也算。旧的工作台裸对话没有绑定，不算任何智能体。
+/// 自动化 Run 虽然可能带着同一个 id，但那不是对话。不从 cwd 反推——项目
+/// 路径说明不了是谁，space 子目录也不是另一个智能体。
+fn bound_agent_definition_id<'a>(
+    definition_id: Option<&'a str>,
+    automation_id: Option<&str>,
+) -> Option<&'a str> {
+    if automation_id.is_some() {
+        return None;
     }
-    icon()
-        .size(px(17.))
-        .text_color(color(None))
-        .into_any_element()
+    definition_id.map(str::trim).filter(|id| !id.is_empty())
 }
 
-const AGENT_CONV_HEADER_GROUP: &str = "agent-conv-header";
-const AGENT_SESSION_INDENT: f32 = 22.;
-const AGENT_GUIDE_LEFT: f32 = 18.;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentConversationInput {
-    session_ix: usize,
-    definition_id: Option<String>,
-    cwd: Option<String>,
+/// 侧栏「最近对话」：按最近活动排，新的在前。
+fn recent_conversation_order(updated_at: &[u64]) -> Vec<usize> {
+    let mut ixes: Vec<usize> = (0..updated_at.len()).collect();
+    ixes.sort_by(|left, right| {
+        updated_at[*right]
+            .cmp(&updated_at[*left])
+            .then(left.cmp(right))
+    });
+    ixes
 }
 
-impl AgentConversationInput {
-    fn new(session_ix: usize, definition_id: Option<&str>, cwd: Option<&str>) -> Self {
-        Self {
-            session_ix,
-            definition_id: definition_id.map(str::to_string),
-            cwd: cwd.map(str::to_string),
-        }
-    }
-
-    fn resolved_definition_id(&self) -> Option<String> {
-        self.definition_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                self.cwd.as_deref().and_then(|cwd| {
-                    smelt_core::agent_definition_store::agent_definition_id_for_space(
-                        std::path::Path::new(cwd),
-                    )
-                })
-            })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentConversationGroup {
-    agent_id: String,
-    agent_name: String,
-    session_ixes: Vec<usize>,
-}
-
-/// 侧栏「对话」按智能体分组：定义顺序优先，找不到定义的对话收进「其他」。
-fn group_agent_conversations(
-    agents: &[(String, String)],
-    conversations: &[AgentConversationInput],
-) -> Vec<AgentConversationGroup> {
-    let mut groups: Vec<AgentConversationGroup> = agents
+/// 行首头像：智能体取显示名第一个字；没绑智能体的工作台对话标 Pi。
+/// 绑了智能体的会话行首头像。没绑（工作台「新对话」、裸引擎）返回 `None`。
+pub(crate) fn bound_agent_mark(
+    definition_id: Option<&str>,
+    automation_id: Option<&str>,
+    agents: &[settings::AgentDefinition],
+) -> Option<String> {
+    let id = bound_agent_definition_id(definition_id, automation_id)?;
+    let name = agents
         .iter()
-        .map(|(id, name)| AgentConversationGroup {
-            agent_id: id.clone(),
-            agent_name: agent_display_name(name),
-            session_ixes: Vec::new(),
-        })
-        .collect();
-    let mut orphans = Vec::new();
-    for conversation in conversations {
-        match conversation.resolved_definition_id() {
-            Some(id) => {
-                if let Some(group) = groups.iter_mut().find(|group| group.agent_id == id) {
-                    group.session_ixes.push(conversation.session_ix);
-                } else {
-                    orphans.push(conversation.session_ix);
-                }
-            }
-            None => orphans.push(conversation.session_ix),
-        }
-    }
-    groups.retain(|group| !group.session_ixes.is_empty());
-    if !orphans.is_empty() {
-        groups.push(AgentConversationGroup {
-            agent_id: String::new(),
-            agent_name: "其他".into(),
-            session_ixes: orphans,
-        });
-    }
-    groups
+        .find(|agent| agent.id == id)
+        .map(|agent| agent_display_name(&agent.name));
+    Some(conversation_agent_mark(name.as_deref().or(Some(id))))
 }
 
-fn agent_conversation_group_status(
-    session_ixes: &[usize],
-    statuses: &[AgentStatus],
-) -> AgentStatus {
-    AgentStatus::highest(
-        session_ixes
-            .iter()
-            .filter_map(|&session_ix| statuses.get(session_ix).copied()),
-    )
+fn conversation_agent_mark(agent_name: Option<&str>) -> String {
+    match agent_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.chars().next().unwrap_or('智').to_string(),
+        None => "Pi".to_string(),
+    }
 }
 
-/// 分组标题已经表达智能体身份；对话行只展示用户命名或对话自己的自动标题。
-fn nested_agent_conversation_title(custom_title: Option<&str>, auto_title: Option<&str>) -> String {
+/// 对话行只展示用户命名或对话自己的自动标题。
+fn conversation_row_title(custom_title: Option<&str>, auto_title: Option<&str>) -> String {
     custom_title
         .map(str::trim)
         .filter(|title| !title.is_empty())
@@ -583,6 +588,44 @@ fn trigger_from_editor(
     }
     trigger.validate()?;
     Ok(trigger)
+}
+
+impl AutomationEditor {
+    fn action(&self, cx: &App) -> settings::AutomationAction {
+        match self.action_kind {
+            settings::AutomationActionKindId::Agent => {
+                let prompt = self.prompt.read(cx).value().trim().to_string();
+                settings::AutomationAction::Agent {
+                    agent_definition_id: self.agent_id.clone(),
+                    prompt: (!prompt.is_empty()).then_some(prompt),
+                }
+            }
+            settings::AutomationActionKindId::Shell => settings::AutomationAction::shell(
+                self.command.read(cx).value().trim().to_string(),
+                Vec::new(),
+            ),
+        }
+    }
+
+    fn missing_fields(&self, cx: &App) -> Vec<&'static str> {
+        let agent_exists = !self.agent_id.is_empty()
+            && cx
+                .global::<settings::AgentHostState>()
+                .agents
+                .iter()
+                .any(|agent| agent.id == self.agent_id);
+        let has_schedule = self
+            .entries
+            .iter()
+            .any(|entry| entry.trigger_kind != settings::AutomationTriggerKindId::Webhook);
+        automation_missing_fields(
+            &self.name.read(cx).value(),
+            trigger_from_editor(self, cx).is_ok(),
+            has_schedule,
+            &self.action(cx),
+            agent_exists,
+        )
+    }
 }
 
 fn schedule_from_values_for_rule(
@@ -932,7 +975,7 @@ fn render_trigger_entry(
                 )
                 .child(
                     compact_chip(format!("automation-remove-trigger-{index}"))
-                        .icon(IconName::Delete)
+                        .icon(crate::trash_icon())
                         .tooltip("删除触发器")
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |workspace, cx| {
@@ -981,16 +1024,19 @@ fn trigger_entry_title(entry: &TriggerEntryEditor, cx: &App) -> String {
 }
 
 fn interval_entry_title(entry: &TriggerEntryEditor, cx: &App) -> String {
-    match entry.schedule.interval_unit {
-        IntervalUnit::Hours => "每小时".to_string(),
-        IntervalUnit::Minutes => {
-            let value = entry.schedule.interval.read(cx).value();
-            if value.trim().is_empty() {
-                "间隔".to_string()
-            } else {
-                format!("每隔 {value} 分钟")
-            }
-        }
+    interval_title(
+        entry.schedule.interval_unit,
+        &entry.schedule.interval.read(cx).value(),
+    )
+}
+
+fn interval_title(unit: IntervalUnit, value: &str) -> String {
+    let value = value.trim();
+    match unit {
+        _ if value.is_empty() => "间隔".to_string(),
+        IntervalUnit::Hours if value == "1" => "每小时".to_string(),
+        IntervalUnit::Hours => format!("每隔 {value} 小时"),
+        IntervalUnit::Minutes => format!("每隔 {value} 分钟"),
     }
 }
 
@@ -1003,10 +1049,7 @@ fn trigger_entry_hint(entry: &TriggerEntryEditor) -> &'static str {
             ScheduleKind::Weekly => "每周在选定的一天",
             ScheduleKind::Interval => "按固定间隔执行",
         },
-        settings::AutomationTriggerKindId::Interval => match entry.schedule.interval_unit {
-            IntervalUnit::Hours => "按选定间隔每小时",
-            IntervalUnit::Minutes => "按固定间隔执行，可限制星期和时段",
-        },
+        settings::AutomationTriggerKindId::Interval => "按固定间隔执行，可限制星期和时段",
     }
 }
 
@@ -1042,33 +1085,56 @@ fn render_notification_field(
                 menu
             }),
     );
-    let mut field = div()
+    div()
         .flex()
         .flex_col()
         .gap_2()
         .child(automation_section_label("通知"))
-        .child(picker);
-    if selected.includes_feishu() {
-        field = field.child(
-            automation_form_row().child(
-                Input::new(&editor.feishu_chat)
-                    .appearance(false)
-                    .focus_bordered(false)
-                    .focus_ring(false)
-                    .w_full()
-                    .aria_label("飞书会话 ID"),
-            ),
-        );
+        .child(picker)
+        .into_any_element()
+}
+
+fn render_automation_access_note(is_agent: bool) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(automation_section_label("运行环境"))
+        .child(
+            automation_form_shell()
+                .px_3()
+                .py_2p5()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(crate::ui_theme::text_bright()))
+                        .child("无人值守 · 完全访问"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(automation_access_note(is_agent)),
+                ),
+        )
+        .into_any_element()
+}
+
+fn automation_access_note(is_agent: bool) -> &'static str {
+    if is_agent {
+        "运行时不会停下来等你批准，可以读写本机文件、执行命令。在智能体自己的空间里运行，能读到它在对话里攒下的文件和绑定的目录；你的项目不会自动带上，要处理的仓库请在指令里写明路径。"
+    } else {
+        "运行时不会停下来等你批准，命令以你的身份执行，可以读写本机文件。每次都在这条自动化自己的目录里执行。"
     }
-    field.into_any_element()
 }
 
 fn notification_preset_icon(preset: settings::AutomationNotificationPreset) -> IconName {
     match preset {
         settings::AutomationNotificationPreset::Off => IconName::EyeOff,
         settings::AutomationNotificationPreset::App => IconName::Bell,
-        settings::AutomationNotificationPreset::Feishu
-        | settings::AutomationNotificationPreset::AppAndFeishu => IconName::Inbox,
     }
 }
 
@@ -1201,7 +1267,7 @@ fn webhook_curl_example(url: &str) -> String {
 
 fn automation_prompt_hint(is_webhook: bool) -> &'static str {
     if is_webhook {
-        "支持 {{payload}} 和请求字段变量（如 {{text}}）；留空时直接发送请求内容。长期指令请在智能体设置中配置。"
+        "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令请在智能体设置中配置。"
     } else {
         "每次运行时发送给智能体。长期指令请在智能体设置中配置。"
     }
@@ -1401,7 +1467,7 @@ fn render_schedule_rule(
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
         compact_chip(format!("automation-remove-schedule-{index}"))
-            .icon(IconName::Delete)
+            .icon(crate::trash_icon())
             .tooltip("删除时间设置")
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |workspace, cx| {
@@ -1480,6 +1546,74 @@ fn format_next_run_cell(next_run_at: Option<i64>, enabled: bool, now: i64) -> St
         Some(ts) => format_relative_until(ts, now),
         None => "—".to_string(),
     }
+}
+
+fn format_relative_since(ts: i64, now: i64) -> String {
+    let delta = now - ts;
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    if delta < MINUTE {
+        "刚刚".to_string()
+    } else if delta < HOUR {
+        format!("{} 分钟前", delta / MINUTE)
+    } else if delta < DAY {
+        format!("{} 小时前", delta / HOUR)
+    } else {
+        format!("{} 天前", delta / DAY)
+    }
+}
+
+fn format_last_run_cell(
+    last: Option<(smelt_core::automation::AutomationRunStatus, i64)>,
+    now: i64,
+) -> String {
+    match last {
+        Some((status, at)) => format!(
+            "{} · {}",
+            run_status_label(status),
+            format_relative_since(at, now)
+        ),
+        None => "—".to_string(),
+    }
+}
+
+/// 表单还差哪些才能保存。定时触发不带外部内容，所以只有它要求智能体指令；
+/// webhook / 事件会把收到的内容当指令。
+fn automation_missing_fields(
+    name: &str,
+    trigger_ready: bool,
+    has_schedule: bool,
+    action: &settings::AutomationAction,
+    agent_exists: bool,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if name.trim().is_empty() {
+        missing.push("名称");
+    }
+    if !trigger_ready {
+        missing.push("触发器");
+    }
+    match action {
+        settings::AutomationAction::Agent { prompt, .. } => {
+            if !agent_exists {
+                missing.push("智能体");
+            }
+            if has_schedule
+                && prompt
+                    .as_deref()
+                    .is_none_or(|prompt| prompt.trim().is_empty())
+            {
+                missing.push("指令");
+            }
+        }
+        settings::AutomationAction::Shell { command, .. } => {
+            if command.trim().is_empty() {
+                missing.push("命令");
+            }
+        }
+    }
+    missing
 }
 
 fn run_source_label(source: smelt_core::automation::AutomationRunSource) -> &'static str {
@@ -1569,7 +1703,7 @@ fn automation_row_status_label(status: AutomationRowStatus) -> &'static str {
         AutomationRowStatus::Unavailable => "不可用",
         AutomationRowStatus::AgentMissing => "智能体已删除",
         AutomationRowStatus::Running => "运行中",
-        AutomationRowStatus::Active => "已激活",
+        AutomationRowStatus::Active => "已启用",
         AutomationRowStatus::Paused => "已暂停",
     }
 }
@@ -1581,6 +1715,61 @@ fn automation_enabled_toggle_item(enabled: bool) -> PopupMenuItem {
     } else {
         PopupMenuItem::new("启用").icon(IconName::CircleCheck)
     }
+}
+
+fn automation_nav_needs_attention(config: &settings::AgentHostState) -> bool {
+    config.automations.iter().any(|automation| {
+        automation.enabled
+            && config
+                .latest_automation_run(&automation.id)
+                .is_some_and(|run| {
+                    run.status == smelt_core::automation::AutomationRunStatus::Failed
+                })
+    })
+}
+
+fn agent_hub_list_row(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    meta: impl Into<SharedString>,
+    attention: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id.into())
+        .px_4()
+        .py_2p5()
+        .cursor_pointer()
+        .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .text_color(rgb(crate::ui_theme::text_bright()))
+                .truncate()
+                .child(title.into()),
+        )
+        .when(attention, |row| {
+            row.child(
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(crate::ui_theme::red())),
+            )
+        })
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child(meta.into()),
+        )
+        .on_click(on_click)
+        .into_any_element()
 }
 
 fn agent_usage_summary(conversations: usize, automations: usize) -> String {
@@ -1758,38 +1947,16 @@ fn render_engine_chip(label: String, kind: Option<settings::ConversationAgentKin
         .into_any_element()
 }
 
-/// 智能体页头的配置入口：直接开那扇只有模型和插件两页的独立窗口。
-///
-/// 不套一层「模型 / 插件」下拉：窗口左侧本来就列着这两页，多一层菜单只是让用户
-/// 多点一次，还得先猜自己要找的东西归在哪一页。
-fn render_agent_settings_entry(entity: Entity<Workspace>) -> AnyElement {
-    Button::new("agent-settings-entry")
-        .ghost()
-        .small()
-        .icon(IconName::Settings2)
-        .label("配置")
-        .tooltip("智能体的模型与插件")
-        .on_click(move |_, _, cx| {
-            entity.update(cx, |workspace, cx| {
-                workspace.open_scoped_settings_section(
-                    settings::SettingsScope::AgentSetup,
-                    settings::SettingsSection::PiModel,
-                    cx,
-                );
-            });
-        })
-        .into_any_element()
-}
-
 /// 页头前缘的返回。可见的只有符号，悬停提示是控件名。它只退一层，侧栏标题负责回根页。
 fn product_back_button(
     id: &'static str,
+    tooltip: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     Button::new(id)
         .ghost()
         .icon(IconName::ChevronLeft)
-        .tooltip("返回")
+        .tooltip(tooltip)
         .on_click(on_click)
 }
 
@@ -1813,9 +1980,9 @@ fn product_page_chrome(left_guard: Pixels) -> Div {
     )
 }
 
+/// 目录页头：和自动化顶栏同一条高度。左边页名加个数，不写副标题；右边是同尺寸的新建按钮。
 fn product_page_header(
     title: &'static str,
-    subtitle: &'static str,
     count: usize,
     count_unit: &'static str,
     action: AnyElement,
@@ -1823,36 +1990,25 @@ fn product_page_header(
 ) -> AnyElement {
     product_page_chrome(left_guard)
         .justify_between()
-        .gap_4()
+        .gap_3()
         .child(
             div()
+                .h(px(28.))
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .gap_2()
                 .child(
                     div()
-                        .flex()
-                        .items_baseline()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_semibold()
-                                .text_color(rgb(crate::ui_theme::text_bright()))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(crate::ui_theme::text_muted()))
-                                .child(format!("{count} {count_unit}")),
-                        ),
+                        .text_sm()
+                        .font_medium()
+                        .text_color(rgb(crate::ui_theme::text_bright()))
+                        .child(title),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child(subtitle),
+                        .child(format!("{count} {count_unit}")),
                 ),
         )
         .child(action)
@@ -1993,7 +2149,7 @@ fn render_agent_plugin_card(
                                 .text_sm()
                                 .font_medium()
                                 .text_color(rgb(crate::ui_theme::text_bright()))
-                                .child("能力插件"),
+                                .child("技能"),
                         )
                         .child(
                             div()
@@ -2190,7 +2346,7 @@ fn agent_context_row(
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
                 .xsmall()
-                .icon(IconName::Close)
+                .icon(crate::trash_icon())
                 .tooltip(if is_folder {
                     "解除这个目录的绑定"
                 } else {

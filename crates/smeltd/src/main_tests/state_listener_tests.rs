@@ -118,30 +118,52 @@ fn color_query_uses_terminal_theme_snapshot() {
     );
 }
 
+#[derive(Clone)]
+struct TitleCapture(Arc<Mutex<Vec<String>>>);
+
+impl EventListener for TitleCapture {
+    fn send_event(&self, event: Event) {
+        if let Event::Title(title) = event {
+            self.0.lock().unwrap().push(title);
+        }
+    }
+}
+
 #[test]
 fn osc_title_parser_preserves_the_complete_visible_payload() {
-    let state = Arc::new(Mutex::new(SessionState::default()));
-    let listener = StateListener::new(Arc::clone(&state), no_subscribers());
-    let mut term = new_daemon_term(24, 80, listener);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut term = new_daemon_term(24, 80, TitleCapture(Arc::clone(&captured)));
     let mut parser: Processor = Processor::new();
 
     parser.advance(
         &mut term,
         "\x1b]0;⠼ - Preparing read_file... - grok\x07".as_bytes(),
     );
-    assert_eq!(
-        state.lock().unwrap().title.as_deref(),
-        Some("⠼ - Preparing read_file... - grok")
-    );
-
     parser.advance(&mut term, "\x1b]2;✳ 审查权限门闩\x1b\\".as_bytes());
     assert_eq!(
-        state.lock().unwrap().title.as_deref(),
-        Some("✳ 审查权限门闩")
+        captured.lock().unwrap().as_slice(),
+        [
+            "⠼ - Preparing read_file... - grok".to_string(),
+            "✳ 审查权限门闩".to_string(),
+        ]
     );
+
+    let state = Arc::new(Mutex::new(SessionState::default()));
+    let listener = StateListener::new(Arc::clone(&state), no_subscribers());
+    let mut term = new_daemon_term(24, 80, listener);
+    let mut parser: Processor = Processor::new();
+    parser.advance(
+        &mut term,
+        "\x1b]0;⠼ - Preparing read_file... - grok\x07".as_bytes(),
+    );
+    parser.advance(&mut term, "\x1b]2;✳ 审查权限门闩\x1b\\".as_bytes());
+    let st = state.lock().unwrap();
+    assert_eq!(st.title, None, "OSC 原文不是会话名");
+    assert_eq!(st.revision, 0);
+    assert_eq!(st.updated_at, 0);
 }
 
-/// 标题（包括 spinner 和 “Thinking - …”）只更新展示元数据，不能影响回合状态。
+/// OSC 标题不进会话状态：不改 phase、活动时间、revision，也不写会话名。
 #[test]
 fn terminal_titles_never_change_phase_or_phase_since() {
     for phase in [
@@ -170,17 +192,17 @@ fn terminal_titles_never_change_phase_or_phase_since() {
         assert_eq!(st.phase, phase, "标题不该改变 {phase:?}");
         assert_eq!(st.phase_since, 1, "标题不该刷新 {phase:?} 的开始时间");
         assert_eq!(st.updated_at, 9, "标题帧不是会话活动");
-        assert_eq!(st.title.as_deref(), Some("⠋ doing work"));
+        assert_eq!(st.title, None, "OSC 不写入会话名");
+        assert_eq!(st.revision, 0);
     }
 }
 
 #[test]
-fn terminal_title_preserves_spinner_without_touching_activity_timestamp() {
+fn terminal_title_does_not_replace_the_session_name() {
     let state = Arc::new(Mutex::new(SessionState {
         cwd: Some("/Users/me/code/smelt".into()),
         launch: Some("codex --dangerously-bypass-approvals-and-sandbox".into()),
         title: Some("修复 Codex 标题".into()),
-        prompt_title: Some("修复 Codex 标题".into()),
         phase: Phase::Thinking,
         phase_since: 1,
         revision: 7,
@@ -193,9 +215,34 @@ fn terminal_title_preserves_spinner_without_touching_activity_timestamp() {
     listener.send_event(Event::Title("⠙ smelt".to_string()));
 
     let st = state.lock().unwrap();
-    assert_eq!(st.title.as_deref(), Some("⠙ smelt"));
-    assert_ne!(st.revision, 7, "新 OSC 标题仍应发布给展示层");
+    assert_eq!(st.title.as_deref(), Some("修复 Codex 标题"));
+    assert_eq!(st.revision, 7, "OSC 不发布新会话名");
     assert_eq!(st.updated_at, 9, "OSC 标题帧不应刷新会话活动时间");
+}
+
+#[test]
+fn terminal_title_does_not_rename_any_provider() {
+    for provider in ["grok", "codex", "claude", "copilot", "opencode"] {
+        let state = Arc::new(Mutex::new(SessionState {
+            provider: Some(provider.into()),
+            title: Some("UAT 问题修复".into()),
+            revision: 3,
+            updated_at: 9,
+            ..Default::default()
+        }));
+        let listener = StateListener::new(Arc::clone(&state), no_subscribers());
+        listener.send_event(Event::Title(
+            "Action Required - 等你批准 - grok".to_string(),
+        ));
+        listener.send_event(Event::Title(
+            "⠼ - Thinking - CPXM-1479 DVP UAT 前端修复并撤回后端 - grok".to_string(),
+        ));
+
+        let st = state.lock().unwrap();
+        assert_eq!(st.title.as_deref(), Some("UAT 问题修复"));
+        assert_eq!(st.revision, 3, "{provider} 的终端标题不是会话名");
+        assert_eq!(st.updated_at, 9);
+    }
 }
 
 /// Bell 只更新时间戳，不改 phase——单独响铃太不可靠，只能当辅助信号。
@@ -223,14 +270,15 @@ fn send_event_broadcasts_to_subscribers() {
         ..Default::default()
     }));
     let listener = StateListener::new(state, subscribers);
-    listener.send_event(Event::Title("⠋ working".to_string()));
+    listener.send_event(Event::Bell);
 
     let event = next_session_event(&events);
     let state: SessionStateChanged =
         serde_json::from_value(event.envelope.payload.clone()).unwrap();
     assert_eq!(state.session_id, "t");
     assert_eq!(state.phase, smelt_plugin_api::CoreSessionPhase::Idle);
-    assert_eq!(state.title.as_deref(), Some("⠋ working"));
+    assert_eq!(state.title, None);
+    assert!(state.updated_at_unix_seconds > 0);
 }
 
 #[test]
@@ -263,7 +311,7 @@ fn osc_title_broadcast_is_not_persisted_in_identity_directory() {
 
     assert!(
         directory_snapshot.is_empty(),
-        "OSC 标题是瞬时展示状态，不应进入崩溃恢复目录"
+        "OSC 标题不进会话状态，也不进崩溃恢复目录"
     );
 }
 

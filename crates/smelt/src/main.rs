@@ -18,7 +18,7 @@ pub(crate) use smelt_core::sqlite_state;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
 
-mod agents;
+pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
 mod dock;
@@ -459,8 +459,7 @@ impl StageCover {
 
 /// 守护状态更新很频繁（agent 活跃时每步都推 phase/标题变化）。
 /// 这里合并后只 notify 当前 Workspace，让侧栏/状态点重算；不用
-/// `refresh_windows()` 把独立的 TerminalView 画布也一起标脏。纯 OSC 标题帧因此
-/// 不再触发终端网格布局和文本重塑。
+/// `refresh_windows()` 把独立的 TerminalView 画布也一起标脏。
 static STATE_REFRESH_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 fn apply_automation_projection(
@@ -1462,16 +1461,17 @@ enum RenameTarget {
     },
 }
 
-/// 单个终端 pane 自动推导的标题：优先 daemon/OSC 任务名，其次快捷启动显示名，
-/// 再回退建终端时的 cwd 名。不看用户改的名字——`Session::title` 靠它拿活动 pane
-/// 的「客观」标题。
+/// 单个终端 pane 自动推导的标题。
+///
+/// 会话名只来自守护已经发布的那份（provider 标题或首条 prompt 兜底）。
+/// 终端标题栏的 OSC 对所有 provider 都不是会话名；没有守护状态时回退到
+/// 启动项或目录名。不看用户改的名字。
 fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
     let t = view.read(cx);
-    let daemon_title = daemon_state_for(view, cx).and_then(|state| state.title);
-    let agent_title = daemon_title.or_else(|| t.agent_title());
+    let session_title = daemon_state_for(view, cx).and_then(|state| state.title);
     smelt_core::session_title::display_title(
         None,
-        agent_title.as_deref(),
+        session_title.as_deref(),
         t.launch_label(),
         Some(t.title()),
     )
@@ -3773,7 +3773,10 @@ impl Render for Workspace {
                                                     cx,
                                                 )
                                             }))
-                                            .child(view.clone())
+                                            .child(
+                                                view.clone()
+                                                    .cached(StyleRefinement::default().size_full()),
+                                            )
                                             .into_any_element()
                                     }
                                 },
@@ -4522,6 +4525,12 @@ const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ("dsh", include_bytes!("../assets/icons/agent-dsh.svg")),
 ];
 
+/// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
+/// 删除/移除统一用这枚 Lucide trash-2。
+pub(crate) fn trash_icon() -> Icon {
+    Icon::empty().path("smelt-icons/trash.svg")
+}
+
 /// `smelt-icons/agent-<id>.svg` → 图标字节；不是 agent 图标路径返回 None。
 fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
     let id = path
@@ -4561,6 +4570,11 @@ impl gpui::AssetSource for SmeltAssets {
         if path == "smelt-icons/square-pen.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(
                 include_bytes!("../assets/icons/square-pen.svg").as_slice(),
+            )));
+        }
+        if path == "smelt-icons/trash.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(
+                include_bytes!("../assets/icons/trash.svg").as_slice(),
             )));
         }
         // panel-right-filled / panel-left-filled：bundled 的 panel-right /

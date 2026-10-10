@@ -172,7 +172,7 @@ impl AcpView {
                 ui_theme::yellow()
             } else {
                 usage_pct
-                    .map(usage_meter_color)
+                    .map(usage_ring_color)
                     .unwrap_or(ui_theme::text_faint())
             };
             let extra_configs: Vec<_> = config_options
@@ -373,10 +373,8 @@ impl AcpView {
                     .into_any_element()
             };
             let skills_control = (self.agent == ConversationAgentKind::Pi).then(|| {
-                let skills = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-                    &self.launch,
-                    self.cwd.as_deref().map(std::path::Path::new),
-                );
+                // 缓存在 `ensure_loaded_skills`；这里再调 `loaded_skills_for_launch` 会把扫盘盘回每帧。
+                let skills = self.loaded_skills().to_vec();
                 let count = skills.len();
                 Button::new("acp-skills-pill")
                     .ghost()

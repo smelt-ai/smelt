@@ -149,6 +149,8 @@ pub(crate) struct AcpSession {
     /// 自动化只关心相位、投递账本和闸门。流式文本不进这组，避免每来一个字就整段重算。
     pub(crate) automation_watch: Mutex<Option<AutomationWatch>>,
     pub(crate) pending_prompts: Mutex<VecDeque<QueuedAcpPrompt>>,
+    /// 一次「立即发送」还没落地。文本是稳定键；附图在认领时抄下，因为 Pi 的 clear_queue 还原不带图。
+    pub(crate) immediate_delivery: Mutex<Option<ImmediateDelivery>>,
     /// 已经写给 Pi、还没被收下的那条。收下之前不回显；拒绝后回到队列，不记回合失败。
     pub(crate) unaccepted_prompt: Mutex<Option<QueuedAcpPrompt>>,
     /// 界面上的「思考中」只是为了接住还在跑的 Pi，并不是一条已被收下的回合。
@@ -203,7 +205,17 @@ pub(crate) enum AcpPromptOrigin {
     User,
 }
 
+/// 原生排队「立即发送」的单槽。clear_queue 还回这一条才发；没还回来就不能再发。
 #[derive(Clone)]
+pub(crate) struct ImmediateDelivery {
+    text: String,
+    images: Vec<smelt_core::acp_conn::PromptImage>,
+    /// 这次 clear 的还原还没到。到之前不能发，否则队列里那份会再被带走。
+    awaiting_clear: bool,
+    /// 还原里确实有这一条，provider 空闲后发一次。
+    send: bool,
+}
+
 pub(crate) struct QueuedAcpPrompt {
     pub(crate) text: String,
     pub(crate) images: Vec<smelt_core::acp_conn::PromptImage>,
@@ -242,9 +254,6 @@ pub(crate) struct AcpOpenRequest {
     /// 分叉副本的切点（与 `fork_id` 搭配）：整拷打开后、重放前切到该用户消息
     /// 之前。见 `smelt_core::acp_conn::AcpForkCut`。
     pub(crate) fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
-    /// 旧客户端用来限制首帧历史长度。窗口现在按页另取历史，这个字段保留给协议，不再裁首帧。
-    #[allow(dead_code)]
-    pub(crate) tail_limit: Option<usize>,
     /// `None` 表示客户端未指定。已有会话仅在 daemon 自己仍未知时采用该值。
     pub(crate) conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
     /// 与 conversation binding 正交的产品级智能体/controller 实例绑定。
@@ -290,9 +299,7 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
             .get("fork_cut")
             .filter(|value| !value.is_null())
             .and_then(|value| serde_json::from_value(value.clone()).ok()),
-        tail_limit: v["tail_limit"]
-            .as_u64()
-            .map(|value| (value as usize).clamp(1, 500)),
+        // 开会话不读 tail_limit。旧客户端仍会发；历史分页在另一处按页取。
         conversation_binding,
         agent_session,
         pending_agent_preset: v["pending_agent_preset"]
@@ -1195,6 +1202,8 @@ pub(crate) fn settle_acp_turn_locked(
         note_automation_watch(sess);
     }
     if gate_was_held || turn_ended || ready || provider_idle {
+        // 用户点的是这一条，要比停在旁边的普通 prompt 先走。
+        try_flush_immediate_delivery(sess, subscribers);
         flush_pending_acp_prompt_locked(sess, subscribers);
     }
 }
@@ -1275,7 +1284,7 @@ pub(crate) fn start_acp_event_drain(
                 let mut prompt_refused = false;
                 let mut applied = false;
                 let mut stop = false;
-                for ev in batch {
+                for mut ev in batch {
                     if sess.connection_generation.load(Ordering::SeqCst) != generation {
                         // 这条连接已被换掉，剩下的事件不能再改新连接的状态。但被丢掉的
                         // 若是 Ready，会话就会一直停在 Connecting——必须留痕，否则现场
@@ -1355,6 +1364,12 @@ pub(crate) fn start_acp_event_drain(
                             .unwrap()
                             .mark_restored(history_id.as_deref());
                     }
+                    if let smelt_core::acp_conn::ConversationEvent::ComposerRestore {
+                        texts, ..
+                    } = &mut ev
+                    {
+                        note_immediate_queue_restore(sess, texts);
+                    }
                     let (outcome, owner_ids) = {
                         let mut st = sess.reduced.lock().unwrap();
                         let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
@@ -1404,6 +1419,8 @@ pub(crate) fn start_acp_event_drain(
                     update_acp_daemon_state(sess, &subscribers);
                     // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                     settle_acp_turn_locked(sess, turn_ended, ready, provider_idle, &subscribers);
+                    // 闸门本来就开着时 settle 不进 flush 分支。还原刚落地的立即发送仍要发出去。
+                    try_flush_immediate_delivery(sess, &subscribers);
                 }
                 if stop {
                     break;
@@ -1864,6 +1881,7 @@ pub(crate) fn make_acp_session(
         prompt_in_flight: AtomicBool::new(false),
         automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),
@@ -1882,7 +1900,6 @@ pub(crate) fn make_acp_session(
             agent_mcp: false,
             agent_token: uuid::Uuid::new_v4().simple().to_string(),
             title: None,
-            prompt_title: None,
             phase: Phase::Idle,
             phase_since: 0,
             pending_question: None,
@@ -2263,6 +2280,134 @@ fn send_acp_compact(sess: &AcpSession) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn request_acp_cancel(sess: &AcpSession, subscribers: &EventHubHandle) -> Result<(), &'static str> {
+    let result = {
+        let handle = sess.handle.lock().unwrap();
+        let Some(h) = handle.as_ref() else {
+            return Err("ACP session is not running");
+        };
+        h.cmd_tx
+            .try_send(smelt_core::acp_conn::ConversationCommand::Cancel)
+            .map_err(|_| "ACP command channel is busy or closed")
+    };
+    if result.is_ok() {
+        smelt_core::acp_session::note_cancel_requested(&mut sess.reduced.lock().unwrap());
+        push_acp_snapshot(sess, false);
+        update_acp_daemon_state(sess, subscribers);
+    }
+    result
+}
+
+/// 原生排队「立即发送」。认领这一条，停掉当前回答或只清队列，等 clear_queue 把它还回来之后只发一次。
+/// 同一文本再来一次是同一个动作。调用方必须能拿到 `turn_completion`；这里自己拿，避免和还原处理交错。
+fn deliver_queued_now(
+    sess: &AcpSession,
+    text: String,
+    subscribers: &EventHubHandle,
+) -> Result<(), &'static str> {
+    let _turn = sess.turn_completion.lock().unwrap();
+    if sess.handle.lock().unwrap().is_none() {
+        return Err("ACP session is not running");
+    }
+    {
+        let slot = sess.immediate_delivery.lock().unwrap();
+        if let Some(existing) = slot.as_ref() {
+            return if existing.text == text {
+                Ok(())
+            } else {
+                Err("another immediate send is in progress")
+            };
+        }
+    }
+    let (images, stop_turn) = {
+        let state = sess.reduced.lock().unwrap();
+        if !state.supports_native_queue {
+            return Err("agent does not support native queue");
+        }
+        if matches!(
+            state.phase,
+            smelt_core::daemon_state::DaemonPhase::Connecting
+                | smelt_core::daemon_state::DaemonPhase::Dead
+        ) {
+            return Err("ACP session is not running");
+        }
+        let Some((images, _)) = smelt_core::acp_session::queued_item_images(&state, &text) else {
+            return Err("queued item is gone");
+        };
+        // 界面已经空闲就只清队列。还在跑（含取消还没落成 Idle）才停当前回答。
+        let stop_turn = !matches!(state.phase, smelt_core::daemon_state::DaemonPhase::Idle);
+        (images, stop_turn)
+    };
+    *sess.immediate_delivery.lock().unwrap() = Some(ImmediateDelivery {
+        text,
+        images,
+        awaiting_clear: true,
+        send: false,
+    });
+    let result = if stop_turn {
+        request_acp_cancel(sess, subscribers)
+    } else {
+        send_acp_clear_queue(sess)
+    };
+    if result.is_err() {
+        *sess.immediate_delivery.lock().unwrap() = None;
+    }
+    result
+}
+
+/// clear_queue 还回来的原文里拿掉已经认领的那一条。没还回来就丢掉这次发送，不能再补一次。
+pub(crate) fn note_immediate_queue_restore(sess: &AcpSession, texts: &mut Vec<String>) {
+    let mut slot = sess.immediate_delivery.lock().unwrap();
+    let Some(delivery) = slot.as_mut() else {
+        return;
+    };
+    if !delivery.awaiting_clear {
+        return;
+    }
+    delivery.awaiting_clear = false;
+    delivery.send = smelt_core::acp_session::take_claimed_queue_text(texts, &delivery.text);
+    if !delivery.send {
+        *slot = None;
+    }
+}
+
+/// 闸门开着、界面空闲、还原已经证明这一条还在队列里，才发一次。再调用不会再发。
+pub(crate) fn try_flush_immediate_delivery(sess: &AcpSession, subscribers: &EventHubHandle) {
+    let idle = matches!(
+        sess.reduced.lock().unwrap().phase,
+        smelt_core::daemon_state::DaemonPhase::Idle
+    );
+    if !idle || sess.unaccepted_prompt.lock().unwrap().is_some() {
+        return;
+    }
+    if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let delivery = {
+        let mut slot = sess.immediate_delivery.lock().unwrap();
+        let ready = slot
+            .as_ref()
+            .is_some_and(|delivery| delivery.send && !delivery.awaiting_clear);
+        if !ready {
+            sess.prompt_in_flight.store(false, Ordering::SeqCst);
+            return;
+        }
+        slot.take().expect("ready immediate delivery")
+    };
+    if send_acp_prompt_reserved(
+        sess,
+        delivery.text.clone(),
+        delivery.images.clone(),
+        None,
+        AcpPromptOrigin::User,
+        subscribers,
+    )
+    .is_err()
+    {
+        *sess.immediate_delivery.lock().unwrap() = Some(delivery);
+    }
+}
+
 fn send_acp_clear_queue(sess: &AcpSession) -> Result<(), &'static str> {
     let handle = sess.handle.lock().unwrap().as_ref().map(|h| {
         (
@@ -2507,20 +2652,24 @@ fn apply_acp_user_action_inner(
                 }
             }
             if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
-                // 回合正在跑。驱动支持中途插入（Pi 的 steer）就直接送进当前
-                // 回合，不占闸门；不支持的才排到回合结束后再发。
-                match send_acp_mid_turn_input(sess, text.clone(), images.clone(), subscribers) {
-                    Ok(true) => return Ok(()),
-                    Ok(false) => {}
-                    Err(error) => {
-                        if let Some(delivery_id) = delivery_id.as_deref() {
-                            sess.reduced
-                                .lock()
-                                .unwrap()
-                                .accepted_delivery_ids
-                                .remove(delivery_id);
+                // 只有回合还在跑才 steer。取消已经把界面收成 Idle、闸门却还握着等 Pi 空闲时，
+                // 再插进当前回合会把「立即发送」的消息退回队列；再点一次就会连发两遍。
+                let steer =
+                    smelt_core::acp_session::accepts_mid_turn_steer(&sess.reduced.lock().unwrap());
+                if steer {
+                    match send_acp_mid_turn_input(sess, text.clone(), images.clone(), subscribers) {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => {}
+                        Err(error) => {
+                            if let Some(delivery_id) = delivery_id.as_deref() {
+                                sess.reduced
+                                    .lock()
+                                    .unwrap()
+                                    .accepted_delivery_ids
+                                    .remove(delivery_id);
+                            }
+                            return Err(error);
                         }
-                        return Err(error);
                     }
                 }
                 sess.pending_prompts
@@ -2577,24 +2726,9 @@ fn apply_acp_user_action_inner(
             Ok(())
         }
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
+        AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
         AcpUserAction::RewindToMessage { entry_index } => send_acp_rewind(sess, entry_index),
-        AcpUserAction::Cancel => {
-            let result = {
-                let handle = sess.handle.lock().unwrap();
-                let Some(h) = handle.as_ref() else {
-                    return Err("ACP session is not running");
-                };
-                h.cmd_tx
-                    .try_send(ConversationCommand::Cancel)
-                    .map_err(|_| "ACP command channel is busy or closed")
-            };
-            if result.is_ok() {
-                smelt_core::acp_session::note_cancel_requested(&mut sess.reduced.lock().unwrap());
-                push_acp_snapshot(sess, false);
-                update_acp_daemon_state(sess, subscribers);
-            }
-            result
-        }
+        AcpUserAction::Cancel => request_acp_cancel(sess, subscribers),
         AcpUserAction::SetConfigOption {
             config_id,
             value_id,
@@ -3050,6 +3184,7 @@ pub(crate) fn handle_acp_action(
                     if matches!(
                         &action,
                         smelt_core::acp_session::AcpUserAction::Cancel
+                            | smelt_core::acp_session::AcpUserAction::DeliverQueuedNow { .. }
                             | smelt_core::acp_session::AcpUserAction::Compact
                             | smelt_core::acp_session::AcpUserAction::ClearQueue
                             | smelt_core::acp_session::AcpUserAction::RewindToMessage { .. }

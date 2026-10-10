@@ -1620,6 +1620,239 @@ fn prompt_submitted_while_turn_active_is_steered_when_driver_supports_it() {
     );
 }
 
+#[test]
+fn prompt_after_cancel_waits_for_provider_idle_instead_of_reentering_the_queue() {
+    // 立即发送会先 cancel。Pi 立刻把界面收成 Idle，但闸门要等 provider 空闲才放开。
+    // 这条替换 prompt 若再 steer，会回到「当前回合」；再点一次就会连发两遍。
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    reduced.turn_outcome = Some(smelt_core::acp_session::AcpTurnOutcome::Cancelled);
+    reduced.queued_steering.push("但是我想字数一致".into());
+    let (slot, _) = acp_sessions.reserve_with("acp-immediate-after-cancel", || {
+        make_acp_session_value("acp-immediate-after-cancel", reduced)
+    });
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *slot.value.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: true,
+        supports_compaction: false,
+        supports_native_queue: true,
+        supports_rewind: false,
+    });
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: "但是我想字数一致".to_string(),
+            images: Vec::new(),
+            delivery_id: None,
+        },
+        &subscribers,
+    )
+    .unwrap();
+
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "取消后的替换 prompt 不能再 steer 回当前回合"
+    );
+    assert_eq!(
+        slot.value.pending_prompts.lock().unwrap().len(),
+        1,
+        "要停在 daemon 队列，等 provider 空闲再发一次"
+    );
+    assert_eq!(
+        slot.value.reduced.lock().unwrap().queued_steering,
+        ["但是我想字数一致".to_string()]
+    );
+
+    let _turn_completion = slot.value.turn_completion.lock().unwrap();
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "但是我想字数一致");
+        }
+        _ => panic!("expected a single prompt"),
+    }
+    assert!(cmd_rx.try_recv().is_err(), "只能发一次");
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    reduced.supports_native_queue = true;
+    reduced.queued_steering = vec!["但是我想字数一致".into(), "别的".into()];
+    reduced.queued_steering_images = vec![
+        vec![smelt_core::acp_chat::AcpImage {
+            mime: "image/png".into(),
+            data_b64: "aGk=".into(),
+        }],
+        Vec::new(),
+    ];
+    let (slot, _) = acp_sessions.reserve_with("acp-deliver-now", || {
+        let session = make_acp_session_value("acp-deliver-now", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+    let deliver = |text: &str| {
+        apply_acp_user_action(
+            &slot.value,
+            smelt_core::acp_session::AcpUserAction::DeliverQueuedNow {
+                text: text.to_string(),
+            },
+            &subscribers,
+        )
+    };
+
+    deliver("但是我想字数一致").unwrap();
+    assert!(
+        matches!(
+            cmd_rx.try_recv(),
+            Ok(smelt_core::acp_conn::ConversationCommand::Cancel)
+        ),
+        "运行中的立即发送只停当前回答，不能把这条再 steer 回去"
+    );
+    assert!(cmd_rx.try_recv().is_err());
+    deliver("但是我想字数一致").unwrap();
+    assert!(cmd_rx.try_recv().is_err(), "再点一次不能再取消或再发");
+    assert!(deliver("别的").is_err(), "另一条要等这一条落地");
+
+    let _turn = slot.value.turn_completion.lock().unwrap();
+    try_flush_immediate_delivery(&slot.value, &subscribers);
+    assert!(cmd_rx.try_recv().is_err(), "还原没到不能发");
+
+    let mut texts = vec!["但是我想字数一致".to_string(), "别的".to_string()];
+    note_immediate_queue_restore(&slot.value, &mut texts);
+    assert_eq!(texts, vec!["别的".to_string()]);
+    smelt_core::acp_session::apply_event(
+        &mut slot.value.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::ComposerRestore {
+            revision: 1,
+            texts,
+            images: Vec::new(),
+        },
+    );
+    slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
+    try_flush_immediate_delivery(&slot.value, &subscribers);
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "provider 还没空闲，闸门不能放行"
+    );
+
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    match cmd_rx.try_recv() {
+        Ok(smelt_core::acp_conn::ConversationCommand::Prompt { text, images }) => {
+            assert_eq!(text, "但是我想字数一致");
+            assert_eq!(images.len(), 1);
+        }
+        Ok(_) => panic!("expected one prompt, got another command"),
+        Err(_) => panic!("expected one prompt, channel was empty"),
+    }
+    assert!(cmd_rx.try_recv().is_err(), "只能发一次");
+    assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
+    assert_eq!(
+        slot.value.reduced.lock().unwrap().composer_restore_texts,
+        vec!["别的".to_string()]
+    );
+}
+
+#[test]
+fn deliver_queued_now_does_not_resend_when_the_provider_already_took_the_item() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.supports_native_queue = true;
+    reduced.queued_steering = vec!["但是我想字数一致".into()];
+    let (slot, _) = acp_sessions.reserve_with("acp-deliver-consumed", || {
+        let session = make_acp_session_value("acp-deliver-consumed", reduced);
+        *session.launch_spec.lock().unwrap() = Some(pi_launch());
+        session
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
+    let subscribers = new_event_hub();
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::DeliverQueuedNow {
+            text: "但是我想字数一致".into(),
+        },
+        &subscribers,
+    )
+    .unwrap();
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(smelt_core::acp_conn::ConversationCommand::Cancel)
+    ));
+
+    let mut texts = vec!["别的".to_string()];
+    note_immediate_queue_restore(&slot.value, &mut texts);
+    assert_eq!(texts, vec!["别的".to_string()]);
+    slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
+    let _turn = slot.value.turn_completion.lock().unwrap();
+    settle_acp_turn_locked(&slot.value, false, false, true, &subscribers);
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "provider 已经吃掉这一条时不能再发一次"
+    );
+}
+
+#[test]
+fn deliver_queued_now_while_idle_waits_for_the_queue_clear_before_sending() {
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    reduced.supports_native_queue = true;
+    reduced.queued_follow_up = vec!["总结".into()];
+    let (slot, _) = acp_sessions.reserve_with("acp-deliver-idle", || {
+        make_acp_session_value("acp-deliver-idle", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    let subscribers = new_event_hub();
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::DeliverQueuedNow {
+            text: "总结".into(),
+        },
+        &subscribers,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            cmd_rx.try_recv(),
+            Ok(smelt_core::acp_conn::ConversationCommand::ClearQueue)
+        ),
+        "空闲时只清队列，不取消一个已经结束的回合"
+    );
+
+    try_flush_immediate_delivery(&slot.value, &subscribers);
+    assert!(cmd_rx.try_recv().is_err(), "清队列的回执没到不能发");
+    assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
+
+    let mut texts = vec!["总结".to_string()];
+    note_immediate_queue_restore(&slot.value, &mut texts);
+    assert!(texts.is_empty());
+    try_flush_immediate_delivery(&slot.value, &subscribers);
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(smelt_core::acp_conn::ConversationCommand::Prompt { text, .. }) if text == "总结"
+    ));
+    assert!(cmd_rx.try_recv().is_err(), "只能发一次");
+}
+
 fn pi_launch() -> smelt_core::agent_kind::ConversationLaunchSpec {
     smelt_core::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
 }

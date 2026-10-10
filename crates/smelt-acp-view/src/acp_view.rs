@@ -13,8 +13,9 @@ use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment,
     ListHorizontalSizingBehavior, ListOffset, ListState, ParentElement, PathBuilder, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowHandle, WindowOptions, canvas, div, list as virtual_list, point, px, size, uniform_list,
+    ScrollHandle, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowHandle, WindowOptions, canvas, div, list as virtual_list, point, px, size,
+    uniform_list,
 };
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -41,7 +42,7 @@ use smelt_core::acp_session::{
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_core::daemon_state::DaemonPhase;
-use smelt_ui::daemon_states_global::{AttentionGlobal, AttentionKind};
+use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
     ambient_animation, ambient_application_active, ambient_motion_enabled, ambient_spinner,
 };
@@ -353,7 +354,14 @@ fn usage_warn_color(pct: u32) -> Option<u32> {
     }
 }
 
-/// 用量环的颜色。没到警告线就是弱灰，不拿强调蓝当装饰。
+/// 用量环已用弧。平时用蓝，和跑动态同一套；75% 黄、90% 红。
+/// 轨道仍是弱灰，不把整圈染成强调色。
+fn usage_ring_color(pct: u32) -> u32 {
+    usage_warn_color(pct).unwrap_or(ui_theme::blue())
+}
+
+/// 没有分桶时，弹层里整条对话占用的颜色。环上的蓝不要再用到这里，
+/// 否则和 Subagent 那一桶撞色。
 fn usage_meter_color(pct: u32) -> u32 {
     usage_warn_color(pct).unwrap_or(ui_theme::text_faint())
 }
@@ -486,81 +494,30 @@ fn native_queue_item_kind_label(is_follow_up: bool) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NativeImmediateSendPlan {
-    selected: String,
-    leftovers: Vec<String>,
-}
-
-/// 原生排队条点「立即发送」：选中的那条改成新 prompt，其余还回输入框。
-fn plan_native_immediate_send(
-    steering: &[String],
-    follow_up: &[String],
-    index: usize,
-) -> Option<NativeImmediateSendPlan> {
-    let mut items: Vec<String> = steering.iter().chain(follow_up).cloned().collect();
-    if index >= items.len() {
-        return None;
-    }
-    let selected = items.remove(index);
-    Some(NativeImmediateSendPlan {
-        selected,
-        leftovers: items,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct ComposerRestoreConsume {
     last_revision: u64,
-    skip_next: bool,
     restore_texts: Option<Vec<String>>,
     restore_images: Option<Vec<AcpImage>>,
-    discarded_revision: Option<u64>,
 }
 
-/// cancel 会把整队还回输入框。立即发送已经把选中条改成新 prompt，这次还原必须丢掉。
+/// 只收下比本地水位新的还原。认领过的那一条已经在 daemon 从原文里拿掉，这里不再猜该丢哪条。
 fn consume_composer_restore(
     last_revision: u64,
     incoming_revision: u64,
     incoming_texts: Vec<String>,
     incoming_images: Vec<AcpImage>,
-    skip_next: bool,
 ) -> ComposerRestoreConsume {
     if incoming_revision <= last_revision {
         return ComposerRestoreConsume {
             last_revision,
-            skip_next,
             restore_texts: None,
             restore_images: None,
-            discarded_revision: None,
-        };
-    }
-    if skip_next {
-        return ComposerRestoreConsume {
-            last_revision: incoming_revision,
-            skip_next: false,
-            restore_texts: None,
-            restore_images: None,
-            discarded_revision: Some(incoming_revision),
         };
     }
     ComposerRestoreConsume {
         last_revision: incoming_revision,
-        skip_next: false,
         restore_texts: (!incoming_texts.is_empty()).then_some(incoming_texts),
         restore_images: (!incoming_images.is_empty()).then_some(incoming_images),
-        discarded_revision: None,
-    }
-}
-
-fn native_queue_from_snapshot(
-    skip_pending_immediate: bool,
-    steering: Vec<String>,
-    follow_up: Vec<String>,
-) -> (Vec<String>, Vec<String>) {
-    if skip_pending_immediate {
-        (Vec::new(), Vec::new())
-    } else {
-        (steering, follow_up)
     }
 }
 
@@ -747,15 +704,6 @@ fn can_load_older_history(history_loading: bool, loaded_offset: usize) -> bool {
     !history_loading && loaded_offset > 0
 }
 
-fn can_dispatch_prompt_immediately(
-    phase: &DaemonPhase,
-    prompt_dispatch_pending: bool,
-    queue_is_empty: bool,
-    has_handle: bool,
-) -> bool {
-    matches!(phase, DaemonPhase::Idle) && !prompt_dispatch_pending && queue_is_empty && has_handle
-}
-
 fn is_recovered_phase(phase: &DaemonPhase) -> bool {
     matches!(
         phase,
@@ -877,38 +825,6 @@ fn is_dispatch_in_flight(prompt_dispatch_pending: bool, immediate_cancel_pending
     prompt_dispatch_pending || immediate_cancel_pending
 }
 
-fn conversation_phase_label(
-    phase: &DaemonPhase,
-    turn_outcome: Option<AcpTurnOutcome>,
-    prompt_dispatch_pending: bool,
-    immediate_cancel_pending: bool,
-    fresh_start: bool,
-    fresh_start_pending: bool,
-) -> (&'static str, u32) {
-    if is_dispatch_in_flight(prompt_dispatch_pending, immediate_cancel_pending)
-        && !matches!(phase, DaemonPhase::Dead | DaemonPhase::Connecting)
-    {
-        return ("运行中", ui_theme::blue());
-    }
-    match phase {
-        DaemonPhase::Connecting if fresh_start_pending => ("运行中", ui_theme::blue()),
-        DaemonPhase::Connecting if fresh_start => ("新对话", ui_theme::text_faint()),
-        DaemonPhase::Connecting => ("启动中", ui_theme::blue()),
-        DaemonPhase::Idle => match turn_outcome {
-            Some(AcpTurnOutcome::Succeeded) => ("已完成", ui_theme::green()),
-            Some(AcpTurnOutcome::Cancelled) => ("已停止", ui_theme::text_faint()),
-            Some(outcome) if outcome.failure_message().is_some() => ("失败", ui_theme::red()),
-            _ => ("空闲", ui_theme::text_faint()),
-        },
-        DaemonPhase::Thinking | DaemonPhase::ExecutingTool => ("运行中", ui_theme::blue()),
-        DaemonPhase::AwaitingApproval => ("等你批准", ui_theme::yellow()),
-        DaemonPhase::WaitingForUser => ("等你选择", ui_theme::accent()),
-        DaemonPhase::Succeeded => ("已完成", ui_theme::green()),
-        DaemonPhase::Failed => ("失败", ui_theme::red()),
-        DaemonPhase::Dead => ("已结束", ui_theme::text_faint()),
-    }
-}
-
 /// 快照到达后本地 prompt 闸门怎么走。立即发送会先 cancel 再等 Idle 派发队首；
 /// 若把「任意 Idle」当成取消完成，上一条尚未确认的 dispatch 会把队首永远卡住。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -961,12 +877,6 @@ fn next_snapshot_prompt_gate(
 /// 断线兜底快照，仍需接受；其余过期/重复快照不能把较新的 Running 倒退成 Idle。
 fn should_apply_snapshot_revision(last_applied: u64, incoming: u64) -> bool {
     incoming == 0 || incoming > last_applied
-}
-
-/// 只有快照带来非空标题时才替换。流式帧经常只改正文、不带标题；
-/// 这时把已有标题写成空，侧栏会落到首条消息或「对话 · 目录」，下一帧再跳回来。
-fn should_replace_session_title(incoming_title: Option<&str>) -> bool {
-    incoming_title.is_some_and(|title| !title.trim().is_empty())
 }
 
 fn is_stale_blank_history_id(
@@ -1253,6 +1163,13 @@ pub struct AcpViewOrigin {
 
 impl EventEmitter<AcpViewEvent> for AcpView {}
 
+/// 消息流的独立绘制边界。和输入框是兄弟，不是父子，所以打字标脏输入框时
+/// 不会把这段列表标脏。
+struct ConversationTranscript {
+    host: Entity<AcpView>,
+    _observe: Subscription,
+}
+
 pub struct AcpView {
     sid: String,
     cwd: Option<String>,
@@ -1335,6 +1252,12 @@ pub struct AcpView {
     /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
     /// entry 变化时执行，静态重绘直接复用 `SharedString`。
     rendered_markdown: Vec<Option<gpui::SharedString>>,
+    /// Pi 输入栏「技能 N」的发现结果。技能目录和祖先 `.git` 探测一次就要数毫秒
+    /// 到几十毫秒，不能跟着消息流每帧重扫。
+    loaded_skills: Option<LoadedSkillsSnapshot>,
+    /// 消息列表单独成视图再缓存。输入框是 `AcpView` 的子视图，每次按键都会把
+    /// 祖先标脏；列表若留在同一棵树上，打字会重排全部可见 Markdown 和图片。
+    transcript: Entity<ConversationTranscript>,
     /// 当前本地 `entries[0]` 在 smeltd 完整历史中的全局下标，以及服务端总条数。
     /// GUI 首次 attach 只取尾页，实时增量仍使用服务端全局 offset，因此合并时必须
     /// 显式换算，不能再假设本地 Vec 从全局 0 开始。
@@ -1391,13 +1314,10 @@ pub struct AcpView {
     pending_composer_restore: Option<Vec<String>>,
     pending_composer_restore_images: Option<Vec<AcpImage>>,
     /// `pending_composer_restore` 中来自 daemon 的最新 revision。文本真正写入
-    /// Textarea 后才确认；本地“立即发送”产生的 leftovers 没有 revision。
+    /// Textarea 后才确认。
     pending_composer_restore_revision: Option<u64>,
     /// 已处理、等待写回 daemon 的 revision。action 队列暂满时留到下次渲染重试。
     pending_composer_restore_ack: Option<u64>,
-    /// 原生排队「立即发送」已把选中条改成新 prompt。随后 cancel 的 ComposerRestore
-    /// 不能再把同一条还进输入框，否则会和即将发出的 prompt 重复。
-    skip_next_composer_restore: bool,
     /// 非新建会话启动/续接的起点，用来在横幅上报「已等了几秒」。
     /// 实测 `session/new` 里 Claude Code 自身要约 10 秒（跟下载无关，同一适配器
     /// 进程建第二个会话一样慢），没有进度反馈会让人以为卡死了。
@@ -1719,7 +1639,17 @@ impl AcpView {
                 });
             });
         });
-        Self {
+        let host = cx.entity();
+        let transcript = cx.new(|cx| {
+            // 只跟 `cx.notify()` 走，不跟祖先标脏走。打字标脏的是输入框的祖先，
+            // 不会进这里，消息列表因此可以跳过重排。
+            let observe = cx.observe(&host, |_, _, cx| cx.notify());
+            ConversationTranscript {
+                host,
+                _observe: observe,
+            }
+        });
+        let mut this = Self {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
@@ -1758,6 +1688,8 @@ impl AcpView {
             rendered_diffs,
             rendered_tool_images: std::collections::HashMap::new(),
             rendered_markdown,
+            loaded_skills: None,
+            transcript,
             loaded_entries_offset: 0,
             entries_total: initial_entry_count,
             tool_debug: Default::default(),
@@ -1790,7 +1722,6 @@ impl AcpView {
             pending_composer_restore_images: None,
             pending_composer_restore_revision: None,
             pending_composer_restore_ack: None,
-            skip_next_composer_restore: false,
             starting_since: None,
             plan: None,
             // 计划是导航摘要，不应该在打开会话时占据整块消息区；需要细节时
@@ -1831,7 +1762,10 @@ impl AcpView {
             pending_agent_preset: None,
             focus_handle: cx.focus_handle(),
             _input_sub: None,
-        }
+        };
+        // 技能发现读磁盘，只在视图建好时做一次。绘制路径只允许读缓存。
+        this.ensure_loaded_skills();
+        this
     }
 
     /// 「重新开始」：带着上次的 session id（如果有）尝试真续接——smeltd 那边
@@ -1878,6 +1812,7 @@ impl AcpView {
                 self.refresh_launch_from_settings,
             );
         }
+        self.ensure_loaded_skills();
         self.permissions.clear();
         self.permission_submitting = None;
         self.elicitation = None;
@@ -1950,35 +1885,6 @@ impl AcpView {
     /// 舞台头状态胶囊用的相位：ACP 当前活动，与守护相位同一枚举。
     pub fn phase(&self) -> DaemonPhase {
         self.phase
-    }
-
-    /// 当前上下文 token 用量 `(used, window)`；这不是本轮 input/output，
-    /// 不能直接作为外部 controller 的账单 usage 回传。
-    pub fn usage(&self) -> Option<(u64, u64)> {
-        self.usage
-    }
-
-    /// 最近一条状态行（agent 在干什么，如「正在运行 test」）；None = 无。
-    /// controller 进度上报（report_progress summary）用。
-    pub fn status_line(&self) -> Option<String> {
-        self.status_line.clone()
-    }
-
-    /// 当前完整消息流。controller 任务执行日志上报用（增量按 entries 长度水位
-    /// 取新条目，映射成官方 TaskMessage 批量上报）。
-    pub fn entries(&self) -> &[AcpEntry] {
-        &self.entries
-    }
-
-    pub fn phase_label(&self) -> (&'static str, u32) {
-        conversation_phase_label(
-            &self.phase,
-            self.turn_outcome,
-            self.prompt_dispatch_pending,
-            self.immediate_cancel_pending,
-            self.is_fresh_conversation_start(),
-            self.has_pending_fresh_start_prompt(),
-        )
     }
 
     fn is_fresh_conversation_start(&self) -> bool {
@@ -2144,6 +2050,37 @@ impl AcpView {
         }
     }
 
+    /// 技能发现只跟启动规格和工作目录走。绘制路径只读 `loaded_skills()`。
+    fn ensure_loaded_skills(&mut self) {
+        match loaded_skills_refresh(
+            self.agent,
+            &self.launch,
+            &self.cwd,
+            self.loaded_skills.as_ref(),
+        ) {
+            LoadedSkillsRefresh::Keep => {}
+            LoadedSkillsRefresh::Clear => self.loaded_skills = None,
+            LoadedSkillsRefresh::Rescan => {
+                let skills = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
+                    &self.launch,
+                    self.cwd.as_deref().map(std::path::Path::new),
+                );
+                self.loaded_skills = Some(LoadedSkillsSnapshot {
+                    launch: self.launch.clone(),
+                    cwd: self.cwd.clone(),
+                    skills,
+                });
+            }
+        }
+    }
+
+    fn loaded_skills(&self) -> &[smelt_core::pi_plugin_catalog::PiPlugin] {
+        self.loaded_skills
+            .as_ref()
+            .map(|cached| cached.skills.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// 回合进行中每秒重绘一次，让「已用 6s」跟 Grok 一样往前走。
     fn ensure_running_tick(&mut self, cx: &mut Context<Self>) {
         if self.running_tick {
@@ -2262,8 +2199,11 @@ impl AcpView {
         self.entries = page;
         self.loaded_entries_offset = snapshot.entries_offset;
         self.entries_total = self.entries_total.max(snapshot.entries_total);
-        if snapshot.session_title.is_some() {
-            self.session_title = snapshot.session_title;
+        // 省略或空白不是清空。
+        if let Some(title) =
+            smelt_core::session_title::provider_session_title(snapshot.session_title.as_deref())
+        {
+            self.session_title = Some(title.to_string());
         }
         if let Some(tool_debug) = snapshot.tool_debug {
             self.tool_debug = tool_debug;
@@ -2316,9 +2256,8 @@ impl AcpView {
     /// 通用 ACP `session_info_update` 的 Agent 标题优先；Agent 尚未上报时由
     /// smeltd 从首条用户消息生成稳定兜底。侧栏和完成通知共用这个结果。
     pub fn auto_title(&self) -> Option<String> {
-        self.session_title
-            .clone()
-            .or_else(|| smelt_core::acp_chat::auto_title(&self.entries))
+        let fallback = smelt_core::acp_chat::auto_title(&self.entries);
+        smelt_core::session_title::session_name(self.session_title.as_deref(), fallback.as_deref())
     }
 
     /// 存档快照：写进 AcpSaved.history_session_id，GUI 重开后「重新开始」
@@ -2682,82 +2621,11 @@ impl AcpView {
         true
     }
 
-    /// 末几条消息的纯文本（总览卡片迷你预览，对齐终端的 last_lines）。
-    pub fn last_lines(&self, n: usize) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for e in self.entries.iter().rev() {
-            if out.len() >= n {
-                break;
-            }
-            let line = match e {
-                AcpEntry::User(t) => format!("> {}", t.lines().next().unwrap_or_default()),
-                AcpEntry::UserWithImages { text, images } => {
-                    let first = text.lines().next().unwrap_or_default();
-                    if first.is_empty() {
-                        format!("> {} 张图片", images.len())
-                    } else {
-                        format!("> {first}")
-                    }
-                }
-                AcpEntry::Assistant {
-                    text,
-                    thought: false,
-                } => text.lines().last().unwrap_or_default().to_string(),
-                AcpEntry::Assistant { thought: true, .. } => continue,
-                AcpEntry::ToolCall { title, output, .. }
-                    if is_task_completion_tool_title(title) =>
-                {
-                    let summary = completion_summary_text(output);
-                    if summary.trim().is_empty() {
-                        "完成".to_string()
-                    } else {
-                        summary.lines().last().unwrap_or("完成").to_string()
-                    }
-                }
-                AcpEntry::ToolCall { title, .. } => format!("🔧 {title}"),
-                AcpEntry::TaskNote(note) => note.summary(),
-                AcpEntry::Divider(_) => continue,
-            };
-            if !line.trim().is_empty() {
-                out.push(line);
-            }
-        }
-        out.reverse();
-        out
-    }
-
-    pub fn completed_unread(&self, cx: &App) -> bool {
-        cx.try_global::<AttentionGlobal>().is_some_and(|store| {
-            store
-                .0
-                .lock()
-                .unwrap()
-                .unread(&self.sid)
-                .is_some_and(|item| item.kind == AttentionKind::Success)
-        })
-    }
-
     /// 会话被激活查看后清「有结果可看」。
     pub fn mark_read(&mut self, cx: &mut Context<Self>) {
         if cx.try_global::<AttentionGlobal>().is_some() {
             AttentionGlobal::mark_read(&self.sid, cx);
         }
-    }
-
-    pub fn is_awaiting_approval(&self) -> bool {
-        matches!(self.phase, DaemonPhase::AwaitingApproval)
-    }
-
-    pub fn is_running(&self) -> bool {
-        matches!(
-            self.phase,
-            DaemonPhase::Thinking | DaemonPhase::ExecutingTool
-        )
-    }
-
-    /// 出了选择题等用户点（四档色里归「需要处理」橙档）。
-    pub fn is_awaiting_choice(&self) -> bool {
-        matches!(self.phase, DaemonPhase::WaitingForUser)
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -2985,81 +2853,10 @@ impl AcpView {
         })
     }
 
-    /// 最后一条 agent 正文（非思考）文本；没有返回 None。
-    /// controller 任务回写用它作为 complete 的 output（结构化回复，精准）。
-    pub fn last_assistant_text(&self) -> Option<String> {
-        self.entries.iter().rev().find_map(|e| match e {
-            AcpEntry::Assistant {
-                text,
-                thought: false,
-            } if !text.trim().is_empty() => Some(text.clone()),
-            _ => None,
-        })
-    }
-
     /// provider 侧会话 id（ACP session/new 返回，可用于下次 session/load 恢复）。
     /// controller 回写时作为 complete 的 session_id 回传，供下个任务续跑上下文。
     pub fn provider_session_id(&self) -> Option<SessionId> {
         self.acp_session_id.clone()
-    }
-
-    /// 任务等外部调用者需要把 prompt 和一次执行记录严格对应，不能把消息排到
-    /// 正在运行的 turn 后面。仅在当前会话可立即发送时返回 true。
-    pub fn can_send_prompt_immediately(&self) -> bool {
-        can_dispatch_prompt_immediately(
-            &self.phase,
-            self.prompt_dispatch_pending,
-            self.queued_prompts.is_empty(),
-            self.handle.is_some(),
-        )
-    }
-
-    /// 立即发送 prompt（可带图），绝不排队。返回 false 表示会话不再空闲或连接不可用。
-    pub fn try_send_prompt_immediately(
-        &mut self,
-        text: String,
-        images: Vec<std::sync::Arc<gpui::Image>>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.try_send_prompt_immediately_with_config(text, images, Vec::new(), cx)
-    }
-
-    /// 在已打开的普通 ACP 会话里立即发送 prompt；可选地先切换模型。
-    pub fn try_send_prompt_immediately_with_model(
-        &mut self,
-        text: String,
-        images: Vec<std::sync::Arc<gpui::Image>>,
-        model_id: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let config_values = model_id
-            .filter(|model| !model.trim().is_empty())
-            .map(|model| vec![("model".to_string(), model)])
-            .unwrap_or_default();
-        self.try_send_prompt_immediately_with_config(text, images, config_values, cx)
-    }
-
-    /// 在已打开的普通 ACP 会话里立即发送 prompt，并先应用配置；配置动作和
-    /// prompt 走同一条 smeltd action 队列，顺序不会倒置。
-    pub fn try_send_prompt_immediately_with_config(
-        &mut self,
-        text: String,
-        images: Vec<std::sync::Arc<gpui::Image>>,
-        config_values: Vec<(String, String)>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if text.trim().is_empty() || !self.can_send_prompt_immediately() {
-            return false;
-        }
-        self.awaiting_initial_history_snapshot = false;
-        // 记住非空配置，让随后强制重启的 adapter 仍按最近一次用户选择恢复。
-        if !config_values.is_empty() {
-            self.restart_config_values = config_values.clone();
-            // 不能只等回合结束才把新配置写进 workspace 存档。
-            cx.emit(AcpViewEvent::Changed);
-        }
-        self.queue_config_values(config_values);
-        self.send_prompt_now(&text, &images, cx)
     }
 
     /// 真正把一条 prompt 打给 smeltd——不碰 `self.pending_images`，图片由调用方
@@ -3137,28 +2934,24 @@ impl AcpView {
         cx.notify();
     }
 
-    /// 原生排队项改成新 prompt：先停当前回合，再按本地队列立即发送。
-    /// cancel 会把 Pi 整队还回输入框，所以选中条必须跳过这次还原。
-    fn send_native_queue_item_immediately(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.immediate_cancel_pending {
-            return;
-        }
-        let Some(plan) =
-            plan_native_immediate_send(&self.queued_steering, &self.queued_follow_up, ix)
+    /// 原生排队「立即发送」是守护进程的一个动作：从 provider 队列拿走这一条，
+    /// 停掉当前回答，等它真正空闲后只发一次。界面不抄一份，也不猜还原时机。
+    fn send_native_queue_item_immediately(&mut self, ix: usize, _cx: &mut Context<Self>) {
+        let Some(text) = self
+            .queued_steering
+            .iter()
+            .chain(self.queued_follow_up.iter())
+            .nth(ix)
+            .cloned()
         else {
             return;
         };
-        self.queued_steering.clear();
-        self.queued_follow_up.clear();
-        self.skip_next_composer_restore = true;
-        if !plan.leftovers.is_empty() {
-            match &mut self.pending_composer_restore {
-                Some(existing) => existing.extend(plan.leftovers),
-                None => self.pending_composer_restore = Some(plan.leftovers),
-            }
-        }
-        self.queued_prompts.push_front((plan.selected, Vec::new()));
-        self.send_queued_prompt_immediately(0, cx);
+        let Some(h) = self.handle.as_ref() else {
+            return;
+        };
+        let _ = h
+            .action_tx
+            .try_send(AcpUserAction::DeliverQueuedNow { text });
     }
 
     /// 剪贴板里是图就收进待发列表（返回 true 表示这次粘贴被图片消费掉了，
@@ -3658,8 +3451,11 @@ impl AcpView {
         ) {
             self.pending_config_values.clear();
         }
-        if should_replace_session_title(snap.session_title.as_deref()) {
-            self.session_title = snap.session_title;
+        // 省略或空白不是清空。
+        if let Some(title) =
+            smelt_core::session_title::provider_session_title(snap.session_title.as_deref())
+        {
+            self.session_title = Some(title.to_string());
         }
         let has_runtime_session_id = snap.acp_session_id.is_some();
         let runtime_session_id = snap.acp_session_id.map(SessionId::new);
@@ -3691,19 +3487,16 @@ impl AcpView {
         self.supports_native_queue = snap.supports_native_queue;
         self.supports_rewind = snap.supports_rewind;
         self.compacting = snap.compacting;
-        let skip_restore = self.skip_next_composer_restore;
-        (self.queued_steering, self.queued_follow_up) =
-            native_queue_from_snapshot(skip_restore, snap.queued_steering, snap.queued_follow_up);
+        self.queued_steering = snap.queued_steering;
+        self.queued_follow_up = snap.queued_follow_up;
         let restore_revision = snap.composer_restore_revision;
         let restore = consume_composer_restore(
             self.last_composer_restore_revision,
             restore_revision,
             snap.composer_restore_texts,
             snap.composer_restore_images,
-            skip_restore,
         );
         self.last_composer_restore_revision = restore.last_revision;
-        self.skip_next_composer_restore = restore.skip_next;
         let has_restore = restore.restore_texts.is_some() || restore.restore_images.is_some();
         if let Some(texts) = restore.restore_texts {
             match &mut self.pending_composer_restore {
@@ -3722,13 +3515,6 @@ impl AcpView {
                 self.pending_composer_restore_revision
                     .map_or(restore_revision, |pending| pending.max(restore_revision)),
             );
-        }
-        if let Some(revision) = restore.discarded_revision {
-            self.pending_composer_restore_ack = Some(
-                self.pending_composer_restore_ack
-                    .map_or(revision, |pending| pending.max(revision)),
-            );
-            self.try_acknowledge_composer_restore();
         }
         self.plan = snap.plan;
         self.background_tasks = snap.background_tasks;
@@ -4029,12 +3815,6 @@ impl AcpView {
             let displayed = overlay_model_state(model, &self.pending_config_values);
             model_label_with_provider(&displayed.current_value, &displayed.current_name)
         })
-    }
-
-    /// 当前上下文已用 token 数（舞台头显示用）；None = agent 没上报过用量。
-    /// 跟输入栏「上下文 %」胶囊同一个数据源，只是这里要精确数字而非百分比。
-    pub fn context_tokens_used(&self) -> Option<u64> {
-        self.usage.map(|(used, _)| used)
     }
 
     /// 最近一条整条滚出视口顶的用户提问，压成一行（舞台标题胶囊吸顶用）。
@@ -5642,6 +5422,42 @@ fn tool_running_label(kind: ToolKind) -> &'static str {
         ToolKind::Compact => "正在整理上下文",
         ToolKind::Wait => "正在等待",
         ToolKind::Other => "正在处理",
+    }
+}
+
+struct LoadedSkillsSnapshot {
+    launch: ConversationLaunchSpec,
+    cwd: Option<String>,
+    skills: Vec<smelt_core::pi_plugin_catalog::PiPlugin>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadedSkillsRefresh {
+    /// 启动规格没变，绘制时直接复用。
+    Keep,
+    /// 不是 Pi，缓存不能留着，但也不要为此扫盘。
+    Clear,
+    /// Pi 的启动规格或工作目录变了，下一次绘制前重扫一次。
+    Rescan,
+}
+
+fn loaded_skills_refresh(
+    agent: ConversationAgentKind,
+    launch: &ConversationLaunchSpec,
+    cwd: &Option<String>,
+    cached: Option<&LoadedSkillsSnapshot>,
+) -> LoadedSkillsRefresh {
+    if agent != ConversationAgentKind::Pi {
+        return if cached.is_some() {
+            LoadedSkillsRefresh::Clear
+        } else {
+            LoadedSkillsRefresh::Keep
+        };
+    }
+    if cached.is_some_and(|cached| cached.launch == *launch && cached.cwd == *cwd) {
+        LoadedSkillsRefresh::Keep
+    } else {
+        LoadedSkillsRefresh::Rescan
     }
 }
 

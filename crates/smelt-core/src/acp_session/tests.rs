@@ -1459,6 +1459,24 @@ fn late_permission_event(tool_call_id: &str) -> ConversationEvent {
 }
 
 #[test]
+fn cancelled_turn_does_not_accept_another_steer() {
+    let mut running = fresh_state();
+    running.phase = DaemonPhase::Thinking;
+    assert!(accepts_mid_turn_steer(&running));
+
+    note_cancel_requested(&mut running);
+    assert!(!accepts_mid_turn_steer(&running));
+
+    let mut settled = fresh_state();
+    settled.phase = DaemonPhase::Idle;
+    settled.turn_outcome = Some(AcpTurnOutcome::Cancelled);
+    assert!(
+        !accepts_mid_turn_steer(&settled),
+        "界面已停、Pi 闸门还没放开时不能再插入当前回合"
+    );
+}
+
+#[test]
 fn cancel_request_dismisses_pending_approval_cards() {
     let mut s = fresh_state();
     note_prompt_sent(&mut s, "do it".into(), Vec::new());
@@ -2505,6 +2523,36 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
             .any(|entry| matches!(entry, AcpEntry::User(text) if text == "换方向")),
         "撤回排队不得把中途插入写进会话"
     );
+}
+
+#[test]
+fn claimed_queue_text_is_removed_once_and_only_if_returned() {
+    let mut texts = vec![
+        "别的".to_string(),
+        "但是我想字数一致".to_string(),
+        "但是我想字数一致".to_string(),
+    ];
+    assert!(take_claimed_queue_text(&mut texts, "但是我想字数一致"));
+    assert_eq!(
+        texts,
+        vec!["别的".to_string(), "但是我想字数一致".to_string()]
+    );
+    assert!(!take_claimed_queue_text(&mut texts, "没有"));
+
+    let mut state = fresh_state();
+    state.queued_steering = vec!["带图".into()];
+    state.queued_steering_images = vec![vec![crate::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    }]];
+    state.queued_follow_up = vec!["下一回合".into()];
+    let (images, follow_up) = queued_item_images(&state, "带图").unwrap();
+    assert!(!follow_up);
+    assert_eq!(images.len(), 1);
+    let (images, follow_up) = queued_item_images(&state, "下一回合").unwrap();
+    assert!(follow_up);
+    assert!(images.is_empty());
+    assert!(queued_item_images(&state, "没有").is_none());
 }
 
 #[test]

@@ -351,7 +351,7 @@ pub(super) fn pi_model_page(
                                                                 ))
                                                                 .ghost()
                                                                 .small()
-                                                                .icon(IconName::Delete)
+                                                                .icon(crate::trash_icon())
                                                                 .tooltip("删除此 Provider")
                                                                 .disabled(custom_editor.is_some())
                                                                 .on_click(move |_, window, cx| {
@@ -672,7 +672,7 @@ pub(super) fn pi_model_page(
                                                     Button::new(format!("pi-remove-custom-model-{index}"))
                                                         .ghost()
                                                         .small()
-                                                        .icon(IconName::Delete)
+                                                        .icon(crate::trash_icon())
                                                         .tooltip("移除此模型")
                                                         .on_click(move |_, _, cx| {
                                                             remove_entity.update(cx, |workspace, cx| {

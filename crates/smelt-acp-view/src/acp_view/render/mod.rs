@@ -6,6 +6,8 @@
 use super::*;
 use smelt_core::daemon_state::DaemonPhase;
 
+use super::ConversationTranscript;
+
 mod cards;
 mod composer;
 mod conversation;
@@ -15,6 +17,20 @@ impl Render for AcpView {
         self.ensure_elicitation_inputs(window, cx);
         self.apply_pending_composer_restore(window, cx);
         self.settle_revealed_prompt();
+        // 技能目录一次就要数毫秒到几十毫秒。过期必须在启动规格变化时刷新，
+        // 不能留到绘制里扫盘。
+        debug_assert!(
+            !matches!(
+                loaded_skills_refresh(
+                    self.agent,
+                    &self.launch,
+                    &self.cwd,
+                    self.loaded_skills.as_ref(),
+                ),
+                LoadedSkillsRefresh::Rescan
+            ),
+            "技能目录过期却留到了绘制路径"
+        );
         let composer_focused = self
             .input
             .as_ref()
@@ -414,11 +430,7 @@ impl AcpView {
                                 .child(label)
                         }))
                         .children((self.agent == ConversationAgentKind::Pi).then(|| {
-                            let count = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-                                &self.launch,
-                                self.cwd.as_deref().map(std::path::Path::new),
-                            )
-                            .len();
+                            let count = self.loaded_skills().len();
                             div().text_xs().text_color(muted).child(if count == 0 {
                                 "未加载技能".to_string()
                             } else {
@@ -483,11 +495,15 @@ impl AcpView {
                 .into_any_element()
         });
         // 顶上的条已经让开胶囊时，列表第一条不要再让一次。
-        let clear_capsule =
-            history_error_banner.is_none() && banner.is_none() && plan_bar.is_none();
-        // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
-        // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
-        let list = self.render_message_list(animate_ambient, clear_capsule, cx);
+        let clear_capsule = self.message_list_clears_capsule();
+        // 消息列表是独立缓存视图。这里每帧都会走到，但列表没脏时不会重排
+        // Markdown / 图片；打字只标脏输入框的祖先，不会标脏列表。
+        let list = self.transcript.clone().cached(
+            gpui::StyleRefinement::default()
+                .w_full()
+                .flex_1()
+                .min_h(gpui::px(0.)),
+        );
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
         let input_row = self.render_composer(composer_focused, cx);
         v_flex()
@@ -626,5 +642,49 @@ impl AcpView {
                     .child(msg.clone())
             }))
             .children(input_row)
+    }
+
+    fn message_list_clears_capsule(&self) -> bool {
+        let history_error_visible =
+            !matches!(self.phase, DaemonPhase::Connecting) && self.history_error.is_some();
+        if history_error_visible {
+            return false;
+        }
+        if self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| !plan.entries.is_empty())
+        {
+            return false;
+        }
+        let show_starting_placeholder = should_show_starting_placeholder(
+            &self.phase,
+            self.entries.is_empty(),
+            self.history_session_id.is_some(),
+            self.pending_initial_prompt.is_some(),
+        );
+        let show_ended_placeholder =
+            matches!(self.phase, DaemonPhase::Dead) && self.entries.is_empty();
+        let non_fresh_starting =
+            matches!(self.phase, DaemonPhase::Connecting) && !self.is_fresh_conversation_start();
+        match self.phase {
+            DaemonPhase::Connecting if non_fresh_starting && !show_starting_placeholder => false,
+            DaemonPhase::Dead if !show_ended_placeholder => false,
+            _ => true,
+        }
+    }
+}
+
+impl Render for ConversationTranscript {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let animate_ambient = ambient_motion_enabled(
+            ambient_application_active(cx),
+            window.is_window_active(),
+            true,
+        );
+        self.host.update(cx, |view, cx| {
+            let clear_capsule = view.message_list_clears_capsule();
+            view.render_message_list(animate_ambient, clear_capsule, cx)
+        })
     }
 }

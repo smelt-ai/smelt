@@ -62,6 +62,14 @@ pub fn save_sqlite_kv<T: Serialize>(namespace: &str, key: &str, value: &T) -> Re
     store.put_blob(namespace, key, &raw).map_err(Into::into)
 }
 
+/// 删除一个 SQLite KV。不会动同名 JSON 文件。
+pub fn delete_sqlite_kv(namespace: &str, key: &str) -> Result<(), String> {
+    default_sqlite_store()?
+        .delete_blob(namespace, key)
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
 /// 当前进程的默认 SQLite 库。桌面启动启用 SQLite 路由后才可用。
 pub fn default_sqlite_store() -> Result<smelt_store::Store, String> {
     let root = default_smelt_root().ok_or_else(|| "SQLite state 未启用".to_string())?;

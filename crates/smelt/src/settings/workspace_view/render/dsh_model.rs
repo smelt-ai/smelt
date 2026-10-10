@@ -676,7 +676,7 @@ pub(super) fn dsh_model_page(
                                                     ))
                                                     .ghost()
                                                     .small()
-                                                    .icon(IconName::Delete)
+                                                    .icon(crate::trash_icon())
                                                     .tooltip("移除此模型")
                                                     .on_click(move |_, _, cx| {
                                                         remove_entity.update(

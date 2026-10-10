@@ -5,6 +5,55 @@
 use super::*;
 
 impl Workspace {
+    pub(crate) fn render_delete_automation_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let Some(target) = self.automation_surface.pending_delete.as_ref() else {
+            return div();
+        };
+        let (fg, muted) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let body = if target.runs == 0 {
+            format!("将删除「{}」，此操作不可撤销。", target.name)
+        } else {
+            format!(
+                "将删除「{}」和它的 {} 条运行记录，此操作不可撤销。",
+                target.name, target.runs
+            )
+        };
+        let content = div()
+            .flex()
+            .flex_col()
+            .child(Self::modal_title(fg, "确定删除这条自动化吗？"))
+            .child(div().text_sm().text_color(muted).child(body))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-delete-automation",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_delete_automation(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-delete-automation",
+                        "确定删除",
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_delete_automation(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(420., true, content, cx)
+    }
+
     pub(crate) fn render_automation_navigation(
         &self,
         entity: Entity<Workspace>,
@@ -21,23 +70,28 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .child(self.render_workbench_chat_row(entity.clone()))
-            .child(self.render_agent_product_navigation_row(
-                "agents-route",
-                "智能体",
-                IconName::Bot,
-                config.agents.len(),
-                WorkspaceRoute::Agents,
-                entity.clone(),
-            ))
+            .child(self.render_workbench_chat_row(entity.clone(), cx))
+            .child(
+                self.render_agent_product_navigation_row(
+                    "agents-route",
+                    "智能体",
+                    IconName::Bot,
+                    statuses
+                        .iter()
+                        .any(|status| *status == AgentStatus::NeedsYou),
+                    WorkspaceRoute::Agents,
+                    entity.clone(),
+                ),
+            )
             .child(self.render_agent_product_navigation_row(
                 "automations-route",
                 "自动化",
                 IconName::Cpu,
-                config.automations.len(),
+                automation_nav_needs_attention(&config),
                 WorkspaceRoute::Automations,
                 entity.clone(),
             ))
+            .child(self.render_customize_row(entity.clone()))
             .child(self.render_product_conversation_nav(entity, statuses, animate_running, cx))
     }
 
@@ -52,6 +106,7 @@ impl Workspace {
             .gap_2()
             .child(product_back_button(
                 "automation-drill-back",
+                "返回",
                 move |_, _, cx| {
                     back_entity.update(cx, |workspace, cx| workspace.close_automation_editor(cx));
                 },
@@ -154,7 +209,7 @@ impl Workspace {
                                 .text_sm()
                                 .font_medium()
                                 .text_color(rgb(crate::ui_theme::text_bright()))
-                                .child("任务"),
+                                .child("设置"),
                         )
                         .on_click(move |_, _, cx| {
                             task_entity
@@ -467,6 +522,30 @@ impl Workspace {
         } else {
             framed_automation_textarea(Textarea::new(&editor.command))
         };
+        let missing = editor.missing_fields(cx);
+        let missing_hint = (!missing.is_empty()).then(|| {
+            let list = missing.join("、");
+            if editor.is_new {
+                (format!("还差：{list}"), crate::ui_theme::text_faint())
+            } else {
+                (
+                    format!("还差：{list}，补齐后自动保存"),
+                    crate::ui_theme::red(),
+                )
+            }
+        });
+        let create_entity = entity.clone();
+        let create_button = Button::new("automation-create")
+            .primary()
+            .small()
+            .label("创建")
+            .loading(saving)
+            .disabled(!missing.is_empty())
+            .on_click(move |_, _, cx| {
+                create_entity.update(cx, |workspace, cx| {
+                    workspace.create_automation_from_editor(cx);
+                });
+            });
 
         div()
             .id("automation-editor-scroll")
@@ -488,72 +567,93 @@ impl Workspace {
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(neutral_icon_mark(IconName::Cpu, 32.))
+                            .flex_col()
+                            .gap_1p5()
                             .child(
-                                automation_form_row().flex_1().min_w_0().child(
-                                    Input::new(&editor.name)
-                                        .appearance(false)
-                                        .focus_bordered(false)
-                                        .focus_ring(false)
-                                        .w_full()
-                                        .text_sm(),
-                                ),
-                            )
-                            .when(!editor.is_new, |row| {
-                                row.child(
-                                    Button::new("automation-editor-more")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::Ellipsis)
-                                        .dropdown_menu(move |mut menu, _, _| {
-                                            let run_entity = test_entity.clone();
-                                            menu = menu.item(
-                                                PopupMenuItem::new("运行一次")
-                                                    .icon(IconName::Play)
-                                                    .disabled(header_saving)
-                                                    .on_click(move |_, _, cx| {
-                                                        run_entity.update(cx, |workspace, cx| {
-                                                            workspace.test_automation_editor(cx);
-                                                        });
-                                                    }),
-                                            );
-                                            let toggle_entity = toggle_entity.clone();
-                                            let toggle_id = toggle_id.clone();
-                                            menu = menu.item(
-                                                automation_enabled_toggle_item(enabled).on_click(
-                                                    move |_, _, cx| {
-                                                        let id = toggle_id.clone();
-                                                        toggle_entity.update(
-                                                            cx,
-                                                            |workspace, cx| {
-                                                                workspace.set_automation_enabled(
-                                                                    id, !enabled, cx,
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(neutral_icon_mark(IconName::Cpu, 32.))
+                                    .child(
+                                        automation_form_row().flex_1().min_w_0().child(
+                                            Input::new(&editor.name)
+                                                .appearance(false)
+                                                .focus_bordered(false)
+                                                .focus_ring(false)
+                                                .w_full()
+                                                .text_sm(),
+                                        ),
+                                    )
+                                    .when(editor.is_new, |row| row.child(create_button))
+                                    .when(!editor.is_new, |row| {
+                                        row.child(
+                                            Button::new("automation-editor-more")
+                                                .ghost()
+                                                .small()
+                                                .icon(IconName::Ellipsis)
+                                                .dropdown_menu(move |mut menu, _, _| {
+                                                    let run_entity = test_entity.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new("运行一次")
+                                                            .icon(IconName::Play)
+                                                            .disabled(header_saving)
+                                                            .on_click(move |_, _, cx| {
+                                                                run_entity.update(
+                                                                    cx,
+                                                                    |workspace, cx| {
+                                                                        workspace
+                                                                            .test_automation_editor(
+                                                                                cx,
+                                                                            );
+                                                                    },
                                                                 );
-                                                            },
-                                                        );
-                                                    },
-                                                ),
-                                            );
-                                            let delete_entity = delete_entity.clone();
-                                            let delete_id = delete_id.clone();
-                                            menu.item(
-                                                PopupMenuItem::new("删除自动化")
-                                                    .icon(IconName::Delete)
-                                                    .on_click(move |_, _, cx| {
-                                                        let id = delete_id.clone();
-                                                        delete_entity.update(
-                                                            cx,
-                                                            |workspace, cx| {
-                                                                workspace.delete_automation(id, cx)
-                                                            },
-                                                        );
-                                                    }),
-                                            )
-                                        }),
-                                )
-                            }),
+                                                            }),
+                                                    );
+                                                    let toggle_entity = toggle_entity.clone();
+                                                    let toggle_id = toggle_id.clone();
+                                                    menu = menu.item(
+                                                        automation_enabled_toggle_item(enabled)
+                                                            .on_click(move |_, _, cx| {
+                                                                let id = toggle_id.clone();
+                                                                toggle_entity.update(
+                                                                    cx,
+                                                                    |workspace, cx| {
+                                                                        workspace
+                                                                            .set_automation_enabled(
+                                                                                id, !enabled, cx,
+                                                                            );
+                                                                    },
+                                                                );
+                                                            }),
+                                                    );
+                                                    let delete_entity = delete_entity.clone();
+                                                    let delete_id = delete_id.clone();
+                                                    menu.item(
+                                                        PopupMenuItem::new("删除自动化")
+                                                            .icon(crate::trash_icon())
+                                                            .on_click(move |_, _, cx| {
+                                                                let id = delete_id.clone();
+                                                                delete_entity.update(
+                                                                    cx,
+                                                                    |workspace, cx| {
+                                                                        workspace
+                                                                    .start_delete_automation(id, cx)
+                                                                    },
+                                                                );
+                                                            }),
+                                                    )
+                                                }),
+                                        )
+                                    }),
+                            )
+                            .children(missing_hint.map(|(text, color)| {
+                                div()
+                                    .pl(px(44.))
+                                    .text_xs()
+                                    .text_color(rgb(color))
+                                    .child(text)
+                            })),
                     )
                     .child(
                         div()
@@ -615,6 +715,7 @@ impl Workspace {
                                 )
                             }),
                     )
+                    .child(render_automation_access_note(is_agent))
                     .child(render_notification_field(editor, entity, cx)),
             )
             .into_any_element()
@@ -665,7 +766,7 @@ impl Workspace {
                             Button::new("automation-run-pane-cancel")
                                 .ghost()
                                 .small()
-                                .icon(IconName::CircleX)
+                                .icon(IconName::Close)
                                 .label("停止")
                                 .on_click(move |_, _, cx| {
                                     let run_id = run_id.clone();

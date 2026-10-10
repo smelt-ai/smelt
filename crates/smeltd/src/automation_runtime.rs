@@ -352,22 +352,26 @@ impl Driver {
                 }
             };
             if run.context.agent_instructions.is_none() {
-                let result = self.automations.lock().unwrap().bind_run_execution(
-                    &run.id,
-                    execution.definition.name.clone(),
-                    execution.kind.id().to_string(),
-                    execution.definition.prompt.clone(),
-                );
-                match result {
-                    Ok(snapshot) => publish_automation_projection(&self.event_hub, &snapshot),
+                let result = self
+                    .automations
+                    .lock()
+                    .unwrap()
+                    .bind_run_execution(&run.id, &execution);
+                let bound = match result {
+                    Ok(snapshot) => {
+                        publish_automation_projection(&self.event_hub, &snapshot);
+                        snapshot.runs.into_iter().find(|bound| bound.id == run.id)
+                    }
                     Err(error) => {
                         self.fail_run(&run, &format!("保存智能体执行上下文失败: {error}"));
                         continue;
                     }
-                }
-                run.context.agent_definition_name = Some(execution.definition.name.clone());
-                run.context.engine_kind_id = Some(execution.kind.id().to_string());
-                run.context.agent_instructions = Some(execution.definition.prompt.clone());
+                };
+                let Some(bound) = bound else {
+                    self.fail_run(&run, "保存智能体执行上下文失败: Run 已不在历史里");
+                    continue;
+                };
+                run.context = bound.context;
             } else if run.context.engine_kind_id.as_deref() != Some(execution.kind.id()) {
                 self.fail_run(&run, "智能体执行引擎与 Run 快照不一致");
                 continue;
@@ -424,7 +428,6 @@ impl Driver {
             resume_id: None,
             fork_id: None,
             fork_cut: None,
-            tail_limit: None,
             conversation_binding: Some(ConversationBinding::Automation {
                 run_id: run.id.clone(),
             }),
@@ -1329,7 +1332,7 @@ mod lifecycle_tests {
                         }),
                         action: smelt_core::automation::AutomationAction::Agent {
                             agent_definition_id: "agent-1".into(),
-                            prompt: None,
+                            prompt: Some("Run".into()),
                         },
                         sinks: Vec::new(),
                     }),

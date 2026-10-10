@@ -222,18 +222,6 @@ impl DaemonSessionState {
             _ => q.to_string(),
         })
     }
-
-    /// 进入当前 phase 多久（秒）；phase_since 为 0 则 None。
-    pub fn phase_age_secs(&self) -> Option<u64> {
-        if self.phase_since == 0 {
-            return None;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_secs();
-        Some(now.saturating_sub(self.phase_since))
-    }
 }
 
 /// 终端 attachment 断线后的下一步。权威答案是 reattach 本身；镜像只用来

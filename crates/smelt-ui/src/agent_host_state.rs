@@ -431,11 +431,6 @@ impl AgentHostState {
         self.webhook_base_url = snapshot.webhook_base_url;
         true
     }
-
-    pub fn remove_automations_for(&mut self, agent_id: &str) {
-        self.automations
-            .retain(|automation| automation.agent_definition_id() != Some(agent_id));
-    }
 }
 
 impl Default for AgentHostState {

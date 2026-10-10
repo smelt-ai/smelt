@@ -153,14 +153,6 @@ impl NewSessionAction {
             _ => None,
         }
     }
-
-    /// 终端动作要先跑的命令。空白终端返回 None（就是一个干净的 shell）。
-    pub fn terminal_command(&self) -> Option<&str> {
-        match &self.target {
-            NewSessionTarget::Terminal { command, .. } => Some(command),
-            _ => None,
-        }
-    }
 }
 
 /// 三个分组。常用不额外占一层，和终端 / 对话同级。

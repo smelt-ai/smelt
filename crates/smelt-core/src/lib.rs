@@ -34,6 +34,7 @@ pub mod copilot_quota;
 pub mod daemon_image;
 pub mod daemon_protocol;
 pub mod daemon_state;
+pub mod default_conversation;
 pub mod dsh_auto_models;
 pub mod fd_limit;
 pub mod font_config;

@@ -31,7 +31,7 @@ use crate::daemon_state::DaemonPhase;
 mod apply;
 pub use apply::{
     ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
-    queue_composer_restore,
+    queue_composer_restore, queued_item_images, take_claimed_queue_text,
 };
 use apply::{pending_action_phase, resume_running};
 
@@ -1387,11 +1387,9 @@ impl AcpSessionState {
         };
         // 没带标题不是清空。流式尾巴经常省略标题，盖掉已有协议标题后，
         // 父镜像只会用当前这一截的提问当兜底，侧栏就闪成另一串字再跳回来。
-        if session_title
-            .as_deref()
-            .is_some_and(|title| !title.trim().is_empty())
+        if let Some(title) = crate::session_title::provider_session_title(session_title.as_deref())
         {
-            self.protocol_title = session_title;
+            self.protocol_title = Some(title.to_string());
         }
         self.phase = phase;
         self.end_reason = end_reason;
@@ -1502,9 +1500,8 @@ impl AcpSessionState {
 
     /// 协议标题优先；Agent 尚未上报或明确清空时，用首条用户消息兜底。
     pub fn resolved_session_title(&self) -> Option<String> {
-        self.protocol_title
-            .clone()
-            .or_else(|| crate::acp_chat::auto_title(self.entries()))
+        let fallback = crate::acp_chat::auto_title(self.entries());
+        crate::session_title::session_name(self.protocol_title.as_deref(), fallback.as_deref())
     }
 
     /// 会话正文：窗口、分页、活帧、回退校验与持久化看到的都是这一份。
@@ -2078,6 +2075,28 @@ pub fn note_cancel_requested(state: &mut AcpSessionState) {
     }
 }
 
+/// 中途插入只对还在跑的回合有意义。
+///
+/// 取消会先把界面收成 Idle，Pi 的闸门却要等 provider 真正空闲才放开。
+/// 这段窗口里再 steer，消息会回到「当前回合」队列；用户再点一次立即发送，
+/// 下一条 prompt 会把队列里那份和自己一起送进对话。
+pub fn is_cancel_requested(state: &AcpSessionState) -> bool {
+    state.cancel_requested
+}
+
+pub fn accepts_mid_turn_steer(state: &AcpSessionState) -> bool {
+    if state.cancel_requested {
+        return false;
+    }
+    matches!(
+        state.phase,
+        DaemonPhase::Thinking
+            | DaemonPhase::ExecutingTool
+            | DaemonPhase::AwaitingApproval
+            | DaemonPhase::WaitingForUser
+    )
+}
+
 pub(super) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2292,6 +2311,11 @@ pub enum AcpUserAction {
     },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
+    /// 把原生队列里的这一条从 provider 拿走，停掉当前回答，等 provider 真正空闲后只发一次。
+    /// 再发同一个文本是同一个动作，不会再发一遍。旧 daemon 不认识，会回 unknown variant。
+    DeliverQueuedNow {
+        text: String,
+    },
     /// 编辑并重发最后一条用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
     /// 回输入框供修改。`entry_index` 是投影里的绝对 entry 下标。仅空闲
     /// 会话可回退；旧 daemon 不认识这个动作，会回 unknown variant 错误。

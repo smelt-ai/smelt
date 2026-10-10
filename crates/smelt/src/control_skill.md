@@ -26,14 +26,14 @@ smelt agent delete <id>
 ```sh
 smelt automation list
 smelt automation create --name "名称" --agent <智能体id> --every-hours 1 --prompt "这一次要做什么"
-smelt automation create --name "名称" --agent <智能体id> --daily 09:30
+smelt automation create --name "名称" --agent <智能体id> --daily 09:30 --prompt "这一次要做什么"
 smelt automation create --name "名称" --agent <智能体id> --webhook
 smelt automation create --name "名称" --agent <智能体id> --event topic.name
 smelt automation update <id> --prompt "新的单次输入"
 smelt automation enable|disable|run|delete <id>
 ```
 
-自动化写操作需要 Smelt/smeltd 在跑。webhook 令牌不会出现在 list 里。
+自动化写操作需要 Smelt/smeltd 在跑。webhook 令牌不会出现在 list 里。定时（`--every-hours` / `--daily`）必须带 `--prompt`；`--webhook` / `--event` 可以不带，收到的内容就是这次的指令，但不带 `--prompt` 时不能手动 `run`；带了 `--prompt`，收到的内容附在它后面，写 `{{payload}}` 或 `{{字段名}}` 可以放到指定位置。智能体自动化在它的 space（`~/.smelt/agents/<id>/automations/` 下的子目录）里运行，能读到它在对话里攒下的文件和绑定的目录，但不会带上你的项目，要处理的仓库写进 `--prompt`。
 
 ```sh
 smelt settings get

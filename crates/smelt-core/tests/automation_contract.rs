@@ -45,6 +45,142 @@ fn inbound(topic: &str, event_id: &str, payload: serde_json::Value) -> Automatio
     }
 }
 
+fn agent_without_instruction(prompt: Option<&str>) -> AutomationAction {
+    AutomationAction::Agent {
+        agent_definition_id: "agent-1".to_string(),
+        prompt: prompt.map(str::to_string),
+    }
+}
+
+#[test]
+fn scheduled_agent_automation_requires_an_instruction() {
+    let now = Utc.with_ymd_and_hms(2026, 3, 2, 9, 0, 0).unwrap();
+    let mut file = AutomationFile::default();
+    for prompt in [None, Some("   ")] {
+        let mut scheduled = automation("scheduled");
+        scheduled.action = agent_without_instruction(prompt);
+        let error = apply_automation_command(
+            &mut file,
+            AutomationCommand::Upsert {
+                automation: Box::new(scheduled),
+            },
+            now,
+        )
+        .unwrap_err();
+        assert!(error.contains("指令"), "{error}");
+    }
+    assert!(file.automations.is_empty());
+
+    let mut hook = automation("hook");
+    hook.trigger = AutomationTrigger::webhook_with_secret("tok_hook");
+    hook.action = agent_without_instruction(None);
+    apply_automation_command(
+        &mut file,
+        AutomationCommand::Upsert {
+            automation: Box::new(hook),
+        },
+        now,
+    )
+    .expect("webhook 自带请求内容，可以不写指令");
+}
+
+#[test]
+fn manual_run_without_instruction_or_payload_is_rejected() {
+    let now = Utc.with_ymd_and_hms(2026, 3, 2, 9, 0, 0).unwrap();
+    let mut file = AutomationFile::default();
+    let mut hook = automation("hook");
+    hook.trigger = AutomationTrigger::webhook_with_secret("tok_hook");
+    hook.action = agent_without_instruction(None);
+    apply_automation_command(
+        &mut file,
+        AutomationCommand::Upsert {
+            automation: Box::new(hook),
+        },
+        now,
+    )
+    .unwrap();
+
+    let error = apply_automation_command(
+        &mut file,
+        AutomationCommand::RunOnce {
+            automation_id: "hook".into(),
+        },
+        now,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("指令"), "{error}");
+    assert!(file.runs.is_empty());
+}
+
+#[test]
+fn stored_schedule_without_instruction_fails_instead_of_sending_an_empty_prompt() {
+    let now = Utc.with_ymd_and_hms(2026, 3, 2, 9, 0, 0).unwrap();
+    let mut legacy = automation("legacy");
+    legacy.action = agent_without_instruction(None);
+    let mut file = AutomationFile::default();
+    file.automations.push(legacy);
+    file.states.push(smelt_core::automation::AutomationState {
+        automation_id: "legacy".into(),
+        next_run_at: Some(now.timestamp()),
+        last_run_id: None,
+    });
+
+    let claimed = claim_due_automations(&mut file, now);
+
+    assert!(claimed.is_empty());
+    let run = file
+        .runs
+        .iter()
+        .find(|run| run.automation_id == "legacy")
+        .expect("到点的计划要留下一条失败记录");
+    assert_eq!(run.status, AutomationRunStatus::Failed);
+    assert!(
+        run.error
+            .as_deref()
+            .is_some_and(|error| error.contains("指令")),
+        "{:?}",
+        run.error
+    );
+    assert!(run.runtime_released_at.is_some());
+}
+
+#[test]
+fn event_without_payload_cannot_drive_an_automation_without_instruction() {
+    let now = Utc.with_ymd_and_hms(2026, 3, 2, 9, 0, 0).unwrap();
+    let mut file = AutomationFile::default();
+    apply_automation_command(
+        &mut file,
+        AutomationCommand::Upsert {
+            automation: Box::new(event_automation("watch", "ci.failed", None)),
+        },
+        now,
+    )
+    .unwrap();
+
+    let published = publish_automation_event(
+        &mut file,
+        &AutomationInboundEvent {
+            topic: "ci.failed".into(),
+            event_id: "evt-1".into(),
+            payload: None,
+        },
+        now,
+    )
+    .unwrap();
+
+    assert_eq!(published.runs.len(), 1);
+    assert_eq!(published.runs[0].status, AutomationRunStatus::Failed);
+    assert!(
+        published.runs[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("指令")),
+        "{:?}",
+        published.runs[0].error
+    );
+}
+
 #[test]
 fn shell_automation_does_not_require_an_agent() {
     let automation = Automation {
@@ -994,6 +1130,51 @@ fn webhook_token_identifies_the_automation() {
     .unwrap();
     assert_eq!(run.source, AutomationRunSource::Webhook);
     assert_eq!(run.context.prompt.as_deref(), Some("你好"));
+}
+
+#[test]
+fn webhook_content_reaches_the_agent_even_without_placeholders() {
+    let now = Utc.with_ymd_and_hms(2026, 3, 2, 9, 0, 0).unwrap();
+    let mut file = AutomationFile::default();
+    for (id, instruction) in [("plain", "翻译成英文"), ("placed", "翻译成英文：{{text}}")]
+    {
+        let mut hook = automation(id);
+        hook.trigger = AutomationTrigger::webhook_with_secret(format!("tok_{id}"));
+        hook.action = agent_without_instruction(Some(instruction));
+        apply_automation_command(
+            &mut file,
+            AutomationCommand::Upsert {
+                automation: Box::new(hook),
+            },
+            now,
+        )
+        .unwrap();
+    }
+    let prompt_for = |file: &mut AutomationFile, id: &str| {
+        apply_automation_command(
+            file,
+            AutomationCommand::Trigger {
+                automation_id: id.into(),
+                source: AutomationRunSource::Webhook,
+                payload: Some(serde_json::json!({"text": "你好"})),
+            },
+            now,
+        )
+        .unwrap()
+        .run()
+        .unwrap()
+        .context
+        .prompt
+    };
+
+    assert_eq!(
+        prompt_for(&mut file, "plain").as_deref(),
+        Some("翻译成英文\n\n收到的内容：\n你好")
+    );
+    assert_eq!(
+        prompt_for(&mut file, "placed").as_deref(),
+        Some("翻译成英文：你好")
+    );
 }
 
 #[test]

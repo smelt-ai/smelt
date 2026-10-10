@@ -1414,10 +1414,6 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
 /// 从当前可执行文件路径反推 `Smelt.app` 的位置：
 /// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
 /// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
-pub fn current_app_bundle_path() -> anyhow::Result<PathBuf> {
-    current_app_bundle()
-}
-
 fn current_app_bundle() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let bundle = exe
@@ -1882,17 +1878,6 @@ fn reconcile_update_state_locked(
     save_update_state_locked(state_path, &state)?;
 
     Ok(Some(pending))
-}
-
-/// 把当前 App 与同目录的完整候选包做原子交换。当前 App 的路径始终存在；交换前后
-/// 都有持久化事务状态，因此进程在任意一步被强杀时，下一次启动都能判定并收敛。
-/// `prepare` 只会收到复制并验证完成的同卷候选 App，守护交接不能越过这条校验边界。
-pub fn finalize_pending_update(
-    update: &StagedUpdate,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<InstallPreparation>,
-) -> anyhow::Result<FinalizeOutcome> {
-    let app_bundle = current_app_bundle()?;
-    finalize_pending_update_at(update, None, &app_bundle, prepare)
 }
 
 fn finalize_pending_update_for_attempt(

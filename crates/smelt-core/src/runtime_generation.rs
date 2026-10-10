@@ -5,7 +5,7 @@
 
 #![cfg(unix)]
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write as _,
@@ -148,21 +148,6 @@ impl GenerationStore {
     ) -> Result<GenerationLease, String> {
         let _manager = self.lock_manager()?;
         self.acquire_shared_locked(kind, id)
-    }
-
-    pub fn read_manifest_locked<T: DeserializeOwned>(
-        &self,
-        kind: GenerationKind,
-        id: &str,
-    ) -> Result<T, String> {
-        let root = self.generation_root(kind, id);
-        if !published_marker_is_valid(&root) {
-            return Err(format!("generation 未完整发布：{}", root.display()));
-        }
-        let bytes = fs::read(root.join(MANIFEST_FILE))
-            .map_err(|error| format!("读取 generation manifest 失败：{error}"))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| format!("解析 generation manifest 失败：{error}"))
     }
 
     pub fn write_current_locked(&self, kind: GenerationKind, id: &str) -> Result<(), String> {

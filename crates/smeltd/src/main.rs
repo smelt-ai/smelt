@@ -206,8 +206,8 @@ use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
 pub(crate) use session_state::{
-    Phase, PhaseSource, SessionState, apply_agent_event, apply_terminal_title, bump_state_revision,
-    commit_session_phase, next_session_instance, now_unix,
+    Phase, PhaseSource, SessionState, apply_agent_event, bump_state_revision, commit_session_phase,
+    next_session_instance, now_unix,
 };
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent};
 use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboundEvent};
@@ -916,16 +916,6 @@ fn broadcast_state(event_hub: &EventHubHandle, state: &SessionState) {
     }
 }
 
-/// 瞬时展示状态只进订阅总线，不进崩溃恢复目录。OSC 标题可能是
-/// spinner 帧；将它落盘会让整份 sessions 文档持续重写。与持久广播共用
-/// commit gate，避免 EventHub 发布和目录提交交错；迟到 revision 由 EventHub 拒绝。
-fn broadcast_transient_state(event_hub: &EventHubHandle, state: &SessionState) {
-    let _commit = STATE_DIRECTORY_COMMIT_GATE.lock().unwrap();
-    if let Err(error) = event_hub.publish_session(state) {
-        eprintln!("[event-hub] transient session state publish failed: {error}");
-    }
-}
-
 /// 身份删除口：精确 runtime 由 instance 退休；无 instance 只清理没有代际信息的
 /// 历史条目，避免迟到的旧清理覆盖同 id 的替换 runtime。
 fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
@@ -1412,9 +1402,8 @@ fn is_known_remote_session(
         .map(|catalog| catalog.kind_for(id) == Some(kind))
 }
 
-/// 常驻 Term 的事件监听：接住 alacritty 解析出的 `Event::Title`/`Event::Bell`，
-/// 写进共享的 `SessionState`，顺带广播给所有 `subscribe` 连接。标题仅更新展示
-/// 元数据，绝不能影响 phase 或其它回合状态。
+/// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
+/// Bell 只刷新活动时间并广播。颜色查询在网格锁内入队，泵释放锁后再写回。
 #[derive(Clone)]
 struct StateListener {
     state: Arc<Mutex<SessionState>>,
@@ -1453,35 +1442,20 @@ impl EventListener for StateListener {
             }
             return;
         }
+        // OSC 0/2 不是会话名，也不广播。
+        let Event::Bell = event else {
+            return;
+        };
 
-        let (snapshot, transient) = {
+        let snapshot = {
             let Ok(mut st) = self.state.lock() else {
                 return;
             };
-            let transient = match event {
-                Event::Title(t) => {
-                    let title_changed = apply_terminal_title(&mut st, &t);
-                    if !title_changed {
-                        return;
-                    }
-                    // 标题 spinner 不是会话活动：不改 updated_at，不干扰
-                    // “最近会话”排序和空闲时长。
-                    true
-                }
-                Event::Bell => {
-                    st.updated_at = now_unix();
-                    false
-                }
-                _ => return,
-            };
+            st.updated_at = now_unix();
             bump_state_revision(&mut st);
-            (st.clone(), transient)
+            st.clone()
         };
-        if transient {
-            broadcast_transient_state(&self.event_hub, &snapshot);
-        } else {
-            broadcast_state(&self.event_hub, &snapshot);
-        }
+        broadcast_state(&self.event_hub, &snapshot);
     }
 }
 
@@ -3107,6 +3081,7 @@ fn resume_hosted_acp_handoff_item(
         prompt_in_flight: AtomicBool::new(prompt_in_flight),
         automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),
@@ -3436,7 +3411,7 @@ pub(crate) fn resume_from_value(
         let alt_flag = item["alt_screen"].as_bool().unwrap_or(false);
         // 旧 handoff 文件可能仍带 "buf"（环形原始字节）——**忽略，永不 feed**。
         // 状态通道不参与交接：新进程里全新一份 SessionState（launch 会写回，便于
-        // snapshot 识别 agent）。hook/ACP 很快会补 phase，终端标题会独立更新。
+        // snapshot 识别 agent）。phase 和会话名随后只由 hook/ACP 写回，不从 OSC 恢复。
         let instance = next_session_instance();
         let state = Arc::new(Mutex::new(SessionState {
             id: id.to_string(),
@@ -3668,6 +3643,7 @@ pub(crate) fn resume_from_value(
             prompt_in_flight: AtomicBool::new(recover_running_turn),
             automation_watch: Mutex::new(None),
             pending_prompts: Mutex::new(VecDeque::new()),
+            immediate_delivery: Mutex::new(None),
             unaccepted_prompt: Mutex::new(None),
             provider_hold: AtomicBool::new(false),
             hosted_handle: Mutex::new(None),

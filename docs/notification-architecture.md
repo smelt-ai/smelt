@@ -8,11 +8,10 @@
 展示。三者不得互相代替：
 
 ```text
-各 provider hook / ACP → AgentEvent v1 生命周期 / v2 标题元数据
+各 provider hook / ACP → AgentEvent v1 生命周期 / v2 会话名
                                       ↓
-                               smeltd reducer → DaemonPhase → AgentStatus + AttentionItem
-终端标题 ───────────────────────────────────────→ 展示元数据
-OSC / BEL ──────────────────────────────────────→ Informational AttentionItem
+                               smeltd reducer → DaemonPhase + 会话名 → AgentStatus + AttentionItem
+OSC 9/99/777 / BEL ─────────────────────────→ Informational AttentionItem
                                                        ↓
                                             铃铛 / 系统通知 / Dock / 菜单栏
 ```
@@ -56,12 +55,12 @@ helper 每条 hook 只发送一次向后兼容的 `state + event` 信封：新 d
 不会把一次改名误判成 Idle。
 
 `PromptSubmitted` 可附带由首条用户请求压缩出的 `conversation_title`：它只在 provider
-尚未给出语义标题时充当本地兜底，不混入 `pending_question`。后续 ACP/OSC 显式标题（例如
-Codex `/rename`）仍优先；纯产品名、项目名和 spinner 帧不能反向覆盖已经建立的对话标题。
+尚未给出语义标题时充当本地兜底，不混入 `pending_question`。显式改名走 ACP `session_title`
+或 `SessionTitleChanged`，不走 OSC。
 provider 工具名只在适配层用于把原始 hook 判定为这些稳定语义之一，不进入 UI 的状态判断
 逻辑。
 
-结构化 hook/ACP 通过 `apply_daemon_transition` 写入 store。终端标题始终只是展示元数据；
+结构化 hook/ACP 通过 `apply_daemon_transition` 写入 store。终端 OSC 标题不进入会话名；
 会话尚未收到有效结构化事件时，OSC/BEL 可以在 `TerminalView` 中翻译成信息性
 `AttentionItem`，但绝不能改变 phase 或伪造完成。结构化事件一旦接通，低可信终端通知
 永久退出该会话的 agent 通知链路，避免重复投递。

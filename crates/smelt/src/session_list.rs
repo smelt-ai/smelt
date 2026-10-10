@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use crate::git_panel::main_repo_root_from_common_dir;
 // drag.rs / row.rs 作为本模块子模块沿用 `super::*` 读取 ACP 类型。
-use crate::settings::ConversationAgentKind;
+use crate::settings::{AgentHostState, ConversationAgentKind};
 use crate::{
     AgentStatus, RenameTarget, SessionKind, SidebarGrouping, Workspace, pane_provider_kind,
     pane_status, pane_title, ui_theme,
@@ -943,7 +943,7 @@ impl Workspace {
                                         } else {
                                             "关闭项目".to_string()
                                         })
-                                        .icon(IconName::CircleX)
+                                        .icon(IconName::Close)
                                         .on_click(
                                             move |_ev, _window, cx| {
                                                 let root = close_root.clone();
@@ -957,7 +957,7 @@ impl Workspace {
                                 menu.when(is_worktree_group, move |menu| {
                                     menu.separator().item(
                                         PopupMenuItem::new("删除 Worktree")
-                                            .icon(IconName::Delete)
+                                            .icon(crate::trash_icon())
                                             .on_click(move |_ev, _window, cx| {
                                                 let del_path = del_path.clone();
                                                 let del_main_root = del_main_root.clone();
@@ -1037,6 +1037,11 @@ impl Workspace {
                     .or_else(|| provider.map(|agent| agent.label()))
                     .unwrap_or("终端");
                 let plugin_agent = self.sessions[ix].plugin_agent_presentation(cx);
+                let agent_mark = crate::agents::bound_agent_mark(
+                    self.sessions[ix].agent_definition_id.as_deref(),
+                    self.sessions[ix].automation_id.as_deref(),
+                    &cx.global::<AgentHostState>().agents,
+                );
                 let identity_label = plugin_agent
                     .as_ref()
                     .map(|agent| agent.name.clone())
@@ -1106,7 +1111,32 @@ impl Workspace {
 
                 // 运行态只在进入时短暂提亮一次；随后保留静态蓝，不让一个长任务
                 // 永久持有动画 timer。明确状态仍可从行内标签或图标 tooltip 获得。
-                let session_icon = if animate_running && status == AgentStatus::Running {
+                let session_icon = if let Some(mark) = agent_mark {
+                    div()
+                        .id(("sess-provider-icon", ix))
+                        .flex_shrink_0()
+                        .size(px(SESSION_AGENT_ICON_BOX_SIZE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(Self::session_icon_color(status, None))
+                        .child(
+                            div()
+                                .size(px(SESSION_AGENT_ICON_SIZE))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(10.))
+                                .font_medium()
+                                .child(mark),
+                        )
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(identity_label.clone())
+                                .build(window, cx)
+                        })
+                        .into_any_element()
+                } else if animate_running && status == AgentStatus::Running {
                     let plugin_agent = plugin_agent.clone();
                     ambient_animation(
                         ("sess-provider-glow", ix),
@@ -1303,7 +1333,7 @@ impl Workspace {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
-                                    .child(Icon::new(IconName::CircleX).size(px(14.)))
+                                    .child(Icon::new(IconName::Close).size(px(14.)))
                                     .on_click(move |_ev, _w, cx| {
                                         cx.stop_propagation();
                                         e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
@@ -1566,7 +1596,7 @@ impl Workspace {
                                             Button::new(("close-pane", ix * 100 + lix))
                                                 .ghost()
                                                 .xsmall()
-                                                .icon(IconName::CircleX)
+                                                .icon(IconName::Close)
                                                 .on_click(move |_ev, window, cx| {
                                                     cx.stop_propagation();
                                                     let pane = close_pane.clone();
@@ -1626,7 +1656,7 @@ impl Workspace {
                                     // 行内的 × 只关这一个 pane；要连整组一起关走这里。
                                     .item(
                                         PopupMenuItem::new("关闭整个会话（含全部分屏）")
-                                            .icon(IconName::CircleX)
+                                            .icon(IconName::Close)
                                             .on_click(move |_ev, _window, cx| {
                                                 e_close_all
                                                     .update(cx, |ws, cx| ws.close_session(ix, cx));

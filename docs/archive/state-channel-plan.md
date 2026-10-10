@@ -5,8 +5,8 @@
 > （三态 `NeedsYou`/`Running`/`Idle`）与 `smelt-core/src/daemon_state.rs`
 > （`DaemonSessionState`/`DaemonPhase` 9 态）为准。
 > 行号和 `AgentStatus` 变体列表已过时，本文作为历史施工记录存档，实施时勿按字面执行。
-> 文中 OSC 标题 spinner 与 OSC 9 的 phase fallback 已废弃；终端标题现在只作展示，
-> OSC/BEL 现在只作信息通知。
+> 文中 OSC 标题 spinner 与 OSC 9 的 phase fallback 已废弃。OSC 0/2 不是会话名，也不推断相位。
+> OSC 9/777 与 BEL 只作信息通知。正文仍是当时的施工记录，不要按字面恢复 `Event::Title` 写 `title`。
 
 配套 [collaboration.md](../collaboration.md) 的设计讨论。那份讲「做什么」，这份讲「改哪些函数」。
 

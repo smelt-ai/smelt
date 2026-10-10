@@ -59,6 +59,7 @@ fn make_acp_session_value(
         prompt_in_flight: AtomicBool::new(false),
         automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),

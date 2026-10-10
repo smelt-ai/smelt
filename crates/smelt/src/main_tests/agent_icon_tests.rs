@@ -39,5 +39,6 @@ fn every_agent_has_a_sidebar_icon() {
 fn non_agent_paths_are_not_claimed() {
     assert!(crate::agent_icon_svg("smelt-icons/not-an-agent.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/git-branch.svg").is_none());
+    assert!(crate::agent_icon_svg("smelt-icons/trash.svg").is_none());
     assert!(crate::agent_icon_svg("smelt-icons/agent-nope.svg").is_none());
 }

@@ -39,14 +39,6 @@ impl AutomationTriggerKindId {
         }
     }
 
-    pub fn event_hint(self) -> &'static str {
-        match self {
-            Self::Calendar => "按每日、工作日或每周的指定时间执行",
-            Self::Interval => "按固定间隔执行，可限制星期和时段",
-            Self::Webhook => "接收本机程序的 HTTP 请求后执行",
-        }
-    }
-
     pub fn enabled_on(self, trigger: &AutomationTrigger) -> bool {
         match self {
             Self::Calendar => trigger
@@ -155,52 +147,32 @@ impl AutomationTriggerPresetId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutomationNotificationPreset {
-    Off,
     App,
-    Feishu,
-    AppAndFeishu,
+    Off,
 }
 
 impl AutomationNotificationPreset {
-    pub const ALL: [Self; 4] = [Self::Off, Self::App, Self::Feishu, Self::AppAndFeishu];
+    pub const ALL: [Self; 2] = [Self::App, Self::Off];
 
     pub fn from_sinks(sinks: &[AutomationSink]) -> Self {
-        let off = sinks.iter().any(AutomationSink::is_off);
-        let app = sinks.iter().any(AutomationSink::is_local);
-        let feishu = sinks
-            .iter()
-            .any(|sink| matches!(sink, AutomationSink::Feishu { .. }));
-        if off {
-            Self::Off
-        } else if app && feishu {
-            Self::AppAndFeishu
-        } else if feishu {
-            Self::Feishu
-        } else {
+        if automation_notifies_app(sinks) {
             Self::App
+        } else {
+            Self::Off
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Off => "关闭",
-            Self::App => "应用",
-            Self::Feishu => "飞书",
-            Self::AppAndFeishu => "应用 + 飞书",
+            Self::App => "应用内通知",
+            Self::Off => "不通知",
         }
     }
 
-    pub fn includes_feishu(self) -> bool {
-        matches!(self, Self::Feishu | Self::AppAndFeishu)
-    }
-
-    pub fn to_sinks(self, feishu_chat_id: &str) -> Vec<AutomationSink> {
-        let chat_id = feishu_chat_id.trim().to_string();
+    pub fn to_sinks(self) -> Vec<AutomationSink> {
         match self {
-            Self::Off => vec![AutomationSink::Off],
             Self::App => vec![AutomationSink::Local],
-            Self::Feishu => vec![AutomationSink::Feishu { chat_id }],
-            Self::AppAndFeishu => vec![AutomationSink::Local, AutomationSink::Feishu { chat_id }],
+            Self::Off => vec![AutomationSink::Off],
         }
     }
 }
@@ -415,7 +387,14 @@ mod tests {
     }
 
     #[test]
-    fn notification_preset_round_trips_app_feishu_and_off() {
+    fn notification_preset_only_offers_targets_that_deliver() {
+        assert_eq!(
+            AutomationNotificationPreset::ALL,
+            [
+                AutomationNotificationPreset::App,
+                AutomationNotificationPreset::Off
+            ]
+        );
         assert_eq!(
             AutomationNotificationPreset::from_sinks(&[]),
             AutomationNotificationPreset::App
@@ -428,48 +407,13 @@ mod tests {
             AutomationNotificationPreset::from_sinks(&[AutomationSink::Off]),
             AutomationNotificationPreset::Off
         );
-        assert_eq!(
-            AutomationNotificationPreset::from_sinks(&[AutomationSink::Feishu {
-                chat_id: "oc_1".into(),
-            }]),
-            AutomationNotificationPreset::Feishu
-        );
-        assert_eq!(
-            AutomationNotificationPreset::from_sinks(&[
-                AutomationSink::Local,
-                AutomationSink::Feishu {
-                    chat_id: String::new(),
-                },
-            ]),
-            AutomationNotificationPreset::AppAndFeishu
-        );
-        assert_eq!(
-            AutomationNotificationPreset::Off.to_sinks("oc_1"),
-            vec![AutomationSink::Off]
-        );
-        assert_eq!(
-            AutomationNotificationPreset::Feishu.to_sinks(" oc_9 "),
-            vec![AutomationSink::Feishu {
-                chat_id: "oc_9".into(),
-            }]
-        );
-        assert_eq!(AutomationNotificationPreset::App.label(), "应用");
-        assert_eq!(AutomationNotificationPreset::Feishu.label(), "飞书");
-        assert_eq!(
-            AutomationNotificationPreset::AppAndFeishu.label(),
-            "应用 + 飞书"
-        );
-        assert!(automation_notifies_app(&[]));
-        assert!(automation_notifies_app(&[AutomationSink::Local]));
-        assert!(!automation_notifies_app(&[AutomationSink::Off]));
-        assert!(!automation_notifies_app(&[AutomationSink::Feishu {
-            chat_id: "oc_1".into(),
-        }]));
-        assert!(automation_notifies_app(&[
-            AutomationSink::Local,
-            AutomationSink::Feishu {
-                chat_id: "oc_1".into(),
-            }
-        ]));
+        for preset in AutomationNotificationPreset::ALL {
+            assert_eq!(
+                AutomationNotificationPreset::from_sinks(&preset.to_sinks()),
+                preset
+            );
+        }
+        assert_eq!(AutomationNotificationPreset::App.label(), "应用内通知");
+        assert_eq!(AutomationNotificationPreset::Off.label(), "不通知");
     }
 }

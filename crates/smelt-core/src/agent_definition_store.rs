@@ -262,11 +262,16 @@ fn agent_workspace_skill_roots(definition: &AgentDefinition) -> Vec<PathBuf> {
 /// 攒下的文件、笔记、AGENTS.md 下次开对话就找不到了。space 根让这些东西真正
 /// 属于智能体。
 pub fn agent_space_root(agent_definition_id: &str) -> Option<PathBuf> {
+    agent_space_in(&agent_spaces_root()?, agent_definition_id)
+}
+
+/// `spaces_root` 下这个智能体的 space；id 不能安全地当目录名时返回 `None`。
+pub fn agent_space_in(spaces_root: &Path, agent_definition_id: &str) -> Option<PathBuf> {
     let id = agent_definition_id.trim();
     if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
         return None;
     }
-    smelt_paths::smelt_home().map(|home| home.join("agents").join(id))
+    Some(spaces_root.join(id))
 }
 
 pub fn ensure_agent_space(agent_definition_id: &str) -> Option<PathBuf> {
@@ -351,6 +356,27 @@ pub fn build_agent_instructions(definition: &AgentDefinition) -> String {
         (true, Some(context)) => context,
         (false, None) => prompt.to_string(),
         (false, Some(context)) => format!("{prompt}\n\n{context}"),
+    }
+}
+
+/// 自动化运行带的指令：和对话同一份工作方式与绑定上下文，再说明 space 在哪。
+/// 对话开在 space 根，自动化开在 space 下的子目录，不说的话它不会往上找。
+pub fn build_automation_run_instructions(
+    definition: &AgentDefinition,
+    space: Option<&Path>,
+) -> String {
+    let instructions = build_agent_instructions(definition);
+    let Some(space) = space else {
+        return instructions;
+    };
+    let section = format!(
+        "## 你的空间\n\n你在对话里攒下的文件都在 {}，可以直接用绝对路径读写。这次是自动化运行，当前工作目录是它下面这条自动化自己的子目录，产出写在这里。\n",
+        space.display()
+    );
+    if instructions.is_empty() {
+        section
+    } else {
+        format!("{instructions}\n\n{section}")
     }
 }
 

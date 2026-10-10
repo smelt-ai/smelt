@@ -233,7 +233,7 @@ session_id + turn_id + notification_kind + request_id
 | ACP permission / elicitation / completion | 是 | 协议事实，最高可信度 |
 | agent 官方 hook | 是 | 结构化生命周期事实 |
 | 进程退出 | 可进入完成/失败 | 必须结合退出码和当前 turn |
-| OSC 标题（含 spinner） | 否 | 仅作任务标题等展示元数据 |
+| OSC 标题（含 spinner） | 否 | 终端标题栏自己的 OSC，不是会话名 |
 | OSC 9/99/777 | 否 | 仅产生 `Informational` 通知 |
 | BEL | 否 | `Informational` 通知 |
 

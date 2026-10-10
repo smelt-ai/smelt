@@ -787,8 +787,8 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         cli_program: "codex",
         label: "Codex",
         quick_terminal_label: "Codex",
-        // 标题策略归 CLI 自己所有：Smelt 像普通终端一样接收其完整 OSC 0/2，
-        // 不通过启动参数压掉 spinner、项目名或其它 provider 自定义组成部分。
+        // 启动命令不改写 CLI 自己的标题配置。侧栏不读 OSC。
+        // 旧的 `tui.terminal_title=["thread-title"]` 只留在下面的迁移名单里。
         quick_terminal_cmd: "codex --dangerously-bypass-approvals-and-sandbox",
         previous_quick_terminal_cmds: &[concat!(
             "codex --dangerously-bypass-approvals-and-sandbox ",

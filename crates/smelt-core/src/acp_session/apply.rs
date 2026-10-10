@@ -27,6 +27,37 @@ pub fn acknowledge_composer_restore(state: &mut AcpSessionState, revision: u64) 
     true
 }
 
+/// 立即发送已经认领了这一条。`clear_queue` 还回来的原文里拿掉一次出现，
+/// 不能再进输入框。没还回来说明 provider 已经把它吃掉或根本没进队列，调用方不得再发。
+pub fn take_claimed_queue_text(texts: &mut Vec<String>, claimed: &str) -> bool {
+    let Some(ix) = texts.iter().position(|text| text == claimed) else {
+        return false;
+    };
+    texts.remove(ix);
+    true
+}
+
+/// 活队列里第一次出现的文本。steering 附图跟着走；follow-up 没有附图。
+pub fn queued_item_images(
+    state: &AcpSessionState,
+    text: &str,
+) -> Option<(Vec<crate::acp_chat::AcpImage>, bool)> {
+    if let Some(ix) = state.queued_steering.iter().position(|item| item == text) {
+        return Some((
+            state
+                .queued_steering_images
+                .get(ix)
+                .cloned()
+                .unwrap_or_default(),
+            false,
+        ));
+    }
+    if state.queued_follow_up.iter().any(|item| item == text) {
+        return Some((Vec::new(), true));
+    }
+    None
+}
+
 /// 把没被收下的草稿还回输入框。文本和图片是同一份，revision 单调增加。
 /// 只有图、没有字也要还回去。
 pub fn queue_composer_restore(

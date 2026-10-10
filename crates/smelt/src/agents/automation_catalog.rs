@@ -34,7 +34,7 @@ impl Workspace {
                     .border_color(crate::ui_theme::card_stroke())
                     .child(catalog_tab_pill(
                         "automations-tab-tasks",
-                        "自动化任务",
+                        "自动化",
                         tab == AutomationCatalogTab::Tasks,
                         move |_, _, cx| {
                             tasks_entity.update(cx, |workspace, cx| {
@@ -58,7 +58,6 @@ impl Workspace {
             .child(
                 Button::new("automations-add")
                     .primary()
-                    .small()
                     .icon(IconName::Plus)
                     .label("新建自动化")
                     .on_click(move |_, window, cx| {
@@ -114,7 +113,7 @@ impl Workspace {
                     div()
                         .text_sm()
                         .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child("还没有自动化任务，可从下面的模板添加。"),
+                        .child("还没有自动化，可从下面的模板添加。"),
                 )
             })
             .child(self.render_automation_templates(entity, cx))
@@ -209,13 +208,22 @@ impl Workspace {
             agent_missing,
             running,
         );
+        let now = Local::now().timestamp();
         let next_run = format_next_run_cell(
             config
                 .automation_state_for(&automation.id)
                 .and_then(|state| state.next_run_at),
             enabled,
-            Local::now().timestamp(),
+            now,
         );
+        let latest_run = config.latest_automation_run(&automation.id);
+        let latest_run_id = latest_run.map(|run| run.id.clone());
+        let last_run = format_last_run_cell(
+            latest_run.map(|run| (run.status, run.finished_at.unwrap_or(run.created_at))),
+            now,
+        );
+        let last_run_failed = latest_run
+            .is_some_and(|run| run.status == smelt_core::automation::AutomationRunStatus::Failed);
         let action_summary = match &automation.action {
             settings::AutomationAction::Agent { .. } => agent
                 .as_ref()
@@ -238,8 +246,14 @@ impl Workspace {
         let schedule = automation.trigger.summary();
         let open_id = automation.id.clone();
         let open_entity = entity.clone();
-        let menu =
-            render_automation_row_menu(&automation.id, enabled, can_run, cancel_run_id, entity);
+        let menu = render_automation_row_menu(
+            &automation.id,
+            enabled,
+            can_run,
+            cancel_run_id,
+            latest_run_id,
+            entity,
+        );
 
         div()
             .id(format!("automation-row-{}", automation.id))
@@ -289,6 +303,29 @@ impl Workspace {
                     .text_color(rgb(crate::ui_theme::text_muted()))
                     .truncate()
                     .child(schedule),
+            )
+            .child(
+                automation_fixed_col(AUTOMATION_COL_LAST)
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .when(last_run_failed, |cell| {
+                        cell.child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(rgb(crate::ui_theme::red())),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(crate::ui_theme::text_muted()))
+                            .truncate()
+                            .child(last_run),
+                    ),
             )
             .child(
                 automation_fixed_col(AUTOMATION_COL_NEXT)
@@ -391,7 +428,7 @@ impl Workspace {
 
     fn render_template_filters(&self, entity: Entity<Workspace>) -> AnyElement {
         let selected = self.automation_surface.template_filter;
-        let mut filters = vec![(None, "所有的")];
+        let mut filters = vec![(None, "全部")];
         filters.extend(
             AutomationTemplateCategory::ALL
                 .into_iter()
@@ -459,6 +496,7 @@ fn automation_catalog_column() -> Div {
 }
 
 const AUTOMATION_COL_SCHEDULE: f32 = 168.;
+const AUTOMATION_COL_LAST: f32 = 120.;
 const AUTOMATION_COL_NEXT: f32 = 96.;
 const AUTOMATION_COL_STATUS: f32 = 108.;
 const AUTOMATION_COL_MENU: f32 = 32.;
@@ -512,13 +550,19 @@ fn automation_table_header() -> AnyElement {
                 .min_w_0()
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
-                .child("自动化任务"),
+                .child("自动化"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_SCHEDULE)
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child("日程"),
+        )
+        .child(
+            automation_fixed_col(AUTOMATION_COL_LAST)
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child("上次运行"),
         )
         .child(
             automation_fixed_col(AUTOMATION_COL_NEXT)
@@ -541,15 +585,15 @@ fn render_automation_row_menu(
     enabled: bool,
     can_run: bool,
     cancel_run_id: Option<String>,
+    latest_run_id: Option<String>,
     entity: Entity<Workspace>,
 ) -> AnyElement {
     let run_id = automation_id.to_string();
     let toggle_id = automation_id.to_string();
-    let task_id = automation_id.to_string();
     let delete_id = automation_id.to_string();
     let run_entity = entity.clone();
     let toggle_entity = entity.clone();
-    let task_entity = entity.clone();
+    let view_entity = entity.clone();
     let delete_entity = entity.clone();
     let cancel_entity = entity;
     Button::new(format!("automation-row-more-{automation_id}"))
@@ -559,7 +603,7 @@ fn render_automation_row_menu(
         .dropdown_menu(move |mut menu, _, _| {
             if let Some(active_run_id) = cancel_run_id.clone() {
                 let entity = cancel_entity.clone();
-                menu = menu.item(PopupMenuItem::new("停止").icon(IconName::CircleX).on_click(
+                menu = menu.item(PopupMenuItem::new("停止").icon(IconName::Close).on_click(
                     move |_, _, cx| {
                         let run_id = active_run_id.clone();
                         entity.update(cx, |workspace, cx| {
@@ -582,16 +626,17 @@ fn render_automation_row_menu(
                         }),
                 );
             }
-            let task_entity = task_entity.clone();
-            let task_id = task_id.clone();
-            menu = menu.item(PopupMenuItem::new("查看运行").icon(IconName::Eye).on_click(
-                move |_, _, cx| {
-                    let id = task_id.clone();
-                    task_entity.update(cx, |workspace, cx| {
-                        workspace.open_catalog_automation_task(id, cx);
-                    });
-                },
-            ));
+            if let Some(latest_run_id) = latest_run_id.clone() {
+                let entity = view_entity.clone();
+                menu = menu.item(PopupMenuItem::new("查看运行").icon(IconName::Eye).on_click(
+                    move |_, window, cx| {
+                        let run_id = latest_run_id.clone();
+                        entity.update(cx, |workspace, cx| {
+                            workspace.open_catalog_automation_run(run_id, window, cx);
+                        });
+                    },
+                ));
+            }
             let toggle_entity = toggle_entity.clone();
             let toggle_id = toggle_id.clone();
             menu = menu.item(
@@ -606,11 +651,11 @@ fn render_automation_row_menu(
             let delete_id = delete_id.clone();
             menu.item(
                 PopupMenuItem::new("删除自动化")
-                    .icon(IconName::Delete)
+                    .icon(crate::trash_icon())
                     .on_click(move |_, _, cx| {
                         let id = delete_id.clone();
                         delete_entity.update(cx, |workspace, cx| {
-                            workspace.delete_automation(id, cx);
+                            workspace.start_delete_automation(id, cx);
                         });
                     }),
             )

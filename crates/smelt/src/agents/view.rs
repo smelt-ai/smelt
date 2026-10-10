@@ -4,12 +4,61 @@
 use super::*;
 
 impl Workspace {
+    pub(crate) fn render_delete_agent_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let Some(target) = self.agent_surface.pending_delete.as_ref() else {
+            return div();
+        };
+        let (fg, muted) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let kept = if target.conversations == 0 {
+            String::new()
+        } else {
+            format!("已有的 {} 段对话会保留。", target.conversations)
+        };
+        let content = div()
+            .flex()
+            .flex_col()
+            .child(Self::modal_title(fg, "确定删除这个智能体吗？"))
+            .child(div().text_sm().text_color(muted).child(format!(
+                "将删除智能体「{}」和它的指令、插件设置。{kept}此操作不可撤销。",
+                target.name
+            )))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-delete-agent",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_delete_agent(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-delete-agent",
+                        "确定删除",
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_delete_agent(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(420., true, content, cx)
+    }
+
     pub(super) fn render_agent_product_navigation_row(
         &self,
         id: &'static str,
         label: &'static str,
         icon: IconName,
-        count: usize,
+        attention: bool,
         route: WorkspaceRoute,
         entity: Entity<Workspace>,
     ) -> AnyElement {
@@ -48,12 +97,13 @@ impl Workspace {
                     }))
                     .child(label),
             )
-            .when(count > 0, |row| {
+            .when(attention, |row| {
                 row.child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_faint()))
-                        .child(count.to_string()),
+                        .flex_shrink_0()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(crate::ui_theme::red())),
                 )
             })
             .on_click({
@@ -67,8 +117,97 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 侧栏最顶「聊天」：动作行，不是路由。点一下就用 Pi 新开一段对话。
-    pub(super) fn render_workbench_chat_row(&self, entity: Entity<Workspace>) -> AnyElement {
+    /// 侧栏「能力库」：以后放智能体的插件、技能、MCP 这类配置。
+    /// 三个字，和「智能体」「自动化」对齐。现在先打开已有的模型和插件窗口。不是路由。
+    pub(super) fn render_customize_row(&self, entity: Entity<Workspace>) -> AnyElement {
+        div()
+            .id("customize-route")
+            .h(px(32.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(crate::ui_theme::row_radius())
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+            .child(
+                Icon::new(IconName::LayoutDashboard)
+                    .size(px(16.))
+                    .text_color(rgb(crate::ui_theme::text_muted())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                    .font_medium()
+                    .text_color(rgb(crate::ui_theme::text_mid()))
+                    .child("能力库"),
+            )
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |workspace, cx| {
+                    workspace.open_scoped_settings_section(
+                        settings::SettingsScope::AgentSetup,
+                        settings::SettingsSection::PiModel,
+                        cx,
+                    );
+                });
+            })
+            .into_any_element()
+    }
+
+    /// 侧栏最顶「新对话」：跟某个智能体开一场，不是裸引擎。
+    ///
+    /// 有默认时单击直接开，右侧箭头只换默认。没有默认时弹出可对话的智能体。
+    /// 一个都没有就去空状态，不偷偷开 Pi。
+    pub(super) fn render_workbench_chat_row(
+        &self,
+        entity: Entity<Workspace>,
+        cx: &App,
+    ) -> AnyElement {
+        let stored = stored_default_conversation_agent();
+        let resolution = smelt_core::default_conversation::resolve_new_conversation(
+            &cx.global::<settings::AgentHostState>().agents,
+            stored.as_deref(),
+            self.agent_surface.conversation_draft_id.as_deref(),
+        );
+        let default_name = resolution.default_name.as_deref().map(agent_display_name);
+        let label = new_conversation_row_label(default_name.as_deref());
+        let mark = default_name
+            .as_deref()
+            .map(|name| conversation_agent_mark(Some(name)));
+        match resolution.intent {
+            smelt_core::default_conversation::NewConversationIntent::PickAgent => self
+                .render_new_conversation_picker(
+                    entity,
+                    label,
+                    resolution.ready,
+                    resolution.clear_stored_default,
+                    cx,
+                ),
+            smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => self
+                .render_new_conversation_action(
+                    entity,
+                    label,
+                    mark,
+                    Some((agent_id, resolution.ready)),
+                ),
+            smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
+                self.render_new_conversation_action(entity, label, mark, None)
+            }
+        }
+    }
+
+    fn render_new_conversation_action(
+        &self,
+        entity: Entity<Workspace>,
+        label: String,
+        mark: Option<String>,
+        switch: Option<(
+            String,
+            Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+        )>,
+    ) -> AnyElement {
+        let click_entity = entity.clone();
         div()
             .id("workbench-chat")
             .h(px(32.))
@@ -79,347 +218,243 @@ impl Workspace {
             .rounded(crate::ui_theme::row_radius())
             .cursor_pointer()
             .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-            .child(
-                Icon::empty()
-                    .path("smelt-icons/square-pen.svg")
-                    .size(px(16.))
-                    .text_color(rgb(crate::ui_theme::text_muted())),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
-                    .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_mid()))
-                    .child("聊天"),
-            )
-            .on_click({
-                move |_, window, cx| {
-                    entity.update(cx, |workspace, cx| {
-                        workspace.start_workbench_chat(window, cx)
-                    });
-                }
+            .child(new_conversation_row_body(label, mark).flex_1())
+            .when_some(switch, |row, (current_id, ready)| {
+                let menu_entity = entity.clone();
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new("workbench-chat-switch")
+                                .ghost()
+                                .size(px(22.))
+                                .icon(IconName::ChevronDown)
+                                .tooltip("更换默认智能体")
+                                // 这一行在侧栏顶上。Bottom* 会往上翻进红绿灯，
+                                // 菜单要向下展开，并贴着箭头右缘，避免冲出侧栏。
+                                .dropdown_menu_with_anchor(
+                                    Anchor::TopRight,
+                                    move |menu, _, _| {
+                                        fill_conversation_agent_menu(
+                                            menu,
+                                            ready.clone(),
+                                            Some(current_id.clone()),
+                                            false,
+                                            menu_entity.clone(),
+                                        )
+                                    },
+                                ),
+                        ),
+                )
+            })
+            .on_click(move |_, window, cx| {
+                click_entity.update(cx, |workspace, cx| {
+                    workspace.begin_new_conversation(window, cx)
+                });
             })
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn render_new_conversation_picker(
+        &self,
+        entity: Entity<Workspace>,
+        label: String,
+        ready: Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+        clear_stored: bool,
+        cx: &App,
+    ) -> AnyElement {
+        div()
+            .id("workbench-chat")
+            .h(px(32.))
+            .rounded(crate::ui_theme::row_radius())
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+            .child(
+                Button::new("workbench-chat-pick")
+                    .custom(ButtonCustomVariant::new(cx))
+                    .h(px(32.))
+                    .w_full()
+                    .px_2()
+                    .cursor_pointer()
+                    .child(new_conversation_row_body(label, None).w_full())
+                    // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                        if clear_stored {
+                            clear_default_conversation_agent();
+                        }
+                        fill_conversation_agent_menu(
+                            menu,
+                            ready.clone(),
+                            None,
+                            true,
+                            entity.clone(),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_product_conversation_nav(
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
-        animate_running: bool,
+        _animate_running: bool,
         cx: &App,
     ) -> AnyElement {
         let config = cx.global::<settings::AgentHostState>();
-        let agents: Vec<(String, String)> = config
-            .agents
-            .iter()
-            .map(|agent| (agent.id.clone(), agent.name.clone()))
-            .collect();
-        let conversations: Vec<AgentConversationInput> = self
+        let product: Vec<usize> = self
             .sessions
             .iter()
             .enumerate()
             .filter(|(_, session)| session.is_agent_conversation(cx))
-            .map(|(ix, session)| {
-                let cwd = session.cwd(cx);
-                AgentConversationInput::new(
-                    ix,
-                    session.agent_definition_id.as_deref(),
-                    cwd.as_deref(),
-                )
-            })
+            .map(|(ix, _)| ix)
             .collect();
-        let groups = group_agent_conversations(&agents, &conversations);
+        let updated: Vec<u64> = product
+            .iter()
+            .map(|&ix| self.sessions[ix].effective_updated_at(cx))
+            .collect();
+        let ixes: Vec<usize> = recent_conversation_order(&updated)
+            .into_iter()
+            .map(|order| product[order])
+            .collect();
         let mut rows = Vec::new();
-        for group in &groups {
-            let collapsed =
-                !group.agent_id.is_empty() && self.collapsed_agents.contains(&group.agent_id);
-            let group_active = group.session_ixes.iter().any(|&ix| {
-                self.sessions.get(ix).is_some_and(|session| {
-                    session.active_acp().is_some_and(|view| {
-                        self.active_tab() == &WorkspaceRoute::Agents
-                            && self.nav.agents().conversation_sid()
-                                == Some(view.read(cx).session_id())
-                    })
-                })
+        for &ix in &ixes {
+            let Some(session) = self.sessions.get(ix) else {
+                continue;
+            };
+            let Some(view) = session.active_acp() else {
+                continue;
+            };
+            let sid = view.read(cx).session_id().to_string();
+            let selected = self.active_tab() == &WorkspaceRoute::Agents
+                && self.nav.agents().conversation_sid() == Some(sid.as_str());
+            let title = conversation_row_title(
+                session.custom_title.as_deref(),
+                view.read(cx).auto_title().as_deref(),
+            );
+            let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
+            let bound = bound_agent_definition_id(
+                session.agent_definition_id.as_deref(),
+                session.automation_id.as_deref(),
+            );
+            let agent_name = bound.and_then(|id| {
+                config
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == id)
+                    .map(|agent| agent_display_name(&agent.name))
             });
-            let group_status = agent_conversation_group_status(&group.session_ixes, statuses);
-            let toggle_id = group.agent_id.clone();
-            let toggle_entity = entity.clone();
-            let can_start = !group.agent_id.is_empty();
-            let start_id = group.agent_id.clone();
-            let start_entity = entity.clone();
+            let mark = conversation_agent_mark(agent_name.as_deref());
+            let open_ix = ix;
+            let open_entity = entity.clone();
+            let close_entity = entity.clone();
+            let rename_entity = entity.clone();
             rows.push(
                 div()
-                    .id(format!("agent-conv-header-{}", group.agent_id))
-                    .group(AGENT_CONV_HEADER_GROUP)
+                    .id(format!("product-conversation-{sid}"))
+                    .group("product-conv-row")
                     .h(px(32.))
                     .px_2()
                     .flex()
                     .items_center()
                     .gap_2()
                     .rounded(crate::ui_theme::row_radius())
-                    .when(can_start, |header| {
-                        header
-                            .cursor_pointer()
-                            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                    .cursor_pointer()
+                    .map(|row| {
+                        if selected {
+                            row.bg(rgb(crate::ui_theme::bg_selected()))
+                        } else {
+                            row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                        }
                     })
                     .child(
                         div()
-                            .w(px(14.))
                             .flex_shrink_0()
+                            .size(px(18.))
+                            .rounded_full()
+                            .bg(rgb(crate::ui_theme::bg_selected()))
                             .flex()
+                            .items_center()
                             .justify_center()
-                            .children(can_start.then(|| {
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .size(px(13.))
-                            })),
+                            .text_size(px(10.))
+                            .font_medium()
+                            .text_color(conversation_icon_color(status, None))
+                            .child(mark),
                     )
-                    .child(Icon::new(IconName::Bot).size(px(15.)).text_color(rgb(
-                        if group_active {
-                            crate::ui_theme::text_bright()
-                        } else {
-                            crate::ui_theme::text_muted()
-                        },
-                    )))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
-                            .font_semibold()
-                            .text_color(rgb(if group_active {
+                            .text_color(rgb(if selected {
                                 crate::ui_theme::text_bright()
                             } else {
-                                crate::ui_theme::text_mid()
+                                crate::ui_theme::text()
                             }))
                             .truncate()
-                            .child(group.agent_name.clone()),
+                            .child(title),
                     )
-                    .when(group_status != AgentStatus::Idle, |header| {
-                        header.child(
+                    .children(
+                        crate::session_list::row::session_row_status_label(status).map(|label| {
                             div()
-                                .id(format!("agent-conv-status-dot-{}", group.agent_id))
                                 .flex_shrink_0()
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(crate::ui_theme::session_dot_color(group_status)),
-                        )
-                    })
+                                .text_size(px(11.))
+                                .text_color(crate::ui_theme::session_dot_color(status))
+                                .child(label)
+                        }),
+                    )
                     .child(
                         div()
-                            .relative()
                             .flex_shrink_0()
-                            .w(px(28.))
-                            .h(px(20.))
+                            .opacity(0.0)
+                            .group_hover("product-conv-row", |s| s.opacity(1.0))
                             .child(
                                 div()
-                                    .absolute()
-                                    .inset_0()
+                                    .id(format!("close-product-conversation-{sid}"))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(crate::ui_theme::text_faint()))
-                                    .group_hover(AGENT_CONV_HEADER_GROUP, |style| {
-                                        style.opacity(if can_start { 0.0 } else { 1.0 })
+                                    .size(px(20.))
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .text_color(rgb(crate::ui_theme::text_muted()))
+                                    .hover(|d| d.text_color(rgb(crate::ui_theme::red())))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
                                     })
-                                    .child(group.session_ixes.len().to_string()),
-                            )
-                            .when(can_start, |slot| {
-                                slot.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .opacity(0.0)
-                                        .group_hover(AGENT_CONV_HEADER_GROUP, |style| {
-                                            style.opacity(1.0)
-                                        })
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .child(
-                                            Button::new(format!(
-                                                "agent-conv-new-{}",
-                                                group.agent_id
-                                            ))
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(IconName::Plus)
-                                            .on_click({
-                                                let start_id = start_id.clone();
-                                                let start_entity = start_entity.clone();
-                                                move |_, window, cx| {
-                                                    cx.stop_propagation();
-                                                    let id = start_id.clone();
-                                                    start_entity.update(cx, |workspace, cx| {
-                                                        workspace.start_agent_conversation(
-                                                            id, window, cx,
-                                                        )
-                                                    });
-                                                }
-                                            }),
-                                        ),
-                                )
-                            }),
+                                    .child(Icon::new(IconName::Close).size(px(14.)))
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        close_entity.update(cx, |workspace, cx| {
+                                            workspace.close_session(open_ix, cx)
+                                        });
+                                    }),
+                            ),
                     )
-                    .when(can_start, |header| {
-                        header.on_click(move |_, _, cx| {
-                            let id = toggle_id.clone();
-                            toggle_entity.update(cx, |workspace, cx| {
-                                workspace.toggle_agent_conversations_collapsed(&id, cx);
-                            });
-                        })
+                    .on_click(move |_, window, cx| {
+                        open_entity.update(cx, |workspace, cx| {
+                            workspace.open_agent_conversation(open_ix, window, cx)
+                        });
+                    })
+                    .context_menu(move |menu, _window, _cx| {
+                        let rename_entity = rename_entity.clone();
+                        menu.item(
+                            PopupMenuItem::new("重命名")
+                                .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
+                                .on_click(move |_ev, window, cx| {
+                                    rename_entity.update(cx, |workspace, cx| {
+                                        workspace.start_rename(
+                                            crate::RenameTarget::Session(open_ix),
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        )
                     })
                     .into_any_element(),
             );
-            if collapsed {
-                continue;
-            }
-            let mut body = div()
-                .relative()
-                .flex()
-                .flex_col()
-                .gap(px(1.))
-                .pb_1()
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(AGENT_GUIDE_LEFT))
-                        .top_0()
-                        .bottom(px(4.))
-                        .w(px(1.))
-                        .bg(crate::ui_theme::hairline()),
-                )
-                .pl(px(AGENT_SESSION_INDENT));
-            for &ix in &group.session_ixes {
-                let Some(session) = self.sessions.get(ix) else {
-                    continue;
-                };
-                let Some(view) = session.active_acp() else {
-                    continue;
-                };
-                let sid = view.read(cx).session_id().to_string();
-                let selected = self.active_tab() == &WorkspaceRoute::Agents
-                    && self.nav.agents().conversation_sid() == Some(sid.as_str());
-                let title = nested_agent_conversation_title(
-                    session.custom_title.as_deref(),
-                    view.read(cx).auto_title().as_deref(),
-                );
-                let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
-                let open_ix = ix;
-                let open_entity = entity.clone();
-                let close_entity = entity.clone();
-                let rename_entity = entity.clone();
-                body = body.child(
-                    div()
-                        .id(format!("product-conversation-{sid}"))
-                        .group("product-conv-row")
-                        .h(px(32.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(crate::ui_theme::row_radius())
-                        .cursor_pointer()
-                        .map(|row| {
-                            if selected {
-                                row.bg(rgb(crate::ui_theme::bg_selected()))
-                            } else {
-                                row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-                            }
-                        })
-                        .child(conversation_status_icon(
-                            &sid,
-                            status,
-                            animate_running,
-                            session.acp_kind(cx),
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
-                                .text_color(rgb(if selected {
-                                    crate::ui_theme::text_bright()
-                                } else {
-                                    crate::ui_theme::text()
-                                }))
-                                .truncate()
-                                .child(title),
-                        )
-                        .children(
-                            crate::session_list::row::session_row_status_label(status).map(
-                                |label| {
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(px(11.))
-                                        .text_color(crate::ui_theme::session_dot_color(status))
-                                        .child(label)
-                                },
-                            ),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .opacity(0.0)
-                                .group_hover("product-conv-row", |s| s.opacity(1.0))
-                                .child(
-                                    div()
-                                        .id(format!("close-product-conversation-{sid}"))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size(px(20.))
-                                        .rounded(px(4.))
-                                        .cursor_pointer()
-                                        .text_color(rgb(crate::ui_theme::text_muted()))
-                                        .hover(|d| d.text_color(rgb(crate::ui_theme::red())))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .child(Icon::new(IconName::CircleX).size(px(14.)))
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            close_entity.update(cx, |workspace, cx| {
-                                                workspace.close_session(open_ix, cx)
-                                            });
-                                        }),
-                                ),
-                        )
-                        .on_click(move |_, window, cx| {
-                            open_entity.update(cx, |workspace, cx| {
-                                workspace.open_agent_conversation(open_ix, window, cx)
-                            });
-                        })
-                        .context_menu(move |menu, _window, _cx| {
-                            let rename_entity = rename_entity.clone();
-                            menu.item(
-                                PopupMenuItem::new("重命名")
-                                    .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
-                                    .on_click(move |_ev, window, cx| {
-                                        rename_entity.update(cx, |workspace, cx| {
-                                            workspace.start_rename(
-                                                crate::RenameTarget::Session(open_ix),
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    }),
-                            )
-                        }),
-                );
-            }
-            rows.push(body.into_any_element());
         }
         div()
             .pt_1()
@@ -433,7 +468,7 @@ impl Workspace {
                     .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
                     .font_medium()
                     .text_color(rgb(crate::ui_theme::text_faint()))
-                    .child("聊天"),
+                    .child("最近对话"),
             )
             .map(|section| {
                 if rows.is_empty() {
@@ -445,7 +480,7 @@ impl Workspace {
                             .items_center()
                             .text_xs()
                             .text_color(rgb(crate::ui_theme::text_faint()))
-                            .child("还没有聊天"),
+                            .child("还没有对话"),
                     )
                 } else {
                     section.children(rows)
@@ -467,9 +502,8 @@ impl Workspace {
             let kind = *kind;
             Button::new("agents-add")
                 .primary()
-                .small()
                 .icon(IconName::Plus)
-                .label("新建")
+                .label("新建智能体")
                 .on_click(move |_, window, cx| {
                     add_entity.update(cx, |workspace, cx| workspace.create_agent(kind, window, cx));
                 })
@@ -477,9 +511,8 @@ impl Workspace {
         } else {
             Button::new("agents-add")
                 .primary()
-                .small()
                 .icon(IconName::Plus)
-                .label("新建")
+                .label("新建智能体")
                 .dropdown_menu(move |mut menu, _, _| {
                     for kind in agent_engine_kinds() {
                         let entity = add_entity.clone();
@@ -499,18 +532,107 @@ impl Workspace {
         };
         product_page_header(
             "智能体",
-            "定义它是谁、怎么做事。对话和自动化都会引用这里。",
             count,
             "个",
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(render_agent_settings_entry(entity))
                 .child(add_button)
                 .into_any_element(),
             left_guard,
         )
+    }
+
+    pub(super) fn render_agent_hub_header(
+        &self,
+        agent: &settings::AgentDefinition,
+        entity: Entity<Workspace>,
+        cx: &App,
+        left_guard: Pixels,
+    ) -> AnyElement {
+        let back_entity = entity.clone();
+        let talk_entity = entity.clone();
+        let talk_id = agent.id.clone();
+        let automation_count = cx
+            .global::<settings::AgentHostState>()
+            .automations_for(&agent.id)
+            .len();
+        let settings_entity = entity.clone();
+        let settings_id = agent.id.clone();
+        let delete_entity = entity;
+        let delete_id = agent.id.clone();
+        let delete_tooltip = if automation_count == 0 {
+            "删除智能体；已有对话会保留".to_string()
+        } else {
+            format!("请先删除关联的 {automation_count} 条自动化")
+        };
+        product_page_chrome(left_guard)
+            .gap_2()
+            .child(product_back_button(
+                "agent-hub-back",
+                "返回",
+                move |_, _, cx| {
+                    back_entity.update(cx, |workspace, cx| workspace.close_agent_definition(cx));
+                },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_lg()
+                    .font_semibold()
+                    .text_color(rgb(crate::ui_theme::text_bright()))
+                    .truncate()
+                    .child(agent_display_name(&agent.name)),
+            )
+            .child(
+                Button::new("agent-hub-edit-settings")
+                    .ghost()
+                    .small()
+                    .label("设置")
+                    .on_click(move |_, window, cx| {
+                        let id = settings_id.clone();
+                        settings_entity.update(cx, |workspace, cx| {
+                            workspace.open_agent_definition(id, window, cx);
+                        });
+                    }),
+            )
+            .child(
+                Button::new("agent-hub-new-conversation")
+                    .primary()
+                    .small()
+                    .label("新对话")
+                    .on_click(move |_, window, cx| {
+                        let id = talk_id.clone();
+                        talk_entity.update(cx, |workspace, cx| {
+                            workspace.start_agent_conversation(id, window, cx)
+                        });
+                    }),
+            )
+            .child(
+                Button::new("agent-hub-menu")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Ellipsis)
+                    .tooltip(delete_tooltip)
+                    .dropdown_menu(move |menu, _, _| {
+                        let entity = delete_entity.clone();
+                        let id = delete_id.clone();
+                        menu.item(
+                            PopupMenuItem::new("删除智能体")
+                                .icon(crate::trash_icon())
+                                .disabled(automation_count != 0)
+                                .on_click(move |_, _, cx| {
+                                    let id = id.clone();
+                                    entity.update(cx, |workspace, cx| {
+                                        workspace.start_delete_agent(id, cx)
+                                    });
+                                }),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 
     pub(super) fn render_agent_editor_header(
@@ -519,14 +641,24 @@ impl Workspace {
         entity: Entity<Workspace>,
         left_guard: Pixels,
     ) -> AnyElement {
-        let back_entity = entity;
+        let draft = self.editing_conversation_draft();
+        let back_entity = entity.clone();
+        let start_entity = entity;
         product_page_chrome(left_guard)
             .gap_2()
-            .child(product_back_button("agent-editor-back", move |_, _, cx| {
-                back_entity.update(cx, |workspace, cx| workspace.close_agent_definition(cx));
-            }))
+            .child(product_back_button(
+                "agent-editor-back",
+                if draft { "取消" } else { "返回" },
+                move |_, window, cx| {
+                    back_entity.update(cx, |workspace, cx| {
+                        workspace.close_agent_settings(window, cx)
+                    });
+                },
+            ))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -535,15 +667,33 @@ impl Workspace {
                             .text_lg()
                             .font_semibold()
                             .text_color(rgb(crate::ui_theme::text_bright()))
+                            .truncate()
                             .child(agent_display_name(name)),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(crate::ui_theme::text_muted()))
-                            .child("长期规则会带进对话和自动化，不会当成第一条消息。"),
+                            .child(if draft {
+                                "开始对话后会设为默认。返回会取消，不保留这个智能体。"
+                            } else {
+                                "长期规则会带进对话和自动化，不会当成第一条消息。"
+                            }),
                     ),
             )
+            .when(draft, |row| {
+                row.child(
+                    Button::new("agent-draft-start-conversation")
+                        .primary()
+                        .small()
+                        .label("开始对话")
+                        .on_click(move |_, window, cx| {
+                            start_entity.update(cx, |workspace, cx| {
+                                workspace.commit_conversation_draft(window, cx)
+                            });
+                        }),
+                )
+            })
             .into_any_element()
     }
 
@@ -638,7 +788,7 @@ impl Workspace {
                                     .text_xs()
                                     .text_color(rgb(crate::ui_theme::text_faint()))
                                     .child(agent_usage_summary(
-                                        self.agent_conversation_count(&id, cx),
+                                        self.agent_conversation_count(&id),
                                         automation_count,
                                     )),
                             ),
@@ -672,9 +822,7 @@ impl Workspace {
             )
             .on_click(move |_, window, cx| {
                 let id = open_id.clone();
-                open_entity.update(cx, |workspace, cx| {
-                    workspace.open_agent_definition(id, window, cx)
-                });
+                open_entity.update(cx, |workspace, cx| workspace.open_agent_hub(id, window, cx));
             })
             .into_any_element()
     }
@@ -720,7 +868,11 @@ impl Workspace {
                                     .text_sm()
                                     .text_color(rgb(crate::ui_theme::text_muted()))
                                     .text_center()
-                                    .child("创建一个可复用的智能体。之后对话和自动化都会引用它。"),
+                                    .child(if self.agent_surface.arm_conversation_on_create {
+                                        "创建一个可复用的智能体。开始对话后会用它开场，并设为默认。返回则不保留。"
+                                    } else {
+                                        "创建一个可复用的智能体。之后对话和自动化都会引用它。"
+                                    }),
                             ),
                     )
                     .child(
@@ -810,11 +962,11 @@ impl Workspace {
                 let disabled = automation_count != 0;
                 menu.item(
                     PopupMenuItem::new("删除智能体")
-                        .icon(IconName::Delete)
+                        .icon(crate::trash_icon())
                         .disabled(disabled)
                         .on_click(move |_, _, cx| {
                             let id = id.clone();
-                            entity.update(cx, |workspace, cx| workspace.delete_agent(id, cx));
+                            entity.update(cx, |workspace, cx| workspace.start_delete_agent(id, cx));
                         }),
                 )
             });
@@ -871,7 +1023,7 @@ impl Workspace {
                                                     .text_xs()
                                                     .text_color(rgb(crate::ui_theme::text_faint()))
                                                     .child(agent_usage_summary(
-                                                        self.agent_conversation_count(&agent.id, cx),
+                                                        self.agent_conversation_count(&agent.id),
                                                         automation_count,
                                                     )),
                                             ),
@@ -957,7 +1109,7 @@ impl Workspace {
             .children(background_image.as_deref().map(|path| {
                 crate::workspace_frame::background_image_layer(path, bg_image_opacity, cx)
             }))
-            .child(view)
+            .child(view.cached(gpui::StyleRefinement::default().size_full()))
             .into_any_element()
     }
 
@@ -969,16 +1121,197 @@ impl Workspace {
         self.render_product_conversation_view(view, cx)
     }
 
+    pub(super) fn render_agent_hub(
+        &self,
+        agent: &settings::AgentDefinition,
+        entity: Entity<Workspace>,
+        cx: &App,
+    ) -> AnyElement {
+        let config = cx.global::<settings::AgentHostState>();
+        let now = Local::now().timestamp();
+        let conversation_ixes: Vec<usize> = {
+            let owned: Vec<usize> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, session)| self.session_belongs_to_agent(session, &agent.id))
+                .map(|(ix, _)| ix)
+                .collect();
+            let updated: Vec<u64> = owned
+                .iter()
+                .map(|&ix| self.sessions[ix].effective_updated_at(cx))
+                .collect();
+            recent_conversation_order(&updated)
+                .into_iter()
+                .map(|order| owned[order])
+                .collect()
+        };
+        let automations = config.automations_for(&agent.id);
+        let prompt = agent_prompt_summary(&agent.prompt);
+        let settings_id = agent.id.clone();
+        let settings_entity = entity.clone();
+        let mut conversation_rows = Vec::new();
+        for ix in conversation_ixes {
+            let Some(session) = self.sessions.get(ix) else {
+                continue;
+            };
+            let Some(view) = session.active_acp() else {
+                continue;
+            };
+            let title = conversation_row_title(
+                session.custom_title.as_deref(),
+                view.read(cx).auto_title().as_deref(),
+            );
+            let project = (!session.is_agent_conversation(cx))
+                .then(|| session.cwd(cx))
+                .flatten()
+                .and_then(|cwd| {
+                    std::path::Path::new(&cwd)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                });
+            let time = format_relative_since(session.effective_updated_at(cx) as i64, now);
+            let meta = match project {
+                Some(project) => format!("{project} · {time}"),
+                None => time,
+            };
+            let open_entity = entity.clone();
+            conversation_rows.push(agent_hub_list_row(
+                format!("agent-hub-conversation-{ix}"),
+                title,
+                meta,
+                false,
+                move |_, window, cx| {
+                    open_entity.update(cx, |workspace, cx| {
+                        workspace.activate(ix, window, cx);
+                    });
+                },
+            ));
+        }
+        let mut automation_rows = Vec::new();
+        for automation in &automations {
+            let last = format_last_run_cell(
+                config
+                    .latest_automation_run(&automation.id)
+                    .map(|run| (run.status, run.finished_at.unwrap_or(run.created_at))),
+                now,
+            );
+            let failed = config
+                .latest_automation_run(&automation.id)
+                .is_some_and(|run| {
+                    run.status == smelt_core::automation::AutomationRunStatus::Failed
+                });
+            let open_id = automation.id.clone();
+            let open_entity = entity.clone();
+            automation_rows.push(agent_hub_list_row(
+                format!("agent-hub-automation-{}", automation.id),
+                if automation.name.trim().is_empty() {
+                    "未命名自动化".to_string()
+                } else {
+                    automation.name.clone()
+                },
+                format!("{} · {last}", automation.trigger.summary()),
+                failed,
+                move |_, window, cx| {
+                    let id = open_id.clone();
+                    open_entity.update(cx, |workspace, cx| {
+                        workspace.open_automation_editor(id, window, cx);
+                    });
+                },
+            ));
+        }
+        let create_entity = entity;
+        div()
+            .id("agent-hub-scroll")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .child(
+                agent_definition_column()
+                    .py_5()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .children(prompt.map(|summary| {
+                        let id = settings_id.clone();
+                        let entity = settings_entity.clone();
+                        div()
+                            .id("agent-hub-prompt")
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                let id = id.clone();
+                                entity.update(cx, |workspace, cx| {
+                                    workspace.open_agent_definition(id, window, cx);
+                                });
+                            })
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(crate::ui_theme::text_muted()))
+                                    .child(summary),
+                            )
+                            .into_any_element()
+                    }))
+                    .child(agent_surface_card().flex().flex_col().map(|card| {
+                        if conversation_rows.is_empty() {
+                            card.child(
+                                div()
+                                    .px_4()
+                                    .py_5()
+                                    .text_sm()
+                                    .text_color(rgb(crate::ui_theme::text_faint()))
+                                    .child("还没有对话。右上角可以开一段。"),
+                            )
+                        } else {
+                            card.children(conversation_rows)
+                        }
+                    }))
+                    .when(!automation_rows.is_empty(), |column| {
+                        column
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(rgb(crate::ui_theme::text_faint()))
+                                    .child("自动化"),
+                            )
+                            .child(
+                                agent_surface_card()
+                                    .flex()
+                                    .flex_col()
+                                    .children(automation_rows),
+                            )
+                    })
+                    .child(
+                        Button::new("agent-hub-new-automation")
+                            .ghost()
+                            .small()
+                            .label("用它新建自动化")
+                            .on_click(move |_, window, cx| {
+                                create_entity.update(cx, |workspace, cx| {
+                                    workspace.add_automation(window, cx);
+                                });
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn render_agents_page(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let agents = cx.global::<settings::AgentHostState>().agents.clone();
-        if self
+        let open_id = self
             .nav
             .agents()
-            .editor_id()
+            .hub_id()
+            .or_else(|| self.nav.agents().editor_id())
+            .map(str::to_string);
+        if open_id
+            .as_deref()
             .is_some_and(|id| agents.iter().all(|agent| agent.id != id))
         {
             self.nav.agents_mut().pop_to_root();
@@ -992,6 +1325,7 @@ impl Workspace {
         }
 
         let editor_id = self.nav.agents().editor_id().map(str::to_string);
+        let hub_id = self.nav.agents().hub_id().map(str::to_string);
         if editor_id.is_some() {
             self.ensure_agent_editor(window, cx);
         } else {
@@ -1007,6 +1341,17 @@ impl Workspace {
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
+                    self.render_agents_header(agents.len(), entity.clone(), cx, left_guard),
+                    self.render_agent_catalog(&agents, entity, cx),
+                ),
+            }
+        } else if let Some(hub_id) = hub_id {
+            match agents.iter().find(|agent| agent.id == hub_id).cloned() {
+                Some(agent) => (
+                    self.render_agent_hub_header(&agent, entity.clone(), cx, left_guard),
+                    self.render_agent_hub(&agent, entity, cx),
+                ),
+                None => (
                     self.render_agents_header(agents.len(), entity.clone(), cx, left_guard),
                     self.render_agent_catalog(&agents, entity, cx),
                 ),
@@ -1032,4 +1377,71 @@ impl Workspace {
             .child(body)
             .into_any_element()
     }
+}
+
+fn new_conversation_mark(mark: String) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(18.))
+        .rounded_full()
+        .bg(rgb(crate::ui_theme::bg_selected()))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(10.))
+        .font_medium()
+        .text_color(rgb(crate::ui_theme::text_muted()))
+        .child(mark)
+}
+
+fn new_conversation_row_body(label: String, mark: Option<String>) -> Div {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(match mark {
+            Some(mark) => new_conversation_mark(mark),
+            None => div().flex_shrink_0().child(
+                Icon::empty()
+                    .path("smelt-icons/square-pen.svg")
+                    .size(px(16.))
+                    .text_color(rgb(crate::ui_theme::text_muted())),
+            ),
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_mid()))
+                .child(label),
+        )
+}
+
+fn fill_conversation_agent_menu(
+    mut menu: PopupMenu,
+    ready: Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+    current_id: Option<String>,
+    start: bool,
+    entity: Entity<Workspace>,
+) -> PopupMenu {
+    for choice in ready {
+        let entity = entity.clone();
+        let id = choice.id;
+        let checked = !start && current_id.as_deref() == Some(id.as_str());
+        menu = menu.item(
+            PopupMenuItem::new(agent_display_name(&choice.name))
+                .checked(checked)
+                .on_click(move |_, window, cx| {
+                    let id = id.clone();
+                    entity.update(cx, |workspace, cx| {
+                        workspace.choose_default_conversation_agent(id, start, window, cx)
+                    });
+                }),
+        );
+    }
+    menu
 }

@@ -2,35 +2,34 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text,
-    apply_pending_config_selection, background_task_output_lines, background_task_summary,
-    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
-    build_tool_image_parts, cached_diff_stats, can_dispatch_prompt_immediately,
-    can_load_older_history, classify_attached_paths, compact_token_count, compact_tool_headline,
-    compact_tool_run_label, composer_config_section_label, composer_menu_sections,
-    composer_model_label, composer_model_scroll, composer_native_queue_shortcut_hint,
-    composer_next_turn_notice, composer_should_nest_models, composer_usage_breakdown,
-    config_selection_is_pending, config_update_failure_is_new, consecutive_compact_tool_run,
-    consume_composer_restore, conversation_input_for_submit, conversation_phase_label,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
+    RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text, apply_pending_config_selection,
+    background_task_output_lines, background_task_summary, build_conversation_layout,
+    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
+    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
+    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
+    composer_menu_sections, composer_model_label, composer_model_scroll,
+    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
+    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
+    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
     current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
     diff_stats_for_output, escape_html_tags_for_markdown, external_clipboard_image_paths,
     filter_trajectory_events, format_attached_paths, is_active_permission_selection,
     is_dispatch_in_flight, is_fresh_conversation_start, is_match_count_line,
     is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
-    loaded_entries_end, markdown_text_for_cwd, markdown_user_text_for_cwd, merge_rejected_prompt,
-    merge_snapshot_entries, model_label_with_provider, move_queue_item_to_front,
-    native_queue_from_snapshot, native_queue_item_kind_label, next_snapshot_prompt_gate,
+    loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
+    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
+    move_queue_item_to_front, native_queue_item_kind_label, next_snapshot_prompt_gate,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
-    pending_config_choice_names, plan_current_step, plan_native_immediate_send, preformatted_html,
-    process_group_header_label, process_group_label, progress_has_details, progress_summary,
-    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
-    resolve_restart_launch, restorable_gui_prompt, running_background_tasks, search_summary_text,
-    selected_provider_group, session_trajectory_events, should_apply_snapshot_revision,
-    should_cancel_for_immediate_prompt, should_clear_history_session_id_after_snapshot,
-    should_replace_session_title, should_seed_restored_height_hints, task_body_from_selection,
-    tool_card_default_expanded, tool_image_cache_matches_output, tool_output_has_content,
-    tool_result_summary, tool_uses_compact_process_row, trajectory_counts, usage_percent,
-    usage_warn_color,
+    pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
+    process_group_label, progress_has_details, progress_summary, provider_switch_value,
+    reconcile_pending_config_values, refresh_markdown_cache, resolve_restart_launch,
+    restorable_gui_prompt, running_background_tasks, search_summary_text, selected_provider_group,
+    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
+    task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
+    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
+    usage_percent, usage_ring_color, usage_warn_color,
 };
 use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -56,6 +55,49 @@ fn cleanshot_external_png_is_treated_as_an_image_attachment() {
     ];
 
     assert_eq!(external_clipboard_image_paths(&entries), vec![path]);
+}
+
+#[test]
+fn loaded_skills_are_not_rescanned_until_launch_or_cwd_changes() {
+    let launch = ConversationLaunchSpec::from_command("pi");
+    let cwd = Some("/tmp/project".to_string());
+    let cached = LoadedSkillsSnapshot {
+        launch: launch.clone(),
+        cwd: cwd.clone(),
+        skills: Vec::new(),
+    };
+
+    assert_eq!(
+        loaded_skills_refresh(ConversationAgentKind::Pi, &launch, &cwd, Some(&cached)),
+        LoadedSkillsRefresh::Keep,
+        "同一场 Pi 对话的静态重绘不能再扫技能目录"
+    );
+    assert_eq!(
+        loaded_skills_refresh(ConversationAgentKind::Pi, &launch, &cwd, None),
+        LoadedSkillsRefresh::Rescan
+    );
+    let changed_launch = launch.clone().with_env("SMELT_AGENT_PLUGIN_ARGS", "[]");
+    assert_eq!(
+        loaded_skills_refresh(
+            ConversationAgentKind::Pi,
+            &changed_launch,
+            &cwd,
+            Some(&cached)
+        ),
+        LoadedSkillsRefresh::Rescan
+    );
+    assert_eq!(
+        loaded_skills_refresh(ConversationAgentKind::Pi, &launch, &None, Some(&cached)),
+        LoadedSkillsRefresh::Rescan
+    );
+    assert_eq!(
+        loaded_skills_refresh(ConversationAgentKind::Claude, &launch, &cwd, Some(&cached)),
+        LoadedSkillsRefresh::Clear
+    );
+    assert_eq!(
+        loaded_skills_refresh(ConversationAgentKind::Claude, &launch, &cwd, None),
+        LoadedSkillsRefresh::Keep
+    );
 }
 
 #[test]
@@ -379,57 +421,23 @@ fn native_queue_copy_names_current_round_and_after_round() {
 }
 
 #[test]
-fn native_immediate_send_takes_the_clicked_item_and_returns_the_rest() {
-    let steering = vec!["换方向".to_string(), "补测试".to_string()];
-    let follow_up = vec!["总结".to_string()];
-    assert_eq!(
-        plan_native_immediate_send(&steering, &follow_up, 0)
-            .map(|plan| (plan.selected, plan.leftovers)),
-        Some(("换方向".into(), vec!["补测试".into(), "总结".into()]))
-    );
-    assert_eq!(
-        plan_native_immediate_send(&steering, &follow_up, 2)
-            .map(|plan| (plan.selected, plan.leftovers)),
-        Some(("总结".into(), vec!["换方向".into(), "补测试".into()]))
-    );
-    assert!(plan_native_immediate_send(&steering, &follow_up, 3).is_none());
-}
-
-#[test]
-fn native_immediate_send_drops_cancel_restore_so_the_prompt_is_not_duplicated() {
-    let skipped =
-        consume_composer_restore(0, 1, vec!["换方向".into(), "总结".into()], Vec::new(), true);
-    assert_eq!(skipped.last_revision, 1);
-    assert!(!skipped.skip_next);
-    assert_eq!(skipped.restore_texts, None);
-    assert_eq!(skipped.discarded_revision, Some(1));
-    assert_eq!(
-        native_queue_from_snapshot(true, vec!["换方向".into()], vec!["总结".into()]),
-        (Vec::new(), Vec::new())
-    );
-
-    let restored = consume_composer_restore(0, 1, vec!["换方向".into()], Vec::new(), false);
+fn composer_restore_keeps_only_a_newer_revision() {
+    let restored = consume_composer_restore(0, 1, vec!["换方向".into()], Vec::new());
+    assert_eq!(restored.last_revision, 1);
     assert_eq!(
         restored.restore_texts.as_deref(),
         Some(&["换方向".to_string()][..])
     );
-    assert_eq!(restored.discarded_revision, None);
-    assert_eq!(
-        native_queue_from_snapshot(false, vec!["换方向".into()], vec!["总结".into()]),
-        (vec!["换方向".into()], vec!["总结".into()])
-    );
 
-    let pending = consume_composer_restore(1, 1, vec!["换方向".into()], Vec::new(), true);
-    assert!(pending.skip_next);
-    assert_eq!(pending.last_revision, 1);
-    assert_eq!(pending.restore_texts, None);
-    assert_eq!(pending.discarded_revision, None);
+    let stale = consume_composer_restore(1, 1, vec!["换方向".into()], Vec::new());
+    assert_eq!(stale.last_revision, 1);
+    assert_eq!(stale.restore_texts, None);
 
     let image = smelt_core::acp_chat::AcpImage {
         mime: "image/png".into(),
         data_b64: "aGk=".into(),
     };
-    let images_only = consume_composer_restore(1, 2, Vec::new(), vec![image.clone()], false);
+    let images_only = consume_composer_restore(1, 2, Vec::new(), vec![image.clone()]);
     assert_eq!(images_only.restore_texts, None);
     assert_eq!(images_only.restore_images, Some(vec![image]));
 }
@@ -477,6 +485,9 @@ fn composer_usage_is_readonly_and_only_warns_when_high() {
     assert_eq!(usage_warn_color(6), None);
     assert_eq!(usage_warn_color(75), Some(ui_theme::yellow()));
     assert_eq!(usage_warn_color(90), Some(ui_theme::red()));
+    assert_eq!(usage_ring_color(38), ui_theme::blue());
+    assert_eq!(usage_ring_color(75), ui_theme::yellow());
+    assert_eq!(usage_ring_color(90), ui_theme::red());
     let conversation = composer_usage_breakdown(12_400, 200_000, None, None, ui_theme::accent());
     assert_eq!(conversation[0].label, "Conversation");
     assert_eq!(conversation[0].tokens, 12_400);
@@ -747,40 +758,6 @@ fn history_pagination_does_not_require_a_live_control_connection() {
     assert!(can_load_older_history(false, 900));
     assert!(!can_load_older_history(true, 900));
     assert!(!can_load_older_history(false, 0));
-}
-
-#[test]
-fn task_prompt_can_only_dispatch_to_an_idle_connected_session() {
-    assert!(can_dispatch_prompt_immediately(
-        &DaemonPhase::Idle,
-        false,
-        true,
-        true,
-    ));
-    assert!(!can_dispatch_prompt_immediately(
-        &DaemonPhase::Thinking,
-        false,
-        true,
-        true,
-    ));
-    assert!(!can_dispatch_prompt_immediately(
-        &DaemonPhase::Idle,
-        true,
-        true,
-        true,
-    ));
-    assert!(!can_dispatch_prompt_immediately(
-        &DaemonPhase::Idle,
-        false,
-        false,
-        true,
-    ));
-    assert!(!can_dispatch_prompt_immediately(
-        &DaemonPhase::Idle,
-        false,
-        true,
-        false,
-    ));
 }
 
 #[test]
@@ -1109,35 +1086,10 @@ fn unknown_plugin_submission_reuses_its_id_only_for_the_unchanged_draft() {
 }
 
 #[test]
-fn immediate_send_gap_looks_like_a_running_turn() {
+fn dispatch_stays_in_flight_until_the_prompt_and_cancel_both_settle() {
     assert!(is_dispatch_in_flight(true, false));
     assert!(is_dispatch_in_flight(false, true));
-    assert_eq!(
-        conversation_phase_label(
-            &DaemonPhase::Idle,
-            Some(AcpTurnOutcome::Cancelled),
-            true,
-            false,
-            false,
-            false,
-        ),
-        ("运行中", ui_theme::blue())
-    );
-    assert_eq!(
-        conversation_phase_label(
-            &DaemonPhase::Idle,
-            Some(AcpTurnOutcome::Cancelled),
-            false,
-            false,
-            false,
-            false,
-        ),
-        ("已停止", ui_theme::text_faint())
-    );
-    assert_eq!(
-        conversation_phase_label(&DaemonPhase::Connecting, None, true, false, true, false,),
-        ("新对话", ui_theme::text_faint())
-    );
+    assert!(!is_dispatch_in_flight(false, false));
 }
 
 #[test]
@@ -1177,15 +1129,6 @@ fn starting_or_ended_empty_snapshot_keeps_history_identity() {
         4,
         true,
     ));
-}
-
-#[test]
-fn streaming_snapshot_without_title_keeps_the_existing_title() {
-    // 流式输出每帧都在改正文。没带标题不能换成空，否则侧栏会落到首条消息，
-    // 下一帧标题回来再跳一次。空白标题同样不是新名字。
-    assert!(!should_replace_session_title(None));
-    assert!(!should_replace_session_title(Some("   ")));
-    assert!(should_replace_session_title(Some("UAT 问题修复")));
 }
 
 #[test]

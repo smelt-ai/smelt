@@ -19,7 +19,7 @@
 - 守护崩溃后的落盘恢复
 - 会话 JSONL 落盘 + SQLite 索引（列表分页 / 全文搜索）
 - smeltd JSON-RPC 结构化控制通道（状态从猜字节 → 协议事实）
-- Claude Code hook → `smelt-notify` 直写 smeltd socket（OSC 第二信源）
+- Claude Code hook → `smelt-notify` 直写 smeltd socket（状态的协议事实；OSC 不是信源）
 - 会话卡片：运行时长、token / 上下文余量
 
 ---
