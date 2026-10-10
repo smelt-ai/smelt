@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent_definition::AgentDefinition;
 use crate::agent_kind::{
     ConversationAgentKind, ConversationLaunchSpec, SMELT_AGENT_INSTRUCTIONS_ENV,
-    SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV,
+    SMELT_AGENT_MEMORY_DIR_ENV, SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV,
+    SMELT_AGENT_PLUGIN_ARGS_ENV, SMELT_USER_MEMORY_DIR_ENV,
 };
 use crate::automation::AutomationAction;
 use crate::sqlite_state;
@@ -206,6 +207,10 @@ pub fn prepare_agent_definition_launch(
                 .insert(SMELT_AGENT_INSTRUCTIONS_ENV.to_string(), instructions);
         }
     }
+    attach_agent_memory_dirs(
+        &mut launch,
+        definition.map(|definition| definition.id.as_str()),
+    );
     // 只要是产品智能体就走勾选式加载。哪怕一个都没勾也要下发参数，因为那时
     // 需要的恰恰是「关掉 Pi 的自动发现」——不下发就等于全量加载。
     if let Some(definition) = definition {
@@ -282,6 +287,46 @@ pub fn ensure_agent_space(agent_definition_id: &str) -> Option<PathBuf> {
     let dir = agent_space_root(agent_definition_id)?;
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// 按智能体身份写入两个记忆目录的启动变量；不是产品智能体就清掉。
+///
+/// 记忆目录完全由智能体 id 决定，所以恢复升级前保存的会话时也能补上，不必像说明、插件那样
+/// 沿用创建时的快照。只有产品智能体有记忆：普通会话上万一带着同名 env（设置里手配的、
+/// 旧快照留下的），也不能让它冒充某个智能体去读写记忆。
+pub fn attach_agent_memory_dirs(
+    launch: &mut ConversationLaunchSpec,
+    agent_definition_id: Option<&str>,
+) {
+    launch.env.remove(SMELT_AGENT_MEMORY_DIR_ENV);
+    launch.env.remove(SMELT_USER_MEMORY_DIR_ENV);
+    let Some(id) = agent_definition_id else {
+        return;
+    };
+    for (name, dir) in [
+        (SMELT_AGENT_MEMORY_DIR_ENV, agent_memory_dir(id)),
+        (SMELT_USER_MEMORY_DIR_ENV, user_memory_dir()),
+    ] {
+        // 启动器只读不建目录；建不出来就不下发，免得模型写记忆时才发现路径不存在。
+        if let Some(dir) = dir.filter(|dir| std::fs::create_dir_all(dir).is_ok()) {
+            launch
+                .env
+                .insert(name.to_string(), dir.to_string_lossy().into_owned());
+        }
+    }
+}
+
+/// 智能体自己的记忆目录：`~/.smelt/agents/<id>/memory`。
+///
+/// 跟着智能体走，不跟着工作目录走：同一个智能体在自己的 space、自动化目录还是用户项目
+/// 里运行，读写的都是这一份。格式和规则见 `docs/agent-memory.md`。
+pub fn agent_memory_dir(agent_definition_id: &str) -> Option<PathBuf> {
+    agent_space_root(agent_definition_id).map(|space| space.join("memory"))
+}
+
+/// 跨智能体的用户全局记忆：`~/.smelt/memory`，只放用户本人和用户纠正过的做法。
+pub fn user_memory_dir() -> Option<PathBuf> {
+    smelt_paths::smelt_home().map(|home| home.join("memory"))
 }
 
 fn agent_spaces_root() -> Option<PathBuf> {
@@ -662,6 +707,16 @@ pub fn delete_agent_definition_on(
         return Err(AgentDefinitionError::NotFound(format!(
             "智能体不存在: {id}"
         )));
+    }
+    // 记忆属于智能体本身，定义没了就一起删。space 里其余的是工作产物，不动。
+    if let Some(dir) = agent_memory_dir(&id) {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!("[agent] 删除智能体记忆失败 {}: {error}", dir.display());
+            }
+        }
     }
     Ok(())
 }
@@ -1151,6 +1206,96 @@ mod tests {
             launch.env.get(SMELT_AGENT_INSTRUCTIONS_ENV),
             Some(&"Review carefully".to_string())
         );
+    }
+
+    #[test]
+    fn product_agent_launch_carries_both_memory_directories() {
+        let definition = definition_with_context(&[], &[]);
+
+        let launch = prepare_agent_definition_launch(
+            ConversationAgentKind::Pi.default_launch(),
+            Some(&definition),
+        );
+
+        let agent_dir = agent_memory_dir("space-agent").unwrap();
+        let user_dir = user_memory_dir().unwrap();
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_MEMORY_DIR_ENV)
+                .map(PathBuf::from),
+            Some(agent_dir.clone())
+        );
+        assert_eq!(
+            launch.env.get(SMELT_USER_MEMORY_DIR_ENV).map(PathBuf::from),
+            Some(user_dir.clone())
+        );
+        // 启动器只读不建目录；目录不存在时模型第一次写记忆就会失败。
+        assert!(agent_dir.is_dir());
+        assert!(user_dir.is_dir());
+        assert!(agent_dir.starts_with(agent_space_root("space-agent").unwrap()));
+    }
+
+    /// 普通 Pi 会话没有记忆。设置里万一配了同名 env，也不能让它冒充产品智能体。
+    #[test]
+    fn plain_launch_never_carries_memory_directories() {
+        let mut launch = ConversationAgentKind::Pi.default_launch();
+        launch
+            .env
+            .insert(SMELT_AGENT_MEMORY_DIR_ENV.into(), "/tmp/stale".into());
+        launch
+            .env
+            .insert(SMELT_USER_MEMORY_DIR_ENV.into(), "/tmp/stale".into());
+
+        let launch = prepare_agent_definition_launch(launch, None);
+
+        assert_eq!(launch.env.get(SMELT_AGENT_MEMORY_DIR_ENV), None);
+        assert_eq!(launch.env.get(SMELT_USER_MEMORY_DIR_ENV), None);
+    }
+
+    /// 升级前保存的会话没有记忆变量；恢复时按它记录的智能体 id 补上。
+    #[test]
+    fn restored_sessions_get_memory_directories_from_their_agent_id() {
+        let mut launch = ConversationAgentKind::Pi.default_launch();
+
+        attach_agent_memory_dirs(&mut launch, Some("space-agent"));
+
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_MEMORY_DIR_ENV)
+                .map(PathBuf::from),
+            agent_memory_dir("space-agent")
+        );
+        assert_eq!(
+            launch.env.get(SMELT_USER_MEMORY_DIR_ENV).map(PathBuf::from),
+            user_memory_dir()
+        );
+
+        attach_agent_memory_dirs(&mut launch, None);
+        assert_eq!(launch.env.get(SMELT_AGENT_MEMORY_DIR_ENV), None);
+        assert_eq!(launch.env.get(SMELT_USER_MEMORY_DIR_ENV), None);
+    }
+
+    #[test]
+    fn deleting_an_agent_deletes_its_memory_but_keeps_the_user_layer() {
+        let (_dir, store) = open_store();
+        let id = format!("memory-{}", uuid::Uuid::new_v4());
+        create_sample(&store, &id);
+        let agent_dir = agent_memory_dir(&id).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("MEMORY.md"), "- [a](a.md) — a\n").unwrap();
+        let space_note = agent_space_root(&id).unwrap().join("notes.md");
+        std::fs::write(&space_note, "工作产物").unwrap();
+        let user_dir = user_memory_dir().unwrap();
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        delete_agent_definition_on(&store, &id).unwrap();
+
+        assert!(!agent_dir.exists(), "智能体记忆要跟着删掉");
+        assert!(space_note.exists(), "只删记忆，不动智能体目录里的工作产物");
+        assert!(user_dir.is_dir(), "用户全局记忆不属于任何一个智能体");
+        let _ = std::fs::remove_dir_all(agent_space_root(&id).unwrap());
     }
 
     #[test]

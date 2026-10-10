@@ -1479,17 +1479,13 @@ pub(crate) fn resolve_restart_launch(
     } else {
         current_launch.clone()
     };
-    // Product-agent instructions are launch identity, not a mutable provider preference. A
-    // settings refresh may replace command/env defaults, but it must not turn the session into a
-    // plain provider conversation when a fresh runtime is required.
-    if let Some(instructions) = current_launch
-        .env
-        .get(smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
-    {
-        launch.env.insert(
-            smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV.to_string(),
-            instructions.clone(),
-        );
+    // Product-agent instructions and memory directories are launch identity, not mutable provider
+    // preferences. A settings refresh may replace command/env defaults, but it must not turn the
+    // session into a plain provider conversation when a fresh runtime is required.
+    for name in smelt_core::agent_kind::SMELT_AGENT_LAUNCH_IDENTITY_ENVS {
+        if let Some(value) = current_launch.env.get(name) {
+            launch.env.insert(name.to_string(), value.clone());
+        }
     }
     launch
 }

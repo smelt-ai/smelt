@@ -2048,6 +2048,36 @@ fn restart_refresh_preserves_product_agent_instructions() {
 }
 
 #[test]
+fn restart_refresh_preserves_product_agent_memory_directories() {
+    use smelt_core::agent_kind::{SMELT_AGENT_MEMORY_DIR_ENV, SMELT_USER_MEMORY_DIR_ENV};
+    let current = ConversationLaunchSpec::from_command("smelt-pi-agent")
+        .with_env(
+            SMELT_AGENT_MEMORY_DIR_ENV,
+            "/home/me/.smelt/agents/a/memory",
+        )
+        .with_env(SMELT_USER_MEMORY_DIR_ENV, "/home/me/.smelt/memory");
+    let config =
+        AgentHostState::default().with_acp_cmd(ConversationAgentKind::Pi, "smelt-pi-agent");
+
+    let resolved = resolve_restart_launch(&current, None, &config, ConversationAgentKind::Pi, true);
+
+    assert_eq!(
+        resolved
+            .env
+            .get(SMELT_AGENT_MEMORY_DIR_ENV)
+            .map(String::as_str),
+        Some("/home/me/.smelt/agents/a/memory")
+    );
+    assert_eq!(
+        resolved
+            .env
+            .get(SMELT_USER_MEMORY_DIR_ENV)
+            .map(String::as_str),
+        Some("/home/me/.smelt/memory")
+    );
+}
+
+#[test]
 fn restart_keeps_legacy_launch_when_refresh_is_disabled() {
     let current =
         ConversationLaunchSpec::from_command("CLAUDE_CONFIG_DIR=~/Claude Workspaces/quant claude");

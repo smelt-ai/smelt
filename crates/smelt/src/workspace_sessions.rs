@@ -202,12 +202,17 @@ impl Workspace {
                         }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
+                        let mut launch = saved.launch;
+                        smelt_core::agent_definition_store::attach_agent_memory_dirs(
+                            &mut launch,
+                            agent_definition_id.as_deref(),
+                        );
                         let view = cx.new(|cx| {
                             acp_view::AcpView::placeholder(
                                 cx,
                                 acp_view::AcpViewOrigin {
                                     agent,
-                                    launch: saved.launch,
+                                    launch,
                                     refresh_launch_from_settings,
                                     profile_id: saved.profile_id,
                                     cwd: saved.cwd,

@@ -14,6 +14,7 @@ pub mod agent_definition;
 pub mod agent_definition_store;
 pub mod agent_event;
 pub mod agent_kind;
+pub mod agent_memory;
 pub mod agent_status;
 pub mod antigravity_history;
 pub mod app_log;
