@@ -1793,14 +1793,17 @@ fn product_back_button(
         .on_click(on_click)
 }
 
-/// 目录和编辑器的页头。这些面不画标题胶囊，标题住在交通灯那一条上。
-/// 左侧让开交通灯，右侧让开窗口开关，底边是发丝。空白处拖窗口，按钮自己拦住点击。
+/// 目录和编辑器的页头。这些面不画标题胶囊。
+///
+/// 最上 `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐。分段、标题和按钮放在这条下面，
+/// 不再塞进 34px 里贴着窗口顶。左侧让开交通灯，右侧让开窗口开关，底边是发丝。按钮自己拦住点击。
 fn product_page_chrome(left_guard: Pixels) -> Div {
     crate::workspace_frame::with_window_drag(
         div()
             .w_full()
             .flex_shrink_0()
-            .min_h(crate::workspace_frame::TOP_BAR_HEIGHT)
+            .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
+            .pb(px(8.))
             .pl(left_guard + px(20.))
             .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
             .border_b_1()
@@ -1819,7 +1822,6 @@ fn product_page_header(
     left_guard: Pixels,
 ) -> AnyElement {
     product_page_chrome(left_guard)
-        .py_2()
         .justify_between()
         .gap_4()
         .child(
