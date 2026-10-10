@@ -1385,7 +1385,14 @@ impl AcpSessionState {
         } else {
             None
         };
-        self.protocol_title = session_title;
+        // 没带标题不是清空。流式尾巴经常省略标题，盖掉已有协议标题后，
+        // 父镜像只会用当前这一截的提问当兜底，侧栏就闪成另一串字再跳回来。
+        if session_title
+            .as_deref()
+            .is_some_and(|title| !title.trim().is_empty())
+        {
+            self.protocol_title = session_title;
+        }
         self.phase = phase;
         self.end_reason = end_reason;
         self.end_kind = end_kind;

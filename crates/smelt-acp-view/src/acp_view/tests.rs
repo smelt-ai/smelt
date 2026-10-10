@@ -1180,10 +1180,12 @@ fn starting_or_ended_empty_snapshot_keeps_history_identity() {
 }
 
 #[test]
-fn state_only_snapshot_without_title_keeps_the_existing_title() {
-    assert!(!should_replace_session_title(false, false));
-    assert!(should_replace_session_title(true, false));
-    assert!(should_replace_session_title(false, true));
+fn streaming_snapshot_without_title_keeps_the_existing_title() {
+    // 流式输出每帧都在改正文。没带标题不能换成空，否则侧栏会落到首条消息，
+    // 下一帧标题回来再跳一次。空白标题同样不是新名字。
+    assert!(!should_replace_session_title(None));
+    assert!(!should_replace_session_title(Some("   ")));
+    assert!(should_replace_session_title(Some("UAT 问题修复")));
 }
 
 #[test]

@@ -963,8 +963,10 @@ fn should_apply_snapshot_revision(last_applied: u64, incoming: u64) -> bool {
     incoming == 0 || incoming > last_applied
 }
 
-fn should_replace_session_title(incoming_has_title: bool, entries_changed: bool) -> bool {
-    incoming_has_title || entries_changed
+/// 只有快照带来非空标题时才替换。流式帧经常只改正文、不带标题；
+/// 这时把已有标题写成空，侧栏会落到首条消息或「对话 · 目录」，下一帧再跳回来。
+fn should_replace_session_title(incoming_title: Option<&str>) -> bool {
+    incoming_title.is_some_and(|title| !title.trim().is_empty())
 }
 
 fn is_stale_blank_history_id(
@@ -3656,7 +3658,7 @@ impl AcpView {
         ) {
             self.pending_config_values.clear();
         }
-        if should_replace_session_title(snap.session_title.is_some(), snapshot_entries_changed) {
+        if should_replace_session_title(snap.session_title.as_deref()) {
             self.session_title = snap.session_title;
         }
         let has_runtime_session_id = snap.acp_session_id.is_some();

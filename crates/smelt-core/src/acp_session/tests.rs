@@ -2799,6 +2799,59 @@ fn hosted_mirror_drops_committed_history_and_keeps_the_open_turn() {
 }
 
 #[test]
+fn hosted_mirror_keeps_protocol_title_when_a_streaming_frame_omits_it() {
+    let mut state = AcpSessionState::default();
+    let mut snapshot = state.to_snapshot(false);
+    snapshot.entries_offset = 0;
+    snapshot.entries_total = 2;
+    snapshot.entries = vec![
+        AcpEntry::User("帮我修 UAT 上的登录失败".into()),
+        AcpEntry::Assistant {
+            text: "正在看".into(),
+            thought: false,
+        },
+    ];
+    snapshot.session_title = Some("UAT 问题修复".into());
+    snapshot.phase = DaemonPhase::Thinking;
+    state
+        .merge_hosted_snapshot(snapshot)
+        .expect("带标题的宿主快照应能合并");
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("UAT 问题修复")
+    );
+
+    let mut tail = state.to_snapshot(false);
+    tail.entries_offset = 1;
+    tail.entries_total = 2;
+    tail.entries = vec![AcpEntry::Assistant {
+        text: "正在看日志".into(),
+        thought: false,
+    }];
+    tail.session_title = None;
+    tail.phase = DaemonPhase::Thinking;
+    state
+        .merge_hosted_snapshot(tail)
+        .expect("只改正文的流式帧应能合并");
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("UAT 问题修复"),
+        "流式帧没带标题不能把协议标题盖成空，否则侧栏会落到当前回合的提问"
+    );
+
+    let mut renamed = state.to_snapshot(false);
+    renamed.session_title = Some("登录失败定位".into());
+    state
+        .merge_hosted_snapshot(renamed)
+        .expect("带新标题的帧应能合并");
+    assert_eq!(
+        state.resolved_session_title().as_deref(),
+        Some("登录失败定位"),
+        "新的非空标题仍然要换上"
+    );
+}
+
+#[test]
 fn hosted_mirror_keeps_the_last_turn_when_idle() {
     let mut state = AcpSessionState::default();
     let mut snapshot = state.to_snapshot(false);
