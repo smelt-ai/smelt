@@ -591,14 +591,12 @@ fn render_automation_row_menu(
             let toggle_entity = toggle_entity.clone();
             let toggle_id = toggle_id.clone();
             menu = menu.item(
-                PopupMenuItem::new(if enabled { "暂停" } else { "启用" }).on_click(
-                    move |_, _, cx| {
-                        let id = toggle_id.clone();
-                        toggle_entity.update(cx, |workspace, cx| {
-                            workspace.set_automation_enabled(id, !enabled, cx);
-                        });
-                    },
-                ),
+                automation_enabled_toggle_item(enabled).on_click(move |_, _, cx| {
+                    let id = toggle_id.clone();
+                    toggle_entity.update(cx, |workspace, cx| {
+                        workspace.set_automation_enabled(id, !enabled, cx);
+                    });
+                }),
             );
             let delete_entity = delete_entity.clone();
             let delete_id = delete_id.clone();

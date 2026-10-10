@@ -403,17 +403,19 @@ impl Workspace {
                         })
                         .context_menu(move |menu, _window, _cx| {
                             let rename_entity = rename_entity.clone();
-                            menu.item(PopupMenuItem::new("重命名").on_click(
-                                move |_ev, window, cx| {
-                                    rename_entity.update(cx, |workspace, cx| {
-                                        workspace.start_rename(
-                                            crate::RenameTarget::Session(open_ix),
-                                            window,
-                                            cx,
-                                        )
-                                    });
-                                },
-                            ))
+                            menu.item(
+                                PopupMenuItem::new("重命名")
+                                    .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
+                                    .on_click(move |_ev, window, cx| {
+                                        rename_entity.update(cx, |workspace, cx| {
+                                            workspace.start_rename(
+                                                crate::RenameTarget::Session(open_ix),
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
                         }),
                 );
             }

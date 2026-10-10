@@ -1340,11 +1340,13 @@ impl Workspace {
                         let sess_ix = ix;
                         let mut menu = menu
                             .item(
-                                PopupMenuItem::new("重命名").on_click(move |_ev, window, cx| {
-                                    e_rename.update(cx, |ws, cx| {
-                                        ws.start_rename(RenameTarget::Session(ix), window, cx)
-                                    });
-                                }),
+                                PopupMenuItem::new("重命名")
+                                    .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
+                                    .on_click(move |_ev, window, cx| {
+                                        e_rename.update(cx, |ws, cx| {
+                                            ws.start_rename(RenameTarget::Session(ix), window, cx)
+                                        });
+                                    }),
                             )
                             .item(
                                 PopupMenuItem::new("复制会话 ID")
@@ -1358,13 +1360,15 @@ impl Workspace {
                         // 只有 ACP 对话会话才需要「强制重启」：卡在工具调用里、
                         // 「停止」按钮打不断时的兜底，见 `force_restart_acp_session`。
                         if is_acp {
-                            menu = menu.item(PopupMenuItem::new("强制重启").on_click(
-                                move |_ev, _window, cx| {
-                                    e_restart.update(cx, |ws, cx| {
-                                        ws.force_restart_acp_session(sess_ix, cx)
-                                    });
-                                },
-                            ));
+                            menu = menu.item(
+                                PopupMenuItem::new("强制重启")
+                                    .icon(IconName::Redo)
+                                    .on_click(move |_ev, _window, cx| {
+                                        e_restart.update(cx, |ws, cx| {
+                                            ws.force_restart_acp_session(sess_ix, cx)
+                                        });
+                                    }),
+                            );
                         }
                         if let Some(payload) = session_action_payload {
                             if !session_actions.is_empty() {
@@ -1600,14 +1604,16 @@ impl Workspace {
                                     let e_close_all = e_pane_menu.clone();
                                     let rename_pane = menu_pane.clone();
                                     let copy_session_id = copy_session_id.clone();
-                                    menu.item(PopupMenuItem::new("重命名").on_click(
-                                        move |_ev, window, cx| {
-                                            let target = RenameTarget::Pane(rename_pane.clone());
-                                            e_rename.update(cx, |ws, cx| {
-                                                ws.start_rename(target, window, cx)
-                                            });
-                                        },
-                                    ))
+                                    menu.item(
+                                        PopupMenuItem::new("重命名")
+                                            .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
+                                            .on_click(move |_ev, window, cx| {
+                                                let target = RenameTarget::Pane(rename_pane.clone());
+                                                e_rename.update(cx, |ws, cx| {
+                                                    ws.start_rename(target, window, cx)
+                                                });
+                                            }),
+                                    )
                                     .item(
                                         PopupMenuItem::new("复制会话 ID")
                                             .icon(IconName::Copy)
@@ -1619,12 +1625,12 @@ impl Workspace {
                                     )
                                     // 行内的 × 只关这一个 pane；要连整组一起关走这里。
                                     .item(
-                                        PopupMenuItem::new("关闭整个会话（含全部分屏）").on_click(
-                                            move |_ev, _window, cx| {
+                                        PopupMenuItem::new("关闭整个会话（含全部分屏）")
+                                            .icon(IconName::CircleX)
+                                            .on_click(move |_ev, _window, cx| {
                                                 e_close_all
                                                     .update(cx, |ws, cx| ws.close_session(ix, cx));
-                                            },
-                                        ),
+                                            }),
                                     )
                                 })
                                 .when(can_drag && dragging, |row| {

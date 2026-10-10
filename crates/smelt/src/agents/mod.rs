@@ -1574,6 +1574,15 @@ fn automation_row_status_label(status: AutomationRowStatus) -> &'static str {
     }
 }
 
+/// 「启用」不用 Play：同一个菜单里「运行一次」已经是 Play。
+fn automation_enabled_toggle_item(enabled: bool) -> PopupMenuItem {
+    if enabled {
+        PopupMenuItem::new("暂停").icon(IconName::Pause)
+    } else {
+        PopupMenuItem::new("启用").icon(IconName::CircleCheck)
+    }
+}
+
 fn agent_usage_summary(conversations: usize, automations: usize) -> String {
     match (conversations, automations) {
         (0, 0) => "还没有对话".to_string(),
