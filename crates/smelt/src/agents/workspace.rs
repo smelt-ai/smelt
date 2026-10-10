@@ -293,6 +293,55 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 重新扫描记忆目录。智能体在对话里写了新记忆后，不用重开编辑器就能看到。
+    pub(super) fn refresh_agent_memories(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            editor.memories = AgentMemories::scan(&editor.id);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_agent_memory_file(
+        &mut self,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error = crate::ide::open_in_system_text_editor(&path).err();
+        cx.notify();
+    }
+
+    pub(super) fn open_agent_memory_folder(
+        &mut self,
+        agent_id: String,
+        layer: MemoryLayer,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error = match layer.dir(&agent_id) {
+            Some(dir) => std::fs::create_dir_all(&dir)
+                .map_err(|error| format!("无法创建记忆目录：{error}"))
+                .and_then(|()| crate::ide::open_in_file_manager(&dir))
+                .err(),
+            None => Some("找不到记忆目录".to_string()),
+        };
+        cx.notify();
+    }
+
+    pub(super) fn delete_agent_memory(
+        &mut self,
+        agent_id: String,
+        layer: MemoryLayer,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error = match layer.dir(&agent_id) {
+            Some(dir) => smelt_core::agent_memory::delete_memory(&dir, &file_name)
+                .map_err(|error| format!("删除记忆失败：{error}"))
+                .err(),
+            None => Some("找不到记忆目录".to_string()),
+        };
+        self.refresh_agent_memories(cx);
+    }
+
     pub(super) fn finish_automation_name_edit(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.automation_surface.editor.as_mut() {
             editor.name_editing = false;
@@ -419,6 +468,7 @@ impl Workspace {
             }),
         );
 
+        let memories = AgentMemories::scan(&id);
         self.agent_surface.editor = Some(AgentEditor {
             id,
             name,
@@ -426,6 +476,7 @@ impl Workspace {
             instructions,
             context_link,
             plugins: discover_plugins(),
+            memories,
             _subscriptions: subscriptions,
         });
         window.focus(&self.focus_handle, cx);

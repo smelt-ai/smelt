@@ -111,7 +111,46 @@ pub(crate) struct AgentEditor {
     context_link: Entity<InputState>,
     /// 打开编辑器时扫一次磁盘的插件目录；不在渲染里扫，避免每次输入都读文件。
     plugins: Vec<PiPlugin>,
+    /// 同理，记忆目录也只在打开编辑器、点刷新或删除后扫描。
+    memories: AgentMemories,
     _subscriptions: Vec<Subscription>,
+}
+
+/// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。
+#[derive(Default)]
+pub(crate) struct AgentMemories {
+    agent: smelt_core::agent_memory::MemoryListing,
+    user: smelt_core::agent_memory::MemoryListing,
+}
+
+impl AgentMemories {
+    pub(crate) fn scan(agent_id: &str) -> Self {
+        let list = |dir: Option<std::path::PathBuf>| {
+            dir.map(|dir| smelt_core::agent_memory::list_memories(&dir))
+                .unwrap_or_default()
+        };
+        Self {
+            agent: list(smelt_core::agent_definition_store::agent_memory_dir(
+                agent_id,
+            )),
+            user: list(smelt_core::agent_definition_store::user_memory_dir()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryLayer {
+    Agent,
+    User,
+}
+
+impl MemoryLayer {
+    pub(crate) fn dir(self, agent_id: &str) -> Option<std::path::PathBuf> {
+        match self {
+            Self::Agent => smelt_core::agent_definition_store::agent_memory_dir(agent_id),
+            Self::User => smelt_core::agent_definition_store::user_memory_dir(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2366,6 +2405,270 @@ fn render_agent_context_card(
                     "工作目录 {space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
                     smelt_core::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
                 )),
+        )
+        .into_any_element()
+}
+
+/// 智能体的记忆：它在对话和自动化里自己记下的长期信息。正文是 Markdown 文件，
+/// 这里只列出、打开和删除；写入规则见 `docs/agent-memory.md`。
+fn render_agent_memory_card(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let refresh_entity = entity.clone();
+    let refresh_button = compact_chip("agent-memory-refresh")
+        .icon(IconName::Redo)
+        .tooltip("重新读取记忆")
+        .on_click(move |_, _, cx| {
+            refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_memories(cx));
+        });
+
+    agent_surface_card()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_5()
+                .pt_4()
+                .pb_2()
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .child("记忆"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(crate::ui_theme::text_muted()))
+                                .child(
+                                    "智能体在对话和自动化里记下的长期信息。改动对新开的对话生效。",
+                                ),
+                        ),
+                )
+                .child(div().flex_shrink_0().child(refresh_button)),
+        )
+        .child(agent_memory_section(
+            &agent.id,
+            MemoryLayer::Agent,
+            "这个智能体",
+            "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。",
+            &editor.memories.agent,
+            entity.clone(),
+        ))
+        .child(agent_memory_section(
+            &agent.id,
+            MemoryLayer::User,
+            "全局（所有智能体共享）",
+            "还没有全局记忆。这里只放你本人的情况和你纠正过的做法。",
+            &editor.memories.user,
+            entity,
+        ))
+        .into_any_element()
+}
+
+fn agent_memory_section(
+    agent_id: &str,
+    layer: MemoryLayer,
+    title: &'static str,
+    empty_hint: &'static str,
+    listing: &smelt_core::agent_memory::MemoryListing,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let layer_key = match layer {
+        MemoryLayer::Agent => "agent",
+        MemoryLayer::User => "user",
+    };
+    let folder_agent = agent_id.to_string();
+    let folder_entity = entity.clone();
+    let open_folder = compact_chip(format!("agent-memory-folder-{layer_key}"))
+        .xsmall()
+        .icon(IconName::FolderOpen)
+        .tooltip("打开记忆文件夹")
+        .on_click(move |_, _, cx| {
+            let agent_id = folder_agent.clone();
+            folder_entity.update(cx, |workspace, cx| {
+                workspace.open_agent_memory_folder(agent_id, layer, cx)
+            });
+        });
+
+    let rows: Vec<AnyElement> = listing
+        .entries
+        .iter()
+        .map(|entry| agent_memory_row(agent_id, layer, layer_key, entry, entity.clone()))
+        .collect();
+    let body = if rows.is_empty() {
+        div()
+            .px_3()
+            .py_1p5()
+            .text_xs()
+            .text_color(rgb(crate::ui_theme::text_faint()))
+            .child(empty_hint)
+            .into_any_element()
+    } else {
+        div().flex().flex_col().children(rows).into_any_element()
+    };
+
+    div()
+        .px_2()
+        .pb_3()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_3()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .font_medium()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(format!("{title} · {} 条", listing.entries.len())),
+                )
+                .child(open_folder),
+        )
+        .when(listing.core_over_budget, |section| {
+            section.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::red()))
+                    .child(format!(
+                        "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
+                        smelt_core::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
+                    )),
+            )
+        })
+        .child(body)
+        .into_any_element()
+}
+
+fn memory_kind_label(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("user") => "关于你",
+        Some("feedback") => "做法",
+        Some("project") => "事实",
+        Some("reference") => "资源",
+        _ => "格式有误",
+    }
+}
+
+/// 行尾的使用情况：长期没用的事实标红，提示用户考虑删掉；用过的显示次数。
+fn memory_usage_label(entry: &smelt_core::agent_memory::MemoryEntry) -> Option<(String, bool)> {
+    if entry.stale {
+        return Some(("长期未用".to_string(), true));
+    }
+    (entry.read_count > 0).then(|| (format!("用过 {} 次", entry.read_count), false))
+}
+
+fn agent_memory_row(
+    agent_id: &str,
+    layer: MemoryLayer,
+    layer_key: &str,
+    entry: &smelt_core::agent_memory::MemoryEntry,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let open_path = entry.path.clone();
+    let open_entity = entity.clone();
+    let remove_agent = agent_id.to_string();
+    let remove_file = entry.file_name.clone();
+    let subtitle = if entry.description.is_empty() {
+        entry.file_name.clone()
+    } else {
+        entry.description.clone()
+    };
+    div()
+        .px_3()
+        .py_1p5()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(44.))
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child(memory_kind_label(entry.kind.as_deref())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_bright()))
+                        .truncate()
+                        .child(entry.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .truncate()
+                        .child(subtitle),
+                ),
+        )
+        .when_some(memory_usage_label(entry), |row, (label, stale)| {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(rgb(if stale {
+                        crate::ui_theme::red()
+                    } else {
+                        crate::ui_theme::text_faint()
+                    }))
+                    .child(label),
+            )
+        })
+        .child(
+            compact_chip(format!("agent-memory-open-{layer_key}-{}", entry.file_name))
+                .xsmall()
+                .icon(IconName::ExternalLink)
+                .tooltip("用文本编辑器打开")
+                .on_click(move |_, _, cx| {
+                    let path = open_path.clone();
+                    open_entity.update(cx, |workspace, cx| {
+                        workspace.open_agent_memory_file(path, cx)
+                    });
+                }),
+        )
+        .child(
+            compact_chip(format!(
+                "agent-memory-remove-{layer_key}-{}",
+                entry.file_name
+            ))
+            .xsmall()
+            .icon(IconName::Close)
+            .tooltip("删除这条记忆")
+            .on_click(move |_, _, cx| {
+                let agent_id = remove_agent.clone();
+                let file_name = remove_file.clone();
+                entity.update(cx, |workspace, cx| {
+                    workspace.delete_agent_memory(agent_id, layer, file_name, cx)
+                });
+            }),
         )
         .into_any_element()
 }

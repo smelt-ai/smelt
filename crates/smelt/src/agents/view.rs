@@ -976,7 +976,7 @@ impl Workspace {
         let delete_entity = entity.clone();
         let delete_id = agent.id.clone();
         let delete_tooltip = if automation_count == 0 {
-            "删除智能体；已有对话会保留".to_string()
+            "删除智能体和它的记忆；已有对话会保留".to_string()
         } else {
             format!("请先删除关联的 {automation_count} 条自动化")
         };
@@ -1113,6 +1113,7 @@ impl Workspace {
                             ),
                     )
                     .child(render_agent_context_card(&agent, editor, entity.clone()))
+                    .child(render_agent_memory_card(&agent, editor, entity.clone()))
                     .child(render_agent_plugin_card(&agent, editor, entity, cx)),
             )
             .into_any_element()
